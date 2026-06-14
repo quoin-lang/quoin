@@ -592,22 +592,38 @@ p1.print;
 }
 
 fn build_object_class() -> NativeClassBuilder {
-    NativeClassBuilder::new("Object", None).instance_method("print", |_vm, _mc, args| {
-        let obj = arg!(args, Object, 0);
+    NativeClassBuilder::new("Object", None)
+        //
+        .instance_method("s", |_vm, mc, args| {
+            let obj = arg!(args, Object, 0);
+            let s = format!(
+                "{}{{{}}}",
+                obj.borrow().class.borrow().name,
+                obj.borrow()
+                    .fields
+                    .iter()
+                    .map(|(k, v)| format!("{}={:?}", k, v))
+                    .join(", ")
+            );
+            Ok(Value::String(gc!(mc, s)))
+        })
+        //
+        .instance_method("print", |_vm, _mc, args| {
+            let obj = arg!(args, Object, 0);
 
-        // TODO: Recursively call #s on everything to build the string.
-        println!(
-            "{}{{{}}}",
-            obj.borrow().class.borrow().name,
-            obj.borrow()
-                .fields
-                .iter()
-                .map(|(k, v)| format!("{}={:?}", k, v))
-                .join(", ")
-        );
+            // TODO: Recursively call #s on everything to build the string.
+            println!(
+                "{}{{{}}}",
+                obj.borrow().class.borrow().name,
+                obj.borrow()
+                    .fields
+                    .iter()
+                    .map(|(k, v)| format!("{}={:?}", k, v))
+                    .join(", ")
+            );
 
-        Ok(Value::Nil)
-    })
+            Ok(Value::Nil)
+        })
 }
 
 fn build_point_class() -> NativeClassBuilder {
