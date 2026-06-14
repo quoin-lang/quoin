@@ -12,22 +12,8 @@ pub mod generated {
 macro_rules! cast_node {
     ( $p:pat, $v:ident, $e:expr ) => {{
         match $e.value {
-            | $p => $v,
-            | x => panic!("MethodCall.arguments set to incorrect NodeValue {:?}", x),
+            $p => $v,
+            x => panic!("MethodCall.arguments set to incorrect NodeValue {:?}", x),
         }
     }};
-}
-
-#[macro_export]
-macro_rules! cast_nodes {
-    ( $p:pat, $v:ident, $it:expr ) => {
-        $it.map(|n| cast_node!($p, $v, n).clone()).collect()
-    };
-}
-
-#[macro_export]
-macro_rules! panic_unexpected_sub_node {
-    ( $e:expr ) => {
-        panic!("Found unexpected lone {:?} node", $e)
-    };
 }

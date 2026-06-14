@@ -1,5 +1,5 @@
 use crate::instruction::{Constant, Instruction};
-use crate::value::{Block, Class, EnvFrame, BBRegex, NativeClass, Value};
+use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, Value};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
@@ -51,14 +51,19 @@ impl<'gc> VmState<'gc> {
             cls_methods.insert(name, Value::Native(func));
         }
 
-        let class_obj = Gc::new(mc, RefLock::new(Class {
-            name: native_class.name().to_string(),
-            parent: None,
-            instance_methods: inst_methods,
-            class_methods: cls_methods,
-        }));
+        let class_obj = Gc::new(
+            mc,
+            RefLock::new(Class {
+                name: native_class.name().to_string(),
+                parent: None,
+                instance_methods: inst_methods,
+                class_methods: cls_methods,
+            }),
+        );
 
-        self.globals.borrow_mut(mc).insert(native_class.name().to_string(), Value::Class(class_obj));
+        self.globals
+            .borrow_mut(mc)
+            .insert(native_class.name().to_string(), Value::Class(class_obj));
     }
 
     pub fn lookup_method(&self, receiver: Value<'gc>, selector: &str) -> Option<Value<'gc>> {
@@ -76,8 +81,11 @@ impl<'gc> VmState<'gc> {
             }
             _ => {
                 let type_name = receiver.type_name();
-                if let Some(Value::Class(class_obj)) = self.globals.borrow().get(type_name).copied() {
-                    if let Some(m) = self.lookup_in_class_hierarchy(Value::Class(class_obj), selector, false) {
+                if let Some(Value::Class(class_obj)) = self.globals.borrow().get(type_name).copied()
+                {
+                    if let Some(m) =
+                        self.lookup_in_class_hierarchy(Value::Class(class_obj), selector, false)
+                    {
                         return Some(m);
                     }
                 }
@@ -86,7 +94,12 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    fn lookup_in_class_hierarchy(&self, mut class_val: Value<'gc>, selector: &str, class_side: bool) -> Option<Value<'gc>> {
+    fn lookup_in_class_hierarchy(
+        &self,
+        mut class_val: Value<'gc>,
+        selector: &str,
+        class_side: bool,
+    ) -> Option<Value<'gc>> {
         while let Value::Class(class_obj) = class_val {
             let class_borrow = class_obj.borrow();
             let methods = if class_side {
@@ -111,14 +124,24 @@ impl<'gc> VmState<'gc> {
     }
 
     pub fn pop(&mut self) -> Result<Value<'gc>, String> {
-        self.stack.pop().ok_or_else(|| "Stack underflow".to_string())
+        self.stack
+            .pop()
+            .ok_or_else(|| "Stack underflow".to_string())
     }
 
     pub fn peek(&self) -> Result<Value<'gc>, String> {
-        self.stack.last().copied().ok_or_else(|| "Stack is empty".to_string())
+        self.stack
+            .last()
+            .copied()
+            .ok_or_else(|| "Stack is empty".to_string())
     }
 
-    pub fn start_block(&mut self, mc: &Mutation<'gc>, block: Gc<'gc, Block<'gc>>, args: Vec<Value<'gc>>) {
+    pub fn start_block(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        args: Vec<Value<'gc>>,
+    ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
 
@@ -191,7 +214,12 @@ impl<'gc> VmState<'gc> {
                 frame.ip += 1;
             }
             Instruction::LoadGlobal(name) => {
-                let val = self.globals.borrow().get(&name).copied().unwrap_or(Value::Nil);
+                let val = self
+                    .globals
+                    .borrow()
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(Value::Nil);
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
@@ -209,13 +237,16 @@ impl<'gc> VmState<'gc> {
                     Constant::String(s) => Value::String(Gc::new(mc, s.clone())),
                     Constant::Block(sb) => {
                         let parent_env = self.frames.last().map(|f| f.env);
-                        let block = Gc::new(mc, Block {
-                            name: sb.name.clone(),
-                            is_nested_block: sb.is_nested_block,
-                            param_names: sb.param_names.clone(),
-                            bytecode: sb.bytecode.clone(),
-                            parent_env,
-                        });
+                        let block = Gc::new(
+                            mc,
+                            Block {
+                                name: sb.name.clone(),
+                                is_nested_block: sb.is_nested_block,
+                                param_names: sb.param_names.clone(),
+                                bytecode: sb.bytecode.clone(),
+                                parent_env,
+                            },
+                        );
                         Value::Block(block)
                     }
                 };
@@ -268,7 +299,8 @@ impl<'gc> VmState<'gc> {
                 self.frames[frame_idx].ip += 1; // Advance caller frame IP
 
                 if let Value::Block(block) = receiver {
-                    if selector == "value" || selector == "value:" || selector.starts_with("value:") {
+                    if selector == "value" || selector == "value:" || selector.starts_with("value:")
+                    {
                         self.start_block(mc, block, args);
                         return Ok(VmStatus::Running);
                     }
@@ -288,10 +320,18 @@ impl<'gc> VmState<'gc> {
                             all_args.extend(args);
                             self.start_block(mc, block, all_args);
                         }
-                        _ => return Err(format!("Selector '{}' resolved to non-callable value: {:?}", selector, method_val)),
+                        _ => {
+                            return Err(format!(
+                                "Selector '{}' resolved to non-callable value: {:?}",
+                                selector, method_val
+                            ));
+                        }
                     }
                 } else {
-                    return Err(format!("Message not understood: receiver={:?}, selector='{}', args={:?}", receiver, selector, args));
+                    return Err(format!(
+                        "Message not understood: receiver={:?}, selector='{}', args={:?}",
+                        receiver, selector, args
+                    ));
                 }
             }
             Instruction::Return | Instruction::BlockReturn => {
@@ -368,11 +408,15 @@ impl<'gc> VmState<'gc> {
             Instruction::NewRegex => {
                 let pattern_val = self.pop()?;
                 if let Value::String(s) = pattern_val {
-                    let re = regex::Regex::new(&**s).map_err(|e| format!("Invalid regex: {}", e))?;
+                    let re =
+                        regex::Regex::new(&**s).map_err(|e| format!("Invalid regex: {}", e))?;
                     let regex_val = Gc::new(mc, BBRegex(re));
                     self.push(Value::Regex(regex_val));
                 } else {
-                    return Err(format!("Regex pattern must be a String, got: {:?}", pattern_val));
+                    return Err(format!(
+                        "Regex pattern must be a String, got: {:?}",
+                        pattern_val
+                    ));
                 }
                 self.frames[frame_idx].ip += 1;
             }

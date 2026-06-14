@@ -1,4 +1,4 @@
-use crate::instruction::{Instruction, Constant, StaticBlock};
+use crate::instruction::{Constant, Instruction, StaticBlock};
 
 struct Builder {
     name: Option<String>,
@@ -31,10 +31,17 @@ pub fn assemble(source: &str) -> Result<StaticBlock, String> {
 
         if first == "block" || first == "nested_block" {
             if tokens.len() < 2 {
-                return Err(format!("Line {}: block requires a name (use '_' for anonymous)", line_num));
+                return Err(format!(
+                    "Line {}: block requires a name (use '_' for anonymous)",
+                    line_num
+                ));
             }
             let raw_name = tokens[1].clone();
-            let name = if raw_name == "_" { None } else { Some(raw_name) };
+            let name = if raw_name == "_" {
+                None
+            } else {
+                Some(raw_name)
+            };
             let params = tokens[2..].to_vec();
             builders.push(Builder {
                 name,
@@ -131,61 +138,103 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
     Ok(tokens)
 }
 
-fn parse_instruction(tokens: &[String], original_line: &str, line_num: usize) -> Result<Instruction, String> {
+fn parse_instruction(
+    tokens: &[String],
+    original_line: &str,
+    line_num: usize,
+) -> Result<Instruction, String> {
     let op = &tokens[0];
     match op.as_str() {
         "load_local" => {
-            let name = tokens.get(1).ok_or_else(|| format!("Line {}: load_local requires a variable name", line_num))?;
+            let name = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: load_local requires a variable name", line_num))?;
             Ok(Instruction::LoadLocal(name.clone()))
         }
         "define_local" => {
-            let name = tokens.get(1).ok_or_else(|| format!("Line {}: define_local requires a variable name", line_num))?;
+            let name = tokens.get(1).ok_or_else(|| {
+                format!("Line {}: define_local requires a variable name", line_num)
+            })?;
             Ok(Instruction::DefineLocal(name.clone()))
         }
         "store_local" => {
-            let name = tokens.get(1).ok_or_else(|| format!("Line {}: store_local requires a variable name", line_num))?;
+            let name = tokens.get(1).ok_or_else(|| {
+                format!("Line {}: store_local requires a variable name", line_num)
+            })?;
             Ok(Instruction::StoreLocal(name.clone()))
         }
         "load_global" => {
-            let name = tokens.get(1).ok_or_else(|| format!("Line {}: load_global requires a name", line_num))?;
+            let name = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: load_global requires a name", line_num))?;
             Ok(Instruction::LoadGlobal(name.clone()))
         }
         "store_global" => {
-            let name = tokens.get(1).ok_or_else(|| format!("Line {}: store_global requires a name", line_num))?;
+            let name = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: store_global requires a name", line_num))?;
             Ok(Instruction::StoreGlobal(name.clone()))
         }
         "push" => {
-            let type_str = tokens.get(1).ok_or_else(|| format!("Line {}: push requires a type (nil, bool, int, float, string)", line_num))?;
+            let type_str = tokens.get(1).ok_or_else(|| {
+                format!(
+                    "Line {}: push requires a type (nil, bool, int, float, string)",
+                    line_num
+                )
+            })?;
             let const_val = match type_str.as_str() {
                 "nil" => Constant::Nil,
                 "bool" => {
-                    let b_str = tokens.get(2).ok_or_else(|| format!("Line {}: push bool requires a value (true/false)", line_num))?;
-                    let b = b_str.parse::<bool>().map_err(|_| format!("Line {}: invalid bool value: {}", line_num, b_str))?;
+                    let b_str = tokens.get(2).ok_or_else(|| {
+                        format!("Line {}: push bool requires a value (true/false)", line_num)
+                    })?;
+                    let b = b_str
+                        .parse::<bool>()
+                        .map_err(|_| format!("Line {}: invalid bool value: {}", line_num, b_str))?;
                     Constant::Bool(b)
                 }
                 "int" => {
-                    let i_str = tokens.get(2).ok_or_else(|| format!("Line {}: push int requires an integer value", line_num))?;
-                    let i = i_str.parse::<i64>().map_err(|_| format!("Line {}: invalid integer: {}", line_num, i_str))?;
+                    let i_str = tokens.get(2).ok_or_else(|| {
+                        format!("Line {}: push int requires an integer value", line_num)
+                    })?;
+                    let i = i_str
+                        .parse::<i64>()
+                        .map_err(|_| format!("Line {}: invalid integer: {}", line_num, i_str))?;
                     Constant::Int(i)
                 }
                 "float" => {
-                    let f_str = tokens.get(2).ok_or_else(|| format!("Line {}: push float requires a float value", line_num))?;
-                    let f = f_str.parse::<f64>().map_err(|_| format!("Line {}: invalid float: {}", line_num, f_str))?;
+                    let f_str = tokens.get(2).ok_or_else(|| {
+                        format!("Line {}: push float requires a float value", line_num)
+                    })?;
+                    let f = f_str
+                        .parse::<f64>()
+                        .map_err(|_| format!("Line {}: invalid float: {}", line_num, f_str))?;
                     Constant::Float(f)
                 }
                 "string" => {
-                    let s = tokens.get(2).ok_or_else(|| format!("Line {}: push string requires a string literal", line_num))?;
+                    let s = tokens.get(2).ok_or_else(|| {
+                        format!("Line {}: push string requires a string literal", line_num)
+                    })?;
                     Constant::String(s.clone())
                 }
-                _ => return Err(format!("Line {}: unknown push type '{}'", line_num, type_str)),
+                _ => {
+                    return Err(format!(
+                        "Line {}: unknown push type '{}'",
+                        line_num, type_str
+                    ));
+                }
             };
             Ok(Instruction::Push(const_val))
         }
         "pop" => Ok(Instruction::Pop),
         "dup" => Ok(Instruction::Dup),
         "call" => {
-            let n_str = tokens.get(1).ok_or_else(|| format!("Line {}: call requires arg count", line_num))?;
-            let n = n_str.parse::<usize>().map_err(|_| format!("Line {}: invalid call count: {}", line_num, n_str))?;
+            let n_str = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: call requires arg count", line_num))?;
+            let n = n_str
+                .parse::<usize>()
+                .map_err(|_| format!("Line {}: invalid call count: {}", line_num, n_str))?;
             Ok(Instruction::Call(n))
         }
         "return" => Ok(Instruction::Return),
@@ -193,31 +242,54 @@ fn parse_instruction(tokens: &[String], original_line: &str, line_num: usize) ->
         "block_return" => Ok(Instruction::BlockReturn),
         "method_return" => Ok(Instruction::MethodReturn),
         "jump" => {
-            let offset_str = tokens.get(1).ok_or_else(|| format!("Line {}: jump requires offset", line_num))?;
-            let offset = offset_str.parse::<isize>().map_err(|_| format!("Line {}: invalid jump offset: {}", line_num, offset_str))?;
+            let offset_str = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: jump requires offset", line_num))?;
+            let offset = offset_str
+                .parse::<isize>()
+                .map_err(|_| format!("Line {}: invalid jump offset: {}", line_num, offset_str))?;
             Ok(Instruction::Jump(offset))
         }
         "if_jump" => {
-            let offset_str = tokens.get(1).ok_or_else(|| format!("Line {}: if_jump requires offset", line_num))?;
-            let offset = offset_str.parse::<isize>().map_err(|_| format!("Line {}: invalid jump offset: {}", line_num, offset_str))?;
+            let offset_str = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: if_jump requires offset", line_num))?;
+            let offset = offset_str
+                .parse::<isize>()
+                .map_err(|_| format!("Line {}: invalid jump offset: {}", line_num, offset_str))?;
             Ok(Instruction::IfJump(offset))
         }
         "else_jump" => {
-            let offset_str = tokens.get(1).ok_or_else(|| format!("Line {}: else_jump requires offset", line_num))?;
-            let offset = offset_str.parse::<isize>().map_err(|_| format!("Line {}: invalid jump offset: {}", line_num, offset_str))?;
+            let offset_str = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: else_jump requires offset", line_num))?;
+            let offset = offset_str
+                .parse::<isize>()
+                .map_err(|_| format!("Line {}: invalid jump offset: {}", line_num, offset_str))?;
             Ok(Instruction::ElseJump(offset))
         }
         "new_list" => {
-            let n_str = tokens.get(1).ok_or_else(|| format!("Line {}: new_list requires element count", line_num))?;
-            let n = n_str.parse::<usize>().map_err(|_| format!("Line {}: invalid list count: {}", line_num, n_str))?;
+            let n_str = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: new_list requires element count", line_num))?;
+            let n = n_str
+                .parse::<usize>()
+                .map_err(|_| format!("Line {}: invalid list count: {}", line_num, n_str))?;
             Ok(Instruction::NewList(n))
         }
         "new_dict" => {
-            let n_str = tokens.get(1).ok_or_else(|| format!("Line {}: new_dict requires pair count", line_num))?;
-            let n = n_str.parse::<usize>().map_err(|_| format!("Line {}: invalid dict count: {}", line_num, n_str))?;
+            let n_str = tokens
+                .get(1)
+                .ok_or_else(|| format!("Line {}: new_dict requires pair count", line_num))?;
+            let n = n_str
+                .parse::<usize>()
+                .map_err(|_| format!("Line {}: invalid dict count: {}", line_num, n_str))?;
             Ok(Instruction::NewDict(n))
         }
         "new_regex" => Ok(Instruction::NewRegex),
-        _ => Err(format!("Line {}: unknown operation '{}' (full: '{}')", line_num, op, original_line)),
+        _ => Err(format!(
+            "Line {}: unknown operation '{}' (full: '{}')",
+            line_num, op, original_line
+        )),
     }
 }

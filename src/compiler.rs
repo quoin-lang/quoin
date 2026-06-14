@@ -1,7 +1,7 @@
 use crate::instruction::{Constant, Instruction, StaticBlock};
 use crate::parser::ast_visitor::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, MethodCallNode, Node,
-    NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType
+    NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType,
 };
 
 use std::collections::HashSet;
@@ -19,7 +19,9 @@ pub struct Compiler {
 impl Compiler {
     pub fn new() -> Self {
         Self {
-            scopes: vec![Scope { locals: HashSet::new() }],
+            scopes: vec![Scope {
+                locals: HashSet::new(),
+            }],
             temp_counter: 0,
         }
     }
@@ -51,7 +53,7 @@ impl Compiler {
 
     pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, String> {
         let mut bytecode = Vec::new();
-        
+
         // Define default top-level self = nil
         bytecode.push(Instruction::Push(Constant::Nil));
         bytecode.push(Instruction::DefineLocal("self".to_string()));
@@ -163,7 +165,11 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_assignment(&mut self, assign: &AssignmentNode, bytecode: &mut Vec<Instruction>) -> Result<(), String> {
+    fn compile_assignment(
+        &mut self,
+        assign: &AssignmentNode,
+        bytecode: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
         if assign.lvalues.is_empty() {
             return Err("Assignment requires at least one target lvalue".to_string());
         }
@@ -176,7 +182,11 @@ impl Compiler {
             self.compile_store(lval, bytecode)?;
         } else {
             let temp_var = self.new_temp_var();
-            self.scopes.last_mut().unwrap().locals.insert(temp_var.clone());
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .locals
+                .insert(temp_var.clone());
             bytecode.push(Instruction::Dup);
             bytecode.push(Instruction::DefineLocal(temp_var.clone()));
 
@@ -186,7 +196,11 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_store(&mut self, lval: &Node, bytecode: &mut Vec<Instruction>) -> Result<(), String> {
+    fn compile_store(
+        &mut self,
+        lval: &Node,
+        bytecode: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
         match &lval.value {
             NodeValue::IdentLValue(ident_lval) => {
                 let name = &ident_lval.identifier.name;
@@ -201,7 +215,12 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_destruct(&mut self, lvalues: &[Arc<Node>], temp_var: &str, bytecode: &mut Vec<Instruction>) -> Result<(), String> {
+    fn compile_destruct(
+        &mut self,
+        lvalues: &[Arc<Node>],
+        temp_var: &str,
+        bytecode: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
         for (i, lval) in lvalues.iter().enumerate() {
             match &lval.value {
                 NodeValue::IdentLValue(ident_lval) => {
@@ -209,7 +228,7 @@ impl Compiler {
                     bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send("at:".to_string(), 1));
-                    
+
                     if self.is_local(name) {
                         bytecode.push(Instruction::StoreLocal(name.clone()));
                     } else {
@@ -221,7 +240,7 @@ impl Compiler {
                     bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send("sliceFrom:".to_string(), 1));
-                    
+
                     if self.is_local(name) {
                         bytecode.push(Instruction::StoreLocal(name.clone()));
                     } else {
@@ -232,22 +251,35 @@ impl Compiler {
                 NodeValue::IgnoredSplatLValue => {}
                 NodeValue::SubLValue(sub_lval) => {
                     let nested_temp = self.new_temp_var();
-                    self.scopes.last_mut().unwrap().locals.insert(nested_temp.clone());
-                    
+                    self.scopes
+                        .last_mut()
+                        .unwrap()
+                        .locals
+                        .insert(nested_temp.clone());
+
                     bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send("at:".to_string(), 1));
                     bytecode.push(Instruction::DefineLocal(nested_temp.clone()));
-                    
+
                     self.compile_destruct(&sub_lval.lvalues, &nested_temp, bytecode)?;
                 }
-                _ => return Err(format!("Unsupported destructuring element: {:?}", lval.value)),
+                _ => {
+                    return Err(format!(
+                        "Unsupported destructuring element: {:?}",
+                        lval.value
+                    ));
+                }
             }
         }
         Ok(())
     }
 
-    fn compile_method_call(&mut self, call: &MethodCallNode, bytecode: &mut Vec<Instruction>) -> Result<(), String> {
+    fn compile_method_call(
+        &mut self,
+        call: &MethodCallNode,
+        bytecode: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
         let args = &call.arguments;
 
         // Evaluate receiver
@@ -283,7 +315,11 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_binary_operator(&mut self, op: &BinaryOperatorNode, bytecode: &mut Vec<Instruction>) -> Result<(), String> {
+    fn compile_binary_operator(
+        &mut self,
+        op: &BinaryOperatorNode,
+        bytecode: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
         self.compile_node(&op.left, bytecode)?;
         self.compile_node(&op.right, bytecode)?;
 
@@ -300,14 +336,23 @@ impl Compiler {
             BinaryOperatorType::GtEq => ">=",
             BinaryOperatorType::And => "&&",
             BinaryOperatorType::Or => "||",
-            _ => return Err(format!("Unsupported binary operator type: {:?}", op.operator)),
+            _ => {
+                return Err(format!(
+                    "Unsupported binary operator type: {:?}",
+                    op.operator
+                ));
+            }
         };
 
         bytecode.push(Instruction::Send(selector.to_string(), 1));
         Ok(())
     }
 
-    fn compile_unary_operator(&mut self, op: &UnaryOperatorNode, bytecode: &mut Vec<Instruction>) -> Result<(), String> {
+    fn compile_unary_operator(
+        &mut self,
+        op: &UnaryOperatorNode,
+        bytecode: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
         // Compile operand (receiver)
         self.compile_node(&op.right, bytecode)?;
 
@@ -319,12 +364,21 @@ impl Compiler {
                 bytecode.push(Instruction::Send("negated".to_string(), 0));
             }
             UnaryOperatorType::Add => {} // Unary + is a no-op
-            _ => return Err(format!("Unsupported unary operator type: {:?}", op.operator)),
+            _ => {
+                return Err(format!(
+                    "Unsupported unary operator type: {:?}",
+                    op.operator
+                ));
+            }
         }
         Ok(())
     }
 
-    fn compile_block(&mut self, block: &BlockNode, bytecode: &mut Vec<Instruction>) -> Result<(), String> {
+    fn compile_block(
+        &mut self,
+        block: &BlockNode,
+        bytecode: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
         let mut param_names = Vec::new();
         let mut locals = HashSet::new();
 

@@ -1,15 +1,15 @@
+mod assembler;
+mod compiler;
 mod instruction;
+mod parser;
 mod value;
 mod vm;
-mod assembler;
-mod parser;
-mod compiler;
 
-use crate::value::{NativeFunc, Block, Value, Object, NativeClassBuilder};
+use crate::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
 use crate::vm::{VmState, VmStatus};
 
+use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
 use std::collections::HashMap;
-use gc_arena::{Arena, Rootable, Mutation, Gc, lock::RefLock};
 
 // Native helper: print
 fn native_print<'gc>(
@@ -43,7 +43,10 @@ fn native_len<'gc>(
         Value::String(s) => Ok(Value::Int((**s).len() as i64)),
         Value::List(l) => Ok(Value::Int(l.borrow().len() as i64)),
         Value::Dict(d) => Ok(Value::Int(d.borrow().len() as i64)),
-        _ => Err(format!("len expects string, list, or dict, got {:?}", args[0])),
+        _ => Err(format!(
+            "len expects string, list, or dict, got {:?}",
+            args[0]
+        )),
     }
 }
 
@@ -61,7 +64,10 @@ fn native_push<'gc>(
             l.borrow_mut(mc).push(args[1]);
             Ok(Value::Nil)
         }
-        _ => Err(format!("push first argument must be list, got {:?}", args[0])),
+        _ => Err(format!(
+            "push first argument must be list, got {:?}",
+            args[0]
+        )),
     }
 }
 
@@ -79,7 +85,10 @@ fn native_pop<'gc>(
             let val = l.borrow_mut(mc).pop().unwrap_or(Value::Nil);
             Ok(val)
         }
-        _ => Err(format!("pop first argument must be list, got {:?}", args[0])),
+        _ => Err(format!(
+            "pop first argument must be list, got {:?}",
+            args[0]
+        )),
     }
 }
 
@@ -305,7 +314,10 @@ fn native_negated<'gc>(
     match &args[0] {
         Value::Int(i) => Ok(Value::Int(-*i)),
         Value::Float(f) => Ok(Value::Float(-*f)),
-        _ => Err(format!("negated expects integer or float, got {:?}", args[0])),
+        _ => Err(format!(
+            "negated expects integer or float, got {:?}",
+            args[0]
+        )),
     }
 }
 
@@ -328,7 +340,10 @@ fn native_list_at<'gc>(
                 Ok(Value::Nil)
             }
         }
-        _ => Err(format!("at expects list and integer, got {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!(
+            "at expects list and integer, got {:?} and {:?}",
+            args[0], args[1]
+        )),
     }
 }
 
@@ -352,7 +367,10 @@ fn native_list_slice_from<'gc>(
             };
             Ok(Value::List(Gc::new(mc, RefLock::new(sliced))))
         }
-        _ => Err(format!("sliceFrom expects list and integer, got {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!(
+            "sliceFrom expects list and integer, got {:?} and {:?}",
+            args[0], args[1]
+        )),
     }
 }
 
@@ -429,7 +447,7 @@ d = p1.dist: p2;
 
     println!("Parsing BuildingBlocks script to AST...");
     let ast = parser::parser::parse_building_blocks_string(script);
-    
+
     let program_node = match &ast.value {
         parser::ast_visitor::NodeValue::Program(p) => p,
         _ => {
@@ -456,15 +474,30 @@ d = p1.dist: p2;
         // Register dynamic methods/operators in globals
         {
             let mut globals = vm.globals.borrow_mut(mc);
-            globals.insert("print:".to_string(), Value::Native(NativeFunc(native_print)));
-            globals.insert("print:and:".to_string(), Value::Native(NativeFunc(native_print)));
-            globals.insert("print:and:and:and:".to_string(), Value::Native(NativeFunc(native_print)));
+            globals.insert(
+                "print:".to_string(),
+                Value::Native(NativeFunc(native_print)),
+            );
+            globals.insert(
+                "print:and:".to_string(),
+                Value::Native(NativeFunc(native_print)),
+            );
+            globals.insert(
+                "print:and:and:and:".to_string(),
+                Value::Native(NativeFunc(native_print)),
+            );
             globals.insert("len".to_string(), Value::Native(NativeFunc(native_len)));
             globals.insert("push:".to_string(), Value::Native(NativeFunc(native_push)));
             globals.insert("pop".to_string(), Value::Native(NativeFunc(native_pop)));
-            globals.insert("regex_match:".to_string(), Value::Native(NativeFunc(native_regex_match)));
-            globals.insert("error:".to_string(), Value::Native(NativeFunc(native_error)));
-            
+            globals.insert(
+                "regex_match:".to_string(),
+                Value::Native(NativeFunc(native_regex_match)),
+            );
+            globals.insert(
+                "error:".to_string(),
+                Value::Native(NativeFunc(native_error)),
+            );
+
             // Operators
             globals.insert("+".to_string(), Value::Native(NativeFunc(native_add)));
             globals.insert("-".to_string(), Value::Native(NativeFunc(native_sub)));
@@ -476,67 +509,78 @@ d = p1.dist: p2;
             globals.insert(">".to_string(), Value::Native(NativeFunc(native_gt)));
             globals.insert("<=".to_string(), Value::Native(NativeFunc(native_le)));
             globals.insert(">=".to_string(), Value::Native(NativeFunc(native_ge)));
-            
+
             // Unary
             globals.insert("!".to_string(), Value::Native(NativeFunc(native_not)));
-            globals.insert("negated".to_string(), Value::Native(NativeFunc(native_negated)));
-            
+            globals.insert(
+                "negated".to_string(),
+                Value::Native(NativeFunc(native_negated)),
+            );
+
             // List destructuring
             globals.insert("at:".to_string(), Value::Native(NativeFunc(native_list_at)));
-            globals.insert("sliceFrom:".to_string(), Value::Native(NativeFunc(native_list_slice_from)));
+            globals.insert(
+                "sliceFrom:".to_string(),
+                Value::Native(NativeFunc(native_list_slice_from)),
+            );
         }
 
-        vm.register_native_class(mc, NativeClassBuilder::new("Point")
-            .class_method("newX:y:", |_vm, mc, args| {
-                if args.len() != 3 {
-                    return Err("Point newX:y: expects exactly 2 arguments (x, y)".to_string());
-                }
-                let mut fields = HashMap::new();
-                fields.insert("x".to_string(), args[1]);
-                fields.insert("y".to_string(), args[2]);
-                Ok(Value::Object(Gc::new(mc, RefLock::new(Object {
-                    class: args[0],
-                    fields,
-                }))))
-            })
-            .instance_method("x", |_vm, _mc, args| {
-                match &args[0] {
-                    Value::Object(obj) => Ok(obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil)),
+        vm.register_native_class(
+            mc,
+            NativeClassBuilder::new("Point")
+                .class_method("newX:y:", |_vm, mc, args| {
+                    if args.len() != 3 {
+                        return Err("Point newX:y: expects exactly 2 arguments (x, y)".to_string());
+                    }
+                    let mut fields = HashMap::new();
+                    fields.insert("x".to_string(), args[1]);
+                    fields.insert("y".to_string(), args[2]);
+                    Ok(Value::Object(Gc::new(
+                        mc,
+                        RefLock::new(Object {
+                            class: args[0],
+                            fields,
+                        }),
+                    )))
+                })
+                .instance_method("x", |_vm, _mc, args| match &args[0] {
+                    Value::Object(obj) => {
+                        Ok(obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil))
+                    }
                     _ => Err("Point x expects Point object as receiver".to_string()),
-                }
-            })
-            .instance_method("y", |_vm, _mc, args| {
-                match &args[0] {
-                    Value::Object(obj) => Ok(obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil)),
+                })
+                .instance_method("y", |_vm, _mc, args| match &args[0] {
+                    Value::Object(obj) => {
+                        Ok(obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil))
+                    }
                     _ => Err("Point y expects Point object as receiver".to_string()),
-                }
-            })
-            .instance_method("dist:", |_vm, _mc, args| {
-                let (x1, y1) = match &args[0] {
-                    Value::Object(obj) => (
-                        obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
-                        obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
-                    ),
-                    _ => return Err("Point dist: expects Point object as receiver".to_string()),
-                };
-                let (x2, y2) = match &args[1] {
-                    Value::Object(obj) => (
-                        obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
-                        obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
-                    ),
-                    _ => return Err("Point dist: expects Point object as argument".to_string()),
-                };
+                })
+                .instance_method("dist:", |_vm, _mc, args| {
+                    let (x1, y1) = match &args[0] {
+                        Value::Object(obj) => (
+                            obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
+                            obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
+                        ),
+                        _ => return Err("Point dist: expects Point object as receiver".to_string()),
+                    };
+                    let (x2, y2) = match &args[1] {
+                        Value::Object(obj) => (
+                            obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
+                            obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
+                        ),
+                        _ => return Err("Point dist: expects Point object as argument".to_string()),
+                    };
 
-                let to_f64 = |val| match val {
-                    Value::Int(i) => i as f64,
-                    Value::Float(f) => f,
-                    _ => 0.0,
-                };
+                    let to_f64 = |val| match val {
+                        Value::Int(i) => i as f64,
+                        Value::Float(f) => f,
+                        _ => 0.0,
+                    };
 
-                let dx = to_f64(x1) - to_f64(x2);
-                let dy = to_f64(y1) - to_f64(y2);
-                Ok(Value::Float((dx * dx + dy * dy).sqrt()))
-            })
+                    let dx = to_f64(x1) - to_f64(x2);
+                    let dy = to_f64(y1) - to_f64(y2);
+                    Ok(Value::Float((dx * dx + dy * dy).sqrt()))
+                }),
         );
 
         // Convert StaticBlock to Block in GC and start it
@@ -565,25 +609,17 @@ d = p1.dist: p2;
     println!("Running virtual machine...");
     let mut step_count = 0;
     loop {
-        let status = arena.mutate_root(|mc, vm| {
-            match vm.step(mc) {
-                Ok(VmStatus::Running) => Ok(ExecutionStatus::Running),
-                Ok(VmStatus::Finished(val)) => {
-                    println!(
-                        "VM execution finished successfully. Top value: {}",
-                        val
-                    );
-                    Ok(ExecutionStatus::Finished)
-                }
-                Ok(VmStatus::Yeeted(val)) => {
-                    println!(
-                        "VM execution terminated with uncaught exception: {}",
-                        val
-                    );
-                    Ok(ExecutionStatus::Yeeted)
-                }
-                Err(e) => Err(e),
+        let status = arena.mutate_root(|mc, vm| match vm.step(mc) {
+            Ok(VmStatus::Running) => Ok(ExecutionStatus::Running),
+            Ok(VmStatus::Finished(val)) => {
+                println!("VM execution finished successfully. Top value: {}", val);
+                Ok(ExecutionStatus::Finished)
             }
+            Ok(VmStatus::Yeeted(val)) => {
+                println!("VM execution terminated with uncaught exception: {}", val);
+                Ok(ExecutionStatus::Yeeted)
+            }
+            Err(e) => Err(e),
         });
         match status {
             Ok(ExecutionStatus::Running) => {

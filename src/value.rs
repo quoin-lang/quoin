@@ -1,10 +1,10 @@
 use crate::instruction::Instruction;
 use crate::vm::VmState;
 
+use gc_arena::{lock::RefLock, Collect, Gc};
+use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
-use regex::Regex;
-use gc_arena::{Collect, Gc, lock::RefLock};
 
 #[derive(Clone, Collect)]
 #[collect(require_static)]
@@ -17,10 +17,22 @@ impl fmt::Debug for BBRegex {
 }
 
 #[derive(Clone, Copy)]
-pub struct NativeFunc(pub for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>);
+pub struct NativeFunc(
+    pub  for<'a> fn(
+        &mut VmState<'a>,
+        &gc_arena::Mutation<'a>,
+        Vec<Value<'a>>,
+    ) -> Result<Value<'a>, String>,
+);
 
 impl NativeFunc {
-    pub fn new(f: for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>) -> Self {
+    pub fn new(
+        f: for<'a> fn(
+            &mut VmState<'a>,
+            &gc_arena::Mutation<'a>,
+            Vec<Value<'a>>,
+        ) -> Result<Value<'a>, String>,
+    ) -> Self {
         Self(f)
     }
 }
@@ -111,7 +123,9 @@ impl<'gc> PartialEq for Value<'gc> {
             (Value::Dict(a), Value::Dict(b)) => Gc::ptr_eq(*a, *b),
             (Value::Regex(a), Value::Regex(b)) => Gc::ptr_eq(*a, *b),
             (Value::Block(a), Value::Block(b)) => Gc::ptr_eq(*a, *b),
-            (Value::Method(a), Value::Method(b)) => Gc::ptr_eq(a.block, b.block) && a.receiver == b.receiver,
+            (Value::Method(a), Value::Method(b)) => {
+                Gc::ptr_eq(a.block, b.block) && a.receiver == b.receiver
+            }
             (Value::Class(a), Value::Class(b)) => Gc::ptr_eq(*a, *b),
             (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
             (Value::Native(a), Value::Native(b)) => {
@@ -248,7 +262,12 @@ impl<'gc> EnvFrame<'gc> {
         }
     }
 
-    pub fn set(frame: Gc<'gc, RefLock<Self>>, mc: &gc_arena::Mutation<'gc>, name: &str, val: Value<'gc>) -> bool {
+    pub fn set(
+        frame: Gc<'gc, RefLock<Self>>,
+        mc: &gc_arena::Mutation<'gc>,
+        name: &str,
+        val: Value<'gc>,
+    ) -> bool {
         let mut current = Some(frame);
         while let Some(curr) = current {
             if curr.borrow().vars.contains_key(name) {
@@ -307,13 +326,31 @@ impl NativeClassBuilder {
         }
     }
 
-    pub fn class_method(mut self, selector: &str, f: for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>) -> Self {
-        self.class_methods.insert(selector.to_string(), NativeFunc(f));
+    pub fn class_method(
+        mut self,
+        selector: &str,
+        f: for<'a> fn(
+            &mut VmState<'a>,
+            &gc_arena::Mutation<'a>,
+            Vec<Value<'a>>,
+        ) -> Result<Value<'a>, String>,
+    ) -> Self {
+        self.class_methods
+            .insert(selector.to_string(), NativeFunc(f));
         self
     }
 
-    pub fn instance_method(mut self, selector: &str, f: for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>) -> Self {
-        self.instance_methods.insert(selector.to_string(), NativeFunc(f));
+    pub fn instance_method(
+        mut self,
+        selector: &str,
+        f: for<'a> fn(
+            &mut VmState<'a>,
+            &gc_arena::Mutation<'a>,
+            Vec<Value<'a>>,
+        ) -> Result<Value<'a>, String>,
+    ) -> Self {
+        self.instance_methods
+            .insert(selector.to_string(), NativeFunc(f));
         self
     }
 }

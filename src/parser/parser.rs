@@ -19,7 +19,11 @@ pub fn parse_building_blocks_string(code: &str) -> Node {
 
     let root = parser.program().unwrap();
 
-    let mut visitor = AstVisitor { x: Node { value: NodeValue::Unknown } };
+    let mut visitor = AstVisitor {
+        x: Node {
+            value: NodeValue::Unknown,
+        },
+    };
 
     let visitor_result = visitor.visit(&*root);
 
@@ -32,14 +36,14 @@ pub fn parse_building_blocks_file(path: &Path) -> Node {
     let filename = path.display();
 
     let mut file = match File::open(&path) {
-        | Err(why) => panic!("couldn't open {}: {}", filename, why),
-        | Ok(file) => file,
+        Err(why) => panic!("couldn't open {}: {}", filename, why),
+        Ok(file) => file,
     };
 
     let mut contents = String::new();
     match file.read_to_string(&mut contents) {
-        | Ok(_) => {}
-        | Err(why) => panic!("couldn't read {}: {}", filename, why),
+        Ok(_) => {}
+        Err(why) => panic!("couldn't read {}: {}", filename, why),
     };
 
     let builder = thread::Builder::new()
@@ -53,7 +57,11 @@ pub fn parse_building_blocks_file(path: &Path) -> Node {
 
             let root = parser.program().unwrap();
 
-            let mut visitor = AstVisitor { x: Node { value: NodeValue::Unknown } };
+            let mut visitor = AstVisitor {
+                x: Node {
+                    value: NodeValue::Unknown,
+                },
+            };
 
             let visitor_result = visitor.visit(&*root);
 
