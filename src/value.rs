@@ -18,6 +18,12 @@ impl fmt::Debug for MyRegex {
 #[derive(Clone, Copy)]
 pub struct NativeFunc(pub for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>);
 
+impl NativeFunc {
+    pub fn new(f: for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>) -> Self {
+        Self(f)
+    }
+}
+
 unsafe impl<'gc> Collect<'gc> for NativeFunc {
     const NEEDS_TRACE: bool = false;
 }
@@ -283,4 +289,44 @@ pub trait NativeClass {
     fn name(&self) -> &'static str;
     fn class_methods(&self) -> HashMap<String, NativeFunc>;
     fn instance_methods(&self) -> HashMap<String, NativeFunc>;
+}
+
+pub struct NativeClassBuilder {
+    name: &'static str,
+    class_methods: HashMap<String, NativeFunc>,
+    instance_methods: HashMap<String, NativeFunc>,
+}
+
+impl NativeClassBuilder {
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            class_methods: HashMap::new(),
+            instance_methods: HashMap::new(),
+        }
+    }
+
+    pub fn class_method(mut self, selector: &str, f: for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>) -> Self {
+        self.class_methods.insert(selector.to_string(), NativeFunc(f));
+        self
+    }
+
+    pub fn instance_method(mut self, selector: &str, f: for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>) -> Self {
+        self.instance_methods.insert(selector.to_string(), NativeFunc(f));
+        self
+    }
+}
+
+impl NativeClass for NativeClassBuilder {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn class_methods(&self) -> HashMap<String, NativeFunc> {
+        self.class_methods.clone()
+    }
+
+    fn instance_methods(&self) -> HashMap<String, NativeFunc> {
+        self.instance_methods.clone()
+    }
 }
