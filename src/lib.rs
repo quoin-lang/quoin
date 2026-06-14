@@ -33,9 +33,10 @@ macro_rules! arg {
                         None => "None".to_string(),
                     },
                     msg: format!(
-                        "Expected {} at argument index {}",
+                        "Expected {} at argument index {} (got {:?})",
                         stringify!($variant),
-                        $idx
+                        $idx,
+                        $args[$idx],
                     ),
                 })
             }

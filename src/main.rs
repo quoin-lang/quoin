@@ -62,6 +62,10 @@ p2 = Point.newX: 0 y: 0;
 d = p1.dist: p2;
 .print: 'distance =' and: d;
 p1.print;
+.print: 'p1.id =' and: p1.id;
+.print: 'p2.id =' and: p2.id;
+.print: 'p1.id =' and: p1.id;
+.print: 'p2.id =' and: p2.id;
 
 "* Test 7: Fatal error unwinding
 .print: 'Triggering error:';
