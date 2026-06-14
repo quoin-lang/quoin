@@ -10,7 +10,7 @@ mod parser;
 mod value;
 mod vm;
 
-use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
+use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
 use std::collections::HashMap;
 
 // Native helper: print
@@ -30,71 +30,6 @@ fn native_print<'gc>(
     }
     println!();
     Ok(Value::Nil)
-}
-
-// Native helper: len
-fn native_len<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 1 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 1,
-            got: args.len(),
-            msg: "len expects exactly 1 argument (receiver)".to_string(),
-        });
-    }
-    match &args[0] {
-        Value::String(s) => Ok(Value::Int((**s).len() as i64)),
-        Value::List(l) => Ok(Value::Int(l.borrow().len() as i64)),
-        Value::Dict(d) => Ok(Value::Int(d.borrow().len() as i64)),
-        _ => Err(format!("len expects string, list, or dict, got {:?}", args[0]).into()),
-    }
-}
-
-// Native helper: list push
-fn native_push<'gc>(
-    _vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 2 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 2,
-            got: args.len(),
-            msg: "push expects exactly 2 arguments (list, element)".to_string(),
-        });
-    }
-    match &args[0] {
-        Value::List(l) => {
-            l.borrow_mut(mc).push(args[1]);
-            Ok(Value::Nil)
-        }
-        _ => Err(format!("push first argument must be list, got {:?}", args[0]).into()),
-    }
-}
-
-// Native helper: list pop
-fn native_pop<'gc>(
-    _vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 1 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 1,
-            got: args.len(),
-            msg: "pop expects exactly 1 argument (list)".to_string(),
-        });
-    }
-    match &args[0] {
-        Value::List(l) => {
-            let val = l.borrow_mut(mc).pop().unwrap_or(Value::Nil);
-            Ok(val)
-        }
-        _ => Err(format!("pop first argument must be list, got {:?}", args[0]).into()),
-    }
 }
 
 // Native helper: regex_match
@@ -592,9 +527,6 @@ p1.print;
                 "print:and:and:and:".to_string(),
                 Value::Native(NativeFunc(native_print)),
             );
-            globals.insert("len".to_string(), Value::Native(NativeFunc(native_len)));
-            globals.insert("push:".to_string(), Value::Native(NativeFunc(native_push)));
-            globals.insert("pop".to_string(), Value::Native(NativeFunc(native_pop)));
             globals.insert(
                 "regex_match:".to_string(),
                 Value::Native(NativeFunc(native_regex_match)),
