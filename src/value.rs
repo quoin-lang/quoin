@@ -156,7 +156,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
             Value::Class(c) => write!(f, "Class({})", c.borrow().name),
             Value::Object(o) => {
                 let name = o.borrow().class.borrow().name.clone();
-                write!(f, "Object({}, fields: {:?})", name, o.borrow().fields)
+                write!(f, "Object({}, {{{:?}}})", name, o.borrow().fields)
             }
         }
     }
@@ -172,10 +172,10 @@ impl<'gc> fmt::Display for Value<'gc> {
             Value::String(s) => write!(f, "{}", **s),
             Value::List(l) => {
                 let borrowed = l.borrow();
-                write!(f, "[")?;
+                write!(f, "#[")?;
                 for (i, val) in borrowed.iter().enumerate() {
                     if i > 0 {
-                        write!(f, ", ")?;
+                        write!(f, " ")?;
                     }
                     write!(f, "{}", val)?;
                 }
@@ -183,23 +183,21 @@ impl<'gc> fmt::Display for Value<'gc> {
             }
             Value::Dict(d) => {
                 let borrowed = d.borrow();
-                write!(f, "{{")?;
-                let mut first = true;
-                for (k, v) in borrowed.iter() {
-                    if !first {
-                        write!(f, ", ")?;
+                write!(f, "#{{")?;
+                for (i, (k, v)) in borrowed.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
                     }
-                    first = false;
-                    write!(f, "{:?}: {}", k, v)?;
+                    write!(f, "{}: {}", k, v)?;
                 }
                 write!(f, "}}")
             }
-            Value::Regex(r) => write!(f, "/{}/", r.0.as_str()),
+            Value::Regex(r) => write!(f, "#/{}/", r.0.as_str()),
             Value::Block(b) => {
                 if let Some(ref name) = b.name {
                     write!(f, "<block {}>", name)
                 } else {
-                    write!(f, "<block <anonymous>>")
+                    write!(f, "<block>")
                 }
             }
             Value::Method(m) => write!(f, "<method {}#{}>", m.receiver.type_name(), m.name),
@@ -207,7 +205,14 @@ impl<'gc> fmt::Display for Value<'gc> {
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
             Value::Object(o) => {
                 let name = o.borrow().class.borrow().name.clone();
-                write!(f, "an instance of {}", name)
+                write!(f, "{}{{", name)?;
+                for (i, (k, v)) in o.borrow().fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{}: {}", k, v)?;
+                }
+                write!(f, "}}")
             }
         }
     }

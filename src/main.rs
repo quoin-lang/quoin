@@ -10,7 +10,6 @@ use crate::vm::{VmState, VmStatus};
 use new_vm::{arg, arg_obj, gc, gcl};
 
 use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
-use itertools::Itertools;
 use std::collections::HashMap;
 use std::error::Error;
 
@@ -587,31 +586,18 @@ fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
         //
         .instance_method("s", |_vm, mc, args| {
-            let obj = arg!(args, Object, 0);
-            let s = format!(
-                "{}{{{}}}",
-                obj.borrow().class.borrow().name,
-                obj.borrow()
-                    .fields
-                    .iter()
-                    .map(|(k, v)| format!("{}={:?}", k, v))
-                    .join(", ")
-            );
-            Ok(Value::String(gc!(mc, s)))
+            Ok(Value::String(gc!(mc, format!("{}", args[0]))))
         })
         //
-        .instance_method("print", |_vm, _mc, args| {
-            let obj = arg!(args, Object, 0);
+        .instance_method("print", |vm, mc, args| {
+            let s_result = vm.call_method(mc, args[0], "s", vec![])?;
 
-            // TODO: Recursively call #s on everything to build the string.
             println!(
-                "{}{{{}}}",
-                obj.borrow().class.borrow().name,
-                obj.borrow()
-                    .fields
-                    .iter()
-                    .map(|(k, v)| format!("{}={:?}", k, v))
-                    .join(", ")
+                "{}",
+                match s_result {
+                    Value::String(string) => string.to_string(),
+                    x => format!("{:?}", x),
+                }
             );
 
             Ok(Value::Nil)

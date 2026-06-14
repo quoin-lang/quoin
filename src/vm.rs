@@ -117,6 +117,25 @@ impl<'gc> VmState<'gc> {
             .insert(native_class.name().to_string(), Value::Class(class_obj));
     }
 
+    pub fn call_method(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        selector: &str,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, Box<dyn Error>> {
+        let method = self.lookup_method(receiver, selector);
+        if let Some(method) = method {
+            let mut all_args = vec![receiver];
+            all_args.extend(args);
+            method.call(self, mc, all_args)?;
+            Ok(self.pop()?)
+        } else {
+            Ok(Value::Nil)
+        }
+    }
+
+    //noinspection DuplicatedCode
     pub fn lookup_method(
         &self,
         receiver: Value<'gc>,
