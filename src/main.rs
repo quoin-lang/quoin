@@ -3,15 +3,13 @@ use crate::vm::{VmState, VmStatus};
 use new_vm::error::BBError;
 use new_vm::{arg, arg_obj, gc, gcl};
 
-mod assembler;
 mod compiler;
 mod instruction;
 mod parser;
 mod value;
 mod vm;
 
-use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
-use itertools::Itertools;
+use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
 use std::collections::HashMap;
 
 // Native helper: print
