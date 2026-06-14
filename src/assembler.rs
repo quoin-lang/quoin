@@ -228,15 +228,6 @@ fn parse_instruction(
         }
         "pop" => Ok(Instruction::Pop),
         "dup" => Ok(Instruction::Dup),
-        "call" => {
-            let n_str = tokens
-                .get(1)
-                .ok_or_else(|| format!("Line {}: call requires arg count", line_num))?;
-            let n = n_str
-                .parse::<usize>()
-                .map_err(|_| format!("Line {}: invalid call count: {}", line_num, n_str))?;
-            Ok(Instruction::Call(n))
-        }
         "return" => Ok(Instruction::Return),
         "yeet" => Ok(Instruction::Yeet),
         "block_return" => Ok(Instruction::BlockReturn),

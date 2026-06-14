@@ -321,32 +321,6 @@ impl<'gc> VmState<'gc> {
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
-            Instruction::Call(num_args) => {
-                let mut args = Vec::new();
-                for _ in 0..num_args {
-                    args.push(self.pop()?);
-                }
-                args.reverse();
-
-                let callable = self.pop()?;
-                self.frames[frame_idx].ip += 1; // Advance caller frame IP
-
-                match callable {
-                    Value::Block(block) => {
-                        self.start_block(mc, block, args);
-                    }
-                    Value::Method(method) => {
-                        let mut method_args = vec![method.receiver];
-                        method_args.extend(args);
-                        self.start_block(mc, method.block, method_args);
-                    }
-                    Value::Native(native_fn) => {
-                        let ret = native_fn.0(self, mc, args)?;
-                        self.push(ret);
-                    }
-                    _ => return Err(format!("Value is not callable: {:?}", callable)),
-                }
-            }
             Instruction::Send(selector, num_args) => {
                 let mut args = Vec::new();
                 for _ in 0..num_args {
