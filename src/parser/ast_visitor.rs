@@ -14,24 +14,24 @@ use crate::parser::ast_visitor::NodeValue::{
     ClassExtension, ConstDefinition, Dictionary, Double, IdentLValue, Identifier, IgnoredLValue,
     IgnoredSplatLValue, Integer, List, MethodCall, MethodCallArguments, MethodDefinition,
     MethodExtension, MethodReturn, MethodSelector, Namespace, Program, Regex, Set, SplatLValue,
-    Str, SubLValue, Symbol, UnaryOperator, UserString, YieldReturn,
+    Str, SubLValue, Symbol, UnaryOperator, UserList, UserString, YieldReturn,
 };
 use crate::parser::generated::buildingblocksparser::{
     AddExprContext, AndExprContext, ArgIdentContext, ArgIdentContextAttrs, ArgIdentInstContext,
     ArgIdentInstContextAttrs, AssignmentContext, AssignmentContextAttrs, AssignmentStmtContext,
     AssignmentStmtContextAttrs, Bang3StmtContext, BlockArgIgnoredContext, BlockArgTypedContext,
-    BlockArgUntypedContext, BlockDeclTypedContext, BlockDeclUntypedContext, BlockDeclsContextAttrs,
-    BlockNoDeclsContext, BlockNoDeclsContextAttrs, BlockReturnContext, BlockReturnContextAttrs,
-    BlockWDeclsContext, BlockWDeclsContextAttrs, BuildingBlocksParserContextType,
-    CallSigNoArgBangContext, CallSigNoArgBangContextAttrs, CallSigNoArgContext,
-    CallSigNoArgContextAttrs, CallSigWArgContext, CallSigWArgContextAttrs, ClassDef2ExprContext,
-    ClassDef2ExprContextAttrs, ClassDefExprContext, ClassDefExprContextAttrs, ClassExtExprContext,
-    ClassExtExprContextAttrs, ConstDefExprContext, ConstDefExprContextAttrs, DefCallExprContext,
-    DefCallExprContextAttrs, DictExprContext, DivExprContext, Dot3StmtContext, EqExprContext,
-    ExprCallExprContext, ExprStmtContext, ExprStmtContextAttrs, FullNSContext, FullNSContextAttrs,
-    GtEqExprContext, GtExprContext, Huh3StmtContext, IdentKeywordContext, IdentKeywordContextAttrs,
-    IdentLValueContext, IdentLValueContextAttrs, IdentOtherContext, IdentOtherContextAttrs,
-    IgnoredLValueContext, IgnoredSplatLValueContext, InstanceIdentContext,
+    BlockArgUntypedContext, BlockDeclTypedContext, BlockDeclUntypedContext, BlockDeclsContext,
+    BlockDeclsContextAttrs, BlockNoDeclsContext, BlockNoDeclsContextAttrs, BlockReturnContext,
+    BlockReturnContextAttrs, BlockWDeclsContext, BlockWDeclsContextAttrs,
+    BuildingBlocksParserContextType, CallSigNoArgBangContext, CallSigNoArgBangContextAttrs,
+    CallSigNoArgContext, CallSigNoArgContextAttrs, CallSigWArgContext, CallSigWArgContextAttrs,
+    ClassDef2ExprContext, ClassDef2ExprContextAttrs, ClassDefExprContext, ClassDefExprContextAttrs,
+    ClassExtExprContext, ClassExtExprContextAttrs, ConstDefExprContext, ConstDefExprContextAttrs,
+    DefCallExprContext, DefCallExprContextAttrs, DictExprContext, DivExprContext, Dot3StmtContext,
+    EqExprContext, ExprCallExprContext, ExprStmtContext, ExprStmtContextAttrs, FullNSContext,
+    FullNSContextAttrs, GtEqExprContext, GtExprContext, Huh3StmtContext, IdentKeywordContext,
+    IdentKeywordContextAttrs, IdentLValueContext, IdentLValueContextAttrs, IdentOtherContext,
+    IdentOtherContextAttrs, IgnoredLValueContext, IgnoredSplatLValueContext, InstanceIdentContext,
     InstanceIdentContextAttrs, ListExprContext, ListExprContextAttrs, LiteralNumberContext,
     LiteralStringContext, LiteralStringContextAttrs, LiteralSymbolContext,
     LiteralSymbolContextAttrs, LocalIdentContext, LocalIdentContextAttrs, LtEqExprContext,
@@ -47,7 +47,7 @@ use crate::parser::generated::buildingblocksparser::{
     SplatLValueContextAttrs, SubExprContext, SubLValueContext, SubLValueContextAttrs,
     SymbolContext, SymbolContextAttrs, UnBangExprContext, UnBangExprContextAttrs,
     UnMinusExprContext, UnMinusExprContextAttrs, UnModExprContext, UnModExprContextAttrs,
-    UnPlusExprContext, UnPlusExprContextAttrs, UserListExprContext, UserStringExprContext,
+    UnPlusExprContext, UnPlusExprContextAttrs, UserListExprContext, UserListExprContextAttrs, UserStringExprContext,
     UserStringExprContextAttrs, YieldReturnContext, YieldReturnContextAttrs,
 };
 use crate::parser::generated::buildingblocksvisitor::BuildingBlocksVisitorCompat;
@@ -61,7 +61,7 @@ pub enum IdentifierType {
     Namespaced,
     Keyword,
 }
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub enum UnaryOperatorType {
     #[default]
     Unknown,
@@ -70,7 +70,7 @@ pub enum UnaryOperatorType {
     Sub,
     Mod,
 }
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub enum BinaryOperatorType {
     #[default]
     Unknown,
@@ -91,165 +91,165 @@ pub enum BinaryOperatorType {
     Match,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssignmentNode {
     pub lvalues: Vec<Arc<Node>>,
     pub rvalue: Arc<Node>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BinaryOperatorNode {
     pub operator: BinaryOperatorType,
     pub left: Arc<Node>,
     pub right: Arc<Node>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockNode {
     pub arguments: Vec<Arc<BlockArgNode>>,
-    pub decls: Vec<Arc<BlockArgNode>>,
+    pub decls: Vec<Arc<BlockDeclNode>>,
     pub decl_block: Option<Arc<BlockNode>>,
     pub statements: Vec<Arc<Node>>,
     pub name: Option<Arc<SymbolNode>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockArgNode {
     pub identifier: Arc<IdentifierNode>,
     pub type_hint: Option<Arc<IdentifierNode>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockDeclNode {
     pub identifier: Arc<IdentifierNode>,
     pub type_hint: Option<Arc<IdentifierNode>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockReturnNode {
     pub value: Arc<Node>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassDefinitionNode {
     pub identifier: Arc<IdentifierNode>,
     pub parent_identifier: Option<Arc<IdentifierNode>>,
     pub block: Arc<BlockNode>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassExtensionNode {
     pub expression: Arc<Node>,
     pub block: Arc<BlockNode>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConstDefinitionNode {
     pub identifier: Arc<IdentifierNode>,
     pub rvalue: Arc<Node>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DictionaryNode {
     pub keys: Vec<Arc<Node>>,
     pub values: Vec<Arc<Node>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DoubleNode {
     pub value: f64,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IdentLValueNode {
     pub identifier: Arc<IdentifierNode>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IdentifierNode {
     pub namespace: Option<Arc<NamespaceNode>>,
     pub name: String,
     pub identifier_type: IdentifierType,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IntegerNode {
     pub value: i64,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ListNode {
     pub values: Vec<Arc<Node>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodCallArgumentsNode {
     pub signature: Arc<MethodSelectorNode>,
     pub expressions: Vec<Arc<Node>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodCallNode {
     pub subject: Option<Arc<Node>>,
     pub arguments: Arc<MethodCallArgumentsNode>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodDefinitionNode {
     pub signature: Arc<MethodSelectorNode>,
     pub block: Arc<BlockNode>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodExtensionNode {
     pub signature: Arc<MethodSelectorNode>,
     pub block: Arc<BlockNode>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodReturnNode {
     pub value: Arc<Node>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodSelectorNode {
     pub identifiers: Vec<Arc<IdentifierNode>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NamespaceNode {
     pub identifiers: Vec<Arc<IdentifierNode>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProgramNode {
     pub expressions: Vec<Arc<Node>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RegexNode {
     pub value: String,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SetNode {
     pub values: Vec<Arc<Node>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SplatLValueNode {
     pub identifier: Arc<IdentifierNode>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StringNode {
     pub value: String,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SubLValueNode {
     pub lvalues: Vec<Arc<Node>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SymbolNode {
     pub value: String,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnaryOperatorNode {
     pub operator: UnaryOperatorType,
     pub right: Arc<Node>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserListNode {
     pub identifier: Arc<IdentifierNode>,
     pub values: Vec<Arc<Node>>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserStringNode {
     pub identifier: Arc<IdentifierNode>,
     pub value: String,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct YieldReturnNode {
     pub value: Arc<Node>,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub enum NodeValue {
     #[default]
     Unknown,
@@ -294,7 +294,7 @@ pub enum NodeValue {
     YieldReturn(YieldReturnNode),
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct Node {
     pub value: NodeValue,
 }
@@ -490,23 +490,15 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_MulExpr(&mut self, ctx: &MulExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Mul,
-                left: Arc::new(self.visit(&*ctx.left.clone().unwrap())),
-                right: Arc::new(self.visit(&*ctx.right.clone().unwrap())),
-            }),
-        }
+        let left = self.visit(&*ctx.left.clone().unwrap());
+        let right = self.visit(&*ctx.right.clone().unwrap());
+        self.make_binary_operator(BinaryOperatorType::Mul, left, right)
     }
 
     fn visit_AndExpr(&mut self, ctx: &AndExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::And,
-                left: Arc::new(self.visit(&*ctx.left.clone().unwrap())),
-                right: Arc::new(self.visit(&*ctx.right.clone().unwrap())),
-            }),
-        }
+        let left = self.visit(&*ctx.left.clone().unwrap());
+        let right = self.visit(&*ctx.right.clone().unwrap());
+        self.make_binary_operator(BinaryOperatorType::And, left, right)
     }
 
     fn visit_LiteralString(&mut self, ctx: &LiteralStringContext<'a>) -> Self::Return {
@@ -554,37 +546,45 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_GtExpr(&mut self, ctx: &GtExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Gt,
-                left: Arc::new(self.visit(&*ctx.left.clone().unwrap())),
-                right: Arc::new(self.visit(&*ctx.right.clone().unwrap())),
-            }),
-        }
+        let left = self.visit(&*ctx.left.clone().unwrap());
+        let right = self.visit(&*ctx.right.clone().unwrap());
+        self.make_binary_operator(BinaryOperatorType::Gt, left, right)
     }
 
     fn visit_LtExpr(&mut self, ctx: &LtExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Lt,
-                left: Arc::new(self.visit(&*ctx.left.clone().unwrap())),
-                right: Arc::new(self.visit(&*ctx.right.clone().unwrap())),
-            }),
-        }
+        let left = self.visit(&*ctx.left.clone().unwrap());
+        let right = self.visit(&*ctx.right.clone().unwrap());
+        self.make_binary_operator(BinaryOperatorType::Lt, left, right)
     }
 
-    fn visit_UserListExpr(&mut self, _ctx: &UserListExprContext<'a>) -> Self::Return {
-        todo!()
+    fn visit_UserListExpr(&mut self, ctx: &UserListExprContext<'a>) -> Self::Return {
+        let raw_start = ctx.USER_LIST_START().unwrap().get_text();
+        let ident_name = raw_start
+            .trim_start_matches('#')
+            .trim_end_matches('(')
+            .to_string();
+
+        let mut values: Vec<Arc<Node>> = Vec::new();
+        for node in ctx.expr_all() {
+            values.push(Arc::new(self.visit(&*node)));
+        }
+
+        Node {
+            value: UserList(UserListNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: ident_name,
+                    identifier_type: IdentifierType::Local,
+                }),
+                values,
+            }),
+        }
     }
 
     fn visit_LtEqExpr(&mut self, ctx: &LtEqExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::LtEq,
-                left: Arc::new(self.visit(&*ctx.left.clone().unwrap())),
-                right: Arc::new(self.visit(&*ctx.right.clone().unwrap())),
-            }),
-        }
+        let left = self.visit(&*ctx.left.clone().unwrap());
+        let right = self.visit(&*ctx.right.clone().unwrap());
+        self.make_binary_operator(BinaryOperatorType::LtEq, left, right)
     }
 
     fn visit_MethodDefExpr(&mut self, ctx: &MethodDefExprContext<'a>) -> Self::Return {
@@ -698,23 +698,15 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_SubExpr(&mut self, ctx: &SubExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Sub,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::Sub, left, right)
     }
 
     fn visit_AddExpr(&mut self, ctx: &AddExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Add,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::Add, left, right)
     }
 
     fn visit_ConstDefExpr(&mut self, ctx: &ConstDefExprContext<'a>) -> Self::Return {
@@ -731,13 +723,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_RangeExpr(&mut self, ctx: &RangeExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Range,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::Range, left, right)
     }
 
     fn visit_UnPlusExpr(&mut self, ctx: &UnPlusExprContext<'a>) -> Self::Return {
@@ -750,13 +738,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_OrExpr(&mut self, ctx: &OrExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Or,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::Or, left, right)
     }
 
     fn visit_ClassDef2Expr(&mut self, ctx: &ClassDef2ExprContext<'a>) -> Self::Return {
@@ -778,23 +762,15 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_GtEqExpr(&mut self, ctx: &GtEqExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::GtEq,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::GtEq, left, right)
     }
 
     fn visit_DivExpr(&mut self, ctx: &DivExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Div,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::Div, left, right)
     }
 
     fn visit_UnBangExpr(&mut self, ctx: &UnBangExprContext<'a>) -> Self::Return {
@@ -807,13 +783,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_NotEqExpr(&mut self, ctx: &NotEqExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::NotEq,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::NotEq, left, right)
     }
 
     fn visit_UnMinusExpr(&mut self, ctx: &UnMinusExprContext<'a>) -> Self::Return {
@@ -826,13 +798,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_EqExpr(&mut self, ctx: &EqExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Eq,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::Eq, left, right)
     }
 
     fn visit_ClassExtExpr(&mut self, ctx: &ClassExtExprContext<'a>) -> Self::Return {
@@ -849,23 +817,15 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_ModExpr(&mut self, ctx: &ModExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Mod,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::Mod, left, right)
     }
 
     fn visit_MatchExpr(&mut self, ctx: &MatchExprContext<'a>) -> Self::Return {
-        Node {
-            value: BinaryOperator(BinaryOperatorNode {
-                operator: BinaryOperatorType::Match,
-                left: Arc::new(self.visit(ctx.left.clone().unwrap().as_ref())),
-                right: Arc::new(self.visit(ctx.right.clone().unwrap().as_ref())),
-            }),
-        }
+        let left = self.visit(ctx.left.clone().unwrap().as_ref());
+        let right = self.visit(ctx.right.clone().unwrap().as_ref());
+        self.make_binary_operator(BinaryOperatorType::Match, left, right)
     }
 
     fn visit_DefCallExpr(&mut self, ctx: &DefCallExprContext<'a>) -> Self::Return {
@@ -999,20 +959,8 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_NamedBlockWDecls(&mut self, ctx: &NamedBlockWDeclsContext<'a>) -> Self::Return {
-        let mut arguments: Vec<Arc<BlockArgNode>> = Vec::new();
-        for node in ctx.blockDecls().unwrap().blockArg_all() {
-            arguments.push(Arc::new(cast_node!(BlockArg(arg), arg, self.visit(&*node))));
-        }
-
-        let mut decls: Vec<Arc<BlockArgNode>> = Vec::new();
-        for node in ctx.blockDecls().unwrap().blockDecl_all() {
-            decls.push(Arc::new(cast_node!(BlockArg(arg), arg, self.visit(&*node))));
-        }
-
-        let decl_block = match ctx.blockDecls().unwrap().block() {
-            Some(db) => Some(Arc::new(cast_node!(Block(b), b, self.visit(&*db)))),
-            None => None,
-        };
+        let decl_ctx = ctx.blockDecls().unwrap();
+        let (arguments, decls, decl_block) = self.parse_block_decls(&decl_ctx);
 
         let mut statements: Vec<Arc<Node>> = Vec::new();
         for node in ctx.stmt_all() {
@@ -1035,37 +983,8 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_BlockWDecls(&mut self, ctx: &BlockWDeclsContext<'a>) -> Self::Return {
-        let declCtx = ctx.blockDecls().unwrap();
-
-        let mut arguments: Vec<Arc<BlockArgNode>> = Vec::new();
-        for node in declCtx.blockArg_all() {
-            match self.visit(&*node).value {
-                BlockArg(arg) => {
-                    arguments.push(Arc::new(arg));
-                }
-                BlockIgnoredArgument => {
-                    arguments.push(Arc::new(BlockArgNode {
-                        identifier: Arc::new(IdentifierNode {
-                            name: "?".to_string(),
-                            namespace: None,
-                            identifier_type: IdentifierType::Local,
-                        }),
-                        type_hint: None,
-                    }));
-                }
-                x => panic!("Very unexpected node type {:?} in block decls", x),
-            }
-        }
-
-        let mut decls: Vec<Arc<BlockArgNode>> = Vec::new();
-        for node in declCtx.blockDecl_all() {
-            decls.push(Arc::new(cast_node!(BlockArg(arg), arg, self.visit(&*node))));
-        }
-
-        let decl_block = match declCtx.block() {
-            Some(db) => Some(Arc::new(cast_node!(Block(b), b, self.visit(&*db)))),
-            None => None,
-        };
+        let decl_ctx = ctx.blockDecls().unwrap();
+        let (arguments, decls, decl_block) = self.parse_block_decls(&decl_ctx);
 
         let mut statements: Vec<Arc<Node>> = Vec::new();
         for node in ctx.stmt_all() {
@@ -1220,6 +1139,61 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 }
 
 impl AstVisitor {
+    fn parse_block_decls<'a>(
+        &mut self,
+        decl_ctx: &BlockDeclsContext<'a>,
+    ) -> (
+        Vec<Arc<BlockArgNode>>,
+        Vec<Arc<BlockDeclNode>>,
+        Option<Arc<BlockNode>>,
+    ) {
+        let mut arguments: Vec<Arc<BlockArgNode>> = Vec::new();
+        for node in decl_ctx.blockArg_all() {
+            match self.visit(&*node).value {
+                BlockArg(arg) => {
+                    arguments.push(Arc::new(arg));
+                }
+                BlockIgnoredArgument => {
+                    arguments.push(Arc::new(BlockArgNode {
+                        identifier: Arc::new(IdentifierNode {
+                            name: "?".to_string(),
+                            namespace: None,
+                            identifier_type: IdentifierType::Local,
+                        }),
+                        type_hint: None,
+                    }));
+                }
+                x => panic!("Very unexpected node type {:?} in block decls", x),
+            }
+        }
+
+        let mut decls: Vec<Arc<BlockDeclNode>> = Vec::new();
+        for node in decl_ctx.blockDecl_all() {
+            decls.push(Arc::new(cast_node!(
+                BlockDecl(arg),
+                arg,
+                self.visit(&*node)
+            )));
+        }
+
+        let decl_block = match decl_ctx.block() {
+            Some(db) => Some(Arc::new(cast_node!(Block(b), b, self.visit(&*db)))),
+            None => None,
+        };
+
+        (arguments, decls, decl_block)
+    }
+
+    fn make_binary_operator(&mut self, op: BinaryOperatorType, left: Node, right: Node) -> Node {
+        Node {
+            value: BinaryOperator(BinaryOperatorNode {
+                operator: op,
+                left: Arc::new(left),
+                right: Arc::new(right),
+            }),
+        }
+    }
+
     fn add_bang_to_ident(id: IdentifierNode) -> IdentifierNode {
         IdentifierNode {
             namespace: id.namespace,

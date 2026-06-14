@@ -1,7 +1,7 @@
 use crate::instruction::Instruction;
 use crate::vm::VmState;
 
-use gc_arena::{lock::RefLock, Collect, Gc};
+use gc_arena::{Collect, Gc, lock::RefLock};
 use new_vm::error::BBError;
 use regex::Regex;
 use std::collections::HashMap;

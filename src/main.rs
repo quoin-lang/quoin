@@ -10,7 +10,7 @@ mod parser;
 mod value;
 mod vm;
 
-use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
+use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
 use itertools::Itertools;
 use std::collections::HashMap;
 
