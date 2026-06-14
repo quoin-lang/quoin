@@ -68,7 +68,6 @@ p1.print;
 'Fatal exception yeeted!'.throw;
 "#;
 
-    println!("Parsing BuildingBlocks script to AST...");
     let ast = parser::parse_building_blocks_string(script);
 
     let program_node = match &ast.value {
@@ -79,7 +78,6 @@ p1.print;
         }
     };
 
-    println!("Compiling AST to VM bytecode...");
     let mut compiler = compiler::Compiler::new();
     let program = match compiler.compile_program(program_node) {
         Ok(p) => p,
@@ -88,9 +86,7 @@ p1.print;
             std::process::exit(1);
         }
     };
-    println!("Compilation successful!");
 
-    println!("Initializing gc-arena and virtual machine...");
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc);
 
@@ -139,7 +135,6 @@ p1.print;
         Yeeted,
     }
 
-    println!("Running virtual machine...");
     let mut step_count = 0;
     loop {
         let status = arena.mutate_root(|mc, vm| match vm.step(mc) {
@@ -171,9 +166,7 @@ p1.print;
         }
     }
 
-    println!("Running full garbage collection cycle...");
     arena.finish_cycle();
-    println!("Done!");
 }
 
 fn build_point_class() -> NativeClassBuilder {
