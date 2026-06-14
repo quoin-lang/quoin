@@ -1,0 +1,10 @@
+[package]
+name = "new-vm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gc-arena = "0.6.0"
+antlr-rust = "0.3.0-beta"
+regex = "1.10"
+

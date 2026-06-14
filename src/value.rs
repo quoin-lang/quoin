@@ -1,0 +1,231 @@
+use std::collections::HashMap;
+use std::fmt;
+use regex::Regex;
+use gc_arena::{Collect, Gc, lock::RefLock};
+use crate::instruction::Instruction;
+use crate::vm::VmState;
+
+#[derive(Clone, Collect)]
+#[collect(require_static)]
+pub struct MyRegex(pub Regex);
+
+impl fmt::Debug for MyRegex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Regex({})", self.0.as_str())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeFunc(pub for<'a> fn(&mut VmState<'a>, &gc_arena::Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, String>);
+
+unsafe impl<'gc> Collect<'gc> for NativeFunc {
+    const NEEDS_TRACE: bool = false;
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub enum Value<'gc> {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(Gc<'gc, String>),
+    List(Gc<'gc, RefLock<Vec<Value<'gc>>>>),
+    Dict(Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>),
+    Regex(Gc<'gc, MyRegex>),
+    Block(Gc<'gc, Block<'gc>>),
+    Method(Gc<'gc, Method<'gc>>),
+    Native(NativeFunc),
+}
+
+unsafe impl<'gc> Collect<'gc> for Value<'gc> {
+    const NEEDS_TRACE: bool = true;
+
+    #[inline]
+    fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
+        match self {
+            Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Native(_) => {}
+            Value::String(s) => cc.trace(s),
+            Value::List(l) => cc.trace(l),
+            Value::Dict(d) => cc.trace(d),
+            Value::Regex(r) => cc.trace(r),
+            Value::Block(b) => cc.trace(b),
+            Value::Method(m) => {
+                cc.trace(&m.receiver);
+                cc.trace(&m.block);
+            }
+        }
+    }
+}
+
+impl<'gc> Value<'gc> {
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Value::Nil => false,
+            Value::Bool(b) => *b,
+            _ => true,
+        }
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Nil => "Nil",
+            Value::Bool(_) => "Bool",
+            Value::Int(_) => "Int",
+            Value::Float(_) => "Float",
+            Value::String(_) => "String",
+            Value::List(_) => "List",
+            Value::Dict(_) => "Dict",
+            Value::Regex(_) => "Regex",
+            Value::Block(_) => "Block",
+            Value::Method(_) => "Method",
+            Value::Native(_) => "Native",
+        }
+    }
+}
+
+impl<'gc> PartialEq for Value<'gc> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Nil, Value::Nil) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
+            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+            (Value::String(a), Value::String(b)) => **a == **b,
+            (Value::List(a), Value::List(b)) => Gc::ptr_eq(*a, *b),
+            (Value::Dict(a), Value::Dict(b)) => Gc::ptr_eq(*a, *b),
+            (Value::Regex(a), Value::Regex(b)) => Gc::ptr_eq(*a, *b),
+            (Value::Block(a), Value::Block(b)) => Gc::ptr_eq(*a, *b),
+            (Value::Method(a), Value::Method(b)) => Gc::ptr_eq(a.block, b.block) && a.receiver == b.receiver,
+            (Value::Native(a), Value::Native(b)) => {
+                let a_ptr = a.0 as *const ();
+                let b_ptr = b.0 as *const ();
+                a_ptr == b_ptr
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<'gc> fmt::Debug for Value<'gc> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Nil => write!(f, "Nil"),
+            Value::Bool(b) => write!(f, "Bool({})", b),
+            Value::Int(i) => write!(f, "Int({})", i),
+            Value::Float(fl) => write!(f, "Float({})", fl),
+            Value::String(s) => write!(f, "String({:?})", **s),
+            Value::List(_) => write!(f, "List(...)"),
+            Value::Dict(_) => write!(f, "Dict(...)"),
+            Value::Regex(r) => write!(f, "{:?}", r),
+            Value::Block(b) => write!(f, "Block({:?})", b.name),
+            Value::Method(m) => write!(f, "Method({}#{})", m.receiver.type_name(), m.name),
+            Value::Native(_) => write!(f, "Native(<fn>)"),
+        }
+    }
+}
+
+impl<'gc> fmt::Display for Value<'gc> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Nil => write!(f, "nil"),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Int(i) => write!(f, "{}", i),
+            Value::Float(fl) => write!(f, "{}", fl),
+            Value::String(s) => write!(f, "{}", **s),
+            Value::List(l) => {
+                let borrowed = l.borrow();
+                write!(f, "[")?;
+                for (i, val) in borrowed.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", val)?;
+                }
+                write!(f, "]")
+            }
+            Value::Dict(d) => {
+                let borrowed = d.borrow();
+                write!(f, "{{")?;
+                let mut first = true;
+                for (k, v) in borrowed.iter() {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, "{:?}: {}", k, v)?;
+                }
+                write!(f, "}}")
+            }
+            Value::Regex(r) => write!(f, "/{}/", r.0.as_str()),
+            Value::Block(b) => {
+                if let Some(ref name) = b.name {
+                    write!(f, "<block {}>", name)
+                } else {
+                    write!(f, "<block <anonymous>>")
+                }
+            }
+            Value::Method(m) => write!(f, "<method {}#{}>", m.receiver.type_name(), m.name),
+            Value::Native(_) => write!(f, "<native fn>"),
+        }
+    }
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct Block<'gc> {
+    pub name: Option<String>,
+    pub is_nested_block: bool,
+    pub param_names: Vec<String>,
+    pub bytecode: Vec<Instruction>,
+    pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct Method<'gc> {
+    pub name: String,
+    pub receiver: Value<'gc>,
+    pub block: Gc<'gc, Block<'gc>>,
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct EnvFrame<'gc> {
+    pub parent: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+    pub vars: HashMap<String, Value<'gc>>,
+}
+
+impl<'gc> EnvFrame<'gc> {
+    pub fn new(parent: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>) -> Self {
+        Self {
+            parent,
+            vars: HashMap::new(),
+        }
+    }
+
+    pub fn get(frame: Gc<'gc, RefLock<Self>>, name: &str) -> Option<Value<'gc>> {
+        let borrowed = frame.borrow();
+        if let Some(val) = borrowed.vars.get(name) {
+            Some(*val)
+        } else if let Some(parent) = borrowed.parent {
+            Self::get(parent, name)
+        } else {
+            None
+        }
+    }
+
+    pub fn set(frame: Gc<'gc, RefLock<Self>>, mc: &gc_arena::Mutation<'gc>, name: &str, val: Value<'gc>) -> bool {
+        let mut current = Some(frame);
+        while let Some(curr) = current {
+            if curr.borrow().vars.contains_key(name) {
+                curr.borrow_mut(mc).vars.insert(name.to_string(), val);
+                return true;
+            }
+            current = curr.borrow().parent;
+        }
+        false
+    }
+}
