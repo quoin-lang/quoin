@@ -301,20 +301,23 @@ impl<'gc> Object<'gc> {
 }
 
 pub trait NativeClass {
+    fn parent_name(&self) -> Option<&'static str>;
     fn name(&self) -> &'static str;
     fn class_methods(&self) -> HashMap<String, NativeFunc>;
     fn instance_methods(&self) -> HashMap<String, NativeFunc>;
 }
 
 pub struct NativeClassBuilder {
+    parent_name: Option<&'static str>,
     name: &'static str,
     class_methods: HashMap<String, NativeFunc>,
     instance_methods: HashMap<String, NativeFunc>,
 }
 
 impl NativeClassBuilder {
-    pub fn new(name: &'static str) -> Self {
+    pub fn new(name: &'static str, parent_name: Option<&'static str>) -> Self {
         Self {
+            parent_name,
             name,
             class_methods: HashMap::new(),
             instance_methods: HashMap::new(),
@@ -351,6 +354,10 @@ impl NativeClassBuilder {
 }
 
 impl NativeClass for NativeClassBuilder {
+    fn parent_name(&self) -> Option<&'static str> {
+        self.parent_name
+    }
+
     fn name(&self) -> &'static str {
         self.name
     }

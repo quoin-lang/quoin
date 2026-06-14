@@ -9,6 +9,7 @@ use crate::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
 use crate::vm::{VmState, VmStatus};
 
 use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
+use itertools::Itertools;
 use std::collections::HashMap;
 
 macro_rules! arg {
@@ -491,6 +492,7 @@ p2 = Point.newX: 0 y: 0;
 .print: 'p1.y =' and: p1.y;
 d = p1.dist: p2;
 .print: 'distance =' and: d;
+p1.print;
 
 "* Test 7: Fatal error unwinding
 .print: 'Triggering error:';
@@ -577,6 +579,7 @@ d = p1.dist: p2;
             );
         }
 
+        vm.register_native_class(mc, build_object_class());
         vm.register_native_class(mc, build_point_class());
 
         // Convert StaticBlock to Block in GC and start it
@@ -639,8 +642,27 @@ d = p1.dist: p2;
     println!("Done!");
 }
 
+fn build_object_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("Object", None).instance_method("print", |_vm, _mc, args| {
+        let obj = arg!(args, Object, 0);
+
+        // TODO: Recursively call #s on everything to build the string.
+        println!(
+            "{}{{{}}}",
+            obj.borrow().class.borrow().name,
+            obj.borrow()
+                .fields
+                .iter()
+                .map(|(k, v)| format!("{}={:?}", k, v))
+                .join(", ")
+        );
+
+        Ok(Value::Nil)
+    })
+}
+
 fn build_point_class() -> NativeClassBuilder {
-    NativeClassBuilder::new("Point")
+    NativeClassBuilder::new("Point", Some("Object"))
         .class_method("newX:y:", |_vm, mc, args| {
             if args.len() != 3 {
                 return Err("Point newX:y: expects exactly 2 arguments (x, y)".to_string());

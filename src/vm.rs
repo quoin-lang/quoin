@@ -1,7 +1,7 @@
 use crate::instruction::{Constant, Instruction};
 use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, Value};
 
-use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
 
 #[derive(Collect)]
@@ -41,6 +41,15 @@ impl<'gc> VmState<'gc> {
     }
 
     pub fn register_native_class<T: NativeClass>(&mut self, mc: &Mutation<'gc>, native_class: T) {
+        let parent_class = if let Some(parent_name) = native_class.parent_name()
+            && let Some(parent_value) = self.globals.borrow().get(parent_name).copied()
+            && let Value::Class(parent_class) = parent_value
+        {
+            Some(parent_class)
+        } else {
+            None
+        };
+
         let mut inst_methods = HashMap::new();
         for (name, func) in native_class.instance_methods() {
             inst_methods.insert(name, Value::Native(func));
@@ -55,7 +64,7 @@ impl<'gc> VmState<'gc> {
             mc,
             RefLock::new(Class {
                 name: native_class.name().to_string(),
-                parent: None,
+                parent: parent_class,
                 instance_methods: inst_methods,
                 class_methods: cls_methods,
             }),
