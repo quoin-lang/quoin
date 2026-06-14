@@ -1,6 +1,6 @@
 use gc_arena::Collect;
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Clone, Debug, Collect, PartialEq)]
 #[collect(require_static)]
 pub struct StaticBlock {
     pub name: Option<String>,
@@ -9,7 +9,7 @@ pub struct StaticBlock {
     pub bytecode: Vec<Instruction>,
 }
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Clone, Debug, Collect, PartialEq)]
 #[collect(require_static)]
 pub enum Constant {
     Nil,
@@ -20,7 +20,7 @@ pub enum Constant {
     Block(StaticBlock),
 }
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Clone, Debug, Collect, PartialEq)]
 #[collect(require_static)]
 pub enum Instruction {
     LoadLocal(String),

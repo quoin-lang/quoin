@@ -432,3 +432,404 @@ impl Compiler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::ast_visitor::*;
+    use std::sync::Arc;
+
+    // Helpers to easily construct Nodes
+    fn int(value: i64) -> Node {
+        Node {
+            value: NodeValue::Integer(IntegerNode { value }),
+        }
+    }
+
+    fn double(value: f64) -> Node {
+        Node {
+            value: NodeValue::Double(DoubleNode { value }),
+        }
+    }
+
+    fn string(value: &str) -> Node {
+        Node {
+            value: NodeValue::Str(StringNode {
+                value: value.to_string(),
+            }),
+        }
+    }
+
+    fn sym(value: &str) -> Node {
+        Node {
+            value: NodeValue::Symbol(SymbolNode {
+                value: value.to_string(),
+            }),
+        }
+    }
+
+    fn local_id(name: &str) -> Node {
+        Node {
+            value: NodeValue::Identifier(IdentifierNode {
+                namespace: None,
+                name: name.to_string(),
+                identifier_type: IdentifierType::Local,
+            }),
+        }
+    }
+
+    fn assign_node(lvals: Vec<Node>, rval: Node) -> Node {
+        Node {
+            value: NodeValue::Assignment(AssignmentNode {
+                lvalues: lvals.into_iter().map(Arc::new).collect(),
+                rvalue: Arc::new(rval),
+            }),
+        }
+    }
+
+    fn binary(op: BinaryOperatorType, left: Node, right: Node) -> Node {
+        Node {
+            value: NodeValue::BinaryOperator(BinaryOperatorNode {
+                operator: op,
+                left: Arc::new(left),
+                right: Arc::new(right),
+            }),
+        }
+    }
+
+    fn unary(op: UnaryOperatorType, right: Node) -> Node {
+        Node {
+            value: NodeValue::UnaryOperator(UnaryOperatorNode {
+                operator: op,
+                right: Arc::new(right),
+            }),
+        }
+    }
+
+    fn call(subject: Option<Node>, selector_name: &str, args: Vec<Node>) -> Node {
+        Node {
+            value: NodeValue::MethodCall(MethodCallNode {
+                subject: subject.map(Arc::new),
+                arguments: Arc::new(MethodCallArgumentsNode {
+                    signature: Arc::new(MethodSelectorNode {
+                        identifiers: vec![Arc::new(IdentifierNode {
+                            namespace: None,
+                            name: selector_name.to_string(),
+                            identifier_type: IdentifierType::Local,
+                        })],
+                    }),
+                    expressions: args.into_iter().map(Arc::new).collect(),
+                }),
+            }),
+        }
+    }
+
+    // Helper to compile ProgramNode
+    fn compile(exprs: Vec<Node>) -> Result<StaticBlock, String> {
+        let mut compiler = Compiler::new();
+        let program = ProgramNode {
+            expressions: exprs.into_iter().map(Arc::new).collect(),
+        };
+        compiler.compile_program(&program)
+    }
+
+    // Default prefix for every program
+    fn prefix_ops() -> Vec<Instruction> {
+        vec![
+            Instruction::Push(Constant::Nil),
+            Instruction::DefineLocal("self".to_string()),
+        ]
+    }
+
+    #[test]
+    fn test_compile_literals() {
+        let res = compile(vec![int(123)]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Int(123)));
+        assert_eq!(res.bytecode, expected);
+
+        let res = compile(vec![double(1.5)]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Float(1.5)));
+        assert_eq!(res.bytecode, expected);
+
+        let res = compile(vec![string("hello")]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::String("hello".to_string())));
+        assert_eq!(res.bytecode, expected);
+
+        let res = compile(vec![sym("mysym")]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::String("mysym".to_string())));
+        assert_eq!(res.bytecode, expected);
+    }
+
+    #[test]
+    fn test_compile_identifiers() {
+        let res = compile(vec![local_id("nil")]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Nil));
+        assert_eq!(res.bytecode, expected);
+
+        let res = compile(vec![local_id("true")]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Bool(true)));
+        assert_eq!(res.bytecode, expected);
+
+        let res = compile(vec![local_id("false")]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Bool(false)));
+        assert_eq!(res.bytecode, expected);
+
+        // self is always local
+        let res = compile(vec![local_id("self")]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadLocal("self".to_string()));
+        assert_eq!(res.bytecode, expected);
+
+        // unknown name defaults to LoadGlobal
+        let res = compile(vec![local_id("my_var")]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("my_var".to_string()));
+        assert_eq!(res.bytecode, expected);
+    }
+
+    #[test]
+    fn test_compile_assignments() {
+        // Single global assignment
+        let lval = Node {
+            value: NodeValue::IdentLValue(IdentLValueNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "x".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+            }),
+        };
+        let res = compile(vec![assign_node(vec![lval.clone()], int(42))]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Int(42)));
+        expected.push(Instruction::Dup);
+        expected.push(Instruction::StoreGlobal("x".to_string()));
+        assert_eq!(res.bytecode, expected);
+
+        // Destructuring assignment (e.g. a b = x)
+        let lval_a = Node {
+            value: NodeValue::IdentLValue(IdentLValueNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "a".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+            }),
+        };
+        let lval_b = Node {
+            value: NodeValue::IdentLValue(IdentLValueNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "b".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+            }),
+        };
+        let res = compile(vec![assign_node(vec![lval_a, lval_b], local_id("x"))]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::Dup);
+        expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::Push(Constant::Int(0)));
+        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::StoreGlobal("a".to_string()));
+        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::Push(Constant::Int(1)));
+        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::StoreGlobal("b".to_string()));
+        assert_eq!(res.bytecode, expected);
+
+        // Splat: *rest = x; (under destruct)
+        let lval_rest = Node {
+            value: NodeValue::SplatLValue(SplatLValueNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "rest".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+            }),
+        };
+        let lval_ignore = Node {
+            value: NodeValue::IgnoredLValue,
+        };
+        let res = compile(vec![assign_node(
+            vec![lval_ignore, lval_rest],
+            local_id("x"),
+        )])
+        .unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::Dup);
+        expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::Push(Constant::Int(1)));
+        expected.push(Instruction::Send("sliceFrom:".to_string(), 1));
+        expected.push(Instruction::StoreGlobal("rest".to_string()));
+        assert_eq!(res.bytecode, expected);
+    }
+
+    #[test]
+    fn test_compile_method_calls() {
+        // x.foo: 1
+        let res = compile(vec![call(Some(local_id("x")), "foo", vec![int(1)])]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::Push(Constant::Int(1)));
+        expected.push(Instruction::Send("foo:".to_string(), 1));
+        assert_eq!(res.bytecode, expected);
+
+        // Implicit subject (self): .foo
+        let res = compile(vec![call(None, "foo", vec![])]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadLocal("self".to_string()));
+        expected.push(Instruction::Send("foo".to_string(), 0));
+        assert_eq!(res.bytecode, expected);
+    }
+
+    #[test]
+    fn test_compile_binary_unary_operators() {
+        // 1 + 2
+        let res = compile(vec![binary(BinaryOperatorType::Add, int(1), int(2))]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Int(1)));
+        expected.push(Instruction::Push(Constant::Int(2)));
+        expected.push(Instruction::Send("+".to_string(), 1));
+        assert_eq!(res.bytecode, expected);
+
+        // -x
+        let res = compile(vec![unary(UnaryOperatorType::Sub, local_id("x"))]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::Send("negated".to_string(), 0));
+        assert_eq!(res.bytecode, expected);
+
+        // !x
+        let res = compile(vec![unary(UnaryOperatorType::Bang, local_id("x"))]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::Send("!".to_string(), 0));
+        assert_eq!(res.bytecode, expected);
+
+        // +x (no-op)
+        let res = compile(vec![unary(UnaryOperatorType::Add, local_id("x"))]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("x".to_string()));
+        assert_eq!(res.bytecode, expected);
+    }
+
+    #[test]
+    fn test_compile_blocks() {
+        // { |x| x + 1 }
+        let block_node = BlockNode {
+            name: None,
+            arguments: vec![Arc::new(BlockArgNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "x".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+                type_hint: None,
+            })],
+            decls: vec![],
+            decl_block: None,
+            statements: vec![Arc::new(binary(
+                BinaryOperatorType::Add,
+                local_id("x"),
+                int(1),
+            ))],
+        };
+        let res = compile(vec![Node {
+            value: NodeValue::Block(block_node),
+        }])
+        .unwrap();
+
+        let inner_static = StaticBlock {
+            name: None,
+            is_nested_block: true,
+            param_names: vec!["x".to_string()],
+            bytecode: vec![
+                Instruction::LoadLocal("x".to_string()),
+                Instruction::Push(Constant::Int(1)),
+                Instruction::Send("+".to_string(), 1),
+                Instruction::Return,
+            ],
+        };
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Block(inner_static)));
+        assert_eq!(res.bytecode, expected);
+    }
+
+    #[test]
+    fn test_compile_lists_dicts_regex() {
+        // #(1 2)
+        let list = Node {
+            value: NodeValue::List(ListNode {
+                values: vec![Arc::new(int(1)), Arc::new(int(2))],
+            }),
+        };
+        let res = compile(vec![list]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::Int(1)));
+        expected.push(Instruction::Push(Constant::Int(2)));
+        expected.push(Instruction::NewList(2));
+        assert_eq!(res.bytecode, expected);
+
+        // #{'a': 1}
+        let dict = Node {
+            value: NodeValue::Dictionary(DictionaryNode {
+                keys: vec![Arc::new(string("a"))],
+                values: vec![Arc::new(int(1))],
+            }),
+        };
+        let res = compile(vec![dict]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::String("a".to_string())));
+        expected.push(Instruction::Push(Constant::Int(1)));
+        expected.push(Instruction::NewDict(1));
+        assert_eq!(res.bytecode, expected);
+
+        // #/^[a-z]+$/
+        let regex = Node {
+            value: NodeValue::Regex(RegexNode {
+                value: "#/^[a-z]+$/".to_string(),
+            }),
+        };
+        let res = compile(vec![regex]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::Push(Constant::String("^[a-z]+$".to_string())));
+        expected.push(Instruction::NewRegex);
+        assert_eq!(res.bytecode, expected);
+    }
+
+    #[test]
+    fn test_compile_errors_and_fallbacks() {
+        // Unknown NodeValue returns error
+        let res = compile(vec![Node {
+            value: NodeValue::Unknown,
+        }]);
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap(), "Encountered Unknown NodeValue");
+
+        // Dictionary mismatch keys/values returns error
+        let dict_mismatch = Node {
+            value: NodeValue::Dictionary(DictionaryNode {
+                keys: vec![Arc::new(string("a"))],
+                values: vec![],
+            }),
+        };
+        let res = compile(vec![dict_mismatch]);
+        assert!(res.is_err());
+        assert_eq!(
+            res.err().unwrap(),
+            "Dictionary keys and values count mismatch"
+        );
+    }
+}
