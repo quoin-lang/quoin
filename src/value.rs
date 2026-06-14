@@ -4,6 +4,7 @@ use crate::vm::VmState;
 use gc_arena::{lock::RefLock, Collect, Gc};
 use regex::Regex;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt;
 
 #[derive(Clone, Collect)]
@@ -22,7 +23,7 @@ pub struct NativeFunc(
         &mut VmState<'a>,
         &gc_arena::Mutation<'a>,
         Vec<Value<'a>>,
-    ) -> Result<Value<'a>, String>,
+    ) -> Result<Value<'a>, Box<dyn Error>>,
 );
 
 impl NativeFunc {
@@ -31,7 +32,7 @@ impl NativeFunc {
             &mut VmState<'a>,
             &gc_arena::Mutation<'a>,
             Vec<Value<'a>>,
-        ) -> Result<Value<'a>, String>,
+        ) -> Result<Value<'a>, Box<dyn Error>>,
     ) -> Self {
         Self(f)
     }
@@ -331,7 +332,7 @@ impl NativeClassBuilder {
             &mut VmState<'a>,
             &gc_arena::Mutation<'a>,
             Vec<Value<'a>>,
-        ) -> Result<Value<'a>, String>,
+        ) -> Result<Value<'a>, Box<dyn Error>>,
     ) -> Self {
         self.class_methods
             .insert(selector.to_string(), NativeFunc(f));
@@ -345,7 +346,7 @@ impl NativeClassBuilder {
             &mut VmState<'a>,
             &gc_arena::Mutation<'a>,
             Vec<Value<'a>>,
-        ) -> Result<Value<'a>, String>,
+        ) -> Result<Value<'a>, Box<dyn Error>>,
     ) -> Self {
         self.instance_methods
             .insert(selector.to_string(), NativeFunc(f));

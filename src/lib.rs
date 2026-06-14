@@ -22,14 +22,15 @@ macro_rules! arg {
                     "Expected {} at argument index {}",
                     stringify!($variant),
                     $idx
-                ))
+                )
+                .into())
             }
         }
     };
     ($args:ident, $variant:ident, $idx:expr, $err:expr) => {
         match $args.get($idx) {
             Some(&Value::$variant(val)) => val,
-            _ => return Err($err.to_string()),
+            _ => return Err($err.into()),
         }
     };
 }
@@ -44,10 +45,11 @@ macro_rules! arg_obj {
                     return Err(format!(
                         "Object at argument index {} is {}, wanted {}",
                         $idx, x, $class_name
-                    ))
+                    )
+                    .into())
                 }
             },
-            _ => return Err(format!("Expected Object at argument index {}", $idx)),
+            _ => return Err(format!("Expected Object at argument index {}", $idx).into()),
         }
     };
     ($args:ident, $class_name:expr, $idx:expr, $err:expr) => {

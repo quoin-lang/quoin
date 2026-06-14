@@ -12,13 +12,14 @@ use new_vm::{arg, arg_obj, gc, gcl};
 use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
 use itertools::Itertools;
 use std::collections::HashMap;
+use std::error::Error;
 
 // Native helper: print
 fn native_print<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     // args[0] is the receiver (self)
     if args.len() > 1 {
         for (i, arg) in args[1..].iter().enumerate() {
@@ -37,18 +38,15 @@ fn native_len<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 1 {
-        return Err("len expects exactly 1 argument (receiver)".to_string());
+        return Err("len expects exactly 1 argument (receiver)".into());
     }
     match &args[0] {
         Value::String(s) => Ok(Value::Int((**s).len() as i64)),
         Value::List(l) => Ok(Value::Int(l.borrow().len() as i64)),
         Value::Dict(d) => Ok(Value::Int(d.borrow().len() as i64)),
-        _ => Err(format!(
-            "len expects string, list, or dict, got {:?}",
-            args[0]
-        )),
+        _ => Err(format!("len expects string, list, or dict, got {:?}", args[0]).into()),
     }
 }
 
@@ -57,19 +55,16 @@ fn native_push<'gc>(
     _vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
-        return Err("push expects exactly 2 arguments (list, element)".to_string());
+        return Err("push expects exactly 2 arguments (list, element)".into());
     }
     match &args[0] {
         Value::List(l) => {
             l.borrow_mut(mc).push(args[1]);
             Ok(Value::Nil)
         }
-        _ => Err(format!(
-            "push first argument must be list, got {:?}",
-            args[0]
-        )),
+        _ => Err(format!("push first argument must be list, got {:?}", args[0]).into()),
     }
 }
 
@@ -78,19 +73,16 @@ fn native_pop<'gc>(
     _vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 1 {
-        return Err("pop expects exactly 1 argument (list)".to_string());
+        return Err("pop expects exactly 1 argument (list)".into());
     }
     match &args[0] {
         Value::List(l) => {
             let val = l.borrow_mut(mc).pop().unwrap_or(Value::Nil);
             Ok(val)
         }
-        _ => Err(format!(
-            "pop first argument must be list, got {:?}",
-            args[0]
-        )),
+        _ => Err(format!("pop first argument must be list, got {:?}", args[0]).into()),
     }
 }
 
@@ -99,9 +91,9 @@ fn native_regex_match<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
-        return Err("regex_match expects exactly 2 arguments (regex, string)".to_string());
+        return Err("regex_match expects exactly 2 arguments (regex, string)".into());
     }
     match (&args[0], &args[1]) {
         (Value::Regex(r), Value::String(s)) => {
@@ -111,7 +103,8 @@ fn native_regex_match<'gc>(
         _ => Err(format!(
             "regex_match expects regex and string, got {:?} and {:?}",
             args[0], args[1]
-        )),
+        )
+        .into()),
     }
 }
 
@@ -120,7 +113,7 @@ fn native_add<'gc>(
     _vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("add expects 2 arguments".into());
     }
@@ -133,7 +126,7 @@ fn native_add<'gc>(
             let new_str = format!("{}{}", **a, **b);
             Ok(Value::String(gc!(mc, new_str)))
         }
-        _ => Err(format!("Cannot add {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!("Cannot add {:?} and {:?}", args[0], args[1]).into()),
     }
 }
 
@@ -142,7 +135,7 @@ fn native_sub<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("sub expects 2 arguments".into());
     }
@@ -151,7 +144,7 @@ fn native_sub<'gc>(
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 - b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - *b as f64)),
-        _ => Err(format!("Cannot subtract {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!("Cannot subtract {:?} and {:?}", args[0], args[1]).into()),
     }
 }
 
@@ -160,7 +153,7 @@ fn native_mul<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("mul expects 2 arguments".into());
     }
@@ -169,7 +162,7 @@ fn native_mul<'gc>(
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
-        _ => Err(format!("Cannot multiply {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!("Cannot multiply {:?} and {:?}", args[0], args[1]).into()),
     }
 }
 
@@ -178,7 +171,7 @@ fn native_div<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("div expects 2 arguments".into());
     }
@@ -192,7 +185,7 @@ fn native_div<'gc>(
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 / b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / *b as f64)),
-        _ => Err(format!("Cannot divide {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!("Cannot divide {:?} and {:?}", args[0], args[1]).into()),
     }
 }
 
@@ -201,7 +194,7 @@ fn native_eq<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("eq expects 2 arguments".into());
     }
@@ -213,7 +206,7 @@ fn native_ne<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("ne expects 2 arguments".into());
     }
@@ -225,7 +218,7 @@ fn native_lt<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("lt expects 2 arguments".into());
     }
@@ -234,7 +227,7 @@ fn native_lt<'gc>(
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) < *b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a < (*b as f64))),
-        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1]).into()),
     }
 }
 
@@ -243,7 +236,7 @@ fn native_gt<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("gt expects 2 arguments".into());
     }
@@ -252,7 +245,7 @@ fn native_gt<'gc>(
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) > *b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a > (*b as f64))),
-        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1]).into()),
     }
 }
 
@@ -261,7 +254,7 @@ fn native_le<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("le expects 2 arguments".into());
     }
@@ -270,7 +263,7 @@ fn native_le<'gc>(
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) <= *b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a <= (*b as f64))),
-        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1]).into()),
     }
 }
 
@@ -279,7 +272,7 @@ fn native_ge<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("ge expects 2 arguments".into());
     }
@@ -288,7 +281,7 @@ fn native_ge<'gc>(
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) >= *b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a >= (*b as f64))),
-        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1])),
+        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1]).into()),
     }
 }
 
@@ -297,7 +290,7 @@ fn native_not<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 1 {
         return Err("not expects exactly 1 argument (receiver)".into());
     }
@@ -309,17 +302,14 @@ fn native_negated<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 1 {
         return Err("negated expects exactly 1 argument (receiver)".into());
     }
     match &args[0] {
         Value::Int(i) => Ok(Value::Int(-*i)),
         Value::Float(f) => Ok(Value::Float(-*f)),
-        _ => Err(format!(
-            "negated expects integer or float, got {:?}",
-            args[0]
-        )),
+        _ => Err(format!("negated expects integer or float, got {:?}", args[0]).into()),
     }
 }
 
@@ -328,7 +318,7 @@ fn native_list_at<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("at expects exactly 2 arguments (receiver, index)".into());
     }
@@ -345,7 +335,8 @@ fn native_list_at<'gc>(
         _ => Err(format!(
             "at expects list and integer, got {:?} and {:?}",
             args[0], args[1]
-        )),
+        )
+        .into()),
     }
 }
 
@@ -354,7 +345,7 @@ fn native_list_slice_from<'gc>(
     _vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() != 2 {
         return Err("sliceFrom expects exactly 2 arguments (receiver, index)".into());
     }
@@ -372,7 +363,8 @@ fn native_list_slice_from<'gc>(
         _ => Err(format!(
             "sliceFrom expects list and integer, got {:?} and {:?}",
             args[0], args[1]
-        )),
+        )
+        .into()),
     }
 }
 
@@ -381,11 +373,11 @@ fn native_error<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, String> {
+) -> Result<Value<'gc>, Box<dyn Error>> {
     if args.len() < 2 {
-        return Err("error: expects a message".to_string());
+        return Err("error: expects a message".into());
     }
-    Err(format!("{}", args[1]))
+    Err(format!("{}", args[1]).into())
 }
 
 fn main() {
@@ -630,7 +622,7 @@ fn build_point_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Point", Some("Object"))
         .class_method("newX:y:", |_vm, mc, args| {
             if args.len() != 3 {
-                return Err("Point newX:y: expects exactly 2 arguments (x, y)".to_string());
+                return Err("Point newX:y: expects exactly 2 arguments (x, y)".into());
             }
             let class_ref = arg!(args, Class, 0, "Expected Class as receiver");
             let mut fields = HashMap::new();

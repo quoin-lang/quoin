@@ -4,6 +4,7 @@ use new_vm::{gc, gcl};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
+use std::error::Error;
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -37,7 +38,7 @@ pub trait Callable<'gc> {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
-    ) -> Result<(), String>;
+    ) -> Result<(), Box<dyn Error>>;
 }
 
 pub struct BlockCallable<'gc> {
@@ -50,7 +51,7 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Box<dyn Error>> {
         vm.start_block(mc, self.block, args);
         Ok(())
     }
@@ -64,7 +65,7 @@ impl<'gc> Callable<'gc> for NativeCallable {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Box<dyn Error>> {
         let ret = self.0.0(vm, mc, args)?;
         vm.push(ret);
         Ok(())
@@ -228,7 +229,7 @@ impl<'gc> VmState<'gc> {
         });
     }
 
-    pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, String> {
+    pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, Box<dyn Error>> {
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or(Value::Nil);
             return Ok(VmStatus::Finished(ret));
@@ -348,7 +349,8 @@ impl<'gc> VmState<'gc> {
                     return Err(format!(
                         "Message not understood: receiver={:?}, selector='{}', args={:?}",
                         receiver, selector, args
-                    ));
+                    )
+                    .into());
                 }
             }
             Instruction::Return | Instruction::BlockReturn => {
@@ -367,7 +369,7 @@ impl<'gc> VmState<'gc> {
                     }
                     self.push(ret_val);
                 } else {
-                    return Err("MethodReturn executed outside of a method context".to_string());
+                    return Err("MethodReturn executed outside of a method context".into());
                 }
             }
             Instruction::Yeet => {
@@ -415,7 +417,7 @@ impl<'gc> VmState<'gc> {
                     if let Value::String(s) = key_val {
                         map.insert((*s).clone(), val);
                     } else {
-                        return Err(format!("Dict keys must be Strings, got: {:?}", key_val));
+                        return Err(format!("Dict keys must be Strings, got: {:?}", key_val).into());
                     }
                 }
                 let dict = gcl!(mc, map);
@@ -430,10 +432,9 @@ impl<'gc> VmState<'gc> {
                     let regex_val = gc!(mc, BBRegex(re));
                     self.push(Value::Regex(regex_val));
                 } else {
-                    return Err(format!(
-                        "Regex pattern must be a String, got: {:?}",
-                        pattern_val
-                    ));
+                    return Err(
+                        format!("Regex pattern must be a String, got: {:?}", pattern_val).into(),
+                    );
                 }
                 self.frames[frame_idx].ip += 1;
             }
