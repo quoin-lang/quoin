@@ -1,3 +1,5 @@
+pub mod error;
+
 #[macro_export]
 macro_rules! gc {
     ($mc:ident, $val:expr) => {
@@ -18,12 +20,18 @@ macro_rules! arg {
         match $args.get($idx) {
             Some(&Value::$variant(val)) => val,
             _ => {
-                return Err(format!(
-                    "Expected {} at argument index {}",
-                    stringify!($variant),
-                    $idx
-                )
-                .into())
+                return Err($crate::error::BBError::TypeError {
+                    expected: stringify!($variant).to_string(),
+                    got: match $args.get($idx) {
+                        Some(v) => v.type_name().to_string(),
+                        None => "None".to_string(),
+                    },
+                    msg: format!(
+                        "Expected {} at argument index {}",
+                        stringify!($variant),
+                        $idx
+                    ),
+                })
             }
         }
     };
@@ -42,28 +50,35 @@ macro_rules! arg_obj {
             Some(&Value::Object(val)) => match val.borrow().class_name().as_str() {
                 $class_name => val,
                 x => {
-                    return Err(format!(
-                        "Object at argument index {} is {}, wanted {}",
-                        $idx, x, $class_name
-                    )
-                    .into())
+                    return Err($crate::error::BBError::TypeError {
+                        expected: $class_name.to_string(),
+                        got: x.to_string(),
+                        msg: format!(
+                            "Object at argument index {} is {}, wanted {}",
+                            $idx, x, $class_name
+                        ),
+                    })
                 }
             },
-            _ => return Err(format!("Expected Object at argument index {}", $idx).into()),
+            _ => {
+                return Err($crate::error::BBError::TypeError {
+                    expected: "Object".to_string(),
+                    got: match $args.get($idx) {
+                        Some(v) => v.type_name().to_string(),
+                        None => "None".to_string(),
+                    },
+                    msg: format!("Expected Object at argument index {}", $idx),
+                })
+            }
         }
     };
     ($args:ident, $class_name:expr, $idx:expr, $err:expr) => {
         match $args.get($idx) {
             Some(&Value::Object(val)) => match val.borrow().class_name().as_str() {
                 $class_name => val,
-                x => {
-                    return Err(format!(
-                        "Object at argument index {} is {}, wanted {}",
-                        $idx, x, $class_name
-                    ))
-                }
+                x => return Err($err.into()),
             },
-            _ => return Err($err.to_string()),
+            _ => return Err($err.into()),
         }
     };
 }

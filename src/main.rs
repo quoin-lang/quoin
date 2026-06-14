@@ -1,3 +1,8 @@
+use crate::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
+use crate::vm::{VmState, VmStatus};
+use new_vm::error::BBError;
+use new_vm::{arg, arg_obj, gc, gcl};
+
 mod assembler;
 mod compiler;
 mod instruction;
@@ -5,20 +10,15 @@ mod parser;
 mod value;
 mod vm;
 
-use crate::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
-use crate::vm::{VmState, VmStatus};
-use new_vm::{arg, arg_obj, gc, gcl};
-
-use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
+use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
 use std::collections::HashMap;
-use std::error::Error;
 
 // Native helper: print
 fn native_print<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     // args[0] is the receiver (self)
     if args.len() > 1 {
         for (i, arg) in args[1..].iter().enumerate() {
@@ -37,9 +37,13 @@ fn native_len<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 1 {
-        return Err("len expects exactly 1 argument (receiver)".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 1,
+            got: args.len(),
+            msg: "len expects exactly 1 argument (receiver)".to_string(),
+        });
     }
     match &args[0] {
         Value::String(s) => Ok(Value::Int((**s).len() as i64)),
@@ -54,9 +58,13 @@ fn native_push<'gc>(
     _vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("push expects exactly 2 arguments (list, element)".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "push expects exactly 2 arguments (list, element)".to_string(),
+        });
     }
     match &args[0] {
         Value::List(l) => {
@@ -72,9 +80,13 @@ fn native_pop<'gc>(
     _vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 1 {
-        return Err("pop expects exactly 1 argument (list)".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 1,
+            got: args.len(),
+            msg: "pop expects exactly 1 argument (list)".to_string(),
+        });
     }
     match &args[0] {
         Value::List(l) => {
@@ -90,9 +102,13 @@ fn native_regex_match<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("regex_match expects exactly 2 arguments (regex, string)".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "regex_match expects exactly 2 arguments (regex, string)".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Regex(r), Value::String(s)) => {
@@ -112,9 +128,13 @@ fn native_add<'gc>(
     _vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("add expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "add expects 2 arguments".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
@@ -125,7 +145,11 @@ fn native_add<'gc>(
             let new_str = format!("{}{}", **a, **b);
             Ok(Value::String(gc!(mc, new_str)))
         }
-        _ => Err(format!("Cannot add {:?} and {:?}", args[0], args[1]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "numeric or compatible types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot add {:?} and {:?}", args[0], args[1]),
+        }),
     }
 }
 
@@ -134,16 +158,24 @@ fn native_sub<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("sub expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "sub expects 2 arguments".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 - b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - *b as f64)),
-        _ => Err(format!("Cannot subtract {:?} and {:?}", args[0], args[1]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "numeric types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot subtract {:?} and {:?}", args[0], args[1]),
+        }),
     }
 }
 
@@ -152,16 +184,24 @@ fn native_mul<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("mul expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "mul expects 2 arguments".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
-        _ => Err(format!("Cannot multiply {:?} and {:?}", args[0], args[1]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "numeric types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot multiply {:?} and {:?}", args[0], args[1]),
+        }),
     }
 }
 
@@ -170,21 +210,29 @@ fn native_div<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("div expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "div expects 2 arguments".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => {
             if *b == 0 {
-                return Err("Division by zero".into());
+                return Err(BBError::ArithmeticError("Division by zero".to_string()));
             }
             Ok(Value::Int(a / b))
         }
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 / b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / *b as f64)),
-        _ => Err(format!("Cannot divide {:?} and {:?}", args[0], args[1]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "numeric types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot divide {:?} and {:?}", args[0], args[1]),
+        }),
     }
 }
 
@@ -193,9 +241,13 @@ fn native_eq<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("eq expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "eq expects 2 arguments".to_string(),
+        });
     }
     Ok(Value::Bool(args[0] == args[1]))
 }
@@ -205,9 +257,13 @@ fn native_ne<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("ne expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "ne expects 2 arguments".to_string(),
+        });
     }
     Ok(Value::Bool(args[0] != args[1]))
 }
@@ -217,16 +273,24 @@ fn native_lt<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("lt expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "lt expects 2 arguments".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) < *b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a < (*b as f64))),
-        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "comparable types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot compare {:?} and {:?}", args[0], args[1]),
+        }),
     }
 }
 
@@ -235,16 +299,24 @@ fn native_gt<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("gt expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "gt expects 2 arguments".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) > *b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a > (*b as f64))),
-        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "comparable types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot compare {:?} and {:?}", args[0], args[1]),
+        }),
     }
 }
 
@@ -253,16 +325,24 @@ fn native_le<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("le expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "le expects 2 arguments".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) <= *b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a <= (*b as f64))),
-        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "comparable types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot compare {:?} and {:?}", args[0], args[1]),
+        }),
     }
 }
 
@@ -271,16 +351,24 @@ fn native_ge<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("ge expects 2 arguments".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "ge expects 2 arguments".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) >= *b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a >= (*b as f64))),
-        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "comparable types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot compare {:?} and {:?}", args[0], args[1]),
+        }),
     }
 }
 
@@ -289,9 +377,13 @@ fn native_not<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 1 {
-        return Err("not expects exactly 1 argument (receiver)".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 1,
+            got: args.len(),
+            msg: "not expects exactly 1 argument (receiver)".to_string(),
+        });
     }
     Ok(Value::Bool(!args[0].is_truthy()))
 }
@@ -301,14 +393,22 @@ fn native_negated<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 1 {
-        return Err("negated expects exactly 1 argument (receiver)".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 1,
+            got: args.len(),
+            msg: "negated expects exactly 1 argument (receiver)".to_string(),
+        });
     }
     match &args[0] {
         Value::Int(i) => Ok(Value::Int(-*i)),
         Value::Float(f) => Ok(Value::Float(-*f)),
-        _ => Err(format!("negated expects integer or float, got {:?}", args[0]).into()),
+        _ => Err(BBError::TypeError {
+            expected: "Integer or Float".to_string(),
+            got: args[0].type_name().to_string(),
+            msg: format!("negated expects integer or float, got {:?}", args[0]),
+        }),
     }
 }
 
@@ -317,9 +417,13 @@ fn native_list_at<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("at expects exactly 2 arguments (receiver, index)".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "at expects exactly 2 arguments (receiver, index)".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::List(l), Value::Int(idx)) => {
@@ -344,9 +448,13 @@ fn native_list_slice_from<'gc>(
     _vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
-        return Err("sliceFrom expects exactly 2 arguments (receiver, index)".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "sliceFrom expects exactly 2 arguments (receiver, index)".to_string(),
+        });
     }
     match (&args[0], &args[1]) {
         (Value::List(l), Value::Int(idx)) => {
@@ -372,9 +480,13 @@ fn native_error<'gc>(
     _vm: &mut VmState<'gc>,
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, Box<dyn Error>> {
+) -> Result<Value<'gc>, BBError> {
     if args.len() < 2 {
-        return Err("error: expects a message".into());
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "error: expects a message".to_string(),
+        });
     }
     Err(format!("{}", args[1]).into())
 }
@@ -608,7 +720,11 @@ fn build_point_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Point", Some("Object"))
         .class_method("newX:y:", |_vm, mc, args| {
             if args.len() != 3 {
-                return Err("Point newX:y: expects exactly 2 arguments (x, y)".into());
+                return Err(BBError::ArgumentCountMismatch {
+                    expected: 3,
+                    got: args.len(),
+                    msg: "Point newX:y: expects exactly 2 arguments (x, y)".to_string(),
+                });
             }
             let class_ref = arg!(args, Class, 0, "Expected Class as receiver");
             let mut fields = HashMap::new();

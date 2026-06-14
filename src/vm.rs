@@ -2,9 +2,9 @@ use crate::instruction::{Constant, Instruction};
 use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, NativeFunc, Value};
 use new_vm::{gc, gcl};
 
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use new_vm::error::BBError;
 use std::collections::HashMap;
-use std::error::Error;
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -38,7 +38,7 @@ pub trait Callable<'gc> {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
-    ) -> Result<(), Box<dyn Error>>;
+    ) -> Result<(), BBError>;
 }
 
 pub struct BlockCallable<'gc> {
@@ -51,7 +51,7 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), BBError> {
         vm.start_block(mc, self.block, args);
         Ok(())
     }
@@ -65,7 +65,7 @@ impl<'gc> Callable<'gc> for NativeCallable {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), BBError> {
         let ret = self.0.0(vm, mc, args)?;
         vm.push(ret);
         Ok(())
@@ -123,7 +123,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         selector: &str,
         args: Vec<Value<'gc>>,
-    ) -> Result<Value<'gc>, Box<dyn Error>> {
+    ) -> Result<Value<'gc>, BBError> {
         let method = self.lookup_method(receiver, selector);
         if let Some(method) = method {
             let mut all_args = vec![receiver];
@@ -248,7 +248,7 @@ impl<'gc> VmState<'gc> {
         });
     }
 
-    pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, Box<dyn Error>> {
+    pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or(Value::Nil);
             return Ok(VmStatus::Finished(ret));
@@ -436,7 +436,11 @@ impl<'gc> VmState<'gc> {
                     if let Value::String(s) = key_val {
                         map.insert((*s).clone(), val);
                     } else {
-                        return Err(format!("Dict keys must be Strings, got: {:?}", key_val).into());
+                        return Err(BBError::TypeError {
+                            expected: "String".to_string(),
+                            got: key_val.type_name().to_string(),
+                            msg: format!("Dict keys must be Strings, got: {:?}", key_val),
+                        });
                     }
                 }
                 let dict = gcl!(mc, map);
@@ -451,9 +455,11 @@ impl<'gc> VmState<'gc> {
                     let regex_val = gc!(mc, BBRegex(re));
                     self.push(Value::Regex(regex_val));
                 } else {
-                    return Err(
-                        format!("Regex pattern must be a String, got: {:?}", pattern_val).into(),
-                    );
+                    return Err(BBError::TypeError {
+                        expected: "String".to_string(),
+                        got: pattern_val.type_name().to_string(),
+                        msg: format!("Regex pattern must be a String, got: {:?}", pattern_val),
+                    });
                 }
                 self.frames[frame_idx].ip += 1;
             }
