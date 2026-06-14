@@ -154,10 +154,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
             Value::Native(_) => write!(f, "Native(<fn>)"),
             Value::Class(c) => write!(f, "Class({})", c.borrow().name),
             Value::Object(o) => {
-                let name = match o.borrow().class {
-                    Value::Class(c) => c.borrow().name.clone(),
-                    _ => "Unknown".to_string(),
-                };
+                let name = o.borrow().class.borrow().name.clone();
                 write!(f, "Object({}, fields: {:?})", name, o.borrow().fields)
             }
         }
@@ -208,10 +205,7 @@ impl<'gc> fmt::Display for Value<'gc> {
             Value::Native(_) => write!(f, "<native fn>"),
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
             Value::Object(o) => {
-                let name = match o.borrow().class {
-                    Value::Class(c) => c.borrow().name.clone(),
-                    _ => "Unknown".to_string(),
-                };
+                let name = o.borrow().class.borrow().name.clone();
                 write!(f, "an instance of {}", name)
             }
         }
@@ -284,7 +278,7 @@ impl<'gc> EnvFrame<'gc> {
 #[collect(no_drop)]
 pub struct Class<'gc> {
     pub name: String,
-    pub parent: Option<Value<'gc>>,
+    pub parent: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub instance_methods: HashMap<String, Value<'gc>>,
     pub class_methods: HashMap<String, Value<'gc>>,
 }
@@ -292,16 +286,13 @@ pub struct Class<'gc> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Object<'gc> {
-    pub class: Value<'gc>,
+    pub class: Gc<'gc, RefLock<Class<'gc>>>,
     pub fields: HashMap<String, Value<'gc>>,
 }
 
 impl<'gc> Object<'gc> {
     pub fn class_name(&self) -> String {
-        match self.class {
-            Value::Class(c) => c.borrow().name.clone(),
-            _ => "Unknown".to_string(),
-        }
+        self.class.borrow().name.clone()
     }
 }
 

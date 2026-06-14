@@ -69,23 +69,19 @@ impl<'gc> VmState<'gc> {
     pub fn lookup_method(&self, receiver: Value<'gc>, selector: &str) -> Option<Value<'gc>> {
         match receiver {
             Value::Object(obj) => {
-                let class_val = obj.borrow().class;
-                if let Some(m) = self.lookup_in_class_hierarchy(class_val, selector, false) {
+                let class_ref = obj.borrow().class;
+                if let Some(m) = self.lookup_in_class_hierarchy(class_ref, selector, false) {
                     Some(m)
                 } else {
                     self.globals.borrow().get(selector).copied()
                 }
             }
-            Value::Class(class_obj) => {
-                self.lookup_in_class_hierarchy(Value::Class(class_obj), selector, true)
-            }
+            Value::Class(class_obj) => self.lookup_in_class_hierarchy(class_obj, selector, true),
             _ => {
                 let type_name = receiver.type_name();
                 if let Some(Value::Class(class_obj)) = self.globals.borrow().get(type_name).copied()
                 {
-                    if let Some(m) =
-                        self.lookup_in_class_hierarchy(Value::Class(class_obj), selector, false)
-                    {
+                    if let Some(m) = self.lookup_in_class_hierarchy(class_obj, selector, false) {
                         return Some(m);
                     }
                 }
@@ -96,12 +92,12 @@ impl<'gc> VmState<'gc> {
 
     fn lookup_in_class_hierarchy(
         &self,
-        mut class_val: Value<'gc>,
+        mut class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         selector: &str,
         class_side: bool,
     ) -> Option<Value<'gc>> {
-        while let Value::Class(class_obj) = class_val {
-            let class_borrow = class_obj.borrow();
+        loop {
+            let class_borrow = class_ref.borrow();
             let methods = if class_side {
                 &class_borrow.class_methods
             } else {
@@ -111,7 +107,7 @@ impl<'gc> VmState<'gc> {
                 return Some(method);
             }
             if let Some(parent) = class_borrow.parent {
-                class_val = parent;
+                class_ref = parent;
             } else {
                 break;
             }
