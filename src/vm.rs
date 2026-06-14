@@ -1,9 +1,9 @@
 use crate::error::BBError;
 use crate::instruction::{Constant, Instruction};
-use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, NativeFunc, Value};
+use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, NativeFunc, Object, Value};
 use crate::{gc, gcl};
 
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use std::collections::HashMap;
 
 #[derive(Collect)]
@@ -15,6 +15,7 @@ pub struct Frame<'gc> {
     pub block: Gc<'gc, Block<'gc>>,
     pub ip: usize,
     pub env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
+    pub instantiating_obj: Option<Gc<'gc, RefLock<Object<'gc>>>>,
 }
 
 #[derive(Collect)]
@@ -76,6 +77,51 @@ impl<'gc> Callable<'gc> for MetaCallable<'gc> {
         _args: Vec<Value<'gc>>,
     ) -> Result<(), BBError> {
         vm.push(Value::ClassMeta(self.class_obj));
+        Ok(())
+    }
+}
+
+pub struct NewCallable<'gc> {
+    pub class_obj: Gc<'gc, RefLock<Class<'gc>>>,
+}
+
+impl<'gc> Callable<'gc> for NewCallable<'gc> {
+    fn call(
+        &self,
+        vm: &mut VmState<'gc>,
+        mc: &Mutation<'gc>,
+        args: Vec<Value<'gc>>,
+    ) -> Result<(), BBError> {
+        if args.len() != 2 {
+            return Err(BBError::Other(
+                "new: expects receiver and a block".to_string(),
+            ));
+        }
+        let block = match args[1] {
+            Value::Block(b) => b,
+            _ => {
+                return Err(BBError::TypeError {
+                    expected: "Block".to_string(),
+                    got: args[1].type_name().to_string(),
+                    msg: "new: expects a Block".to_string(),
+                });
+            }
+        };
+
+        // Create the new object
+        let mut fields = HashMap::new();
+        for var in &self.class_obj.borrow().instance_vars {
+            fields.insert(var.clone(), Value::Nil);
+        }
+        let obj = gcl!(
+            mc,
+            Object {
+                class: self.class_obj,
+                fields,
+            }
+        );
+
+        vm.start_block_for_instantiation(mc, block, obj);
         Ok(())
     }
 }
@@ -168,6 +214,11 @@ impl<'gc> VmState<'gc> {
         if selector == "meta" {
             if let Value::Class(c) = receiver {
                 return Some(Box::new(MetaCallable { class_obj: c }));
+            }
+        }
+        if selector == "new:" {
+            if let Value::Class(c) = receiver {
+                return Some(Box::new(NewCallable { class_obj: c }));
             }
         }
         let method_val = match receiver {
@@ -277,6 +328,7 @@ impl<'gc> VmState<'gc> {
             block,
             ip: 0,
             env: env_ref,
+            instantiating_obj: None,
         });
     }
 
@@ -313,6 +365,51 @@ impl<'gc> VmState<'gc> {
             block,
             ip: 0,
             env: env_ref,
+            instantiating_obj: None,
+        });
+    }
+
+    pub fn start_block_for_instantiation(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        obj: Gc<'gc, RefLock<Object<'gc>>>,
+    ) {
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+
+        let mut env_frame = EnvFrame::new(block.parent_env);
+        // Bind self to the object
+        env_frame
+            .vars
+            .insert("self".to_string(), Value::Object(obj));
+        // Bind all instance variables as local variables in this block, initialized from the parent env or current fields
+        for var in &obj.borrow().class.borrow().instance_vars {
+            let val = if let Some(parent) = block.parent_env {
+                EnvFrame::get(parent, var)
+                    .unwrap_or_else(|| obj.borrow().fields.get(var).copied().unwrap_or(Value::Nil))
+            } else {
+                obj.borrow().fields.get(var).copied().unwrap_or(Value::Nil)
+            };
+            env_frame.vars.insert(var.clone(), val);
+        }
+        let env_ref = gcl!(mc, env_frame);
+
+        let is_nested_block = block.is_nested_block;
+        let enclosing_method_id = if is_nested_block {
+            self.frames.last().and_then(|f| f.enclosing_method_id)
+        } else {
+            Some(frame_id)
+        };
+
+        self.frames.push(Frame {
+            id: frame_id,
+            is_nested_block,
+            enclosing_method_id,
+            block,
+            ip: 0,
+            env: env_ref,
+            instantiating_obj: Some(obj),
         });
     }
 
@@ -458,7 +555,7 @@ impl<'gc> VmState<'gc> {
                     Constant::Nil => Value::Nil,
                     Constant::Bool(b) => Value::Bool(b),
                     Constant::Int(i) => Value::Int(i),
-                    Constant::Float(f) => Value::Float(f),
+                    Constant::Double(f) => Value::Double(f),
                     Constant::String(s) => Value::String(gc!(mc, s.clone())),
                     Constant::Block(sb) => {
                         let parent_env = self.frames.last().map(|f| f.env);
@@ -519,8 +616,18 @@ impl<'gc> VmState<'gc> {
                 }
             }
             Instruction::Return | Instruction::BlockReturn => {
-                let ret_val = self.pop()?;
-                self.frames.pop();
+                let mut ret_val = self.pop()?;
+                let popped_frame = self.frames.pop().unwrap();
+                if let Some(obj) = popped_frame.instantiating_obj {
+                    let env_borrow = popped_frame.env.borrow();
+                    let vars = obj.borrow().class.borrow().instance_vars.clone();
+                    for var in &vars {
+                        if let Some(val) = env_borrow.vars.get(var) {
+                            obj.borrow_mut(mc).fields.insert(var.clone(), *val);
+                        }
+                    }
+                    ret_val = Value::Object(obj);
+                }
                 self.push(ret_val);
             }
             Instruction::MethodReturn => {
@@ -528,6 +635,15 @@ impl<'gc> VmState<'gc> {
                 let enclosing_id = self.frames[frame_idx].enclosing_method_id;
                 if let Some(target_id) = enclosing_id {
                     while let Some(f) = self.frames.pop() {
+                        if let Some(obj) = f.instantiating_obj {
+                            let env_borrow = f.env.borrow();
+                            let vars = obj.borrow().class.borrow().instance_vars.clone();
+                            for var in &vars {
+                                if let Some(val) = env_borrow.vars.get(var) {
+                                    obj.borrow_mut(mc).fields.insert(var.clone(), *val);
+                                }
+                            }
+                        }
                         if f.id == target_id {
                             break;
                         }
@@ -762,6 +878,31 @@ impl<'gc> VmState<'gc> {
                     });
                 }
             }
+            Instruction::LoadField(name) => {
+                let frame = &self.frames[frame_idx];
+                let self_val = EnvFrame::get(frame.env, "self").unwrap_or(Value::Nil);
+                let val = if let Value::Object(obj) = self_val {
+                    obj.borrow().get_field_or_default(&name)
+                } else {
+                    Value::Nil
+                };
+                self.push(val);
+                self.frames[frame_idx].ip += 1;
+            }
+            Instruction::StoreField(name) => {
+                let val = self.pop()?;
+                let frame = &self.frames[frame_idx];
+                let self_val = EnvFrame::get(frame.env, "self").unwrap_or(Value::Nil);
+                if let Value::Object(obj) = self_val {
+                    obj.borrow_mut(mc).fields.insert(name, val);
+                } else {
+                    return Err(BBError::Other(format!(
+                        "Cannot set field '{}' on non-object {:?}",
+                        name, self_val
+                    )));
+                }
+                self.frames[frame_idx].ip += 1;
+            }
         }
 
         Ok(VmStatus::Running)
@@ -941,7 +1082,7 @@ mod tests {
             vec![
                 Instruction::Push(Constant::Nil),
                 Instruction::Push(Constant::Bool(true)),
-                Instruction::Push(Constant::Float(3.14)),
+                Instruction::Push(Constant::Double(3.14)),
                 Instruction::Push(Constant::String("hello".to_string())),
             ],
             |vm, mc| {
@@ -957,7 +1098,7 @@ mod tests {
                 vm.step(mc).unwrap();
                 assert_eq!(
                     vm.stack,
-                    vec![Value::Nil, Value::Bool(true), Value::Float(3.14)]
+                    vec![Value::Nil, Value::Bool(true), Value::Double(3.14)]
                 );
 
                 // String

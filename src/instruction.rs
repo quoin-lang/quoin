@@ -15,7 +15,7 @@ pub enum Constant {
     Nil,
     Bool(bool),
     Int(i64),
-    Float(f64),
+    Double(f64),
     String(String),
     Block(StaticBlock),
 }
@@ -50,4 +50,6 @@ pub enum Instruction {
     ExecuteBlockWithSelf,
     DefineMethod(String),
     OverrideMethod(String),
+    LoadField(String),
+    StoreField(String),
 }

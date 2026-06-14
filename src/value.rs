@@ -48,7 +48,7 @@ pub enum Value<'gc> {
     Nil,
     Bool(bool),
     Int(i64),
-    Float(f64),
+    Double(f64),
     String(Gc<'gc, String>),
     List(Gc<'gc, RefLock<Vec<Value<'gc>>>>),
     Dict(Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>),
@@ -67,7 +67,7 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
     #[inline]
     fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
         match self {
-            Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Native(_) => {}
+            Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Double(_) | Value::Native(_) => {}
             Value::String(s) => cc.trace(s),
             Value::List(l) => cc.trace(l),
             Value::Dict(d) => cc.trace(d),
@@ -98,7 +98,7 @@ impl<'gc> Value<'gc> {
             Value::Nil => "Nil",
             Value::Bool(_) => "Boolean",
             Value::Int(_) => "Integer",
-            Value::Float(_) => "Float",
+            Value::Double(_) => "Double",
             Value::String(_) => "String",
             Value::List(_) => "List",
             Value::Dict(_) => "Dictionary",
@@ -119,9 +119,9 @@ impl<'gc> PartialEq for Value<'gc> {
             (Value::Nil, Value::Nil) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
-            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+            (Value::Double(a), Value::Double(b)) => a == b,
+            (Value::Int(a), Value::Double(b)) => (*a as f64) == *b,
+            (Value::Double(a), Value::Int(b)) => *a == (*b as f64),
             (Value::String(a), Value::String(b)) => **a == **b,
             (Value::List(a), Value::List(b)) => Gc::ptr_eq(*a, *b),
             (Value::Dict(a), Value::Dict(b)) => Gc::ptr_eq(*a, *b),
@@ -149,7 +149,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
             Value::Nil => write!(f, "Nil"),
             Value::Bool(b) => write!(f, "Bool({})", b),
             Value::Int(i) => write!(f, "Int({})", i),
-            Value::Float(fl) => write!(f, "Float({})", fl),
+            Value::Double(fl) => write!(f, "Float({})", fl),
             Value::String(s) => write!(f, "String({:?})", **s),
             Value::List(_) => write!(f, "List(...)"),
             Value::Dict(_) => write!(f, "Dict(...)"),
@@ -173,7 +173,7 @@ impl<'gc> fmt::Display for Value<'gc> {
             Value::Nil => write!(f, "nil"),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(i) => write!(f, "{}", i),
-            Value::Float(fl) => write!(f, "{}", fl),
+            Value::Double(fl) => write!(f, "{}", fl),
             Value::String(s) => write!(f, "{}", **s),
             Value::List(l) => {
                 let borrowed = l.borrow();

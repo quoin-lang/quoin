@@ -1,15 +1,31 @@
 use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
 use new_vm::runtime::{native, object};
-use new_vm::value::{Block, NativeClassBuilder, Object, Value};
+use new_vm::value::{Block, NativeClassBuilder, Value};
 use new_vm::vm::{VmState, VmStatus};
-use new_vm::{arg, arg_obj, compiler, gc, gcl};
+use new_vm::{compiler, gc};
 
-use gc_arena::{lock::RefLock, Arena, Gc, Rootable};
-use std::collections::HashMap;
+use gc_arena::{Arena, Gc, Rootable};
 
 fn main() {
     let script = r#"
+Point <- { | @x @y |
+  .meta <-- {
+    newX:y: -> { |x y|
+      .new: { x = x; y = y }
+    }
+  }
+
+  x -> { @x }
+  y -> { @y }
+
+  dist: -> { |other|
+    dx = @x - other.x;
+    dy = @y - other.y;
+    ((dx * dx) + (dy * dy)).sqrt
+  }
+};
+
 "* Test 1: Simple assignments, variables, and operators
 x = 10;
 y = 20;
@@ -97,14 +113,13 @@ p1.print;
         native::register_native_funcs(&mut vm, mc);
 
         vm.register_native_class(mc, object::build_object_class());
-        vm.register_native_class(mc, build_point_class());
 
         // Register placeholder classes for all of the builtin types.
         for t in [
             "Nil",
             "Boolean",
             "Integer",
-            "Float",
+            "Double",
             "String",
             "List",
             "Dictionary",
@@ -113,7 +128,22 @@ p1.print;
             "Method",
             "Native",
         ] {
-            vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
+            if t == "Double" || t == "Integer" {
+                let class_builder = NativeClassBuilder::new(t, Some("Object"))
+                    .instance_method("sqrt", |_vm, _mc, args| {
+                        if args.is_empty() {
+                            return Err(BBError::Other("sqrt expects a receiver".to_string()));
+                        }
+                        match args[0] {
+                            Value::Double(f) => Ok(Value::Double(f.sqrt())),
+                            Value::Int(i) => Ok(Value::Double((i as f64).sqrt())),
+                            _ => Err(BBError::Other(format!("sqrt expected number, got {:?}", args[0]))),
+                        }
+                    });
+                vm.register_native_class(mc, class_builder);
+            } else {
+                vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
+            }
         }
 
         // Convert StaticBlock to Block in GC and start it
@@ -173,56 +203,4 @@ p1.print;
     arena.finish_cycle();
 }
 
-fn build_point_class() -> NativeClassBuilder {
-    NativeClassBuilder::new("Point", Some("Object"))
-        .class_method("newX:y:", |_vm, mc, args| {
-            if args.len() != 3 {
-                return Err(BBError::ArgumentCountMismatch {
-                    expected: 3,
-                    got: args.len(),
-                    msg: "Point newX:y: expects exactly 2 arguments (x, y)".to_string(),
-                });
-            }
-            let class_ref = arg!(args, Class, 0, "Expected Class as receiver");
-            let mut fields = HashMap::new();
-            fields.insert("x".to_string(), args[1]);
-            fields.insert("y".to_string(), args[2]);
-            Ok(Value::Object(gcl!(
-                mc,
-                Object {
-                    class: class_ref,
-                    fields,
-                }
-            )))
-        })
-        .instance_method("x", |_vm, _mc, args| {
-            let obj = arg_obj!(args, "Point", 0);
-            Ok(obj.borrow().get_field_or_default("x"))
-        })
-        .instance_method("y", |_vm, _mc, args| {
-            let obj = arg_obj!(args, "Point", 0);
-            Ok(obj.borrow().get_field_or_default("y"))
-        })
-        .instance_method("dist:", |_vm, _mc, args| {
-            let obj1 = arg_obj!(args, "Point", 0);
-            let (x1, y1) = (
-                obj1.borrow().get_field_or_default("x"),
-                obj1.borrow().get_field_or_default("y"),
-            );
-            let obj2 = arg_obj!(args, "Point", 1);
-            let (x2, y2) = (
-                obj2.borrow().get_field_or_default("x"),
-                obj2.borrow().get_field_or_default("y"),
-            );
 
-            let to_f64 = |val| match val {
-                Value::Int(i) => i as f64,
-                Value::Float(f) => f,
-                _ => 0.0,
-            };
-
-            let dx = to_f64(x1) - to_f64(x2);
-            let dy = to_f64(y1) - to_f64(y2);
-            Ok(Value::Float((dx * dx + dy * dy).sqrt()))
-        })
-}

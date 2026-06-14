@@ -65,9 +65,9 @@ pub fn native_add<'gc>(
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 + b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + *b as f64)),
+        (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a + b)),
+        (Value::Int(a), Value::Double(b)) => Ok(Value::Double(*a as f64 + b)),
+        (Value::Double(a), Value::Int(b)) => Ok(Value::Double(a + *b as f64)),
         (Value::String(a), Value::String(b)) => {
             let new_str = format!("{}{}", **a, **b);
             Ok(Value::String(gc!(mc, new_str)))
@@ -95,9 +95,9 @@ pub fn native_sub<'gc>(
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 - b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - *b as f64)),
+        (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a - b)),
+        (Value::Int(a), Value::Double(b)) => Ok(Value::Double(*a as f64 - b)),
+        (Value::Double(a), Value::Int(b)) => Ok(Value::Double(a - *b as f64)),
         _ => Err(BBError::TypeError {
             expected: "numeric types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -121,9 +121,9 @@ pub fn native_mul<'gc>(
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
+        (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a * b)),
+        (Value::Int(a), Value::Double(b)) => Ok(Value::Double(*a as f64 * b)),
+        (Value::Double(a), Value::Int(b)) => Ok(Value::Double(a * *b as f64)),
         _ => Err(BBError::TypeError {
             expected: "numeric types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -152,9 +152,9 @@ pub fn native_div<'gc>(
             }
             Ok(Value::Int(a / b))
         }
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 / b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / *b as f64)),
+        (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a / b)),
+        (Value::Int(a), Value::Double(b)) => Ok(Value::Double(*a as f64 / b)),
+        (Value::Double(a), Value::Int(b)) => Ok(Value::Double(a / *b as f64)),
         _ => Err(BBError::TypeError {
             expected: "numeric types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -210,9 +210,9 @@ pub fn native_lt<'gc>(
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) < *b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a < (*b as f64))),
+        (Value::Double(a), Value::Double(b)) => Ok(Value::Bool(a < b)),
+        (Value::Int(a), Value::Double(b)) => Ok(Value::Bool((*a as f64) < *b)),
+        (Value::Double(a), Value::Int(b)) => Ok(Value::Bool(*a < (*b as f64))),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -236,9 +236,9 @@ pub fn native_gt<'gc>(
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) > *b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a > (*b as f64))),
+        (Value::Double(a), Value::Double(b)) => Ok(Value::Bool(a > b)),
+        (Value::Int(a), Value::Double(b)) => Ok(Value::Bool((*a as f64) > *b)),
+        (Value::Double(a), Value::Int(b)) => Ok(Value::Bool(*a > (*b as f64))),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -262,9 +262,9 @@ pub fn native_le<'gc>(
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) <= *b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a <= (*b as f64))),
+        (Value::Double(a), Value::Double(b)) => Ok(Value::Bool(a <= b)),
+        (Value::Int(a), Value::Double(b)) => Ok(Value::Bool((*a as f64) <= *b)),
+        (Value::Double(a), Value::Int(b)) => Ok(Value::Bool(*a <= (*b as f64))),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -288,9 +288,9 @@ pub fn native_ge<'gc>(
     }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) >= *b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a >= (*b as f64))),
+        (Value::Double(a), Value::Double(b)) => Ok(Value::Bool(a >= b)),
+        (Value::Int(a), Value::Double(b)) => Ok(Value::Bool((*a as f64) >= *b)),
+        (Value::Double(a), Value::Int(b)) => Ok(Value::Bool(*a >= (*b as f64))),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -330,7 +330,7 @@ pub fn native_negated<'gc>(
     }
     match &args[0] {
         Value::Int(i) => Ok(Value::Int(-*i)),
-        Value::Float(f) => Ok(Value::Float(-*f)),
+        Value::Double(f) => Ok(Value::Double(-*f)),
         _ => Err(BBError::TypeError {
             expected: "Integer or Float".to_string(),
             got: args[0].type_name().to_string(),

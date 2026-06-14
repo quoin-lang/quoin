@@ -1,7 +1,7 @@
 use crate::instruction::{Constant, Instruction, StaticBlock};
 use crate::parser::ast_visitor::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, MethodCallNode, Node,
-    NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType, MethodSelectorNode,
+    NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType, MethodSelectorNode, IdentifierType,
 };
 
 use std::collections::HashSet;
@@ -85,7 +85,7 @@ impl Compiler {
                 bytecode.push(Instruction::Push(Constant::Int(n.value)));
             }
             NodeValue::Double(d) => {
-                bytecode.push(Instruction::Push(Constant::Float(d.value)));
+                bytecode.push(Instruction::Push(Constant::Double(d.value)));
             }
             NodeValue::Str(s) => {
                 bytecode.push(Instruction::Push(Constant::String(s.value.clone())));
@@ -94,7 +94,9 @@ impl Compiler {
                 bytecode.push(Instruction::Push(Constant::String(s.value.clone())));
             }
             NodeValue::Identifier(id) => {
-                if id.name == "nil" || id.name == "true" || id.name == "false" {
+                if id.identifier_type == IdentifierType::Instance {
+                    bytecode.push(Instruction::LoadField(id.name.clone()));
+                } else if id.name == "nil" || id.name == "true" || id.name == "false" {
                     match id.name.as_str() {
                         "nil" => bytecode.push(Instruction::Push(Constant::Nil)),
                         "true" => bytecode.push(Instruction::Push(Constant::Bool(true))),
@@ -251,7 +253,9 @@ impl Compiler {
         match &lval.value {
             NodeValue::IdentLValue(ident_lval) => {
                 let name = &ident_lval.identifier.name;
-                if self.is_local(name) {
+                if ident_lval.identifier.identifier_type == IdentifierType::Instance {
+                    bytecode.push(Instruction::StoreField(name.clone()));
+                } else if self.is_local(name) {
                     bytecode.push(Instruction::StoreLocal(name.clone()));
                 } else {
                     bytecode.push(Instruction::StoreGlobal(name.clone()));
@@ -276,7 +280,9 @@ impl Compiler {
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send("at:".to_string(), 1));
 
-                    if self.is_local(name) {
+                    if ident_lval.identifier.identifier_type == IdentifierType::Instance {
+                        bytecode.push(Instruction::StoreField(name.clone()));
+                    } else if self.is_local(name) {
                         bytecode.push(Instruction::StoreLocal(name.clone()));
                     } else {
                         bytecode.push(Instruction::StoreGlobal(name.clone()));
@@ -608,7 +614,7 @@ mod tests {
 
         let res = compile(vec![double(1.5)]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::Push(Constant::Float(1.5)));
+        expected.push(Instruction::Push(Constant::Double(1.5)));
         assert_eq!(res.bytecode, expected);
 
         let res = compile(vec![string("hello")]).unwrap();
