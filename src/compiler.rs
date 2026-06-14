@@ -1,7 +1,8 @@
 use crate::instruction::{Constant, Instruction, StaticBlock};
 use crate::parser::ast_visitor::{
-    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, MethodCallNode, Node,
-    NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType, MethodSelectorNode, IdentifierType,
+    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, IdentifierType,
+    MethodCallNode, MethodSelectorNode, Node, NodeValue, ProgramNode, UnaryOperatorNode,
+    UnaryOperatorType,
 };
 
 use std::collections::HashSet;
@@ -72,7 +73,7 @@ impl Compiler {
         }
 
         Ok(StaticBlock {
-            name: Some("main".to_string()),
+            name: None,
             is_nested_block: false,
             param_names: Vec::new(),
             bytecode,
@@ -158,7 +159,10 @@ impl Compiler {
             }
             NodeValue::ClassDefinition(class_def) => {
                 let name = class_def.identifier.name.clone();
-                let parent_name = class_def.parent_identifier.as_ref().map(|id| id.name.clone());
+                let parent_name = class_def
+                    .parent_identifier
+                    .as_ref()
+                    .map(|id| id.name.clone());
                 let mut instance_vars = Vec::new();
                 for arg in &class_def.block.arguments {
                     instance_vars.push(arg.identifier.name.clone());
@@ -228,7 +232,7 @@ impl Compiler {
         if assign.lvalues.len() == 1 {
             let lval = &assign.lvalues[0];
             bytecode.push(Instruction::Dup);
-            self.compile_store(lval, bytecode)?;
+            self.compile_lvalue_store(lval, bytecode)?;
         } else {
             let temp_var = self.new_temp_var();
             self.scopes
@@ -245,7 +249,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_store(
+    fn compile_lvalue_store(
         &mut self,
         lval: &Node,
         bytecode: &mut Vec<Instruction>,
@@ -253,17 +257,26 @@ impl Compiler {
         match &lval.value {
             NodeValue::IdentLValue(ident_lval) => {
                 let name = &ident_lval.identifier.name;
-                if ident_lval.identifier.identifier_type == IdentifierType::Instance {
-                    bytecode.push(Instruction::StoreField(name.clone()));
-                } else if self.is_local(name) {
-                    bytecode.push(Instruction::StoreLocal(name.clone()));
-                } else {
-                    bytecode.push(Instruction::StoreGlobal(name.clone()));
-                }
+                self.compile_ident_store(&ident_lval.identifier.identifier_type, name, bytecode);
             }
             _ => return Err(format!("Unsupported store target: {:?}", lval.value)),
         }
         Ok(())
+    }
+
+    fn compile_ident_store(
+        &mut self,
+        ident_type: &IdentifierType,
+        name: &String,
+        bytecode: &mut Vec<Instruction>,
+    ) {
+        if ident_type == &IdentifierType::Instance {
+            bytecode.push(Instruction::StoreField(name.clone()));
+        } else if self.is_local(name) {
+            bytecode.push(Instruction::StoreLocal(name.clone()));
+        } else {
+            bytecode.push(Instruction::StoreGlobal(name.clone()));
+        }
     }
 
     fn compile_destruct(
@@ -280,13 +293,11 @@ impl Compiler {
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send("at:".to_string(), 1));
 
-                    if ident_lval.identifier.identifier_type == IdentifierType::Instance {
-                        bytecode.push(Instruction::StoreField(name.clone()));
-                    } else if self.is_local(name) {
-                        bytecode.push(Instruction::StoreLocal(name.clone()));
-                    } else {
-                        bytecode.push(Instruction::StoreGlobal(name.clone()));
-                    }
+                    self.compile_ident_store(
+                        &ident_lval.identifier.identifier_type,
+                        name,
+                        bytecode,
+                    );
                 }
                 NodeValue::SplatLValue(splat_lval) => {
                     let name = &splat_lval.identifier.name;
@@ -294,11 +305,11 @@ impl Compiler {
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send("sliceFrom:".to_string(), 1));
 
-                    if self.is_local(name) {
-                        bytecode.push(Instruction::StoreLocal(name.clone()));
-                    } else {
-                        bytecode.push(Instruction::StoreGlobal(name.clone()));
-                    }
+                    self.compile_ident_store(
+                        &splat_lval.identifier.identifier_type,
+                        name,
+                        bytecode,
+                    );
                 }
                 NodeValue::IgnoredLValue => {}
                 NodeValue::IgnoredSplatLValue => {}
@@ -790,11 +801,7 @@ mod tests {
                 lvalues: vec![Arc::new(lval_b), Arc::new(lval_c)],
             }),
         };
-        let res = compile(vec![assign_node(
-            vec![lval_a, lval_nested],
-            local_id("x"),
-        )])
-        .unwrap();
+        let res = compile(vec![assign_node(vec![lval_a, lval_nested], local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal("x".to_string()));
         expected.push(Instruction::Dup);
