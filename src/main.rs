@@ -7,62 +7,11 @@ mod vm;
 
 use crate::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
 use crate::vm::{VmState, VmStatus};
+use new_vm::{arg, arg_obj, gc, gcl};
 
 use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
 use itertools::Itertools;
 use std::collections::HashMap;
-
-macro_rules! arg {
-    ($args:ident, $variant:ident, $idx:expr) => {
-        match $args.get($idx) {
-            Some(&Value::$variant(val)) => val,
-            _ => {
-                return Err(format!(
-                    "Expected {} at argument index {}",
-                    stringify!($variant),
-                    $idx
-                ))
-            }
-        }
-    };
-    ($args:ident, $variant:ident, $idx:expr, $err:expr) => {
-        match $args.get($idx) {
-            Some(&Value::$variant(val)) => val,
-            _ => return Err($err.to_string()),
-        }
-    };
-}
-
-macro_rules! arg_obj {
-    ($args:ident, $class_name:expr, $idx:expr) => {
-        match $args.get($idx) {
-            Some(&Value::Object(val)) => match val.borrow().class_name().as_str() {
-                $class_name => val,
-                x => {
-                    return Err(format!(
-                        "Object at argument index {} is {}, wanted {}",
-                        $idx, x, $class_name
-                    ))
-                }
-            },
-            _ => return Err(format!("Expected Object at argument index {}", $idx)),
-        }
-    };
-    ($args:ident, $class_name:expr, $idx:expr, $err:expr) => {
-        match $args.get($idx) {
-            Some(&Value::Object(val)) => match val.borrow().class_name().as_str() {
-                $class_name => val,
-                x => {
-                    return Err(format!(
-                        "Object at argument index {} is {}, wanted {}",
-                        $idx, x, $class_name
-                    ))
-                }
-            },
-            _ => return Err($err.to_string()),
-        }
-    };
-}
 
 // Native helper: print
 fn native_print<'gc>(
@@ -182,7 +131,7 @@ fn native_add<'gc>(
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + *b as f64)),
         (Value::String(a), Value::String(b)) => {
             let new_str = format!("{}{}", **a, **b);
-            Ok(Value::String(Gc::new(mc, new_str)))
+            Ok(Value::String(gc!(mc, new_str)))
         }
         _ => Err(format!("Cannot add {:?} and {:?}", args[0], args[1])),
     }
@@ -418,7 +367,7 @@ fn native_list_slice_from<'gc>(
             } else {
                 Vec::new()
             };
-            Ok(Value::List(Gc::new(mc, RefLock::new(sliced))))
+            Ok(Value::List(gcl!(mc, sliced)))
         }
         _ => Err(format!(
             "sliceFrom expects list and integer, got {:?} and {:?}",
@@ -583,7 +532,7 @@ p1.print;
         vm.register_native_class(mc, build_point_class());
 
         // Convert StaticBlock to Block in GC and start it
-        let main_block = Gc::new(
+        let main_block = gc!(
             mc,
             Block {
                 name: program.name.clone(),
@@ -591,7 +540,7 @@ p1.print;
                 param_names: program.param_names.clone(),
                 bytecode: program.bytecode.clone(),
                 parent_env: None,
-            },
+            }
         );
         vm.start_block(mc, main_block, Vec::new());
 
@@ -671,12 +620,12 @@ fn build_point_class() -> NativeClassBuilder {
             let mut fields = HashMap::new();
             fields.insert("x".to_string(), args[1]);
             fields.insert("y".to_string(), args[2]);
-            Ok(Value::Object(Gc::new(
+            Ok(Value::Object(gcl!(
                 mc,
-                RefLock::new(Object {
+                Object {
                     class: class_ref,
                     fields,
-                }),
+                }
             )))
         })
         .instance_method("x", |_vm, _mc, args| {

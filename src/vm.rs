@@ -1,5 +1,6 @@
 use crate::instruction::{Constant, Instruction};
 use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, Value};
+use new_vm::{gc, gcl};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
@@ -35,7 +36,7 @@ impl<'gc> VmState<'gc> {
         Self {
             stack: Vec::new(),
             frames: Vec::new(),
-            globals: Gc::new(mc, RefLock::new(HashMap::new())),
+            globals: gcl!(mc, HashMap::new()),
             next_frame_id: 1,
         }
     }
@@ -60,14 +61,14 @@ impl<'gc> VmState<'gc> {
             cls_methods.insert(name, Value::Native(func));
         }
 
-        let class_obj = Gc::new(
+        let class_obj = gcl!(
             mc,
-            RefLock::new(Class {
+            Class {
                 name: native_class.name().to_string(),
                 parent: parent_class,
                 instance_methods: inst_methods,
                 class_methods: cls_methods,
-            }),
+            }
         );
 
         self.globals
@@ -155,7 +156,7 @@ impl<'gc> VmState<'gc> {
         for (name, val) in block.param_names.iter().zip(args.into_iter()) {
             env_frame.vars.insert(name.clone(), val);
         }
-        let env_ref = Gc::new(mc, RefLock::new(env_frame));
+        let env_ref = gcl!(mc, env_frame);
 
         let is_nested_block = block.is_nested_block;
         let enclosing_method_id = if is_nested_block {
@@ -239,10 +240,10 @@ impl<'gc> VmState<'gc> {
                     Constant::Bool(b) => Value::Bool(b),
                     Constant::Int(i) => Value::Int(i),
                     Constant::Float(f) => Value::Float(f),
-                    Constant::String(s) => Value::String(Gc::new(mc, s.clone())),
+                    Constant::String(s) => Value::String(gc!(mc, s.clone())),
                     Constant::Block(sb) => {
                         let parent_env = self.frames.last().map(|f| f.env);
-                        let block = Gc::new(
+                        let block = gc!(
                             mc,
                             Block {
                                 name: sb.name.clone(),
@@ -250,7 +251,7 @@ impl<'gc> VmState<'gc> {
                                 param_names: sb.param_names.clone(),
                                 bytecode: sb.bytecode.clone(),
                                 parent_env,
-                            },
+                            }
                         );
                         Value::Block(block)
                     }
@@ -391,7 +392,7 @@ impl<'gc> VmState<'gc> {
                     elements.push(self.pop()?);
                 }
                 elements.reverse();
-                let list = Gc::new(mc, RefLock::new(elements));
+                let list = gcl!(mc, elements);
                 self.push(Value::List(list));
                 self.frames[frame_idx].ip += 1;
             }
@@ -406,7 +407,7 @@ impl<'gc> VmState<'gc> {
                         return Err(format!("Dict keys must be Strings, got: {:?}", key_val));
                     }
                 }
-                let dict = Gc::new(mc, RefLock::new(map));
+                let dict = gcl!(mc, map);
                 self.push(Value::Dict(dict));
                 self.frames[frame_idx].ip += 1;
             }
@@ -415,7 +416,7 @@ impl<'gc> VmState<'gc> {
                 if let Value::String(s) = pattern_val {
                     let re =
                         regex::Regex::new(&**s).map_err(|e| format!("Invalid regex: {}", e))?;
-                    let regex_val = Gc::new(mc, BBRegex(re));
+                    let regex_val = gc!(mc, BBRegex(re));
                     self.push(Value::Regex(regex_val));
                 } else {
                     return Err(format!(
