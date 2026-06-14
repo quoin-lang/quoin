@@ -1,7 +1,8 @@
+use crate::instruction::{Constant, Instruction};
+use crate::value::{Block, Class, EnvFrame, BBRegex, NativeClass, Value};
+
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
-use gc_arena::{Collect, Gc, lock::RefLock, Mutation};
-use crate::instruction::{Instruction, Constant};
-use crate::value::{Value, Block, EnvFrame, MyRegex, Class, Object, NativeClass};
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -279,7 +280,7 @@ impl<'gc> VmState<'gc> {
                         Value::Native(native_fn) => {
                             let mut all_args = vec![receiver];
                             all_args.extend(args);
-                            let ret = (native_fn.0)(self, mc, all_args)?;
+                            let ret = native_fn.0(self, mc, all_args)?;
                             self.push(ret);
                         }
                         Value::Block(block) => {
@@ -368,7 +369,7 @@ impl<'gc> VmState<'gc> {
                 let pattern_val = self.pop()?;
                 if let Value::String(s) = pattern_val {
                     let re = regex::Regex::new(&**s).map_err(|e| format!("Invalid regex: {}", e))?;
-                    let regex_val = Gc::new(mc, MyRegex(re));
+                    let regex_val = Gc::new(mc, BBRegex(re));
                     self.push(Value::Regex(regex_val));
                 } else {
                     return Err(format!("Regex pattern must be a String, got: {:?}", pattern_val));

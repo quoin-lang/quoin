@@ -5,10 +5,11 @@ mod assembler;
 mod parser;
 mod compiler;
 
+use crate::value::{NativeFunc, Block, Value, Object, NativeClassBuilder};
+use crate::vm::{VmState, VmStatus};
+
 use std::collections::HashMap;
 use gc_arena::{Arena, Rootable, Mutation, Gc, lock::RefLock};
-use crate::value::{Value, Block, NativeFunc, NativeClass, Object, Class, NativeClassBuilder};
-use crate::vm::{VmState, VmStatus};
 
 // Native helper: print
 fn native_print<'gc>(
@@ -555,7 +556,7 @@ d = p1.dist: p2;
     });
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum SimpleStatus {
+    enum ExecutionStatus {
         Running,
         Finished,
         Yeeted,
@@ -566,32 +567,32 @@ d = p1.dist: p2;
     loop {
         let status = arena.mutate_root(|mc, vm| {
             match vm.step(mc) {
-                Ok(VmStatus::Running) => Ok(SimpleStatus::Running),
+                Ok(VmStatus::Running) => Ok(ExecutionStatus::Running),
                 Ok(VmStatus::Finished(val)) => {
                     println!(
                         "VM execution finished successfully. Top value: {}",
                         val
                     );
-                    Ok(SimpleStatus::Finished)
+                    Ok(ExecutionStatus::Finished)
                 }
                 Ok(VmStatus::Yeeted(val)) => {
                     println!(
                         "VM execution terminated with uncaught exception: {}",
                         val
                     );
-                    Ok(SimpleStatus::Yeeted)
+                    Ok(ExecutionStatus::Yeeted)
                 }
                 Err(e) => Err(e),
             }
         });
         match status {
-            Ok(SimpleStatus::Running) => {
+            Ok(ExecutionStatus::Running) => {
                 step_count += 1;
                 if step_count % 10 == 0 {
                     arena.collect_debt();
                 }
             }
-            Ok(SimpleStatus::Finished) | Ok(SimpleStatus::Yeeted) => {
+            Ok(ExecutionStatus::Finished) | Ok(ExecutionStatus::Yeeted) => {
                 break;
             }
             Err(e) => {

@@ -1,11 +1,11 @@
+use crate::instruction::{Constant, Instruction, StaticBlock};
+use crate::parser::ast_visitor::{
+    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, MethodCallNode, Node,
+    NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType
+};
+
 use std::collections::HashSet;
 use std::sync::Arc;
-use crate::instruction::{Instruction, Constant, StaticBlock};
-use crate::parser::ast_visitor::{
-    Node, NodeValue, ProgramNode, BlockNode, AssignmentNode, MethodCallNode,
-    BinaryOperatorNode, UnaryOperatorNode, BinaryOperatorType, UnaryOperatorType,
-    IdentifierType
-};
 
 struct Scope {
     locals: HashSet<String>,

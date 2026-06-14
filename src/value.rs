@@ -1,15 +1,16 @@
+use crate::instruction::Instruction;
+use crate::vm::VmState;
+
 use std::collections::HashMap;
 use std::fmt;
 use regex::Regex;
 use gc_arena::{Collect, Gc, lock::RefLock};
-use crate::instruction::Instruction;
-use crate::vm::VmState;
 
 #[derive(Clone, Collect)]
 #[collect(require_static)]
-pub struct MyRegex(pub Regex);
+pub struct BBRegex(pub Regex);
 
-impl fmt::Debug for MyRegex {
+impl fmt::Debug for BBRegex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Regex({})", self.0.as_str())
     }
@@ -38,7 +39,7 @@ pub enum Value<'gc> {
     String(Gc<'gc, String>),
     List(Gc<'gc, RefLock<Vec<Value<'gc>>>>),
     Dict(Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>),
-    Regex(Gc<'gc, MyRegex>),
+    Regex(Gc<'gc, BBRegex>),
     Block(Gc<'gc, Block<'gc>>),
     Method(Gc<'gc, Method<'gc>>),
     Native(NativeFunc),
