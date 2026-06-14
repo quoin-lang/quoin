@@ -1,0 +1,35 @@
+(TestSuite.new:{ name = 'Operators' }).add:{
+    .test:
+    andOr -> {
+        .isTrue:{ true && true };
+        .isFalse:{ true && false };
+        .isFalse:{ false && xyz };
+        .isFalse:{ false && true };
+
+        .isTrue:{ true || true };
+        .isTrue:{ true || xyz };
+        .isTrue:{ false || true };
+        .isFalse:{ false || false };
+    };
+
+    .test:
+    return -> {
+        .is:{
+            TORC <- {
+                x -> {
+                    true.if:{ ^^42 }
+                    ^66
+                }
+            }
+            TORC.new.x
+        } equalTo:42;
+
+        .is:{
+            x = {
+                ^42
+                66
+            }
+            x.value
+        } equalTo:42;
+    };
+}

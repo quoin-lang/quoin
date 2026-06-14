@@ -2,6 +2,7 @@ mod instruction;
 mod value;
 mod vm;
 mod assembler;
+mod parser;
 
 use gc_arena::{Arena, Rootable, Mutation, Gc};
 use crate::value::{Value, Block, NativeFunc};

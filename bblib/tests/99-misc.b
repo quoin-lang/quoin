@@ -1,0 +1,96 @@
+(TestSuite.new:{ name = 'Misc' }).add:{
+    .test:
+    defaultNotEq -> {
+        .is:{
+            EqTester1 <- {
+                #'==:' --> { true }
+            }
+            x = EqTester1.new
+            #( (x==x) (x!=x) )
+        } equalTo:#( true false );
+
+        .is:{
+            EqTester2 <- {
+                #'==:' --> { false }
+            }
+            x = EqTester2.new
+            #( (x==x) (x!=x) )
+        } equalTo:#( false true );
+    };
+
+    .test:
+    whileDo -> {
+        .is:{
+            i = 3;
+            r = #();
+            { i < 10 }.whileDo:{ r.add:i; i = i + 1 }
+            ^r
+        } equalTo:#( 3 4 5 6 7 8 9 );
+    };
+
+    .test:
+    blockRecursion -> {
+        .is:{
+            block = {|a|
+            (a >= 'aaaaa').if:{ a }
+                         else:{ block.value:(a + 'a') };
+            };
+            block.value:'a'
+        } equalTo:'aaaaa';
+    };
+
+    .test:
+    constOperator -> {
+        .is:{ TestConst <- 456; TestConst } equalTo:456;
+        .is:{ [Y]TestConst <- 789; [Y]TestConst } equalTo:789;
+        .does:{ TestConst <- 123 } throw:'Global [/]TestConst is already defined in this scope';
+        .does:{ [Y]TestConst <- 123 } throw:'Global [Y]TestConst is already defined in this scope';
+        .does:{ TestConst = 123 } throw:'Can\'t modify global constant [/]TestConst';
+    };
+
+    .test:
+    throw3 -> {
+        .does:{ !!! } throw:'!!!';
+        .does:{ ??? } throw:'???';
+        .does:{ ... } throw:'...';
+    };
+
+    .test:
+    immutableKeywords -> {
+        .does:{ true = false } throw:'Can\'t modify keyword true';
+        .does:{ false = true } throw:'Can\'t modify keyword false';
+        .does:{ nil = 1 } throw:'Can\'t modify keyword nil';
+    };
+
+    .test:
+    assignGlobal -> {
+        .is:{ [Y]Mutable = 1; [Y]Mutable } equalTo:1;
+        .is:{ [/]Mutable = 2; [/]Mutable } equalTo:2;
+    };
+
+    .test:
+    assignIgnore -> {
+        .is:{ _ = 42; } equalTo:42;
+        .is:{ *_ = 42; } equalTo:42;
+    };
+
+    .test:
+    defined? -> {
+        .isFalse:{ nil.defined? };
+        .isTrue:{ 0.defined? };
+    };
+
+    .test:
+    nilsPrintEmpty -> {
+        .is:{ nil.s } equalTo:'';
+    };
+
+    .test:
+    nilsPropagate -> {
+        .is:{ nil + 42 } equalTo:nil;
+        .is:{ nil - 42 } equalTo:nil;
+        .is:{ nil * 42 } equalTo:nil;
+        .is:{ nil / 42 } equalTo:nil;
+        .is:{ nil % 42 } equalTo:nil;
+    };
+}
