@@ -5,11 +5,63 @@ mod parser;
 mod value;
 mod vm;
 
-use crate::value::{Block, Class, NativeClassBuilder, NativeFunc, Object, Value};
+use crate::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
 use crate::vm::{VmState, VmStatus};
 
-use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
+use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
 use std::collections::HashMap;
+
+macro_rules! arg {
+    ($args:ident, $variant:ident, $idx:expr) => {
+        match $args.get($idx) {
+            Some(&Value::$variant(val)) => val,
+            _ => {
+                return Err(format!(
+                    "Expected {} at argument index {}",
+                    stringify!($variant),
+                    $idx
+                ))
+            }
+        }
+    };
+    ($args:ident, $variant:ident, $idx:expr, $err:expr) => {
+        match $args.get($idx) {
+            Some(&Value::$variant(val)) => val,
+            _ => return Err($err.to_string()),
+        }
+    };
+}
+
+macro_rules! arg_obj {
+    ($args:ident, $class_name:expr, $idx:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Object(val)) => match val.borrow().class_name().as_str() {
+                $class_name => val,
+                x => {
+                    return Err(format!(
+                        "Object at argument index {} is {}, wanted {}",
+                        $idx, x, $class_name
+                    ))
+                }
+            },
+            _ => return Err(format!("Expected Object at argument index {}", $idx)),
+        }
+    };
+    ($args:ident, $class_name:expr, $idx:expr, $err:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Object(val)) => match val.borrow().class_name().as_str() {
+                $class_name => val,
+                x => {
+                    return Err(format!(
+                        "Object at argument index {} is {}, wanted {}",
+                        $idx, x, $class_name
+                    ))
+                }
+            },
+            _ => return Err($err.to_string()),
+        }
+    };
+}
 
 // Native helper: print
 fn native_print<'gc>(
@@ -593,10 +645,7 @@ fn build_point_class() -> NativeClassBuilder {
             if args.len() != 3 {
                 return Err("Point newX:y: expects exactly 2 arguments (x, y)".to_string());
             }
-            let class_ref = match args[0] {
-                Value::Class(c) => c,
-                _ => return Err("Expected Class as receiver".to_string()),
-            };
+            let class_ref = arg!(args, Class, 0, "Expected Class as receiver");
             let mut fields = HashMap::new();
             fields.insert("x".to_string(), args[1]);
             fields.insert("y".to_string(), args[2]);
@@ -608,29 +657,25 @@ fn build_point_class() -> NativeClassBuilder {
                 }),
             )))
         })
-        .instance_method("x", |_vm, _mc, args| match &args[0] {
-            Value::Object(obj) => Ok(obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil)),
-            _ => Err("Point x expects Point object as receiver".to_string()),
+        .instance_method("x", |_vm, _mc, args| {
+            let obj = arg_obj!(args, "Point", 0);
+            Ok(obj.borrow().get_field_or_default("x"))
         })
-        .instance_method("y", |_vm, _mc, args| match &args[0] {
-            Value::Object(obj) => Ok(obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil)),
-            _ => Err("Point y expects Point object as receiver".to_string()),
+        .instance_method("y", |_vm, _mc, args| {
+            let obj = arg_obj!(args, "Point", 0);
+            Ok(obj.borrow().get_field_or_default("y"))
         })
         .instance_method("dist:", |_vm, _mc, args| {
-            let (x1, y1) = match &args[0] {
-                Value::Object(obj) => (
-                    obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
-                    obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
-                ),
-                _ => return Err("Point dist: expects Point object as receiver".to_string()),
-            };
-            let (x2, y2) = match &args[1] {
-                Value::Object(obj) => (
-                    obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
-                    obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
-                ),
-                _ => return Err("Point dist: expects Point object as argument".to_string()),
-            };
+            let obj1 = arg_obj!(args, "Point", 0);
+            let (x1, y1) = (
+                obj1.borrow().get_field_or_default("x"),
+                obj1.borrow().get_field_or_default("y"),
+            );
+            let obj2 = arg_obj!(args, "Point", 1);
+            let (x2, y2) = (
+                obj2.borrow().get_field_or_default("x"),
+                obj2.borrow().get_field_or_default("y"),
+            );
 
             let to_f64 = |val| match val {
                 Value::Int(i) => i as f64,

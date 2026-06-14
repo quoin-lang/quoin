@@ -1,7 +1,7 @@
 use crate::instruction::Instruction;
 use crate::vm::VmState;
 
-use gc_arena::{Collect, Gc, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
@@ -293,6 +293,10 @@ pub struct Object<'gc> {
 impl<'gc> Object<'gc> {
     pub fn class_name(&self) -> String {
         self.class.borrow().name.clone()
+    }
+
+    pub fn get_field_or_default(&self, name: &str) -> Value<'gc> {
+        self.fields.get(name).copied().unwrap_or(Value::Nil)
     }
 }
 
