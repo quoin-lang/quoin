@@ -380,7 +380,12 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_SelectorWArgs(&mut self, ctx: &SelectorWArgsContext<'a>) -> Self::Return {
         let mut idents: Vec<Arc<IdentifierNode>> = Vec::new();
         for node in ctx.ident_all() {
-            idents.push(Arc::new(cast_node!(Identifier(id), id, self.visit(&*node))));
+            let id = cast_node!(Identifier(id), id, self.visit(&*node));
+            idents.push(Arc::new(IdentifierNode {
+                namespace: id.namespace.clone(),
+                name: format!("{}:", id.name),
+                identifier_type: id.identifier_type,
+            }));
         }
         Node {
             value: MethodSelector(MethodSelectorNode {
@@ -415,8 +420,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         let binding = ctx.symbol().unwrap().get_text();
         let selectorText = binding
             .trim_start_matches('#')
-            .trim_matches('\'')
-            .trim_end_matches(':');
+            .trim_matches('\'');
         Node {
             value: MethodSelector(MethodSelectorNode {
                 identifiers: vec![Arc::new(IdentifierNode {

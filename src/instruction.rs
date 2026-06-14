@@ -42,4 +42,12 @@ pub enum Instruction {
     NewList(usize), // num_elements
     NewDict(usize), // num_pairs (key/value count)
     NewRegex,
+    DefineClass {
+        name: String,
+        parent_name: Option<String>,
+        instance_vars: Vec<String>,
+    },
+    ExecuteBlockWithSelf,
+    DefineMethod(String),
+    OverrideMethod(String),
 }

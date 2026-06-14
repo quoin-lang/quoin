@@ -601,12 +601,12 @@ mod tests {
                     identifiers: vec![
                         Arc::new(IdentifierNode {
                             namespace: None,
-                            name: "foo".to_string(),
+                            name: "foo:".to_string(),
                             identifier_type: IdentifierType::Local,
                         }),
                         Arc::new(IdentifierNode {
                             namespace: None,
-                            name: "bar".to_string(),
+                            name: "bar:".to_string(),
                             identifier_type: IdentifierType::Local,
                         }),
                     ],

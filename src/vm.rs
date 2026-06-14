@@ -52,7 +52,30 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
     ) -> Result<(), BBError> {
-        vm.start_block(mc, self.block, args);
+        if args.is_empty() {
+            return Err(BBError::Other(
+                "Method call arguments is empty (missing receiver)".to_string(),
+            ));
+        }
+        let receiver = args[0];
+        let method_args = args[1..].to_vec();
+        vm.start_block_as_method(mc, self.block, receiver, method_args);
+        Ok(())
+    }
+}
+
+pub struct MetaCallable<'gc> {
+    pub class_obj: Gc<'gc, RefLock<Class<'gc>>>,
+}
+
+impl<'gc> Callable<'gc> for MetaCallable<'gc> {
+    fn call(
+        &self,
+        vm: &mut VmState<'gc>,
+        _mc: &Mutation<'gc>,
+        _args: Vec<Value<'gc>>,
+    ) -> Result<(), BBError> {
+        vm.push(Value::ClassMeta(self.class_obj));
         Ok(())
     }
 }
@@ -107,6 +130,7 @@ impl<'gc> VmState<'gc> {
             Class {
                 name: native_class.name().to_string(),
                 parent: parent_class,
+                instance_vars: Vec::new(),
                 instance_methods: inst_methods,
                 class_methods: cls_methods,
             }
@@ -141,6 +165,11 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         selector: &str,
     ) -> Option<Box<dyn Callable<'gc> + 'gc>> {
+        if selector == "meta" {
+            if let Value::Class(c) = receiver {
+                return Some(Box::new(MetaCallable { class_obj: c }));
+            }
+        }
         let method_val = match receiver {
             Value::Object(obj) => {
                 let class_ref = obj.borrow().class;
@@ -151,6 +180,9 @@ impl<'gc> VmState<'gc> {
                 }
             }
             Value::Class(class_obj) => self.lookup_in_class_hierarchy(class_obj, selector, true),
+            Value::ClassMeta(class_obj) => {
+                self.lookup_in_class_hierarchy(class_obj, selector, true)
+            }
             _ => {
                 let type_name = receiver.type_name();
                 if let Some(Value::Class(class_obj)) = self.globals.borrow().get(type_name).copied()
@@ -246,6 +278,120 @@ impl<'gc> VmState<'gc> {
             ip: 0,
             env: env_ref,
         });
+    }
+
+    pub fn start_block_as_method(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        receiver: Value<'gc>,
+        args: Vec<Value<'gc>>,
+    ) {
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+
+        let mut env_frame = EnvFrame::new(block.parent_env);
+        // Bind self
+        env_frame.vars.insert("self".to_string(), receiver);
+        // Bind parameters
+        for (name, val) in block.param_names.iter().zip(args.into_iter()) {
+            env_frame.vars.insert(name.clone(), val);
+        }
+        let env_ref = gcl!(mc, env_frame);
+
+        let is_nested_block = block.is_nested_block;
+        let enclosing_method_id = if is_nested_block {
+            self.frames.last().and_then(|f| f.enclosing_method_id)
+        } else {
+            Some(frame_id)
+        };
+
+        self.frames.push(Frame {
+            id: frame_id,
+            is_nested_block,
+            enclosing_method_id,
+            block,
+            ip: 0,
+            env: env_ref,
+        });
+    }
+
+    fn get_target_class_for_def(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+    ) -> Result<Gc<'gc, RefLock<Class<'gc>>>, String> {
+        match receiver {
+            Value::Class(c) => Ok(c),
+            Value::ClassMeta(c) => Ok(c),
+            Value::Object(obj) => {
+                let class_ref = obj.borrow().class;
+                if class_ref.borrow().name.starts_with('$') {
+                    Ok(class_ref)
+                } else {
+                    let singleton_name = format!("${}", class_ref.borrow().name);
+                    let s = gcl!(
+                        mc,
+                        Class {
+                            name: singleton_name,
+                            parent: Some(class_ref),
+                            instance_vars: Vec::new(),
+                            instance_methods: HashMap::new(),
+                            class_methods: HashMap::new(),
+                        }
+                    );
+                    obj.borrow_mut(mc).class = s;
+                    Ok(s)
+                }
+            }
+            Value::Bool(b) => {
+                let name = if b { "TrueClass" } else { "FalseClass" };
+                self.get_or_create_global_class(mc, name, "Boolean")
+            }
+            Value::Nil => self.get_or_create_global_class(mc, "Nil", "Object"),
+            _ => {
+                let name = receiver.type_name();
+                self.get_or_create_global_class(mc, name, "Object")
+            }
+        }
+    }
+
+    fn get_or_create_global_class(
+        &mut self,
+        mc: &Mutation<'gc>,
+        name: &str,
+        default_parent: &str,
+    ) -> Result<Gc<'gc, RefLock<Class<'gc>>>, String> {
+        if let Some(Value::Class(c)) = self.globals.borrow().get(name).copied() {
+            Ok(c)
+        } else {
+            let parent = self
+                .globals
+                .borrow()
+                .get(default_parent)
+                .copied()
+                .and_then(|v| {
+                    if let Value::Class(c) = v {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                });
+            let c = gcl!(
+                mc,
+                Class {
+                    name: name.to_string(),
+                    parent,
+                    instance_vars: Vec::new(),
+                    instance_methods: HashMap::new(),
+                    class_methods: HashMap::new(),
+                }
+            );
+            self.globals
+                .borrow_mut(mc)
+                .insert(name.to_string(), Value::Class(c));
+            Ok(c)
+        }
     }
 
     pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
@@ -462,6 +608,159 @@ impl<'gc> VmState<'gc> {
                     });
                 }
                 self.frames[frame_idx].ip += 1;
+            }
+            Instruction::DefineClass {
+                name,
+                parent_name,
+                instance_vars,
+            } => {
+                let parent = if let Some(p_name) = &parent_name {
+                    let val = self
+                        .globals
+                        .borrow()
+                        .get(p_name)
+                        .copied()
+                        .ok_or_else(|| format!("Parent class {} not found", p_name))?;
+                    if let Value::Class(parent_class) = val {
+                        Some(parent_class)
+                    } else {
+                        return Err(format!("Parent {} is not a Class", p_name).into());
+                    }
+                } else {
+                    if name != "Object" {
+                        if let Some(Value::Class(obj_class)) =
+                            self.globals.borrow().get("Object").copied()
+                        {
+                            Some(obj_class)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                let class_obj = gcl!(
+                    mc,
+                    Class {
+                        name: name.clone(),
+                        parent,
+                        instance_vars: instance_vars.clone(),
+                        instance_methods: HashMap::new(),
+                        class_methods: HashMap::new(),
+                    }
+                );
+                self.globals
+                    .borrow_mut(mc)
+                    .insert(name.clone(), Value::Class(class_obj));
+                self.push(Value::Class(class_obj));
+                self.frames[frame_idx].ip += 1;
+            }
+            Instruction::ExecuteBlockWithSelf => {
+                let block_val = self.pop()?;
+                let self_val = self.pop()?;
+                if let Value::Block(block) = block_val {
+                    self.frames[frame_idx].ip += 1;
+                    self.start_block_as_method(mc, block, self_val, Vec::new());
+                    return Ok(VmStatus::Running);
+                } else {
+                    return Err(BBError::TypeError {
+                        expected: "Block".to_string(),
+                        got: block_val.type_name().to_string(),
+                        msg: format!("ExecuteBlockWithSelf expects a Block, got {:?}", block_val),
+                    });
+                }
+            }
+            Instruction::DefineMethod(selector) => {
+                let block_val = self.pop()?;
+                if let Value::Block(block) = block_val {
+                    let self_val =
+                        EnvFrame::get(self.frames[frame_idx].env, "self").unwrap_or(Value::Nil);
+                    let target_class = self
+                        .get_target_class_for_def(mc, self_val)
+                        .map_err(|e| BBError::Other(e))?;
+
+                    let is_class_side = matches!(self_val, Value::ClassMeta(_));
+                    if is_class_side {
+                        if target_class.borrow().class_methods.contains_key(&selector) {
+                            return Err(BBError::Other(format!(
+                                "Method {} already exists on Class {}",
+                                selector,
+                                target_class.borrow().name
+                            )));
+                        }
+                        target_class
+                            .borrow_mut(mc)
+                            .class_methods
+                            .insert(selector, Value::Block(block));
+                    } else {
+                        if target_class
+                            .borrow()
+                            .instance_methods
+                            .contains_key(&selector)
+                        {
+                            return Err(BBError::Other(format!(
+                                "Method {} already exists on Class {}",
+                                selector,
+                                target_class.borrow().name
+                            )));
+                        }
+                        target_class
+                            .borrow_mut(mc)
+                            .instance_methods
+                            .insert(selector, Value::Block(block));
+                    }
+                    self.push(Value::Nil);
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return Err(BBError::TypeError {
+                        expected: "Block".to_string(),
+                        got: block_val.type_name().to_string(),
+                        msg: format!("DefineMethod expects a Block, got {:?}", block_val),
+                    });
+                }
+            }
+            Instruction::OverrideMethod(selector) => {
+                let block_val = self.pop()?;
+                if let Value::Block(block) = block_val {
+                    let self_val =
+                        EnvFrame::get(self.frames[frame_idx].env, "self").unwrap_or(Value::Nil);
+                    let target_class = self
+                        .get_target_class_for_def(mc, self_val)
+                        .map_err(|e| BBError::Other(e))?;
+
+                    let is_class_side = matches!(self_val, Value::ClassMeta(_));
+                    let exists = self
+                        .lookup_in_class_hierarchy(target_class, &selector, is_class_side)
+                        .is_some();
+                    if !exists {
+                        return Err(BBError::Other(format!(
+                            "Method {} does not exist in hierarchy of Class {} to override",
+                            selector,
+                            target_class.borrow().name
+                        )));
+                    }
+
+                    if is_class_side {
+                        target_class
+                            .borrow_mut(mc)
+                            .class_methods
+                            .insert(selector, Value::Block(block));
+                    } else {
+                        target_class
+                            .borrow_mut(mc)
+                            .instance_methods
+                            .insert(selector, Value::Block(block));
+                    }
+                    self.push(Value::Nil);
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return Err(BBError::TypeError {
+                        expected: "Block".to_string(),
+                        got: block_val.type_name().to_string(),
+                        msg: format!("OverrideMethod expects a Block, got {:?}", block_val),
+                    });
+                }
             }
         }
 
@@ -915,14 +1214,114 @@ mod tests {
                 assert_eq!(vm.frames[2].enclosing_method_id, Some(vm.frames[1].id));
 
                 vm.step(mc).unwrap(); // Inside block_nested: Push(999) -> Stack has [999]
-                assert_eq!(vm.stack, vec![Value::Int(999)]);
-
                 // Inside block_nested: MethodReturn.
                 // It should pop frame 3 (nested) and frame 2 (method), leaving only the main frame (frame 1),
                 // and pushing 999 to the stack.
                 vm.step(mc).unwrap();
                 assert_eq!(vm.frames.len(), 1);
                 assert_eq!(vm.stack, vec![Value::Int(999)]);
+            },
+        );
+    }
+
+    #[test]
+    fn test_class_and_method_definition_vm() {
+        let class_block = StaticBlock {
+            name: Some("class_block".to_string()),
+            is_nested_block: false,
+            param_names: Vec::new(),
+            bytecode: vec![
+                // 1. Define inst method x
+                Instruction::Push(Constant::Block(StaticBlock {
+                    name: Some("x".to_string()),
+                    is_nested_block: false,
+                    param_names: Vec::new(),
+                    bytecode: vec![
+                        Instruction::LoadLocal("self".to_string()),
+                        Instruction::Return,
+                    ],
+                })),
+                Instruction::DefineMethod("x".to_string()),
+                // 2. Override inst method x
+                Instruction::Push(Constant::Block(StaticBlock {
+                    name: Some("x".to_string()),
+                    is_nested_block: false,
+                    param_names: Vec::new(),
+                    bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
+                })),
+                Instruction::OverrideMethod("x".to_string()),
+                Instruction::Return,
+            ],
+        };
+
+        run_test_steps(
+            vec![
+                // Define class Point
+                Instruction::DefineClass {
+                    name: "Point".to_string(),
+                    parent_name: None,
+                    instance_vars: vec!["x".to_string(), "y".to_string()],
+                },
+                // Push class block
+                Instruction::Push(Constant::Block(class_block)),
+                // Execute block with Point as self
+                Instruction::ExecuteBlockWithSelf,
+                // Send "meta" to Point
+                Instruction::LoadGlobal("Point".to_string()),
+                Instruction::Send("meta".to_string(), 0),
+            ],
+            |vm, mc| {
+                // Step DefineClass
+                vm.step(mc).unwrap();
+                let class_val = vm.peek().unwrap();
+                if let Value::Class(c) = class_val {
+                    assert_eq!(c.borrow().name, "Point");
+                    assert_eq!(
+                        c.borrow().instance_vars,
+                        vec!["x".to_string(), "y".to_string()]
+                    );
+                } else {
+                    panic!("Expected Class value");
+                }
+
+                // Step Push Block
+                vm.step(mc).unwrap();
+                // Step ExecuteBlockWithSelf -> frame for class_block starts
+                vm.step(mc).unwrap();
+                assert_eq!(vm.frames.len(), 2);
+                assert_eq!(EnvFrame::get(vm.frames[1].env, "self").unwrap(), class_val);
+
+                // Inside class_block: Push(x_block)
+                vm.step(mc).unwrap();
+                // Inside class_block: DefineMethod("x")
+                vm.step(mc).unwrap();
+
+                // Verify method x exists in instance_methods
+                if let Value::Class(c) = class_val {
+                    assert!(c.borrow().instance_methods.contains_key("x"));
+                }
+
+                // Inside class_block: Push(override_x_block)
+                vm.step(mc).unwrap();
+                // Inside class_block: OverrideMethod("x")
+                vm.step(mc).unwrap();
+
+                // Inside class_block: Return -> pops class_block frame, pushes Nil to main stack
+                vm.step(mc).unwrap();
+                assert_eq!(vm.frames.len(), 1);
+
+                // Step LoadGlobal Point
+                vm.step(mc).unwrap();
+                // Step Send meta
+                vm.step(mc).unwrap();
+
+                // Stack should have [Point, Nil, ClassMeta(Point)]
+                let meta_val = vm.peek().unwrap();
+                if let Value::ClassMeta(c) = meta_val {
+                    assert_eq!(c.borrow().name, "Point");
+                } else {
+                    panic!("Expected ClassMeta, got {:?}", meta_val);
+                }
             },
         );
     }

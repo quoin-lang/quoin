@@ -1,7 +1,7 @@
 use crate::instruction::{Constant, Instruction, StaticBlock};
 use crate::parser::ast_visitor::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, MethodCallNode, Node,
-    NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType,
+    NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType, MethodSelectorNode,
 };
 
 use std::collections::HashSet;
@@ -154,12 +154,59 @@ impl Compiler {
                 bytecode.push(Instruction::Push(Constant::String(pattern)));
                 bytecode.push(Instruction::NewRegex);
             }
+            NodeValue::ClassDefinition(class_def) => {
+                let name = class_def.identifier.name.clone();
+                let parent_name = class_def.parent_identifier.as_ref().map(|id| id.name.clone());
+                let mut instance_vars = Vec::new();
+                for arg in &class_def.block.arguments {
+                    instance_vars.push(arg.identifier.name.clone());
+                }
+                bytecode.push(Instruction::DefineClass {
+                    name,
+                    parent_name,
+                    instance_vars,
+                });
+                self.compile_block(&class_def.block, bytecode)?;
+                bytecode.push(Instruction::ExecuteBlockWithSelf);
+            }
+            NodeValue::ClassExtension(class_ext) => {
+                self.compile_node(&class_ext.expression, bytecode)?;
+                self.compile_block(&class_ext.block, bytecode)?;
+                bytecode.push(Instruction::ExecuteBlockWithSelf);
+            }
+            NodeValue::MethodDefinition(method_def) => {
+                let selector = self.reconstruct_selector(&method_def.signature)?;
+                self.compile_block(&method_def.block, bytecode)?;
+                bytecode.push(Instruction::DefineMethod(selector));
+            }
+            NodeValue::MethodExtension(method_ext) => {
+                let selector = self.reconstruct_selector(&method_ext.signature)?;
+                self.compile_block(&method_ext.block, bytecode)?;
+                bytecode.push(Instruction::OverrideMethod(selector));
+            }
+            NodeValue::ConstDefinition(const_def) => {
+                self.compile_node(&const_def.rvalue, bytecode)?;
+                bytecode.push(Instruction::Dup);
+                bytecode.push(Instruction::StoreGlobal(const_def.identifier.name.clone()));
+            }
+            NodeValue::UserString(user_str) => {
+                bytecode.push(Instruction::LoadGlobal(user_str.identifier.name.clone()));
+                bytecode.push(Instruction::Push(Constant::String(user_str.value.clone())));
+                bytecode.push(Instruction::Send("newUserString:".to_string(), 1));
+            }
+            NodeValue::UserList(user_list) => {
+                bytecode.push(Instruction::LoadGlobal(user_list.identifier.name.clone()));
+                for val in &user_list.values {
+                    self.compile_node(val, bytecode)?;
+                }
+                bytecode.push(Instruction::NewList(user_list.values.len()));
+                bytecode.push(Instruction::Send("newUserList:".to_string(), 1));
+            }
             NodeValue::Unknown => {
                 return Err("Encountered Unknown NodeValue".to_string());
             }
             _ => {
-                // Fallback for currently unsupported or skipped nodes
-                todo!()
+                return Err(format!("Unsupported NodeValue: {:?}", node.value));
             }
         }
         Ok(())
@@ -430,6 +477,17 @@ impl Compiler {
 
         bytecode.push(Instruction::Push(Constant::Block(static_block)));
         Ok(())
+    }
+
+    fn reconstruct_selector(&self, sig: &MethodSelectorNode) -> Result<String, String> {
+        if sig.identifiers.is_empty() {
+            return Err("No identifiers found in method selector".to_string());
+        }
+        let mut s = String::new();
+        for ident in &sig.identifiers {
+            s.push_str(&ident.name);
+        }
+        Ok(s)
     }
 }
 
@@ -909,5 +967,65 @@ mod tests {
             res.err().unwrap(),
             "Dictionary keys and values count mismatch"
         );
+    }
+
+    #[test]
+    fn test_compile_class_and_method_definitions() {
+        let block_node = BlockNode {
+            arguments: vec![
+                Arc::new(BlockArgNode {
+                    identifier: Arc::new(IdentifierNode {
+                        namespace: None,
+                        name: "a".to_string(),
+                        identifier_type: IdentifierType::Instance,
+                    }),
+                    type_hint: None,
+                }),
+                Arc::new(BlockArgNode {
+                    identifier: Arc::new(IdentifierNode {
+                        namespace: None,
+                        name: "b".to_string(),
+                        identifier_type: IdentifierType::Instance,
+                    }),
+                    type_hint: None,
+                }),
+            ],
+            decls: vec![],
+            decl_block: None,
+            statements: vec![],
+            name: None,
+        };
+        let class_def = Node {
+            value: NodeValue::ClassDefinition(ClassDefinitionNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "MyClass".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+                parent_identifier: Some(Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "Object".to_string(),
+                    identifier_type: IdentifierType::Local,
+                })),
+                block: Arc::new(block_node.clone()),
+            }),
+        };
+
+        let res = compile(vec![class_def]).unwrap();
+        let expected_block = StaticBlock {
+            name: None,
+            is_nested_block: true,
+            param_names: vec!["a".to_string(), "b".to_string()],
+            bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
+        };
+        let mut expected = prefix_ops();
+        expected.push(Instruction::DefineClass {
+            name: "MyClass".to_string(),
+            parent_name: Some("Object".to_string()),
+            instance_vars: vec!["a".to_string(), "b".to_string()],
+        });
+        expected.push(Instruction::Push(Constant::Block(expected_block)));
+        expected.push(Instruction::ExecuteBlockWithSelf);
+        assert_eq!(res.bytecode, expected);
     }
 }

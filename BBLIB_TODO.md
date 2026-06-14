@@ -3,17 +3,17 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the BuildingBlocks standard library (`bblib`) files and test suites.
 
 ## 1. Class & Method Definition Semantics
-- [ ] **Class Creation (`<-` operator)**:
+- [x] **Class Creation (`<-` operator)**:
   - Implement AST compilation for `IDENTIFIER <- BLOCK` expressions. This should define a new `Value::Class` and store it in `globals`.
   - The block body must be executed with the new Class object as the default receiver (`self`).
   - Declare instance variables using the block's parameters (e.g. `| @x @y |` inside the class definition block).
-- [ ] **Class/Instance Extension (`<--` operator)**:
+- [x] **Class/Instance Extension (`<--` operator)**:
   - Implement `IDENTIFIER <-- BLOCK` behavior. This adds new methods to either a Class meta-object or a specific object instance (singleton/eigenclass methods).
-- [ ] **Method Definitions (`->`) and Overrides (`-->`)**:
+- [x] **Method Definitions (`->`) and Overrides (`-->`)**:
   - `SELECTOR -> BLOCK`: Define a new method on the current subject. Raise an error if it already exists.
   - `SELECTOR --> BLOCK`: Override an existing method. Raise an error if it does not exist.
   - Support normalize selectors for operator symbols (e.g., mapping `#'-'` to `-`, `#'+:'` to `+:`).
-- [ ] **Class Meta-object (`.meta`)**:
+- [x] **Class Meta-object (`.meta`)**:
   - Implement a `.meta` method on `Class` to retrieve/define class-side (static/constructor) methods.
 
 ## 2. Object Instantiation & Instance Variables

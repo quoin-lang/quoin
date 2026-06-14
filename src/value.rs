@@ -58,6 +58,7 @@ pub enum Value<'gc> {
     Native(NativeFunc),
     Class(Gc<'gc, RefLock<Class<'gc>>>),
     Object(Gc<'gc, RefLock<Object<'gc>>>),
+    ClassMeta(Gc<'gc, RefLock<Class<'gc>>>),
 }
 
 unsafe impl<'gc> Collect<'gc> for Value<'gc> {
@@ -78,6 +79,7 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
             }
             Value::Class(c) => cc.trace(c),
             Value::Object(o) => cc.trace(o),
+            Value::ClassMeta(c) => cc.trace(c),
         }
     }
 }
@@ -106,6 +108,7 @@ impl<'gc> Value<'gc> {
             Value::Native(_) => "Native",
             Value::Class(_) => "Class",
             Value::Object(_) => "Object",
+            Value::ClassMeta(_) => "ClassMeta",
         }
     }
 }
@@ -129,6 +132,7 @@ impl<'gc> PartialEq for Value<'gc> {
             }
             (Value::Class(a), Value::Class(b)) => Gc::ptr_eq(*a, *b),
             (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
+            (Value::ClassMeta(a), Value::ClassMeta(b)) => Gc::ptr_eq(*a, *b),
             (Value::Native(a), Value::Native(b)) => {
                 let a_ptr = a.0 as *const ();
                 let b_ptr = b.0 as *const ();
@@ -154,6 +158,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
             Value::Method(m) => write!(f, "Method({}#{})", m.receiver.type_name(), m.name),
             Value::Native(_) => write!(f, "Native(<fn>)"),
             Value::Class(c) => write!(f, "Class({})", c.borrow().name),
+            Value::ClassMeta(c) => write!(f, "ClassMeta({})", c.borrow().name),
             Value::Object(o) => {
                 let name = o.borrow().class.borrow().name.clone();
                 write!(f, "Object({}, {{{:?}}})", name, o.borrow().fields)
@@ -203,6 +208,7 @@ impl<'gc> fmt::Display for Value<'gc> {
             Value::Method(m) => write!(f, "<method {}#{}>", m.receiver.type_name(), m.name),
             Value::Native(_) => write!(f, "<native fn>"),
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
+            Value::ClassMeta(c) => write!(f, "class {} meta", c.borrow().name),
             Value::Object(o) => {
                 let name = o.borrow().class.borrow().name.clone();
                 write!(f, "{}{{", name)?;
@@ -285,6 +291,7 @@ impl<'gc> EnvFrame<'gc> {
 pub struct Class<'gc> {
     pub name: String,
     pub parent: Option<Gc<'gc, RefLock<Class<'gc>>>>,
+    pub instance_vars: Vec<String>,
     pub instance_methods: HashMap<String, Value<'gc>>,
     pub class_methods: HashMap<String, Value<'gc>>,
 }
