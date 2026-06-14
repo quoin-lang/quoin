@@ -159,7 +159,7 @@ impl Compiler {
             }
             _ => {
                 // Fallback for currently unsupported or skipped nodes
-                bytecode.push(Instruction::Push(Constant::Nil));
+                todo!()
             }
         }
         Ok(())
@@ -673,6 +673,84 @@ mod tests {
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("sliceFrom:".to_string(), 1));
         expected.push(Instruction::StoreGlobal("rest".to_string()));
+        assert_eq!(res.bytecode, expected);
+
+        // IgnoredSplatLValue: _ *_ = x;
+        let lval_ignore = Node {
+            value: NodeValue::IgnoredLValue,
+        };
+        let lval_ignore_splat = Node {
+            value: NodeValue::IgnoredSplatLValue,
+        };
+        let res = compile(vec![assign_node(
+            vec![lval_ignore, lval_ignore_splat],
+            local_id("x"),
+        )])
+        .unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::Dup);
+        expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
+        assert_eq!(res.bytecode, expected);
+
+        // SubLValue: a (b c) = x;
+        let lval_a = Node {
+            value: NodeValue::IdentLValue(IdentLValueNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "a".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+            }),
+        };
+        let lval_b = Node {
+            value: NodeValue::IdentLValue(IdentLValueNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "b".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+            }),
+        };
+        let lval_c = Node {
+            value: NodeValue::IdentLValue(IdentLValueNode {
+                identifier: Arc::new(IdentifierNode {
+                    namespace: None,
+                    name: "c".to_string(),
+                    identifier_type: IdentifierType::Local,
+                }),
+            }),
+        };
+        let lval_nested = Node {
+            value: NodeValue::SubLValue(SubLValueNode {
+                lvalues: vec![Arc::new(lval_b), Arc::new(lval_c)],
+            }),
+        };
+        let res = compile(vec![assign_node(
+            vec![lval_a, lval_nested],
+            local_id("x"),
+        )])
+        .unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::Dup);
+        expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::Push(Constant::Int(0)));
+        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::StoreGlobal("a".to_string()));
+        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::Push(Constant::Int(1)));
+        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::DefineLocal("__bb_temp_2".to_string()));
+        expected.push(Instruction::LoadLocal("__bb_temp_2".to_string()));
+        expected.push(Instruction::Push(Constant::Int(0)));
+        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::StoreGlobal("b".to_string()));
+        expected.push(Instruction::LoadLocal("__bb_temp_2".to_string()));
+        expected.push(Instruction::Push(Constant::Int(1)));
+        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::StoreGlobal("c".to_string()));
         assert_eq!(res.bytecode, expected);
     }
 
