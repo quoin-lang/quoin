@@ -1,5 +1,5 @@
 use crate::instruction::{Constant, Instruction};
-use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, Value};
+use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, NativeFunc, Value};
 use new_vm::{gc, gcl};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
@@ -29,6 +29,46 @@ pub enum VmStatus<'gc> {
     Running,
     Finished(Value<'gc>),
     Yeeted(Value<'gc>), // Uncaught exception
+}
+
+pub trait Callable<'gc> {
+    fn call(
+        &self,
+        vm: &mut VmState<'gc>,
+        mc: &Mutation<'gc>,
+        args: Vec<Value<'gc>>,
+    ) -> Result<(), String>;
+}
+
+pub struct BlockCallable<'gc> {
+    pub block: Gc<'gc, Block<'gc>>,
+}
+
+impl<'gc> Callable<'gc> for BlockCallable<'gc> {
+    fn call(
+        &self,
+        vm: &mut VmState<'gc>,
+        mc: &Mutation<'gc>,
+        args: Vec<Value<'gc>>,
+    ) -> Result<(), String> {
+        vm.start_block(mc, self.block, args);
+        Ok(())
+    }
+}
+
+pub struct NativeCallable(pub NativeFunc);
+
+impl<'gc> Callable<'gc> for NativeCallable {
+    fn call(
+        &self,
+        vm: &mut VmState<'gc>,
+        mc: &Mutation<'gc>,
+        args: Vec<Value<'gc>>,
+    ) -> Result<(), String> {
+        let ret = self.0.0(vm, mc, args)?;
+        vm.push(ret);
+        Ok(())
+    }
 }
 
 impl<'gc> VmState<'gc> {
@@ -76,8 +116,12 @@ impl<'gc> VmState<'gc> {
             .insert(native_class.name().to_string(), Value::Class(class_obj));
     }
 
-    pub fn lookup_method(&self, receiver: Value<'gc>, selector: &str) -> Option<Value<'gc>> {
-        match receiver {
+    pub fn lookup_method(
+        &self,
+        receiver: Value<'gc>,
+        selector: &str,
+    ) -> Option<Box<dyn Callable<'gc> + 'gc>> {
+        let method_val = match receiver {
             Value::Object(obj) => {
                 let class_ref = obj.borrow().class;
                 if let Some(m) = self.lookup_in_class_hierarchy(class_ref, selector, false) {
@@ -92,11 +136,20 @@ impl<'gc> VmState<'gc> {
                 if let Some(Value::Class(class_obj)) = self.globals.borrow().get(type_name).copied()
                 {
                     if let Some(m) = self.lookup_in_class_hierarchy(class_obj, selector, false) {
-                        return Some(m);
+                        Some(m)
+                    } else {
+                        self.globals.borrow().get(selector).copied()
                     }
+                } else {
+                    self.globals.borrow().get(selector).copied()
                 }
-                self.globals.borrow().get(selector).copied()
             }
+        }?;
+
+        match method_val {
+            Value::Block(block) => Some(Box::new(BlockCallable { block })),
+            Value::Native(native_fn) => Some(Box::new(NativeCallable(native_fn))),
+            _ => None,
         }
     }
 
@@ -313,26 +366,10 @@ impl<'gc> VmState<'gc> {
                 }
 
                 let method_opt = self.lookup_method(receiver, &selector);
-                if let Some(method_val) = method_opt {
-                    match method_val {
-                        Value::Native(native_fn) => {
-                            let mut all_args = vec![receiver];
-                            all_args.extend(args);
-                            let ret = native_fn.0(self, mc, all_args)?;
-                            self.push(ret);
-                        }
-                        Value::Block(block) => {
-                            let mut all_args = vec![receiver];
-                            all_args.extend(args);
-                            self.start_block(mc, block, all_args);
-                        }
-                        _ => {
-                            return Err(format!(
-                                "Selector '{}' resolved to non-callable value: {:?}",
-                                selector, method_val
-                            ));
-                        }
-                    }
+                if let Some(callable) = method_opt {
+                    let mut all_args = vec![receiver];
+                    all_args.extend(args);
+                    callable.call(self, mc, all_args)?;
                 } else {
                     return Err(format!(
                         "Message not understood: receiver={:?}, selector='{}', args={:?}",
