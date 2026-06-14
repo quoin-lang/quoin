@@ -3,6 +3,8 @@
 #![allow(nonstandard_style)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
+use antlr_rust::PredictionContextCache;
+use antlr_rust::TokenSource;
 use antlr_rust::atn::ATN;
 use antlr_rust::atn_deserializer::ATNDeserializer;
 use antlr_rust::char_stream::CharStream;
@@ -11,16 +13,14 @@ use antlr_rust::error_listener::ErrorListener;
 use antlr_rust::int_stream::IntStream;
 use antlr_rust::lexer::{BaseLexer, Lexer, LexerRecog};
 use antlr_rust::lexer_atn_simulator::{ILexerATNSimulator, LexerATNSimulator};
-use antlr_rust::parser_rule_context::{cast, BaseParserRuleContext, ParserRuleContext};
+use antlr_rust::parser_rule_context::{BaseParserRuleContext, ParserRuleContext, cast};
 use antlr_rust::recognizer::{Actions, Recognizer};
 use antlr_rust::rule_context::{BaseRuleContext, EmptyContext, EmptyCustomRuleContext};
 use antlr_rust::token::*;
 use antlr_rust::token_factory::{CommonTokenFactory, TokenAware, TokenFactory};
 use antlr_rust::vocabulary::{Vocabulary, VocabularyImpl};
-use antlr_rust::PredictionContextCache;
-use antlr_rust::TokenSource;
 
-use antlr_rust::{lazy_static, Tid, TidAble, TidExt};
+use antlr_rust::{Tid, TidAble, TidExt, lazy_static};
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -253,12 +253,17 @@ pub const _SYMBOLIC_NAMES: [Option<&'static str>; 53] = [
     Some("NUMBER"),
 ];
 lazy_static! {
-    static ref _shared_context_cache: Arc<PredictionContextCache> = Arc::new(PredictionContextCache::new());
-    static ref VOCABULARY: Box<dyn Vocabulary> =
-        Box::new(VocabularyImpl::new(_LITERAL_NAMES.iter(), _SYMBOLIC_NAMES.iter(), None));
+    static ref _shared_context_cache: Arc<PredictionContextCache> =
+        Arc::new(PredictionContextCache::new());
+    static ref VOCABULARY: Box<dyn Vocabulary> = Box::new(VocabularyImpl::new(
+        _LITERAL_NAMES.iter(),
+        _SYMBOLIC_NAMES.iter(),
+        None
+    ));
 }
 
-pub type LexerContext<'input> = BaseRuleContext<'input, EmptyCustomRuleContext<'input, LocalTokenFactory<'input>>>;
+pub type LexerContext<'input> =
+    BaseRuleContext<'input, EmptyCustomRuleContext<'input, LocalTokenFactory<'input>>>;
 pub type LocalTokenFactory<'input> = CommonTokenFactory;
 
 type From<'a> = <LocalTokenFactory<'a> as TokenFactory<'a>>::From;
@@ -321,7 +326,10 @@ where
     &'input LocalTokenFactory<'input>: Default,
 {
     pub fn new(input: Input) -> Self {
-        BuildingBlocksLexer::new_with_token_factory(input, <&LocalTokenFactory<'input> as Default>::default())
+        BuildingBlocksLexer::new_with_token_factory(
+            input,
+            <&LocalTokenFactory<'input> as Default>::default(),
+        )
     }
 }
 
@@ -338,15 +346,19 @@ impl<'input, Input: CharStream<From<'input>>>
 impl<'input, Input: CharStream<From<'input>>> BuildingBlocksLexer<'input, Input> {}
 
 impl<'input, Input: CharStream<From<'input>>>
-    LexerRecog<'input, BaseLexer<'input, BuildingBlocksLexerActions, Input, LocalTokenFactory<'input>>>
-    for BuildingBlocksLexerActions
+    LexerRecog<
+        'input,
+        BaseLexer<'input, BuildingBlocksLexerActions, Input, LocalTokenFactory<'input>>,
+    > for BuildingBlocksLexerActions
 {
 }
 impl<'input> TokenAware<'input> for BuildingBlocksLexerActions {
     type TF = LocalTokenFactory<'input>;
 }
 
-impl<'input, Input: CharStream<From<'input>>> TokenSource<'input> for BuildingBlocksLexer<'input, Input> {
+impl<'input, Input: CharStream<From<'input>>> TokenSource<'input>
+    for BuildingBlocksLexer<'input, Input>
+{
     type TF = LocalTokenFactory<'input>;
 
     fn next_token(&mut self) -> <Self::TF as TokenFactory<'input>>::Tok {
@@ -375,7 +387,8 @@ impl<'input, Input: CharStream<From<'input>>> TokenSource<'input> for BuildingBl
 }
 
 lazy_static! {
-    static ref _ATN: Arc<ATN> = Arc::new(ATNDeserializer::new(None).deserialize(_serializedATN.chars()));
+    static ref _ATN: Arc<ATN> =
+        Arc::new(ATNDeserializer::new(None).deserialize(_serializedATN.chars()));
     static ref _decision_to_DFA: Arc<Vec<antlr_rust::RwLock<DFA>>> = {
         let mut dfa = Vec::new();
         let size = _ATN.decision_to_state.len();

@@ -1,7 +1,7 @@
 use crate::instruction::{Constant, Instruction};
 use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, Value};
 
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use std::collections::HashMap;
 
 #[derive(Collect)]

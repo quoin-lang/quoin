@@ -8,6 +8,8 @@
 #![allow(unused_braces)]
 use super::buildingblockslistener::*;
 use super::buildingblocksvisitor::*;
+use antlr_rust::PredictionContextCache;
+use antlr_rust::TokenSource;
 use antlr_rust::atn::{ATN, INVALID_ALT};
 use antlr_rust::atn_deserializer::ATNDeserializer;
 use antlr_rust::dfa::DFA;
@@ -16,16 +18,14 @@ use antlr_rust::errors::*;
 use antlr_rust::int_stream::EOF;
 use antlr_rust::parser::{BaseParser, Parser, ParserNodeType, ParserRecog};
 use antlr_rust::parser_atn_simulator::ParserATNSimulator;
-use antlr_rust::parser_rule_context::{cast, cast_mut, BaseParserRuleContext, ParserRuleContext};
+use antlr_rust::parser_rule_context::{BaseParserRuleContext, ParserRuleContext, cast, cast_mut};
 use antlr_rust::recognizer::{Actions, Recognizer};
 use antlr_rust::rule_context::{BaseRuleContext, CustomRuleContext, RuleContext};
-use antlr_rust::token::{OwningToken, Token, TOKEN_EOF};
+use antlr_rust::token::{OwningToken, TOKEN_EOF, Token};
 use antlr_rust::token_factory::{CommonTokenFactory, TokenAware, TokenFactory};
 use antlr_rust::token_stream::TokenStream;
 use antlr_rust::tree::*;
 use antlr_rust::vocabulary::{Vocabulary, VocabularyImpl};
-use antlr_rust::PredictionContextCache;
-use antlr_rust::TokenSource;
 
 use antlr_rust::lazy_static;
 use antlr_rust::{TidAble, TidExt};
@@ -115,9 +115,29 @@ pub const RULE_ident: usize = 20;
 pub const RULE_symbol: usize = 21;
 pub const RULE_number: usize = 22;
 pub const ruleNames: [&'static str; 23] = [
-    "program", "stmt", "bang3", "dot3", "huh3", "selector", "assignment", "lvalue", "expr", "userString", "callSig",
-    "nsvarident", "namespace", "keyword", "block", "blockDecls", "blockArg", "blockDecl", "string", "argident",
-    "ident", "symbol", "number",
+    "program",
+    "stmt",
+    "bang3",
+    "dot3",
+    "huh3",
+    "selector",
+    "assignment",
+    "lvalue",
+    "expr",
+    "userString",
+    "callSig",
+    "nsvarident",
+    "namespace",
+    "keyword",
+    "block",
+    "blockDecls",
+    "blockArg",
+    "blockDecl",
+    "string",
+    "argident",
+    "ident",
+    "symbol",
+    "number",
 ];
 
 pub const _LITERAL_NAMES: [Option<&'static str>; 50] = [
@@ -228,9 +248,13 @@ pub const _SYMBOLIC_NAMES: [Option<&'static str>; 53] = [
     Some("NUMBER"),
 ];
 lazy_static! {
-    static ref _shared_context_cache: Arc<PredictionContextCache> = Arc::new(PredictionContextCache::new());
-    static ref VOCABULARY: Box<dyn Vocabulary> =
-        Box::new(VocabularyImpl::new(_LITERAL_NAMES.iter(), _SYMBOLIC_NAMES.iter(), None));
+    static ref _shared_context_cache: Arc<PredictionContextCache> =
+        Arc::new(PredictionContextCache::new());
+    static ref VOCABULARY: Box<dyn Vocabulary> = Box::new(VocabularyImpl::new(
+        _LITERAL_NAMES.iter(),
+        _SYMBOLIC_NAMES.iter(),
+        None
+    ));
 }
 
 type BaseParserType<'input, I> = BaseParser<
@@ -244,8 +268,12 @@ type BaseParserType<'input, I> = BaseParser<
 type TokenType<'input> = <LocalTokenFactory<'input> as TokenFactory<'input>>::Tok;
 pub type LocalTokenFactory<'input> = CommonTokenFactory;
 
-pub type BuildingBlocksTreeWalker<'input, 'a> =
-    ParseTreeWalker<'input, 'a, BuildingBlocksParserContextType, dyn BuildingBlocksListener<'input> + 'a>;
+pub type BuildingBlocksTreeWalker<'input, 'a> = ParseTreeWalker<
+    'input,
+    'a,
+    BuildingBlocksParserContextType,
+    dyn BuildingBlocksListener<'input> + 'a,
+>;
 
 /// Parser for BuildingBlocks grammar
 pub struct BuildingBlocksParser<'input, I, H>
@@ -283,7 +311,9 @@ where
             base: BaseParser::new_base_parser(
                 input,
                 Arc::clone(&interpreter),
-                BuildingBlocksParserExt { _pd: Default::default() },
+                BuildingBlocksParserExt {
+                    _pd: Default::default(),
+                },
             ),
             interpreter,
             _shared_context_cache: Box::new(PredictionContextCache::new()),
@@ -303,7 +333,8 @@ where
     }
 }
 
-impl<'input, I> BuildingBlocksParser<'input, I, DefaultErrorStrategy<'input, BuildingBlocksParserContextType>>
+impl<'input, I>
+    BuildingBlocksParser<'input, I, DefaultErrorStrategy<'input, BuildingBlocksParserContextType>>
 where
     I: TokenStream<'input, TF = LocalTokenFactory<'input>> + TidAble<'input>,
 {
@@ -313,8 +344,7 @@ where
 }
 
 /// Trait for monomorphized trait object that corresponds to the nodes of parse tree generated for BuildingBlocksParser
-pub trait BuildingBlocksParserContext<'input>:
-    for<'x> Listenable<dyn BuildingBlocksListener<'input> + 'x>
+pub trait BuildingBlocksParserContext<'input>: for<'x> Listenable<dyn BuildingBlocksListener<'input> + 'x>
     + for<'x> Visitable<dyn BuildingBlocksVisitor<'input> + 'x>
     + ParserRuleContext<'input, TF = LocalTokenFactory<'input>, Ctx = BuildingBlocksParserContextType>
 {
@@ -331,8 +361,14 @@ where
     }
 }
 
-impl<'input> BuildingBlocksParserContext<'input> for TerminalNode<'input, BuildingBlocksParserContextType> {}
-impl<'input> BuildingBlocksParserContext<'input> for ErrorNode<'input, BuildingBlocksParserContextType> {}
+impl<'input> BuildingBlocksParserContext<'input>
+    for TerminalNode<'input, BuildingBlocksParserContextType>
+{
+}
+impl<'input> BuildingBlocksParserContext<'input>
+    for ErrorNode<'input, BuildingBlocksParserContextType>
+{
+}
 
 antlr_rust::tid! { impl<'input> TidAble<'input> for dyn BuildingBlocksParserContext<'input> + 'input }
 
@@ -405,17 +441,18 @@ impl<'input, I: TokenStream<'input, TF = LocalTokenFactory<'input>> + TidAble<'i
         recog: &mut BaseParserType<'input, I>,
     ) -> bool {
         match rule_index {
-            | 8 => BuildingBlocksParser::<'input, I, _>::expr_sempred(
+            8 => BuildingBlocksParser::<'input, I, _>::expr_sempred(
                 _localctx.and_then(|x| x.downcast_ref()),
                 pred_index,
                 recog,
             ),
-            | _ => true,
+            _ => true,
         }
     }
 }
 
-impl<'input, I> BuildingBlocksParser<'input, I, DefaultErrorStrategy<'input, BuildingBlocksParserContextType>>
+impl<'input, I>
+    BuildingBlocksParser<'input, I, DefaultErrorStrategy<'input, BuildingBlocksParserContextType>>
 where
     I: TokenStream<'input, TF = LocalTokenFactory<'input>> + TidAble<'input>,
 {
@@ -425,24 +462,24 @@ where
         recog: &mut <Self as Deref>::Target,
     ) -> bool {
         match pred_index {
-            | 0 => recog.precpred(None, 28),
-            | 1 => recog.precpred(None, 25),
-            | 2 => recog.precpred(None, 24),
-            | 3 => recog.precpred(None, 23),
-            | 4 => recog.precpred(None, 22),
-            | 5 => recog.precpred(None, 21),
-            | 6 => recog.precpred(None, 20),
-            | 7 => recog.precpred(None, 19),
-            | 8 => recog.precpred(None, 18),
-            | 9 => recog.precpred(None, 17),
-            | 10 => recog.precpred(None, 16),
-            | 11 => recog.precpred(None, 15),
-            | 12 => recog.precpred(None, 14),
-            | 13 => recog.precpred(None, 13),
-            | 14 => recog.precpred(None, 12),
-            | 15 => recog.precpred(None, 31),
-            | 16 => recog.precpred(None, 26),
-            | _ => true,
+            0 => recog.precpred(None, 28),
+            1 => recog.precpred(None, 25),
+            2 => recog.precpred(None, 24),
+            3 => recog.precpred(None, 23),
+            4 => recog.precpred(None, 22),
+            5 => recog.precpred(None, 21),
+            6 => recog.precpred(None, 20),
+            7 => recog.precpred(None, 19),
+            8 => recog.precpred(None, 18),
+            9 => recog.precpred(None, 17),
+            10 => recog.precpred(None, 16),
+            11 => recog.precpred(None, 15),
+            12 => recog.precpred(None, 14),
+            13 => recog.precpred(None, 13),
+            14 => recog.precpred(None, 12),
+            15 => recog.precpred(None, 31),
+            16 => recog.precpred(None, 26),
+            _ => true,
         }
     }
 }
@@ -599,9 +636,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -636,15 +673,15 @@ impl<'input> Deref for StmtContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use StmtContextAll::*;
         match self {
-            | MethodReturnContext(inner) => inner,
-            | ExprStmtContext(inner) => inner,
-            | Dot3StmtContext(inner) => inner,
-            | AssignmentStmtContext(inner) => inner,
-            | Huh3StmtContext(inner) => inner,
-            | BlockReturnContext(inner) => inner,
-            | Bang3StmtContext(inner) => inner,
-            | YieldReturnContext(inner) => inner,
-            | Error(inner) => inner,
+            MethodReturnContext(inner) => inner,
+            ExprStmtContext(inner) => inner,
+            Dot3StmtContext(inner) => inner,
+            AssignmentStmtContext(inner) => inner,
+            Huh3StmtContext(inner) => inner,
+            BlockReturnContext(inner) => inner,
+            Bang3StmtContext(inner) => inner,
+            YieldReturnContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -690,19 +727,25 @@ impl<'input> StmtContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            StmtContextExt { ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                StmtContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
-pub trait StmtContextAttrs<'input>: BuildingBlocksParserContext<'input> + BorrowMut<StmtContextExt<'input>> {}
+pub trait StmtContextAttrs<'input>:
+    BuildingBlocksParserContext<'input> + BorrowMut<StmtContextExt<'input>>
+{
+}
 
 impl<'input> StmtContextAttrs<'input> for StmtContext<'input> {}
 
-pub type MethodReturnContext<'input> = BaseParserRuleContext<'input, MethodReturnContextExt<'input>>;
+pub type MethodReturnContext<'input> =
+    BaseParserRuleContext<'input, MethodReturnContextExt<'input>>;
 
 pub trait MethodReturnContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     /// Retrieves first TerminalNode corresponding to token METHOD_RETURN
@@ -732,7 +775,9 @@ antlr_rust::tid! {MethodReturnContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for MethodReturnContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for MethodReturnContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for MethodReturnContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_MethodReturn(self);
@@ -773,10 +818,15 @@ impl<'input> StmtContextAttrs<'input> for MethodReturnContext<'input> {}
 
 impl<'input> MethodReturnContextExt<'input> {
     fn new(ctx: &dyn StmtContextAttrs<'input>) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::MethodReturnContext(BaseParserRuleContext::copy_from(
-            ctx,
-            MethodReturnContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::MethodReturnContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                MethodReturnContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -843,10 +893,15 @@ impl<'input> StmtContextAttrs<'input> for ExprStmtContext<'input> {}
 
 impl<'input> ExprStmtContextExt<'input> {
     fn new(ctx: &dyn StmtContextAttrs<'input>) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::ExprStmtContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ExprStmtContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::ExprStmtContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ExprStmtContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -913,14 +968,20 @@ impl<'input> StmtContextAttrs<'input> for Dot3StmtContext<'input> {}
 
 impl<'input> Dot3StmtContextExt<'input> {
     fn new(ctx: &dyn StmtContextAttrs<'input>) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::Dot3StmtContext(BaseParserRuleContext::copy_from(
-            ctx,
-            Dot3StmtContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::Dot3StmtContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                Dot3StmtContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type AssignmentStmtContext<'input> = BaseParserRuleContext<'input, AssignmentStmtContextExt<'input>>;
+pub type AssignmentStmtContext<'input> =
+    BaseParserRuleContext<'input, AssignmentStmtContextExt<'input>>;
 
 pub trait AssignmentStmtContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn assignment(&self) -> Option<Rc<AssignmentContextAll<'input>>>
@@ -942,7 +1003,9 @@ antlr_rust::tid! {AssignmentStmtContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for AssignmentStmtContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for AssignmentStmtContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for AssignmentStmtContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_AssignmentStmt(self);
@@ -953,7 +1016,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Assignm
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for AssignmentStmtContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for AssignmentStmtContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_AssignmentStmt(self);
     }
@@ -983,10 +1048,15 @@ impl<'input> StmtContextAttrs<'input> for AssignmentStmtContext<'input> {}
 
 impl<'input> AssignmentStmtContextExt<'input> {
     fn new(ctx: &dyn StmtContextAttrs<'input>) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::AssignmentStmtContext(BaseParserRuleContext::copy_from(
-            ctx,
-            AssignmentStmtContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::AssignmentStmtContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                AssignmentStmtContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -1053,10 +1123,15 @@ impl<'input> StmtContextAttrs<'input> for Huh3StmtContext<'input> {}
 
 impl<'input> Huh3StmtContextExt<'input> {
     fn new(ctx: &dyn StmtContextAttrs<'input>) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::Huh3StmtContext(BaseParserRuleContext::copy_from(
-            ctx,
-            Huh3StmtContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::Huh3StmtContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                Huh3StmtContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -1090,7 +1165,9 @@ antlr_rust::tid! {BlockReturnContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for BlockReturnContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockReturnContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockReturnContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_BlockReturn(self);
@@ -1131,10 +1208,15 @@ impl<'input> StmtContextAttrs<'input> for BlockReturnContext<'input> {}
 
 impl<'input> BlockReturnContextExt<'input> {
     fn new(ctx: &dyn StmtContextAttrs<'input>) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::BlockReturnContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockReturnContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::BlockReturnContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockReturnContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -1201,10 +1283,15 @@ impl<'input> StmtContextAttrs<'input> for Bang3StmtContext<'input> {}
 
 impl<'input> Bang3StmtContextExt<'input> {
     fn new(ctx: &dyn StmtContextAttrs<'input>) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::Bang3StmtContext(BaseParserRuleContext::copy_from(
-            ctx,
-            Bang3StmtContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::Bang3StmtContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                Bang3StmtContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -1238,7 +1325,9 @@ antlr_rust::tid! {YieldReturnContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for YieldReturnContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for YieldReturnContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for YieldReturnContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_YieldReturn(self);
@@ -1279,10 +1368,15 @@ impl<'input> StmtContextAttrs<'input> for YieldReturnContext<'input> {}
 
 impl<'input> YieldReturnContextExt<'input> {
     fn new(ctx: &dyn StmtContextAttrs<'input>) -> Rc<StmtContextAll<'input>> {
-        Rc::new(StmtContextAll::YieldReturnContext(BaseParserRuleContext::copy_from(
-            ctx,
-            YieldReturnContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(StmtContextAll::YieldReturnContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                YieldReturnContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -1301,46 +1395,52 @@ where
             recog.base.set_state(65);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(2, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     let tmp = MethodReturnContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
                     {
                         recog.base.set_state(54);
-                        recog.base.match_token(METHOD_RETURN, &mut recog.err_handler)?;
+                        recog
+                            .base
+                            .match_token(METHOD_RETURN, &mut recog.err_handler)?;
 
                         /*InvokeRule expr*/
                         recog.base.set_state(55);
                         recog.expr_rec(0)?;
                     }
                 }
-                | 2 => {
+                2 => {
                     let tmp = YieldReturnContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
                     {
                         recog.base.set_state(56);
-                        recog.base.match_token(YIELD_RETURN, &mut recog.err_handler)?;
+                        recog
+                            .base
+                            .match_token(YIELD_RETURN, &mut recog.err_handler)?;
 
                         /*InvokeRule expr*/
                         recog.base.set_state(57);
                         recog.expr_rec(0)?;
                     }
                 }
-                | 3 => {
+                3 => {
                     let tmp = BlockReturnContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 3);
                     _localctx = tmp;
                     {
                         recog.base.set_state(58);
-                        recog.base.match_token(BLOCK_RETURN, &mut recog.err_handler)?;
+                        recog
+                            .base
+                            .match_token(BLOCK_RETURN, &mut recog.err_handler)?;
 
                         /*InvokeRule expr*/
                         recog.base.set_state(59);
                         recog.expr_rec(0)?;
                     }
                 }
-                | 4 => {
+                4 => {
                     let tmp = AssignmentStmtContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 4);
                     _localctx = tmp;
@@ -1350,7 +1450,7 @@ where
                         recog.assignment()?;
                     }
                 }
-                | 5 => {
+                5 => {
                     let tmp = Bang3StmtContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 5);
                     _localctx = tmp;
@@ -1360,7 +1460,7 @@ where
                         recog.bang3()?;
                     }
                 }
-                | 6 => {
+                6 => {
                     let tmp = Dot3StmtContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 6);
                     _localctx = tmp;
@@ -1370,7 +1470,7 @@ where
                         recog.dot3()?;
                     }
                 }
-                | 7 => {
+                7 => {
                     let tmp = Huh3StmtContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 7);
                     _localctx = tmp;
@@ -1380,7 +1480,7 @@ where
                         recog.huh3()?;
                     }
                 }
-                | 8 => {
+                8 => {
                     let tmp = ExprStmtContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 8);
                     _localctx = tmp;
@@ -1391,14 +1491,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -1461,7 +1561,10 @@ impl<'input> Bang3ContextExt<'input> {
     }
 }
 
-pub trait Bang3ContextAttrs<'input>: BuildingBlocksParserContext<'input> + BorrowMut<Bang3ContextExt<'input>> {}
+pub trait Bang3ContextAttrs<'input>:
+    BuildingBlocksParserContext<'input> + BorrowMut<Bang3ContextExt<'input>>
+{
+}
 
 impl<'input> Bang3ContextAttrs<'input> for Bang3Context<'input> {}
 
@@ -1486,9 +1589,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -1551,7 +1654,10 @@ impl<'input> Dot3ContextExt<'input> {
     }
 }
 
-pub trait Dot3ContextAttrs<'input>: BuildingBlocksParserContext<'input> + BorrowMut<Dot3ContextExt<'input>> {}
+pub trait Dot3ContextAttrs<'input>:
+    BuildingBlocksParserContext<'input> + BorrowMut<Dot3ContextExt<'input>>
+{
+}
 
 impl<'input> Dot3ContextAttrs<'input> for Dot3Context<'input> {}
 
@@ -1576,9 +1682,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -1641,7 +1747,10 @@ impl<'input> Huh3ContextExt<'input> {
     }
 }
 
-pub trait Huh3ContextAttrs<'input>: BuildingBlocksParserContext<'input> + BorrowMut<Huh3ContextExt<'input>> {}
+pub trait Huh3ContextAttrs<'input>:
+    BuildingBlocksParserContext<'input> + BorrowMut<Huh3ContextExt<'input>>
+{
+}
 
 impl<'input> Huh3ContextAttrs<'input> for Huh3Context<'input> {}
 
@@ -1666,9 +1775,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -1699,11 +1808,11 @@ impl<'input> Deref for SelectorContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use SelectorContextAll::*;
         match self {
-            | SelectorNoArgsContext(inner) => inner,
-            | SelectorNoArgsBangContext(inner) => inner,
-            | SelectorSymbolContext(inner) => inner,
-            | SelectorWArgsContext(inner) => inner,
-            | Error(inner) => inner,
+            SelectorNoArgsContext(inner) => inner,
+            SelectorNoArgsBangContext(inner) => inner,
+            SelectorSymbolContext(inner) => inner,
+            SelectorWArgsContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -1712,7 +1821,9 @@ impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for SelectorC
         self.deref().accept(visitor)
     }
 }
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for SelectorContextAll<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for SelectorContextAll<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         self.deref().enter(listener)
     }
@@ -1749,11 +1860,13 @@ impl<'input> SelectorContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<SelectorContextAll<'input>> {
-        Rc::new(SelectorContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            SelectorContextExt { ph: PhantomData },
-        )))
+        Rc::new(SelectorContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                SelectorContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
@@ -1764,7 +1877,8 @@ pub trait SelectorContextAttrs<'input>:
 
 impl<'input> SelectorContextAttrs<'input> for SelectorContext<'input> {}
 
-pub type SelectorNoArgsContext<'input> = BaseParserRuleContext<'input, SelectorNoArgsContextExt<'input>>;
+pub type SelectorNoArgsContext<'input> =
+    BaseParserRuleContext<'input, SelectorNoArgsContextExt<'input>>;
 
 pub trait SelectorNoArgsContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
@@ -1786,7 +1900,9 @@ antlr_rust::tid! {SelectorNoArgsContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for SelectorNoArgsContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for SelectorNoArgsContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for SelectorNoArgsContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_SelectorNoArgs(self);
@@ -1797,7 +1913,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Selecto
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for SelectorNoArgsContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for SelectorNoArgsContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_SelectorNoArgs(self);
     }
@@ -1827,14 +1945,20 @@ impl<'input> SelectorContextAttrs<'input> for SelectorNoArgsContext<'input> {}
 
 impl<'input> SelectorNoArgsContextExt<'input> {
     fn new(ctx: &dyn SelectorContextAttrs<'input>) -> Rc<SelectorContextAll<'input>> {
-        Rc::new(SelectorContextAll::SelectorNoArgsContext(BaseParserRuleContext::copy_from(
-            ctx,
-            SelectorNoArgsContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(SelectorContextAll::SelectorNoArgsContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                SelectorNoArgsContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type SelectorNoArgsBangContext<'input> = BaseParserRuleContext<'input, SelectorNoArgsBangContextExt<'input>>;
+pub type SelectorNoArgsBangContext<'input> =
+    BaseParserRuleContext<'input, SelectorNoArgsBangContextExt<'input>>;
 
 pub trait SelectorNoArgsBangContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
@@ -1856,7 +1980,9 @@ antlr_rust::tid! {SelectorNoArgsBangContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for SelectorNoArgsBangContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for SelectorNoArgsBangContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for SelectorNoArgsBangContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_SelectorNoArgsBang(self);
@@ -1867,7 +1993,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Selecto
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for SelectorNoArgsBangContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for SelectorNoArgsBangContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_SelectorNoArgsBang(self);
     }
@@ -1897,14 +2025,20 @@ impl<'input> SelectorContextAttrs<'input> for SelectorNoArgsBangContext<'input> 
 
 impl<'input> SelectorNoArgsBangContextExt<'input> {
     fn new(ctx: &dyn SelectorContextAttrs<'input>) -> Rc<SelectorContextAll<'input>> {
-        Rc::new(SelectorContextAll::SelectorNoArgsBangContext(BaseParserRuleContext::copy_from(
-            ctx,
-            SelectorNoArgsBangContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(SelectorContextAll::SelectorNoArgsBangContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                SelectorNoArgsBangContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type SelectorSymbolContext<'input> = BaseParserRuleContext<'input, SelectorSymbolContextExt<'input>>;
+pub type SelectorSymbolContext<'input> =
+    BaseParserRuleContext<'input, SelectorSymbolContextExt<'input>>;
 
 pub trait SelectorSymbolContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn symbol(&self) -> Option<Rc<SymbolContextAll<'input>>>
@@ -1926,7 +2060,9 @@ antlr_rust::tid! {SelectorSymbolContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for SelectorSymbolContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for SelectorSymbolContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for SelectorSymbolContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_SelectorSymbol(self);
@@ -1937,7 +2073,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Selecto
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for SelectorSymbolContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for SelectorSymbolContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_SelectorSymbol(self);
     }
@@ -1967,14 +2105,20 @@ impl<'input> SelectorContextAttrs<'input> for SelectorSymbolContext<'input> {}
 
 impl<'input> SelectorSymbolContextExt<'input> {
     fn new(ctx: &dyn SelectorContextAttrs<'input>) -> Rc<SelectorContextAll<'input>> {
-        Rc::new(SelectorContextAll::SelectorSymbolContext(BaseParserRuleContext::copy_from(
-            ctx,
-            SelectorSymbolContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(SelectorContextAll::SelectorSymbolContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                SelectorSymbolContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type SelectorWArgsContext<'input> = BaseParserRuleContext<'input, SelectorWArgsContextExt<'input>>;
+pub type SelectorWArgsContext<'input> =
+    BaseParserRuleContext<'input, SelectorWArgsContextExt<'input>>;
 
 pub trait SelectorWArgsContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn ident_all(&self) -> Vec<Rc<IdentContextAll<'input>>>
@@ -2002,7 +2146,9 @@ antlr_rust::tid! {SelectorWArgsContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for SelectorWArgsContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for SelectorWArgsContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for SelectorWArgsContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_SelectorWArgs(self);
@@ -2013,7 +2159,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Selecto
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for SelectorWArgsContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for SelectorWArgsContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_SelectorWArgs(self);
     }
@@ -2043,10 +2191,15 @@ impl<'input> SelectorContextAttrs<'input> for SelectorWArgsContext<'input> {}
 
 impl<'input> SelectorWArgsContextExt<'input> {
     fn new(ctx: &dyn SelectorContextAttrs<'input>) -> Rc<SelectorContextAll<'input>> {
-        Rc::new(SelectorContextAll::SelectorWArgsContext(BaseParserRuleContext::copy_from(
-            ctx,
-            SelectorWArgsContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(SelectorContextAll::SelectorWArgsContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                SelectorWArgsContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -2066,7 +2219,7 @@ where
             recog.base.set_state(88);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(5, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     let tmp = SelectorWArgsContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -2111,7 +2264,7 @@ where
                         }
                     }
                 }
-                | 2 => {
+                2 => {
                     let tmp = SelectorNoArgsContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -2121,7 +2274,7 @@ where
                         recog.ident()?;
                     }
                 }
-                | 3 => {
+                3 => {
                     let tmp = SelectorNoArgsBangContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 3);
                     _localctx = tmp;
@@ -2134,7 +2287,7 @@ where
                         recog.base.match_token(T__6, &mut recog.err_handler)?;
                     }
                 }
-                | 4 => {
+                4 => {
                     let tmp = SelectorSymbolContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 4);
                     _localctx = tmp;
@@ -2145,14 +2298,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -2249,7 +2402,9 @@ where
         let mut recog = self;
         let _parentctx = recog.ctx.take();
         let mut _localctx = AssignmentContextExt::new(_parentctx.clone(), recog.base.get_state());
-        recog.base.enter_rule(_localctx.clone(), 12, RULE_assignment);
+        recog
+            .base
+            .enter_rule(_localctx.clone(), 12, RULE_assignment);
         let mut _localctx: Rc<AssignmentContextAll> = _localctx;
         let mut _la: isize = -1;
         let result: Result<(), ANTLRError> = (|| {
@@ -2296,9 +2451,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -2330,12 +2485,12 @@ impl<'input> Deref for LvalueContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use LvalueContextAll::*;
         match self {
-            | IdentLValueContext(inner) => inner,
-            | SplatLValueContext(inner) => inner,
-            | SubLValueContext(inner) => inner,
-            | IgnoredSplatLValueContext(inner) => inner,
-            | IgnoredLValueContext(inner) => inner,
-            | Error(inner) => inner,
+            IdentLValueContext(inner) => inner,
+            SplatLValueContext(inner) => inner,
+            SubLValueContext(inner) => inner,
+            IgnoredSplatLValueContext(inner) => inner,
+            IgnoredLValueContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -2381,11 +2536,13 @@ impl<'input> LvalueContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<LvalueContextAll<'input>> {
-        Rc::new(LvalueContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            LvalueContextExt { ph: PhantomData },
-        )))
+        Rc::new(LvalueContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                LvalueContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
@@ -2418,7 +2575,9 @@ antlr_rust::tid! {IdentLValueContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for IdentLValueContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for IdentLValueContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for IdentLValueContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_IdentLValue(self);
@@ -2459,10 +2618,15 @@ impl<'input> LvalueContextAttrs<'input> for IdentLValueContext<'input> {}
 
 impl<'input> IdentLValueContextExt<'input> {
     fn new(ctx: &dyn LvalueContextAttrs<'input>) -> Rc<LvalueContextAll<'input>> {
-        Rc::new(LvalueContextAll::IdentLValueContext(BaseParserRuleContext::copy_from(
-            ctx,
-            IdentLValueContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(LvalueContextAll::IdentLValueContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                IdentLValueContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -2488,7 +2652,9 @@ antlr_rust::tid! {SplatLValueContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for SplatLValueContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for SplatLValueContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for SplatLValueContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_SplatLValue(self);
@@ -2529,10 +2695,15 @@ impl<'input> LvalueContextAttrs<'input> for SplatLValueContext<'input> {}
 
 impl<'input> SplatLValueContextExt<'input> {
     fn new(ctx: &dyn LvalueContextAttrs<'input>) -> Rc<LvalueContextAll<'input>> {
-        Rc::new(LvalueContextAll::SplatLValueContext(BaseParserRuleContext::copy_from(
-            ctx,
-            SplatLValueContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(LvalueContextAll::SplatLValueContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                SplatLValueContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -2605,14 +2776,20 @@ impl<'input> LvalueContextAttrs<'input> for SubLValueContext<'input> {}
 
 impl<'input> SubLValueContextExt<'input> {
     fn new(ctx: &dyn LvalueContextAttrs<'input>) -> Rc<LvalueContextAll<'input>> {
-        Rc::new(LvalueContextAll::SubLValueContext(BaseParserRuleContext::copy_from(
-            ctx,
-            SubLValueContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(LvalueContextAll::SubLValueContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                SubLValueContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type IgnoredSplatLValueContext<'input> = BaseParserRuleContext<'input, IgnoredSplatLValueContextExt<'input>>;
+pub type IgnoredSplatLValueContext<'input> =
+    BaseParserRuleContext<'input, IgnoredSplatLValueContextExt<'input>>;
 
 pub trait IgnoredSplatLValueContextAttrs<'input>: BuildingBlocksParserContext<'input> {}
 
@@ -2627,7 +2804,9 @@ antlr_rust::tid! {IgnoredSplatLValueContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for IgnoredSplatLValueContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for IgnoredSplatLValueContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for IgnoredSplatLValueContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_IgnoredSplatLValue(self);
@@ -2638,7 +2817,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Ignored
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for IgnoredSplatLValueContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for IgnoredSplatLValueContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_IgnoredSplatLValue(self);
     }
@@ -2668,14 +2849,20 @@ impl<'input> LvalueContextAttrs<'input> for IgnoredSplatLValueContext<'input> {}
 
 impl<'input> IgnoredSplatLValueContextExt<'input> {
     fn new(ctx: &dyn LvalueContextAttrs<'input>) -> Rc<LvalueContextAll<'input>> {
-        Rc::new(LvalueContextAll::IgnoredSplatLValueContext(BaseParserRuleContext::copy_from(
-            ctx,
-            IgnoredSplatLValueContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(LvalueContextAll::IgnoredSplatLValueContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                IgnoredSplatLValueContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type IgnoredLValueContext<'input> = BaseParserRuleContext<'input, IgnoredLValueContextExt<'input>>;
+pub type IgnoredLValueContext<'input> =
+    BaseParserRuleContext<'input, IgnoredLValueContextExt<'input>>;
 
 pub trait IgnoredLValueContextAttrs<'input>: BuildingBlocksParserContext<'input> {}
 
@@ -2690,7 +2877,9 @@ antlr_rust::tid! {IgnoredLValueContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for IgnoredLValueContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for IgnoredLValueContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for IgnoredLValueContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_IgnoredLValue(self);
@@ -2701,7 +2890,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Ignored
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for IgnoredLValueContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for IgnoredLValueContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_IgnoredLValue(self);
     }
@@ -2731,10 +2922,15 @@ impl<'input> LvalueContextAttrs<'input> for IgnoredLValueContext<'input> {}
 
 impl<'input> IgnoredLValueContextExt<'input> {
     fn new(ctx: &dyn LvalueContextAttrs<'input>) -> Rc<LvalueContextAll<'input>> {
-        Rc::new(LvalueContextAll::IgnoredLValueContext(BaseParserRuleContext::copy_from(
-            ctx,
-            IgnoredLValueContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(LvalueContextAll::IgnoredLValueContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                IgnoredLValueContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -2754,7 +2950,7 @@ where
             recog.base.set_state(112);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(8, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     let tmp = IdentLValueContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -2764,7 +2960,7 @@ where
                         recog.nsvarident()?;
                     }
                 }
-                | 2 => {
+                2 => {
                     let tmp = SplatLValueContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -2777,7 +2973,7 @@ where
                         recog.nsvarident()?;
                     }
                 }
-                | 3 => {
+                3 => {
                     let tmp = IgnoredLValueContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 3);
                     _localctx = tmp;
@@ -2786,7 +2982,7 @@ where
                         recog.base.match_token(T__9, &mut recog.err_handler)?;
                     }
                 }
-                | 4 => {
+                4 => {
                     let tmp = IgnoredSplatLValueContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 4);
                     _localctx = tmp;
@@ -2798,7 +2994,7 @@ where
                         recog.base.match_token(T__9, &mut recog.err_handler)?;
                     }
                 }
-                | 5 => {
+                5 => {
                     let tmp = SubLValueContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 5);
                     _localctx = tmp;
@@ -2841,14 +3037,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -2914,46 +3110,46 @@ impl<'input> Deref for ExprContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use ExprContextAll::*;
         match self {
-            | MulExprContext(inner) => inner,
-            | AndExprContext(inner) => inner,
-            | LiteralStringContext(inner) => inner,
-            | UserStringExprContext(inner) => inner,
-            | RegexExprContext(inner) => inner,
-            | GtExprContext(inner) => inner,
-            | LtExprContext(inner) => inner,
-            | UserListExprContext(inner) => inner,
-            | LtEqExprContext(inner) => inner,
-            | MethodDefExprContext(inner) => inner,
-            | LiteralSymbolContext(inner) => inner,
-            | ClassDefExprContext(inner) => inner,
-            | ExprCallExprContext(inner) => inner,
-            | SetExprContext(inner) => inner,
-            | UnModExprContext(inner) => inner,
-            | MethodExtExprContext(inner) => inner,
-            | DictExprContext(inner) => inner,
-            | ListExprContext(inner) => inner,
-            | IdentExprContext(inner) => inner,
-            | SubExprContext(inner) => inner,
-            | AddExprContext(inner) => inner,
-            | ConstDefExprContext(inner) => inner,
-            | RangeExprContext(inner) => inner,
-            | UnPlusExprContext(inner) => inner,
-            | BlockExprContext(inner) => inner,
-            | OrExprContext(inner) => inner,
-            | ClassDef2ExprContext(inner) => inner,
-            | GtEqExprContext(inner) => inner,
-            | DivExprContext(inner) => inner,
-            | UnBangExprContext(inner) => inner,
-            | NotEqExprContext(inner) => inner,
-            | UnMinusExprContext(inner) => inner,
-            | EqExprContext(inner) => inner,
-            | ClassExtExprContext(inner) => inner,
-            | NestedExprContext(inner) => inner,
-            | ModExprContext(inner) => inner,
-            | MatchExprContext(inner) => inner,
-            | DefCallExprContext(inner) => inner,
-            | LiteralNumberContext(inner) => inner,
-            | Error(inner) => inner,
+            MulExprContext(inner) => inner,
+            AndExprContext(inner) => inner,
+            LiteralStringContext(inner) => inner,
+            UserStringExprContext(inner) => inner,
+            RegexExprContext(inner) => inner,
+            GtExprContext(inner) => inner,
+            LtExprContext(inner) => inner,
+            UserListExprContext(inner) => inner,
+            LtEqExprContext(inner) => inner,
+            MethodDefExprContext(inner) => inner,
+            LiteralSymbolContext(inner) => inner,
+            ClassDefExprContext(inner) => inner,
+            ExprCallExprContext(inner) => inner,
+            SetExprContext(inner) => inner,
+            UnModExprContext(inner) => inner,
+            MethodExtExprContext(inner) => inner,
+            DictExprContext(inner) => inner,
+            ListExprContext(inner) => inner,
+            IdentExprContext(inner) => inner,
+            SubExprContext(inner) => inner,
+            AddExprContext(inner) => inner,
+            ConstDefExprContext(inner) => inner,
+            RangeExprContext(inner) => inner,
+            UnPlusExprContext(inner) => inner,
+            BlockExprContext(inner) => inner,
+            OrExprContext(inner) => inner,
+            ClassDef2ExprContext(inner) => inner,
+            GtEqExprContext(inner) => inner,
+            DivExprContext(inner) => inner,
+            UnBangExprContext(inner) => inner,
+            NotEqExprContext(inner) => inner,
+            UnMinusExprContext(inner) => inner,
+            EqExprContext(inner) => inner,
+            ClassExtExprContext(inner) => inner,
+            NestedExprContext(inner) => inner,
+            ModExprContext(inner) => inner,
+            MatchExprContext(inner) => inner,
+            DefCallExprContext(inner) => inner,
+            LiteralNumberContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -2999,15 +3195,20 @@ impl<'input> ExprContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            ExprContextExt { ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                ExprContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
-pub trait ExprContextAttrs<'input>: BuildingBlocksParserContext<'input> + BorrowMut<ExprContextExt<'input>> {}
+pub trait ExprContextAttrs<'input>:
+    BuildingBlocksParserContext<'input> + BorrowMut<ExprContextExt<'input>>
+{
+}
 
 impl<'input> ExprContextAttrs<'input> for ExprContext<'input> {}
 
@@ -3082,15 +3283,17 @@ impl<'input> ExprContextAttrs<'input> for MulExprContext<'input> {}
 
 impl<'input> MulExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::MulExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            MulExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::MulExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                MulExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -3165,19 +3368,22 @@ impl<'input> ExprContextAttrs<'input> for AndExprContext<'input> {}
 
 impl<'input> AndExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::AndExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            AndExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::AndExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                AndExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type LiteralStringContext<'input> = BaseParserRuleContext<'input, LiteralStringContextExt<'input>>;
+pub type LiteralStringContext<'input> =
+    BaseParserRuleContext<'input, LiteralStringContextExt<'input>>;
 
 pub trait LiteralStringContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn string(&self) -> Option<Rc<StringContextAll<'input>>>
@@ -3199,7 +3405,9 @@ antlr_rust::tid! {LiteralStringContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for LiteralStringContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for LiteralStringContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for LiteralStringContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_LiteralString(self);
@@ -3210,7 +3418,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Literal
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for LiteralStringContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for LiteralStringContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_LiteralString(self);
     }
@@ -3240,14 +3450,20 @@ impl<'input> ExprContextAttrs<'input> for LiteralStringContext<'input> {}
 
 impl<'input> LiteralStringContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::LiteralStringContext(BaseParserRuleContext::copy_from(
-            ctx,
-            LiteralStringContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::LiteralStringContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                LiteralStringContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type UserStringExprContext<'input> = BaseParserRuleContext<'input, UserStringExprContextExt<'input>>;
+pub type UserStringExprContext<'input> =
+    BaseParserRuleContext<'input, UserStringExprContextExt<'input>>;
 
 pub trait UserStringExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn userString(&self) -> Option<Rc<UserStringContextAll<'input>>>
@@ -3269,7 +3485,9 @@ antlr_rust::tid! {UserStringExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for UserStringExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for UserStringExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for UserStringExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_UserStringExpr(self);
@@ -3280,7 +3498,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for UserStr
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for UserStringExprContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for UserStringExprContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_UserStringExpr(self);
     }
@@ -3310,10 +3530,15 @@ impl<'input> ExprContextAttrs<'input> for UserStringExprContext<'input> {}
 
 impl<'input> UserStringExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::UserStringExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            UserStringExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::UserStringExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                UserStringExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -3382,10 +3607,15 @@ impl<'input> ExprContextAttrs<'input> for RegexExprContext<'input> {}
 
 impl<'input> RegexExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::RegexExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            RegexExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::RegexExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                RegexExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -3460,15 +3690,17 @@ impl<'input> ExprContextAttrs<'input> for GtExprContext<'input> {}
 
 impl<'input> GtExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::GtExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            GtExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::GtExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                GtExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -3543,19 +3775,22 @@ impl<'input> ExprContextAttrs<'input> for LtExprContext<'input> {}
 
 impl<'input> LtExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::LtExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            LtExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::LtExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                LtExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type UserListExprContext<'input> = BaseParserRuleContext<'input, UserListExprContextExt<'input>>;
+pub type UserListExprContext<'input> =
+    BaseParserRuleContext<'input, UserListExprContextExt<'input>>;
 
 pub trait UserListExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     /// Retrieves first TerminalNode corresponding to token USER_LIST_START
@@ -3591,7 +3826,9 @@ antlr_rust::tid! {UserListExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for UserListExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for UserListExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for UserListExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_UserListExpr(self);
@@ -3632,10 +3869,15 @@ impl<'input> ExprContextAttrs<'input> for UserListExprContext<'input> {}
 
 impl<'input> UserListExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::UserListExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            UserListExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::UserListExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                UserListExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -3710,19 +3952,22 @@ impl<'input> ExprContextAttrs<'input> for LtEqExprContext<'input> {}
 
 impl<'input> LtEqExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::LtEqExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            LtEqExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::LtEqExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                LtEqExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type MethodDefExprContext<'input> = BaseParserRuleContext<'input, MethodDefExprContextExt<'input>>;
+pub type MethodDefExprContext<'input> =
+    BaseParserRuleContext<'input, MethodDefExprContextExt<'input>>;
 
 pub trait MethodDefExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn selector(&self) -> Option<Rc<SelectorContextAll<'input>>>
@@ -3750,7 +3995,9 @@ antlr_rust::tid! {MethodDefExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for MethodDefExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for MethodDefExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for MethodDefExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_MethodDefExpr(self);
@@ -3761,7 +4008,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for MethodD
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for MethodDefExprContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for MethodDefExprContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_MethodDefExpr(self);
     }
@@ -3791,14 +4040,20 @@ impl<'input> ExprContextAttrs<'input> for MethodDefExprContext<'input> {}
 
 impl<'input> MethodDefExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::MethodDefExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            MethodDefExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::MethodDefExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                MethodDefExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type LiteralSymbolContext<'input> = BaseParserRuleContext<'input, LiteralSymbolContextExt<'input>>;
+pub type LiteralSymbolContext<'input> =
+    BaseParserRuleContext<'input, LiteralSymbolContextExt<'input>>;
 
 pub trait LiteralSymbolContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn symbol(&self) -> Option<Rc<SymbolContextAll<'input>>>
@@ -3820,7 +4075,9 @@ antlr_rust::tid! {LiteralSymbolContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for LiteralSymbolContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for LiteralSymbolContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for LiteralSymbolContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_LiteralSymbol(self);
@@ -3831,7 +4088,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Literal
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for LiteralSymbolContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for LiteralSymbolContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_LiteralSymbol(self);
     }
@@ -3861,14 +4120,20 @@ impl<'input> ExprContextAttrs<'input> for LiteralSymbolContext<'input> {}
 
 impl<'input> LiteralSymbolContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::LiteralSymbolContext(BaseParserRuleContext::copy_from(
-            ctx,
-            LiteralSymbolContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::LiteralSymbolContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                LiteralSymbolContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type ClassDefExprContext<'input> = BaseParserRuleContext<'input, ClassDefExprContextExt<'input>>;
+pub type ClassDefExprContext<'input> =
+    BaseParserRuleContext<'input, ClassDefExprContextExt<'input>>;
 
 pub trait ClassDefExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn block(&self) -> Option<Rc<BlockContextAll<'input>>>
@@ -3897,7 +4162,9 @@ antlr_rust::tid! {ClassDefExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for ClassDefExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ClassDefExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for ClassDefExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_ClassDefExpr(self);
@@ -3938,14 +4205,21 @@ impl<'input> ExprContextAttrs<'input> for ClassDefExprContext<'input> {}
 
 impl<'input> ClassDefExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::ClassDefExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ClassDefExprContextExt { name: None, base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::ClassDefExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ClassDefExprContextExt {
+                    name: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type ExprCallExprContext<'input> = BaseParserRuleContext<'input, ExprCallExprContextExt<'input>>;
+pub type ExprCallExprContext<'input> =
+    BaseParserRuleContext<'input, ExprCallExprContextExt<'input>>;
 
 pub trait ExprCallExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn expr(&self) -> Option<Rc<ExprContextAll<'input>>>
@@ -3975,7 +4249,9 @@ antlr_rust::tid! {ExprCallExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for ExprCallExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ExprCallExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for ExprCallExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_ExprCallExpr(self);
@@ -4016,15 +4292,17 @@ impl<'input> ExprContextAttrs<'input> for ExprCallExprContext<'input> {}
 
 impl<'input> ExprCallExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::ExprCallExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ExprCallExprContextExt {
-                subject: None,
-                sig: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::ExprCallExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ExprCallExprContextExt {
+                    subject: None,
+                    sig: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4097,10 +4375,15 @@ impl<'input> ExprContextAttrs<'input> for SetExprContext<'input> {}
 
 impl<'input> SetExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::SetExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            SetExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::SetExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                SetExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4167,14 +4450,20 @@ impl<'input> ExprContextAttrs<'input> for UnModExprContext<'input> {}
 
 impl<'input> UnModExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::UnModExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            UnModExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::UnModExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                UnModExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type MethodExtExprContext<'input> = BaseParserRuleContext<'input, MethodExtExprContextExt<'input>>;
+pub type MethodExtExprContext<'input> =
+    BaseParserRuleContext<'input, MethodExtExprContextExt<'input>>;
 
 pub trait MethodExtExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn selector(&self) -> Option<Rc<SelectorContextAll<'input>>>
@@ -4202,7 +4491,9 @@ antlr_rust::tid! {MethodExtExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for MethodExtExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for MethodExtExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for MethodExtExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_MethodExtExpr(self);
@@ -4213,7 +4504,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for MethodE
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for MethodExtExprContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for MethodExtExprContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_MethodExtExpr(self);
     }
@@ -4243,10 +4536,15 @@ impl<'input> ExprContextAttrs<'input> for MethodExtExprContext<'input> {}
 
 impl<'input> MethodExtExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::MethodExtExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            MethodExtExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::MethodExtExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                MethodExtExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4322,16 +4620,18 @@ impl<'input> ExprContextAttrs<'input> for DictExprContext<'input> {}
 
 impl<'input> DictExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::DictExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            DictExprContextExt {
-                expr: None,
-                k: Vec::new(),
-                v: Vec::new(),
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::DictExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                DictExprContextExt {
+                    expr: None,
+                    k: Vec::new(),
+                    v: Vec::new(),
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4404,10 +4704,15 @@ impl<'input> ExprContextAttrs<'input> for ListExprContext<'input> {}
 
 impl<'input> ListExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::ListExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ListExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::ListExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ListExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4474,10 +4779,15 @@ impl<'input> ExprContextAttrs<'input> for IdentExprContext<'input> {}
 
 impl<'input> IdentExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::IdentExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            IdentExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::IdentExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                IdentExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4552,15 +4862,17 @@ impl<'input> ExprContextAttrs<'input> for SubExprContext<'input> {}
 
 impl<'input> SubExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::SubExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            SubExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::SubExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                SubExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4635,19 +4947,22 @@ impl<'input> ExprContextAttrs<'input> for AddExprContext<'input> {}
 
 impl<'input> AddExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::AddExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            AddExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::AddExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                AddExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type ConstDefExprContext<'input> = BaseParserRuleContext<'input, ConstDefExprContextExt<'input>>;
+pub type ConstDefExprContext<'input> =
+    BaseParserRuleContext<'input, ConstDefExprContextExt<'input>>;
 
 pub trait ConstDefExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn nsvarident(&self) -> Option<Rc<NsvaridentContextAll<'input>>>
@@ -4675,7 +4990,9 @@ antlr_rust::tid! {ConstDefExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for ConstDefExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ConstDefExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for ConstDefExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_ConstDefExpr(self);
@@ -4716,10 +5033,15 @@ impl<'input> ExprContextAttrs<'input> for ConstDefExprContext<'input> {}
 
 impl<'input> ConstDefExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::ConstDefExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ConstDefExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::ConstDefExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ConstDefExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4794,15 +5116,17 @@ impl<'input> ExprContextAttrs<'input> for RangeExprContext<'input> {}
 
 impl<'input> RangeExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::RangeExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            RangeExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::RangeExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                RangeExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4869,10 +5193,15 @@ impl<'input> ExprContextAttrs<'input> for UnPlusExprContext<'input> {}
 
 impl<'input> UnPlusExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::UnPlusExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            UnPlusExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::UnPlusExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                UnPlusExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -4939,10 +5268,15 @@ impl<'input> ExprContextAttrs<'input> for BlockExprContext<'input> {}
 
 impl<'input> BlockExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::BlockExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::BlockExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5017,19 +5351,22 @@ impl<'input> ExprContextAttrs<'input> for OrExprContext<'input> {}
 
 impl<'input> OrExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::OrExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            OrExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::OrExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                OrExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type ClassDef2ExprContext<'input> = BaseParserRuleContext<'input, ClassDef2ExprContextExt<'input>>;
+pub type ClassDef2ExprContext<'input> =
+    BaseParserRuleContext<'input, ClassDef2ExprContextExt<'input>>;
 
 pub trait ClassDef2ExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn block(&self) -> Option<Rc<BlockContextAll<'input>>>
@@ -5065,7 +5402,9 @@ antlr_rust::tid! {ClassDef2ExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for ClassDef2ExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ClassDef2ExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for ClassDef2ExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_ClassDef2Expr(self);
@@ -5076,7 +5415,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ClassDe
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for ClassDef2ExprContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for ClassDef2ExprContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_ClassDef2Expr(self);
     }
@@ -5106,15 +5447,17 @@ impl<'input> ExprContextAttrs<'input> for ClassDef2ExprContext<'input> {}
 
 impl<'input> ClassDef2ExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::ClassDef2ExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ClassDef2ExprContextExt {
-                parent: None,
-                name: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::ClassDef2ExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ClassDef2ExprContextExt {
+                    parent: None,
+                    name: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5189,15 +5532,17 @@ impl<'input> ExprContextAttrs<'input> for GtEqExprContext<'input> {}
 
 impl<'input> GtEqExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::GtEqExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            GtEqExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::GtEqExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                GtEqExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5272,15 +5617,17 @@ impl<'input> ExprContextAttrs<'input> for DivExprContext<'input> {}
 
 impl<'input> DivExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::DivExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            DivExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::DivExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                DivExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5347,10 +5694,15 @@ impl<'input> ExprContextAttrs<'input> for UnBangExprContext<'input> {}
 
 impl<'input> UnBangExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::UnBangExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            UnBangExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::UnBangExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                UnBangExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5425,15 +5777,17 @@ impl<'input> ExprContextAttrs<'input> for NotEqExprContext<'input> {}
 
 impl<'input> NotEqExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::NotEqExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            NotEqExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::NotEqExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                NotEqExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5459,7 +5813,9 @@ antlr_rust::tid! {UnMinusExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for UnMinusExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for UnMinusExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for UnMinusExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_UnMinusExpr(self);
@@ -5500,10 +5856,15 @@ impl<'input> ExprContextAttrs<'input> for UnMinusExprContext<'input> {}
 
 impl<'input> UnMinusExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::UnMinusExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            UnMinusExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::UnMinusExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                UnMinusExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5578,19 +5939,22 @@ impl<'input> ExprContextAttrs<'input> for EqExprContext<'input> {}
 
 impl<'input> EqExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::EqExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            EqExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::EqExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                EqExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type ClassExtExprContext<'input> = BaseParserRuleContext<'input, ClassExtExprContextExt<'input>>;
+pub type ClassExtExprContext<'input> =
+    BaseParserRuleContext<'input, ClassExtExprContextExt<'input>>;
 
 pub trait ClassExtExprContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn expr(&self) -> Option<Rc<ExprContextAll<'input>>>
@@ -5618,7 +5982,9 @@ antlr_rust::tid! {ClassExtExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for ClassExtExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ClassExtExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for ClassExtExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_ClassExtExpr(self);
@@ -5659,10 +6025,15 @@ impl<'input> ExprContextAttrs<'input> for ClassExtExprContext<'input> {}
 
 impl<'input> ClassExtExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::ClassExtExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ClassExtExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::ClassExtExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ClassExtExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5729,10 +6100,15 @@ impl<'input> ExprContextAttrs<'input> for NestedExprContext<'input> {}
 
 impl<'input> NestedExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::NestedExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            NestedExprContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::NestedExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                NestedExprContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5807,15 +6183,17 @@ impl<'input> ExprContextAttrs<'input> for ModExprContext<'input> {}
 
 impl<'input> ModExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::ModExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ModExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::ModExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ModExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5890,15 +6268,17 @@ impl<'input> ExprContextAttrs<'input> for MatchExprContext<'input> {}
 
 impl<'input> MatchExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::MatchExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            MatchExprContextExt {
-                left: None,
-                right: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(ExprContextAll::MatchExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                MatchExprContextExt {
+                    left: None,
+                    right: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -5925,7 +6305,9 @@ antlr_rust::tid! {DefCallExprContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for DefCallExprContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for DefCallExprContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for DefCallExprContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_DefCallExpr(self);
@@ -5966,14 +6348,21 @@ impl<'input> ExprContextAttrs<'input> for DefCallExprContext<'input> {}
 
 impl<'input> DefCallExprContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::DefCallExprContext(BaseParserRuleContext::copy_from(
-            ctx,
-            DefCallExprContextExt { sig: None, base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::DefCallExprContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                DefCallExprContextExt {
+                    sig: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type LiteralNumberContext<'input> = BaseParserRuleContext<'input, LiteralNumberContextExt<'input>>;
+pub type LiteralNumberContext<'input> =
+    BaseParserRuleContext<'input, LiteralNumberContextExt<'input>>;
 
 pub trait LiteralNumberContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn number(&self) -> Option<Rc<NumberContextAll<'input>>>
@@ -5995,7 +6384,9 @@ antlr_rust::tid! {LiteralNumberContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for LiteralNumberContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for LiteralNumberContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for LiteralNumberContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_LiteralNumber(self);
@@ -6006,7 +6397,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Literal
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for LiteralNumberContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for LiteralNumberContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_LiteralNumber(self);
     }
@@ -6036,10 +6429,15 @@ impl<'input> ExprContextAttrs<'input> for LiteralNumberContext<'input> {}
 
 impl<'input> LiteralNumberContextExt<'input> {
     fn new(ctx: &dyn ExprContextAttrs<'input>) -> Rc<ExprContextAll<'input>> {
-        Rc::new(ExprContextAll::LiteralNumberContext(BaseParserRuleContext::copy_from(
-            ctx,
-            LiteralNumberContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ExprContextAll::LiteralNumberContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                LiteralNumberContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -6057,7 +6455,9 @@ where
         let _parentctx = recog.ctx.take();
         let _parentState = recog.base.get_state();
         let mut _localctx = ExprContextExt::new(_parentctx.clone(), recog.base.get_state());
-        recog.base.enter_recursion_rule(_localctx.clone(), 16, RULE_expr, _p);
+        recog
+            .base
+            .enter_recursion_rule(_localctx.clone(), 16, RULE_expr, _p);
         let mut _localctx: Rc<ExprContextAll> = _localctx;
         let mut _prevctx = _localctx.clone();
         let _startState = 16;
@@ -6070,7 +6470,7 @@ where
                 recog.base.set_state(196);
                 recog.err_handler.sync(&mut recog.base)?;
                 match recog.interpreter.adaptive_predict(13, &mut recog.base)? {
-                    | 1 => {
+                    1 => {
                         {
                             let mut tmp = NestedExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6088,7 +6488,7 @@ where
                             recog.base.match_token(T__11, &mut recog.err_handler)?;
                         }
                     }
-                    | 2 => {
+                    2 => {
                         {
                             let mut tmp = UnMinusExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6102,7 +6502,7 @@ where
                             recog.expr_rec(38)?;
                         }
                     }
-                    | 3 => {
+                    3 => {
                         {
                             let mut tmp = UnPlusExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6116,7 +6516,7 @@ where
                             recog.expr_rec(37)?;
                         }
                     }
-                    | 4 => {
+                    4 => {
                         {
                             let mut tmp = UnBangExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6130,7 +6530,7 @@ where
                             recog.expr_rec(36)?;
                         }
                     }
-                    | 5 => {
+                    5 => {
                         {
                             let mut tmp = UnModExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6144,7 +6544,7 @@ where
                             recog.expr_rec(35)?;
                         }
                     }
-                    | 6 => {
+                    6 => {
                         {
                             let mut tmp = ClassDef2ExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6183,7 +6583,7 @@ where
                             recog.block()?;
                         }
                     }
-                    | 7 => {
+                    7 => {
                         {
                             let mut tmp = ClassDefExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6208,7 +6608,7 @@ where
                             recog.block()?;
                         }
                     }
-                    | 8 => {
+                    8 => {
                         {
                             let mut tmp = ConstDefExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6226,7 +6626,7 @@ where
                             recog.expr_rec(32)?;
                         }
                     }
-                    | 9 => {
+                    9 => {
                         {
                             let mut tmp = MethodDefExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6244,7 +6644,7 @@ where
                             recog.block()?;
                         }
                     }
-                    | 10 => {
+                    10 => {
                         {
                             let mut tmp = MethodExtExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6262,7 +6662,7 @@ where
                             recog.block()?;
                         }
                     }
-                    | 11 => {
+                    11 => {
                         {
                             let mut tmp = DefCallExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6285,14 +6685,16 @@ where
                             }
                         }
                     }
-                    | 12 => {
+                    12 => {
                         {
                             let mut tmp = UserListExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
                             _localctx = tmp;
                             _prevctx = _localctx.clone();
                             recog.base.set_state(151);
-                            recog.base.match_token(USER_LIST_START, &mut recog.err_handler)?;
+                            recog
+                                .base
+                                .match_token(USER_LIST_START, &mut recog.err_handler)?;
 
                             recog.base.set_state(155);
                             recog.err_handler.sync(&mut recog.base)?;
@@ -6339,7 +6741,7 @@ where
                             recog.base.match_token(T__11, &mut recog.err_handler)?;
                         }
                     }
-                    | 13 => {
+                    13 => {
                         {
                             let mut tmp = ListExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6396,7 +6798,7 @@ where
                             recog.base.match_token(T__11, &mut recog.err_handler)?;
                         }
                     }
-                    | 14 => {
+                    14 => {
                         {
                             let mut tmp = SetExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6453,7 +6855,7 @@ where
                             recog.base.match_token(T__22, &mut recog.err_handler)?;
                         }
                     }
-                    | 15 => {
+                    15 => {
                         {
                             let mut tmp = DictExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6560,7 +6962,7 @@ where
                             recog.base.match_token(T__30, &mut recog.err_handler)?;
                         }
                     }
-                    | 16 => {
+                    16 => {
                         {
                             let mut tmp = LiteralNumberContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6571,7 +6973,7 @@ where
                             recog.number()?;
                         }
                     }
-                    | 17 => {
+                    17 => {
                         {
                             let mut tmp = LiteralStringContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6582,7 +6984,7 @@ where
                             recog.string()?;
                         }
                     }
-                    | 18 => {
+                    18 => {
                         {
                             let mut tmp = LiteralSymbolContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6593,7 +6995,7 @@ where
                             recog.symbol()?;
                         }
                     }
-                    | 19 => {
+                    19 => {
                         {
                             let mut tmp = BlockExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6604,7 +7006,7 @@ where
                             recog.block()?;
                         }
                     }
-                    | 20 => {
+                    20 => {
                         {
                             let mut tmp = IdentExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6615,7 +7017,7 @@ where
                             recog.nsvarident()?;
                         }
                     }
-                    | 21 => {
+                    21 => {
                         let mut tmp = RegexExprContextExt::new(&**_localctx);
                         recog.ctx = Some(tmp.clone());
                         _localctx = tmp;
@@ -6623,7 +7025,7 @@ where
                         recog.base.set_state(194);
                         recog.base.match_token(REGEXP, &mut recog.err_handler)?;
                     }
-                    | 22 => {
+                    22 => {
                         {
                             let mut tmp = UserStringExprContextExt::new(&**_localctx);
                             recog.ctx = Some(tmp.clone());
@@ -6635,7 +7037,7 @@ where
                         }
                     }
 
-                    | _ => {}
+                    _ => {}
                 }
 
                 let tmp = recog.input.lt(-1).cloned();
@@ -6651,13 +7053,14 @@ where
                             recog.base.set_state(251);
                             recog.err_handler.sync(&mut recog.base)?;
                             match recog.interpreter.adaptive_predict(14, &mut recog.base)? {
-                                | 1 => {
+                                1 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = RangeExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            RangeExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::RangeExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6665,7 +7068,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(198);
                                         if !({ recog.precpred(None, 28) }) {
@@ -6690,13 +7097,14 @@ where
                                         }
                                     }
                                 }
-                                | 2 => {
+                                2 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = AddExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            AddExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::AddExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6704,7 +7112,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(201);
                                         if !({ recog.precpred(None, 25) }) {
@@ -6729,13 +7141,14 @@ where
                                         }
                                     }
                                 }
-                                | 3 => {
+                                3 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = SubExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            SubExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::SubExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6743,7 +7156,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(204);
                                         if !({ recog.precpred(None, 24) }) {
@@ -6768,13 +7185,14 @@ where
                                         }
                                     }
                                 }
-                                | 4 => {
+                                4 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = DivExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            DivExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::DivExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6782,7 +7200,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(207);
                                         if !({ recog.precpred(None, 23) }) {
@@ -6807,13 +7229,14 @@ where
                                         }
                                     }
                                 }
-                                | 5 => {
+                                5 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = MulExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            MulExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::MulExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6821,7 +7244,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(210);
                                         if !({ recog.precpred(None, 22) }) {
@@ -6846,13 +7273,14 @@ where
                                         }
                                     }
                                 }
-                                | 6 => {
+                                6 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = ModExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            ModExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::ModExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6860,7 +7288,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(213);
                                         if !({ recog.precpred(None, 21) }) {
@@ -6885,13 +7317,14 @@ where
                                         }
                                     }
                                 }
-                                | 7 => {
+                                7 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = MatchExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            MatchExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::MatchExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6899,7 +7332,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(216);
                                         if !({ recog.precpred(None, 20) }) {
@@ -6924,13 +7361,14 @@ where
                                         }
                                     }
                                 }
-                                | 8 => {
+                                8 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = GtEqExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            GtEqExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::GtEqExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6938,7 +7376,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(219);
                                         if !({ recog.precpred(None, 19) }) {
@@ -6966,13 +7408,14 @@ where
                                         }
                                     }
                                 }
-                                | 9 => {
+                                9 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = GtExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            GtExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::GtExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -6980,7 +7423,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(223);
                                         if !({ recog.precpred(None, 18) }) {
@@ -7005,13 +7452,14 @@ where
                                         }
                                     }
                                 }
-                                | 10 => {
+                                10 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = LtEqExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            LtEqExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::LtEqExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -7019,7 +7467,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(226);
                                         if !({ recog.precpred(None, 17) }) {
@@ -7047,13 +7499,14 @@ where
                                         }
                                     }
                                 }
-                                | 11 => {
+                                11 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = LtExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            LtExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::LtExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -7061,7 +7514,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(230);
                                         if !({ recog.precpred(None, 16) }) {
@@ -7086,13 +7543,14 @@ where
                                         }
                                     }
                                 }
-                                | 12 => {
+                                12 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = AndExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            AndExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::AndExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -7100,7 +7558,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(233);
                                         if !({ recog.precpred(None, 15) }) {
@@ -7125,13 +7587,14 @@ where
                                         }
                                     }
                                 }
-                                | 13 => {
+                                13 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = OrExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            OrExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::OrExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -7139,7 +7602,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(236);
                                         if !({ recog.precpred(None, 14) }) {
@@ -7164,13 +7631,14 @@ where
                                         }
                                     }
                                 }
-                                | 14 => {
+                                14 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = EqExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            EqExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::EqExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -7178,7 +7646,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(239);
                                         if !({ recog.precpred(None, 13) }) {
@@ -7203,13 +7675,14 @@ where
                                         }
                                     }
                                 }
-                                | 15 => {
+                                15 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = NotEqExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            NotEqExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::NotEqExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -7217,7 +7690,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(242);
                                         if !({ recog.precpred(None, 12) }) {
@@ -7242,14 +7719,19 @@ where
                                         }
                                     }
                                 }
-                                | 16 => {
+                                16 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = ClassExtExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        let mut tmp =
+                                            ClassExtExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(245);
                                         if !({ recog.precpred(None, 31) }) {
@@ -7267,13 +7749,14 @@ where
                                         recog.block()?;
                                     }
                                 }
-                                | 17 => {
+                                17 => {
                                     {
                                         /*recRuleLabeledAltStartAction*/
-                                        let mut tmp = ExprCallExprContextExt::new(&**ExprContextExt::new(
-                                            _parentctx.clone(),
-                                            _parentState,
-                                        ));
+                                        let mut tmp =
+                                            ExprCallExprContextExt::new(&**ExprContextExt::new(
+                                                _parentctx.clone(),
+                                                _parentState,
+                                            ));
                                         if let ExprContextAll::ExprCallExprContext(ctx) =
                                             cast_mut::<_, ExprContextAll>(&mut tmp)
                                         {
@@ -7281,7 +7764,11 @@ where
                                         } else {
                                             unreachable!("cant cast");
                                         }
-                                        recog.push_new_recursion_context(tmp.clone(), _startState, RULE_expr);
+                                        recog.push_new_recursion_context(
+                                            tmp.clone(),
+                                            _startState,
+                                            RULE_expr,
+                                        );
                                         _localctx = tmp;
                                         recog.base.set_state(248);
                                         if !({ recog.precpred(None, 26) }) {
@@ -7293,7 +7780,9 @@ where
                                         }
                                         {
                                             recog.base.set_state(249);
-                                            recog.base.match_token(T__19, &mut recog.err_handler)?;
+                                            recog
+                                                .base
+                                                .match_token(T__19, &mut recog.err_handler)?;
 
                                             /*InvokeRule callSig*/
                                             recog.base.set_state(250);
@@ -7309,7 +7798,7 @@ where
                                     }
                                 }
 
-                                | _ => {}
+                                _ => {}
                             }
                         }
                     }
@@ -7321,9 +7810,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -7410,21 +7899,25 @@ where
         let mut recog = self;
         let _parentctx = recog.ctx.take();
         let mut _localctx = UserStringContextExt::new(_parentctx.clone(), recog.base.get_state());
-        recog.base.enter_rule(_localctx.clone(), 18, RULE_userString);
+        recog
+            .base
+            .enter_rule(_localctx.clone(), 18, RULE_userString);
         let mut _localctx: Rc<UserStringContextAll> = _localctx;
         let result: Result<(), ANTLRError> = (|| {
             //recog.base.enter_outer_alt(_localctx.clone(), 1);
             recog.base.enter_outer_alt(None, 1);
             {
                 recog.base.set_state(256);
-                recog.base.match_token(USER_STRING, &mut recog.err_handler)?;
+                recog
+                    .base
+                    .match_token(USER_STRING, &mut recog.err_handler)?;
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -7454,10 +7947,10 @@ impl<'input> Deref for CallSigContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use CallSigContextAll::*;
         match self {
-            | CallSigWArgContext(inner) => inner,
-            | CallSigNoArgContext(inner) => inner,
-            | CallSigNoArgBangContext(inner) => inner,
-            | Error(inner) => inner,
+            CallSigWArgContext(inner) => inner,
+            CallSigNoArgContext(inner) => inner,
+            CallSigNoArgBangContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -7503,11 +7996,13 @@ impl<'input> CallSigContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<CallSigContextAll<'input>> {
-        Rc::new(CallSigContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            CallSigContextExt { ph: PhantomData },
-        )))
+        Rc::new(CallSigContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                CallSigContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
@@ -7562,7 +8057,9 @@ antlr_rust::tid! {CallSigWArgContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for CallSigWArgContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for CallSigWArgContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for CallSigWArgContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_CallSigWArg(self);
@@ -7603,21 +8100,24 @@ impl<'input> CallSigContextAttrs<'input> for CallSigWArgContext<'input> {}
 
 impl<'input> CallSigWArgContextExt<'input> {
     fn new(ctx: &dyn CallSigContextAttrs<'input>) -> Rc<CallSigContextAll<'input>> {
-        Rc::new(CallSigContextAll::CallSigWArgContext(BaseParserRuleContext::copy_from(
-            ctx,
-            CallSigWArgContextExt {
-                ident: None,
-                expr: None,
-                id: Vec::new(),
-                val: Vec::new(),
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(CallSigContextAll::CallSigWArgContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                CallSigWArgContextExt {
+                    ident: None,
+                    expr: None,
+                    id: Vec::new(),
+                    val: Vec::new(),
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type CallSigNoArgContext<'input> = BaseParserRuleContext<'input, CallSigNoArgContextExt<'input>>;
+pub type CallSigNoArgContext<'input> =
+    BaseParserRuleContext<'input, CallSigNoArgContextExt<'input>>;
 
 pub trait CallSigNoArgContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
@@ -7640,7 +8140,9 @@ antlr_rust::tid! {CallSigNoArgContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for CallSigNoArgContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for CallSigNoArgContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for CallSigNoArgContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_CallSigNoArg(self);
@@ -7681,14 +8183,21 @@ impl<'input> CallSigContextAttrs<'input> for CallSigNoArgContext<'input> {}
 
 impl<'input> CallSigNoArgContextExt<'input> {
     fn new(ctx: &dyn CallSigContextAttrs<'input>) -> Rc<CallSigContextAll<'input>> {
-        Rc::new(CallSigContextAll::CallSigNoArgContext(BaseParserRuleContext::copy_from(
-            ctx,
-            CallSigNoArgContextExt { id: None, base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(CallSigContextAll::CallSigNoArgContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                CallSigNoArgContextExt {
+                    id: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type CallSigNoArgBangContext<'input> = BaseParserRuleContext<'input, CallSigNoArgBangContextExt<'input>>;
+pub type CallSigNoArgBangContext<'input> =
+    BaseParserRuleContext<'input, CallSigNoArgBangContextExt<'input>>;
 
 pub trait CallSigNoArgBangContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
@@ -7711,7 +8220,9 @@ antlr_rust::tid! {CallSigNoArgBangContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for CallSigNoArgBangContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for CallSigNoArgBangContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for CallSigNoArgBangContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_CallSigNoArgBang(self);
@@ -7722,7 +8233,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for CallSig
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for CallSigNoArgBangContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for CallSigNoArgBangContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_CallSigNoArgBang(self);
     }
@@ -7752,10 +8265,16 @@ impl<'input> CallSigContextAttrs<'input> for CallSigNoArgBangContext<'input> {}
 
 impl<'input> CallSigNoArgBangContextExt<'input> {
     fn new(ctx: &dyn CallSigContextAttrs<'input>) -> Rc<CallSigContextAll<'input>> {
-        Rc::new(CallSigContextAll::CallSigNoArgBangContext(BaseParserRuleContext::copy_from(
-            ctx,
-            CallSigNoArgBangContextExt { id: None, base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(CallSigContextAll::CallSigNoArgBangContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                CallSigNoArgBangContextExt {
+                    id: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -7775,7 +8294,7 @@ where
             recog.base.set_state(270);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(17, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     let tmp = CallSigWArgContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -7785,7 +8304,7 @@ where
                         _alt = 1;
                         loop {
                             match _alt {
-                                | x if x == 1 => {
+                                x if x == 1 => {
                                     {
                                         /*InvokeRule ident*/
                                         recog.base.set_state(258);
@@ -7798,13 +8317,14 @@ where
                                             unreachable!("cant cast");
                                         }
 
-                                        let temp = if let CallSigContextAll::CallSigWArgContext(ctx) =
-                                            cast_mut::<_, CallSigContextAll>(&mut _localctx)
-                                        {
-                                            ctx.ident.clone().unwrap()
-                                        } else {
-                                            unreachable!("cant cast");
-                                        };
+                                        let temp =
+                                            if let CallSigContextAll::CallSigWArgContext(ctx) =
+                                                cast_mut::<_, CallSigContextAll>(&mut _localctx)
+                                            {
+                                                ctx.ident.clone().unwrap()
+                                            } else {
+                                                unreachable!("cant cast");
+                                            };
                                         if let CallSigContextAll::CallSigWArgContext(ctx) =
                                             cast_mut::<_, CallSigContextAll>(&mut _localctx)
                                         {
@@ -7826,13 +8346,14 @@ where
                                             unreachable!("cant cast");
                                         }
 
-                                        let temp = if let CallSigContextAll::CallSigWArgContext(ctx) =
-                                            cast_mut::<_, CallSigContextAll>(&mut _localctx)
-                                        {
-                                            ctx.expr.clone().unwrap()
-                                        } else {
-                                            unreachable!("cant cast");
-                                        };
+                                        let temp =
+                                            if let CallSigContextAll::CallSigWArgContext(ctx) =
+                                                cast_mut::<_, CallSigContextAll>(&mut _localctx)
+                                            {
+                                                ctx.expr.clone().unwrap()
+                                            } else {
+                                                unreachable!("cant cast");
+                                            };
                                         if let CallSigContextAll::CallSigWArgContext(ctx) =
                                             cast_mut::<_, CallSigContextAll>(&mut _localctx)
                                         {
@@ -7843,7 +8364,9 @@ where
                                     }
                                 }
 
-                                | _ => Err(ANTLRError::NoAltError(NoViableAltError::new(&mut recog.base)))?,
+                                _ => Err(ANTLRError::NoAltError(NoViableAltError::new(
+                                    &mut recog.base,
+                                )))?,
                             }
                             recog.base.set_state(264);
                             recog.err_handler.sync(&mut recog.base)?;
@@ -7854,7 +8377,7 @@ where
                         }
                     }
                 }
-                | 2 => {
+                2 => {
                     let tmp = CallSigNoArgContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -7871,7 +8394,7 @@ where
                         }
                     }
                 }
-                | 3 => {
+                3 => {
                     let tmp = CallSigNoArgBangContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 3);
                     _localctx = tmp;
@@ -7892,14 +8415,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -7929,19 +8452,23 @@ impl<'input> Deref for NsvaridentContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use NsvaridentContextAll::*;
         match self {
-            | InstanceIdentContext(inner) => inner,
-            | NamespacedIdentContext(inner) => inner,
-            | LocalIdentContext(inner) => inner,
-            | Error(inner) => inner,
+            InstanceIdentContext(inner) => inner,
+            NamespacedIdentContext(inner) => inner,
+            LocalIdentContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for NsvaridentContextAll<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for NsvaridentContextAll<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         self.deref().accept(visitor)
     }
 }
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for NsvaridentContextAll<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for NsvaridentContextAll<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         self.deref().enter(listener)
     }
@@ -7978,11 +8505,13 @@ impl<'input> NsvaridentContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<NsvaridentContextAll<'input>> {
-        Rc::new(NsvaridentContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            NsvaridentContextExt { ph: PhantomData },
-        )))
+        Rc::new(NsvaridentContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                NsvaridentContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
@@ -7993,7 +8522,8 @@ pub trait NsvaridentContextAttrs<'input>:
 
 impl<'input> NsvaridentContextAttrs<'input> for NsvaridentContext<'input> {}
 
-pub type InstanceIdentContext<'input> = BaseParserRuleContext<'input, InstanceIdentContextExt<'input>>;
+pub type InstanceIdentContext<'input> =
+    BaseParserRuleContext<'input, InstanceIdentContextExt<'input>>;
 
 pub trait InstanceIdentContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
@@ -8015,7 +8545,9 @@ antlr_rust::tid! {InstanceIdentContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for InstanceIdentContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for InstanceIdentContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for InstanceIdentContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_InstanceIdent(self);
@@ -8026,7 +8558,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Instanc
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for InstanceIdentContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for InstanceIdentContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_InstanceIdent(self);
     }
@@ -8056,14 +8590,20 @@ impl<'input> NsvaridentContextAttrs<'input> for InstanceIdentContext<'input> {}
 
 impl<'input> InstanceIdentContextExt<'input> {
     fn new(ctx: &dyn NsvaridentContextAttrs<'input>) -> Rc<NsvaridentContextAll<'input>> {
-        Rc::new(NsvaridentContextAll::InstanceIdentContext(BaseParserRuleContext::copy_from(
-            ctx,
-            InstanceIdentContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(NsvaridentContextAll::InstanceIdentContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                InstanceIdentContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type NamespacedIdentContext<'input> = BaseParserRuleContext<'input, NamespacedIdentContextExt<'input>>;
+pub type NamespacedIdentContext<'input> =
+    BaseParserRuleContext<'input, NamespacedIdentContextExt<'input>>;
 
 pub trait NamespacedIdentContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
@@ -8092,7 +8632,9 @@ antlr_rust::tid! {NamespacedIdentContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for NamespacedIdentContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for NamespacedIdentContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for NamespacedIdentContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_NamespacedIdent(self);
@@ -8103,7 +8645,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for Namespa
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for NamespacedIdentContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for NamespacedIdentContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_NamespacedIdent(self);
     }
@@ -8133,10 +8677,16 @@ impl<'input> NsvaridentContextAttrs<'input> for NamespacedIdentContext<'input> {
 
 impl<'input> NamespacedIdentContextExt<'input> {
     fn new(ctx: &dyn NsvaridentContextAttrs<'input>) -> Rc<NsvaridentContextAll<'input>> {
-        Rc::new(NsvaridentContextAll::NamespacedIdentContext(BaseParserRuleContext::copy_from(
-            ctx,
-            NamespacedIdentContextExt { ns: None, base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(NsvaridentContextAll::NamespacedIdentContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                NamespacedIdentContextExt {
+                    ns: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -8203,10 +8753,15 @@ impl<'input> NsvaridentContextAttrs<'input> for LocalIdentContext<'input> {}
 
 impl<'input> LocalIdentContextExt<'input> {
     fn new(ctx: &dyn NsvaridentContextAttrs<'input>) -> Rc<NsvaridentContextAll<'input>> {
-        Rc::new(NsvaridentContextAll::LocalIdentContext(BaseParserRuleContext::copy_from(
-            ctx,
-            LocalIdentContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(NsvaridentContextAll::LocalIdentContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                LocalIdentContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -8219,13 +8774,15 @@ where
         let mut recog = self;
         let _parentctx = recog.ctx.take();
         let mut _localctx = NsvaridentContextExt::new(_parentctx.clone(), recog.base.get_state());
-        recog.base.enter_rule(_localctx.clone(), 22, RULE_nsvarident);
+        recog
+            .base
+            .enter_rule(_localctx.clone(), 22, RULE_nsvarident);
         let mut _localctx: Rc<NsvaridentContextAll> = _localctx;
         let result: Result<(), ANTLRError> = (|| {
             recog.base.set_state(278);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.base.input.la(1) {
-                | T__32 => {
+                T__32 => {
                     let tmp = NamespacedIdentContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -8247,7 +8804,7 @@ where
                     }
                 }
 
-                | T__31 => {
+                T__31 => {
                     let tmp = InstanceIdentContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -8261,7 +8818,7 @@ where
                     }
                 }
 
-                | T__34 | T__35 | T__36 | IDENT => {
+                T__34 | T__35 | T__36 | IDENT => {
                     let tmp = LocalIdentContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 3);
                     _localctx = tmp;
@@ -8272,14 +8829,16 @@ where
                     }
                 }
 
-                | _ => Err(ANTLRError::NoAltError(NoViableAltError::new(&mut recog.base)))?,
+                _ => Err(ANTLRError::NoAltError(NoViableAltError::new(
+                    &mut recog.base,
+                )))?,
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -8308,9 +8867,9 @@ impl<'input> Deref for NamespaceContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use NamespaceContextAll::*;
         match self {
-            | FullNSContext(inner) => inner,
-            | RootNSContext(inner) => inner,
-            | Error(inner) => inner,
+            FullNSContext(inner) => inner,
+            RootNSContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -8319,7 +8878,9 @@ impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for Namespace
         self.deref().accept(visitor)
     }
 }
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for NamespaceContextAll<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for NamespaceContextAll<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         self.deref().enter(listener)
     }
@@ -8356,11 +8917,13 @@ impl<'input> NamespaceContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<NamespaceContextAll<'input>> {
-        Rc::new(NamespaceContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            NamespaceContextExt { ph: PhantomData },
-        )))
+        Rc::new(NamespaceContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                NamespaceContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
@@ -8442,15 +9005,17 @@ impl<'input> NamespaceContextAttrs<'input> for FullNSContext<'input> {}
 
 impl<'input> FullNSContextExt<'input> {
     fn new(ctx: &dyn NamespaceContextAttrs<'input>) -> Rc<NamespaceContextAll<'input>> {
-        Rc::new(NamespaceContextAll::FullNSContext(BaseParserRuleContext::copy_from(
-            ctx,
-            FullNSContextExt {
-                first: None,
-                rest: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(NamespaceContextAll::FullNSContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                FullNSContextExt {
+                    first: None,
+                    rest: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -8510,10 +9075,15 @@ impl<'input> NamespaceContextAttrs<'input> for RootNSContext<'input> {}
 
 impl<'input> RootNSContextExt<'input> {
     fn new(ctx: &dyn NamespaceContextAttrs<'input>) -> Rc<NamespaceContextAll<'input>> {
-        Rc::new(NamespaceContextAll::RootNSContext(BaseParserRuleContext::copy_from(
-            ctx,
-            RootNSContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(NamespaceContextAll::RootNSContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                RootNSContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -8534,7 +9104,7 @@ where
             recog.base.set_state(297);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(21, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     let tmp = FullNSContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -8594,7 +9164,7 @@ where
                         recog.base.match_token(T__33, &mut recog.err_handler)?;
                     }
                 }
-                | 2 => {
+                2 => {
                     let tmp = RootNSContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -8610,14 +9180,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -8708,7 +9278,9 @@ where
                 if {
                     !(((_la - 35) & !0x3f) == 0
                         && ((1usize << (_la - 35))
-                            & ((1usize << (T__34 - 35)) | (1usize << (T__35 - 35)) | (1usize << (T__36 - 35))))
+                            & ((1usize << (T__34 - 35))
+                                | (1usize << (T__35 - 35))
+                                | (1usize << (T__36 - 35))))
                             != 0)
                 } {
                     recog.err_handler.recover_inline(&mut recog.base)?;
@@ -8723,9 +9295,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -8755,10 +9327,10 @@ impl<'input> Deref for BlockContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use BlockContextAll::*;
         match self {
-            | BlockNoDeclsContext(inner) => inner,
-            | NamedBlockWDeclsContext(inner) => inner,
-            | BlockWDeclsContext(inner) => inner,
-            | Error(inner) => inner,
+            BlockNoDeclsContext(inner) => inner,
+            NamedBlockWDeclsContext(inner) => inner,
+            BlockWDeclsContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -8804,19 +9376,25 @@ impl<'input> BlockContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<BlockContextAll<'input>> {
-        Rc::new(BlockContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            BlockContextExt { ph: PhantomData },
-        )))
+        Rc::new(BlockContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                BlockContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
-pub trait BlockContextAttrs<'input>: BuildingBlocksParserContext<'input> + BorrowMut<BlockContextExt<'input>> {}
+pub trait BlockContextAttrs<'input>:
+    BuildingBlocksParserContext<'input> + BorrowMut<BlockContextExt<'input>>
+{
+}
 
 impl<'input> BlockContextAttrs<'input> for BlockContext<'input> {}
 
-pub type BlockNoDeclsContext<'input> = BaseParserRuleContext<'input, BlockNoDeclsContextExt<'input>>;
+pub type BlockNoDeclsContext<'input> =
+    BaseParserRuleContext<'input, BlockNoDeclsContextExt<'input>>;
 
 pub trait BlockNoDeclsContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn stmt_all(&self) -> Vec<Rc<StmtContextAll<'input>>>
@@ -8844,7 +9422,9 @@ antlr_rust::tid! {BlockNoDeclsContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for BlockNoDeclsContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockNoDeclsContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockNoDeclsContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_BlockNoDecls(self);
@@ -8885,14 +9465,20 @@ impl<'input> BlockContextAttrs<'input> for BlockNoDeclsContext<'input> {}
 
 impl<'input> BlockNoDeclsContextExt<'input> {
     fn new(ctx: &dyn BlockContextAttrs<'input>) -> Rc<BlockContextAll<'input>> {
-        Rc::new(BlockContextAll::BlockNoDeclsContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockNoDeclsContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(BlockContextAll::BlockNoDeclsContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockNoDeclsContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type NamedBlockWDeclsContext<'input> = BaseParserRuleContext<'input, NamedBlockWDeclsContextExt<'input>>;
+pub type NamedBlockWDeclsContext<'input> =
+    BaseParserRuleContext<'input, NamedBlockWDeclsContextExt<'input>>;
 
 pub trait NamedBlockWDeclsContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn symbol(&self) -> Option<Rc<SymbolContextAll<'input>>>
@@ -8932,7 +9518,9 @@ antlr_rust::tid! {NamedBlockWDeclsContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for NamedBlockWDeclsContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for NamedBlockWDeclsContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for NamedBlockWDeclsContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_NamedBlockWDecls(self);
@@ -8943,7 +9531,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for NamedBl
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for NamedBlockWDeclsContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for NamedBlockWDeclsContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_NamedBlockWDecls(self);
     }
@@ -8973,10 +9563,15 @@ impl<'input> BlockContextAttrs<'input> for NamedBlockWDeclsContext<'input> {}
 
 impl<'input> NamedBlockWDeclsContextExt<'input> {
     fn new(ctx: &dyn BlockContextAttrs<'input>) -> Rc<BlockContextAll<'input>> {
-        Rc::new(BlockContextAll::NamedBlockWDeclsContext(BaseParserRuleContext::copy_from(
-            ctx,
-            NamedBlockWDeclsContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(BlockContextAll::NamedBlockWDeclsContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                NamedBlockWDeclsContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -9014,7 +9609,9 @@ antlr_rust::tid! {BlockWDeclsContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for BlockWDeclsContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockWDeclsContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockWDeclsContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_BlockWDecls(self);
@@ -9055,10 +9652,15 @@ impl<'input> BlockContextAttrs<'input> for BlockWDeclsContext<'input> {}
 
 impl<'input> BlockWDeclsContextExt<'input> {
     fn new(ctx: &dyn BlockContextAttrs<'input>) -> Rc<BlockContextAll<'input>> {
-        Rc::new(BlockContextAll::BlockWDeclsContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockWDeclsContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(BlockContextAll::BlockWDeclsContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockWDeclsContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -9078,7 +9680,7 @@ where
             recog.base.set_state(339);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(28, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     let tmp = NamedBlockWDeclsContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -9157,7 +9759,7 @@ where
                         recog.base.match_token(T__30, &mut recog.err_handler)?;
                     }
                 }
-                | 2 => {
+                2 => {
                     let tmp = BlockWDeclsContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -9232,7 +9834,7 @@ where
                         recog.base.match_token(T__30, &mut recog.err_handler)?;
                     }
                 }
-                | 3 => {
+                3 => {
                     let tmp = BlockNoDeclsContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 3);
                     _localctx = tmp;
@@ -9304,14 +9906,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -9420,14 +10022,16 @@ where
         let mut recog = self;
         let _parentctx = recog.ctx.take();
         let mut _localctx = BlockDeclsContextExt::new(_parentctx.clone(), recog.base.get_state());
-        recog.base.enter_rule(_localctx.clone(), 30, RULE_blockDecls);
+        recog
+            .base
+            .enter_rule(_localctx.clone(), 30, RULE_blockDecls);
         let mut _localctx: Rc<BlockDeclsContextAll> = _localctx;
         let mut _la: isize = -1;
         let result: Result<(), ANTLRError> = (|| {
             recog.base.set_state(370);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(34, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     //recog.base.enter_outer_alt(_localctx.clone(), 1);
                     recog.base.enter_outer_alt(None, 1);
                     {
@@ -9499,7 +10103,7 @@ where
                         recog.base.match_token(T__37, &mut recog.err_handler)?;
                     }
                 }
-                | 2 => {
+                2 => {
                     //recog.base.enter_outer_alt(_localctx.clone(), 2);
                     recog.base.enter_outer_alt(None, 2);
                     {
@@ -9546,14 +10150,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -9583,10 +10187,10 @@ impl<'input> Deref for BlockArgContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use BlockArgContextAll::*;
         match self {
-            | BlockArgTypedContext(inner) => inner,
-            | BlockArgIgnoredContext(inner) => inner,
-            | BlockArgUntypedContext(inner) => inner,
-            | Error(inner) => inner,
+            BlockArgTypedContext(inner) => inner,
+            BlockArgIgnoredContext(inner) => inner,
+            BlockArgUntypedContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -9595,7 +10199,9 @@ impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for BlockArgC
         self.deref().accept(visitor)
     }
 }
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockArgContextAll<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockArgContextAll<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         self.deref().enter(listener)
     }
@@ -9632,11 +10238,13 @@ impl<'input> BlockArgContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<BlockArgContextAll<'input>> {
-        Rc::new(BlockArgContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            BlockArgContextExt { ph: PhantomData },
-        )))
+        Rc::new(BlockArgContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                BlockArgContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
@@ -9647,7 +10255,8 @@ pub trait BlockArgContextAttrs<'input>:
 
 impl<'input> BlockArgContextAttrs<'input> for BlockArgContext<'input> {}
 
-pub type BlockArgTypedContext<'input> = BaseParserRuleContext<'input, BlockArgTypedContextExt<'input>>;
+pub type BlockArgTypedContext<'input> =
+    BaseParserRuleContext<'input, BlockArgTypedContextExt<'input>>;
 
 pub trait BlockArgTypedContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn argident(&self) -> Option<Rc<ArgidentContextAll<'input>>>
@@ -9677,7 +10286,9 @@ antlr_rust::tid! {BlockArgTypedContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for BlockArgTypedContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockArgTypedContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockArgTypedContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_BlockArgTyped(self);
@@ -9688,7 +10299,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockAr
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for BlockArgTypedContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for BlockArgTypedContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_BlockArgTyped(self);
     }
@@ -9718,19 +10331,22 @@ impl<'input> BlockArgContextAttrs<'input> for BlockArgTypedContext<'input> {}
 
 impl<'input> BlockArgTypedContextExt<'input> {
     fn new(ctx: &dyn BlockArgContextAttrs<'input>) -> Rc<BlockArgContextAll<'input>> {
-        Rc::new(BlockArgContextAll::BlockArgTypedContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockArgTypedContextExt {
-                name: None,
-                argtype: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(BlockArgContextAll::BlockArgTypedContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockArgTypedContextExt {
+                    name: None,
+                    argtype: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type BlockArgIgnoredContext<'input> = BaseParserRuleContext<'input, BlockArgIgnoredContextExt<'input>>;
+pub type BlockArgIgnoredContext<'input> =
+    BaseParserRuleContext<'input, BlockArgIgnoredContextExt<'input>>;
 
 pub trait BlockArgIgnoredContextAttrs<'input>: BuildingBlocksParserContext<'input> {}
 
@@ -9745,7 +10361,9 @@ antlr_rust::tid! {BlockArgIgnoredContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for BlockArgIgnoredContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockArgIgnoredContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockArgIgnoredContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_BlockArgIgnored(self);
@@ -9756,7 +10374,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockAr
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for BlockArgIgnoredContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for BlockArgIgnoredContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_BlockArgIgnored(self);
     }
@@ -9786,14 +10406,20 @@ impl<'input> BlockArgContextAttrs<'input> for BlockArgIgnoredContext<'input> {}
 
 impl<'input> BlockArgIgnoredContextExt<'input> {
     fn new(ctx: &dyn BlockArgContextAttrs<'input>) -> Rc<BlockArgContextAll<'input>> {
-        Rc::new(BlockArgContextAll::BlockArgIgnoredContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockArgIgnoredContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(BlockArgContextAll::BlockArgIgnoredContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockArgIgnoredContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type BlockArgUntypedContext<'input> = BaseParserRuleContext<'input, BlockArgUntypedContextExt<'input>>;
+pub type BlockArgUntypedContext<'input> =
+    BaseParserRuleContext<'input, BlockArgUntypedContextExt<'input>>;
 
 pub trait BlockArgUntypedContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn argident(&self) -> Option<Rc<ArgidentContextAll<'input>>>
@@ -9816,7 +10442,9 @@ antlr_rust::tid! {BlockArgUntypedContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for BlockArgUntypedContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockArgUntypedContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockArgUntypedContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_BlockArgUntyped(self);
@@ -9827,7 +10455,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockAr
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for BlockArgUntypedContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for BlockArgUntypedContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_BlockArgUntyped(self);
     }
@@ -9857,10 +10487,16 @@ impl<'input> BlockArgContextAttrs<'input> for BlockArgUntypedContext<'input> {}
 
 impl<'input> BlockArgUntypedContextExt<'input> {
     fn new(ctx: &dyn BlockArgContextAttrs<'input>) -> Rc<BlockArgContextAll<'input>> {
-        Rc::new(BlockArgContextAll::BlockArgUntypedContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockArgUntypedContextExt { name: None, base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(BlockArgContextAll::BlockArgUntypedContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockArgUntypedContextExt {
+                    name: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -9879,7 +10515,7 @@ where
             recog.base.set_state(378);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(35, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     let tmp = BlockArgIgnoredContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -9888,7 +10524,7 @@ where
                         recog.base.match_token(T__9, &mut recog.err_handler)?;
                     }
                 }
-                | 2 => {
+                2 => {
                     let tmp = BlockArgTypedContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -9919,7 +10555,7 @@ where
                         }
                     }
                 }
-                | 3 => {
+                3 => {
                     let tmp = BlockArgUntypedContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 3);
                     _localctx = tmp;
@@ -9937,14 +10573,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -9973,9 +10609,9 @@ impl<'input> Deref for BlockDeclContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use BlockDeclContextAll::*;
         match self {
-            | BlockDeclUntypedContext(inner) => inner,
-            | BlockDeclTypedContext(inner) => inner,
-            | Error(inner) => inner,
+            BlockDeclUntypedContext(inner) => inner,
+            BlockDeclTypedContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -9984,7 +10620,9 @@ impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for BlockDecl
         self.deref().accept(visitor)
     }
 }
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockDeclContextAll<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockDeclContextAll<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         self.deref().enter(listener)
     }
@@ -10021,11 +10659,13 @@ impl<'input> BlockDeclContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<BlockDeclContextAll<'input>> {
-        Rc::new(BlockDeclContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            BlockDeclContextExt { ph: PhantomData },
-        )))
+        Rc::new(BlockDeclContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                BlockDeclContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
@@ -10036,7 +10676,8 @@ pub trait BlockDeclContextAttrs<'input>:
 
 impl<'input> BlockDeclContextAttrs<'input> for BlockDeclContext<'input> {}
 
-pub type BlockDeclUntypedContext<'input> = BaseParserRuleContext<'input, BlockDeclUntypedContextExt<'input>>;
+pub type BlockDeclUntypedContext<'input> =
+    BaseParserRuleContext<'input, BlockDeclUntypedContextExt<'input>>;
 
 pub trait BlockDeclUntypedContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn argident(&self) -> Option<Rc<ArgidentContextAll<'input>>>
@@ -10059,7 +10700,9 @@ antlr_rust::tid! {BlockDeclUntypedContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for BlockDeclUntypedContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockDeclUntypedContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockDeclUntypedContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_BlockDeclUntyped(self);
@@ -10070,7 +10713,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockDe
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for BlockDeclUntypedContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for BlockDeclUntypedContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_BlockDeclUntyped(self);
     }
@@ -10100,14 +10745,21 @@ impl<'input> BlockDeclContextAttrs<'input> for BlockDeclUntypedContext<'input> {
 
 impl<'input> BlockDeclUntypedContextExt<'input> {
     fn new(ctx: &dyn BlockDeclContextAttrs<'input>) -> Rc<BlockDeclContextAll<'input>> {
-        Rc::new(BlockDeclContextAll::BlockDeclUntypedContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockDeclUntypedContextExt { name: None, base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(BlockDeclContextAll::BlockDeclUntypedContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockDeclUntypedContextExt {
+                    name: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type BlockDeclTypedContext<'input> = BaseParserRuleContext<'input, BlockDeclTypedContextExt<'input>>;
+pub type BlockDeclTypedContext<'input> =
+    BaseParserRuleContext<'input, BlockDeclTypedContextExt<'input>>;
 
 pub trait BlockDeclTypedContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn argident(&self) -> Option<Rc<ArgidentContextAll<'input>>>
@@ -10137,7 +10789,9 @@ antlr_rust::tid! {BlockDeclTypedContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for BlockDeclTypedContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockDeclTypedContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for BlockDeclTypedContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_BlockDeclTyped(self);
@@ -10148,7 +10802,9 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for BlockDe
     }
 }
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for BlockDeclTypedContext<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for BlockDeclTypedContext<'input>
+{
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         visitor.visit_BlockDeclTyped(self);
     }
@@ -10178,15 +10834,17 @@ impl<'input> BlockDeclContextAttrs<'input> for BlockDeclTypedContext<'input> {}
 
 impl<'input> BlockDeclTypedContextExt<'input> {
     fn new(ctx: &dyn BlockDeclContextAttrs<'input>) -> Rc<BlockDeclContextAll<'input>> {
-        Rc::new(BlockDeclContextAll::BlockDeclTypedContext(BaseParserRuleContext::copy_from(
-            ctx,
-            BlockDeclTypedContextExt {
-                name: None,
-                argtype: None,
-                base: ctx.borrow().clone(),
-                ph: PhantomData,
-            },
-        )))
+        Rc::new(BlockDeclContextAll::BlockDeclTypedContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                BlockDeclTypedContextExt {
+                    name: None,
+                    argtype: None,
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -10205,7 +10863,7 @@ where
             recog.base.set_state(385);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.interpreter.adaptive_predict(36, &mut recog.base)? {
-                | 1 => {
+                1 => {
                     let tmp = BlockDeclTypedContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -10236,7 +10894,7 @@ where
                         }
                     }
                 }
-                | 2 => {
+                2 => {
                     let tmp = BlockDeclUntypedContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -10254,14 +10912,14 @@ where
                     }
                 }
 
-                | _ => {}
+                _ => {}
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -10360,9 +11018,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -10391,9 +11049,9 @@ impl<'input> Deref for ArgidentContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use ArgidentContextAll::*;
         match self {
-            | ArgIdentContext(inner) => inner,
-            | ArgIdentInstContext(inner) => inner,
-            | Error(inner) => inner,
+            ArgIdentContext(inner) => inner,
+            ArgIdentInstContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -10402,7 +11060,9 @@ impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for ArgidentC
         self.deref().accept(visitor)
     }
 }
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ArgidentContextAll<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for ArgidentContextAll<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         self.deref().enter(listener)
     }
@@ -10439,11 +11099,13 @@ impl<'input> ArgidentContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<ArgidentContextAll<'input>> {
-        Rc::new(ArgidentContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            ArgidentContextExt { ph: PhantomData },
-        )))
+        Rc::new(ArgidentContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                ArgidentContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
@@ -10517,14 +11179,20 @@ impl<'input> ArgidentContextAttrs<'input> for ArgIdentContext<'input> {}
 
 impl<'input> ArgIdentContextExt<'input> {
     fn new(ctx: &dyn ArgidentContextAttrs<'input>) -> Rc<ArgidentContextAll<'input>> {
-        Rc::new(ArgidentContextAll::ArgIdentContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ArgIdentContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ArgidentContextAll::ArgIdentContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ArgIdentContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type ArgIdentInstContext<'input> = BaseParserRuleContext<'input, ArgIdentInstContextExt<'input>>;
+pub type ArgIdentInstContext<'input> =
+    BaseParserRuleContext<'input, ArgIdentInstContextExt<'input>>;
 
 pub trait ArgIdentInstContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
@@ -10546,7 +11214,9 @@ antlr_rust::tid! {ArgIdentInstContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for ArgIdentInstContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ArgIdentInstContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for ArgIdentInstContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_ArgIdentInst(self);
@@ -10587,10 +11257,15 @@ impl<'input> ArgidentContextAttrs<'input> for ArgIdentInstContext<'input> {}
 
 impl<'input> ArgIdentInstContextExt<'input> {
     fn new(ctx: &dyn ArgidentContextAttrs<'input>) -> Rc<ArgidentContextAll<'input>> {
-        Rc::new(ArgidentContextAll::ArgIdentInstContext(BaseParserRuleContext::copy_from(
-            ctx,
-            ArgIdentInstContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(ArgidentContextAll::ArgIdentInstContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ArgIdentInstContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -10609,7 +11284,7 @@ where
             recog.base.set_state(392);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.base.input.la(1) {
-                | T__31 => {
+                T__31 => {
                     let tmp = ArgIdentInstContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -10623,7 +11298,7 @@ where
                     }
                 }
 
-                | T__34 | T__35 | T__36 | IDENT => {
+                T__34 | T__35 | T__36 | IDENT => {
                     let tmp = ArgIdentContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -10634,14 +11309,16 @@ where
                     }
                 }
 
-                | _ => Err(ANTLRError::NoAltError(NoViableAltError::new(&mut recog.base)))?,
+                _ => Err(ANTLRError::NoAltError(NoViableAltError::new(
+                    &mut recog.base,
+                )))?,
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -10670,9 +11347,9 @@ impl<'input> Deref for IdentContextAll<'input> {
     fn deref(&self) -> &Self::Target {
         use IdentContextAll::*;
         match self {
-            | IdentOtherContext(inner) => inner,
-            | IdentKeywordContext(inner) => inner,
-            | Error(inner) => inner,
+            IdentOtherContext(inner) => inner,
+            IdentKeywordContext(inner) => inner,
+            Error(inner) => inner,
         }
     }
 }
@@ -10718,15 +11395,20 @@ impl<'input> IdentContextExt<'input> {
         parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
         invoking_state: isize,
     ) -> Rc<IdentContextAll<'input>> {
-        Rc::new(IdentContextAll::Error(BaseParserRuleContext::new_parser_ctx(
-            parent,
-            invoking_state,
-            IdentContextExt { ph: PhantomData },
-        )))
+        Rc::new(IdentContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                IdentContextExt { ph: PhantomData },
+            ),
+        ))
     }
 }
 
-pub trait IdentContextAttrs<'input>: BuildingBlocksParserContext<'input> + BorrowMut<IdentContextExt<'input>> {}
+pub trait IdentContextAttrs<'input>:
+    BuildingBlocksParserContext<'input> + BorrowMut<IdentContextExt<'input>>
+{
+}
 
 impl<'input> IdentContextAttrs<'input> for IdentContext<'input> {}
 
@@ -10795,14 +11477,20 @@ impl<'input> IdentContextAttrs<'input> for IdentOtherContext<'input> {}
 
 impl<'input> IdentOtherContextExt<'input> {
     fn new(ctx: &dyn IdentContextAttrs<'input>) -> Rc<IdentContextAll<'input>> {
-        Rc::new(IdentContextAll::IdentOtherContext(BaseParserRuleContext::copy_from(
-            ctx,
-            IdentOtherContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(IdentContextAll::IdentOtherContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                IdentOtherContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
-pub type IdentKeywordContext<'input> = BaseParserRuleContext<'input, IdentKeywordContextExt<'input>>;
+pub type IdentKeywordContext<'input> =
+    BaseParserRuleContext<'input, IdentKeywordContextExt<'input>>;
 
 pub trait IdentKeywordContextAttrs<'input>: BuildingBlocksParserContext<'input> {
     fn keyword(&self) -> Option<Rc<KeywordContextAll<'input>>>
@@ -10824,7 +11512,9 @@ antlr_rust::tid! {IdentKeywordContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for IdentKeywordContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for IdentKeywordContext<'input> {
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for IdentKeywordContext<'input>
+{
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         listener.enter_every_rule(self);
         listener.enter_IdentKeyword(self);
@@ -10865,10 +11555,15 @@ impl<'input> IdentContextAttrs<'input> for IdentKeywordContext<'input> {}
 
 impl<'input> IdentKeywordContextExt<'input> {
     fn new(ctx: &dyn IdentContextAttrs<'input>) -> Rc<IdentContextAll<'input>> {
-        Rc::new(IdentContextAll::IdentKeywordContext(BaseParserRuleContext::copy_from(
-            ctx,
-            IdentKeywordContextExt { base: ctx.borrow().clone(), ph: PhantomData },
-        )))
+        Rc::new(IdentContextAll::IdentKeywordContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                IdentKeywordContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
     }
 }
 
@@ -10887,7 +11582,7 @@ where
             recog.base.set_state(396);
             recog.err_handler.sync(&mut recog.base)?;
             match recog.base.input.la(1) {
-                | T__34 | T__35 | T__36 => {
+                T__34 | T__35 | T__36 => {
                     let tmp = IdentKeywordContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
@@ -10898,7 +11593,7 @@ where
                     }
                 }
 
-                | IDENT => {
+                IDENT => {
                     let tmp = IdentOtherContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
@@ -10908,14 +11603,16 @@ where
                     }
                 }
 
-                | _ => Err(ANTLRError::NoAltError(NoViableAltError::new(&mut recog.base)))?,
+                _ => Err(ANTLRError::NoAltError(NoViableAltError::new(
+                    &mut recog.base,
+                )))?,
             }
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -11014,9 +11711,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -11115,9 +11812,9 @@ where
             Ok(())
         })();
         match result {
-            | Ok(_) => {}
-            | Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
-            | Err(ref re) => {
+            Ok(_) => {}
+            Err(e @ ANTLRError::FallThrough(_)) => return Err(e),
+            Err(ref re) => {
                 //_localctx.exception = re;
                 recog.err_handler.report_error(&mut recog.base, re);
                 recog.err_handler.recover(&mut recog.base, re)?;
@@ -11130,7 +11827,8 @@ where
 }
 
 lazy_static! {
-    static ref _ATN: Arc<ATN> = Arc::new(ATNDeserializer::new(None).deserialize(_serializedATN.chars()));
+    static ref _ATN: Arc<ATN> =
+        Arc::new(ATNDeserializer::new(None).deserialize(_serializedATN.chars()));
     static ref _decision_to_DFA: Arc<Vec<antlr_rust::RwLock<DFA>>> = {
         let mut dfa = Vec::new();
         let size = _ATN.decision_to_state.len();

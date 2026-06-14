@@ -7,7 +7,9 @@ use antlr_rust::tree::{ParseTreeVisitor, ParseTreeVisitorCompat};
  * This interface defines a complete generic visitor for a parse tree produced
  * by {@link BuildingBlocksParser}.
  */
-pub trait BuildingBlocksVisitor<'input>: ParseTreeVisitor<'input, BuildingBlocksParserContextType> {
+pub trait BuildingBlocksVisitor<'input>:
+    ParseTreeVisitor<'input, BuildingBlocksParserContextType>
+{
     /**
      * Visit a parse tree produced by {@link BuildingBlocksParser#program}.
      * @param ctx the parse tree
@@ -911,7 +913,10 @@ pub trait BuildingBlocksVisitorCompat<'input>:
      * labeled alternative in {@link BuildingBlocksParser#selector}.
      * @param ctx the parse tree
      */
-    fn visit_SelectorNoArgsBang(&mut self, ctx: &SelectorNoArgsBangContext<'input>) -> Self::Return {
+    fn visit_SelectorNoArgsBang(
+        &mut self,
+        ctx: &SelectorNoArgsBangContext<'input>,
+    ) -> Self::Return {
         self.visit_children(ctx)
     }
 
@@ -964,7 +969,10 @@ pub trait BuildingBlocksVisitorCompat<'input>:
      * labeled alternative in {@link BuildingBlocksParser#lvalue}.
      * @param ctx the parse tree
      */
-    fn visit_IgnoredSplatLValue(&mut self, ctx: &IgnoredSplatLValueContext<'input>) -> Self::Return {
+    fn visit_IgnoredSplatLValue(
+        &mut self,
+        ctx: &IgnoredSplatLValueContext<'input>,
+    ) -> Self::Return {
         self.visit_children(ctx)
     }
 

@@ -5,9 +5,9 @@ use std::io::Read;
 use std::path::Path;
 use std::thread;
 
+use antlr_rust::InputStream;
 use antlr_rust::common_token_stream::CommonTokenStream;
 use antlr_rust::tree::ParseTreeVisitorCompat;
-use antlr_rust::InputStream;
 
 use crate::parser::ast_visitor::{AstVisitor, Node, NodeValue};
 use crate::parser::generated::buildingblockslexer::BuildingBlocksLexer;

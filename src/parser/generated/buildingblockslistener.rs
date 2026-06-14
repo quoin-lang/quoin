@@ -3,7 +3,9 @@
 use super::buildingblocksparser::*;
 use antlr_rust::tree::ParseTreeListener;
 
-pub trait BuildingBlocksListener<'input>: ParseTreeListener<'input, BuildingBlocksParserContextType> {
+pub trait BuildingBlocksListener<'input>:
+    ParseTreeListener<'input, BuildingBlocksParserContextType>
+{
     /**
      * Enter a parse tree produced by {@link BuildingBlocksParser#program}.
      * @param ctx the parse tree

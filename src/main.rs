@@ -5,10 +5,10 @@ mod parser;
 mod value;
 mod vm;
 
-use crate::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
+use crate::value::{Block, Class, NativeClassBuilder, NativeFunc, Object, Value};
 use crate::vm::{VmState, VmStatus};
 
-use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
+use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
 use std::collections::HashMap;
 
 // Native helper: print
@@ -525,63 +525,7 @@ d = p1.dist: p2;
             );
         }
 
-        vm.register_native_class(
-            mc,
-            NativeClassBuilder::new("Point")
-                .class_method("newX:y:", |_vm, mc, args| {
-                    if args.len() != 3 {
-                        return Err("Point newX:y: expects exactly 2 arguments (x, y)".to_string());
-                    }
-                    let mut fields = HashMap::new();
-                    fields.insert("x".to_string(), args[1]);
-                    fields.insert("y".to_string(), args[2]);
-                    Ok(Value::Object(Gc::new(
-                        mc,
-                        RefLock::new(Object {
-                            class: args[0],
-                            fields,
-                        }),
-                    )))
-                })
-                .instance_method("x", |_vm, _mc, args| match &args[0] {
-                    Value::Object(obj) => {
-                        Ok(obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil))
-                    }
-                    _ => Err("Point x expects Point object as receiver".to_string()),
-                })
-                .instance_method("y", |_vm, _mc, args| match &args[0] {
-                    Value::Object(obj) => {
-                        Ok(obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil))
-                    }
-                    _ => Err("Point y expects Point object as receiver".to_string()),
-                })
-                .instance_method("dist:", |_vm, _mc, args| {
-                    let (x1, y1) = match &args[0] {
-                        Value::Object(obj) => (
-                            obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
-                            obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
-                        ),
-                        _ => return Err("Point dist: expects Point object as receiver".to_string()),
-                    };
-                    let (x2, y2) = match &args[1] {
-                        Value::Object(obj) => (
-                            obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
-                            obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
-                        ),
-                        _ => return Err("Point dist: expects Point object as argument".to_string()),
-                    };
-
-                    let to_f64 = |val| match val {
-                        Value::Int(i) => i as f64,
-                        Value::Float(f) => f,
-                        _ => 0.0,
-                    };
-
-                    let dx = to_f64(x1) - to_f64(x2);
-                    let dy = to_f64(y1) - to_f64(y2);
-                    Ok(Value::Float((dx * dx + dy * dy).sqrt()))
-                }),
-        );
+        vm.register_native_class(mc, build_point_class());
 
         // Convert StaticBlock to Block in GC and start it
         let main_block = Gc::new(
@@ -641,4 +585,61 @@ d = p1.dist: p2;
     println!("Running full garbage collection cycle...");
     arena.finish_cycle();
     println!("Done!");
+}
+
+fn build_point_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("Point")
+        .class_method("newX:y:", |_vm, mc, args| {
+            if args.len() != 3 {
+                return Err("Point newX:y: expects exactly 2 arguments (x, y)".to_string());
+            }
+            let class_ref = match args[0] {
+                Value::Class(c) => c,
+                _ => return Err("Expected Class as receiver".to_string()),
+            };
+            let mut fields = HashMap::new();
+            fields.insert("x".to_string(), args[1]);
+            fields.insert("y".to_string(), args[2]);
+            Ok(Value::Object(Gc::new(
+                mc,
+                RefLock::new(Object {
+                    class: class_ref,
+                    fields,
+                }),
+            )))
+        })
+        .instance_method("x", |_vm, _mc, args| match &args[0] {
+            Value::Object(obj) => Ok(obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil)),
+            _ => Err("Point x expects Point object as receiver".to_string()),
+        })
+        .instance_method("y", |_vm, _mc, args| match &args[0] {
+            Value::Object(obj) => Ok(obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil)),
+            _ => Err("Point y expects Point object as receiver".to_string()),
+        })
+        .instance_method("dist:", |_vm, _mc, args| {
+            let (x1, y1) = match &args[0] {
+                Value::Object(obj) => (
+                    obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
+                    obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
+                ),
+                _ => return Err("Point dist: expects Point object as receiver".to_string()),
+            };
+            let (x2, y2) = match &args[1] {
+                Value::Object(obj) => (
+                    obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil),
+                    obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil),
+                ),
+                _ => return Err("Point dist: expects Point object as argument".to_string()),
+            };
+
+            let to_f64 = |val| match val {
+                Value::Int(i) => i as f64,
+                Value::Float(f) => f,
+                _ => 0.0,
+            };
+
+            let dx = to_f64(x1) - to_f64(x2);
+            let dy = to_f64(y1) - to_f64(y2);
+            Ok(Value::Float((dx * dx + dy * dy).sqrt()))
+        })
 }
