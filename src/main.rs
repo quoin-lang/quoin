@@ -1,13 +1,9 @@
-use crate::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
-use crate::vm::{VmState, VmStatus};
 use new_vm::error::BBError;
-use new_vm::{arg, arg_obj, gc, gcl};
-
-mod compiler;
-mod instruction;
-mod parser;
-mod value;
-mod vm;
+use new_vm::parser::{ast_visitor, parser};
+use new_vm::runtime::object;
+use new_vm::value::{Block, NativeClassBuilder, NativeFunc, Object, Value};
+use new_vm::vm::{VmState, VmStatus};
+use new_vm::{arg, arg_obj, compiler, gc, gcl};
 
 use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
 use std::collections::HashMap;
@@ -470,10 +466,10 @@ p1.print;
 "#;
 
     println!("Parsing BuildingBlocks script to AST...");
-    let ast = parser::parser::parse_building_blocks_string(script);
+    let ast = parser::parse_building_blocks_string(script);
 
     let program_node = match &ast.value {
-        parser::ast_visitor::NodeValue::Program(p) => p,
+        ast_visitor::NodeValue::Program(p) => p,
         _ => {
             eprintln!("Error: Root AST node is not a ProgramNode");
             std::process::exit(1);
@@ -542,7 +538,7 @@ p1.print;
             );
         }
 
-        vm.register_native_class(mc, build_object_class());
+        vm.register_native_class(mc, object::build_object_class());
         vm.register_native_class(mc, build_point_class());
 
         // Register placeholder classes for all of the builtin types.
@@ -620,30 +616,6 @@ p1.print;
     println!("Running full garbage collection cycle...");
     arena.finish_cycle();
     println!("Done!");
-}
-
-fn build_object_class() -> NativeClassBuilder {
-    NativeClassBuilder::new("Object", None)
-        .instance_method("s", |_vm, mc, args| {
-            Ok(Value::String(gc!(mc, format!("{}", args[0]))))
-        })
-        .instance_method("print", |vm, mc, args| {
-            let s_result = vm.call_method(mc, args[0], "s", vec![])?;
-
-            println!(
-                "{}",
-                match s_result {
-                    Value::String(string) => string.to_string(),
-                    x => format!("{:?}", x),
-                }
-            );
-
-            Ok(Value::Nil)
-        })
-        .instance_method("throw", |_vm, _mc, args| {
-            // TODO: implement throw properly
-            Err(format!("{}", args[0]).into())
-        })
 }
 
 fn build_point_class() -> NativeClassBuilder {

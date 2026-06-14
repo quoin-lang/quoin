@@ -1,9 +1,9 @@
+use crate::error::BBError;
 use crate::instruction::{Constant, Instruction};
 use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, NativeFunc, Value};
-use new_vm::{gc, gcl};
+use crate::{gc, gcl};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
-use new_vm::error::BBError;
 use std::collections::HashMap;
 
 #[derive(Collect)]
@@ -475,7 +475,6 @@ mod tests {
     use crate::instruction::{Constant, StaticBlock};
     use crate::value::NativeClassBuilder;
     use gc_arena::{Arena, Rootable};
-    use new_vm::error::BBError;
 
     fn native_add<'gc>(
         _vm: &mut VmState<'gc>,

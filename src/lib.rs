@@ -1,4 +1,10 @@
+pub mod compiler;
 pub mod error;
+pub mod instruction;
+pub mod parser;
+pub mod runtime;
+pub mod value;
+pub mod vm;
 
 #[macro_export]
 macro_rules! gc {
