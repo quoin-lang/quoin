@@ -6,7 +6,7 @@ mod parser;
 mod compiler;
 
 use gc_arena::{Arena, Rootable, Mutation, Gc, lock::RefLock};
-use crate::value::{Value, Block, NativeFunc};
+use crate::value::{Value, Block, NativeFunc, NativeClass, Object, Class};
 use crate::vm::{VmState, VmStatus};
 
 // Native helper: print
@@ -366,6 +366,120 @@ fn native_error<'gc>(
     Err(format!("{}", args[1]))
 }
 
+use std::collections::HashMap;
+
+// Native Class Point implementation
+struct PointClass;
+
+impl NativeClass for PointClass {
+    fn name(&self) -> &'static str {
+        "Point"
+    }
+
+    fn class_methods(&self) -> HashMap<String, NativeFunc> {
+        let mut m = HashMap::new();
+        m.insert("newX:y:".to_string(), NativeFunc(point_new));
+        m
+    }
+
+    fn instance_methods(&self) -> HashMap<String, NativeFunc> {
+        let mut m = HashMap::new();
+        m.insert("x".to_string(), NativeFunc(point_get_x));
+        m.insert("y".to_string(), NativeFunc(point_get_y));
+        m.insert("dist:".to_string(), NativeFunc(point_dist));
+        m
+    }
+}
+
+fn point_new<'gc>(
+    _vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 3 {
+        return Err("Point newX:y: expects exactly 2 arguments (x, y)".to_string());
+    }
+    let mut fields = HashMap::new();
+    fields.insert("x".to_string(), args[1]);
+    fields.insert("y".to_string(), args[2]);
+    let obj = Gc::new(mc, RefLock::new(Object {
+        class: args[0],
+        fields,
+    }));
+    Ok(Value::Object(obj))
+}
+
+fn point_get_x<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 1 {
+        return Err("Point x expects exactly 0 arguments".to_string());
+    }
+    match &args[0] {
+        Value::Object(obj) => {
+            let val = obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil);
+            Ok(val)
+        }
+        _ => Err("Point x expects Point object as receiver".to_string()),
+    }
+}
+
+fn point_get_y<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 1 {
+        return Err("Point y expects exactly 0 arguments".to_string());
+    }
+    match &args[0] {
+        Value::Object(obj) => {
+            let val = obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil);
+            Ok(val)
+        }
+        _ => Err("Point y expects Point object as receiver".to_string()),
+    }
+}
+
+fn point_dist<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 2 {
+        return Err("Point dist: expects exactly 1 argument (other Point)".to_string());
+    }
+    let (x1, y1) = match &args[0] {
+        Value::Object(obj) => {
+            let x = obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil);
+            let y = obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil);
+            (x, y)
+        }
+        _ => return Err("Point dist: expects Point object as receiver".to_string()),
+    };
+    let (x2, y2) = match &args[1] {
+        Value::Object(obj) => {
+            let x = obj.borrow().fields.get("x").copied().unwrap_or(Value::Nil);
+            let y = obj.borrow().fields.get("y").copied().unwrap_or(Value::Nil);
+            (x, y)
+        }
+        _ => return Err("Point dist: expects Point object as argument".to_string()),
+    };
+
+    let to_f64 = |val: Value<'gc>| match val {
+        Value::Int(i) => i as f64,
+        Value::Float(f) => f,
+        _ => 0.0,
+    };
+
+    let dx = to_f64(x1) - to_f64(x2);
+    let dy = to_f64(y1) - to_f64(y2);
+    let dist = (dx * dx + dy * dy).sqrt();
+    Ok(Value::Float(dist))
+}
+
 fn main() {
     let script = r#"
 "* Test 1: Simple assignments, variables, and operators
@@ -412,7 +526,15 @@ re = #/^[a-z]+$/;
 is_match = re.regex_match: 'gemini';
 .print: 'regex match =' and: is_match;
 
-"* Test 6: Fatal error unwinding
+"* Test 6: Native Class & Methods
+p1 = Point.newX: 3 y: 4;
+p2 = Point.newX: 0 y: 0;
+.print: 'p1.x =' and: p1.x;
+.print: 'p1.y =' and: p1.y;
+d = p1.dist: p2;
+.print: 'distance =' and: d;
+
+"* Test 7: Fatal error unwinding
 .print: 'Triggering error:';
 .error: 'Fatal exception yeeted!';
 "#;
@@ -475,6 +597,8 @@ is_match = re.regex_match: 'gemini';
             globals.insert("at:".to_string(), Value::Native(NativeFunc(native_list_at)));
             globals.insert("sliceFrom:".to_string(), Value::Native(NativeFunc(native_list_slice_from)));
         }
+
+        vm.register_native_class(mc, PointClass);
 
         // Convert StaticBlock to Block in GC and start it
         let main_block = Gc::new(

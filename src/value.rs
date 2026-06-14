@@ -36,6 +36,8 @@ pub enum Value<'gc> {
     Block(Gc<'gc, Block<'gc>>),
     Method(Gc<'gc, Method<'gc>>),
     Native(NativeFunc),
+    Class(Gc<'gc, RefLock<Class<'gc>>>),
+    Object(Gc<'gc, RefLock<Object<'gc>>>),
 }
 
 unsafe impl<'gc> Collect<'gc> for Value<'gc> {
@@ -54,6 +56,8 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
                 cc.trace(&m.receiver);
                 cc.trace(&m.block);
             }
+            Value::Class(c) => cc.trace(c),
+            Value::Object(o) => cc.trace(o),
         }
     }
 }
@@ -80,6 +84,8 @@ impl<'gc> Value<'gc> {
             Value::Block(_) => "Block",
             Value::Method(_) => "Method",
             Value::Native(_) => "Native",
+            Value::Class(_) => "Class",
+            Value::Object(_) => "Object",
         }
     }
 }
@@ -99,6 +105,8 @@ impl<'gc> PartialEq for Value<'gc> {
             (Value::Regex(a), Value::Regex(b)) => Gc::ptr_eq(*a, *b),
             (Value::Block(a), Value::Block(b)) => Gc::ptr_eq(*a, *b),
             (Value::Method(a), Value::Method(b)) => Gc::ptr_eq(a.block, b.block) && a.receiver == b.receiver,
+            (Value::Class(a), Value::Class(b)) => Gc::ptr_eq(*a, *b),
+            (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
             (Value::Native(a), Value::Native(b)) => {
                 let a_ptr = a.0 as *const ();
                 let b_ptr = b.0 as *const ();
@@ -123,6 +131,14 @@ impl<'gc> fmt::Debug for Value<'gc> {
             Value::Block(b) => write!(f, "Block({:?})", b.name),
             Value::Method(m) => write!(f, "Method({}#{})", m.receiver.type_name(), m.name),
             Value::Native(_) => write!(f, "Native(<fn>)"),
+            Value::Class(c) => write!(f, "Class({})", c.borrow().name),
+            Value::Object(o) => {
+                let name = match o.borrow().class {
+                    Value::Class(c) => c.borrow().name.clone(),
+                    _ => "Unknown".to_string(),
+                };
+                write!(f, "Object({}, fields: {:?})", name, o.borrow().fields)
+            }
         }
     }
 }
@@ -169,6 +185,14 @@ impl<'gc> fmt::Display for Value<'gc> {
             }
             Value::Method(m) => write!(f, "<method {}#{}>", m.receiver.type_name(), m.name),
             Value::Native(_) => write!(f, "<native fn>"),
+            Value::Class(c) => write!(f, "class {}", c.borrow().name),
+            Value::Object(o) => {
+                let name = match o.borrow().class {
+                    Value::Class(c) => c.borrow().name.clone(),
+                    _ => "Unknown".to_string(),
+                };
+                write!(f, "an instance of {}", name)
+            }
         }
     }
 }
@@ -228,4 +252,35 @@ impl<'gc> EnvFrame<'gc> {
         }
         false
     }
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct Class<'gc> {
+    pub name: String,
+    pub parent: Option<Value<'gc>>,
+    pub instance_methods: HashMap<String, Value<'gc>>,
+    pub class_methods: HashMap<String, Value<'gc>>,
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct Object<'gc> {
+    pub class: Value<'gc>,
+    pub fields: HashMap<String, Value<'gc>>,
+}
+
+impl<'gc> Object<'gc> {
+    pub fn class_name(&self) -> String {
+        match self.class {
+            Value::Class(c) => c.borrow().name.clone(),
+            _ => "Unknown".to_string(),
+        }
+    }
+}
+
+pub trait NativeClass {
+    fn name(&self) -> &'static str;
+    fn class_methods(&self) -> HashMap<String, NativeFunc>;
+    fn instance_methods(&self) -> HashMap<String, NativeFunc>;
 }

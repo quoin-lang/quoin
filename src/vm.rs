@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use gc_arena::{Collect, Gc, lock::RefLock, Mutation};
 use crate::instruction::{Instruction, Constant};
-use crate::value::{Value, Block, EnvFrame, MyRegex};
+use crate::value::{Value, Block, EnvFrame, MyRegex, Class, Object, NativeClass};
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -37,6 +37,72 @@ impl<'gc> VmState<'gc> {
             globals: Gc::new(mc, RefLock::new(HashMap::new())),
             next_frame_id: 1,
         }
+    }
+
+    pub fn register_native_class<T: NativeClass>(&mut self, mc: &Mutation<'gc>, native_class: T) {
+        let mut inst_methods = HashMap::new();
+        for (name, func) in native_class.instance_methods() {
+            inst_methods.insert(name, Value::Native(func));
+        }
+
+        let mut cls_methods = HashMap::new();
+        for (name, func) in native_class.class_methods() {
+            cls_methods.insert(name, Value::Native(func));
+        }
+
+        let class_obj = Gc::new(mc, RefLock::new(Class {
+            name: native_class.name().to_string(),
+            parent: None,
+            instance_methods: inst_methods,
+            class_methods: cls_methods,
+        }));
+
+        self.globals.borrow_mut(mc).insert(native_class.name().to_string(), Value::Class(class_obj));
+    }
+
+    pub fn lookup_method(&self, receiver: Value<'gc>, selector: &str) -> Option<Value<'gc>> {
+        match receiver {
+            Value::Object(obj) => {
+                let class_val = obj.borrow().class;
+                if let Some(m) = self.lookup_in_class_hierarchy(class_val, selector, false) {
+                    Some(m)
+                } else {
+                    self.globals.borrow().get(selector).copied()
+                }
+            }
+            Value::Class(class_obj) => {
+                self.lookup_in_class_hierarchy(Value::Class(class_obj), selector, true)
+            }
+            _ => {
+                let type_name = receiver.type_name();
+                if let Some(Value::Class(class_obj)) = self.globals.borrow().get(type_name).copied() {
+                    if let Some(m) = self.lookup_in_class_hierarchy(Value::Class(class_obj), selector, false) {
+                        return Some(m);
+                    }
+                }
+                self.globals.borrow().get(selector).copied()
+            }
+        }
+    }
+
+    fn lookup_in_class_hierarchy(&self, mut class_val: Value<'gc>, selector: &str, class_side: bool) -> Option<Value<'gc>> {
+        while let Value::Class(class_obj) = class_val {
+            let class_borrow = class_obj.borrow();
+            let methods = if class_side {
+                &class_borrow.class_methods
+            } else {
+                &class_borrow.instance_methods
+            };
+            if let Some(method) = methods.get(selector).copied() {
+                return Some(method);
+            }
+            if let Some(parent) = class_borrow.parent {
+                class_val = parent;
+            } else {
+                break;
+            }
+        }
+        None
     }
 
     pub fn push(&mut self, val: Value<'gc>) {
@@ -207,7 +273,7 @@ impl<'gc> VmState<'gc> {
                     }
                 }
 
-                let method_opt = self.globals.borrow().get(&selector).copied();
+                let method_opt = self.lookup_method(receiver, &selector);
                 if let Some(method_val) = method_opt {
                     match method_val {
                         Value::Native(native_fn) => {
