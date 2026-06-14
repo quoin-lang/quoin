@@ -3,7 +3,7 @@ use crate::instruction::{Constant, Instruction};
 use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, NativeFunc, Object, Value};
 use crate::{gc, gcl};
 
-use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
 
 #[derive(Collect)]
@@ -595,8 +595,7 @@ impl<'gc> VmState<'gc> {
                 self.frames[frame_idx].ip += 1; // Advance caller frame IP
 
                 if let Value::Block(block) = receiver {
-                    if selector == "value" || selector == "value:" || selector.starts_with("value:")
-                    {
+                    if selector == "value" || selector == "value:" {
                         self.start_block(mc, block, args);
                         return Ok(VmStatus::Running);
                     }
@@ -775,17 +774,17 @@ impl<'gc> VmState<'gc> {
             Instruction::ExecuteBlockWithSelf => {
                 let block_val = self.pop()?;
                 let self_val = self.pop()?;
-                if let Value::Block(block) = block_val {
+                return if let Value::Block(block) = block_val {
                     self.frames[frame_idx].ip += 1;
                     self.start_block_as_method(mc, block, self_val, Vec::new());
-                    return Ok(VmStatus::Running);
+                    Ok(VmStatus::Running)
                 } else {
-                    return Err(BBError::TypeError {
+                    Err(BBError::TypeError {
                         expected: "Block".to_string(),
                         got: block_val.type_name().to_string(),
                         msg: format!("ExecuteBlockWithSelf expects a Block, got {:?}", block_val),
-                    });
-                }
+                    })
+                };
             }
             Instruction::DefineMethod(selector) => {
                 let block_val = self.pop()?;
