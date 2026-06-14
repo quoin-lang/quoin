@@ -3,8 +3,9 @@ mod value;
 mod vm;
 mod assembler;
 mod parser;
+mod compiler;
 
-use gc_arena::{Arena, Rootable, Mutation, Gc};
+use gc_arena::{Arena, Rootable, Mutation, Gc, lock::RefLock};
 use crate::value::{Value, Block, NativeFunc};
 use crate::vm::{VmState, VmStatus};
 
@@ -14,11 +15,14 @@ fn native_print<'gc>(
     _mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, String> {
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            print!(" ");
+    // args[0] is the receiver (self)
+    if args.len() > 1 {
+        for (i, arg) in args[1..].iter().enumerate() {
+            if i > 0 {
+                print!(" ");
+            }
+            print!("{}", arg);
         }
-        print!("{}", arg);
     }
     println!();
     Ok(Value::Nil)
@@ -31,13 +35,13 @@ fn native_len<'gc>(
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, String> {
     if args.len() != 1 {
-        return Err("len() expects exactly 1 argument".to_string());
+        return Err("len expects exactly 1 argument (receiver)".to_string());
     }
     match &args[0] {
         Value::String(s) => Ok(Value::Int((**s).len() as i64)),
         Value::List(l) => Ok(Value::Int(l.borrow().len() as i64)),
         Value::Dict(d) => Ok(Value::Int(d.borrow().len() as i64)),
-        _ => Err(format!("len() expects string, list, or dict, got {:?}", args[0])),
+        _ => Err(format!("len expects string, list, or dict, got {:?}", args[0])),
     }
 }
 
@@ -48,14 +52,14 @@ fn native_push<'gc>(
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, String> {
     if args.len() != 2 {
-        return Err("push() expects exactly 2 arguments (list, element)".to_string());
+        return Err("push expects exactly 2 arguments (list, element)".to_string());
     }
     match &args[0] {
         Value::List(l) => {
             l.borrow_mut(mc).push(args[1]);
             Ok(Value::Nil)
         }
-        _ => Err(format!("push() first argument must be list, got {:?}", args[0])),
+        _ => Err(format!("push first argument must be list, got {:?}", args[0])),
     }
 }
 
@@ -66,14 +70,14 @@ fn native_pop<'gc>(
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, String> {
     if args.len() != 1 {
-        return Err("pop() expects exactly 1 argument (list)".to_string());
+        return Err("pop expects exactly 1 argument (list)".to_string());
     }
     match &args[0] {
         Value::List(l) => {
             let val = l.borrow_mut(mc).pop().unwrap_or(Value::Nil);
             Ok(val)
         }
-        _ => Err(format!("pop() first argument must be list, got {:?}", args[0])),
+        _ => Err(format!("pop first argument must be list, got {:?}", args[0])),
     }
 }
 
@@ -84,7 +88,7 @@ fn native_regex_match<'gc>(
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, String> {
     if args.len() != 2 {
-        return Err("regex_match() expects exactly 2 arguments (regex, string)".to_string());
+        return Err("regex_match expects exactly 2 arguments (regex, string)".to_string());
     }
     match (&args[0], &args[1]) {
         (Value::Regex(r), Value::String(s)) => {
@@ -92,7 +96,7 @@ fn native_regex_match<'gc>(
             Ok(Value::Bool(matched))
         }
         _ => Err(format!(
-            "regex_match() expects regex and string, got {:?} and {:?}",
+            "regex_match expects regex and string, got {:?} and {:?}",
             args[0], args[1]
         )),
     }
@@ -191,6 +195,18 @@ fn native_eq<'gc>(
     Ok(Value::Bool(args[0] == args[1]))
 }
 
+// Native helper: ne
+fn native_ne<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 2 {
+        return Err("ne expects 2 arguments".into());
+    }
+    Ok(Value::Bool(args[0] != args[1]))
+}
+
 // Native helper: lt
 fn native_lt<'gc>(
     _vm: &mut VmState<'gc>,
@@ -227,153 +243,237 @@ fn native_gt<'gc>(
     }
 }
 
+// Native helper: le
+fn native_le<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 2 {
+        return Err("le expects 2 arguments".into());
+    }
+    match (&args[0], &args[1]) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
+        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) <= *b)),
+        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a <= (*b as f64))),
+        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1])),
+    }
+}
+
+// Native helper: ge
+fn native_ge<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 2 {
+        return Err("ge expects 2 arguments".into());
+    }
+    match (&args[0], &args[1]) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
+        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) >= *b)),
+        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a >= (*b as f64))),
+        _ => Err(format!("Cannot compare {:?} and {:?}", args[0], args[1])),
+    }
+}
+
+// Native helper: logic not
+fn native_not<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 1 {
+        return Err("not expects exactly 1 argument (receiver)".into());
+    }
+    Ok(Value::Bool(!args[0].is_truthy()))
+}
+
+// Native helper: negated
+fn native_negated<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 1 {
+        return Err("negated expects exactly 1 argument (receiver)".into());
+    }
+    match &args[0] {
+        Value::Int(i) => Ok(Value::Int(-*i)),
+        Value::Float(f) => Ok(Value::Float(-*f)),
+        _ => Err(format!("negated expects integer or float, got {:?}", args[0])),
+    }
+}
+
+// Native helper: list index lookup (at:)
+fn native_list_at<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 2 {
+        return Err("at expects exactly 2 arguments (receiver, index)".into());
+    }
+    match (&args[0], &args[1]) {
+        (Value::List(l), Value::Int(idx)) => {
+            let borrowed = l.borrow();
+            let idx = *idx;
+            if idx >= 0 && idx < borrowed.len() as i64 {
+                Ok(borrowed[idx as usize])
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        _ => Err(format!("at expects list and integer, got {:?} and {:?}", args[0], args[1])),
+    }
+}
+
+// Native helper: list sliceFrom:
+fn native_list_slice_from<'gc>(
+    _vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() != 2 {
+        return Err("sliceFrom expects exactly 2 arguments (receiver, index)".into());
+    }
+    match (&args[0], &args[1]) {
+        (Value::List(l), Value::Int(idx)) => {
+            let borrowed = l.borrow();
+            let start = (*idx).max(0) as usize;
+            let sliced = if start < borrowed.len() {
+                borrowed[start..].to_vec()
+            } else {
+                Vec::new()
+            };
+            Ok(Value::List(Gc::new(mc, RefLock::new(sliced))))
+        }
+        _ => Err(format!("sliceFrom expects list and integer, got {:?} and {:?}", args[0], args[1])),
+    }
+}
+
+// Native helper: error/exception
+fn native_error<'gc>(
+    _vm: &mut VmState<'gc>,
+    _mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, String> {
+    if args.len() < 2 {
+        return Err("error: expects a message".to_string());
+    }
+    Err(format!("{}", args[1]))
+}
+
 fn main() {
     let script = r#"
-# Test 1: Closures and local variables
-block make_counter initial
-  load_local initial
-  define_local count
-  
-  # Anonymous nested block (using '_' name)
-  nested_block _
-    load_global add
-    load_local count
-    push int 1
-    call 2
-    store_local count
-    load_local count
-    return
-  end
-  
-  return
-end
-define_local make_counter
+"* Test 1: Simple assignments, variables, and operators
+x = 10;
+y = 20;
+z = x + y;
+.print: 'z = x + y =' and: z;
 
-# Call make_counter(10)
-load_local make_counter
-push int 10
-call 1
-define_local my_counter
+"* Test 2: List destructuring
+a b *rest = #(100 200 300 400 500);
+.print: 'a =' and: a;
+.print: 'b =' and: b;
+.print: 'rest =' and: rest;
 
-# Call it twice
-load_local my_counter
-call 0
-define_local c1  # 11
+"* Test 3: Lexical scopes and blocks/closures
+make_counter = { |initial|
+  count = initial;
+  {
+    count = count + 1;
+    count
+  }
+};
 
-load_local my_counter
-call 0
-define_local c2  # 12
+counter = make_counter.value: 10;
+c1 = counter.value;
+c2 = counter.value;
+.print: 'c1 =' and: c1;
+.print: 'c2 =' and: c2;
 
-load_global print
-push string "Counter step 1:"
-load_local c1
-call 2
+"* Test 4: Unary operators
+flag = true;
+inv_flag = !flag;
+.print: 'flag =' and: flag and: 'inv_flag =' and: inv_flag;
 
-load_global print
-push string "Counter step 2:"
-load_local c2
-call 2
+num = 50;
+neg_num = -num;
+.print: 'num =' and: num and: 'neg_num =' and: neg_num;
 
+"* Test 5: Dicts & Regex
+my_dict = #{ 'foo': 100 'bar': 200 };
+.print: 'dict =' and: my_dict;
 
-# Test 2: Lists, Dicts, and Regex
-# Create a list
-push int 10
-push int 20
-push int 30
-new_list 3
-define_local my_list
+re = #/^[a-z]+$/;
+is_match = re.regex_match: 'gemini';
+.print: 'regex match =' and: is_match;
 
-# Create a dict
-push string "foo"
-push int 100
-push string "bar"
-push int 200
-new_dict 2
-define_local my_dict
-
-# Print them
-load_global print
-push string "List:"
-load_local my_list
-call 2
-
-load_global print
-push string "Dict:"
-load_local my_dict
-call 2
-
-# Regex matching
-push string "^[a-z]+$"
-new_regex
-define_local regex
-
-load_global regex_match
-load_local regex
-push string "gemini"
-call 2
-define_local match1
-
-load_global regex_match
-load_local regex
-push string "123gemini"
-call 2
-define_local match2
-
-load_global print
-push string "Regex match 'gemini':"
-load_local match1
-call 2
-
-load_global print
-push string "Regex match '123gemini':"
-load_local match2
-call 2
-
-
-# Test 3: Fatal exception unwinding (Yeet)
-block throw_error
-  push string "Fatal Error Occurred!"
-  yeet
-end
-define_local throw_error
-
-load_global print
-push string "Calling block that will yeet..."
-call 1
-
-load_local throw_error
-call 0
+"* Test 6: Fatal error unwinding
+.print: 'Triggering error:';
+.error: 'Fatal exception yeeted!';
 "#;
 
-    println!("Assembling bytecode script...");
-    let program = match assembler::assemble(script) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Assembly error: {}", e);
+    println!("Parsing BuildingBlocks script to AST...");
+    let ast = parser::parser::parse_building_blocks_string(script);
+    
+    let program_node = match &ast.value {
+        parser::ast_visitor::NodeValue::Program(p) => p,
+        _ => {
+            eprintln!("Error: Root AST node is not a ProgramNode");
             std::process::exit(1);
         }
     };
-    println!("Assembly successful!");
+
+    println!("Compiling AST to VM bytecode...");
+    let mut compiler = compiler::Compiler::new();
+    let program = match compiler.compile_program(program_node) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Compilation error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    println!("Compilation successful!");
 
     println!("Initializing gc-arena and virtual machine...");
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc);
 
-        // Register native globals
+        // Register dynamic methods/operators in globals
         {
             let mut globals = vm.globals.borrow_mut(mc);
-            globals.insert("print".to_string(), Value::Native(NativeFunc(native_print)));
+            globals.insert("print:".to_string(), Value::Native(NativeFunc(native_print)));
+            globals.insert("print:and:".to_string(), Value::Native(NativeFunc(native_print)));
+            globals.insert("print:and:and:and:".to_string(), Value::Native(NativeFunc(native_print)));
             globals.insert("len".to_string(), Value::Native(NativeFunc(native_len)));
-            globals.insert("push".to_string(), Value::Native(NativeFunc(native_push)));
+            globals.insert("push:".to_string(), Value::Native(NativeFunc(native_push)));
             globals.insert("pop".to_string(), Value::Native(NativeFunc(native_pop)));
-            globals.insert("regex_match".to_string(), Value::Native(NativeFunc(native_regex_match)));
-            globals.insert("add".to_string(), Value::Native(NativeFunc(native_add)));
-            globals.insert("sub".to_string(), Value::Native(NativeFunc(native_sub)));
-            globals.insert("mul".to_string(), Value::Native(NativeFunc(native_mul)));
-            globals.insert("div".to_string(), Value::Native(NativeFunc(native_div)));
-            globals.insert("eq".to_string(), Value::Native(NativeFunc(native_eq)));
-            globals.insert("lt".to_string(), Value::Native(NativeFunc(native_lt)));
-            globals.insert("gt".to_string(), Value::Native(NativeFunc(native_gt)));
+            globals.insert("regex_match:".to_string(), Value::Native(NativeFunc(native_regex_match)));
+            globals.insert("error:".to_string(), Value::Native(NativeFunc(native_error)));
+            
+            // Operators
+            globals.insert("+".to_string(), Value::Native(NativeFunc(native_add)));
+            globals.insert("-".to_string(), Value::Native(NativeFunc(native_sub)));
+            globals.insert("*".to_string(), Value::Native(NativeFunc(native_mul)));
+            globals.insert("/".to_string(), Value::Native(NativeFunc(native_div)));
+            globals.insert("==".to_string(), Value::Native(NativeFunc(native_eq)));
+            globals.insert("!=".to_string(), Value::Native(NativeFunc(native_ne)));
+            globals.insert("<".to_string(), Value::Native(NativeFunc(native_lt)));
+            globals.insert(">".to_string(), Value::Native(NativeFunc(native_gt)));
+            globals.insert("<=".to_string(), Value::Native(NativeFunc(native_le)));
+            globals.insert(">=".to_string(), Value::Native(NativeFunc(native_ge)));
+            
+            // Unary
+            globals.insert("!".to_string(), Value::Native(NativeFunc(native_not)));
+            globals.insert("negated".to_string(), Value::Native(NativeFunc(native_negated)));
+            
+            // List destructuring
+            globals.insert("at:".to_string(), Value::Native(NativeFunc(native_list_at)));
+            globals.insert("sliceFrom:".to_string(), Value::Native(NativeFunc(native_list_slice_from)));
         }
 
         // Convert StaticBlock to Block in GC and start it
@@ -425,7 +525,6 @@ call 0
         match status {
             Ok(SimpleStatus::Running) => {
                 step_count += 1;
-                // Incremental GC triggers occasionally
                 if step_count % 10 == 0 {
                     arena.collect_debt();
                 }

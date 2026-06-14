@@ -32,6 +32,7 @@ pub enum Instruction {
     Pop,
     Dup,
     Call(usize), // num_args
+    Send(String, usize), // selector, num_args
     Return,
     Yeet,
     BlockReturn,

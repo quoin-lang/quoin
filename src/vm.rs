@@ -190,6 +190,43 @@ impl<'gc> VmState<'gc> {
                     _ => return Err(format!("Value is not callable: {:?}", callable)),
                 }
             }
+            Instruction::Send(selector, num_args) => {
+                let mut args = Vec::new();
+                for _ in 0..num_args {
+                    args.push(self.pop()?);
+                }
+                args.reverse();
+
+                let receiver = self.pop()?;
+                self.frames[frame_idx].ip += 1; // Advance caller frame IP
+
+                if let Value::Block(block) = receiver {
+                    if selector == "value" || selector == "value:" || selector.starts_with("value:") {
+                        self.start_block(mc, block, args);
+                        return Ok(VmStatus::Running);
+                    }
+                }
+
+                let method_opt = self.globals.borrow().get(&selector).copied();
+                if let Some(method_val) = method_opt {
+                    match method_val {
+                        Value::Native(native_fn) => {
+                            let mut all_args = vec![receiver];
+                            all_args.extend(args);
+                            let ret = (native_fn.0)(self, mc, all_args)?;
+                            self.push(ret);
+                        }
+                        Value::Block(block) => {
+                            let mut all_args = vec![receiver];
+                            all_args.extend(args);
+                            self.start_block(mc, block, all_args);
+                        }
+                        _ => return Err(format!("Selector '{}' resolved to non-callable value: {:?}", selector, method_val)),
+                    }
+                } else {
+                    return Err(format!("Message not understood: receiver={:?}, selector='{}', args={:?}", receiver, selector, args));
+                }
+            }
             Instruction::Return | Instruction::BlockReturn => {
                 let ret_val = self.pop()?;
                 self.frames.pop();
