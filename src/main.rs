@@ -11,6 +11,7 @@ mod value;
 mod vm;
 
 use gc_arena::{lock::RefLock, Arena, Gc, Mutation, Rootable};
+use itertools::Itertools;
 use std::collections::HashMap;
 
 // Native helper: print
@@ -410,22 +411,6 @@ fn native_list_slice_from<'gc>(
     }
 }
 
-// Native helper: error/exception
-fn native_error<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() < 2 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 2,
-            got: args.len(),
-            msg: "error: expects a message".to_string(),
-        });
-    }
-    Err(format!("{}", args[1]).into())
-}
-
 fn main() {
     let script = r#"
 "* Test 1: Simple assignments, variables, and operators
@@ -483,7 +468,7 @@ p1.print;
 
 "* Test 7: Fatal error unwinding
 .print: 'Triggering error:';
-.error: 'Fatal exception yeeted!';
+'Fatal exception yeeted!'.throw;
 "#;
 
     println!("Parsing BuildingBlocks script to AST...");
@@ -531,10 +516,6 @@ p1.print;
                 "regex_match:".to_string(),
                 Value::Native(NativeFunc(native_regex_match)),
             );
-            globals.insert(
-                "error:".to_string(),
-                Value::Native(NativeFunc(native_error)),
-            );
 
             // Operators
             globals.insert("+".to_string(), Value::Native(NativeFunc(native_add)));
@@ -565,6 +546,23 @@ p1.print;
 
         vm.register_native_class(mc, build_object_class());
         vm.register_native_class(mc, build_point_class());
+
+        // Register placeholder classes for all of the builtin types.
+        for t in [
+            "Nil",
+            "Boolean",
+            "Integer",
+            "Float",
+            "String",
+            "List",
+            "Dictionary",
+            "Regex",
+            "Block",
+            "Method",
+            "Native",
+        ] {
+            vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
+        }
 
         // Convert StaticBlock to Block in GC and start it
         let main_block = gc!(
@@ -628,11 +626,9 @@ p1.print;
 
 fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
-        //
         .instance_method("s", |_vm, mc, args| {
             Ok(Value::String(gc!(mc, format!("{}", args[0]))))
         })
-        //
         .instance_method("print", |vm, mc, args| {
             let s_result = vm.call_method(mc, args[0], "s", vec![])?;
 
@@ -645,6 +641,10 @@ fn build_object_class() -> NativeClassBuilder {
             );
 
             Ok(Value::Nil)
+        })
+        .instance_method("throw", |_vm, _mc, args| {
+            // TODO: implement throw properly
+            Err(format!("{}", args[0]).into())
         })
 }
 

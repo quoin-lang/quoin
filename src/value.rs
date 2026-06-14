@@ -1,7 +1,7 @@
 use crate::instruction::Instruction;
 use crate::vm::VmState;
 
-use gc_arena::{Collect, Gc, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc};
 use new_vm::error::BBError;
 use regex::Regex;
 use std::collections::HashMap;
@@ -94,12 +94,12 @@ impl<'gc> Value<'gc> {
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Nil => "Nil",
-            Value::Bool(_) => "Bool",
-            Value::Int(_) => "Int",
+            Value::Bool(_) => "Boolean",
+            Value::Int(_) => "Integer",
             Value::Float(_) => "Float",
             Value::String(_) => "String",
             Value::List(_) => "List",
-            Value::Dict(_) => "Dict",
+            Value::Dict(_) => "Dictionary",
             Value::Regex(_) => "Regex",
             Value::Block(_) => "Block",
             Value::Method(_) => "Method",
