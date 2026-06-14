@@ -2,7 +2,7 @@ use crate::instruction::{Constant, Instruction};
 use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, NativeFunc, Value};
 use new_vm::{gc, gcl};
 
-use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use new_vm::error::BBError;
 use std::collections::HashMap;
 
@@ -466,5 +466,465 @@ impl<'gc> VmState<'gc> {
         }
 
         Ok(VmStatus::Running)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instruction::{Constant, StaticBlock};
+    use crate::value::NativeClassBuilder;
+    use gc_arena::{Arena, Rootable};
+    use new_vm::error::BBError;
+
+    fn native_add<'gc>(
+        _vm: &mut VmState<'gc>,
+        _mc: &Mutation<'gc>,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, BBError> {
+        match (&args[0], &args[1]) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+            _ => Err(BBError::Other("Invalid types".to_string())),
+        }
+    }
+
+    fn run_test_steps<F>(instructions: Vec<Instruction>, check_steps: F)
+    where
+        F: for<'gc> FnOnce(&mut VmState<'gc>, &Mutation<'gc>),
+    {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc);
+
+            // Register standard native functions we might need
+            {
+                let mut globals = vm.globals.borrow_mut(mc);
+                globals.insert("+".to_string(), Value::Native(NativeFunc(native_add)));
+            }
+
+            // Register some basic native classes
+            vm.register_native_class(mc, NativeClassBuilder::new("Object", None));
+
+            let static_block = StaticBlock {
+                name: Some("test_main".to_string()),
+                is_nested_block: false,
+                param_names: Vec::new(),
+                bytecode: instructions,
+            };
+            let block = gc!(
+                mc,
+                Block {
+                    name: static_block.name.clone(),
+                    is_nested_block: static_block.is_nested_block,
+                    param_names: static_block.param_names.clone(),
+                    bytecode: static_block.bytecode.clone(),
+                    parent_env: None,
+                }
+            );
+            vm.start_block(mc, block, Vec::new());
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            check_steps(vm, mc);
+        });
+    }
+
+    #[test]
+    fn test_push_pop_dup() {
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Int(10)),
+                Instruction::Push(Constant::Int(20)),
+                Instruction::Pop,
+                Instruction::Dup,
+            ],
+            |vm, mc| {
+                // Initial: Stack = []
+                assert_eq!(vm.stack.len(), 0);
+
+                // Step 1: Push(10)
+                let status = vm.step(mc).unwrap();
+                assert!(matches!(status, VmStatus::Running));
+                assert_eq!(vm.stack, vec![Value::Int(10)]);
+
+                // Step 2: Push(20)
+                let status = vm.step(mc).unwrap();
+                assert!(matches!(status, VmStatus::Running));
+                assert_eq!(vm.stack, vec![Value::Int(10), Value::Int(20)]);
+
+                // Step 3: Pop
+                let status = vm.step(mc).unwrap();
+                assert!(matches!(status, VmStatus::Running));
+                assert_eq!(vm.stack, vec![Value::Int(10)]);
+
+                // Step 4: Dup
+                let status = vm.step(mc).unwrap();
+                assert!(matches!(status, VmStatus::Running));
+                assert_eq!(vm.stack, vec![Value::Int(10), Value::Int(10)]);
+
+                // Step 5: Implicit return Nil
+                let status = vm.step(mc).unwrap();
+                assert!(matches!(status, VmStatus::Running));
+                assert_eq!(vm.stack, vec![Value::Int(10), Value::Int(10), Value::Nil]);
+
+                // Step 6: Finished
+                let status = vm.step(mc).unwrap();
+                assert!(matches!(status, VmStatus::Finished(Value::Nil)));
+            },
+        );
+    }
+
+    #[test]
+    fn test_local_variables() {
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Int(42)),
+                Instruction::DefineLocal("a".to_string()),
+                Instruction::LoadLocal("a".to_string()),
+                Instruction::Push(Constant::Int(100)),
+                Instruction::StoreLocal("a".to_string()),
+                Instruction::LoadLocal("a".to_string()),
+            ],
+            |vm, mc| {
+                // Step 1: Push(42) -> [Int(42)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42)]);
+
+                // Step 2: DefineLocal("a") -> []
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack.len(), 0);
+
+                // Step 3: LoadLocal("a") -> [Int(42)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42)]);
+
+                // Step 4: Push(100) -> [Int(42), Int(100)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42), Value::Int(100)]);
+
+                // Step 5: StoreLocal("a") -> [Int(42)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42)]);
+
+                // Step 6: LoadLocal("a") -> [Int(42), Int(100)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42), Value::Int(100)]);
+            },
+        );
+    }
+
+    #[test]
+    fn test_global_variables() {
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Int(77)),
+                Instruction::StoreGlobal("g_var".to_string()),
+                Instruction::LoadGlobal("g_var".to_string()),
+            ],
+            |vm, mc| {
+                // Step 1: Push(77)
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(77)]);
+
+                // Step 2: StoreGlobal("g_var")
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack.len(), 0);
+
+                // Step 3: LoadGlobal("g_var")
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(77)]);
+            },
+        );
+    }
+
+    #[test]
+    fn test_constants() {
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Nil),
+                Instruction::Push(Constant::Bool(true)),
+                Instruction::Push(Constant::Float(3.14)),
+                Instruction::Push(Constant::String("hello".to_string())),
+            ],
+            |vm, mc| {
+                // Nil
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Nil]);
+
+                // Bool
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Nil, Value::Bool(true)]);
+
+                // Float
+                vm.step(mc).unwrap();
+                assert_eq!(
+                    vm.stack,
+                    vec![Value::Nil, Value::Bool(true), Value::Float(3.14)]
+                );
+
+                // String
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack.len(), 4);
+                if let Value::String(s) = vm.stack[3] {
+                    assert_eq!(**s, "hello".to_string());
+                } else {
+                    panic!("Expected string value");
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn test_jump_if_else() {
+        run_test_steps(
+            vec![
+                // 0: Push true
+                Instruction::Push(Constant::Bool(true)),
+                // 1: IfJump to 4 (offset +3 -> 4)
+                Instruction::IfJump(3),
+                // 2: Push 99 (should be skipped)
+                Instruction::Push(Constant::Int(99)),
+                // 3: Jump to 5 (offset +2 -> 5)
+                Instruction::Jump(2),
+                // 4: Push 42 (target of IfJump)
+                Instruction::Push(Constant::Int(42)),
+                // 5: Push false
+                Instruction::Push(Constant::Bool(false)),
+                // 6: ElseJump to 9 (offset +3 -> 9)
+                Instruction::ElseJump(3),
+                // 7: Push 88 (should be skipped)
+                Instruction::Push(Constant::Int(88)),
+                // 8: Jump to 10 (offset +2 -> 10)
+                Instruction::Jump(2),
+                // 9: Push 55 (target of ElseJump)
+                Instruction::Push(Constant::Int(55)),
+            ],
+            |vm, mc| {
+                // Push true -> [Bool(true)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Bool(true)]);
+
+                // IfJump(3) -> condition true -> jump to index 4 (Push 42). Stack becomes []
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack.len(), 0);
+                assert_eq!(vm.frames[0].ip, 4);
+
+                // Push 42 -> [Int(42)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42)]);
+
+                // Push false -> [Int(42), Bool(false)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42), Value::Bool(false)]);
+
+                // ElseJump(3) -> condition false -> jump to index 9 (Push 55). Stack becomes [Int(42)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42)]);
+                assert_eq!(vm.frames[0].ip, 9);
+
+                // Push 55 -> [Int(42), Int(55)]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42), Value::Int(55)]);
+            },
+        );
+    }
+
+    #[test]
+    fn test_list_dict_regex() {
+        run_test_steps(
+            vec![
+                // List of 2 elements: Push 1, Push 2, NewList(2)
+                Instruction::Push(Constant::Int(1)),
+                Instruction::Push(Constant::Int(2)),
+                Instruction::NewList(2),
+                // Dict of 1 pair: Push key "a", Push val 10, NewDict(1)
+                Instruction::Push(Constant::String("a".to_string())),
+                Instruction::Push(Constant::Int(10)),
+                Instruction::NewDict(1),
+                // Regex: Push pattern "^ab$", NewRegex
+                Instruction::Push(Constant::String("^ab$".to_string())),
+                Instruction::NewRegex,
+            ],
+            |vm, mc| {
+                // List creation
+                vm.step(mc).unwrap();
+                vm.step(mc).unwrap();
+                vm.step(mc).unwrap(); // NewList(2)
+                assert_eq!(vm.stack.len(), 1);
+                if let Value::List(list) = vm.stack[0] {
+                    assert_eq!(*list.borrow(), vec![Value::Int(1), Value::Int(2)]);
+                } else {
+                    panic!("Expected List");
+                }
+
+                // Dict creation
+                vm.step(mc).unwrap();
+                vm.step(mc).unwrap();
+                vm.step(mc).unwrap(); // NewDict(1)
+                assert_eq!(vm.stack.len(), 2);
+                if let Value::Dict(dict) = vm.stack[1] {
+                    assert_eq!(dict.borrow().get("a").copied(), Some(Value::Int(10)));
+                } else {
+                    panic!("Expected Dict");
+                }
+
+                // Regex creation
+                vm.step(mc).unwrap();
+                vm.step(mc).unwrap(); // NewRegex
+                assert_eq!(vm.stack.len(), 3);
+                if let Value::Regex(re) = vm.stack[2] {
+                    assert!(re.0.is_match("ab"));
+                    assert!(!re.0.is_match("abc"));
+                } else {
+                    panic!("Expected Regex");
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn test_send_message() {
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Int(5)),
+                Instruction::Push(Constant::Int(10)),
+                // Send "+" with 1 argument (selector: "+", receiver: Int(5), arg: Int(10))
+                Instruction::Send("+".to_string(), 1),
+            ],
+            |vm, mc| {
+                vm.step(mc).unwrap();
+                vm.step(mc).unwrap();
+                // Send -> receiver 5 + argument 10 -> returns Int(15)
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(15)]);
+            },
+        );
+    }
+
+    #[test]
+    fn test_block_execution_and_returns() {
+        // We will push a block constant, then send "value" to it.
+        // The block bytecode will load its parameter, add 1 to it, and return.
+        let block_static = StaticBlock {
+            name: Some("test_block".to_string()),
+            is_nested_block: false,
+            param_names: vec!["x".to_string()],
+            bytecode: vec![
+                Instruction::LoadLocal("x".to_string()),
+                Instruction::Push(Constant::Int(1)),
+                Instruction::Send("+".to_string(), 1),
+                Instruction::Return,
+            ],
+        };
+
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Block(block_static)),
+                Instruction::Push(Constant::Int(41)),
+                // Send "value:" with 1 arg
+                Instruction::Send("value:".to_string(), 1),
+            ],
+            |vm, mc| {
+                vm.step(mc).unwrap(); // Push block -> [Block]
+                vm.step(mc).unwrap(); // Push 41 -> [Block, Int(41)]
+                assert_eq!(vm.frames.len(), 1);
+
+                // Send -> starts block frame -> [Block]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.frames.len(), 2);
+                assert_eq!(vm.frames[1].block.name, Some("test_block".to_string()));
+
+                // Inside block: LoadLocal("x") -> push 41 -> [41]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(41)]);
+
+                // Inside block: Push(1) -> [41, 1]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(41), Value::Int(1)]);
+
+                // Inside block: Send("+", 1) -> [42]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack, vec![Value::Int(42)]);
+
+                // Inside block: Return -> pops block frame, leaves return value on stack -> [42]
+                vm.step(mc).unwrap();
+                assert_eq!(vm.frames.len(), 1);
+                assert_eq!(vm.stack, vec![Value::Int(42)]);
+            },
+        );
+    }
+
+    #[test]
+    fn test_yeet_exception() {
+        run_test_steps(
+            vec![Instruction::Push(Constant::Int(500)), Instruction::Yeet],
+            |vm, mc| {
+                vm.step(mc).unwrap();
+                let status = vm.step(mc).unwrap();
+                assert!(matches!(status, VmStatus::Yeeted(Value::Int(500))));
+                assert_eq!(vm.frames.len(), 0);
+            },
+        );
+    }
+
+    #[test]
+    fn test_method_return() {
+        // Block 1 is the method context.
+        // Block 2 is a nested block context.
+        // If Block 2 executes MethodReturn, it should unwind all frames up to and including the method context (Block 1).
+
+        // Block 2: nested block
+        // Bytecode: Push(999), MethodReturn
+        let block_nested = StaticBlock {
+            name: Some("nested".to_string()),
+            is_nested_block: true,
+            param_names: Vec::new(),
+            bytecode: vec![
+                Instruction::Push(Constant::Int(999)),
+                Instruction::MethodReturn,
+            ],
+        };
+
+        // Block 1: method
+        // Bytecode: Push(Block(nested)), Send("value", 0), Push(100), Return
+        let block_method = StaticBlock {
+            name: Some("method".to_string()),
+            is_nested_block: false, // enclosing_method_id will be this frame's ID
+            param_names: Vec::new(),
+            bytecode: vec![
+                Instruction::Push(Constant::Block(block_nested)),
+                Instruction::Send("value".to_string(), 0),
+                Instruction::Push(Constant::Int(100)), // this should be skipped due to MethodReturn
+                Instruction::Return,
+            ],
+        };
+
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Block(block_method)),
+                Instruction::Send("value".to_string(), 0),
+            ],
+            |vm, mc| {
+                vm.step(mc).unwrap(); // Push block_method
+                vm.step(mc).unwrap(); // Send "value" -> starts block_method frame (frame id = 2, enclosing_method_id = 2)
+                assert_eq!(vm.frames.len(), 2);
+                assert_eq!(vm.frames[1].enclosing_method_id, Some(vm.frames[1].id));
+
+                vm.step(mc).unwrap(); // Inside block_method: Push(block_nested)
+                vm.step(mc).unwrap(); // Inside block_method: Send("value", 0) -> starts block_nested frame (frame id = 3, enclosing_method_id = 2)
+                assert_eq!(vm.frames.len(), 3);
+                assert_eq!(vm.frames[2].enclosing_method_id, Some(vm.frames[1].id));
+
+                vm.step(mc).unwrap(); // Inside block_nested: Push(999) -> Stack has [999]
+                assert_eq!(vm.stack, vec![Value::Int(999)]);
+
+                // Inside block_nested: MethodReturn.
+                // It should pop frame 3 (nested) and frame 2 (method), leaving only the main frame (frame 1),
+                // and pushing 999 to the stack.
+                vm.step(mc).unwrap();
+                assert_eq!(vm.frames.len(), 1);
+                assert_eq!(vm.stack, vec![Value::Int(999)]);
+            },
+        );
     }
 }
