@@ -1,9 +1,9 @@
 use crate::error::BBError;
-use crate::value::{NativeFunc, Value};
+use crate::value::{NativeFunc, Value, ObjectPayload, GcRegex};
 use crate::vm::VmState;
-use crate::{gc, gcl};
+use crate::gc;
 
-use gc_arena::{Gc, Mutation, RefLock};
+use gc_arena::{Mutation, RefLock};
 
 // Native helper: print
 pub fn native_print<'gc>(
@@ -11,24 +11,23 @@ pub fn native_print<'gc>(
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
-    // args[0] is the receiver (self)
     if args.len() > 1 {
         for (i, arg) in args[1..].iter().enumerate() {
             if i > 0 {
                 print!(" ");
             }
-            let s = vm.call_method(mc, arg.clone(), "s", vec![])?;
+            let s = vm.call_method(mc, *arg, "s", vec![])?;
             print!("{}", s);
         }
     }
     println!();
-    Ok(Value::Nil)
+    Ok(vm.new_nil(mc))
 }
 
 // Native helper: regex_match
 pub fn native_regex_match<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -38,10 +37,20 @@ pub fn native_regex_match<'gc>(
             msg: "regex_match expects exactly 2 arguments (regex, string)".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Regex(r), Value::String(s)) => {
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "regex_match expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Regex(r), ObjectPayload::String(s)) => {
             let matched = r.0.is_match(&**s);
-            Ok(Value::Bool(matched))
+            Ok(vm.new_bool(mc, matched))
         }
         _ => Err(format!(
             "regex_match expects regex and string, got {:?} and {:?}",
@@ -53,7 +62,7 @@ pub fn native_regex_match<'gc>(
 
 // Native helper: add
 pub fn native_add<'gc>(
-    _vm: &mut VmState<'gc>,
+    vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
@@ -64,14 +73,24 @@ pub fn native_add<'gc>(
             msg: "add expects 2 arguments".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-        (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a + b)),
-        (Value::Int(a), Value::Double(b)) => Ok(Value::Double(*a as f64 + b)),
-        (Value::Double(a), Value::Int(b)) => Ok(Value::Double(a + *b as f64)),
-        (Value::String(a), Value::String(b)) => {
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "add expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => Ok(vm.new_int(mc, a + b)),
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, a + b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, *a as f64 + b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_double(mc, a + *b as f64)),
+        (ObjectPayload::String(a), ObjectPayload::String(b)) => {
             let new_str = format!("{}{}", **a, **b);
-            Ok(Value::String(gc!(mc, new_str)))
+            Ok(vm.new_string(mc, new_str))
         }
         _ => Err(BBError::TypeError {
             expected: "numeric or compatible types".to_string(),
@@ -83,8 +102,8 @@ pub fn native_add<'gc>(
 
 // Native helper: sub
 pub fn native_sub<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -94,11 +113,21 @@ pub fn native_sub<'gc>(
             msg: "sub expects 2 arguments".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
-        (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a - b)),
-        (Value::Int(a), Value::Double(b)) => Ok(Value::Double(*a as f64 - b)),
-        (Value::Double(a), Value::Int(b)) => Ok(Value::Double(a - *b as f64)),
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "sub expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => Ok(vm.new_int(mc, a - b)),
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, a - b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, *a as f64 - b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_double(mc, a - *b as f64)),
         _ => Err(BBError::TypeError {
             expected: "numeric types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -109,8 +138,8 @@ pub fn native_sub<'gc>(
 
 // Native helper: mul
 pub fn native_mul<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -120,11 +149,21 @@ pub fn native_mul<'gc>(
             msg: "mul expects 2 arguments".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-        (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a * b)),
-        (Value::Int(a), Value::Double(b)) => Ok(Value::Double(*a as f64 * b)),
-        (Value::Double(a), Value::Int(b)) => Ok(Value::Double(a * *b as f64)),
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "mul expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => Ok(vm.new_int(mc, a * b)),
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, a * b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, *a as f64 * b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_double(mc, a * *b as f64)),
         _ => Err(BBError::TypeError {
             expected: "numeric types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -135,8 +174,8 @@ pub fn native_mul<'gc>(
 
 // Native helper: div
 pub fn native_div<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -146,16 +185,26 @@ pub fn native_div<'gc>(
             msg: "div expects 2 arguments".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Int(a), Value::Int(b)) => {
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "div expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => {
             if *b == 0 {
                 return Err(BBError::ArithmeticError("Division by zero".to_string()));
             }
-            Ok(Value::Int(a / b))
+            Ok(vm.new_int(mc, a / b))
         }
-        (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a / b)),
-        (Value::Int(a), Value::Double(b)) => Ok(Value::Double(*a as f64 / b)),
-        (Value::Double(a), Value::Int(b)) => Ok(Value::Double(a / *b as f64)),
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, a / b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, *a as f64 / b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_double(mc, a / *b as f64)),
         _ => Err(BBError::TypeError {
             expected: "numeric types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -182,11 +231,10 @@ pub fn native_eq<'gc>(
     let method = vm.lookup_method(receiver, "==:");
     if let Some(method) = method {
         method.call(vm, mc, args)?;
-        vm.pop()?;
+        return Ok(vm.pop()?);
     }
 
-    // TODO: Once all types are Objects this can become unreachable!().
-    Ok(Value::Bool(receiver == other))
+    Ok(vm.new_bool(mc, receiver == other))
 }
 
 // Native helper: ne
@@ -202,13 +250,15 @@ pub fn native_ne<'gc>(
             msg: "ne expects 2 arguments".to_string(),
         });
     }
-    Ok(Value::Bool(native_eq(vm, mc, args)? == Value::Bool(false)))
+    let eq_result = native_eq(vm, mc, args)?;
+    let false_val = vm.new_bool(mc, false);
+    Ok(vm.new_bool(mc, eq_result == false_val))
 }
 
 // Native helper: lt
 pub fn native_lt<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -218,11 +268,21 @@ pub fn native_lt<'gc>(
             msg: "lt expects 2 arguments".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
-        (Value::Double(a), Value::Double(b)) => Ok(Value::Bool(a < b)),
-        (Value::Int(a), Value::Double(b)) => Ok(Value::Bool((*a as f64) < *b)),
-        (Value::Double(a), Value::Int(b)) => Ok(Value::Bool(*a < (*b as f64))),
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "lt expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, a < b)),
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, a < b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) < *b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a < (*b as f64))),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -233,8 +293,8 @@ pub fn native_lt<'gc>(
 
 // Native helper: gt
 pub fn native_gt<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -244,11 +304,21 @@ pub fn native_gt<'gc>(
             msg: "gt expects 2 arguments".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
-        (Value::Double(a), Value::Double(b)) => Ok(Value::Bool(a > b)),
-        (Value::Int(a), Value::Double(b)) => Ok(Value::Bool((*a as f64) > *b)),
-        (Value::Double(a), Value::Int(b)) => Ok(Value::Bool(*a > (*b as f64))),
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "gt expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, a > b)),
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, a > b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) > *b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a > (*b as f64))),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -259,8 +329,8 @@ pub fn native_gt<'gc>(
 
 // Native helper: le
 pub fn native_le<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -270,11 +340,21 @@ pub fn native_le<'gc>(
             msg: "le expects 2 arguments".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
-        (Value::Double(a), Value::Double(b)) => Ok(Value::Bool(a <= b)),
-        (Value::Int(a), Value::Double(b)) => Ok(Value::Bool((*a as f64) <= *b)),
-        (Value::Double(a), Value::Int(b)) => Ok(Value::Bool(*a <= (*b as f64))),
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "le expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, a <= b)),
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, a <= b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) <= *b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a <= (*b as f64))),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -285,8 +365,8 @@ pub fn native_le<'gc>(
 
 // Native helper: ge
 pub fn native_ge<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -296,11 +376,21 @@ pub fn native_ge<'gc>(
             msg: "ge expects 2 arguments".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
-        (Value::Double(a), Value::Double(b)) => Ok(Value::Bool(a >= b)),
-        (Value::Int(a), Value::Double(b)) => Ok(Value::Bool((*a as f64) >= *b)),
-        (Value::Double(a), Value::Int(b)) => Ok(Value::Bool(*a >= (*b as f64))),
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "ge expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, a >= b)),
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, a >= b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) >= *b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a >= (*b as f64))),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -311,8 +401,8 @@ pub fn native_ge<'gc>(
 
 // Native helper: logic not
 pub fn native_not<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 1 {
@@ -322,13 +412,13 @@ pub fn native_not<'gc>(
             msg: "not expects exactly 1 argument (receiver)".to_string(),
         });
     }
-    Ok(Value::Bool(!args[0].is_truthy()))
+    Ok(vm.new_bool(mc, !args[0].is_truthy()))
 }
 
 // Native helper: negated
 pub fn native_negated<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 1 {
@@ -338,21 +428,31 @@ pub fn native_negated<'gc>(
             msg: "negated expects exactly 1 argument (receiver)".to_string(),
         });
     }
-    match &args[0] {
-        Value::Int(i) => Ok(Value::Int(-*i)),
-        Value::Double(f) => Ok(Value::Double(-*f)),
+    let payload = match &args[0] {
+        Value::Object(obj) => &obj.borrow().payload,
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: args[0].type_name().to_string(),
+                msg: "negated expected an object".to_string(),
+            });
+        }
+    };
+    match payload {
+        ObjectPayload::Int(i) => Ok(vm.new_int(mc, -*i)),
+        ObjectPayload::Double(f) => Ok(vm.new_double(mc, -*f)),
         _ => Err(BBError::TypeError {
-            expected: "Integer or Float".to_string(),
+            expected: "Integer or Double".to_string(),
             got: args[0].type_name().to_string(),
-            msg: format!("negated expects integer or float, got {:?}", args[0]),
+            msg: format!("negated expects integer or double, got {:?}", args[0]),
         }),
     }
 }
 
 // Native helper: list index lookup (at:)
 pub fn native_list_at<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -362,14 +462,24 @@ pub fn native_list_at<'gc>(
             msg: "at expects exactly 2 arguments (receiver, index)".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::List(l), Value::Int(idx)) => {
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "at expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::List(l), ObjectPayload::Int(idx)) => {
             let borrowed = l.borrow();
             let idx = *idx;
             if idx >= 0 && idx < borrowed.len() as i64 {
                 Ok(borrowed[idx as usize])
             } else {
-                Ok(Value::Nil)
+                Ok(vm.new_nil(mc))
             }
         }
         _ => Err(format!(
@@ -382,7 +492,7 @@ pub fn native_list_at<'gc>(
 
 // Native helper: list sliceFrom:
 pub fn native_list_slice_from<'gc>(
-    _vm: &mut VmState<'gc>,
+    vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
@@ -393,8 +503,18 @@ pub fn native_list_slice_from<'gc>(
             msg: "sliceFrom expects exactly 2 arguments (receiver, index)".to_string(),
         });
     }
-    match (&args[0], &args[1]) {
-        (Value::List(l), Value::Int(idx)) => {
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "sliceFrom expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::List(l), ObjectPayload::Int(idx)) => {
             let borrowed = l.borrow();
             let start = (*idx).max(0) as usize;
             let sliced = if start < borrowed.len() {
@@ -402,7 +522,7 @@ pub fn native_list_slice_from<'gc>(
             } else {
                 Vec::new()
             };
-            Ok(Value::List(gcl!(mc, sliced)))
+            Ok(vm.new_list(mc, sliced))
         }
         _ => Err(format!(
             "sliceFrom expects list and integer, got {:?} and {:?}",
@@ -413,48 +533,35 @@ pub fn native_list_slice_from<'gc>(
 }
 
 pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
-    // Register dynamic methods/operators in globals
-    let mut globals = vm.globals.borrow_mut(mc);
-    globals.insert(
-        "print:".to_string(),
-        Value::Native(NativeFunc(native_print)),
-    );
-    globals.insert(
-        "print:and:".to_string(),
-        Value::Native(NativeFunc(native_print)),
-    );
-    globals.insert(
-        "print:and:and:and:".to_string(),
-        Value::Native(NativeFunc(native_print)),
-    );
-    globals.insert(
-        "regex_match:".to_string(),
-        Value::Native(NativeFunc(native_regex_match)),
-    );
-
+    let mut funcs = Vec::new();
+    
+    funcs.push(("print:".to_string(), vm.new_native(mc, NativeFunc(native_print))));
+    funcs.push(("print:and:".to_string(), vm.new_native(mc, NativeFunc(native_print))));
+    funcs.push(("print:and:and:and:".to_string(), vm.new_native(mc, NativeFunc(native_print))));
+    funcs.push(("regex_match:".to_string(), vm.new_native(mc, NativeFunc(native_regex_match))));
+    
     // Operators
-    globals.insert("+".to_string(), Value::Native(NativeFunc(native_add)));
-    globals.insert("-".to_string(), Value::Native(NativeFunc(native_sub)));
-    globals.insert("*".to_string(), Value::Native(NativeFunc(native_mul)));
-    globals.insert("/".to_string(), Value::Native(NativeFunc(native_div)));
-    globals.insert("==".to_string(), Value::Native(NativeFunc(native_eq)));
-    globals.insert("!=".to_string(), Value::Native(NativeFunc(native_ne)));
-    globals.insert("<".to_string(), Value::Native(NativeFunc(native_lt)));
-    globals.insert(">".to_string(), Value::Native(NativeFunc(native_gt)));
-    globals.insert("<=".to_string(), Value::Native(NativeFunc(native_le)));
-    globals.insert(">=".to_string(), Value::Native(NativeFunc(native_ge)));
-
+    funcs.push(("+".to_string(), vm.new_native(mc, NativeFunc(native_add))));
+    funcs.push(("-".to_string(), vm.new_native(mc, NativeFunc(native_sub))));
+    funcs.push(("*".to_string(), vm.new_native(mc, NativeFunc(native_mul))));
+    funcs.push(("/".to_string(), vm.new_native(mc, NativeFunc(native_div))));
+    funcs.push(("==".to_string(), vm.new_native(mc, NativeFunc(native_eq))));
+    funcs.push(("!=".to_string(), vm.new_native(mc, NativeFunc(native_ne))));
+    funcs.push(("<".to_string(), vm.new_native(mc, NativeFunc(native_lt))));
+    funcs.push((">".to_string(), vm.new_native(mc, NativeFunc(native_gt))));
+    funcs.push(("<=".to_string(), vm.new_native(mc, NativeFunc(native_le))));
+    funcs.push((">=".to_string(), vm.new_native(mc, NativeFunc(native_ge))));
+    
     // Unary
-    globals.insert("!".to_string(), Value::Native(NativeFunc(native_not)));
-    globals.insert(
-        "negated".to_string(),
-        Value::Native(NativeFunc(native_negated)),
-    );
-
+    funcs.push(("!".to_string(), vm.new_native(mc, NativeFunc(native_not))));
+    funcs.push(("negated".to_string(), vm.new_native(mc, NativeFunc(native_negated))));
+    
     // List destructuring
-    globals.insert("at:".to_string(), Value::Native(NativeFunc(native_list_at)));
-    globals.insert(
-        "sliceFrom:".to_string(),
-        Value::Native(NativeFunc(native_list_slice_from)),
-    );
+    funcs.push(("at:".to_string(), vm.new_native(mc, NativeFunc(native_list_at))));
+    funcs.push(("sliceFrom:".to_string(), vm.new_native(mc, NativeFunc(native_list_slice_from))));
+
+    let mut globals = vm.globals.borrow_mut(mc);
+    for (name, val) in funcs {
+        globals.insert(name, val);
+    }
 }

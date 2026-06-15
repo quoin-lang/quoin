@@ -1,7 +1,7 @@
 use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
 use new_vm::runtime::{boolean, class, native, object};
-use new_vm::value::{Block, NativeClassBuilder, Value};
+use new_vm::value::{Block, NativeClassBuilder, Value, ObjectPayload};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
 
@@ -60,6 +60,19 @@ p3.print;
 p3.print:'p3.x =' and: p3.x;
 p3.print:'p3.y =' and: p3.y;
 p3.print:'p3.z =' and: p3.z;
+
+.print: 'true class is' and: true.class;
+.print: 'nil class is' and: nil.class;
+.print: '5 class is' and: 5.class;
+
+true <-- {
+  custom_print -> {
+    .print: 'Hello from custom_print on true!';
+  }
+};
+true.custom_print;
+.print: 'true class after override is' and: true.class;
+.print: 'false class is' and: false.class;
 
 "* Test 1: Simple assignments, variables, and operators
 x = 10;
@@ -175,13 +188,20 @@ result = p1.test_nlr;
             if t == "Double" || t == "Integer" {
                 let class_builder = NativeClassBuilder::new(t, Some("Object")).instance_method(
                     "sqrt",
-                    |_vm, _mc, args| {
+                    |vm, mc, args| {
                         if args.is_empty() {
                             return Err(BBError::Other("sqrt expects a receiver".to_string()));
                         }
-                        match args[0] {
-                            Value::Double(f) => Ok(Value::Double(f.sqrt())),
-                            Value::Int(i) => Ok(Value::Double((i as f64).sqrt())),
+                        let payload = match args[0] {
+                            Value::Object(obj) => &obj.borrow().payload,
+                            _ => return Err(BBError::Other(format!(
+                                "sqrt expected number, got {:?}",
+                                args[0]
+                            ))),
+                        };
+                        match payload {
+                            ObjectPayload::Double(f) => Ok(vm.new_double(mc, f.sqrt())),
+                            ObjectPayload::Int(i) => Ok(vm.new_double(mc, (*i as f64).sqrt())),
                             _ => Err(BBError::Other(format!(
                                 "sqrt expected number, got {:?}",
                                 args[0]

@@ -6,12 +6,15 @@ use gc_arena::Gc;
 pub fn build_boolean_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Boolean", Some("Object"))
         //
-        .instance_method("s", |_vm, mc, args| {
+        .instance_method("s", |vm, mc, args| {
             let b = arg!(args, Bool, 0);
-            Ok(Value::String(if b {
-                gc!(mc, "true".to_string())
-            } else {
-                gc!(mc, "false".to_string())
-            }))
+            Ok(vm.new_string(
+                mc,
+                if b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                },
+            ))
         })
 }

@@ -1,47 +1,62 @@
-use crate::value::{NativeClassBuilder, Value};
-use crate::{arg, gc};
-
-use gc_arena::Gc;
+use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
-        .instance_method("s", |_vm, mc, args| {
-            Ok(Value::String(gc!(mc, format!("{}", args[0]))))
+        .instance_method("s", |vm, mc, args| {
+            Ok(vm.new_string(mc, format!("{}", args[0])))
         })
-        .instance_method("id", |_vm, mc, args| {
+        .instance_method("id", |vm, mc, args| {
             let value = args[0];
-
-            let id: Value = match value {
-                Value::Object(obj) => Value::String(gc!(mc, obj.borrow().id.0.to_string())),
-                _ => todo!(),
+            let id_str = match value {
+                Value::Object(obj) => {
+                    let obj_borrow = obj.borrow();
+                    match &obj_borrow.payload {
+                        ObjectPayload::Nil => "Nil".to_string(),
+                        ObjectPayload::Bool(b) => format!("Bool({})", b),
+                        ObjectPayload::Int(i) => format!("Int({})", i),
+                        ObjectPayload::Double(d) => format!("Double({})", d),
+                        ObjectPayload::String(s) => format!("String({})", *s),
+                        ObjectPayload::List(l) => format!("List({:p})", &*l.borrow()),
+                        ObjectPayload::Dict(d) => format!("Dict({:p})", &*d.borrow()),
+                        ObjectPayload::Regex(r) => format!("Regex({})", r.0.as_str()),
+                        ObjectPayload::Block(b) => format!("Block({:?})", b.name),
+                        ObjectPayload::Native(n) => format!("Native({:p})", n.0 as *const ()),
+                        ObjectPayload::Instance => {
+                            format!("{}({:?})", obj_borrow.class_name(), obj_borrow.id)
+                        }
+                    }
+                }
+                Value::Class(c) => format!("Class({})", c.borrow().name),
+                Value::ClassMeta(c) => format!("ClassMeta({})", c.borrow().name),
             };
-            Ok(id)
+            Ok(vm.new_string(mc, id_str))
         })
-        .instance_method("class", |_vm, _mc, args| {
-            let obj = arg!(args, Object, 0);
-            Ok(Value::Class(obj.borrow().class))
+        .instance_method("class", |vm, _mc, args| {
+            let receiver = args[0];
+            if let Some(c) = vm.get_class_for_lookup(receiver) {
+                Ok(Value::Class(c))
+            } else {
+                Err(crate::error::BBError::Other(format!(
+                    "Class not found for type {}",
+                    receiver.type_name()
+                )))
+            }
         })
         .instance_method("~:", |vm, mc, args| {
             vm.call_method(mc, args[0], "==:", vec![args[1]])
         })
-        .instance_method("==:", |_vm, _mc, args| {
+        .instance_method("==:", |vm, mc, args| {
             let lhs = args[0];
             let rhs = args[1];
-
-            match (lhs, rhs) {
-                (Value::Object(o1), Value::Object(o2)) => {
-                    Ok(Value::Bool(o1.borrow().id == o2.borrow().id))
-                }
-                _ => Ok(Value::Bool(lhs == rhs)),
-            }
+            Ok(vm.new_bool(mc, lhs == rhs))
         })
         .instance_method("!=:", |vm, mc, args| {
             let lhs = args[0];
             let rhs = args[1];
 
-            Ok(Value::Bool(
-                vm.call_method(mc, lhs, "==:", vec![rhs])? == Value::Bool(false),
-            ))
+            let eq_result = vm.call_method(mc, lhs, "==:", vec![rhs])?;
+            let false_val = vm.new_bool(mc, false);
+            Ok(vm.new_bool(mc, eq_result == false_val))
         })
         // TODO: call #init in #new/#new:
         .instance_method("init", |_vm, _mc, args| Ok(args[0]))
@@ -51,15 +66,16 @@ pub fn build_object_class() -> NativeClassBuilder {
             println!(
                 "{}",
                 match s_result {
-                    Value::String(string) => string.to_string(),
-                    x => format!("{:?}", x),
+                    Value::Object(obj) => match &obj.borrow().payload {
+                        ObjectPayload::String(string) => string.to_string(),
+                        _ => format!("{}", s_result),
+                    },
+                    x => format!("{}", x),
                 }
             );
 
-            Ok(Value::Nil)
+            Ok(vm.new_nil(mc))
         })
-        .instance_method("throw", |_vm, _mc, args| {
-            // TODO: implement throw properly
-            Err(format!("{}", args[0]).into())
-        })
+        // TODO: implement throw properly
+        .instance_method("throw", |_vm, _mc, args| Err(format!("{}", args[0]).into()))
 }

@@ -50,8 +50,17 @@ unsafe impl<'gc> Collect<'gc> for NativeFunc {
     const NEEDS_TRACE: bool = false;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Collect)]
+#[collect(no_drop)]
 pub enum Value<'gc> {
+    Object(Gc<'gc, RefLock<Object<'gc>>>),
+    Class(Gc<'gc, RefLock<Class<'gc>>>),
+    ClassMeta(Gc<'gc, RefLock<Class<'gc>>>),
+}
+
+#[derive(Clone, Copy, Collect)]
+#[collect(no_drop)]
+pub enum ObjectPayload<'gc> {
     Nil,
     Bool(bool),
     Int(i64),
@@ -62,54 +71,38 @@ pub enum Value<'gc> {
     Regex(Gc<'gc, GcRegex>),
     Block(Gc<'gc, Block<'gc>>),
     Native(NativeFunc),
-    Class(Gc<'gc, RefLock<Class<'gc>>>),
-    Object(Gc<'gc, RefLock<Object<'gc>>>),
-    ClassMeta(Gc<'gc, RefLock<Class<'gc>>>),
-}
-
-unsafe impl<'gc> Collect<'gc> for Value<'gc> {
-    const NEEDS_TRACE: bool = true;
-
-    #[inline]
-    fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
-        match self {
-            Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Double(_) | Value::Native(_) => {}
-            Value::String(s) => cc.trace(s),
-            Value::List(l) => cc.trace(l),
-            Value::Dict(d) => cc.trace(d),
-            Value::Regex(r) => cc.trace(r),
-            Value::Block(b) => cc.trace(b),
-            Value::Class(c) => cc.trace(c),
-            Value::Object(o) => cc.trace(o),
-            Value::ClassMeta(c) => cc.trace(c),
-        }
-    }
+    Instance,
 }
 
 impl<'gc> Value<'gc> {
     pub fn is_truthy(&self) -> bool {
         match self {
-            Value::Nil => false,
-            Value::Bool(b) => *b,
+            Value::Object(obj) => match &obj.borrow().payload {
+                ObjectPayload::Nil => false,
+                ObjectPayload::Bool(b) => *b,
+                _ => true,
+            },
             _ => true,
         }
     }
 
     pub fn type_name(&self) -> &'static str {
         match self {
-            Value::Nil => "Nil",
-            Value::Bool(_) => "Boolean",
-            Value::Int(_) => "Integer",
-            Value::Double(_) => "Double",
-            Value::String(_) => "String",
-            Value::List(_) => "List",
-            Value::Dict(_) => "Dictionary",
-            Value::Regex(_) => "Regex",
-            Value::Block(_) => "Block",
-            Value::Native(_) => "Native",
             Value::Class(_) => "Class",
-            Value::Object(_) => "Object",
             Value::ClassMeta(_) => "ClassMeta",
+            Value::Object(obj) => match &obj.borrow().payload {
+                ObjectPayload::Nil => "Nil",
+                ObjectPayload::Bool(_) => "Boolean",
+                ObjectPayload::Int(_) => "Integer",
+                ObjectPayload::Double(_) => "Double",
+                ObjectPayload::String(_) => "String",
+                ObjectPayload::List(_) => "List",
+                ObjectPayload::Dict(_) => "Dictionary",
+                ObjectPayload::Regex(_) => "Regex",
+                ObjectPayload::Block(_) => "Block",
+                ObjectPayload::Native(_) => "Native",
+                _ => "Object",
+            },
         }
     }
 }
@@ -117,24 +110,30 @@ impl<'gc> Value<'gc> {
 impl<'gc> PartialEq for Value<'gc> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Nil, Value::Nil) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Double(a), Value::Double(b)) => a == b,
-            (Value::Int(a), Value::Double(b)) => (*a as f64) == *b,
-            (Value::Double(a), Value::Int(b)) => *a == (*b as f64),
-            (Value::String(a), Value::String(b)) => **a == **b,
-            (Value::List(a), Value::List(b)) => Gc::ptr_eq(*a, *b),
-            (Value::Dict(a), Value::Dict(b)) => Gc::ptr_eq(*a, *b),
-            (Value::Regex(a), Value::Regex(b)) => Gc::ptr_eq(*a, *b),
-            (Value::Block(a), Value::Block(b)) => Gc::ptr_eq(*a, *b),
             (Value::Class(a), Value::Class(b)) => Gc::ptr_eq(*a, *b),
-            (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
             (Value::ClassMeta(a), Value::ClassMeta(b)) => Gc::ptr_eq(*a, *b),
-            (Value::Native(a), Value::Native(b)) => {
-                let a_ptr = a.0 as *const ();
-                let b_ptr = b.0 as *const ();
-                a_ptr == b_ptr
+            (Value::Object(a), Value::Object(b)) => {
+                let a_borrow = a.borrow();
+                let b_borrow = b.borrow();
+                match (&a_borrow.payload, &b_borrow.payload) {
+                    (ObjectPayload::Nil, ObjectPayload::Nil) => true,
+                    (ObjectPayload::Bool(x), ObjectPayload::Bool(y)) => x == y,
+                    (ObjectPayload::Int(x), ObjectPayload::Int(y)) => x == y,
+                    (ObjectPayload::Double(x), ObjectPayload::Double(y)) => x == y,
+                    (ObjectPayload::Int(x), ObjectPayload::Double(y)) => (*x as f64) == *y,
+                    (ObjectPayload::Double(x), ObjectPayload::Int(y)) => *x == (*y as f64),
+                    (ObjectPayload::String(x), ObjectPayload::String(y)) => **x == **y,
+                    (ObjectPayload::List(x), ObjectPayload::List(y)) => Gc::ptr_eq(*x, *y),
+                    (ObjectPayload::Dict(x), ObjectPayload::Dict(y)) => Gc::ptr_eq(*x, *y),
+                    (ObjectPayload::Regex(x), ObjectPayload::Regex(y)) => Gc::ptr_eq(*x, *y),
+                    (ObjectPayload::Block(x), ObjectPayload::Block(y)) => Gc::ptr_eq(*x, *y),
+                    (ObjectPayload::Native(x), ObjectPayload::Native(y)) => {
+                        let a_ptr = x.0 as *const ();
+                        let b_ptr = y.0 as *const ();
+                        a_ptr == b_ptr
+                    }
+                    _ => a_borrow.id == b_borrow.id,
+                }
             }
             _ => false,
         }
@@ -144,21 +143,26 @@ impl<'gc> PartialEq for Value<'gc> {
 impl<'gc> fmt::Debug for Value<'gc> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Nil => write!(f, "Nil"),
-            Value::Bool(b) => write!(f, "Bool({})", b),
-            Value::Int(i) => write!(f, "Int({})", i),
-            Value::Double(fl) => write!(f, "Float({})", fl),
-            Value::String(s) => write!(f, "String({:?})", **s),
-            Value::List(_) => write!(f, "List(...)"),
-            Value::Dict(_) => write!(f, "Dict(...)"),
-            Value::Regex(r) => write!(f, "{:?}", r),
-            Value::Block(b) => write!(f, "Block({:?})", b.name),
-            Value::Native(_) => write!(f, "Native(<fn>)"),
             Value::Class(c) => write!(f, "Class({})", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "ClassMeta({})", c.borrow().name),
             Value::Object(o) => {
-                let name = o.borrow().class.borrow().name.clone();
-                write!(f, "Object({}, {{{:?}}})", name, o.borrow().fields)
+                let o_borrow = o.borrow();
+                match &o_borrow.payload {
+                    ObjectPayload::Nil => write!(f, "Nil"),
+                    ObjectPayload::Bool(b) => write!(f, "Bool({})", b),
+                    ObjectPayload::Int(i) => write!(f, "Int({})", i),
+                    ObjectPayload::Double(fl) => write!(f, "Float({})", fl),
+                    ObjectPayload::String(s) => write!(f, "String({:?})", *s),
+                    ObjectPayload::List(_) => write!(f, "List(...)"),
+                    ObjectPayload::Dict(_) => write!(f, "Dict(...)"),
+                    ObjectPayload::Regex(r) => write!(f, "{:?}", r),
+                    ObjectPayload::Block(b) => write!(f, "Block({:?})", b.name),
+                    ObjectPayload::Native(_) => write!(f, "Native(<fn>)"),
+                    _ => {
+                        let name = o_borrow.class.borrow().name.clone();
+                        write!(f, "Object({}, {{{:?}}})", name, o_borrow.fields)
+                    }
+                }
             }
         }
     }
@@ -167,54 +171,59 @@ impl<'gc> fmt::Debug for Value<'gc> {
 impl<'gc> fmt::Display for Value<'gc> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Nil => write!(f, "nil"),
-            Value::Bool(b) => write!(f, "{}", b),
-            Value::Int(i) => write!(f, "{}", i),
-            Value::Double(fl) => write!(f, "{}", fl),
-            Value::String(s) => write!(f, "{}", **s),
-            Value::List(l) => {
-                let borrowed = l.borrow();
-                write!(f, "#(")?;
-                for (i, val) in borrowed.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    write!(f, "{}", val)?;
-                }
-                write!(f, ")")
-            }
-            Value::Dict(d) => {
-                let borrowed = d.borrow();
-                write!(f, "#{{")?;
-                for (i, (k, v)) in borrowed.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    write!(f, "{}: {}", k, v)?;
-                }
-                write!(f, "}}")
-            }
-            Value::Regex(r) => write!(f, "#/{}/", r.0.as_str()),
-            Value::Block(b) => {
-                if let Some(ref name) = b.name {
-                    write!(f, "<block {}>", name)
-                } else {
-                    write!(f, "<block>")
-                }
-            }
-            Value::Native(_) => write!(f, "<native fn>"),
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "class {} meta", c.borrow().name),
             Value::Object(o) => {
-                let name = o.borrow().class.borrow().name.clone();
-                write!(f, "{}{{", name)?;
-                for (i, (k, v)) in o.borrow().fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
+                let o_borrow = o.borrow();
+                match &o_borrow.payload {
+                    ObjectPayload::Nil => write!(f, "nil"),
+                    ObjectPayload::Bool(b) => write!(f, "{}", b),
+                    ObjectPayload::Int(i) => write!(f, "{}", i),
+                    ObjectPayload::Double(fl) => write!(f, "{}", fl),
+                    ObjectPayload::String(s) => write!(f, "{}", **s),
+                    ObjectPayload::List(l) => {
+                        let borrowed = l.borrow();
+                        write!(f, "#(")?;
+                        for (i, val) in borrowed.iter().enumerate() {
+                            if i > 0 {
+                                write!(f, " ")?;
+                            }
+                            write!(f, "{}", val)?;
+                        }
+                        write!(f, ")")
                     }
-                    write!(f, "{}: {}", k, v)?;
+                    ObjectPayload::Dict(d) => {
+                        let borrowed = d.borrow();
+                        write!(f, "#{{")?;
+                        for (i, (k, v)) in borrowed.iter().enumerate() {
+                            if i > 0 {
+                                write!(f, " ")?;
+                            }
+                            write!(f, "{}: {}", k, v)?;
+                        }
+                        write!(f, "}}")
+                    }
+                    ObjectPayload::Regex(r) => write!(f, "#/{}/", r.0.as_str()),
+                    ObjectPayload::Block(b) => {
+                        if let Some(ref name) = b.name {
+                            write!(f, "<block {}>", name)
+                        } else {
+                            write!(f, "<block>")
+                        }
+                    }
+                    ObjectPayload::Native(_) => write!(f, "<native fn>"),
+                    _ => {
+                        let name = o_borrow.class.borrow().name.clone();
+                        write!(f, "{}{{", name)?;
+                        for (i, (k, v)) in o_borrow.fields.iter().enumerate() {
+                            if i > 0 {
+                                write!(f, " ")?;
+                            }
+                            write!(f, "{}: {}", k, v)?;
+                        }
+                        write!(f, "}}")
+                    }
                 }
-                write!(f, "}}")
             }
         }
     }
@@ -291,15 +300,12 @@ pub struct Object<'gc> {
     pub id: GcUlid,
     pub class: Gc<'gc, RefLock<Class<'gc>>>,
     pub fields: HashMap<String, Value<'gc>>,
+    pub payload: ObjectPayload<'gc>,
 }
 
 impl<'gc> Object<'gc> {
     pub fn class_name(&self) -> String {
         self.class.borrow().name.clone()
-    }
-
-    pub fn get_field_or_default(&self, name: &str) -> Value<'gc> {
-        self.fields.get(name).copied().unwrap_or(Value::Nil)
     }
 }
 

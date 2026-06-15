@@ -22,9 +22,56 @@ macro_rules! gcl {
 
 #[macro_export]
 macro_rules! arg {
+    ($args:ident, Class, $idx:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Class(val)) => val,
+            _ => {
+                return Err($crate::error::BBError::TypeError {
+                    expected: "Class".to_string(),
+                    got: match $args.get($idx) {
+                        Some(v) => v.type_name().to_string(),
+                        None => "None".to_string(),
+                    },
+                    msg: format!("Expected Class at index {}", $idx),
+                })
+            }
+        }
+    };
+    ($args:ident, ClassMeta, $idx:expr) => {
+        match $args.get($idx) {
+            Some(&Value::ClassMeta(val)) => val,
+            _ => {
+                return Err($crate::error::BBError::TypeError {
+                    expected: "ClassMeta".to_string(),
+                    got: match $args.get($idx) {
+                        Some(v) => v.type_name().to_string(),
+                        None => "None".to_string(),
+                    },
+                    msg: format!("Expected ClassMeta at index {}", $idx),
+                })
+            }
+        }
+    };
     ($args:ident, $variant:ident, $idx:expr) => {
         match $args.get($idx) {
-            Some(&Value::$variant(val)) => val,
+            Some(&Value::Object(obj)) => match &obj.borrow().payload {
+                $crate::value::ObjectPayload::$variant(val) => val.clone(),
+                _ => {
+                    return Err($crate::error::BBError::TypeError {
+                        expected: stringify!($variant).to_string(),
+                        got: match $args.get($idx) {
+                            Some(v) => v.type_name().to_string(),
+                            None => "None".to_string(),
+                        },
+                        msg: format!(
+                            "Expected {} at argument index {} (got {:?})",
+                            stringify!($variant),
+                            $idx,
+                            $args[$idx],
+                        ),
+                    })
+                }
+            },
             _ => {
                 return Err($crate::error::BBError::TypeError {
                     expected: stringify!($variant).to_string(),
@@ -42,9 +89,24 @@ macro_rules! arg {
             }
         }
     };
+    ($args:ident, Class, $idx:expr, $err:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Class(val)) => val,
+            _ => return Err($err.into()),
+        }
+    };
+    ($args:ident, ClassMeta, $idx:expr, $err:expr) => {
+        match $args.get($idx) {
+            Some(&Value::ClassMeta(val)) => val,
+            _ => return Err($err.into()),
+        }
+    };
     ($args:ident, $variant:ident, $idx:expr, $err:expr) => {
         match $args.get($idx) {
-            Some(&Value::$variant(val)) => val,
+            Some(&Value::Object(obj)) => match &obj.borrow().payload {
+                $crate::value::ObjectPayload::$variant(val) => val.clone(),
+                _ => return Err($err.into()),
+            },
             _ => return Err($err.into()),
         }
     };

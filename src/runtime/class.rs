@@ -5,9 +5,9 @@ use gc_arena::Gc;
 
 pub fn build_class_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Class", Some("Object"))
-        .instance_method("name", |_vm, mc, args| {
+        .instance_method("name", |vm, mc, args| {
             let clz = arg!(args, Class, 0);
-            Ok(Value::String(gc!(mc, clz.borrow().name.clone())))
+            Ok(vm.new_string(mc, clz.borrow().name.clone()))
         })
         .instance_method("class", |vm, _mc, _args| {
             Ok(vm
@@ -17,13 +17,13 @@ pub fn build_class_class() -> NativeClassBuilder {
                 .expect("Class global not found")
                 .clone())
         })
-        .instance_method("parent", |_vm, _mc, args| {
+        .instance_method("parent", |vm, mc, args| {
             let clz = arg!(args, Class, 0);
             let parent = clz.borrow().parent;
             if let Some(parent) = parent {
                 Ok(Value::Class(parent))
             } else {
-                Ok(Value::Nil)
+                Ok(vm.new_nil(mc))
             }
         })
 }
