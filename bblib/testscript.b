@@ -116,3 +116,23 @@ Point <-- {
 
 result = p1.test_nlr;
 .print: 'Result of non-local return =' and: result;
+
+"* Test 7: Namespaces
+[IO]File <- { | @path |
+  .meta <-- {
+    open: -> { |path|
+      .new: { path = path }
+    }
+  }
+  path -> { @path }
+};
+
+file = [IO]File.open: '/etc/motd';
+.print: 'file path =' and: file.path;
+.print: 'file class =' and: file.class;
+.print: 'file class name =' and: file.class.name;
+.print: '[/]Object =' and: [/]Object;
+.print: 'Object == [/]Object =' and: (Object == [/]Object);
+
+[IO]Stdout = 'standard output';
+.print: 'Stdout =' and: [IO]Stdout;

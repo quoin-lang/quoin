@@ -59,7 +59,7 @@ This document outlines the language features, compiler updates, and VM modificat
   - The VM must unwind execution frames back to the nearest enclosing catch block when an exception is thrown.
 
 ## 7. Namespaces
-- [ ] **Namespaced Globals**:
+- [x] **Namespaced Globals**:
   - Support namespaced identifiers like `[IO]Stdout` or `[IO]Folder`.
   - The compiler and VM must parse, store, and look up namespaced globals.
 

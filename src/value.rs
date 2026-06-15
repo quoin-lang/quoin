@@ -2,7 +2,7 @@ use crate::error::BBError;
 use crate::instruction::Instruction;
 use crate::vm::VmState;
 
-use gc_arena::{lock::RefLock, Collect, Gc};
+use gc_arena::{Collect, Gc, lock::RefLock};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
@@ -22,6 +22,71 @@ pub struct GcRegex(pub Regex);
 impl fmt::Debug for GcRegex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Regex({})", self.0.as_str())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Collect)]
+#[collect(require_static)]
+pub struct NamespacedName {
+    pub path: Vec<String>,
+    pub name: String,
+}
+
+impl NamespacedName {
+    pub fn new(path: Vec<String>, name: String) -> Self {
+        Self { path, name }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        if s.starts_with('[') {
+            if let Some(close_idx) = s.find(']') {
+                let ns_part = &s[1..close_idx];
+                let name = s[close_idx + 1..].to_string();
+                let path = if ns_part == "/" || ns_part.is_empty() {
+                    Vec::new()
+                } else {
+                    ns_part.split('/').map(|x| x.to_string()).collect()
+                };
+                return Self { path, name };
+            }
+        }
+        Self {
+            path: Vec::new(),
+            name: s.to_string(),
+        }
+    }
+
+    pub fn from_ast(id: &crate::parser::ast_visitor::IdentifierNode) -> Self {
+        let path = if let Some(ns) = &id.namespace {
+            ns.identifiers
+                .iter()
+                .map(|ident| ident.name.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            path,
+            name: id.name.clone(),
+        }
+    }
+
+    pub fn to_explicit_string(&self) -> String {
+        if self.path.is_empty() {
+            format!("[/]{}", self.name)
+        } else {
+            format!("[{}]{}", self.path.join("/"), self.name)
+        }
+    }
+}
+
+impl fmt::Display for NamespacedName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.path.is_empty() {
+            write!(f, "{}", self.name)
+        } else {
+            write!(f, "[{}]{}", self.path.join("/"), self.name)
+        }
     }
 }
 
@@ -317,7 +382,7 @@ impl<'gc> EnvFrame<'gc> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Class<'gc> {
-    pub name: String,
+    pub name: NamespacedName,
     pub parent: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub instance_vars: Vec<String>,
     pub instance_methods: HashMap<String, Value<'gc>>,
@@ -336,7 +401,7 @@ pub struct Object<'gc> {
 
 impl<'gc> Object<'gc> {
     pub fn class_name(&self) -> String {
-        self.class.borrow().name.clone()
+        self.class.borrow().name.to_string()
     }
 }
 

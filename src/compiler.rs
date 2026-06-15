@@ -104,10 +104,15 @@ impl Compiler {
                         "false" => bytecode.push(Instruction::Push(Constant::Bool(false))),
                         _ => unreachable!(),
                     }
+                } else if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced
+                {
+                    let ns_name = crate::value::NamespacedName::from_ast(id);
+                    bytecode.push(Instruction::LoadGlobal(ns_name));
                 } else if self.is_local(&id.name) {
                     bytecode.push(Instruction::LoadLocal(id.name.clone()));
                 } else {
-                    bytecode.push(Instruction::LoadGlobal(id.name.clone()));
+                    let ns_name = crate::value::NamespacedName::new(Vec::new(), id.name.clone());
+                    bytecode.push(Instruction::LoadGlobal(ns_name));
                 }
             }
             NodeValue::Assignment(assign) => {
@@ -158,11 +163,11 @@ impl Compiler {
                 bytecode.push(Instruction::NewRegex);
             }
             NodeValue::ClassDefinition(class_def) => {
-                let name = class_def.identifier.name.clone();
+                let name = crate::value::NamespacedName::from_ast(&class_def.identifier);
                 let parent_name = class_def
                     .parent_identifier
                     .as_ref()
-                    .map(|id| id.name.clone());
+                    .map(|id| crate::value::NamespacedName::from_ast(id));
                 let mut instance_vars = Vec::new();
                 for arg in &class_def.block.arguments {
                     instance_vars.push(arg.identifier.name.clone());
@@ -201,17 +206,20 @@ impl Compiler {
                 bytecode.push(Instruction::OverrideMethod(selector));
             }
             NodeValue::ConstDefinition(const_def) => {
+                let ns_name = crate::value::NamespacedName::from_ast(&const_def.identifier);
                 self.compile_node(&const_def.rvalue, bytecode)?;
                 bytecode.push(Instruction::Dup);
-                bytecode.push(Instruction::StoreGlobal(const_def.identifier.name.clone()));
+                bytecode.push(Instruction::StoreGlobal(ns_name));
             }
             NodeValue::UserString(user_str) => {
-                bytecode.push(Instruction::LoadGlobal(user_str.identifier.name.clone()));
+                let ns_name = crate::value::NamespacedName::from_ast(&user_str.identifier);
+                bytecode.push(Instruction::LoadGlobal(ns_name));
                 bytecode.push(Instruction::Push(Constant::String(user_str.value.clone())));
                 bytecode.push(Instruction::Send("newUserString:".to_string(), 1));
             }
             NodeValue::UserList(user_list) => {
-                bytecode.push(Instruction::LoadGlobal(user_list.identifier.name.clone()));
+                let ns_name = crate::value::NamespacedName::from_ast(&user_list.identifier);
+                bytecode.push(Instruction::LoadGlobal(ns_name));
                 for val in &user_list.values {
                     self.compile_node(val, bytecode)?;
                 }
@@ -281,8 +289,14 @@ impl Compiler {
     ) -> Result<(), String> {
         match &lval.value {
             NodeValue::IdentLValue(ident_lval) => {
-                let name = &ident_lval.identifier.name;
-                self.compile_ident_store(&ident_lval.identifier.identifier_type, name, bytecode);
+                let id = &ident_lval.identifier;
+                if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced {
+                    let ns_name = crate::value::NamespacedName::from_ast(id);
+                    bytecode.push(Instruction::StoreGlobal(ns_name));
+                } else {
+                    let name = &id.name;
+                    self.compile_ident_store(&id.identifier_type, name, bytecode);
+                }
             }
             _ => return Err(format!("Unsupported store target: {:?}", lval.value)),
         }
@@ -543,7 +557,12 @@ impl Compiler {
 mod tests {
     use super::*;
     use crate::parser::ast_visitor::*;
+    use crate::value::NamespacedName;
     use std::sync::Arc;
+
+    fn ns(name: &str) -> NamespacedName {
+        NamespacedName::parse(name)
+    }
 
     // Helpers to easily construct Nodes
     fn int(value: i64) -> Node {
@@ -696,7 +715,7 @@ mod tests {
         // unknown name defaults to LoadGlobal
         let res = compile(vec![local_id("my_var")]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("my_var".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("my_var")));
         assert_eq!(res.bytecode, expected);
     }
 
@@ -740,7 +759,7 @@ mod tests {
         };
         let res = compile(vec![assign_node(vec![lval_a, lval_b], local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
         expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
         expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
@@ -772,7 +791,7 @@ mod tests {
         )])
         .unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
         expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
         expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
@@ -794,7 +813,7 @@ mod tests {
         )])
         .unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
         expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
         assert_eq!(res.bytecode, expected);
@@ -834,7 +853,7 @@ mod tests {
         };
         let res = compile(vec![assign_node(vec![lval_a, lval_nested], local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
         expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
         expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
@@ -861,7 +880,7 @@ mod tests {
         // x.foo: 1
         let res = compile(vec![call(Some(local_id("x")), "foo", vec![int(1)])]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("foo:".to_string(), 1));
         assert_eq!(res.bytecode, expected);
@@ -887,21 +906,21 @@ mod tests {
         // -x
         let res = compile(vec![unary(UnaryOperatorType::Sub, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Send("negated".to_string(), 0));
         assert_eq!(res.bytecode, expected);
 
         // !x
         let res = compile(vec![unary(UnaryOperatorType::Bang, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Send("!".to_string(), 0));
         assert_eq!(res.bytecode, expected);
 
         // +x (no-op)
         let res = compile(vec![unary(UnaryOperatorType::Add, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadGlobal("x".to_string()));
+        expected.push(Instruction::LoadGlobal(ns("x")));
         assert_eq!(res.bytecode, expected);
     }
 
@@ -1067,8 +1086,8 @@ mod tests {
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::DefineClass {
-            name: "MyClass".to_string(),
-            parent_name: Some("Object".to_string()),
+            name: ns("MyClass"),
+            parent_name: Some(ns("Object")),
             instance_vars: vec!["a".to_string(), "b".to_string()],
         });
         expected.push(Instruction::Push(Constant::Block(expected_block)));

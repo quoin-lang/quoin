@@ -1,5 +1,5 @@
 use crate::error::BBError;
-use crate::value::{NativeFunc, ObjectPayload, Value};
+use crate::value::{NamespacedName, NativeFunc, ObjectPayload, Value};
 use crate::vm::VmState;
 
 use gc_arena::Mutation;
@@ -582,6 +582,6 @@ pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
 
     let mut globals = vm.globals.borrow_mut(mc);
     for (name, val) in funcs {
-        globals.insert(name, val);
+        globals.insert(NamespacedName::new(Vec::new(), name), val);
     }
 }

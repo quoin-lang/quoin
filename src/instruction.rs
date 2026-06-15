@@ -1,3 +1,4 @@
+use crate::value::NamespacedName;
 use gc_arena::Collect;
 
 #[derive(Clone, Debug, Collect, PartialEq)]
@@ -26,8 +27,8 @@ pub enum Instruction {
     LoadLocal(String),
     DefineLocal(String),
     StoreLocal(String),
-    LoadGlobal(String),
-    StoreGlobal(String),
+    LoadGlobal(NamespacedName),
+    StoreGlobal(NamespacedName),
     Push(Constant),
     Pop,
     Dup,
@@ -43,8 +44,8 @@ pub enum Instruction {
     NewDict(usize), // num_pairs (key/value count)
     NewRegex,
     DefineClass {
-        name: String,
-        parent_name: Option<String>,
+        name: NamespacedName,
+        parent_name: Option<NamespacedName>,
         instance_vars: Vec<String>,
     },
     ExecuteBlockWithSelf,

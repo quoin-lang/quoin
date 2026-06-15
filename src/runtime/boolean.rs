@@ -1,5 +1,5 @@
-use crate::value::{NativeClassBuilder, Value};
 use crate::arg;
+use crate::value::{NativeClassBuilder, Value};
 
 pub fn build_boolean_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Boolean", Some("Object"))

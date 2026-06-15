@@ -1,11 +1,12 @@
 use crate::error::BBError;
 use crate::instruction::{Constant, Instruction};
 use crate::value::{
-    Block, Class, EnvFrame, GcRegex, GcUlid, NativeClass, NativeFunc, Object, ObjectPayload, Value,
+    Block, Class, EnvFrame, GcRegex, GcUlid, NamespacedName, NativeClass, NativeFunc, Object,
+    ObjectPayload, Value,
 };
 use crate::{gc, gcl};
 
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use std::collections::HashMap;
 use ulid::Ulid;
 
@@ -64,7 +65,7 @@ impl<'gc> BuiltinCache<'gc> {
 pub struct VmState<'gc> {
     pub stack: Vec<Value<'gc>>,
     pub frames: Vec<Frame<'gc>>,
-    pub globals: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
+    pub globals: Gc<'gc, RefLock<HashMap<NamespacedName, Value<'gc>>>>,
     pub next_frame_id: usize,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
@@ -172,9 +173,7 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         args: Vec<Value<'gc>>,
     ) -> Result<(), BBError> {
         if args.len() != 1 {
-            return Err(BBError::Other(
-                "new expects only the receiver".to_string(),
-            ));
+            return Err(BBError::Other("new expects only the receiver".to_string()));
         }
 
         // Create the new object
@@ -399,7 +398,8 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         name: &str,
     ) -> Gc<'gc, RefLock<Class<'gc>>> {
-        let existing = self.globals.borrow().get(name).copied();
+        let ns_name = NamespacedName::parse(name);
+        let existing = self.globals.borrow().get(&ns_name).copied();
         if let Some(Value::Class(c)) = existing {
             c
         } else {
@@ -411,7 +411,7 @@ impl<'gc> VmState<'gc> {
             let class_obj = gcl!(
                 mc,
                 Class {
-                    name: name.to_string(),
+                    name: ns_name.clone(),
                     parent,
                     instance_vars: Vec::new(),
                     instance_methods: HashMap::new(),
@@ -421,7 +421,7 @@ impl<'gc> VmState<'gc> {
             );
             self.globals
                 .borrow_mut(mc)
-                .insert(name.to_string(), Value::Class(class_obj));
+                .insert(ns_name, Value::Class(class_obj));
 
             let mut cache = self.builtin_cache.borrow_mut(mc);
             match name {
@@ -442,7 +442,8 @@ impl<'gc> VmState<'gc> {
     }
 
     pub fn get_builtin_class(&self, name: &str) -> Gc<'gc, RefLock<Class<'gc>>> {
-        let existing = self.globals.borrow().get(name).copied();
+        let ns_name = NamespacedName::parse(name);
+        let existing = self.globals.borrow().get(&ns_name).copied();
         if let Some(Value::Class(c)) = existing {
             c
         } else {
@@ -468,7 +469,8 @@ impl<'gc> VmState<'gc> {
         }
 
         let name = native_class.name();
-        let existing = self.globals.borrow().get(name).copied();
+        let ns_name = NamespacedName::parse(name);
+        let existing = self.globals.borrow().get(&ns_name).copied();
         if let Some(Value::Class(existing_class)) = existing {
             let mut borrowed = existing_class.borrow_mut(mc);
             borrowed.parent = parent_class;
@@ -478,7 +480,7 @@ impl<'gc> VmState<'gc> {
             let class_obj = gcl!(
                 mc,
                 Class {
-                    name: name.to_string(),
+                    name: ns_name.clone(),
                     parent: parent_class,
                     instance_vars: Vec::new(),
                     instance_methods: inst_methods,
@@ -489,7 +491,7 @@ impl<'gc> VmState<'gc> {
 
             self.globals
                 .borrow_mut(mc)
-                .insert(name.to_string(), Value::Class(class_obj));
+                .insert(ns_name, Value::Class(class_obj));
 
             let mut cache = self.builtin_cache.borrow_mut(mc);
             match name {
@@ -566,34 +568,40 @@ impl<'gc> VmState<'gc> {
                 return Some(Box::new(NewNoBlockCallable { class_obj: c }));
             }
         }
+        let selector_key = NamespacedName::new(Vec::new(), selector.to_string());
         let method_val = match receiver {
             Value::Class(class_obj) => {
                 if let Some(m) = self.lookup_in_class_hierarchy(class_obj, selector, true) {
                     Some(m)
-                } else if let Some(Value::Class(class_class)) =
-                    self.globals.borrow().get("Class").copied()
-                {
-                    if let Some(m) = self.lookup_in_class_hierarchy(class_class, selector, false) {
-                        Some(m)
-                    } else if let Some(m) = class_class
-                        .borrow()
-                        .mixin_classes
-                        .iter()
-                        .find_map(|c| self.lookup_in_class_hierarchy(*c, selector, false))
-                    {
-                        Some(m)
-                    } else {
-                        self.globals.borrow().get(selector).copied()
-                    }
                 } else {
-                    self.globals.borrow().get(selector).copied()
+                    let class_key = NamespacedName::new(Vec::new(), "Class".to_string());
+                    if let Some(Value::Class(class_class)) =
+                        self.globals.borrow().get(&class_key).copied()
+                    {
+                        if let Some(m) =
+                            self.lookup_in_class_hierarchy(class_class, selector, false)
+                        {
+                            Some(m)
+                        } else if let Some(m) = class_class
+                            .borrow()
+                            .mixin_classes
+                            .iter()
+                            .find_map(|c| self.lookup_in_class_hierarchy(*c, selector, false))
+                        {
+                            Some(m)
+                        } else {
+                            self.globals.borrow().get(&selector_key).copied()
+                        }
+                    } else {
+                        self.globals.borrow().get(&selector_key).copied()
+                    }
                 }
             }
             Value::ClassMeta(class_obj) => {
                 if let Some(m) = self.lookup_in_class_hierarchy(class_obj, selector, true) {
                     Some(m)
                 } else {
-                    self.globals.borrow().get(selector).copied()
+                    self.globals.borrow().get(&selector_key).copied()
                 }
             }
             Value::Object(obj) => {
@@ -601,7 +609,7 @@ impl<'gc> VmState<'gc> {
                 if let Some(m) = self.lookup_in_class_hierarchy(class_obj, selector, false) {
                     Some(m)
                 } else {
-                    self.globals.borrow().get(selector).copied()
+                    self.globals.borrow().get(&selector_key).copied()
                 }
             }
         }?;
@@ -821,14 +829,24 @@ impl<'gc> VmState<'gc> {
             Value::ClassMeta(c) => Ok(c),
             Value::Object(obj) => {
                 let class_ref = obj.borrow().class;
-                if class_ref.borrow().name.starts_with('$') {
+                if class_ref.borrow().name.name.starts_with('$') {
                     Ok(class_ref)
                 } else {
                     let singleton_name = match &obj.borrow().payload {
-                        ObjectPayload::Nil => "$NilClass".to_string(),
-                        ObjectPayload::Bool(true) => "$TrueClass".to_string(),
-                        ObjectPayload::Bool(false) => "$FalseClass".to_string(),
-                        _ => format!("${}", class_ref.borrow().name),
+                        ObjectPayload::Nil => {
+                            NamespacedName::new(Vec::new(), "$NilClass".to_string())
+                        }
+                        ObjectPayload::Bool(true) => {
+                            NamespacedName::new(Vec::new(), "$TrueClass".to_string())
+                        }
+                        ObjectPayload::Bool(false) => {
+                            NamespacedName::new(Vec::new(), "$FalseClass".to_string())
+                        }
+                        _ => {
+                            let mut ns_name = class_ref.borrow().name.clone();
+                            ns_name.name = format!("${}", ns_name.name);
+                            ns_name
+                        }
                     };
                     let s = gcl!(
                         mc,
@@ -1106,9 +1124,10 @@ impl<'gc> VmState<'gc> {
                         return Err(format!("Parent {} is not a Class", p_name).into());
                     }
                 } else {
-                    if name != "Object" {
+                    if !(name.path.is_empty() && name.name == "Object") {
+                        let obj_key = NamespacedName::new(Vec::new(), "Object".to_string());
                         if let Some(Value::Class(obj_class)) =
-                            self.globals.borrow().get("Object").copied()
+                            self.globals.borrow().get(&obj_key).copied()
                         {
                             Some(obj_class)
                         } else {
@@ -1333,8 +1352,8 @@ mod tests {
 
     fn to_spec(val: Value<'_>) -> ValueSpec {
         match val {
-            Value::Class(c) => ValueSpec::Class(c.borrow().name.clone()),
-            Value::ClassMeta(c) => ValueSpec::ClassMeta(c.borrow().name.clone()),
+            Value::Class(c) => ValueSpec::Class(c.borrow().name.to_string()),
+            Value::ClassMeta(c) => ValueSpec::ClassMeta(c.borrow().name.to_string()),
             Value::Object(obj) => {
                 let borrowed = obj.borrow();
                 match &borrowed.payload {
@@ -1359,7 +1378,7 @@ mod tests {
                     ObjectPayload::Block(b) => ValueSpec::Block(b.name.clone()),
                     ObjectPayload::Native(_) => ValueSpec::Native,
                     ObjectPayload::Instance => {
-                        ValueSpec::Instance(borrowed.class.borrow().name.clone())
+                        ValueSpec::Instance(borrowed.class.borrow().name.to_string())
                     }
                 }
             }
@@ -1445,7 +1464,7 @@ mod tests {
             let native_val = vm.new_native(mc, NativeFunc(native_add));
             vm.globals
                 .borrow_mut(mc)
-                .insert("+".to_string(), native_val);
+                .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
 
             let static_block = StaticBlock {
                 name: Some("test_main".to_string()),
@@ -1581,8 +1600,8 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::Push(Constant::Int(77)),
-                Instruction::StoreGlobal("g_var".to_string()),
-                Instruction::LoadGlobal("g_var".to_string()),
+                Instruction::StoreGlobal(NamespacedName::new(Vec::new(), "g_var".to_string())),
+                Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "g_var".to_string())),
             ],
             |vm, mc| {
                 // Step 1: Push(77)
@@ -1919,7 +1938,7 @@ mod tests {
             is_nested_block: false,
             param_names: Vec::new(),
             bytecode: vec![
-                Instruction::LoadGlobal("bar_func".to_string()),
+                Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "bar_func".to_string())),
                 Instruction::Push(Constant::Block(block_nested)),
                 Instruction::Send("value:".to_string(), 1),
                 Instruction::Push(Constant::Int(222)),
@@ -1938,9 +1957,10 @@ mod tests {
                 enclosing_method_id: None,
             };
             let bar_block_val = vm.new_block(mc, bar_block);
-            vm.globals
-                .borrow_mut(mc)
-                .insert("bar_func".to_string(), bar_block_val);
+            vm.globals.borrow_mut(mc).insert(
+                NamespacedName::new(Vec::new(), "bar_func".to_string()),
+                bar_block_val,
+            );
 
             let foo_block = gc!(
                 mc,
@@ -2019,7 +2039,7 @@ mod tests {
             vec![
                 // Define class Point
                 Instruction::DefineClass {
-                    name: "Point".to_string(),
+                    name: NamespacedName::new(Vec::new(), "Point".to_string()),
                     parent_name: None,
                     instance_vars: vec!["x".to_string(), "y".to_string()],
                 },
@@ -2028,7 +2048,7 @@ mod tests {
                 // Execute block with Point as self
                 Instruction::ExecuteBlockWithSelf,
                 // Send "meta" to Point
-                Instruction::LoadGlobal("Point".to_string()),
+                Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "Point".to_string())),
                 Instruction::Send("meta".to_string(), 0),
             ],
             |vm, mc| {
@@ -2036,7 +2056,7 @@ mod tests {
                 vm.step(mc).unwrap();
                 let class_val = vm.peek().unwrap();
                 if let Value::Class(c) = class_val {
-                    assert_eq!(c.borrow().name, "Point");
+                    assert_eq!(c.borrow().name.to_string(), "Point");
                     assert_eq!(
                         c.borrow().instance_vars,
                         vec!["x".to_string(), "y".to_string()]
@@ -2079,7 +2099,7 @@ mod tests {
                 // Stack should have [Point, Nil, ClassMeta(Point)]
                 let meta_val = vm.peek().unwrap();
                 if let Value::ClassMeta(c) = meta_val {
-                    assert_eq!(c.borrow().name, "Point");
+                    assert_eq!(c.borrow().name.to_string(), "Point");
                 } else {
                     panic!("Expected ClassMeta, got {:?}", meta_val);
                 }
@@ -2091,14 +2111,14 @@ mod tests {
     fn test_class_method_lookup_fallback() {
         run_test_steps(
             vec![
-                Instruction::LoadGlobal("Point".to_string()),
+                Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "Point".to_string())),
                 Instruction::Send("name".to_string(), 0),
             ],
             |vm, mc| {
                 let point_class = gcl!(
                     mc,
                     Class {
-                        name: "Point".to_string(),
+                        name: NamespacedName::new(Vec::new(), "Point".to_string()),
                         parent: None,
                         instance_vars: Vec::new(),
                         instance_methods: HashMap::new(),
@@ -2106,9 +2126,10 @@ mod tests {
                         mixin_classes: Vec::new(),
                     }
                 );
-                vm.globals
-                    .borrow_mut(mc)
-                    .insert("Point".to_string(), Value::Class(point_class));
+                vm.globals.borrow_mut(mc).insert(
+                    NamespacedName::new(Vec::new(), "Point".to_string()),
+                    Value::Class(point_class),
+                );
 
                 vm.step(mc).unwrap();
                 assert_eq!(vm.stack.len(), 1);
@@ -2161,7 +2182,7 @@ mod tests {
                 vm.step(mc).unwrap();
                 let class_val = vm.pop().unwrap();
                 if let Value::Class(c) = class_val {
-                    assert_eq!(c.borrow().name, "Boolean");
+                    assert_eq!(c.borrow().name.to_string(), "Boolean");
                 } else {
                     panic!("Expected Class Boolean, got {:?}", class_val);
                 }
@@ -2182,7 +2203,7 @@ mod tests {
                 vm.step(mc).unwrap();
                 let class_val = vm.pop().unwrap();
                 if let Value::Class(c) = class_val {
-                    assert_eq!(c.borrow().name, "$TrueClass");
+                    assert_eq!(c.borrow().name.to_string(), "$TrueClass");
                 } else {
                     panic!("Expected Class $TrueClass, got {:?}", class_val);
                 }
@@ -2199,7 +2220,7 @@ mod tests {
                 vm.step(mc).unwrap();
                 let class_val = vm.pop().unwrap();
                 if let Value::Class(c) = class_val {
-                    assert_eq!(c.borrow().name, "Boolean");
+                    assert_eq!(c.borrow().name.to_string(), "Boolean");
                 } else {
                     panic!("Expected Class Boolean, got {:?}", class_val);
                 }
@@ -2212,11 +2233,11 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::DefineClass {
-                    name: "Point".to_string(),
+                    name: NamespacedName::new(Vec::new(), "Point".to_string()),
                     parent_name: None,
                     instance_vars: vec!["x".to_string(), "y".to_string()],
                 },
-                Instruction::LoadGlobal("Point".to_string()),
+                Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "Point".to_string())),
                 Instruction::Send("new".to_string(), 0),
             ],
             |vm, mc| {
@@ -2225,14 +2246,14 @@ mod tests {
                 vm.step(mc).unwrap(); // Send "new"
                 let obj_val = vm.pop().unwrap();
                 if let Value::Object(obj) = obj_val {
-                    assert_eq!(obj.borrow().class.borrow().name, "Point");
+                    assert_eq!(obj.borrow().class.borrow().name.to_string(), "Point");
                     let fields = &obj.borrow().fields;
                     assert_eq!(to_spec(*fields.get("x").unwrap()), ValueSpec::Nil);
                     assert_eq!(to_spec(*fields.get("y").unwrap()), ValueSpec::Nil);
                 } else {
                     panic!("Expected Object, got {:?}", obj_val);
                 }
-            }
+            },
         );
     }
 }

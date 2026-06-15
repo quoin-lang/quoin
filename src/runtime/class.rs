@@ -1,17 +1,18 @@
 use crate::arg;
-use crate::value::{NativeClassBuilder, Value};
+use crate::value::{NamespacedName, NativeClassBuilder, Value};
 
 pub fn build_class_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Class", Some("Object"))
         .instance_method("name", |vm, mc, args| {
             let clz = arg!(args, Class, 0);
-            Ok(vm.new_string(mc, clz.borrow().name.clone()))
+            Ok(vm.new_string(mc, clz.borrow().name.to_string()))
         })
         .instance_method("class", |vm, _mc, _args| {
+            let class_key = NamespacedName::new(Vec::new(), "Class".to_string());
             Ok(vm
                 .globals
                 .borrow()
-                .get("Class")
+                .get(&class_key)
                 .expect("Class global not found")
                 .clone())
         })
