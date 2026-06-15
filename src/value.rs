@@ -6,6 +6,14 @@ use gc_arena::{lock::RefLock, Collect, Gc};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
+use ulid::Ulid;
+
+#[derive(Clone, Copy, Debug, PartialEq, Hash)]
+pub struct GcUlid(pub Ulid);
+
+unsafe impl<'gc> Collect<'gc> for GcUlid {
+    const NEEDS_TRACE: bool = false;
+}
 
 #[derive(Clone, Collect)]
 #[collect(require_static)]
@@ -300,6 +308,7 @@ pub struct Class<'gc> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Object<'gc> {
+    pub id: GcUlid,
     pub class: Gc<'gc, RefLock<Class<'gc>>>,
     pub fields: HashMap<String, Value<'gc>>,
 }

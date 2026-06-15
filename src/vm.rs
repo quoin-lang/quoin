@@ -1,10 +1,13 @@
 use crate::error::BBError;
 use crate::instruction::{Constant, Instruction};
-use crate::value::{BBRegex, Block, Class, EnvFrame, NativeClass, NativeFunc, Object, Value};
+use crate::value::{
+    BBRegex, Block, Class, EnvFrame, GcUlid, NativeClass, NativeFunc, Object, Value,
+};
 use crate::{gc, gcl};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
+use ulid::Ulid;
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -116,6 +119,7 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
         let obj = gcl!(
             mc,
             Object {
+                id: GcUlid(Ulid::new()),
                 class: self.class_obj,
                 fields,
             }
@@ -578,7 +582,8 @@ impl<'gc> VmState<'gc> {
                     Constant::String(s) => Value::String(gc!(mc, s.clone())),
                     Constant::Block(sb) => {
                         let parent_env = self.frames.last().map(|f| f.env);
-                        let enclosing_method_id = self.frames.last().and_then(|f| f.enclosing_method_id);
+                        let enclosing_method_id =
+                            self.frames.last().and_then(|f| f.enclosing_method_id);
                         let block = gc!(
                             mc,
                             Block {
@@ -1434,24 +1439,32 @@ mod tests {
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc);
-            let bar_block = gc!(mc, Block {
-                name: block_bar.name.clone(),
-                is_nested_block: block_bar.is_nested_block,
-                param_names: block_bar.param_names.clone(),
-                bytecode: block_bar.bytecode.clone(),
-                parent_env: None,
-                enclosing_method_id: None,
-            });
-            vm.globals.borrow_mut(mc).insert("bar_func".to_string(), Value::Block(bar_block));
+            let bar_block = gc!(
+                mc,
+                Block {
+                    name: block_bar.name.clone(),
+                    is_nested_block: block_bar.is_nested_block,
+                    param_names: block_bar.param_names.clone(),
+                    bytecode: block_bar.bytecode.clone(),
+                    parent_env: None,
+                    enclosing_method_id: None,
+                }
+            );
+            vm.globals
+                .borrow_mut(mc)
+                .insert("bar_func".to_string(), Value::Block(bar_block));
 
-            let foo_block = gc!(mc, Block {
-                name: block_foo.name.clone(),
-                is_nested_block: block_foo.is_nested_block,
-                param_names: block_foo.param_names.clone(),
-                bytecode: block_foo.bytecode.clone(),
-                parent_env: None,
-                enclosing_method_id: None,
-            });
+            let foo_block = gc!(
+                mc,
+                Block {
+                    name: block_foo.name.clone(),
+                    is_nested_block: block_foo.is_nested_block,
+                    param_names: block_foo.param_names.clone(),
+                    bytecode: block_foo.bytecode.clone(),
+                    parent_env: None,
+                    enclosing_method_id: None,
+                }
+            );
             vm.start_block(mc, foo_block, Vec::new());
             vm
         });
