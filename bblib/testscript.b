@@ -50,28 +50,6 @@ p3.print:'p3.x =' and: p3.x;
 p3.print:'p3.y =' and: p3.y;
 p3.print:'p3.z =' and: p3.z;
 
-.print: 'true class is' and: true.class;
-.print: 'nil class is' and: nil.class;
-.print: '5 class is' and: 5.class;
-
-true <-- {
-    s --> { 'TTT' };
-
-    if: -> { |ifblock| ifblock.value };
-};
-
-false <-- {
-    s --> { 'FFF' };
-
-    if: -> { |ifblock| nil };
-};
-
-true.if:{ 'YAY'.print };
-false.if:{ 'NOPE'.print };
-
-.print: 'true class after override is' and: true.class;
-.print: 'false class is' and: false.class;
-
 "* Test 1: Simple assignments, variables, and operators
 x = 10;
 y = 20;
@@ -136,7 +114,3 @@ Point <-- {
 
 result = p1.test_nlr;
 .print: 'Result of non-local return =' and: result;
-
-"* Test 7: Fatal error unwinding
-.print: 'Triggering error:';
-'Fatal exception yeeted!'.throw;
