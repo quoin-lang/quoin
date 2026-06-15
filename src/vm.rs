@@ -153,22 +153,34 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
         };
 
         // Create the new object
-        let mut fields = HashMap::new();
-        let nil_val = vm.new_nil(mc);
-        for var in vm.get_all_instance_vars(self.class_obj) {
-            fields.insert(var.clone(), nil_val);
-        }
-        let obj = gcl!(
-            mc,
-            Object {
-                id: GcUlid(Ulid::new()),
-                class: self.class_obj,
-                fields,
-                payload: ObjectPayload::Instance,
-            }
-        );
+        let obj = vm.new_object(mc, self.class_obj);
 
         vm.start_block_for_instantiation(mc, block, obj);
+        Ok(())
+    }
+}
+
+pub struct NewNoBlockCallable<'gc> {
+    pub class_obj: Gc<'gc, RefLock<Class<'gc>>>,
+}
+
+impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
+    fn call(
+        &self,
+        vm: &mut VmState<'gc>,
+        mc: &Mutation<'gc>,
+        args: Vec<Value<'gc>>,
+    ) -> Result<(), BBError> {
+        if args.len() != 1 {
+            return Err(BBError::Other(
+                "new expects only the receiver".to_string(),
+            ));
+        }
+
+        // Create the new object
+        let obj = vm.new_object(mc, self.class_obj);
+
+        vm.push(Value::Object(obj));
         Ok(())
     }
 }
@@ -197,6 +209,27 @@ impl<'gc> VmState<'gc> {
             next_frame_id: 1,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
         }
+    }
+
+    pub fn new_object(
+        &self,
+        mc: &Mutation<'gc>,
+        class_obj: Gc<'gc, RefLock<Class<'gc>>>,
+    ) -> Gc<'gc, RefLock<Object<'gc>>> {
+        let mut fields = HashMap::new();
+        let nil_val = self.new_nil(mc);
+        for var in self.get_all_instance_vars(class_obj) {
+            fields.insert(var.clone(), nil_val);
+        }
+        gcl!(
+            mc,
+            Object {
+                id: GcUlid(Ulid::new()),
+                class: class_obj,
+                fields,
+                payload: ObjectPayload::Instance,
+            }
+        )
     }
 
     pub fn new_nil(&self, mc: &Mutation<'gc>) -> Value<'gc> {
@@ -526,6 +559,11 @@ impl<'gc> VmState<'gc> {
         if selector == "new:" {
             if let Value::Class(c) = receiver {
                 return Some(Box::new(NewCallable { class_obj: c }));
+            }
+        }
+        if selector == "new" {
+            if let Value::Class(c) = receiver {
+                return Some(Box::new(NewNoBlockCallable { class_obj: c }));
             }
         }
         let method_val = match receiver {
@@ -2166,6 +2204,35 @@ mod tests {
                     panic!("Expected Class Boolean, got {:?}", class_val);
                 }
             },
+        );
+    }
+
+    #[test]
+    fn test_class_new() {
+        run_test_steps(
+            vec![
+                Instruction::DefineClass {
+                    name: "Point".to_string(),
+                    parent_name: None,
+                    instance_vars: vec!["x".to_string(), "y".to_string()],
+                },
+                Instruction::LoadGlobal("Point".to_string()),
+                Instruction::Send("new".to_string(), 0),
+            ],
+            |vm, mc| {
+                vm.step(mc).unwrap(); // DefineClass
+                vm.step(mc).unwrap(); // LoadGlobal
+                vm.step(mc).unwrap(); // Send "new"
+                let obj_val = vm.pop().unwrap();
+                if let Value::Object(obj) = obj_val {
+                    assert_eq!(obj.borrow().class.borrow().name, "Point");
+                    let fields = &obj.borrow().fields;
+                    assert_eq!(to_spec(*fields.get("x").unwrap()), ValueSpec::Nil);
+                    assert_eq!(to_spec(*fields.get("y").unwrap()), ValueSpec::Nil);
+                } else {
+                    panic!("Expected Object, got {:?}", obj_val);
+                }
+            }
         );
     }
 }

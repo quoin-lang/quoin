@@ -112,5 +112,7 @@ Point <-- {
   }
 };
 
+.print: 'New Point=' and:Point.new;
+
 result = p1.test_nlr;
 .print: 'Result of non-local return =' and: result;
