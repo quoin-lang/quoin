@@ -6,26 +6,8 @@ pub fn build_object_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, format!("{}", args[0])))
         })
         .instance_method("id", |vm, mc, args| {
-            let value = args[0];
-            let id_str = match value {
-                Value::Object(obj) => {
-                    let obj_borrow = obj.borrow();
-                    match &obj_borrow.payload {
-                        ObjectPayload::Nil => "Nil".to_string(),
-                        ObjectPayload::Bool(b) => format!("Bool({})", b),
-                        ObjectPayload::Int(i) => format!("Int({})", i),
-                        ObjectPayload::Double(d) => format!("Double({})", d),
-                        ObjectPayload::String(s) => format!("String({})", *s),
-                        ObjectPayload::List(l) => format!("List({:p})", &*l.borrow()),
-                        ObjectPayload::Dict(d) => format!("Dict({:p})", &*d.borrow()),
-                        ObjectPayload::Regex(r) => format!("Regex({})", r.0.as_str()),
-                        ObjectPayload::Block(b) => format!("Block({:?})", b.name),
-                        ObjectPayload::Native(n) => format!("Native({:p})", n.0 as *const ()),
-                        ObjectPayload::Instance => {
-                            format!("{}({:?})", obj_borrow.class_name(), obj_borrow.id)
-                        }
-                    }
-                }
+            let id_str = match args[0] {
+                Value::Object(obj) => obj.borrow().id.0.to_string(),
                 Value::Class(c) => format!("Class({})", c.borrow().name),
                 Value::ClassMeta(c) => format!("ClassMeta({})", c.borrow().name),
             };
