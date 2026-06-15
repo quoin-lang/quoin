@@ -25,9 +25,23 @@ pub fn build_object_class() -> NativeClassBuilder {
             vm.call_method(mc, args[0], "==:", vec![args[1]])
         })
         .instance_method("==:", |_vm, _mc, args| {
-            let lhs = arg!(args, Object, 0);
-            let rhs = arg!(args, Object, 1);
-            Ok(Value::Bool(lhs.borrow().id == rhs.borrow().id))
+            let lhs = args[0];
+            let rhs = args[1];
+
+            match (lhs, rhs) {
+                (Value::Object(o1), Value::Object(o2)) => {
+                    Ok(Value::Bool(o1.borrow().id == o2.borrow().id))
+                }
+                _ => Ok(Value::Bool(lhs == rhs)),
+            }
+        })
+        .instance_method("!=:", |vm, mc, args| {
+            let lhs = args[0];
+            let rhs = args[1];
+
+            Ok(Value::Bool(
+                vm.call_method(mc, lhs, "==:", vec![rhs])? == Value::Bool(false),
+            ))
         })
         // TODO: call #init in #new/#new:
         .instance_method("init", |_vm, _mc, args| Ok(args[0]))

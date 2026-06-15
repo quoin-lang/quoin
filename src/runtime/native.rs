@@ -165,8 +165,8 @@ pub fn native_div<'gc>(
 
 // Native helper: eq
 pub fn native_eq<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -176,13 +176,22 @@ pub fn native_eq<'gc>(
             msg: "eq expects 2 arguments".to_string(),
         });
     }
-    Ok(Value::Bool(args[0] == args[1]))
+
+    let (receiver, other) = (args[0], args[1]);
+    let method = vm.lookup_method(receiver, "==:");
+    if let Some(method) = method {
+        method.call(vm, mc, args)?;
+        vm.pop()?;
+    }
+
+    // TODO: Once all types are Objects this can become unreachable!().
+    Ok(Value::Bool(receiver == other))
 }
 
 // Native helper: ne
 pub fn native_ne<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     if args.len() != 2 {
@@ -192,7 +201,7 @@ pub fn native_ne<'gc>(
             msg: "ne expects 2 arguments".to_string(),
         });
     }
-    Ok(Value::Bool(args[0] != args[1]))
+    Ok(Value::Bool(native_eq(vm, mc, args)? == Value::Bool(false)))
 }
 
 // Native helper: lt
