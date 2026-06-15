@@ -25,11 +25,45 @@ fn main() {
     {
         println!("Loading bblib/*.b...");
 
-        let ast_iter = glob("bblib/*.b").unwrap().map(|p| {
+        let ast_iter = glob("bblib/*.b").unwrap().filter_map(|p| {
             let path_buf = p.unwrap();
-            println!("Loading file: {}", path_buf.display());
-            parser::parse_building_blocks_file(&path_buf)
+            let path_s = path_buf.display().to_string();
+            if !path_s.starts_with("bblib/test") && !path_s.ends_with("main.b") {
+                println!("Loading file: {}", path_s);
+                let node = parser::parse_building_blocks_file(&path_buf);
+                Some(node)
+            } else {
+                None
+            }
         });
+        compile_and_run_asts(ast_iter);
+        return;
+    }
+
+    if let Some(arg) = args.get(1)
+        && arg == "test"
+    {
+        println!("Loading bblib/*.b...");
+
+        let ast_iter = glob("bblib/*.b")
+            .unwrap()
+            .filter_map(|p| {
+                let path_buf = p.unwrap();
+                let path_s = path_buf.display().to_string();
+                if path_s == "bblib/test.b"
+                    || (!path_s.starts_with("bblib/test") && !path_s.ends_with("main.b"))
+                {
+                    println!("Loading file: {}", path_s);
+                    let node = parser::parse_building_blocks_file(&path_buf);
+                    Some(node)
+                } else {
+                    None
+                }
+            })
+            .chain(vec![{
+                println!("Loading file: bblib/main.b");
+                parser::parse_building_blocks_string(&read_to_string("bblib/main.b").unwrap())
+            }]);
         compile_and_run_asts(ast_iter);
         return;
     }
@@ -140,10 +174,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
         loop {
             let status = arena.mutate_root(|mc, vm| match vm.step(mc) {
                 Ok(VmStatus::Running) => Ok(ExecutionStatus::Running),
-                Ok(VmStatus::Finished(val)) => {
-                    println!("VM execution finished successfully. Top value: {}", val);
-                    Ok(ExecutionStatus::Finished)
-                }
+                Ok(VmStatus::Finished(_)) => Ok(ExecutionStatus::Finished),
                 Ok(VmStatus::Yeeted(val)) => {
                     println!("VM execution terminated with uncaught exception: {}", val);
                     Ok(ExecutionStatus::Yeeted)
