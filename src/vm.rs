@@ -1,7 +1,7 @@
 use crate::error::BBError;
 use crate::instruction::{Constant, Instruction};
 use crate::value::{
-    BBRegex, Block, Class, EnvFrame, GcUlid, NativeClass, NativeFunc, Object, Value,
+    Block, Class, EnvFrame, GcRegex, GcUlid, NativeClass, NativeFunc, Object, Value,
 };
 use crate::{gc, gcl};
 
@@ -237,7 +237,9 @@ impl<'gc> VmState<'gc> {
             Value::Class(class_obj) => {
                 if let Some(m) = self.lookup_in_class_hierarchy(class_obj, selector, true) {
                     Some(m)
-                } else if let Some(Value::Class(class_class)) = self.globals.borrow().get("Class").copied() {
+                } else if let Some(Value::Class(class_class)) =
+                    self.globals.borrow().get("Class").copied()
+                {
                     if let Some(m) = self.lookup_in_class_hierarchy(class_class, selector, false) {
                         Some(m)
                     } else {
@@ -755,7 +757,7 @@ impl<'gc> VmState<'gc> {
                 if let Value::String(s) = pattern_val {
                     let re =
                         regex::Regex::new(&**s).map_err(|e| format!("Invalid regex: {}", e))?;
-                    let regex_val = gc!(mc, BBRegex(re));
+                    let regex_val = gc!(mc, GcRegex(re));
                     self.push(Value::Regex(regex_val));
                 } else {
                     return Err(BBError::TypeError {
@@ -1635,7 +1637,9 @@ mod tests {
                         class_methods: HashMap::new(),
                     }
                 );
-                vm.globals.borrow_mut(mc).insert("Point".to_string(), Value::Class(point_class));
+                vm.globals
+                    .borrow_mut(mc)
+                    .insert("Point".to_string(), Value::Class(point_class));
 
                 vm.step(mc).unwrap();
                 assert_eq!(vm.stack.len(), 1);
@@ -1648,7 +1652,7 @@ mod tests {
                 } else {
                     panic!("Expected String, got {:?}", vm.peek());
                 }
-            }
+            },
         );
     }
 }

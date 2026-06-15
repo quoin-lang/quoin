@@ -17,9 +17,9 @@ unsafe impl<'gc> Collect<'gc> for GcUlid {
 
 #[derive(Clone, Collect)]
 #[collect(require_static)]
-pub struct BBRegex(pub Regex);
+pub struct GcRegex(pub Regex);
 
-impl fmt::Debug for BBRegex {
+impl fmt::Debug for GcRegex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Regex({})", self.0.as_str())
     }
@@ -60,7 +60,7 @@ pub enum Value<'gc> {
     String(Gc<'gc, String>),
     List(Gc<'gc, RefLock<Vec<Value<'gc>>>>),
     Dict(Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>),
-    Regex(Gc<'gc, BBRegex>),
+    Regex(Gc<'gc, GcRegex>),
     Block(Gc<'gc, Block<'gc>>),
     Method(Gc<'gc, Method<'gc>>),
     Native(NativeFunc),
