@@ -1,7 +1,5 @@
 use crate::value::{NativeClassBuilder, Value};
-use crate::{arg, gc};
-
-use gc_arena::Gc;
+use crate::arg;
 
 pub fn build_class_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Class", Some("Object"))

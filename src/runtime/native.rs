@@ -1,9 +1,8 @@
 use crate::error::BBError;
-use crate::value::{NativeFunc, Value, ObjectPayload, GcRegex};
+use crate::value::{NativeFunc, ObjectPayload, Value};
 use crate::vm::VmState;
-use crate::gc;
 
-use gc_arena::{Mutation, RefLock};
+use gc_arena::Mutation;
 
 // Native helper: print
 pub fn native_print<'gc>(
@@ -534,12 +533,24 @@ pub fn native_list_slice_from<'gc>(
 
 pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
     let mut funcs = Vec::new();
-    
-    funcs.push(("print:".to_string(), vm.new_native(mc, NativeFunc(native_print))));
-    funcs.push(("print:and:".to_string(), vm.new_native(mc, NativeFunc(native_print))));
-    funcs.push(("print:and:and:and:".to_string(), vm.new_native(mc, NativeFunc(native_print))));
-    funcs.push(("regex_match:".to_string(), vm.new_native(mc, NativeFunc(native_regex_match))));
-    
+
+    funcs.push((
+        "print:".to_string(),
+        vm.new_native(mc, NativeFunc(native_print)),
+    ));
+    funcs.push((
+        "print:and:".to_string(),
+        vm.new_native(mc, NativeFunc(native_print)),
+    ));
+    funcs.push((
+        "print:and:and:and:".to_string(),
+        vm.new_native(mc, NativeFunc(native_print)),
+    ));
+    funcs.push((
+        "regex_match:".to_string(),
+        vm.new_native(mc, NativeFunc(native_regex_match)),
+    ));
+
     // Operators
     funcs.push(("+".to_string(), vm.new_native(mc, NativeFunc(native_add))));
     funcs.push(("-".to_string(), vm.new_native(mc, NativeFunc(native_sub))));
@@ -551,14 +562,23 @@ pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
     funcs.push((">".to_string(), vm.new_native(mc, NativeFunc(native_gt))));
     funcs.push(("<=".to_string(), vm.new_native(mc, NativeFunc(native_le))));
     funcs.push((">=".to_string(), vm.new_native(mc, NativeFunc(native_ge))));
-    
+
     // Unary
     funcs.push(("!".to_string(), vm.new_native(mc, NativeFunc(native_not))));
-    funcs.push(("negated".to_string(), vm.new_native(mc, NativeFunc(native_negated))));
-    
+    funcs.push((
+        "negated".to_string(),
+        vm.new_native(mc, NativeFunc(native_negated)),
+    ));
+
     // List destructuring
-    funcs.push(("at:".to_string(), vm.new_native(mc, NativeFunc(native_list_at))));
-    funcs.push(("sliceFrom:".to_string(), vm.new_native(mc, NativeFunc(native_list_slice_from))));
+    funcs.push((
+        "at:".to_string(),
+        vm.new_native(mc, NativeFunc(native_list_at)),
+    ));
+    funcs.push((
+        "sliceFrom:".to_string(),
+        vm.new_native(mc, NativeFunc(native_list_slice_from)),
+    ));
 
     let mut globals = vm.globals.borrow_mut(mc);
     for (name, val) in funcs {

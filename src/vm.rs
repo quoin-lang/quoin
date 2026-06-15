@@ -494,7 +494,10 @@ impl<'gc> VmState<'gc> {
                             break;
                         }
                         VmStatus::Yeeted(val) => {
-                            return Err(BBError::Other(format!("Uncaught exception during method call: {}", val)));
+                            return Err(BBError::Other(format!(
+                                "Uncaught exception during method call: {}",
+                                val
+                            )));
                         }
                     }
                 }
@@ -505,7 +508,6 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    //noinspection DuplicatedCode
     pub fn lookup_method(
         &self,
         receiver: Value<'gc>,
