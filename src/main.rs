@@ -24,12 +24,13 @@ fn main() {
         && arg == "load"
     {
         println!("Loading bblib/*.b...");
-        for file in glob("bblib/*.b").unwrap() {
-            let path_buf = file.unwrap();
+
+        let ast_iter = glob("bblib/*.b").unwrap().map(|p| {
+            let path_buf = p.unwrap();
             println!("Loading file: {}", path_buf.display());
-            let ast = parser::parse_building_blocks_file(&path_buf);
-            compile_and_run_ast(&ast);
-        }
+            parser::parse_building_blocks_file(&path_buf)
+        });
+        compile_and_run_asts(ast_iter);
         return;
     }
 
@@ -37,27 +38,10 @@ fn main() {
 
     let ast = parser::parse_building_blocks_string(&script);
 
-    compile_and_run_ast(&ast);
+    compile_and_run_asts(vec![ast].iter().map(|ast| ast.clone()));
 }
 
-fn compile_and_run_ast(ast: &Node) {
-    let program_node = match &ast.value {
-        ast_visitor::NodeValue::Program(p) => p,
-        _ => {
-            eprintln!("Error: Root AST node is not a ProgramNode");
-            std::process::exit(1);
-        }
-    };
-
-    let mut compiler = compiler::Compiler::new();
-    let program = match compiler.compile_program(program_node) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Compilation error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
+fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc);
 
@@ -112,19 +96,36 @@ fn compile_and_run_ast(ast: &Node) {
             }
         }
 
-        // Convert StaticBlock to Block in GC and start it
-        let main_block = gc!(
-            mc,
-            Block {
-                name: program.name.clone(),
-                is_nested_block: program.is_nested_block,
-                param_names: program.param_names.clone(),
-                bytecode: program.bytecode.clone(),
-                parent_env: None,
-                enclosing_method_id: None,
-            }
-        );
-        vm.start_block(mc, main_block, Vec::new());
+        for ast in ast_iter {
+            let program_node = match &ast.value {
+                ast_visitor::NodeValue::Program(p) => p,
+                _ => {
+                    panic!("Error: Root AST node is not a ProgramNode");
+                }
+            };
+
+            let mut compiler = compiler::Compiler::new();
+            let program = match compiler.compile_program(program_node) {
+                Ok(p) => p,
+                Err(e) => {
+                    panic!("Compilation error: {}", e);
+                }
+            };
+
+            // Convert StaticBlock to Block in GC and start it
+            let main_block = gc!(
+                mc,
+                Block {
+                    name: program.name.clone(),
+                    is_nested_block: program.is_nested_block,
+                    param_names: program.param_names.clone(),
+                    bytecode: program.bytecode.clone(),
+                    parent_env: None,
+                    enclosing_method_id: None,
+                }
+            );
+            vm.start_block(mc, main_block, Vec::new());
+        }
 
         vm
     });

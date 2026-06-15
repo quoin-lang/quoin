@@ -9,8 +9,6 @@ This document outlines the language features, compiler updates, and VM modificat
 ## Bugs/Odd Behavior
 - [ ] Running a file with nothing but class definitions fails the stack empty assertion.
   - It leaves `nil` on the stack.
-- [ ] main.rs needs a way to construct a VM/arena/etc and then compile into it separately.
-  - Probably need to use a lambda for this so it executes in the right scope.
 
 ## 1. Class & Method Definition Semantics
 - [x] **Class Creation (`<-` operator)**:
