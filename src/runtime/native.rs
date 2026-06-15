@@ -7,8 +7,8 @@ use gc_arena::{Gc, Mutation, RefLock};
 
 // Native helper: print
 pub fn native_print<'gc>(
-    _vm: &mut VmState<'gc>,
-    _mc: &Mutation<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     // args[0] is the receiver (self)
@@ -17,7 +17,8 @@ pub fn native_print<'gc>(
             if i > 0 {
                 print!(" ");
             }
-            print!("{}", arg);
+            let s = vm.call_method(mc, arg.clone(), "s", vec![])?;
+            print!("{}", s);
         }
     }
     println!();
