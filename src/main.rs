@@ -1,6 +1,6 @@
 use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
-use new_vm::runtime::{class, native, object};
+use new_vm::runtime::{boolean, class, native, object};
 use new_vm::value::{Block, NativeClassBuilder, Value};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
@@ -157,11 +157,11 @@ result = p1.test_nlr;
 
         vm.register_native_class(mc, object::build_object_class());
         vm.register_native_class(mc, class::build_class_class());
+        vm.register_native_class(mc, boolean::build_boolean_class());
 
         // Register placeholder classes for all of the builtin types.
         for t in [
             "Nil",
-            "Boolean",
             "Integer",
             "Double",
             "String",
