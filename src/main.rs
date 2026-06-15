@@ -42,6 +42,7 @@ fn main() {
 }
 
 fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
+    let asts: Vec<Node> = ast_iter.collect();
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc);
 
@@ -96,7 +97,16 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
             }
         }
 
-        for ast in ast_iter {
+        vm
+    });
+
+    let mut aborted = false;
+    for ast in asts {
+        if aborted {
+            break;
+        }
+
+        arena.mutate_root(|mc, vm| {
             let program_node = match &ast.value {
                 ast_visitor::NodeValue::Program(p) => p,
                 _ => {
@@ -125,38 +135,41 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
                 }
             );
             vm.start_block(mc, main_block, Vec::new());
-        }
-
-        vm
-    });
-
-    let mut step_count = 0;
-    loop {
-        let status = arena.mutate_root(|mc, vm| match vm.step(mc) {
-            Ok(VmStatus::Running) => Ok(ExecutionStatus::Running),
-            Ok(VmStatus::Finished(val)) => {
-                println!("VM execution finished successfully. Top value: {}", val);
-                Ok(ExecutionStatus::Finished)
-            }
-            Ok(VmStatus::Yeeted(val)) => {
-                println!("VM execution terminated with uncaught exception: {}", val);
-                Ok(ExecutionStatus::Yeeted)
-            }
-            Err(e) => Err(e),
         });
-        match status {
-            Ok(ExecutionStatus::Running) => {
-                step_count += 1;
-                if step_count % 10 == 0 {
-                    arena.collect_debt();
+
+        let mut step_count = 0;
+        loop {
+            let status = arena.mutate_root(|mc, vm| match vm.step(mc) {
+                Ok(VmStatus::Running) => Ok(ExecutionStatus::Running),
+                Ok(VmStatus::Finished(val)) => {
+                    println!("VM execution finished successfully. Top value: {}", val);
+                    Ok(ExecutionStatus::Finished)
                 }
-            }
-            Ok(ExecutionStatus::Finished) | Ok(ExecutionStatus::Yeeted) => {
-                break;
-            }
-            Err(e) => {
-                eprintln!("VM execution error: {}", e);
-                break;
+                Ok(VmStatus::Yeeted(val)) => {
+                    println!("VM execution terminated with uncaught exception: {}", val);
+                    Ok(ExecutionStatus::Yeeted)
+                }
+                Err(e) => Err(e),
+            });
+            match status {
+                Ok(ExecutionStatus::Running) => {
+                    step_count += 1;
+                    if step_count % 10 == 0 {
+                        arena.collect_debt();
+                    }
+                }
+                Ok(ExecutionStatus::Finished) => {
+                    break;
+                }
+                Ok(ExecutionStatus::Yeeted) => {
+                    aborted = true;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("VM execution error: {}", e);
+                    aborted = true;
+                    break;
+                }
             }
         }
     }

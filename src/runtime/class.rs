@@ -24,4 +24,7 @@ pub fn build_class_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
+        .instance_method("sealed!", |vm, mc, _args| {
+            Ok(vm.new_nil(mc))
+        })
 }
