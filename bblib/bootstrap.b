@@ -49,30 +49,34 @@ Error <- {
 };
 
 Double <-- {
+    .meta <-- {
+        default -> { 0.0 }
+    }
+
     double -> { self }
 
     next -> { self + 1.0 }
 
     abs -> { (self < 0).if:{ -self } else:{ self } }
-
-    .meta <-- {
-        default -> { 0.0 }
-    }
 };
 
 Integer <-- {
+    .meta <-- {
+        default -> { 0 }
+    }
+
     integer -> { self }
 
     next -> { self + 1 }
 
     abs -> { (self < 0).if:{ -self } else:{ self } }
-
-    .meta <-- {
-        default -> { 0 }
-    }
 };
 
 Nil <-- {
+    .meta <-- {
+        default -> { nil }
+    }
+
     s --> { '' }
     defined? --> { false }
 
@@ -81,14 +85,16 @@ Nil <-- {
     #'*:' -> { |_| self }
     #'/:' -> { |_| self }
     #'%:' -> { |_| self }
-
-    .meta <-- {
-        default -> { nil }
-    }
 };
 
 ANSI <- { |@string|
     .can:ActAsUserString;
+
+    .meta <-- {
+        default -> { #ANSI'' }
+
+        newUserString: -> { |s:String| ^.new:{ string = s } }
+    }
 
     init: -> { |string|
         @string = string
@@ -104,11 +110,5 @@ ANSI <- { |@string|
     "* XXX: Rendered length?
     length -> { @string.length }
 
-    s --> { '#ANSI\'' + @string + '\'' };
-
-    .meta <-- {
-        default -> { #ANSI'' }
-
-        newUserString: -> { |s:String| ^.new:{ string = s } }
-    }
+    s --> { '#ANSI\'' + @string + '\'' }
 };
