@@ -181,12 +181,22 @@ impl Compiler {
                 bytecode.push(Instruction::ExecuteBlockWithSelf);
             }
             NodeValue::MethodDefinition(method_def) => {
-                let selector = self.reconstruct_selector(&method_def.signature)?;
+                let mut selector = self.reconstruct_selector(&method_def.signature)?;
+                if selector == "-" && method_def.block.arguments.is_empty() {
+                    selector = "negated".to_string();
+                } else if selector == "+" && method_def.block.arguments.is_empty() {
+                    selector = "posated".to_string();
+                }
                 self.compile_block(&method_def.block, bytecode)?;
                 bytecode.push(Instruction::DefineMethod(selector));
             }
             NodeValue::MethodExtension(method_ext) => {
-                let selector = self.reconstruct_selector(&method_ext.signature)?;
+                let mut selector = self.reconstruct_selector(&method_ext.signature)?;
+                if selector == "-" && method_ext.block.arguments.is_empty() {
+                    selector = "negated".to_string();
+                } else if selector == "+" && method_ext.block.arguments.is_empty() {
+                    selector = "posated".to_string();
+                }
                 self.compile_block(&method_ext.block, bytecode)?;
                 bytecode.push(Instruction::OverrideMethod(selector));
             }
