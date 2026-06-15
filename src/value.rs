@@ -174,14 +174,14 @@ impl<'gc> fmt::Display for Value<'gc> {
             Value::String(s) => write!(f, "{}", **s),
             Value::List(l) => {
                 let borrowed = l.borrow();
-                write!(f, "#[")?;
+                write!(f, "#(")?;
                 for (i, val) in borrowed.iter().enumerate() {
                     if i > 0 {
                         write!(f, " ")?;
                     }
                     write!(f, "{}", val)?;
                 }
-                write!(f, "]")
+                write!(f, ")")
             }
             Value::Dict(d) => {
                 let borrowed = d.borrow();
