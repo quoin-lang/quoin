@@ -337,7 +337,7 @@ impl<'gc> VmState<'gc> {
 
         let is_nested_block = block.is_nested_block;
         let enclosing_method_id = if is_nested_block {
-            self.frames.last().and_then(|f| f.enclosing_method_id)
+            block.enclosing_method_id
         } else {
             Some(frame_id)
         };
@@ -373,11 +373,7 @@ impl<'gc> VmState<'gc> {
         let env_ref = gcl!(mc, env_frame);
 
         let is_nested_block = block.is_nested_block;
-        let enclosing_method_id = if is_nested_block {
-            self.frames.last().and_then(|f| f.enclosing_method_id)
-        } else {
-            Some(frame_id)
-        };
+        let enclosing_method_id = Some(frame_id);
 
         self.frames.push(Frame {
             id: frame_id,
@@ -419,7 +415,7 @@ impl<'gc> VmState<'gc> {
 
         let is_nested_block = block.is_nested_block;
         let enclosing_method_id = if is_nested_block {
-            self.frames.last().and_then(|f| f.enclosing_method_id)
+            block.enclosing_method_id
         } else {
             Some(frame_id)
         };
@@ -582,6 +578,7 @@ impl<'gc> VmState<'gc> {
                     Constant::String(s) => Value::String(gc!(mc, s.clone())),
                     Constant::Block(sb) => {
                         let parent_env = self.frames.last().map(|f| f.env);
+                        let enclosing_method_id = self.frames.last().and_then(|f| f.enclosing_method_id);
                         let block = gc!(
                             mc,
                             Block {
@@ -590,6 +587,7 @@ impl<'gc> VmState<'gc> {
                                 param_names: sb.param_names.clone(),
                                 bytecode: sb.bytecode.clone(),
                                 parent_env,
+                                enclosing_method_id,
                             }
                         );
                         Value::Block(block)
@@ -979,6 +977,7 @@ mod tests {
                     param_names: static_block.param_names.clone(),
                     bytecode: static_block.bytecode.clone(),
                     parent_env: None,
+                    enclosing_method_id: None,
                 }
             );
             vm.start_block(mc, block, Vec::new());
@@ -1027,6 +1026,12 @@ mod tests {
                 let status = vm.step(mc).unwrap();
                 assert!(matches!(status, VmStatus::Running));
                 assert_eq!(vm.stack, vec![Value::Int(10), Value::Int(10), Value::Nil]);
+
+                // Pop the remaining values left on stack for testing to satisfy the stack-empty assertion
+                vm.pop().unwrap(); // Nil
+                vm.pop().unwrap(); // 10
+                vm.pop().unwrap(); // 10
+                vm.push(Value::Nil); // Push it back as the return value
 
                 // Step 6: Finished
                 let status = vm.step(mc).unwrap();
@@ -1385,6 +1390,98 @@ mod tests {
                 assert_eq!(vm.stack, vec![Value::Int(999)]);
             },
         );
+    }
+
+    #[test]
+    fn test_non_local_return_callback() {
+        // block_nested: Push(777), MethodReturn
+        let block_nested = StaticBlock {
+            name: Some("nested".to_string()),
+            is_nested_block: true,
+            param_names: Vec::new(),
+            bytecode: vec![
+                Instruction::Push(Constant::Int(777)),
+                Instruction::MethodReturn,
+            ],
+        };
+
+        // block_bar: blk.value, Push(111), Return
+        let block_bar = StaticBlock {
+            name: Some("bar".to_string()),
+            is_nested_block: false,
+            param_names: vec!["blk".to_string()],
+            bytecode: vec![
+                Instruction::LoadLocal("blk".to_string()),
+                Instruction::Send("value".to_string(), 0),
+                Instruction::Push(Constant::Int(111)),
+                Instruction::Return,
+            ],
+        };
+
+        // block_foo: bar.value: block_nested, Push(222), Return
+        let block_foo = StaticBlock {
+            name: Some("foo".to_string()),
+            is_nested_block: false,
+            param_names: Vec::new(),
+            bytecode: vec![
+                Instruction::LoadGlobal("bar_func".to_string()),
+                Instruction::Push(Constant::Block(block_nested)),
+                Instruction::Send("value:".to_string(), 1),
+                Instruction::Push(Constant::Int(222)),
+                Instruction::Return,
+            ],
+        };
+
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc);
+            let bar_block = gc!(mc, Block {
+                name: block_bar.name.clone(),
+                is_nested_block: block_bar.is_nested_block,
+                param_names: block_bar.param_names.clone(),
+                bytecode: block_bar.bytecode.clone(),
+                parent_env: None,
+                enclosing_method_id: None,
+            });
+            vm.globals.borrow_mut(mc).insert("bar_func".to_string(), Value::Block(bar_block));
+
+            let foo_block = gc!(mc, Block {
+                name: block_foo.name.clone(),
+                is_nested_block: block_foo.is_nested_block,
+                param_names: block_foo.param_names.clone(),
+                bytecode: block_foo.bytecode.clone(),
+                parent_env: None,
+                enclosing_method_id: None,
+            });
+            vm.start_block(mc, foo_block, Vec::new());
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            // Step 1: Inside foo: LoadGlobal(bar_func)
+            vm.step(mc).unwrap();
+            // Step 2: Inside foo: Push(block_nested)
+            vm.step(mc).unwrap();
+            // Step 3: Inside foo: Send(value:) -> starts block_bar frame
+            vm.step(mc).unwrap();
+            assert_eq!(vm.frames.len(), 2);
+            assert_eq!(vm.frames[1].block.name, Some("bar".to_string()));
+
+            // Step 4: Inside bar: LoadLocal(blk)
+            vm.step(mc).unwrap();
+            // Step 5: Inside bar: Send(value) -> starts block_nested frame
+            vm.step(mc).unwrap();
+            assert_eq!(vm.frames.len(), 3);
+            assert_eq!(vm.frames[2].block.name, Some("nested".to_string()));
+
+            // Step 6: Inside nested: Push(777)
+            vm.step(mc).unwrap();
+            // Step 7: Inside nested: MethodReturn -> unwinds nested, bar, and foo frames!
+            vm.step(mc).unwrap();
+
+            // All frames should be unwound.
+            assert_eq!(vm.frames.len(), 0);
+            assert_eq!(vm.stack, vec![Value::Int(777)]);
+        });
     }
 
     #[test]

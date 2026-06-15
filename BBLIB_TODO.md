@@ -17,10 +17,10 @@ This document outlines the language features, compiler updates, and VM modificat
   - Implement a `.meta` method on `Class` to retrieve/define class-side (static/constructor) methods.
 
 ## 2. Object Instantiation & Instance Variables
-- [ ] **Instantiation Block Syntax (`.new:`)**:
+- [x] **Instantiation Block Syntax (`.new:`)**:
   - Support `Class.new: { ... }`.
   - The block must run in the context of the newly created instance. Instance variable names (without the `@` prefix) are bound as local variables or directly assignable inside the block to initialize fields.
-- [ ] **Instance Variables (`@variable`)**:
+- [x] **Instance Variables (`@variable`)**:
   - Support reading/writing instance variables via the `@` prefix in method definitions.
   - Map field names to their storage on the `Object` struct.
 
@@ -38,7 +38,7 @@ This document outlines the language features, compiler updates, and VM modificat
   - E.g., `split: -> { |pat:String| ... }` vs `split: --> { |p:Regex| ... }` must dispatch correctly depending on whether the argument is a `String` or a `Regex`.
 
 ## 5. Non-Local Returns (`^^` operator)
-- [ ] **Method-level returns (`^^`)**:
+- [x] **Method-level returns (`^^`)**:
   - Implement the `^^` return operator.
   - When a block executes `^^ value`, it must return from the enclosing method that created the block.
   - This requires closures (`Block`) to hold a reference to their creator's stack frame, and the VM to unwind frames up to that context.

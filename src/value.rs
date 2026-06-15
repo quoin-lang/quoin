@@ -232,6 +232,7 @@ pub struct Block<'gc> {
     pub param_names: Vec<String>,
     pub bytecode: Vec<Instruction>,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+    pub enclosing_method_id: Option<usize>,
 }
 
 #[derive(Clone, Collect)]

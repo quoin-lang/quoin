@@ -92,7 +92,28 @@ re = #/^[a-z]+$/;
 is_match = re.regex_match: 'gemini';
 .print: 'regex match =' and: is_match;
 
-"* Test 6: Fatal error unwinding
+"* Test 6: Non-local return (^^)
+Point <-- {
+  test_nlr -> {
+    bar_func = { |blk|
+      blk.value;
+      .print: 'Inside bar: should NOT reach here!';
+      111
+    };
+
+    nested_block = {
+      ^^ 777
+    };
+    bar_func.value: nested_block;
+    .print: 'Inside foo: should NOT reach here!';
+    222
+  }
+};
+
+result = p1.test_nlr;
+.print: 'Result of non-local return =' and: result;
+
+"* Test 7: Fatal error unwinding
 .print: 'Triggering error:';
 'Fatal exception yeeted!'.throw;
 "#;
@@ -169,6 +190,7 @@ is_match = re.regex_match: 'gemini';
                 param_names: program.param_names.clone(),
                 bytecode: program.bytecode.clone(),
                 parent_env: None,
+                enclosing_method_id: None,
             }
         );
         vm.start_block(mc, main_block, Vec::new());
