@@ -613,6 +613,4 @@ List <-- {
         .each:{|x| result.push:x }
         ^result
     }
-
-    jsonRep -> { self }
 }

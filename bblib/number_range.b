@@ -27,8 +27,6 @@ NumberRange <- { | @start @end @cur @n |
 
         ^(((@cur-@end) < 0) == (@n < 0)).if:{ nil } else:{ @cur }
     }
-
-    jsonRep -> { .list }
 };
 
 Integer <-- {

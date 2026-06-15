@@ -10,8 +10,6 @@ true <-- {
     if:else: -> { |ifblock _| ifblock.value };
     not -> { false }
     #'!' -> { false }
-
-    jsonRep -> { self }
 };
 
 false <-- {
@@ -22,8 +20,6 @@ false <-- {
     if:else: -> { |_ elseblock| elseblock.value };
     not -> { true }
     #'!' -> { true }
-
-    jsonRep -> { self }
 };
 
 Object <-- {
@@ -62,8 +58,6 @@ Double <-- {
 
     abs -> { (self < 0).if:{ -self } else:{ self } }
 
-    jsonRep -> { self };
-
     .meta <-- {
         default -> { 0.0 }
     }
@@ -79,8 +73,6 @@ Integer <-- {
 
     abs -> { (self < 0).if:{ -self } else:{ self } }
 
-    jsonRep -> { self };
-
     .meta <-- {
         default -> { 0 }
     }
@@ -95,8 +87,6 @@ Nil <-- {
     #'*:' -> { |_| self }
     #'/:' -> { |_| self }
     #'%:' -> { |_| self }
-
-    jsonRep -> { self };
 
     .meta <-- {
         default -> { nil }
