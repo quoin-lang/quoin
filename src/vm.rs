@@ -234,9 +234,25 @@ impl<'gc> VmState<'gc> {
                     self.globals.borrow().get(selector).copied()
                 }
             }
-            Value::Class(class_obj) => self.lookup_in_class_hierarchy(class_obj, selector, true),
+            Value::Class(class_obj) => {
+                if let Some(m) = self.lookup_in_class_hierarchy(class_obj, selector, true) {
+                    Some(m)
+                } else if let Some(Value::Class(class_class)) = self.globals.borrow().get("Class").copied() {
+                    if let Some(m) = self.lookup_in_class_hierarchy(class_class, selector, false) {
+                        Some(m)
+                    } else {
+                        self.globals.borrow().get(selector).copied()
+                    }
+                } else {
+                    self.globals.borrow().get(selector).copied()
+                }
+            }
             Value::ClassMeta(class_obj) => {
-                self.lookup_in_class_hierarchy(class_obj, selector, true)
+                if let Some(m) = self.lookup_in_class_hierarchy(class_obj, selector, true) {
+                    Some(m)
+                } else {
+                    self.globals.borrow().get(selector).copied()
+                }
             }
             _ => {
                 let type_name = receiver.type_name();
@@ -1596,6 +1612,43 @@ mod tests {
                     panic!("Expected ClassMeta, got {:?}", meta_val);
                 }
             },
+        );
+    }
+
+    #[test]
+    fn test_class_method_lookup_fallback() {
+        run_test_steps(
+            vec![
+                Instruction::LoadGlobal("Point".to_string()),
+                Instruction::Send("name".to_string(), 0),
+            ],
+            |vm, mc| {
+                vm.register_native_class(mc, crate::runtime::class::build_class_class());
+
+                let point_class = gcl!(
+                    mc,
+                    Class {
+                        name: "Point".to_string(),
+                        parent: None,
+                        instance_vars: Vec::new(),
+                        instance_methods: HashMap::new(),
+                        class_methods: HashMap::new(),
+                    }
+                );
+                vm.globals.borrow_mut(mc).insert("Point".to_string(), Value::Class(point_class));
+
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack.len(), 1);
+
+                vm.step(mc).unwrap();
+                assert_eq!(vm.stack.len(), 1);
+
+                if let Value::String(s) = vm.peek().unwrap() {
+                    assert_eq!(&*s, "Point");
+                } else {
+                    panic!("Expected String, got {:?}", vm.peek());
+                }
+            }
         );
     }
 }

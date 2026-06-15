@@ -1,6 +1,6 @@
 use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
-use new_vm::runtime::{native, object};
+use new_vm::runtime::{class, native, object};
 use new_vm::value::{Block, NativeClassBuilder, Value};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
@@ -44,6 +44,10 @@ p1.print;
 
 p3 = Point3D.new: { |x y z| x = 10; y = 20; z = 30 };
 p3.print;
+.print:p3.class;
+.print:p3.class.name;
+.print:(p3.id==p3.id);
+.print:(p3.id!=p3.id);
 p3.print:'p3.x =' and: p3.x;
 p3.print:'p3.y =' and: p3.y;
 p3.print:'p3.z =' and: p3.z;
@@ -143,6 +147,7 @@ result = p1.test_nlr;
         native::register_native_funcs(&mut vm, mc);
 
         vm.register_native_class(mc, object::build_object_class());
+        vm.register_native_class(mc, class::build_class_class());
 
         // Register placeholder classes for all of the builtin types.
         for t in [
