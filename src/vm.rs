@@ -2256,4 +2256,32 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn test_namespaced_native_class() {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc);
+
+            // Build a namespaced native class [IO]File
+            let file_builder = NativeClassBuilder::new("[IO]File", Some("Object"))
+                .instance_method("path", |vm, mc, _args| {
+                    Ok(vm.new_string(mc, "/etc/passwd".to_string()))
+                });
+            vm.register_native_class(mc, file_builder);
+            vm
+        });
+
+        arena.mutate_root(|_mc, vm| {
+            // Verify [IO]File class is in globals
+            let file_key = NamespacedName::new(vec!["IO".to_string()], "File".to_string());
+            let val = vm.globals.borrow().get(&file_key).copied().unwrap();
+            if let Value::Class(c) = val {
+                assert_eq!(c.borrow().name.to_string(), "[IO]File");
+                assert_eq!(c.borrow().name.path, vec!["IO".to_string()]);
+                assert_eq!(c.borrow().name.name, "File");
+            } else {
+                panic!("Expected Class, got {:?}", val);
+            }
+        });
+    }
 }
