@@ -986,7 +986,10 @@ mod tests {
             value: NodeValue::Unknown,
         }]);
         assert!(res.is_err());
-        assert_eq!(res.err().unwrap(), "Encountered Unknown NodeValue");
+        assert_eq!(
+            res.err().unwrap(),
+            "Encountered Unknown NodeValue (ast_visitor bug)"
+        );
 
         // Dictionary mismatch keys/values returns error
         let dict_mismatch = Node {
