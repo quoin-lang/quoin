@@ -75,6 +75,36 @@ pub enum ObjectPayload<'gc> {
 }
 
 impl<'gc> Value<'gc> {
+    pub fn is_nil(&self) -> bool {
+        if let Value::Object(obj) = self
+            && let ObjectPayload::Nil = &obj.borrow().payload
+        {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_true(&self) -> bool {
+        if let Value::Object(obj) = self
+            && let ObjectPayload::Bool(b) = &obj.borrow().payload
+        {
+            *b
+        } else {
+            false
+        }
+    }
+
+    pub fn is_false(&self) -> bool {
+        if let Value::Object(obj) = self
+            && let ObjectPayload::Bool(b) = &obj.borrow().payload
+        {
+            !*b
+        } else {
+            false
+        }
+    }
+
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Object(obj) => match &obj.borrow().payload {

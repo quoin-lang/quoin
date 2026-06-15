@@ -52,6 +52,24 @@ macro_rules! arg {
             }
         }
     };
+    ($args:ident, Instance, $idx:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Object(obj)) => obj,
+            _ => {
+                return Err($crate::error::BBError::TypeError {
+                    expected: "Instance".to_string(),
+                    got: match $args.get($idx) {
+                        Some(v) => v.type_name().to_string(),
+                        None => "None".to_string(),
+                    },
+                    msg: format!(
+                        "Expected {} at argument index {} (got {:?})",
+                        "Instance", $idx, $args[$idx],
+                    ),
+                })
+            }
+        }
+    };
     ($args:ident, $variant:ident, $idx:expr) => {
         match $args.get($idx) {
             Some(&Value::Object(obj)) => match &obj.borrow().payload {
@@ -98,6 +116,12 @@ macro_rules! arg {
     ($args:ident, ClassMeta, $idx:expr, $err:expr) => {
         match $args.get($idx) {
             Some(&Value::ClassMeta(val)) => val,
+            _ => return Err($err.into()),
+        }
+    };
+    ($args:ident, Instance, $idx:expr, $err:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Object(obj)) => obj,
             _ => return Err($err.into()),
         }
     };
