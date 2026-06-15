@@ -51,7 +51,6 @@ unsafe impl<'gc> Collect<'gc> for NativeFunc {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub enum Value<'gc> {
     Nil,
     Bool(bool),
@@ -62,7 +61,6 @@ pub enum Value<'gc> {
     Dict(Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>),
     Regex(Gc<'gc, GcRegex>),
     Block(Gc<'gc, Block<'gc>>),
-    Method(Gc<'gc, Method<'gc>>),
     Native(NativeFunc),
     Class(Gc<'gc, RefLock<Class<'gc>>>),
     Object(Gc<'gc, RefLock<Object<'gc>>>),
@@ -81,10 +79,6 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
             Value::Dict(d) => cc.trace(d),
             Value::Regex(r) => cc.trace(r),
             Value::Block(b) => cc.trace(b),
-            Value::Method(m) => {
-                cc.trace(&m.receiver);
-                cc.trace(&m.block);
-            }
             Value::Class(c) => cc.trace(c),
             Value::Object(o) => cc.trace(o),
             Value::ClassMeta(c) => cc.trace(c),
@@ -112,7 +106,6 @@ impl<'gc> Value<'gc> {
             Value::Dict(_) => "Dictionary",
             Value::Regex(_) => "Regex",
             Value::Block(_) => "Block",
-            Value::Method(_) => "Method",
             Value::Native(_) => "Native",
             Value::Class(_) => "Class",
             Value::Object(_) => "Object",
@@ -135,9 +128,6 @@ impl<'gc> PartialEq for Value<'gc> {
             (Value::Dict(a), Value::Dict(b)) => Gc::ptr_eq(*a, *b),
             (Value::Regex(a), Value::Regex(b)) => Gc::ptr_eq(*a, *b),
             (Value::Block(a), Value::Block(b)) => Gc::ptr_eq(*a, *b),
-            (Value::Method(a), Value::Method(b)) => {
-                Gc::ptr_eq(a.block, b.block) && a.receiver == b.receiver
-            }
             (Value::Class(a), Value::Class(b)) => Gc::ptr_eq(*a, *b),
             (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
             (Value::ClassMeta(a), Value::ClassMeta(b)) => Gc::ptr_eq(*a, *b),
@@ -163,7 +153,6 @@ impl<'gc> fmt::Debug for Value<'gc> {
             Value::Dict(_) => write!(f, "Dict(...)"),
             Value::Regex(r) => write!(f, "{:?}", r),
             Value::Block(b) => write!(f, "Block({:?})", b.name),
-            Value::Method(m) => write!(f, "Method({}#{})", m.receiver.type_name(), m.name),
             Value::Native(_) => write!(f, "Native(<fn>)"),
             Value::Class(c) => write!(f, "Class({})", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "ClassMeta({})", c.borrow().name),
@@ -213,7 +202,6 @@ impl<'gc> fmt::Display for Value<'gc> {
                     write!(f, "<block>")
                 }
             }
-            Value::Method(m) => write!(f, "<method {}#{}>", m.receiver.type_name(), m.name),
             Value::Native(_) => write!(f, "<native fn>"),
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "class {} meta", c.borrow().name),
@@ -241,14 +229,6 @@ pub struct Block<'gc> {
     pub bytecode: Vec<Instruction>,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     pub enclosing_method_id: Option<usize>,
-}
-
-#[derive(Clone, Collect)]
-#[collect(no_drop)]
-pub struct Method<'gc> {
-    pub name: String,
-    pub receiver: Value<'gc>,
-    pub block: Gc<'gc, Block<'gc>>,
 }
 
 #[derive(Collect)]
