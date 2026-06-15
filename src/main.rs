@@ -1,7 +1,7 @@
 use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
 use new_vm::runtime::{boolean, class, native, object};
-use new_vm::value::{Block, NativeClassBuilder, Value, ObjectPayload};
+use new_vm::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
 
@@ -66,11 +66,20 @@ p3.print:'p3.z =' and: p3.z;
 .print: '5 class is' and: 5.class;
 
 true <-- {
-  custom_print -> {
-    .print: 'Hello from custom_print on true!';
-  }
+    s --> { 'TTT' };
+
+    if: -> { |ifblock| ifblock.value };
 };
-true.custom_print;
+
+false <-- {
+    s --> { 'FFF' };
+
+    if: -> { |ifblock| nil };
+};
+
+true.if:{ 'YAY'.print };
+false.if:{ 'NOPE'.print };
+
 .print: 'true class after override is' and: true.class;
 .print: 'false class is' and: false.class;
 
@@ -194,10 +203,12 @@ result = p1.test_nlr;
                         }
                         let payload = match args[0] {
                             Value::Object(obj) => &obj.borrow().payload,
-                            _ => return Err(BBError::Other(format!(
-                                "sqrt expected number, got {:?}",
-                                args[0]
-                            ))),
+                            _ => {
+                                return Err(BBError::Other(format!(
+                                    "sqrt expected number, got {:?}",
+                                    args[0]
+                                )));
+                            }
                         };
                         match payload {
                             ObjectPayload::Double(f) => Ok(vm.new_double(mc, f.sqrt())),

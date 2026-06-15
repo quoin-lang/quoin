@@ -484,7 +484,21 @@ impl<'gc> VmState<'gc> {
         if let Some(method) = method {
             let mut all_args = vec![receiver];
             all_args.extend(args);
+            let initial_frame_count = self.frames.len();
             method.call(self, mc, all_args)?;
+            if self.frames.len() > initial_frame_count {
+                while self.frames.len() > initial_frame_count {
+                    match self.step(mc)? {
+                        VmStatus::Running => {}
+                        VmStatus::Finished(_) => {
+                            break;
+                        }
+                        VmStatus::Yeeted(val) => {
+                            return Err(BBError::Other(format!("Uncaught exception during method call: {}", val)));
+                        }
+                    }
+                }
+            }
             Ok(self.pop()?)
         } else {
             Ok(self.new_nil(mc))
