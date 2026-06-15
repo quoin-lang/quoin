@@ -30,16 +30,23 @@ Point <- Point3D <- { | @z |
     z -> { @z }
 };
 
+p1 = Point.newX: 3 y: 4;
+p2 = Point.newX: 0 y: 0;
+.print: 'p1.x =' and: p1.x;
+.print: 'p1.y =' and: p1.y;
+d = p1.dist: p2;
+.print: 'distance =' and: d;
+p1.print;
+.print: 'p1.id =' and: p1.id;
+.print: 'p2.id =' and: p2.id;
+.print: 'p1.id =' and: p1.id;
+.print: 'p2.id =' and: p2.id;
+
 p3 = Point3D.new: { |x y z| x = 10; y = 20; z = 30 };
 p3.print;
 p3.print:'p3.x =' and: p3.x;
 p3.print:'p3.y =' and: p3.y;
 p3.print:'p3.z =' and: p3.z;
-
-p2 = Point.new: { |x y| x = 10; y = 20 };
-p2.print;
-p2.print:'p2.x =' and: p2.x;
-p2.print:'p2.y =' and: p2.y;
 
 "* Test 1: Simple assignments, variables, and operators
 x = 10;
@@ -85,20 +92,7 @@ re = #/^[a-z]+$/;
 is_match = re.regex_match: 'gemini';
 .print: 'regex match =' and: is_match;
 
-"* Test 6: Native Class & Methods
-p1 = Point.newX: 3 y: 4;
-p2 = Point.newX: 0 y: 0;
-.print: 'p1.x =' and: p1.x;
-.print: 'p1.y =' and: p1.y;
-d = p1.dist: p2;
-.print: 'distance =' and: d;
-p1.print;
-.print: 'p1.id =' and: p1.id;
-.print: 'p2.id =' and: p2.id;
-.print: 'p1.id =' and: p1.id;
-.print: 'p2.id =' and: p2.id;
-
-"* Test 7: Fatal error unwinding
+"* Test 6: Fatal error unwinding
 .print: 'Triggering error:';
 'Fatal exception yeeted!'.throw;
 "#;
