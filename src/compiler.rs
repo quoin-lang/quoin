@@ -401,6 +401,8 @@ impl Compiler {
             BinaryOperatorType::GtEq => ">=",
             BinaryOperatorType::And => "&&",
             BinaryOperatorType::Or => "||",
+            BinaryOperatorType::Mod => "%",
+            BinaryOperatorType::Match => "~",
             _ => {
                 return Err(format!(
                     "Unsupported binary operator type: {:?}",
@@ -429,6 +431,9 @@ impl Compiler {
                 bytecode.push(Instruction::Send("negated".to_string(), 0));
             }
             UnaryOperatorType::Add => {} // Unary + is a no-op
+            UnaryOperatorType::Mod => {
+                bytecode.push(Instruction::Send("mod".to_string(), 0));
+            }
             _ => {
                 return Err(format!(
                     "Unsupported unary operator type: {:?}",
