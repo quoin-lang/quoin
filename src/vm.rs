@@ -383,6 +383,7 @@ impl<'gc> VmState<'gc> {
                     instance_vars: Vec::new(),
                     instance_methods: HashMap::new(),
                     class_methods: HashMap::new(),
+                    mixin_classes: Vec::new(),
                 }
             );
             self.globals
@@ -449,6 +450,7 @@ impl<'gc> VmState<'gc> {
                     instance_vars: Vec::new(),
                     instance_methods: inst_methods,
                     class_methods: cls_methods,
+                    mixin_classes: Vec::new(),
                 }
             );
 
@@ -486,6 +488,8 @@ impl<'gc> VmState<'gc> {
             all_args.extend(args);
             let initial_frame_count = self.frames.len();
             method.call(self, mc, all_args)?;
+
+            // let the VM catch up
             if self.frames.len() > initial_frame_count {
                 while self.frames.len() > initial_frame_count {
                     match self.step(mc)? {
@@ -502,6 +506,7 @@ impl<'gc> VmState<'gc> {
                     }
                 }
             }
+
             Ok(self.pop()?)
         } else {
             Ok(self.new_nil(mc))
@@ -531,6 +536,13 @@ impl<'gc> VmState<'gc> {
                     self.globals.borrow().get("Class").copied()
                 {
                     if let Some(m) = self.lookup_in_class_hierarchy(class_class, selector, false) {
+                        Some(m)
+                    } else if let Some(m) = class_class
+                        .borrow()
+                        .mixin_classes
+                        .iter()
+                        .find_map(|c| self.lookup_in_class_hierarchy(*c, selector, false))
+                    {
                         Some(m)
                     } else {
                         self.globals.borrow().get(selector).copied()
@@ -788,6 +800,7 @@ impl<'gc> VmState<'gc> {
                             instance_vars: Vec::new(),
                             instance_methods: HashMap::new(),
                             class_methods: HashMap::new(),
+                            mixin_classes: Vec::new(),
                         }
                     );
                     obj.borrow_mut(mc).class = s;
@@ -1076,6 +1089,7 @@ impl<'gc> VmState<'gc> {
                         instance_vars: instance_vars.clone(),
                         instance_methods: HashMap::new(),
                         class_methods: HashMap::new(),
+                        mixin_classes: Vec::new(),
                     }
                 );
                 self.globals
@@ -2051,6 +2065,7 @@ mod tests {
                         instance_vars: Vec::new(),
                         instance_methods: HashMap::new(),
                         class_methods: HashMap::new(),
+                        mixin_classes: Vec::new(),
                     }
                 );
                 vm.globals

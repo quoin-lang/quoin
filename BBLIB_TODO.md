@@ -33,9 +33,9 @@ This document outlines the language features, compiler updates, and VM modificat
   - Map field names to their storage on the `Object` struct.
 
 ## 3. Mixins & Multiple Inheritance
-- [ ] **Mixin Registration (`.mix:`)**:
+- [x] **Mixin Registration (`.mix:`)**:
   - Implement `.mix:CLASS` to copy or link behaviors from a mixed-in class.
-- [ ] **Mixin Method Resolution**:
+- [x] **Mixin Method Resolution**:
   - Update `lookup_method` in the VM to search through mixed-in classes (depth-first or breadth-first) before checking parent classes.
 
 ## 4. Advanced Method Dispatch (Multimethods / Argument Types)

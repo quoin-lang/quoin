@@ -292,6 +292,7 @@ pub struct Class<'gc> {
     pub instance_vars: Vec<String>,
     pub instance_methods: HashMap<String, Value<'gc>>,
     pub class_methods: HashMap<String, Value<'gc>>,
+    pub mixin_classes: Vec<Gc<'gc, RefLock<Class<'gc>>>>,
 }
 
 #[derive(Collect)]
