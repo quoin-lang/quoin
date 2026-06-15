@@ -275,7 +275,8 @@ impl Compiler {
         } else if self.is_local(name) {
             bytecode.push(Instruction::StoreLocal(name.clone()));
         } else {
-            bytecode.push(Instruction::StoreGlobal(name.clone()));
+            self.scopes.last_mut().unwrap().locals.insert(name.clone());
+            bytecode.push(Instruction::DefineLocal(name.clone()));
         }
     }
 
@@ -685,7 +686,7 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Int(42)));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::StoreGlobal("x".to_string()));
+        expected.push(Instruction::DefineLocal("x".to_string()));
         assert_eq!(res.bytecode, expected);
 
         // Destructuring assignment (e.g. a b = x)
@@ -715,11 +716,11 @@ mod tests {
         expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send("at:".to_string(), 1));
-        expected.push(Instruction::StoreGlobal("a".to_string()));
+        expected.push(Instruction::DefineLocal("a".to_string()));
         expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("at:".to_string(), 1));
-        expected.push(Instruction::StoreGlobal("b".to_string()));
+        expected.push(Instruction::DefineLocal("b".to_string()));
         assert_eq!(res.bytecode, expected);
 
         // Splat: *rest = x; (under destruct)
@@ -747,7 +748,7 @@ mod tests {
         expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("sliceFrom:".to_string(), 1));
-        expected.push(Instruction::StoreGlobal("rest".to_string()));
+        expected.push(Instruction::DefineLocal("rest".to_string()));
         assert_eq!(res.bytecode, expected);
 
         // IgnoredSplatLValue: _ *_ = x;
@@ -809,7 +810,7 @@ mod tests {
         expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send("at:".to_string(), 1));
-        expected.push(Instruction::StoreGlobal("a".to_string()));
+        expected.push(Instruction::DefineLocal("a".to_string()));
         expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("at:".to_string(), 1));
@@ -817,11 +818,11 @@ mod tests {
         expected.push(Instruction::LoadLocal("__bb_temp_2".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send("at:".to_string(), 1));
-        expected.push(Instruction::StoreGlobal("b".to_string()));
+        expected.push(Instruction::DefineLocal("b".to_string()));
         expected.push(Instruction::LoadLocal("__bb_temp_2".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("at:".to_string(), 1));
-        expected.push(Instruction::StoreGlobal("c".to_string()));
+        expected.push(Instruction::DefineLocal("c".to_string()));
         assert_eq!(res.bytecode, expected);
     }
 

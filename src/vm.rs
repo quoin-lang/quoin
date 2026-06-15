@@ -110,7 +110,7 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
 
         // Create the new object
         let mut fields = HashMap::new();
-        for var in &self.class_obj.borrow().instance_vars {
+        for var in vm.get_all_instance_vars(self.class_obj) {
             fields.insert(var.clone(), Value::Nil);
         }
         let obj = gcl!(
@@ -281,6 +281,27 @@ impl<'gc> VmState<'gc> {
         None
     }
 
+    pub fn get_all_instance_vars(
+        &self,
+        mut class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+    ) -> Vec<String> {
+        let mut vars = Vec::new();
+        loop {
+            let class_borrow = class_ref.borrow();
+            for var in &class_borrow.instance_vars {
+                if !vars.contains(var) {
+                    vars.push(var.clone());
+                }
+            }
+            if let Some(parent) = class_borrow.parent {
+                class_ref = parent;
+            } else {
+                break;
+            }
+        }
+        vars
+    }
+
     pub fn push(&mut self, val: Value<'gc>) {
         self.stack.push(val);
     }
@@ -384,7 +405,8 @@ impl<'gc> VmState<'gc> {
             .vars
             .insert("self".to_string(), Value::Object(obj));
         // Bind all instance variables as local variables in this block, initialized from the parent env or current fields
-        for var in &obj.borrow().class.borrow().instance_vars {
+        let vars = self.get_all_instance_vars(obj.borrow().class);
+        for var in &vars {
             let val = if let Some(parent) = block.parent_env {
                 EnvFrame::get(parent, var)
                     .unwrap_or_else(|| obj.borrow().fields.get(var).copied().unwrap_or(Value::Nil))
@@ -619,7 +641,7 @@ impl<'gc> VmState<'gc> {
                 let popped_frame = self.frames.pop().unwrap();
                 if let Some(obj) = popped_frame.instantiating_obj {
                     let env_borrow = popped_frame.env.borrow();
-                    let vars = obj.borrow().class.borrow().instance_vars.clone();
+                    let vars = self.get_all_instance_vars(obj.borrow().class);
                     for var in &vars {
                         if let Some(val) = env_borrow.vars.get(var) {
                             obj.borrow_mut(mc).fields.insert(var.clone(), *val);
@@ -636,7 +658,7 @@ impl<'gc> VmState<'gc> {
                     while let Some(f) = self.frames.pop() {
                         if let Some(obj) = f.instantiating_obj {
                             let env_borrow = f.env.borrow();
-                            let vars = obj.borrow().class.borrow().instance_vars.clone();
+                            let vars = self.get_all_instance_vars(obj.borrow().class);
                             for var in &vars {
                                 if let Some(val) = env_borrow.vars.get(var) {
                                     obj.borrow_mut(mc).fields.insert(var.clone(), *val);

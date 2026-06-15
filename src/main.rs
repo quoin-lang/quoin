@@ -26,6 +26,21 @@ Point <- { | @x @y |
   }
 };
 
+Point <- Point3D <- { | @z |
+    z -> { @z }
+};
+
+p3 = Point3D.new: { |x y z| x = 10; y = 20; z = 30 };
+p3.print;
+p3.print:'p3.x =' and: p3.x;
+p3.print:'p3.y =' and: p3.y;
+p3.print:'p3.z =' and: p3.z;
+
+p2 = Point.new: { |x y| x = 10; y = 20 };
+p2.print;
+p2.print:'p2.x =' and: p2.x;
+p2.print:'p2.y =' and: p2.y;
+
 "* Test 1: Simple assignments, variables, and operators
 x = 10;
 y = 20;
@@ -129,17 +144,22 @@ p1.print;
             "Native",
         ] {
             if t == "Double" || t == "Integer" {
-                let class_builder = NativeClassBuilder::new(t, Some("Object"))
-                    .instance_method("sqrt", |_vm, _mc, args| {
+                let class_builder = NativeClassBuilder::new(t, Some("Object")).instance_method(
+                    "sqrt",
+                    |_vm, _mc, args| {
                         if args.is_empty() {
                             return Err(BBError::Other("sqrt expects a receiver".to_string()));
                         }
                         match args[0] {
                             Value::Double(f) => Ok(Value::Double(f.sqrt())),
                             Value::Int(i) => Ok(Value::Double((i as f64).sqrt())),
-                            _ => Err(BBError::Other(format!("sqrt expected number, got {:?}", args[0]))),
+                            _ => Err(BBError::Other(format!(
+                                "sqrt expected number, got {:?}",
+                                args[0]
+                            ))),
                         }
-                    });
+                    },
+                );
                 vm.register_native_class(mc, class_builder);
             } else {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
@@ -202,5 +222,3 @@ p1.print;
 
     arena.finish_cycle();
 }
-
-
