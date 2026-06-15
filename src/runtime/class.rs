@@ -40,4 +40,8 @@ pub fn build_class_class() -> NativeClassBuilder {
             // TODO: implement this
             Ok(vm.new_nil(mc))
         })
+        .instance_method("abstract!", |vm, mc, _args| {
+            // TODO: implement this
+            Ok(vm.new_nil(mc))
+        })
 }
