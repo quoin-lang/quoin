@@ -208,8 +208,23 @@ impl Compiler {
                 bytecode.push(Instruction::NewList(user_list.values.len()));
                 bytecode.push(Instruction::Send("newUserList:".to_string(), 1));
             }
+            NodeValue::Dot3 => {
+                // TODO: For now, just throw the string.
+                bytecode.push(Instruction::Push(Constant::String("...".to_string())));
+                bytecode.push(Instruction::Send("throw".to_string(), 0));
+            }
+            NodeValue::Huh3 => {
+                // TODO: For now, just throw the string.
+                bytecode.push(Instruction::Push(Constant::String("???".to_string())));
+                bytecode.push(Instruction::Send("throw".to_string(), 0));
+            }
+            NodeValue::Bang3 => {
+                // TODO: For now, just throw the string.
+                bytecode.push(Instruction::Push(Constant::String("!!!".to_string())));
+                bytecode.push(Instruction::Send("throw".to_string(), 0));
+            }
             NodeValue::Unknown => {
-                return Err("Encountered Unknown NodeValue".to_string());
+                return Err("Encountered Unknown NodeValue (ast_visitor bug)".to_string());
             }
             _ => {
                 return Err(format!("Unsupported NodeValue: {:?}", node.value));
