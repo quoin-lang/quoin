@@ -455,6 +455,7 @@ dependencies = [
  "antlr-rust",
  "cargo-llvm-cov",
  "gc-arena",
+ "glob",
  "itertools",
  "once_cell",
  "rand 0.10.1",

@@ -2,12 +2,12 @@
 
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::PathBuf;
 use std::thread;
 
-use antlr_rust::InputStream;
 use antlr_rust::common_token_stream::CommonTokenStream;
 use antlr_rust::tree::ParseTreeVisitorCompat;
+use antlr_rust::InputStream;
 
 use crate::parser::ast_visitor::{AstVisitor, Node, NodeValue};
 use crate::parser::generated::buildingblockslexer::BuildingBlocksLexer;
@@ -32,7 +32,7 @@ pub fn parse_building_blocks_string(code: &str) -> Node {
     visitor_result
 }
 
-pub fn parse_building_blocks_file(path: &Path) -> Node {
+pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
     let filename = path.display();
 
     let mut file = match File::open(&path) {
@@ -253,7 +253,11 @@ mod tests {
         assert_eq!(ast, expected);
     }
 
-    fn block_arg(name: &str, identifier_type: IdentifierType, type_hint: Option<Arc<IdentifierNode>>) -> Arc<BlockArgNode> {
+    fn block_arg(
+        name: &str,
+        identifier_type: IdentifierType,
+        type_hint: Option<Arc<IdentifierNode>>,
+    ) -> Arc<BlockArgNode> {
         Arc::new(BlockArgNode {
             identifier: Arc::new(IdentifierNode {
                 namespace: None,
@@ -264,7 +268,11 @@ mod tests {
         })
     }
 
-    fn block_decl(name: &str, identifier_type: IdentifierType, type_hint: Option<Arc<IdentifierNode>>) -> Arc<BlockDeclNode> {
+    fn block_decl(
+        name: &str,
+        identifier_type: IdentifierType,
+        type_hint: Option<Arc<IdentifierNode>>,
+    ) -> Arc<BlockDeclNode> {
         Arc::new(BlockDeclNode {
             identifier: Arc::new(IdentifierNode {
                 namespace: None,
@@ -451,19 +459,28 @@ mod tests {
     fn test_parse_unary_operators_all() {
         let ast = parse_building_blocks_string("+x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
-            expressions: vec![unary(UnaryOperatorType::Add, ident("x", IdentifierType::Local))],
+            expressions: vec![unary(
+                UnaryOperatorType::Add,
+                ident("x", IdentifierType::Local),
+            )],
         }));
         assert_eq!(ast, expected);
 
         let ast = parse_building_blocks_string("-x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
-            expressions: vec![unary(UnaryOperatorType::Sub, ident("x", IdentifierType::Local))],
+            expressions: vec![unary(
+                UnaryOperatorType::Sub,
+                ident("x", IdentifierType::Local),
+            )],
         }));
         assert_eq!(ast, expected);
 
         let ast = parse_building_blocks_string("%x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
-            expressions: vec![unary(UnaryOperatorType::Mod, ident("x", IdentifierType::Local))],
+            expressions: vec![unary(
+                UnaryOperatorType::Mod,
+                ident("x", IdentifierType::Local),
+            )],
         }));
         assert_eq!(ast, expected);
     }
@@ -552,95 +569,103 @@ mod tests {
         // SelectorNoArgs
         let ast = parse_building_blocks_string("foo -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
-            expressions: vec![arc_node(NodeValue::MethodDefinition(MethodDefinitionNode {
-                signature: Arc::new(MethodSelectorNode {
-                    identifiers: vec![Arc::new(IdentifierNode {
-                        namespace: None,
-                        name: "foo".to_string(),
-                        identifier_type: IdentifierType::Local,
-                    })],
-                }),
-                block: Arc::new(BlockNode {
-                    name: None,
-                    arguments: vec![],
-                    decls: vec![],
-                    decl_block: None,
-                    statements: vec![integer(1)],
-                }),
-            }))],
+            expressions: vec![arc_node(NodeValue::MethodDefinition(
+                MethodDefinitionNode {
+                    signature: Arc::new(MethodSelectorNode {
+                        identifiers: vec![Arc::new(IdentifierNode {
+                            namespace: None,
+                            name: "foo".to_string(),
+                            identifier_type: IdentifierType::Local,
+                        })],
+                    }),
+                    block: Arc::new(BlockNode {
+                        name: None,
+                        arguments: vec![],
+                        decls: vec![],
+                        decl_block: None,
+                        statements: vec![integer(1)],
+                    }),
+                },
+            ))],
         }));
         assert_eq!(ast, expected);
 
         // SelectorNoArgsBang
         let ast = parse_building_blocks_string("foo! -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
-            expressions: vec![arc_node(NodeValue::MethodDefinition(MethodDefinitionNode {
-                signature: Arc::new(MethodSelectorNode {
-                    identifiers: vec![Arc::new(IdentifierNode {
-                        namespace: None,
-                        name: "foo!".to_string(),
-                        identifier_type: IdentifierType::Local,
-                    })],
-                }),
-                block: Arc::new(BlockNode {
-                    name: None,
-                    arguments: vec![],
-                    decls: vec![],
-                    decl_block: None,
-                    statements: vec![integer(1)],
-                }),
-            }))],
+            expressions: vec![arc_node(NodeValue::MethodDefinition(
+                MethodDefinitionNode {
+                    signature: Arc::new(MethodSelectorNode {
+                        identifiers: vec![Arc::new(IdentifierNode {
+                            namespace: None,
+                            name: "foo!".to_string(),
+                            identifier_type: IdentifierType::Local,
+                        })],
+                    }),
+                    block: Arc::new(BlockNode {
+                        name: None,
+                        arguments: vec![],
+                        decls: vec![],
+                        decl_block: None,
+                        statements: vec![integer(1)],
+                    }),
+                },
+            ))],
         }));
         assert_eq!(ast, expected);
 
         // SelectorWArgs
         let ast = parse_building_blocks_string("foo: bar: -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
-            expressions: vec![arc_node(NodeValue::MethodDefinition(MethodDefinitionNode {
-                signature: Arc::new(MethodSelectorNode {
-                    identifiers: vec![
-                        Arc::new(IdentifierNode {
-                            namespace: None,
-                            name: "foo:".to_string(),
-                            identifier_type: IdentifierType::Local,
-                        }),
-                        Arc::new(IdentifierNode {
-                            namespace: None,
-                            name: "bar:".to_string(),
-                            identifier_type: IdentifierType::Local,
-                        }),
-                    ],
-                }),
-                block: Arc::new(BlockNode {
-                    name: None,
-                    arguments: vec![],
-                    decls: vec![],
-                    decl_block: None,
-                    statements: vec![integer(1)],
-                }),
-            }))],
+            expressions: vec![arc_node(NodeValue::MethodDefinition(
+                MethodDefinitionNode {
+                    signature: Arc::new(MethodSelectorNode {
+                        identifiers: vec![
+                            Arc::new(IdentifierNode {
+                                namespace: None,
+                                name: "foo:".to_string(),
+                                identifier_type: IdentifierType::Local,
+                            }),
+                            Arc::new(IdentifierNode {
+                                namespace: None,
+                                name: "bar:".to_string(),
+                                identifier_type: IdentifierType::Local,
+                            }),
+                        ],
+                    }),
+                    block: Arc::new(BlockNode {
+                        name: None,
+                        arguments: vec![],
+                        decls: vec![],
+                        decl_block: None,
+                        statements: vec![integer(1)],
+                    }),
+                },
+            ))],
         }));
         assert_eq!(ast, expected);
 
         // SelectorSymbol
         let ast = parse_building_blocks_string("#foo -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
-            expressions: vec![arc_node(NodeValue::MethodDefinition(MethodDefinitionNode {
-                signature: Arc::new(MethodSelectorNode {
-                    identifiers: vec![Arc::new(IdentifierNode {
-                        namespace: None,
-                        name: "foo".to_string(),
-                        identifier_type: IdentifierType::Local,
-                    })],
-                }),
-                block: Arc::new(BlockNode {
-                    name: None,
-                    arguments: vec![],
-                    decls: vec![],
-                    decl_block: None,
-                    statements: vec![integer(1)],
-                }),
-            }))],
+            expressions: vec![arc_node(NodeValue::MethodDefinition(
+                MethodDefinitionNode {
+                    signature: Arc::new(MethodSelectorNode {
+                        identifiers: vec![Arc::new(IdentifierNode {
+                            namespace: None,
+                            name: "foo".to_string(),
+                            identifier_type: IdentifierType::Local,
+                        })],
+                    }),
+                    block: Arc::new(BlockNode {
+                        name: None,
+                        arguments: vec![],
+                        decls: vec![],
+                        decl_block: None,
+                        statements: vec![integer(1)],
+                    }),
+                },
+            ))],
         }));
         assert_eq!(ast, expected);
 
@@ -669,22 +694,24 @@ mod tests {
         // SelectorNoArgs with keyword
         let ast = parse_building_blocks_string("nil -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
-            expressions: vec![arc_node(NodeValue::MethodDefinition(MethodDefinitionNode {
-                signature: Arc::new(MethodSelectorNode {
-                    identifiers: vec![Arc::new(IdentifierNode {
-                        namespace: None,
-                        name: "nil".to_string(),
-                        identifier_type: IdentifierType::Keyword,
-                    })],
-                }),
-                block: Arc::new(BlockNode {
-                    name: None,
-                    arguments: vec![],
-                    decls: vec![],
-                    decl_block: None,
-                    statements: vec![integer(1)],
-                }),
-            }))],
+            expressions: vec![arc_node(NodeValue::MethodDefinition(
+                MethodDefinitionNode {
+                    signature: Arc::new(MethodSelectorNode {
+                        identifiers: vec![Arc::new(IdentifierNode {
+                            namespace: None,
+                            name: "nil".to_string(),
+                            identifier_type: IdentifierType::Keyword,
+                        })],
+                    }),
+                    block: Arc::new(BlockNode {
+                        name: None,
+                        arguments: vec![],
+                        decls: vec![],
+                        decl_block: None,
+                        statements: vec![integer(1)],
+                    }),
+                },
+            ))],
         }));
         assert_eq!(ast, expected);
     }
@@ -890,7 +917,11 @@ mod tests {
         let expected = val_node(NodeValue::Program(ProgramNode {
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 name: None,
-                arguments: vec![block_arg("x", IdentifierType::Local, Some(ident_node("Int", IdentifierType::Local)))],
+                arguments: vec![block_arg(
+                    "x",
+                    IdentifierType::Local,
+                    Some(ident_node("Int", IdentifierType::Local)),
+                )],
                 decls: vec![],
                 decl_block: None,
                 statements: vec![integer(1)],
@@ -944,7 +975,11 @@ mod tests {
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 name: None,
                 arguments: vec![],
-                decls: vec![block_decl("x", IdentifierType::Local, Some(ident_node("Int", IdentifierType::Local)))],
+                decls: vec![block_decl(
+                    "x",
+                    IdentifierType::Local,
+                    Some(ident_node("Int", IdentifierType::Local)),
+                )],
                 decl_block: None,
                 statements: vec![integer(1)],
             }))],

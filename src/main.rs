@@ -7,12 +7,40 @@ use new_vm::{compiler, gc};
 use std::fs::read_to_string;
 
 use gc_arena::{Arena, Gc, Rootable};
+use glob::glob;
+use new_vm::parser::ast_visitor::Node;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionStatus {
+    Running,
+    Finished,
+    Yeeted,
+}
 
 fn main() {
+    let args = std::env::args().collect::<Vec<String>>();
+
+    if let Some(arg) = args.get(1)
+        && arg == "load"
+    {
+        println!("Loading bblib/*.b...");
+        for file in glob("bblib/*.b").unwrap() {
+            let path_buf = file.unwrap();
+            println!("Loading file: {}", path_buf.display());
+            let ast = parser::parse_building_blocks_file(&path_buf);
+            compile_and_run_ast(&ast);
+        }
+        return;
+    }
+
     let script = read_to_string("bblib/testscript.b").unwrap();
 
     let ast = parser::parse_building_blocks_string(&script);
 
+    compile_and_run_ast(&ast);
+}
+
+fn compile_and_run_ast(ast: &Node) {
     let program_node = match &ast.value {
         ast_visitor::NodeValue::Program(p) => p,
         _ => {
@@ -100,13 +128,6 @@ fn main() {
 
         vm
     });
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum ExecutionStatus {
-        Running,
-        Finished,
-        Yeeted,
-    }
 
     let mut step_count = 0;
     loop {
