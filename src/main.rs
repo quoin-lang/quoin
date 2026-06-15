@@ -42,7 +42,6 @@ fn main() {
 }
 
 fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
-    let asts: Vec<Node> = ast_iter.collect();
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc);
 
@@ -101,7 +100,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
     });
 
     let mut aborted = false;
-    for ast in asts {
+    for ast in ast_iter {
         if aborted {
             break;
         }
