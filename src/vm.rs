@@ -516,6 +516,7 @@ impl<'gc> VmState<'gc> {
     pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or(Value::Nil);
+            assert_eq!(self.stack.len(), 0, "Stack is not empty! {:?}", self.stack);
             return Ok(VmStatus::Finished(ret));
         }
 
