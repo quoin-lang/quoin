@@ -53,9 +53,6 @@ Double <-- {
 
     next -> { self + 1.0 }
 
-    #'-' -> { 0.0 - self }
-    #'+' -> { self }
-
     abs -> { (self < 0).if:{ -self } else:{ self } }
 
     .meta <-- {
@@ -67,9 +64,6 @@ Integer <-- {
     integer -> { self }
 
     next -> { self + 1 }
-
-    #'-' -> { 0 - self }
-    #'+' -> { self }
 
     abs -> { (self < 0).if:{ -self } else:{ self } }
 
