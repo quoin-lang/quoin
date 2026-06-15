@@ -5,10 +5,9 @@ This document outlines the language features, compiler updates, and VM modificat
 ## Misc
 - [ ] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
   - In the BB language itself all methods are attached to a class.
+- [ ] Support checking `assertMeetsRequirements:` in calls to `mix:`/`can:`.
 
 ## Bugs/Odd Behavior
-- [ ] Running a file with nothing but class definitions fails the stack empty assertion.
-  - It leaves `nil` on the stack.
 
 ## 1. Class & Method Definition Semantics
 - [x] **Class Creation (`<-` operator)**:

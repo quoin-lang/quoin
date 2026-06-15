@@ -1,5 +1,4 @@
 Mixin <- BuiltinAssertions <- {
-    "
     .meta <-- {
         assertMeetsRequirements: -> { |class:Class|
             (class.implements?:#addResult:).else:{
@@ -7,7 +6,6 @@ Mixin <- BuiltinAssertions <- {
             }
         }
     }
-    "
 
     recordResult:evidence:block: -> { |testBlock:Block evidenceArg:List block:Block|
         assertionName = block.name.defined?.if:{ block.name } else:{ '{code}' };
