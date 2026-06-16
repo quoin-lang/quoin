@@ -136,3 +136,12 @@ file = [IO]File.open: '/etc/motd';
 
 [IO]Stdout = 'standard output';
 .print: 'Stdout =' and: [IO]Stdout;
+
+folder = [IO]Folder.open: 'bblib/tests/';
+.print: 'Test file: ' and:folder.next;
+.print: 'Test file: ' and:folder.next;
+.print: 'Test file: ' and:folder.next;
+.print: 'Test file: ' and:folder.next;
+.print: 'Test file: ' and:folder.next;
+.print: 'Test file: ' and:folder.next;
+.print: 'Test file: ' and:folder.next;
