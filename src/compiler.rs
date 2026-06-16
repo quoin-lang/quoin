@@ -72,6 +72,8 @@ impl Compiler {
             bytecode.push(Instruction::Push(Constant::Nil));
         }
 
+        bytecode.push(Instruction::Return);
+
         Ok(StaticBlock {
             name: None,
             is_nested_block: false,
@@ -684,7 +686,11 @@ mod tests {
             expressions: exprs.into_iter().map(Arc::new).collect(),
             source_info: None,
         };
-        compiler.compile_program(&program)
+        let mut block = compiler.compile_program(&program)?;
+        if block.bytecode.last() == Some(&Instruction::Return) {
+            block.bytecode.pop();
+        }
+        Ok(block)
     }
 
     // Default prefix for every program
