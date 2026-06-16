@@ -113,6 +113,19 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 })
                 .map_err(|e| BBError::Other(e.to_string()))
         })
+        .instance_method("name", |vm, mc, args| {
+            args[0]
+                .with_native_state(|io: &NativeIoFile| {
+                    vm.new_string(
+                        mc,
+                        PathBuf::from(&io.path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or("".to_string()),
+                    )
+                })
+                .map_err(|e| BBError::Other(e.to_string()))
+        })
         .instance_method("ext", |vm, mc, args| {
             let ext = args[0].with_native_state(|io: &NativeIoFile| {
                 PathBuf::from(&io.path)
