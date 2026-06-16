@@ -37,15 +37,21 @@ fn main() {
             }
         });
         compile_and_run_asts(ast_iter);
-    } else {
-        println!("Loading bblib/*.b...");
+        return;
+    }
 
+    if let Some(arg) = args.get(1)
+        && arg == "test"
+    {
+        println!("Loading bblib/*.b...");
         let ast_iter = glob("bblib/*.b")
             .unwrap()
             .filter_map(|p| {
                 let path_buf = p.unwrap();
                 let path_s = path_buf.display().to_string();
-                if !path_s.starts_with("bblib/test") && !path_s.ends_with("main.b") {
+                if path_s == "bblib/test.b"
+                    || (!path_s.starts_with("bblib/test") && !path_s.ends_with("main.b"))
+                {
                     println!("Loading file: {}", path_s);
                     let node = parser::parse_building_blocks_file(&path_buf);
                     Some(node)
@@ -54,40 +60,34 @@ fn main() {
                 }
             })
             .chain(vec![{
-                println!("Loading file: bblib/testscript.b");
-                parser::parse_building_blocks_string(&read_to_string("bblib/testscript.b").unwrap())
+                println!("Loading file: bblib/main.b");
+                parser::parse_building_blocks_string(&read_to_string("bblib/main.b").unwrap())
             }]);
 
         compile_and_run_asts(ast_iter);
+        return;
     }
 
-    // if let Some(arg) = args.get(1)
-    //     && arg == "test"
-    // {
-    //     println!("Loading bblib/*.b...");
-    //
-    //     let ast_iter = glob("bblib/*.b")
-    //         .unwrap()
-    //         .filter_map(|p| {
-    //             let path_buf = p.unwrap();
-    //             let path_s = path_buf.display().to_string();
-    //             if path_s == "bblib/test.b"
-    //                 || (!path_s.starts_with("bblib/test") && !path_s.ends_with("main.b"))
-    //             {
-    //                 println!("Loading file: {}", path_s);
-    //                 let node = parser::parse_building_blocks_file(&path_buf);
-    //                 Some(node)
-    //             } else {
-    //                 None
-    //             }
-    //         })
-    //         .chain(vec![{
-    //             println!("Loading file: bblib/main.b");
-    //             parser::parse_building_blocks_string(&read_to_string("bblib/main.b").unwrap())
-    //         }]);
-    //     compile_and_run_asts(ast_iter);
-    //     return;
-    // }
+    println!("Loading bblib/*.b...");
+    let ast_iter = glob("bblib/*.b")
+        .unwrap()
+        .filter_map(|p| {
+            let path_buf = p.unwrap();
+            let path_s = path_buf.display().to_string();
+            if !path_s.starts_with("bblib/test") && !path_s.ends_with("main.b") {
+                println!("Loading file: {}", path_s);
+                let node = parser::parse_building_blocks_file(&path_buf);
+                Some(node)
+            } else {
+                None
+            }
+        })
+        .chain(vec![{
+            println!("Loading file: bblib/testscript.b");
+            parser::parse_building_blocks_string(&read_to_string("bblib/testscript.b").unwrap())
+        }]);
+
+    compile_and_run_asts(ast_iter);
 }
 
 fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
@@ -101,6 +101,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
         vm.register_native_class(mc, boolean::build_boolean_class());
         vm.register_native_class(mc, block::build_block_class());
         vm.register_native_class(mc, io::build_io_folder_class());
+        vm.register_native_class(mc, io::build_io_file_class());
         vm.register_native_class(mc, list::build_list_class());
 
         // Register placeholder classes for all of the builtin types.
@@ -222,4 +223,3 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
 
     arena.finish_cycle();
 }
-

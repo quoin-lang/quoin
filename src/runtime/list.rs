@@ -141,4 +141,24 @@ pub fn build_list_class() -> NativeClassBuilder {
                 })
                 .map_err(|e| BBError::Other(e))?
         })
+        .instance_method("s", |vm, mc, args| {
+            let parts = args[0]
+                .with_native_state::<NativeListState, _, _>(|l| {
+                    let mut parts = Vec::new();
+                    for val in l.get_vec() {
+                        let result = vm.call_method(mc, *val, "s", vec![])?;
+                        if let Value::Object(obj) = result {
+                            if let ObjectPayload::String(s) = &obj.borrow().payload {
+                                parts.push(s.to_string());
+                                continue;
+                            }
+                        }
+                        parts.push(format!("{}", result))
+                    }
+                    Ok::<Vec<String>, BBError>(parts)
+                })
+                .map_err(|e| BBError::Other(e))??;
+
+            Ok(vm.new_string(mc, format!("#({})", parts.join(" "))))
+        })
 }
