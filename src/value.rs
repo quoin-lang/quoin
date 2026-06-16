@@ -9,7 +9,7 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use ulid::Ulid;
 
-#[derive(Clone, Copy, Debug, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GcUlid(pub Ulid);
 
 unsafe impl<'gc> Collect<'gc> for GcUlid {
@@ -342,12 +342,38 @@ impl<'gc> fmt::Debug for Value<'gc> {
     }
 }
 
+thread_local! {
+    static FORMATTING_OBJECTS: std::cell::RefCell<std::collections::HashSet<GcUlid>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+struct FormattingGuard {
+    id: GcUlid,
+}
+
+impl Drop for FormattingGuard {
+    fn drop(&mut self) {
+        FORMATTING_OBJECTS.with(|set| {
+            set.borrow_mut().remove(&self.id);
+        });
+    }
+}
+
 impl<'gc> fmt::Display for Value<'gc> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "class {} meta", c.borrow().name),
             Value::Object(o) => {
+                let id = o.borrow().id;
+                let already_formatting = FORMATTING_OBJECTS.with(|set| {
+                    !set.borrow_mut().insert(id)
+                });
+                if already_formatting {
+                    return write!(f, "{}{{...}}", o.borrow().class.borrow().name);
+                }
+                let _guard = FormattingGuard { id };
+
                 let o_borrow = o.borrow();
                 match &o_borrow.payload {
                     ObjectPayload::Nil => write!(f, "nil"),
