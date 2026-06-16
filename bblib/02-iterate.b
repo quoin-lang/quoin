@@ -4,16 +4,6 @@ KeyValuePair <- { |@key @value|
     key -> { @key }
     value -> { @value }
 
-    #'==:' --> { |other:KeyValuePair| (.key == other.key) && (.value == other.value) }
-    #'!=:' --> { |other:KeyValuePair| (.key != other.key) || (.value != other.value) }
-
-    #'>:'  --> { |other:KeyValuePair| (.key==other.key).if:{ .value > other.value } else:{ .key > other.key }   }
-    #'>=:' --> { |other:KeyValuePair| (.key==other.key).if:{ .value >= other.value } else:{ .key >= other.key } }
-    #'<:'  --> { |other:KeyValuePair| (.key==other.key).if:{ .value < other.value } else:{ .key < other.key }   }
-    #'<=:' --> { |other:KeyValuePair| (.key==other.key).if:{ .value <= other.value } else:{ .key <= other.key } }
-
-    #'~:' --> { |other:KeyValuePair| .key ~ other.key && .value ~ other.value }
-
     s --> { @key + ':' + @value }
 };
 
