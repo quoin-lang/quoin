@@ -1221,6 +1221,16 @@ impl<'gc> VmState<'gc> {
                     }
                 };
 
+                if let Some(existing_val) = self.globals.borrow().get(&name).copied() {
+                    if let Value::Class(_) = existing_val {
+                        return Err(format!(
+                            "Cannot redefine class {} because it already exists",
+                            name.to_explicit_string()
+                        )
+                        .into());
+                    }
+                }
+
                 let class_obj = gcl!(
                     mc,
                     Class {
@@ -1241,6 +1251,11 @@ impl<'gc> VmState<'gc> {
             Instruction::ExecuteBlockWithSelf => {
                 let block_val = self.pop()?;
                 let self_val = self.pop()?;
+                if self_val.is_nil() {
+                    return Err(BBError::Other(
+                        "Cannot extend nil or non-existent class/object".to_string()
+                    ));
+                }
                 return if let Value::Object(obj) = block_val
                     && let ObjectPayload::Block(block) = &obj.borrow().payload
                 {
@@ -2569,5 +2584,50 @@ mod tests {
 
             assert_eq!(to_spec(res2), ValueSpec::Int(30));
         });
+    }
+
+    #[test]
+    fn test_cannot_redefine_existing_class() {
+        run_test_steps(
+            vec![
+                Instruction::DefineClass {
+                    name: NamespacedName::new(Vec::new(), "Object".to_string()),
+                    parent_name: None,
+                    instance_vars: Vec::new(),
+                },
+            ],
+            |vm, mc| {
+                let res = vm.step(mc);
+                assert!(res.is_err());
+                let err_msg = format!("{}", res.err().unwrap());
+                assert!(err_msg.contains("Cannot redefine class [/]Object because it already exists"));
+            },
+        );
+    }
+
+    #[test]
+    fn test_cannot_extend_non_existent_class() {
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Nil),
+                Instruction::Push(Constant::Block(StaticBlock {
+                    name: Some("ext_block".to_string()),
+                    is_nested_block: false,
+                    param_names: Vec::new(),
+                    bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
+                })),
+                Instruction::ExecuteBlockWithSelf,
+            ],
+            |vm, mc| {
+                let res = vm.step(mc);
+                assert!(res.is_ok());
+                let res = vm.step(mc);
+                assert!(res.is_ok());
+                let res = vm.step(mc);
+                assert!(res.is_err());
+                let err_msg = format!("{}", res.err().unwrap());
+                assert!(err_msg.contains("Cannot extend nil or non-existent class/object"));
+            },
+        );
     }
 }
