@@ -471,6 +471,7 @@ impl Compiler {
             BinaryOperatorType::GtEq => ">=",
             BinaryOperatorType::Mod => "%",
             BinaryOperatorType::Match => "~",
+            BinaryOperatorType::Range => "..:",
             _ => {
                 return Err(format!(
                     "Unsupported binary operator type: {:?}",
