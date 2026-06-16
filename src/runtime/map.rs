@@ -1,10 +1,7 @@
 use crate::arg;
-use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
-use crate::vm::VmStatus;
 
 use gc_arena::collect::{DynCollect, Trace};
-use gc_arena::{Gc, lock::RefLock};
 use std::any::Any;
 use std::collections::HashMap;
 
@@ -103,16 +100,17 @@ impl NativeKeyValuePairState {
         unsafe { std::mem::transmute(self.value) }
     }
 
-    pub fn set_key<'gc>(&mut self, key: Value<'gc>) {
+    pub fn set_key(&mut self, key: Value) {
         let key_static: Value<'static> = unsafe { std::mem::transmute(key) };
         self.key = key_static;
     }
 
-    pub fn set_value<'gc>(&mut self, value: Value<'gc>) {
+    pub fn set_value(&mut self, value: Value) {
         let value_static: Value<'static> = unsafe { std::mem::transmute(value) };
         self.value = value_static;
     }
 }
+
 impl AnyCollect for NativeKeyValuePairState {
     fn as_any(&self) -> &dyn Any {
         self
@@ -132,79 +130,6 @@ impl AnyCollect for NativeKeyValuePairState {
 
 pub fn build_key_value_pair_class() -> NativeClassBuilder {
     NativeClassBuilder::new("KeyValuePair", Some("Object"))
-        .class_method("new:", |vm, mc, args| {
-            let class_obj = match args[0] {
-                Value::Class(c) => c,
-                _ => {
-                    return Err(BBError::TypeError {
-                        expected: "Class".to_string(),
-                        got: args[0].type_name().to_string(),
-                        msg: "new: expects Class receiver".to_string(),
-                    });
-                }
-            };
-            let block = if let Value::Object(obj) = args[1]
-                && let crate::value::ObjectPayload::Block(b) = &obj.borrow().payload
-            {
-                *b
-            } else {
-                return Err(BBError::TypeError {
-                    expected: "Block".to_string(),
-                    got: args[1].type_name().to_string(),
-                    msg: "new: expects a Block".to_string(),
-                });
-            };
-
-            let initial_frame_count = vm.frames.len();
-            vm.start_block(mc, block, Vec::new(), None, None);
-
-            let env_ref = vm.frames.last().unwrap().env;
-
-            while vm.frames.len() > initial_frame_count {
-                match vm.step(mc)? {
-                    VmStatus::Running => {}
-                    VmStatus::Finished(_) => break,
-                    VmStatus::Yeeted(val) => {
-                        return Err(BBError::Other(format!(
-                            "Uncaught exception during block execution: {}",
-                            val
-                        )));
-                    }
-                }
-            }
-
-            // Pop the block's return value to clean up the stack
-            let _block_ret = vm.pop().map_err(|e| BBError::Other(e))?;
-
-            let env_borrow = env_ref.borrow();
-            let key = env_borrow
-                .vars
-                .get("key")
-                .copied()
-                .unwrap_or_else(|| vm.new_nil(mc));
-            let value = env_borrow
-                .vars
-                .get("value")
-                .copied()
-                .unwrap_or_else(|| vm.new_nil(mc));
-
-            let state = NativeKeyValuePairState::new(key, value);
-            let boxed_state: Box<dyn AnyCollect> = Box::new(state);
-            let obj = vm.new_object(mc, class_obj);
-            obj.borrow_mut(mc).payload =
-                crate::value::ObjectPayload::NativeState(crate::gc!(mc, RefLock::new(boxed_state)));
-
-            Ok(Value::Object(obj))
-        })
-        .instance_method("init:", |_vm, mc, args| {
-            let key = args[1];
-            let value = args[2];
-            args[0].with_native_state_mut(mc, |kvp: &mut NativeKeyValuePairState| {
-                kvp.set_key(key);
-                kvp.set_value(value);
-            })?;
-            Ok(args[0])
-        })
         .instance_method("key", |_vm, _mc, args| {
             let key = args[0].with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_key())?;
             Ok(key)
