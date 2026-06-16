@@ -6,6 +6,7 @@ use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
+use std::fmt::{Debug, Formatter};
 use ulid::Ulid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Hash)]
@@ -20,12 +21,12 @@ unsafe impl<'gc> Collect<'gc> for GcUlid {
 pub struct GcRegex(pub Regex);
 
 impl fmt::Debug for GcRegex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "Regex({})", self.0.as_str())
     }
 }
 
-pub trait AnyCollect {
+pub trait AnyCollect: Debug {
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
@@ -36,6 +37,12 @@ unsafe impl<'gc> Collect<'gc> for Box<dyn AnyCollect> {
 }
 
 pub struct OpaqueState<T>(pub T);
+
+impl<T: 'static> Debug for OpaqueState<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "OpaqueState({:?})", self)
+    }
+}
 
 impl<T: 'static> AnyCollect for OpaqueState<T> {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -103,7 +110,7 @@ impl NamespacedName {
 }
 
 impl fmt::Display for NamespacedName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if self.path.is_empty() {
             write!(f, "{}", self.name)
         } else {
@@ -112,7 +119,7 @@ impl fmt::Display for NamespacedName {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct NativeFunc(
     pub for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, BBError>,
 );
@@ -141,7 +148,7 @@ pub enum Value<'gc> {
     ClassMeta(Gc<'gc, RefLock<Class<'gc>>>),
 }
 
-#[derive(Clone, Copy, Collect)]
+#[derive(Clone, Copy, Collect, Debug)]
 #[collect(no_drop)]
 pub enum ObjectPayload<'gc> {
     Nil,
@@ -287,7 +294,7 @@ impl<'gc> PartialEq for Value<'gc> {
 }
 
 impl<'gc> fmt::Debug for Value<'gc> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Value::Class(c) => write!(f, "Class({})", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "ClassMeta({})", c.borrow().name),
@@ -315,7 +322,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
 }
 
 impl<'gc> fmt::Display for Value<'gc> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "class {} meta", c.borrow().name),
@@ -375,7 +382,7 @@ impl<'gc> fmt::Display for Value<'gc> {
     }
 }
 
-#[derive(Collect)]
+#[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Block<'gc> {
     pub name: Option<String>,
@@ -386,7 +393,7 @@ pub struct Block<'gc> {
     pub enclosing_method_id: Option<usize>,
 }
 
-#[derive(Collect)]
+#[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct EnvFrame<'gc> {
     pub parent: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
@@ -430,7 +437,7 @@ impl<'gc> EnvFrame<'gc> {
     }
 }
 
-#[derive(Collect)]
+#[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Class<'gc> {
     pub name: NamespacedName,
@@ -441,7 +448,7 @@ pub struct Class<'gc> {
     pub mixin_classes: Vec<Gc<'gc, RefLock<Class<'gc>>>>,
 }
 
-#[derive(Collect)]
+#[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Object<'gc> {
     pub id: GcUlid,
