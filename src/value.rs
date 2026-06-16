@@ -2,9 +2,10 @@ use crate::error::BBError;
 use crate::instruction::Instruction;
 use crate::parser::ast_visitor::IdentifierNode;
 use crate::runtime::list::NativeListState;
-use crate::runtime::map::NativeMapState;
+use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
 use crate::runtime::regex::NativeRegexState;
 use crate::vm::VmState;
+
 use gc_arena::collect::Trace;
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::any::Any;
@@ -331,6 +332,17 @@ impl<'gc> fmt::Debug for Value<'gc> {
                             write!(f, "Regex(...)")
                         }
                     }
+                    _ if o_borrow.class_name() == "KeyValuePair" => {
+                        if let Ok(res) =
+                            self.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
+                                format!("key={:?} value={:?}", kvp.get_key(), kvp.get_value())
+                            })
+                        {
+                            write!(f, "KeyValuePair{{{}}}", res)
+                        } else {
+                            write!(f, "KeyValuePair(...)")
+                        }
+                    }
                     ObjectPayload::Block(b) => write!(f, "Block({:?})", b.name),
                     ObjectPayload::Native(_) => write!(f, "Native(<fn>)"),
                     _ => {
@@ -421,6 +433,21 @@ impl<'gc> fmt::Display for Value<'gc> {
                             write!(f, "#/{}/", pattern)
                         } else {
                             write!(f, "Regex(...)")
+                        }
+                    }
+                    _ if o_borrow.class_name() == "KeyValuePair" => {
+                        if let Ok(res) =
+                            self.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
+                                format!(
+                                    "KeyValuePair{{key: {}, value: {}}}",
+                                    kvp.get_key(),
+                                    kvp.get_value()
+                                )
+                            })
+                        {
+                            write!(f, "{}", res)
+                        } else {
+                            write!(f, "KeyValuePair(...)")
                         }
                     }
                     ObjectPayload::Block(b) => {

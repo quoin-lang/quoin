@@ -1,12 +1,3 @@
-KeyValuePair <- { |@key @value|
-    init: -> { |key value| @key=key; @value=value }
-
-    key -> { @key }
-    value -> { @value }
-
-    s --> { @key + ':' + @value }
-};
-
 Mixin <- Iterate <- {
      each: -> { |eachBlock:Block|
          it = self

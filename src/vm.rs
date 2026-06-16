@@ -604,6 +604,7 @@ impl<'gc> VmState<'gc> {
             borrowed.parent = parent_class;
             borrowed.instance_methods = inst_methods;
             borrowed.class_methods = cls_methods;
+            borrowed.instance_vars = Vec::new();
         } else {
             let class_obj = gcl!(
                 mc,
@@ -720,14 +721,14 @@ impl<'gc> VmState<'gc> {
                 return Some(Box::new(MetaCallable { class_obj: c }));
             }
         }
-        if selector == "new:" {
-            if let Value::Class(c) = receiver {
-                return Some(Box::new(NewCallable { class_obj: c }));
-            }
-        }
-        if selector == "new" {
-            if let Value::Class(c) = receiver {
-                return Some(Box::new(NewNoBlockCallable { class_obj: c }));
+        if let Value::Class(c) = receiver {
+            if self.lookup_in_class_hierarchy(c, selector, true).is_none() {
+                if selector == "new:" {
+                    return Some(Box::new(NewCallable { class_obj: c }));
+                }
+                if selector == "new" {
+                    return Some(Box::new(NewNoBlockCallable { class_obj: c }));
+                }
             }
         }
         let selector_key = NamespacedName::new(Vec::new(), selector.to_string());
@@ -1717,6 +1718,7 @@ mod tests {
             vm.register_native_class(mc, crate::runtime::string::build_string_class());
             vm.register_native_class(mc, crate::runtime::nil::build_nil_class());
             vm.register_native_class(mc, crate::runtime::map::build_map_class());
+            vm.register_native_class(mc, crate::runtime::map::build_key_value_pair_class());
             vm.register_native_class(mc, crate::runtime::regex::build_regex_class());
 
             for t in ["Method", "Native"] {

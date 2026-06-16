@@ -1,7 +1,7 @@
 use new_vm::parser::{ast_visitor, parser};
 use new_vm::runtime::{
-    block, boolean, class, double, integer, io, list, method, native, object, runtime, string,
-    timer, nil, map, regex,
+    block, boolean, class, double, integer, io, list, map, method, native, nil, object, regex,
+    runtime, string, timer,
 };
 use new_vm::value::{Block, NativeClassBuilder};
 use new_vm::vm::{VmState, VmStatus};
@@ -113,6 +113,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
         vm.register_native_class(mc, string::build_string_class());
         vm.register_native_class(mc, nil::build_nil_class());
         vm.register_native_class(mc, map::build_map_class());
+        vm.register_native_class(mc, map::build_key_value_pair_class());
         vm.register_native_class(mc, regex::build_regex_class());
 
         // Register placeholder classes for remaining builtin types.
