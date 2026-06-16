@@ -1,10 +1,8 @@
-// Generated from .\BuildingBlocks.g4 by ANTLR 4.8
+// Generated from ./BuildingBlocks.g4 by ANTLR 4.8
 #![allow(dead_code)]
 #![allow(nonstandard_style)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
-use antlr_rust::PredictionContextCache;
-use antlr_rust::TokenSource;
 use antlr_rust::atn::ATN;
 use antlr_rust::atn_deserializer::ATNDeserializer;
 use antlr_rust::char_stream::CharStream;
@@ -13,14 +11,16 @@ use antlr_rust::error_listener::ErrorListener;
 use antlr_rust::int_stream::IntStream;
 use antlr_rust::lexer::{BaseLexer, Lexer, LexerRecog};
 use antlr_rust::lexer_atn_simulator::{ILexerATNSimulator, LexerATNSimulator};
-use antlr_rust::parser_rule_context::{BaseParserRuleContext, ParserRuleContext, cast};
+use antlr_rust::parser_rule_context::{cast, BaseParserRuleContext, ParserRuleContext};
 use antlr_rust::recognizer::{Actions, Recognizer};
 use antlr_rust::rule_context::{BaseRuleContext, EmptyContext, EmptyCustomRuleContext};
 use antlr_rust::token::*;
 use antlr_rust::token_factory::{CommonTokenFactory, TokenAware, TokenFactory};
 use antlr_rust::vocabulary::{Vocabulary, VocabularyImpl};
+use antlr_rust::PredictionContextCache;
+use antlr_rust::TokenSource;
 
-use antlr_rust::{Tid, TidAble, TidExt, lazy_static};
+use antlr_rust::{lazy_static, Tid, TidAble, TidExt};
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -399,7 +399,8 @@ lazy_static! {
     };
 }
 
-const _serializedATN: &'static str = "\x03\u{608b}\u{a72a}\u{8133}\u{b9ed}\u{417c}\u{3be7}\u{7786}\u{5964}\x02\
+const _serializedATN: &'static str =
+    "\x03\u{608b}\u{a72a}\u{8133}\u{b9ed}\u{417c}\u{3be7}\u{7786}\u{5964}\x02\
 		\x36\u{16d}\x08\x01\x04\x02\x09\x02\x04\x03\x09\x03\x04\x04\x09\x04\x04\
 		\x05\x09\x05\x04\x06\x09\x06\x04\x07\x09\x07\x04\x08\x09\x08\x04\x09\x09\
 		\x09\x04\x0a\x09\x0a\x04\x0b\x09\x0b\x04\x0c\x09\x0c\x04\x0d\x09\x0d\x04\
@@ -600,5 +601,5 @@ const _serializedATN: &'static str = "\x03\u{608b}\u{a72a}\u{8133}\u{b9ed}\u{417
 		\u{16a}\x09\x0e\x02\x02\u{16a}\u{16c}\x09\x0e\x02\x02\u{16b}\u{163}\x03\
 		\x02\x02\x02\u{16b}\u{165}\x03\x02\x02\x02\u{16c}\x76\x03\x02\x02\x02\x17\
 		\x02\u{e0}\u{e8}\u{ee}\u{f0}\u{fa}\u{ff}\u{101}\u{10a}\u{10c}\u{11a}\u{131}\
-		\u{133}\u{13f}\u{142}\u{149}\u{14b}\u{151}\u{153}\u{161}\u{16b}\x03\x08\
-		\x02\x02";
+		\u{133}\u{13f}\u{142}\u{149}\u{14b}\u{151}\u{153}\u{161}\u{16b}\x03\x02\
+		\x03\x02";

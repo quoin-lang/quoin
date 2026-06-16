@@ -1,5 +1,5 @@
 #![allow(nonstandard_style)]
-// Generated from .\BuildingBlocks.g4 by ANTLR 4.8
+// Generated from ./BuildingBlocks.g4 by ANTLR 4.8
 use super::buildingblocksparser::*;
 use antlr_rust::tree::{ParseTreeVisitor, ParseTreeVisitorCompat};
 
@@ -732,7 +732,7 @@ pub trait BuildingBlocksVisitor<'input>:
 
     /**
      * Visit a parse tree produced by the {@code ArgIdentInst}
-     * labeled alternative in {@link BuildingBlocksParser#argident}.
+     * labeled alternative in {@link BuildingBlocksParser#argIdent}.
      * @param ctx the parse tree
      */
     fn visit_ArgIdentInst(&mut self, ctx: &ArgIdentInstContext<'input>) {
@@ -740,11 +740,11 @@ pub trait BuildingBlocksVisitor<'input>:
     }
 
     /**
-     * Visit a parse tree produced by the {@code ArgIdent}
-     * labeled alternative in {@link BuildingBlocksParser#argident}.
+     * Visit a parse tree produced by the {@code ArgIdentNormal}
+     * labeled alternative in {@link BuildingBlocksParser#argIdent}.
      * @param ctx the parse tree
      */
-    fn visit_ArgIdent(&mut self, ctx: &ArgIdentContext<'input>) {
+    fn visit_ArgIdentNormal(&mut self, ctx: &ArgIdentNormalContext<'input>) {
         self.visit_children(ctx)
     }
 
@@ -1514,7 +1514,7 @@ pub trait BuildingBlocksVisitorCompat<'input>:
 
     /**
      * Visit a parse tree produced by the {@code ArgIdentInst}
-     * labeled alternative in {@link BuildingBlocksParser#argident}.
+     * labeled alternative in {@link BuildingBlocksParser#argIdent}.
      * @param ctx the parse tree
      */
     fn visit_ArgIdentInst(&mut self, ctx: &ArgIdentInstContext<'input>) -> Self::Return {
@@ -1522,11 +1522,11 @@ pub trait BuildingBlocksVisitorCompat<'input>:
     }
 
     /**
-     * Visit a parse tree produced by the {@code ArgIdent}
-     * labeled alternative in {@link BuildingBlocksParser#argident}.
+     * Visit a parse tree produced by the {@code ArgIdentNormal}
+     * labeled alternative in {@link BuildingBlocksParser#argIdent}.
      * @param ctx the parse tree
      */
-    fn visit_ArgIdent(&mut self, ctx: &ArgIdentContext<'input>) -> Self::Return {
+    fn visit_ArgIdentNormal(&mut self, ctx: &ArgIdentNormalContext<'input>) -> Self::Return {
         self.visit_children(ctx)
     }
 
@@ -1979,8 +1979,8 @@ where
         *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
     }
 
-    fn visit_ArgIdent(&mut self, ctx: &ArgIdentContext<'input>) {
-        let result = <Self as BuildingBlocksVisitorCompat>::visit_ArgIdent(self, ctx);
+    fn visit_ArgIdentNormal(&mut self, ctx: &ArgIdentNormalContext<'input>) {
+        let result = <Self as BuildingBlocksVisitorCompat>::visit_ArgIdentNormal(self, ctx);
         *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
     }
 

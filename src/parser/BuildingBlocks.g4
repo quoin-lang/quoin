@@ -1,8 +1,5 @@
 grammar BuildingBlocks;
 
-options {
-    language=CSharp;
-}
 
 /////////// GRAMMAR
 
@@ -108,18 +105,18 @@ blockDecls : '|' blockArg* block? '-' blockDecl* '|'
            ;
 
 blockArg : '_'                             #BlockArgIgnored
-         | name=argident ':' argtype=ident #BlockArgTyped
-         | name=argident                   #BlockArgUntyped
+         | name=argIdent ':' argtype=ident #BlockArgTyped
+         | name=argIdent                   #BlockArgUntyped
          ;
 
-blockDecl : name=argident ':' argtype=ident #BlockDeclTyped
-          | name=argident                   #BlockDeclUntyped
+blockDecl : name=argIdent ':' argtype=ident #BlockDeclTyped
+          | name=argIdent                   #BlockDeclUntyped
           ;
 
 string : STRING ;
 
-argident : '@' ident  #ArgIdentInst
-         | ident      #ArgIdent
+argIdent : '@' ident  #ArgIdentInst
+         | ident      #ArgIdentNormal
          ;
 
 ident : keyword #IdentKeyword
@@ -132,7 +129,7 @@ number : NUMBER ;
 
 /////////// LEXER
 
-WS : [ \r\n\t]+ -> skip ; // ignore whitespace
+WS : [ \r\n\t]+ -> channel(HIDDEN) ; // ignore whitespace
 
 IDENT : IDENT_PREFIX IDENT_REST* ;
 
@@ -148,15 +145,15 @@ REGEXP : '#' '/' ( ~[/\\] | REGEX_ESCAPE_SEQUENCE )* '/' ;
 
 USER_STRING : '#' IDENT STRING ;
 
-EOL_COMMENT : '"' '*' ~('\n')* -> skip ;
+EOL_COMMENT : '"' '*' ~('\n')* -> channel(HIDDEN) ;
 
 METHOD_RETURN : '^^' ;
 YIELD_RETURN : '^>' ;
 BLOCK_RETURN : '^' ;
 
-EMPTY_COMMENT : '"' '"' -> skip ;
+EMPTY_COMMENT : '"' '"' -> channel(HIDDEN) ;
 
-COMMENT : '"' ~'*' ( '\\' '"' | ~'"' )* '"' -> skip ;
+COMMENT : '"' ~'*' ( '\\' '"' | ~'"' )* '"' -> channel(HIDDEN) ;
 
 fragment INT : '0' | [1-9] [0-9]* ;
 

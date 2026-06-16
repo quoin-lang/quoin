@@ -1,5 +1,5 @@
 #![allow(nonstandard_style)]
-// Generated from .\BuildingBlocks.g4 by ANTLR 4.8
+// Generated from ./BuildingBlocks.g4 by ANTLR 4.8
 use super::buildingblocksparser::*;
 use antlr_rust::tree::ParseTreeListener;
 
@@ -962,28 +962,28 @@ pub trait BuildingBlocksListener<'input>:
     fn exit_string(&mut self, _ctx: &StringContext<'input>) {}
     /**
      * Enter a parse tree produced by the {@code ArgIdentInst}
-     * labeled alternative in {@link BuildingBlocksParser#argident}.
+     * labeled alternative in {@link BuildingBlocksParser#argIdent}.
      * @param ctx the parse tree
      */
     fn enter_ArgIdentInst(&mut self, _ctx: &ArgIdentInstContext<'input>) {}
     /**
      * Exit a parse tree produced by the {@code ArgIdentInst}
-     * labeled alternative in {@link BuildingBlocksParser#argident}.
+     * labeled alternative in {@link BuildingBlocksParser#argIdent}.
      * @param ctx the parse tree
      */
     fn exit_ArgIdentInst(&mut self, _ctx: &ArgIdentInstContext<'input>) {}
     /**
-     * Enter a parse tree produced by the {@code ArgIdent}
-     * labeled alternative in {@link BuildingBlocksParser#argident}.
+     * Enter a parse tree produced by the {@code ArgIdentNormal}
+     * labeled alternative in {@link BuildingBlocksParser#argIdent}.
      * @param ctx the parse tree
      */
-    fn enter_ArgIdent(&mut self, _ctx: &ArgIdentContext<'input>) {}
+    fn enter_ArgIdentNormal(&mut self, _ctx: &ArgIdentNormalContext<'input>) {}
     /**
-     * Exit a parse tree produced by the {@code ArgIdent}
-     * labeled alternative in {@link BuildingBlocksParser#argident}.
+     * Exit a parse tree produced by the {@code ArgIdentNormal}
+     * labeled alternative in {@link BuildingBlocksParser#argIdent}.
      * @param ctx the parse tree
      */
-    fn exit_ArgIdent(&mut self, _ctx: &ArgIdentContext<'input>) {}
+    fn exit_ArgIdentNormal(&mut self, _ctx: &ArgIdentNormalContext<'input>) {}
     /**
      * Enter a parse tree produced by the {@code IdentKeyword}
      * labeled alternative in {@link BuildingBlocksParser#ident}.

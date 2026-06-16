@@ -128,7 +128,7 @@ blockDecls
 blockArg
 blockDecl
 string
-argident
+argIdent
 ident
 symbol
 number

@@ -1,4 +1,4 @@
-// Generated from .\BuildingBlocks.g4 by ANTLR 4.8
+// Generated from ./BuildingBlocks.g4 by ANTLR 4.8
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -8,8 +8,6 @@
 #![allow(unused_braces)]
 use super::buildingblockslistener::*;
 use super::buildingblocksvisitor::*;
-use antlr_rust::PredictionContextCache;
-use antlr_rust::TokenSource;
 use antlr_rust::atn::{ATN, INVALID_ALT};
 use antlr_rust::atn_deserializer::ATNDeserializer;
 use antlr_rust::dfa::DFA;
@@ -18,14 +16,16 @@ use antlr_rust::errors::*;
 use antlr_rust::int_stream::EOF;
 use antlr_rust::parser::{BaseParser, Parser, ParserNodeType, ParserRecog};
 use antlr_rust::parser_atn_simulator::ParserATNSimulator;
-use antlr_rust::parser_rule_context::{BaseParserRuleContext, ParserRuleContext, cast, cast_mut};
+use antlr_rust::parser_rule_context::{cast, cast_mut, BaseParserRuleContext, ParserRuleContext};
 use antlr_rust::recognizer::{Actions, Recognizer};
 use antlr_rust::rule_context::{BaseRuleContext, CustomRuleContext, RuleContext};
-use antlr_rust::token::{OwningToken, TOKEN_EOF, Token};
+use antlr_rust::token::{OwningToken, Token, TOKEN_EOF};
 use antlr_rust::token_factory::{CommonTokenFactory, TokenAware, TokenFactory};
 use antlr_rust::token_stream::TokenStream;
 use antlr_rust::tree::*;
 use antlr_rust::vocabulary::{Vocabulary, VocabularyImpl};
+use antlr_rust::PredictionContextCache;
+use antlr_rust::TokenSource;
 
 use antlr_rust::lazy_static;
 use antlr_rust::{TidAble, TidExt};
@@ -110,7 +110,7 @@ pub const RULE_blockDecls: usize = 15;
 pub const RULE_blockArg: usize = 16;
 pub const RULE_blockDecl: usize = 17;
 pub const RULE_string: usize = 18;
-pub const RULE_argident: usize = 19;
+pub const RULE_argIdent: usize = 19;
 pub const RULE_ident: usize = 20;
 pub const RULE_symbol: usize = 21;
 pub const RULE_number: usize = 22;
@@ -134,7 +134,7 @@ pub const ruleNames: [&'static str; 23] = [
     "blockArg",
     "blockDecl",
     "string",
-    "argident",
+    "argIdent",
     "ident",
     "symbol",
     "number",
@@ -10041,7 +10041,7 @@ where
                         recog.base.set_state(345);
                         recog.err_handler.sync(&mut recog.base)?;
                         _la = recog.base.input.la(1);
-                        while ((_la - 10) & !0x3f) == 0
+                        while (((_la - 10) & !0x3f) == 0
                             && ((1usize << (_la - 10))
                                 & ((1usize << (T__9 - 10))
                                     | (1usize << (T__31 - 10))
@@ -10049,7 +10049,7 @@ where
                                     | (1usize << (T__35 - 10))
                                     | (1usize << (T__36 - 10))
                                     | (1usize << (IDENT - 10))))
-                                != 0
+                                != 0)
                         {
                             {
                                 {
@@ -10079,14 +10079,14 @@ where
                         recog.base.set_state(355);
                         recog.err_handler.sync(&mut recog.base)?;
                         _la = recog.base.input.la(1);
-                        while ((_la - 32) & !0x3f) == 0
+                        while (((_la - 32) & !0x3f) == 0
                             && ((1usize << (_la - 32))
                                 & ((1usize << (T__31 - 32))
                                     | (1usize << (T__34 - 32))
                                     | (1usize << (T__35 - 32))
                                     | (1usize << (T__36 - 32))
                                     | (1usize << (IDENT - 32))))
-                                != 0
+                                != 0)
                         {
                             {
                                 {
@@ -10113,7 +10113,7 @@ where
                         recog.base.set_state(363);
                         recog.err_handler.sync(&mut recog.base)?;
                         _la = recog.base.input.la(1);
-                        while ((_la - 10) & !0x3f) == 0
+                        while (((_la - 10) & !0x3f) == 0
                             && ((1usize << (_la - 10))
                                 & ((1usize << (T__9 - 10))
                                     | (1usize << (T__31 - 10))
@@ -10121,7 +10121,7 @@ where
                                     | (1usize << (T__35 - 10))
                                     | (1usize << (T__36 - 10))
                                     | (1usize << (IDENT - 10))))
-                                != 0
+                                != 0)
                         {
                             {
                                 {
@@ -10259,7 +10259,7 @@ pub type BlockArgTypedContext<'input> =
     BaseParserRuleContext<'input, BlockArgTypedContextExt<'input>>;
 
 pub trait BlockArgTypedContextAttrs<'input>: BuildingBlocksParserContext<'input> {
-    fn argident(&self) -> Option<Rc<ArgidentContextAll<'input>>>
+    fn argIdent(&self) -> Option<Rc<ArgIdentContextAll<'input>>>
     where
         Self: Sized,
     {
@@ -10277,7 +10277,7 @@ impl<'input> BlockArgTypedContextAttrs<'input> for BlockArgTypedContext<'input> 
 
 pub struct BlockArgTypedContextExt<'input> {
     base: BlockArgContextExt<'input>,
-    pub name: Option<Rc<ArgidentContextAll<'input>>>,
+    pub name: Option<Rc<ArgIdentContextAll<'input>>>,
     pub argtype: Option<Rc<IdentContextAll<'input>>>,
     ph: PhantomData<&'input str>,
 }
@@ -10422,7 +10422,7 @@ pub type BlockArgUntypedContext<'input> =
     BaseParserRuleContext<'input, BlockArgUntypedContextExt<'input>>;
 
 pub trait BlockArgUntypedContextAttrs<'input>: BuildingBlocksParserContext<'input> {
-    fn argident(&self) -> Option<Rc<ArgidentContextAll<'input>>>
+    fn argIdent(&self) -> Option<Rc<ArgIdentContextAll<'input>>>
     where
         Self: Sized,
     {
@@ -10434,7 +10434,7 @@ impl<'input> BlockArgUntypedContextAttrs<'input> for BlockArgUntypedContext<'inp
 
 pub struct BlockArgUntypedContextExt<'input> {
     base: BlockArgContextExt<'input>,
-    pub name: Option<Rc<ArgidentContextAll<'input>>>,
+    pub name: Option<Rc<ArgIdentContextAll<'input>>>,
     ph: PhantomData<&'input str>,
 }
 
@@ -10529,9 +10529,9 @@ where
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
                     {
-                        /*InvokeRule argident*/
+                        /*InvokeRule argIdent*/
                         recog.base.set_state(373);
-                        let tmp = recog.argident()?;
+                        let tmp = recog.argIdent()?;
                         if let BlockArgContextAll::BlockArgTypedContext(ctx) =
                             cast_mut::<_, BlockArgContextAll>(&mut _localctx)
                         {
@@ -10560,9 +10560,9 @@ where
                     recog.base.enter_outer_alt(Some(tmp.clone()), 3);
                     _localctx = tmp;
                     {
-                        /*InvokeRule argident*/
+                        /*InvokeRule argIdent*/
                         recog.base.set_state(377);
-                        let tmp = recog.argident()?;
+                        let tmp = recog.argIdent()?;
                         if let BlockArgContextAll::BlockArgUntypedContext(ctx) =
                             cast_mut::<_, BlockArgContextAll>(&mut _localctx)
                         {
@@ -10680,7 +10680,7 @@ pub type BlockDeclUntypedContext<'input> =
     BaseParserRuleContext<'input, BlockDeclUntypedContextExt<'input>>;
 
 pub trait BlockDeclUntypedContextAttrs<'input>: BuildingBlocksParserContext<'input> {
-    fn argident(&self) -> Option<Rc<ArgidentContextAll<'input>>>
+    fn argIdent(&self) -> Option<Rc<ArgIdentContextAll<'input>>>
     where
         Self: Sized,
     {
@@ -10692,7 +10692,7 @@ impl<'input> BlockDeclUntypedContextAttrs<'input> for BlockDeclUntypedContext<'i
 
 pub struct BlockDeclUntypedContextExt<'input> {
     base: BlockDeclContextExt<'input>,
-    pub name: Option<Rc<ArgidentContextAll<'input>>>,
+    pub name: Option<Rc<ArgIdentContextAll<'input>>>,
     ph: PhantomData<&'input str>,
 }
 
@@ -10762,7 +10762,7 @@ pub type BlockDeclTypedContext<'input> =
     BaseParserRuleContext<'input, BlockDeclTypedContextExt<'input>>;
 
 pub trait BlockDeclTypedContextAttrs<'input>: BuildingBlocksParserContext<'input> {
-    fn argident(&self) -> Option<Rc<ArgidentContextAll<'input>>>
+    fn argIdent(&self) -> Option<Rc<ArgIdentContextAll<'input>>>
     where
         Self: Sized,
     {
@@ -10780,7 +10780,7 @@ impl<'input> BlockDeclTypedContextAttrs<'input> for BlockDeclTypedContext<'input
 
 pub struct BlockDeclTypedContextExt<'input> {
     base: BlockDeclContextExt<'input>,
-    pub name: Option<Rc<ArgidentContextAll<'input>>>,
+    pub name: Option<Rc<ArgIdentContextAll<'input>>>,
     pub argtype: Option<Rc<IdentContextAll<'input>>>,
     ph: PhantomData<&'input str>,
 }
@@ -10868,9 +10868,9 @@ where
                     recog.base.enter_outer_alt(Some(tmp.clone()), 1);
                     _localctx = tmp;
                     {
-                        /*InvokeRule argident*/
+                        /*InvokeRule argIdent*/
                         recog.base.set_state(380);
-                        let tmp = recog.argident()?;
+                        let tmp = recog.argIdent()?;
                         if let BlockDeclContextAll::BlockDeclTypedContext(ctx) =
                             cast_mut::<_, BlockDeclContextAll>(&mut _localctx)
                         {
@@ -10899,9 +10899,9 @@ where
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
                     {
-                        /*InvokeRule argident*/
+                        /*InvokeRule argIdent*/
                         recog.base.set_state(384);
-                        let tmp = recog.argident()?;
+                        let tmp = recog.argIdent()?;
                         if let BlockDeclContextAll::BlockDeclUntypedContext(ctx) =
                             cast_mut::<_, BlockDeclContextAll>(&mut _localctx)
                         {
@@ -11031,37 +11031,37 @@ where
         Ok(_localctx)
     }
 }
-//------------------- argident ----------------
+//------------------- argIdent ----------------
 #[derive(Debug)]
-pub enum ArgidentContextAll<'input> {
-    ArgIdentContext(ArgIdentContext<'input>),
+pub enum ArgIdentContextAll<'input> {
     ArgIdentInstContext(ArgIdentInstContext<'input>),
-    Error(ArgidentContext<'input>),
+    ArgIdentNormalContext(ArgIdentNormalContext<'input>),
+    Error(ArgIdentContext<'input>),
 }
-antlr_rust::tid! {ArgidentContextAll<'a>}
+antlr_rust::tid! {ArgIdentContextAll<'a>}
 
-impl<'input> antlr_rust::parser_rule_context::DerefSeal for ArgidentContextAll<'input> {}
+impl<'input> antlr_rust::parser_rule_context::DerefSeal for ArgIdentContextAll<'input> {}
 
-impl<'input> BuildingBlocksParserContext<'input> for ArgidentContextAll<'input> {}
+impl<'input> BuildingBlocksParserContext<'input> for ArgIdentContextAll<'input> {}
 
-impl<'input> Deref for ArgidentContextAll<'input> {
-    type Target = dyn ArgidentContextAttrs<'input> + 'input;
+impl<'input> Deref for ArgIdentContextAll<'input> {
+    type Target = dyn ArgIdentContextAttrs<'input> + 'input;
     fn deref(&self) -> &Self::Target {
-        use ArgidentContextAll::*;
+        use ArgIdentContextAll::*;
         match self {
-            ArgIdentContext(inner) => inner,
             ArgIdentInstContext(inner) => inner,
+            ArgIdentNormalContext(inner) => inner,
             Error(inner) => inner,
         }
     }
 }
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for ArgidentContextAll<'input> {
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for ArgIdentContextAll<'input> {
     fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
         self.deref().accept(visitor)
     }
 }
 impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
-    for ArgidentContextAll<'input>
+    for ArgIdentContextAll<'input>
 {
     fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
         self.deref().enter(listener)
@@ -11071,125 +11071,50 @@ impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
     }
 }
 
-pub type ArgidentContext<'input> = BaseParserRuleContext<'input, ArgidentContextExt<'input>>;
-
-#[derive(Clone)]
-pub struct ArgidentContextExt<'input> {
-    ph: PhantomData<&'input str>,
-}
-
-impl<'input> BuildingBlocksParserContext<'input> for ArgidentContext<'input> {}
-
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ArgidentContext<'input> {}
-
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for ArgidentContext<'input> {}
-
-impl<'input> CustomRuleContext<'input> for ArgidentContextExt<'input> {
-    type TF = LocalTokenFactory<'input>;
-    type Ctx = BuildingBlocksParserContextType;
-    fn get_rule_index(&self) -> usize {
-        RULE_argident
-    }
-    //fn type_rule_index() -> usize where Self: Sized { RULE_argident }
-}
-antlr_rust::tid! {ArgidentContextExt<'a>}
-
-impl<'input> ArgidentContextExt<'input> {
-    fn new(
-        parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
-        invoking_state: isize,
-    ) -> Rc<ArgidentContextAll<'input>> {
-        Rc::new(ArgidentContextAll::Error(
-            BaseParserRuleContext::new_parser_ctx(
-                parent,
-                invoking_state,
-                ArgidentContextExt { ph: PhantomData },
-            ),
-        ))
-    }
-}
-
-pub trait ArgidentContextAttrs<'input>:
-    BuildingBlocksParserContext<'input> + BorrowMut<ArgidentContextExt<'input>>
-{
-}
-
-impl<'input> ArgidentContextAttrs<'input> for ArgidentContext<'input> {}
-
 pub type ArgIdentContext<'input> = BaseParserRuleContext<'input, ArgIdentContextExt<'input>>;
 
-pub trait ArgIdentContextAttrs<'input>: BuildingBlocksParserContext<'input> {
-    fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
-    where
-        Self: Sized,
-    {
-        self.child_of_type(0)
-    }
-}
-
-impl<'input> ArgIdentContextAttrs<'input> for ArgIdentContext<'input> {}
-
+#[derive(Clone)]
 pub struct ArgIdentContextExt<'input> {
-    base: ArgidentContextExt<'input>,
     ph: PhantomData<&'input str>,
 }
-
-antlr_rust::tid! {ArgIdentContextExt<'a>}
 
 impl<'input> BuildingBlocksParserContext<'input> for ArgIdentContext<'input> {}
 
-impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ArgIdentContext<'input> {
-    fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
-        listener.enter_every_rule(self);
-        listener.enter_ArgIdent(self);
-    }
-    fn exit(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
-        listener.exit_ArgIdent(self);
-        listener.exit_every_rule(self);
-    }
-}
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a> for ArgIdentContext<'input> {}
 
-impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for ArgIdentContext<'input> {
-    fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
-        visitor.visit_ArgIdent(self);
-    }
-}
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a> for ArgIdentContext<'input> {}
 
 impl<'input> CustomRuleContext<'input> for ArgIdentContextExt<'input> {
     type TF = LocalTokenFactory<'input>;
     type Ctx = BuildingBlocksParserContextType;
     fn get_rule_index(&self) -> usize {
-        RULE_argident
+        RULE_argIdent
     }
-    //fn type_rule_index() -> usize where Self: Sized { RULE_argident }
+    //fn type_rule_index() -> usize where Self: Sized { RULE_argIdent }
 }
-
-impl<'input> Borrow<ArgidentContextExt<'input>> for ArgIdentContext<'input> {
-    fn borrow(&self) -> &ArgidentContextExt<'input> {
-        &self.base
-    }
-}
-impl<'input> BorrowMut<ArgidentContextExt<'input>> for ArgIdentContext<'input> {
-    fn borrow_mut(&mut self) -> &mut ArgidentContextExt<'input> {
-        &mut self.base
-    }
-}
-
-impl<'input> ArgidentContextAttrs<'input> for ArgIdentContext<'input> {}
+antlr_rust::tid! {ArgIdentContextExt<'a>}
 
 impl<'input> ArgIdentContextExt<'input> {
-    fn new(ctx: &dyn ArgidentContextAttrs<'input>) -> Rc<ArgidentContextAll<'input>> {
-        Rc::new(ArgidentContextAll::ArgIdentContext(
-            BaseParserRuleContext::copy_from(
-                ctx,
-                ArgIdentContextExt {
-                    base: ctx.borrow().clone(),
-                    ph: PhantomData,
-                },
+    fn new(
+        parent: Option<Rc<dyn BuildingBlocksParserContext<'input> + 'input>>,
+        invoking_state: isize,
+    ) -> Rc<ArgIdentContextAll<'input>> {
+        Rc::new(ArgIdentContextAll::Error(
+            BaseParserRuleContext::new_parser_ctx(
+                parent,
+                invoking_state,
+                ArgIdentContextExt { ph: PhantomData },
             ),
         ))
     }
 }
+
+pub trait ArgIdentContextAttrs<'input>:
+    BuildingBlocksParserContext<'input> + BorrowMut<ArgIdentContextExt<'input>>
+{
+}
+
+impl<'input> ArgIdentContextAttrs<'input> for ArgIdentContext<'input> {}
 
 pub type ArgIdentInstContext<'input> =
     BaseParserRuleContext<'input, ArgIdentInstContextExt<'input>>;
@@ -11206,7 +11131,7 @@ pub trait ArgIdentInstContextAttrs<'input>: BuildingBlocksParserContext<'input> 
 impl<'input> ArgIdentInstContextAttrs<'input> for ArgIdentInstContext<'input> {}
 
 pub struct ArgIdentInstContextExt<'input> {
-    base: ArgidentContextExt<'input>,
+    base: ArgIdentContextExt<'input>,
     ph: PhantomData<&'input str>,
 }
 
@@ -11237,30 +11162,110 @@ impl<'input> CustomRuleContext<'input> for ArgIdentInstContextExt<'input> {
     type TF = LocalTokenFactory<'input>;
     type Ctx = BuildingBlocksParserContextType;
     fn get_rule_index(&self) -> usize {
-        RULE_argident
+        RULE_argIdent
     }
-    //fn type_rule_index() -> usize where Self: Sized { RULE_argident }
+    //fn type_rule_index() -> usize where Self: Sized { RULE_argIdent }
 }
 
-impl<'input> Borrow<ArgidentContextExt<'input>> for ArgIdentInstContext<'input> {
-    fn borrow(&self) -> &ArgidentContextExt<'input> {
+impl<'input> Borrow<ArgIdentContextExt<'input>> for ArgIdentInstContext<'input> {
+    fn borrow(&self) -> &ArgIdentContextExt<'input> {
         &self.base
     }
 }
-impl<'input> BorrowMut<ArgidentContextExt<'input>> for ArgIdentInstContext<'input> {
-    fn borrow_mut(&mut self) -> &mut ArgidentContextExt<'input> {
+impl<'input> BorrowMut<ArgIdentContextExt<'input>> for ArgIdentInstContext<'input> {
+    fn borrow_mut(&mut self) -> &mut ArgIdentContextExt<'input> {
         &mut self.base
     }
 }
 
-impl<'input> ArgidentContextAttrs<'input> for ArgIdentInstContext<'input> {}
+impl<'input> ArgIdentContextAttrs<'input> for ArgIdentInstContext<'input> {}
 
 impl<'input> ArgIdentInstContextExt<'input> {
-    fn new(ctx: &dyn ArgidentContextAttrs<'input>) -> Rc<ArgidentContextAll<'input>> {
-        Rc::new(ArgidentContextAll::ArgIdentInstContext(
+    fn new(ctx: &dyn ArgIdentContextAttrs<'input>) -> Rc<ArgIdentContextAll<'input>> {
+        Rc::new(ArgIdentContextAll::ArgIdentInstContext(
             BaseParserRuleContext::copy_from(
                 ctx,
                 ArgIdentInstContextExt {
+                    base: ctx.borrow().clone(),
+                    ph: PhantomData,
+                },
+            ),
+        ))
+    }
+}
+
+pub type ArgIdentNormalContext<'input> =
+    BaseParserRuleContext<'input, ArgIdentNormalContextExt<'input>>;
+
+pub trait ArgIdentNormalContextAttrs<'input>: BuildingBlocksParserContext<'input> {
+    fn ident(&self) -> Option<Rc<IdentContextAll<'input>>>
+    where
+        Self: Sized,
+    {
+        self.child_of_type(0)
+    }
+}
+
+impl<'input> ArgIdentNormalContextAttrs<'input> for ArgIdentNormalContext<'input> {}
+
+pub struct ArgIdentNormalContextExt<'input> {
+    base: ArgIdentContextExt<'input>,
+    ph: PhantomData<&'input str>,
+}
+
+antlr_rust::tid! {ArgIdentNormalContextExt<'a>}
+
+impl<'input> BuildingBlocksParserContext<'input> for ArgIdentNormalContext<'input> {}
+
+impl<'input, 'a> Listenable<dyn BuildingBlocksListener<'input> + 'a>
+    for ArgIdentNormalContext<'input>
+{
+    fn enter(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
+        listener.enter_every_rule(self);
+        listener.enter_ArgIdentNormal(self);
+    }
+    fn exit(&self, listener: &mut (dyn BuildingBlocksListener<'input> + 'a)) {
+        listener.exit_ArgIdentNormal(self);
+        listener.exit_every_rule(self);
+    }
+}
+
+impl<'input, 'a> Visitable<dyn BuildingBlocksVisitor<'input> + 'a>
+    for ArgIdentNormalContext<'input>
+{
+    fn accept(&self, visitor: &mut (dyn BuildingBlocksVisitor<'input> + 'a)) {
+        visitor.visit_ArgIdentNormal(self);
+    }
+}
+
+impl<'input> CustomRuleContext<'input> for ArgIdentNormalContextExt<'input> {
+    type TF = LocalTokenFactory<'input>;
+    type Ctx = BuildingBlocksParserContextType;
+    fn get_rule_index(&self) -> usize {
+        RULE_argIdent
+    }
+    //fn type_rule_index() -> usize where Self: Sized { RULE_argIdent }
+}
+
+impl<'input> Borrow<ArgIdentContextExt<'input>> for ArgIdentNormalContext<'input> {
+    fn borrow(&self) -> &ArgIdentContextExt<'input> {
+        &self.base
+    }
+}
+impl<'input> BorrowMut<ArgIdentContextExt<'input>> for ArgIdentNormalContext<'input> {
+    fn borrow_mut(&mut self) -> &mut ArgIdentContextExt<'input> {
+        &mut self.base
+    }
+}
+
+impl<'input> ArgIdentContextAttrs<'input> for ArgIdentNormalContext<'input> {}
+
+impl<'input> ArgIdentNormalContextExt<'input> {
+    fn new(ctx: &dyn ArgIdentContextAttrs<'input>) -> Rc<ArgIdentContextAll<'input>> {
+        Rc::new(ArgIdentContextAll::ArgIdentNormalContext(
+            BaseParserRuleContext::copy_from(
+                ctx,
+                ArgIdentNormalContextExt {
                     base: ctx.borrow().clone(),
                     ph: PhantomData,
                 },
@@ -11274,12 +11279,12 @@ where
     I: TokenStream<'input, TF = LocalTokenFactory<'input>> + TidAble<'input>,
     H: ErrorStrategy<'input, BaseParserType<'input, I>>,
 {
-    pub fn argident(&mut self) -> Result<Rc<ArgidentContextAll<'input>>, ANTLRError> {
+    pub fn argIdent(&mut self) -> Result<Rc<ArgIdentContextAll<'input>>, ANTLRError> {
         let mut recog = self;
         let _parentctx = recog.ctx.take();
-        let mut _localctx = ArgidentContextExt::new(_parentctx.clone(), recog.base.get_state());
-        recog.base.enter_rule(_localctx.clone(), 38, RULE_argident);
-        let mut _localctx: Rc<ArgidentContextAll> = _localctx;
+        let mut _localctx = ArgIdentContextExt::new(_parentctx.clone(), recog.base.get_state());
+        recog.base.enter_rule(_localctx.clone(), 38, RULE_argIdent);
+        let mut _localctx: Rc<ArgIdentContextAll> = _localctx;
         let result: Result<(), ANTLRError> = (|| {
             recog.base.set_state(392);
             recog.err_handler.sync(&mut recog.base)?;
@@ -11299,7 +11304,7 @@ where
                 }
 
                 T__34 | T__35 | T__36 | IDENT => {
-                    let tmp = ArgIdentContextExt::new(&**_localctx);
+                    let tmp = ArgIdentNormalContextExt::new(&**_localctx);
                     recog.base.enter_outer_alt(Some(tmp.clone()), 2);
                     _localctx = tmp;
                     {
@@ -11839,7 +11844,8 @@ lazy_static! {
     };
 }
 
-const _serializedATN: &'static str = "\x03\u{608b}\u{a72a}\u{8133}\u{b9ed}\u{417c}\u{3be7}\u{7786}\u{5964}\x03\
+const _serializedATN: &'static str =
+    "\x03\u{608b}\u{a72a}\u{8133}\u{b9ed}\u{417c}\u{3be7}\u{7786}\u{5964}\x03\
 	\x36\u{195}\x04\x02\x09\x02\x04\x03\x09\x03\x04\x04\x09\x04\x04\x05\x09\
 	\x05\x04\x06\x09\x06\x04\x07\x09\x07\x04\x08\x09\x08\x04\x09\x09\x09\x04\
 	\x0a\x09\x0a\x04\x0b\x09\x0b\x04\x0c\x09\x0c\x04\x0d\x09\x0d\x04\x0e\x09\

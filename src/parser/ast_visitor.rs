@@ -17,7 +17,7 @@ use crate::parser::ast_visitor::NodeValue::{
     Str, SubLValue, Symbol, UnaryOperator, UserList, UserString, YieldReturn,
 };
 use crate::parser::generated::buildingblocksparser::{
-    AddExprContext, AndExprContext, ArgIdentContext, ArgIdentContextAttrs, ArgIdentInstContext,
+    AddExprContext, AndExprContext, ArgIdentNormalContext, ArgIdentNormalContextAttrs, ArgIdentInstContext,
     ArgIdentInstContextAttrs, AssignmentContext, AssignmentContextAttrs, AssignmentStmtContext,
     AssignmentStmtContextAttrs, Bang3StmtContext, BlockArgIgnoredContext, BlockArgTypedContext,
     BlockArgUntypedContext, BlockDeclTypedContext, BlockDeclUntypedContext, BlockDeclsContext,
@@ -1099,7 +1099,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
     }
 
-    fn visit_ArgIdent(&mut self, ctx: &ArgIdentContext<'a>) -> Self::Return {
+    fn visit_ArgIdentNormal(&mut self, ctx: &ArgIdentNormalContext<'a>) -> Self::Return {
         Node {
             value: Identifier(IdentifierNode {
                 namespace: None,
