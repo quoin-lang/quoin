@@ -1,4 +1,5 @@
-use crate::value::{NativeClassBuilder, Value, AnyCollect};
+use crate::error::BBError;
+use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 
 #[derive(Debug)]
 pub struct NativeListState {
@@ -9,7 +10,10 @@ pub struct NativeListState {
 impl NativeListState {
     pub fn new(vec: Vec<Value<'_>>) -> Self {
         let vec_static: Vec<Value<'static>> = unsafe { std::mem::transmute(vec) };
-        Self { idx: 0, vec: vec_static }
+        Self {
+            idx: 0,
+            vec: vec_static,
+        }
     }
 
     pub fn get_vec<'gc>(&self) -> &[Value<'gc>] {
@@ -64,66 +68,77 @@ pub fn build_list_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_nil(mc))
         })
+        .instance_method("add:", |_vm, mc, args| {
+            args[0]
+                .with_native_state_mut::<NativeListState, _, _>(mc, |l| {
+                    let vec = l.get_vec_mut();
+                    vec.push(args[1]);
+                })
+                .map_err(|e| BBError::Other(e))?;
+            Ok(args[0])
+        })
         .instance_method("at:", |vm, mc, args| {
             let idx = match args[1] {
                 Value::Object(obj) => match &obj.borrow().payload {
-                    crate::value::ObjectPayload::Int(i) => *i,
+                    ObjectPayload::Int(i) => *i,
                     _ => {
-                        return Err(crate::error::BBError::TypeError {
+                        return Err(BBError::TypeError {
                             expected: "Integer".to_string(),
                             got: args[1].type_name().to_string(),
                             msg: "at expects integer index".to_string(),
                         });
                     }
-                }
+                },
                 _ => {
-                    return Err(crate::error::BBError::TypeError {
+                    return Err(BBError::TypeError {
                         expected: "Integer".to_string(),
                         got: args[1].type_name().to_string(),
                         msg: "at expects integer index".to_string(),
                     });
                 }
             };
-            args[0].with_native_state::<NativeListState, _, _>(|l| {
-                let vec = l.get_vec();
-                if idx >= 0 && idx < vec.len() as i64 {
-                    Ok(vec[idx as usize])
-                } else {
-                    Ok(vm.new_nil(mc))
-                }
-            })
-            .map_err(|e| crate::error::BBError::Other(e))?
+            args[0]
+                .with_native_state::<NativeListState, _, _>(|l| {
+                    let vec = l.get_vec();
+                    if idx >= 0 && idx < vec.len() as i64 {
+                        Ok(vec[idx as usize])
+                    } else {
+                        Ok(vm.new_nil(mc))
+                    }
+                })
+                .map_err(|e| BBError::Other(e))?
         })
         .instance_method("sliceFrom:", |vm, mc, args| {
             let idx = match args[1] {
                 Value::Object(obj) => match &obj.borrow().payload {
-                    crate::value::ObjectPayload::Int(i) => *i,
+                    ObjectPayload::Int(i) => *i,
                     _ => {
-                        return Err(crate::error::BBError::TypeError {
+                        return Err(BBError::TypeError {
                             expected: "Integer".to_string(),
                             got: args[1].type_name().to_string(),
                             msg: "sliceFrom expects integer index".to_string(),
                         });
                     }
-                }
+                },
                 _ => {
-                    return Err(crate::error::BBError::TypeError {
+                    return Err(BBError::TypeError {
                         expected: "Integer".to_string(),
                         got: args[1].type_name().to_string(),
                         msg: "sliceFrom expects integer index".to_string(),
                     });
                 }
             };
-            args[0].with_native_state::<NativeListState, _, _>(|l| {
-                let vec = l.get_vec();
-                let start = idx.max(0) as usize;
-                let sliced = if start < vec.len() {
-                    vec[start..].to_vec()
-                } else {
-                    Vec::new()
-                };
-                Ok(vm.new_list(mc, sliced))
-            })
-            .map_err(|e| crate::error::BBError::Other(e))?
+            args[0]
+                .with_native_state::<NativeListState, _, _>(|l| {
+                    let vec = l.get_vec();
+                    let start = idx.max(0) as usize;
+                    let sliced = if start < vec.len() {
+                        vec[start..].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(vm.new_list(mc, sliced))
+                })
+                .map_err(|e| BBError::Other(e))?
         })
 }
