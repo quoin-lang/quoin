@@ -118,15 +118,15 @@ Mixin <- Iterate <- {
      reduce: -> { |block:Block|
          sum = nil;
          .each:{ |x|
-             sum.defined?.else:{ sum = (block.valueWithArg1:x andArg2:x).class.default };
-             sum = block.valueWithArg1:sum andArg2:x
+             sum.defined?.else:{ sum = (block.valueWithArgs:#(x x)).class.default };
+             sum = block.valueWithArgs:#(sum x)
          }
          ^sum
      }
 
      reduce:into: -> { |block:Block start|
          sum = start;
-         .each:{ |x| sum = block.valueWithArg1:sum andArg2:x }
+         .each:{ |x| sum = block.valueWithArgs:#(sum x) }
          ^sum
      }
 
@@ -148,7 +148,7 @@ Mixin <- Iterate <- {
          max = nil;
          .each:{ |x|
              max.defined?.if:{
-                 (block.valueWithArg1:max andArg2:x).else:{ max = x };
+                 (block.valueWithArgs:#(max x)).else:{ max = x };
              }
              else:{
                  max = x;
@@ -163,7 +163,7 @@ Mixin <- Iterate <- {
          min = nil;
          .each:{ |x|
              min.defined?.if:{
-                 (block.valueWithArg1:min andArg2:x).if:{ min = x };
+                 (block.valueWithArgs:#(min x)).if:{ min = x };
              }
              else:{
                  min = x;
@@ -321,15 +321,15 @@ Dictionary <-- {
      reduce: -> { |block:Block|
          sum = nil;
          .each:{ |x|
-             sum.defined?.else:{ sum = (block.valueWithArg1:x andArg2:x).class.default };
-             sum = block.valueWithArg1:sum andArg2:x
+             sum.defined?.else:{ sum = (block.valueWithArgs:#(x x)).class.default };
+             sum = block.valueWithArgs:#(sum x)
          }
          ^sum
      }
 
      reduce:into: -> { |block:Block start|
          sum = start;
-         .each:{ |x| sum = block.valueWithArg1:sum andArg2:x }
+         .each:{ |x| sum = block.valueWithArgs:#(sum x) }
          ^sum
      }
 
@@ -351,7 +351,7 @@ Dictionary <-- {
          max = nil;
          .each:{ |x|
              max.defined?.if:{
-                 (block.valueWithArg1:max andArg2:x).else:{ max = x };
+                 (block.valueWithArgs:#(max x)).else:{ max = x };
              }
              else:{
                  max = x;
@@ -366,7 +366,7 @@ Dictionary <-- {
          min = nil;
          .each:{ |x|
              min.defined?.if:{
-                 (block.valueWithArg1:min andArg2:x).if:{ min = x };
+                 (block.valueWithArgs:#(min x)).if:{ min = x };
              }
              else:{
                  min = x;
