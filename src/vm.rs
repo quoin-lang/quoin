@@ -948,10 +948,6 @@ impl<'gc> VmState<'gc> {
         self.next_frame_id += 1;
 
         let mut env_frame = EnvFrame::new(block.parent_env);
-        // Bind self to the object
-        env_frame
-            .vars
-            .insert("self".to_string(), Value::Object(obj));
         // Bind all instance variables as local variables in this block, initialized from the parent env or current fields
         let vars = self.get_all_instance_vars(obj.borrow().class);
         for var in &vars {
