@@ -1,8 +1,8 @@
 use crate::error::BBError;
 use crate::instruction::{Constant, Instruction};
 use crate::value::{
-    Block, Class, EnvFrame, GcRegex, GcUlid, NamespacedName, NativeClass, NativeFunc, Object,
-    ObjectPayload, Value,
+    AnyCollect, Block, Class, EnvFrame, GcRegex, GcUlid, NamespacedName, NativeClass, NativeFunc,
+    Object, ObjectPayload, Value,
 };
 use crate::{gc, gcl};
 
@@ -229,6 +229,28 @@ impl<'gc> VmState<'gc> {
                 payload: ObjectPayload::Instance,
             }
         )
+    }
+
+    pub fn new_native_state<T: AnyCollect + 'static>(
+        &self,
+        mc: &Mutation<'gc>,
+        class_obj: Gc<'gc, RefLock<Class<'gc>>>,
+        state: T,
+    ) -> Value<'gc> {
+        let payload = ObjectPayload::NativeState(gcl!(
+            mc,
+            Box::new(state) as Box<dyn AnyCollect>
+        ));
+        let obj = gcl!(
+            mc,
+            Object {
+                id: GcUlid(Ulid::new()),
+                class: class_obj,
+                fields: HashMap::new(),
+                payload,
+            }
+        );
+        Value::Object(obj)
     }
 
     pub fn new_nil(&self, mc: &Mutation<'gc>) -> Value<'gc> {
@@ -1308,7 +1330,7 @@ impl<'gc> VmState<'gc> {
 mod tests {
     use super::*;
     use crate::instruction::{Constant, StaticBlock};
-    use crate::value::NativeClassBuilder;
+    use crate::value::{NativeClassBuilder, OpaqueState};
     use gc_arena::{Arena, Rootable};
 
     fn native_add<'gc>(
@@ -1377,7 +1399,7 @@ mod tests {
                     ObjectPayload::Regex(r) => ValueSpec::Regex(r.0.as_str().to_string()),
                     ObjectPayload::Block(b) => ValueSpec::Block(b.name.clone()),
                     ObjectPayload::Native(_) => ValueSpec::Native,
-                    ObjectPayload::Instance => {
+                    ObjectPayload::Instance | ObjectPayload::NativeState(_) => {
                         ValueSpec::Instance(borrowed.class.borrow().name.to_string())
                     }
                 }
@@ -2282,6 +2304,69 @@ mod tests {
             } else {
                 panic!("Expected Class, got {:?}", val);
             }
+        });
+    }
+
+    #[derive(Debug)]
+    struct MyCustomResource {
+        counter: i32,
+    }
+
+    #[test]
+    fn test_native_state_holding_rust_state() {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc);
+
+            // Build native class [IO]Resource
+            let resource_builder = NativeClassBuilder::new("[IO]Resource", Some("Object"))
+                .class_method("create", |vm, mc, _args| {
+                    let class_obj = vm.get_builtin_class("[IO]Resource");
+                    let state = OpaqueState(MyCustomResource { counter: 10 });
+                    Ok(vm.new_native_state(mc, class_obj, state))
+                })
+                .instance_method("get", |vm, mc, args| {
+                    let val = args[0]
+                        .with_native_state::<MyCustomResource, _, _>(|res| res.counter)
+                        .unwrap();
+                    Ok(vm.new_int(mc, val as i64))
+                })
+                .instance_method("inc:", |_vm, mc, args| {
+                    let val = match args[1] {
+                        Value::Object(obj) => match obj.borrow().payload {
+                            ObjectPayload::Int(i) => i as i32,
+                            _ => panic!("Expected Int"),
+                        },
+                        _ => panic!("Expected Int"),
+                    };
+                    args[0]
+                        .with_native_state_mut::<MyCustomResource, _, _>(mc, |res| {
+                            res.counter += val;
+                        })
+                        .unwrap();
+                    Ok(args[0])
+                });
+            vm.register_native_class(mc, resource_builder);
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            // Instantiate [IO]Resource via sending "create"
+            let resource_class = vm.get_builtin_class("[IO]Resource");
+            let instance = vm
+                .call_method(mc, Value::Class(resource_class), "create", vec![])
+                .unwrap();
+
+            // Check counter is 10
+            let counter_val = vm.call_method(mc, instance, "get", vec![]).unwrap();
+            assert_eq!(to_spec(counter_val), ValueSpec::Int(10));
+
+            // Increment by 5
+            let five = vm.new_int(mc, 5);
+            vm.call_method(mc, instance, "inc:", vec![five]).unwrap();
+
+            // Check counter is 15
+            let counter_val = vm.call_method(mc, instance, "get", vec![]).unwrap();
+            assert_eq!(to_spec(counter_val), ValueSpec::Int(15));
         });
     }
 }

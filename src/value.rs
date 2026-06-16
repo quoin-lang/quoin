@@ -2,7 +2,7 @@ use crate::error::BBError;
 use crate::instruction::Instruction;
 use crate::vm::VmState;
 
-use gc_arena::{Collect, Gc, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
@@ -22,6 +22,28 @@ pub struct GcRegex(pub Regex);
 impl fmt::Debug for GcRegex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Regex({})", self.0.as_str())
+    }
+}
+
+pub trait AnyCollect {
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+unsafe impl<'gc> Collect<'gc> for Box<dyn AnyCollect> {
+    const NEEDS_TRACE: bool = false;
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, _cc: &mut T) {}
+}
+
+pub struct OpaqueState<T>(pub T);
+
+impl<T: 'static> AnyCollect for OpaqueState<T> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        &self.0
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        &mut self.0
     }
 }
 
@@ -92,18 +114,14 @@ impl fmt::Display for NamespacedName {
 
 #[derive(Clone, Copy)]
 pub struct NativeFunc(
-    pub  for<'a> fn(
-        &mut VmState<'a>,
-        &gc_arena::Mutation<'a>,
-        Vec<Value<'a>>,
-    ) -> Result<Value<'a>, BBError>,
+    pub for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, BBError>,
 );
 
 impl NativeFunc {
     pub fn new(
         f: for<'a> fn(
             &mut VmState<'a>,
-            &gc_arena::Mutation<'a>,
+            &Mutation<'a>,
             Vec<Value<'a>>,
         ) -> Result<Value<'a>, BBError>,
     ) -> Self {
@@ -137,6 +155,7 @@ pub enum ObjectPayload<'gc> {
     Block(Gc<'gc, Block<'gc>>),
     Native(NativeFunc),
     Instance,
+    NativeState(Gc<'gc, RefLock<Box<dyn AnyCollect>>>),
 }
 
 impl<'gc> Value<'gc> {
@@ -199,6 +218,38 @@ impl<'gc> Value<'gc> {
                 _ => "Object",
             },
         }
+    }
+
+    pub fn with_native_state<T: 'static, R, F: FnOnce(&T) -> R>(&self, f: F) -> Result<R, String> {
+        if let Value::Object(obj) = self {
+            let borrowed = obj.borrow();
+            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
+                let state_ref = state_cell.borrow();
+                let any_ref = (**state_ref).as_any();
+                if let Some(concrete) = any_ref.downcast_ref::<T>() {
+                    return Ok(f(concrete));
+                }
+            }
+        }
+        Err("Not a native state of the requested type".to_string())
+    }
+
+    pub fn with_native_state_mut<T: 'static, R, F: FnOnce(&mut T) -> R>(
+        &self,
+        mc: &Mutation<'gc>,
+        f: F,
+    ) -> Result<R, String> {
+        if let Value::Object(obj) = self {
+            let borrowed = obj.borrow();
+            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
+                let mut state_ref = state_cell.borrow_mut(mc);
+                let any_mut = (**state_ref).as_any_mut();
+                if let Some(concrete) = any_mut.downcast_mut::<T>() {
+                    return Ok(f(concrete));
+                }
+            }
+        }
+        Err("Not a native state of the requested type".to_string())
     }
 }
 
@@ -363,7 +414,7 @@ impl<'gc> EnvFrame<'gc> {
 
     pub fn set(
         frame: Gc<'gc, RefLock<Self>>,
-        mc: &gc_arena::Mutation<'gc>,
+        mc: &Mutation<'gc>,
         name: &str,
         val: Value<'gc>,
     ) -> bool {
@@ -434,7 +485,7 @@ impl NativeClassBuilder {
         selector: &str,
         f: for<'a> fn(
             &mut VmState<'a>,
-            &gc_arena::Mutation<'a>,
+            &Mutation<'a>,
             Vec<Value<'a>>,
         ) -> Result<Value<'a>, BBError>,
     ) -> Self {
@@ -448,7 +499,7 @@ impl NativeClassBuilder {
         selector: &str,
         f: for<'a> fn(
             &mut VmState<'a>,
-            &gc_arena::Mutation<'a>,
+            &Mutation<'a>,
             Vec<Value<'a>>,
         ) -> Result<Value<'a>, BBError>,
     ) -> Self {
