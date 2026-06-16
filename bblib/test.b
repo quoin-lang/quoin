@@ -179,6 +179,7 @@ TestSuite <- { |@name @tests|
     }
 
     name -> { @name }
+    s -> { @name }
 
     add: -> { |b:Block|
         b.valueWithSelf:self

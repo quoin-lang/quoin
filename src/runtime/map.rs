@@ -60,6 +60,14 @@ pub fn build_map_class() -> NativeClassBuilder {
                 vm.new_nil(mc)
             })
         })
+        .instance_method("at:put:", |_vm, mc, args| {
+            let key = arg!(args, String, 1).to_string();
+            let val = args[2];
+            args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
+                m.get_map_mut().insert(key, val)
+            })?;
+            Ok(args[0])
+        })
         .instance_method("count", |vm, mc, args| {
             Ok(vm.new_int(
                 mc,

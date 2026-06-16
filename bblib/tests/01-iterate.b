@@ -72,7 +72,7 @@
     .test:
     reduce -> {
         .is:{ (1..6).reduce:{|sum n| sum+n } } equalTo:15;
-        .is:{ (1..4).reduce:{ |d x| d.at:x put:x} into:#{} } equalTo:#{ 1:1 2:2 3:3 };
+        .is:{ (1..4).reduce:{ |d x| d.at:x.s put:x} into:#{} } equalTo:#{ '1':1 '2':2 '3':3 };
         .is:{ #{ 'a':1 'b':2 'c':3 }.reduce:{ |l x| l.add:x } into:#() } equalTo:#(
             KeyValuePair.new:{ key='a' value=1 }
             KeyValuePair.new:{ key='b' value=2 }
