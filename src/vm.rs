@@ -6,7 +6,7 @@ use crate::value::{
 };
 use crate::{gc, gcl};
 
-use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
 use ulid::Ulid;
 
@@ -237,10 +237,7 @@ impl<'gc> VmState<'gc> {
         class_obj: Gc<'gc, RefLock<Class<'gc>>>,
         state: T,
     ) -> Value<'gc> {
-        let payload = ObjectPayload::NativeState(gcl!(
-            mc,
-            Box::new(state) as Box<dyn AnyCollect>
-        ));
+        let payload = ObjectPayload::NativeState(gcl!(mc, Box::new(state) as Box<dyn AnyCollect>));
         let obj = gcl!(
             mc,
             Object {
@@ -604,13 +601,6 @@ impl<'gc> VmState<'gc> {
                             self.lookup_in_class_hierarchy(class_class, selector, false)
                         {
                             Some(m)
-                        } else if let Some(m) = class_class
-                            .borrow()
-                            .mixin_classes
-                            .iter()
-                            .find_map(|c| self.lookup_in_class_hierarchy(*c, selector, false))
-                        {
-                            Some(m)
                         } else {
                             self.globals.borrow().get(&selector_key).copied()
                         }
@@ -648,24 +638,43 @@ impl<'gc> VmState<'gc> {
 
     fn lookup_in_class_hierarchy(
         &self,
-        mut class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         selector: &str,
         class_side: bool,
     ) -> Option<Value<'gc>> {
-        loop {
-            let class_borrow = class_ref.borrow();
-            let methods = if class_side {
-                &class_borrow.class_methods
-            } else {
-                &class_borrow.instance_methods
-            };
-            if let Some(method) = methods.get(selector).copied() {
+        let mut visited = Vec::new();
+        self.lookup_in_class_hierarchy_rec(class_ref, selector, class_side, &mut visited)
+    }
+
+    fn lookup_in_class_hierarchy_rec(
+        &self,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        selector: &str,
+        class_side: bool,
+        visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
+    ) -> Option<Value<'gc>> {
+        if visited.iter().any(|c| Gc::ptr_eq(*c, class_ref)) {
+            return None;
+        }
+        visited.push(class_ref);
+
+        let class_borrow = class_ref.borrow();
+        let methods = if class_side {
+            &class_borrow.class_methods
+        } else {
+            &class_borrow.instance_methods
+        };
+        if let Some(method) = methods.get(selector).copied() {
+            return Some(method);
+        }
+        for mixin in &class_borrow.mixin_classes {
+            if let Some(method) = self.lookup_in_class_hierarchy_rec(*mixin, selector, class_side, visited) {
                 return Some(method);
             }
-            if let Some(parent) = class_borrow.parent {
-                class_ref = parent;
-            } else {
-                break;
+        }
+        if let Some(parent) = class_borrow.parent {
+            if let Some(method) = self.lookup_in_class_hierarchy_rec(parent, selector, class_side, visited) {
+                return Some(method);
             }
         }
         None
@@ -673,23 +682,37 @@ impl<'gc> VmState<'gc> {
 
     pub fn get_all_instance_vars(
         &self,
-        mut class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
     ) -> Vec<String> {
         let mut vars = Vec::new();
-        loop {
-            let class_borrow = class_ref.borrow();
-            for var in &class_borrow.instance_vars {
-                if !vars.contains(var) {
-                    vars.push(var.clone());
-                }
-            }
-            if let Some(parent) = class_borrow.parent {
-                class_ref = parent;
-            } else {
-                break;
+        let mut visited = Vec::new();
+        self.collect_instance_vars(class_ref, &mut vars, &mut visited);
+        vars
+    }
+
+    fn collect_instance_vars(
+        &self,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        vars: &mut Vec<String>,
+        visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
+    ) {
+        if visited.iter().any(|c| Gc::ptr_eq(*c, class_ref)) {
+            return;
+        }
+        visited.push(class_ref);
+
+        let class_borrow = class_ref.borrow();
+        for var in &class_borrow.instance_vars {
+            if !vars.contains(var) {
+                vars.push(var.clone());
             }
         }
-        vars
+        for mixin in &class_borrow.mixin_classes {
+            self.collect_instance_vars(*mixin, vars, visited);
+        }
+        if let Some(parent) = class_borrow.parent {
+            self.collect_instance_vars(parent, vars, visited);
+        }
     }
 
     pub fn push(&mut self, val: Value<'gc>) {
@@ -2369,4 +2392,63 @@ mod tests {
             assert_eq!(to_spec(counter_val), ValueSpec::Int(15));
         });
     }
+
+    #[test]
+    fn test_mixin_method_lookup_and_instance_vars() {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let vm = VmState::new(mc);
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            // Define mixin class Point
+            let point_class = gcl!(
+                mc,
+                Class {
+                    name: NamespacedName::new(Vec::new(), "Point".to_string()),
+                    parent: None,
+                    instance_vars: vec!["x".to_string(), "y".to_string()],
+                    instance_methods: {
+                        let mut m = HashMap::new();
+                        m.insert("name".to_string(), vm.new_native(mc, NativeFunc::new(|vm, mc, _args| {
+                            Ok(vm.new_string(mc, "Point".to_string()))
+                        })));
+                        m
+                    },
+                    class_methods: HashMap::new(),
+                    mixin_classes: Vec::new(),
+                }
+            );
+
+            // Define class PType which mixes in Point
+            let ptype_class = gcl!(
+                mc,
+                Class {
+                    name: NamespacedName::new(Vec::new(), "PType".to_string()),
+                    parent: None,
+                    instance_vars: vec!["z".to_string()],
+                    instance_methods: HashMap::new(),
+                    class_methods: HashMap::new(),
+                    mixin_classes: vec![point_class],
+                }
+            );
+
+            // Check instance variables (should contain z, x, y)
+            let vars = vm.get_all_instance_vars(ptype_class);
+            assert!(vars.contains(&"x".to_string()));
+            assert!(vars.contains(&"y".to_string()));
+            assert!(vars.contains(&"z".to_string()));
+
+            // Instantiate PType
+            let obj = vm.new_object(mc, ptype_class);
+
+            // Look up "name" on PType instance -> should find Point's name method
+            let _method = vm.lookup_method(Value::Object(obj), "name").unwrap();
+            
+            // Execute method
+            let ret = vm.call_method(mc, Value::Object(obj), "name", vec![]).unwrap();
+            assert_eq!(to_spec(ret), ValueSpec::String("Point".to_string()));
+        });
+    }
 }
+

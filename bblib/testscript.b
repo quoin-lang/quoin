@@ -7,6 +7,7 @@ Point <- { | @x @y |
 
   x -> { @x }
   y -> { @y }
+  name -> { 'Point' }
 
   dist: -> { |other|
     dx = @x - other.x;
@@ -18,6 +19,12 @@ Point <- { | @x @y |
 Point <- Point3D <- { | @z |
     z -> { @z }
 };
+
+PType <- {
+    .mix:Point;
+};
+
+.print:'PType.name =' and:PType.new.name;
 
 p1 = Point.newX: 3 y: 4;
 p2 = Point.newX: 0 y: 0;
