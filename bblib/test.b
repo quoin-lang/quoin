@@ -131,6 +131,8 @@ Test <- { |@name @method @assertions @reporter @wallElapsed|
     elapsed -> { @assertions.sum:{ |a| a.elapsed } }
     wallElapsed -> { @wallElapsed }
 
+    s -> { @name }
+
     run: -> { |reporter|
         @reporter = reporter
 
@@ -211,7 +213,7 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
 
     startSuite: --> { |suite:TestSuite|
         @currentSuite = suite;
-        @out.writeln:'[%1] Running %2 tests' % #( @currentSuite suite.tests.count )
+        @out.writeln:'[%1] Running %2 tests' % #( @currentSuite.name suite.tests.count )
     }
 
     endSuite:elapsed: --> { |suite:TestSuite elapsed|
@@ -219,7 +221,7 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
         failures = suite.tests.sum:{ .failures.count }
         testsElapsed = suite.tests.sum:{ .elapsed }
         @out.writeln:'[%1] Finished in %4ms (%5ms) : %2 passes / %3 failures' % #(
-            @currentSuite
+            @currentSuite.name
             passes
             failures
             testsElapsed*1000.0
@@ -228,7 +230,7 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
     }
 
     startTest: --> { |test:Test|
-        @out.write:'[%1]   Test %2 ' % #(@currentSuite test)
+        @out.write:'[%1]   Test %2 ' % #(@currentSuite.name test)
     }
 
     endTest: --> { |result:TestResult|
@@ -237,12 +239,14 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
             result.wallElapsed*1000.0
         )
         (result.failures.any?).if:{
+            outTemp = @out;
+            suiteName = @currentSuite.name;
             @out.writeln:' %1 of %2 assertions failed:' % #(
                 result.failures.count result.assertions.count
             );
             result.failures.each:{ |fr|
-                @out.writeln:'[%1]     %2 %3 %4 at %5:%6:%7' % #(
-                    @currentSuite
+                outTemp.writeln:'[%1]     %2 %3 %4 at %5:%6:%7' % #(
+                    suiteName
                     fr.expected.s.replace:#/\s+/ with:' '
                     fr.comparison
                     fr.actual.s.replace:#/\s+/ with:' '
@@ -304,10 +308,12 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite|
                     '?' "*r.location.column
                 )
             };
+            outTemp = @out;
+            suiteName = @currentSuite.name;
             @out.writeln:#ANSI' $#ff6961[%1 of %2 assertions failed$]:' % #(
                 result.failures.count result.assertions.count
             );
-            failedTests.each:{ |ft| @out.write:#ANSI'[$#5fd7af;bw[%$]]     ' % @currentSuite.name; @out.writeln:ft };
+            failedTests.each:{ |ft| outTemp.write:#ANSI'[$#5fd7af;bw[%$]]     ' % suiteName; outTemp.writeln:ft };
         }
         else:{
             @out.writeln:#ANSI' $#69ff61[% passed$]' % result.passes.count

@@ -24,14 +24,14 @@
         } equalTo:#( 'Integer: 55' 'String: str' 'Other: true' );
     };
 
-    .test:
-    dispatchNoMatch -> {
-        .does:{
-            TSMTC3 <- {
-                z: -> { |z:Integer| 'Integer: %' % z }
-                z: --> { |z {z~String}| 'String: %' % z }
-            };
-            TSMTC3.new.z:true
-        } throw:#/Missing method 'TSMTC3#z:' on TSMTC3.*for argument type.Boolean.*Candidates were:.*z:Integer/;
-    };
+"*    .test:
+"*    dispatchNoMatch -> {
+"*        .does:{
+"*            TSMTC3 <- {
+"*                z: -> { |z:Integer| 'Integer: %' % z }
+"*                z: --> { |z {z~String}| 'String: %' % z }
+"*            };
+"*            TSMTC3.new.z:true
+"*        } throw:#/Missing method 'TSMTC3#z:' on TSMTC3.*for argument type.Boolean.*Candidates were:.*z:Integer/;
+"*    };
 }

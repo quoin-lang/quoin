@@ -65,7 +65,9 @@ Mixin <- Iterate <- {
      };
 
      count -> {
-         ^.reduce:{ |sum _| sum+1 };
+         n = 0;
+         .each:{ |_| n = n+1 };
+         ^n
      }
 
      count: -> { |block:Block|
@@ -430,4 +432,6 @@ List <-- {
     }
 
     can?: -> {|clz| clz==Iterate }
+
+    count -> { .length }
 }

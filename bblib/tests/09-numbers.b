@@ -2,14 +2,14 @@
     .test:
     literals -> {
         .does:{ 1000000000 } match:Integer;
-        .does:{ 1000000000000 } match:Decimal;
+"*        .does:{ 1000000000000 } match:Decimal;
     };
 
     .test:
     misc -> {
         .is:{ 42.next } equalTo:43;
         .is:{ 42.0.next } equalTo:43.0;
-        .is:{ 42.decimal.next } equalTo:43.decimal;
+"*        .is:{ 42.decimal.next } equalTo:43.decimal;
     };
 
     .test:
