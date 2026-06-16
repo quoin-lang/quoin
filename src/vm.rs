@@ -180,6 +180,11 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         // Create the new object
         let obj = vm.new_object(mc, self.class_obj);
 
+        let has_init = vm.lookup_in_class_hierarchy(self.class_obj, "init", false).is_some();
+        if has_init {
+            vm.call_method(mc, Value::Object(obj), "init", Vec::new())?;
+        }
+
         vm.push(Value::Object(obj));
         Ok(())
     }
@@ -413,6 +418,84 @@ impl<'gc> VmState<'gc> {
                 payload: ObjectPayload::Native(func),
             }
         ))
+    }
+
+    pub fn new_method(
+        &self,
+        mc: &Mutation<'gc>,
+        selector: String,
+        block: Value<'gc>,
+        is_extension: bool,
+    ) -> Value<'gc> {
+        let class = self.get_or_create_builtin_class(mc, "Method");
+        let state = crate::runtime::method::NativeMethodState::new(selector, block, is_extension);
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
+        Value::Object(gcl!(
+            mc,
+            Object {
+                id: GcUlid(Ulid::new()),
+                class,
+                fields: HashMap::new(),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
+            }
+        ))
+    }
+
+    fn finalize_instantiation(
+        &mut self,
+        mc: &Mutation<'gc>,
+        obj: Gc<'gc, RefLock<Object<'gc>>>,
+        env_borrow: &EnvFrame<'gc>,
+    ) -> Result<(), BBError> {
+        let vars = self.get_all_instance_vars(obj.borrow().class);
+        for var in &vars {
+            if let Some(val) = env_borrow.vars.get(var) {
+                obj.borrow_mut(mc).fields.insert(var.clone(), *val);
+            }
+        }
+
+        // Call init: if it exists
+        let init_val = self.lookup_in_class_hierarchy(obj.borrow().class, "init:", false);
+        let mut init_block = None;
+        if let Some(val) = init_val {
+            if let Value::Object(ref io) = val {
+                match &io.borrow().payload {
+                    ObjectPayload::Block(b) => {
+                        init_block = Some(b.clone());
+                    }
+                    ObjectPayload::NativeState(state_cell) => {
+                        let state_ref = state_cell.borrow();
+                        let any_ref = (**state_ref).as_any();
+                        if let Some(method_state) = any_ref.downcast_ref::<crate::runtime::method::NativeMethodState>() {
+                            let block_val = method_state.get_block();
+                            if let Value::Object(block_obj) = block_val
+                                && let ObjectPayload::Block(b) = &block_obj.borrow().payload
+                            {
+                                init_block = Some(b.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(block) = init_block {
+            let mut init_args = Vec::new();
+            for param in &block.param_names {
+                let val = env_borrow.vars.get(param).copied().unwrap_or_else(|| self.new_nil(mc));
+                init_args.push(val);
+            }
+            self.call_method(mc, Value::Object(obj), "init:", init_args)?;
+        } else {
+            // Call init if it exists
+            let has_init = self.lookup_in_class_hierarchy(obj.borrow().class, "init", false).is_some();
+            if has_init {
+                self.call_method(mc, Value::Object(obj), "init", Vec::new())?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn get_or_create_builtin_class(
@@ -667,6 +750,24 @@ impl<'gc> VmState<'gc> {
             Value::Object(obj) => match &obj.borrow().payload {
                 ObjectPayload::Block(block) => Some(Box::new(BlockCallable { block: *block })),
                 ObjectPayload::Native(native_fn) => Some(Box::new(NativeCallable(*native_fn))),
+                ObjectPayload::NativeState(state_cell) => {
+                    let state_ref = state_cell.borrow();
+                    let any_ref = (**state_ref).as_any();
+                    if let Some(method_state) =
+                        any_ref.downcast_ref::<crate::runtime::method::NativeMethodState>()
+                    {
+                        let block_val = method_state.get_block();
+                        if let Value::Object(block_obj) = block_val
+                            && let ObjectPayload::Block(block) = &block_obj.borrow().payload
+                        {
+                            Some(Box::new(BlockCallable { block: *block }))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             },
             _ => None,
@@ -1103,12 +1204,7 @@ impl<'gc> VmState<'gc> {
                 let popped_frame = self.frames.pop().unwrap();
                 if let Some(obj) = popped_frame.instantiating_obj {
                     let env_borrow = popped_frame.env.borrow();
-                    let vars = self.get_all_instance_vars(obj.borrow().class);
-                    for var in &vars {
-                        if let Some(val) = env_borrow.vars.get(var) {
-                            obj.borrow_mut(mc).fields.insert(var.clone(), *val);
-                        }
-                    }
+                    self.finalize_instantiation(mc, obj, &env_borrow)?;
                     ret_val = Value::Object(obj);
                 }
                 self.push(ret_val);
@@ -1120,12 +1216,7 @@ impl<'gc> VmState<'gc> {
                     while let Some(f) = self.frames.pop() {
                         if let Some(obj) = f.instantiating_obj {
                             let env_borrow = f.env.borrow();
-                            let vars = self.get_all_instance_vars(obj.borrow().class);
-                            for var in &vars {
-                                if let Some(val) = env_borrow.vars.get(var) {
-                                    obj.borrow_mut(mc).fields.insert(var.clone(), *val);
-                                }
-                            }
+                            self.finalize_instantiation(mc, obj, &env_borrow)?;
                         }
                         if f.id == target_id {
                             break;
@@ -1304,6 +1395,7 @@ impl<'gc> VmState<'gc> {
                         .get_target_class_for_def(mc, self_val)
                         .map_err(|e| BBError::Other(e))?;
 
+                    let method_obj = self.new_method(mc, selector.clone(), block_val, false);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
                     if is_class_side {
                         if target_class.borrow().class_methods.contains_key(&selector) {
@@ -1316,7 +1408,7 @@ impl<'gc> VmState<'gc> {
                         target_class
                             .borrow_mut(mc)
                             .class_methods
-                            .insert(selector, block_val);
+                            .insert(selector, method_obj);
                     } else {
                         if target_class
                             .borrow()
@@ -1332,10 +1424,9 @@ impl<'gc> VmState<'gc> {
                         target_class
                             .borrow_mut(mc)
                             .instance_methods
-                            .insert(selector, block_val);
+                            .insert(selector, method_obj);
                     }
-                    let nil = self.new_nil(mc);
-                    self.push(nil);
+                    self.push(method_obj);
                     self.frames[frame_idx].ip += 1;
                 } else {
                     return Err(BBError::TypeError {
@@ -1356,6 +1447,7 @@ impl<'gc> VmState<'gc> {
                         .get_target_class_for_def(mc, self_val)
                         .map_err(|e| BBError::Other(e))?;
 
+                    let method_obj = self.new_method(mc, selector.clone(), block_val, true);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
                     let exists = self
                         .lookup_in_class_hierarchy(target_class, &selector, is_class_side)
@@ -1372,15 +1464,14 @@ impl<'gc> VmState<'gc> {
                         target_class
                             .borrow_mut(mc)
                             .class_methods
-                            .insert(selector, block_val);
+                            .insert(selector, method_obj);
                     } else {
                         target_class
                             .borrow_mut(mc)
                             .instance_methods
-                            .insert(selector, block_val);
+                            .insert(selector, method_obj);
                     }
-                    let nil = self.new_nil(mc);
-                    self.push(nil);
+                    self.push(method_obj);
                     self.frames[frame_idx].ip += 1;
                 } else {
                     return Err(BBError::TypeError {

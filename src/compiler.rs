@@ -301,6 +301,12 @@ impl Compiler {
                     self.compile_ident_store(&id.identifier_type, name, bytecode);
                 }
             }
+            NodeValue::IgnoredLValue => {
+                bytecode.push(Instruction::Pop);
+            }
+            NodeValue::IgnoredSplatLValue => {
+                bytecode.push(Instruction::Pop);
+            }
             _ => return Err(format!("Unsupported store target: {:?}", lval.value)),
         }
         Ok(())
