@@ -129,7 +129,7 @@ number : NUMBER ;
 
 /////////// LEXER
 
-WS : [ \r\n\t]+ -> channel(HIDDEN) ; // ignore whitespace
+WS : [ \r\n\t]+ -> skip ; // ignore whitespace
 
 IDENT : IDENT_PREFIX IDENT_REST* ;
 
@@ -145,15 +145,15 @@ REGEXP : '#' '/' ( ~[/\\] | REGEX_ESCAPE_SEQUENCE )* '/' ;
 
 USER_STRING : '#' IDENT STRING ;
 
-EOL_COMMENT : '"' '*' ~('\n')* -> channel(HIDDEN) ;
+EOL_COMMENT : '"' '*' ~('\n')* -> skip ;
 
 METHOD_RETURN : '^^' ;
 YIELD_RETURN : '^>' ;
 BLOCK_RETURN : '^' ;
 
-EMPTY_COMMENT : '"' '"' -> channel(HIDDEN) ;
+EMPTY_COMMENT : '"' '"' -> skip ;
 
-COMMENT : '"' ~'*' ( '\\' '"' | ~'"' )* '"' -> channel(HIDDEN) ;
+COMMENT : '"' ~'*' ( '\\' '"' | ~'"' )* '"' -> skip ;
 
 fragment INT : '0' | [1-9] [0-9]* ;
 
