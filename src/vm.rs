@@ -12,6 +12,7 @@ use crate::{gc, gcl};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
+use substring::Substring;
 use ulid::Ulid;
 
 #[derive(Collect)]
@@ -24,6 +25,9 @@ pub struct Frame<'gc> {
     pub ip: usize,
     pub env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
     pub instantiating_obj: Option<Gc<'gc, RefLock<Object<'gc>>>>,
+    pub receiver: Option<Value<'gc>>,
+    pub selector: Option<String>,
+    pub args: Vec<Value<'gc>>,
 }
 
 #[derive(Collect)]
@@ -87,6 +91,7 @@ pub trait Callable<'gc> {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
+        selector: Option<String>,
     ) -> Result<(), BBError>;
 }
 
@@ -100,6 +105,7 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
+        selector: Option<String>,
     ) -> Result<(), BBError> {
         if args.is_empty() {
             return Err(BBError::Other(
@@ -108,7 +114,7 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         }
         let receiver = args[0];
         let method_args = args[1..].to_vec();
-        vm.start_block_as_method(mc, self.block, receiver, method_args);
+        vm.start_block_as_method(mc, self.block, receiver, method_args, selector);
         Ok(())
     }
 }
@@ -123,6 +129,7 @@ impl<'gc> Callable<'gc> for MetaCallable<'gc> {
         vm: &mut VmState<'gc>,
         _mc: &Mutation<'gc>,
         _args: Vec<Value<'gc>>,
+        _selector: Option<String>,
     ) -> Result<(), BBError> {
         vm.push(Value::ClassMeta(self.class_obj));
         Ok(())
@@ -139,6 +146,7 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
+        selector: Option<String>,
     ) -> Result<(), BBError> {
         if args.len() != 2 {
             return Err(BBError::Other(
@@ -160,7 +168,7 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
         // Create the new object
         let obj = vm.new_object(mc, self.class_obj);
 
-        vm.start_block_for_instantiation(mc, block, obj);
+        vm.start_block_for_instantiation(mc, block, obj, selector);
         Ok(())
     }
 }
@@ -175,6 +183,7 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
+        _selector: Option<String>,
     ) -> Result<(), BBError> {
         if args.len() != 1 {
             return Err(BBError::Other("new expects only the receiver".to_string()));
@@ -203,6 +212,7 @@ impl<'gc> Callable<'gc> for NativeCallable {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
+        _selector: Option<String>,
     ) -> Result<(), BBError> {
         let ret = self.0.0(vm, mc, args)?;
         vm.push(ret);
@@ -640,7 +650,7 @@ impl<'gc> VmState<'gc> {
             let mut all_args = vec![receiver];
             all_args.extend(args);
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, all_args)?;
+            method.call(self, mc, all_args, Some(selector.to_string()))?;
 
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
@@ -675,9 +685,9 @@ impl<'gc> VmState<'gc> {
     ) -> Result<Value<'gc>, BBError> {
         let initial_frame_count = self.frames.len();
         if let Some(receiver) = self_val {
-            self.start_block_as_method(mc, block, receiver, args);
+            self.start_block_as_method(mc, block, receiver, args, None);
         } else {
-            self.start_block(mc, block, args);
+            self.start_block(mc, block, args, None, None);
         }
 
         if self.frames.len() > initial_frame_count {
@@ -887,13 +897,15 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         block: Gc<'gc, Block<'gc>>,
         args: Vec<Value<'gc>>,
+        receiver: Option<Value<'gc>>,
+        selector: Option<String>,
     ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
 
         let mut env_frame = EnvFrame::new(block.parent_env);
         // Bind parameters
-        for (name, val) in block.param_names.iter().zip(args.into_iter()) {
+        for (name, val) in block.param_names.iter().zip(args.iter().copied()) {
             env_frame.vars.insert(name.clone(), val);
         }
         let env_ref = gcl!(mc, env_frame);
@@ -913,6 +925,9 @@ impl<'gc> VmState<'gc> {
             ip: 0,
             env: env_ref,
             instantiating_obj: None,
+            receiver,
+            selector,
+            args,
         });
     }
 
@@ -922,6 +937,7 @@ impl<'gc> VmState<'gc> {
         block: Gc<'gc, Block<'gc>>,
         receiver: Value<'gc>,
         args: Vec<Value<'gc>>,
+        selector: Option<String>,
     ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
@@ -930,7 +946,7 @@ impl<'gc> VmState<'gc> {
         // Bind self
         env_frame.vars.insert("self".to_string(), receiver);
         // Bind parameters
-        for (name, val) in block.param_names.iter().zip(args.into_iter()) {
+        for (name, val) in block.param_names.iter().zip(args.iter().copied()) {
             env_frame.vars.insert(name.clone(), val);
         }
         let env_ref = gcl!(mc, env_frame);
@@ -946,6 +962,9 @@ impl<'gc> VmState<'gc> {
             ip: 0,
             env: env_ref,
             instantiating_obj: None,
+            receiver: Some(receiver),
+            selector,
+            args,
         });
     }
 
@@ -954,6 +973,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         block: Gc<'gc, Block<'gc>>,
         obj: Gc<'gc, RefLock<Object<'gc>>>,
+        selector: Option<String>,
     ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
@@ -996,6 +1016,9 @@ impl<'gc> VmState<'gc> {
             ip: 0,
             env: env_ref,
             instantiating_obj: Some(obj),
+            receiver: Some(Value::Object(obj)),
+            selector,
+            args: Vec::new(),
         });
     }
 
@@ -1063,9 +1086,49 @@ impl<'gc> VmState<'gc> {
         }
         if let Some(frame) = self.frames.last() {
             if let Some(source_info) = &frame.block.source_info {
+                let mut trace = Vec::new();
+                for f in self.frames.iter().rev() {
+                    let mut parts: Vec<String> = Vec::new();
+                    if let Some(receiver) = f.receiver {
+                        parts.push(
+                            format!("receiver={}", receiver)
+                                .substring(0, 30)
+                                .to_string(),
+                        );
+                    }
+                    if let Some(selector) = &f.selector {
+                        parts.push(format!("selector='{}'", selector));
+                    }
+                    if !f.args.is_empty() {
+                        let formatted_args: Vec<String> =
+                            f.args.iter().map(|a| format!("{}", a)).collect();
+                        parts.push(
+                            format!("args=[{}]", formatted_args.join(", "))
+                                .substring(0, 30)
+                                .to_string(),
+                        );
+                    }
+                    let loc = if let Some(source_info) = &f.block.source_info {
+                        format!(
+                            " at {}:{}:{}",
+                            source_info.filename,
+                            source_info.line,
+                            source_info.column + 1
+                        )
+                    } else {
+                        "".to_string()
+                    };
+                    let frame_str = if parts.is_empty() {
+                        loc.trim_start().to_string()
+                    } else {
+                        format!("{}{}", parts.join(", "), loc)
+                    };
+                    trace.push(frame_str);
+                }
                 return BBError::WithSourceInfo {
                     error: Box::new(error),
                     source_info: source_info.clone(),
+                    trace,
                 };
             }
         }
@@ -1189,7 +1252,7 @@ impl<'gc> VmState<'gc> {
                     && let ObjectPayload::Block(block) = &obj.borrow().payload
                 {
                     if selector == "value" || selector == "value:" {
-                        self.start_block(mc, *block, args);
+                        self.start_block(mc, *block, args, Some(receiver), Some(selector.clone()));
                         return Ok(VmStatus::Running);
                     }
                 }
@@ -1198,7 +1261,7 @@ impl<'gc> VmState<'gc> {
                 if let Some(callable) = method_opt {
                     let mut all_args = vec![receiver];
                     all_args.extend(args);
-                    callable.call(self, mc, all_args)?;
+                    callable.call(self, mc, all_args, Some(selector.clone()))?;
                 } else {
                     return Err(format!(
                         "Message not understood: receiver={:?}, selector='{}', args={:?}",
@@ -1382,7 +1445,7 @@ impl<'gc> VmState<'gc> {
                     && let ObjectPayload::Block(block) = &obj.borrow().payload
                 {
                     self.frames[frame_idx].ip += 1;
-                    self.start_block_as_method(mc, *block, self_val, Vec::new());
+                    self.start_block_as_method(mc, *block, self_val, Vec::new(), None);
                     Ok(VmStatus::Running)
                 } else {
                     Err(BBError::TypeError {
@@ -1685,7 +1748,7 @@ mod tests {
                     enclosing_method_id: None,
                 }
             );
-            vm.start_block(mc, block, Vec::new());
+            vm.start_block(mc, block, Vec::new(), None, None);
             vm
         });
 
@@ -2183,7 +2246,7 @@ mod tests {
                     enclosing_method_id: None,
                 }
             );
-            vm.start_block(mc, foo_block, Vec::new());
+            vm.start_block(mc, foo_block, Vec::new(), None, None);
             vm
         });
 
@@ -2861,7 +2924,7 @@ mod tests {
                     enclosing_method_id: None,
                 }
             );
-            vm.start_block(mc, block, Vec::new());
+            vm.start_block(mc, block, Vec::new(), None, None);
 
             // Run until error. It should fail because Integer/Nil does not have 'foo' method.
             let mut err = None;

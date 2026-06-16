@@ -35,6 +35,7 @@ pub enum BBError {
     WithSourceInfo {
         error: Box<BBError>,
         source_info: SourceInfo,
+        trace: Vec<String>,
     },
 }
 
@@ -62,7 +63,7 @@ impl fmt::Display for BBError {
             BBError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
             BBError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             BBError::Other(msg) => write!(f, "{}", msg),
-            BBError::WithSourceInfo { error, source_info } => {
+            BBError::WithSourceInfo { error, source_info, trace } => {
                 writeln!(f, "{}", error)?;
                 write!(
                     f,
@@ -76,6 +77,16 @@ impl fmt::Display for BBError {
                         writeln!(f, "  | {}", line)?;
                     }
                     write!(f, "  |")?;
+                }
+                if !trace.is_empty() {
+                    writeln!(f)?;
+                    writeln!(f, "VM Stack Trace:")?;
+                    for (i, frame_str) in trace.iter().enumerate() {
+                        if i > 0 {
+                            writeln!(f)?;
+                        }
+                        write!(f, "    {}", frame_str)?;
+                    }
                 }
                 Ok(())
             }

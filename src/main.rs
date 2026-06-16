@@ -158,7 +158,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
                     source_info: program.source_info.clone(),
                 }
             );
-            vm.start_block(mc, main_block, Vec::new());
+            vm.start_block(mc, main_block, Vec::new(), None, None);
         });
 
         let mut step_count = 0;

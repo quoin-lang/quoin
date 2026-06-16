@@ -118,7 +118,7 @@ pub fn native_match<'gc>(
 
     if has_custom_tilde {
         let method = vm.lookup_method(lhs, "~:").unwrap();
-        method.call(vm, mc, args)?;
+        method.call(vm, mc, args, Some("~:".to_string()))?;
         return Ok(vm.pop()?);
     }
 
@@ -159,7 +159,7 @@ pub fn native_match<'gc>(
     }
 
     let eq_val = if let Some(method) = vm.lookup_method(lhs, "==:") {
-        method.call(vm, mc, vec![lhs, rhs])?;
+        method.call(vm, mc, vec![lhs, rhs], Some("==:".to_string()))?;
         vm.pop()?
     } else {
         vm.new_bool(mc, lhs == rhs)
@@ -465,7 +465,7 @@ pub fn native_eq<'gc>(
     let (receiver, other) = (args[0], args[1]);
     let method = vm.lookup_method(receiver, "==:");
     if let Some(method) = method {
-        method.call(vm, mc, args)?;
+        method.call(vm, mc, args, Some("==:".to_string()))?;
         return Ok(vm.pop()?);
     }
 
