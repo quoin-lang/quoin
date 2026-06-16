@@ -1,6 +1,6 @@
 use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
-use new_vm::runtime::{boolean, class, io, native, object};
+use new_vm::runtime::{block, boolean, class, io, native, object};
 use new_vm::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
@@ -88,12 +88,6 @@ fn main() {
     //     compile_and_run_asts(ast_iter);
     //     return;
     // }
-
-    let script = read_to_string("bblib/testscript.b").unwrap();
-
-    let ast = parser::parse_building_blocks_string(&script);
-
-    compile_and_run_asts(vec![ast].iter().map(|ast| ast.clone()));
 }
 
 fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
@@ -105,6 +99,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
         vm.register_native_class(mc, object::build_object_class());
         vm.register_native_class(mc, class::build_class_class());
         vm.register_native_class(mc, boolean::build_boolean_class());
+        vm.register_native_class(mc, block::build_block_class());
         vm.register_native_class(mc, io::build_io_folder_class());
 
         // Register placeholder classes for all of the builtin types.
@@ -116,7 +111,6 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
             "List",
             "Dictionary",
             "Regex",
-            "Block",
             "Method",
             "Native",
         ] {

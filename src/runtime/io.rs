@@ -41,4 +41,10 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                 vm.new_nil(mc)
             });
         })
+        .instance_method("reset", |vm, mc, args| {
+            args[0].with_native_state_mut(mc, |io: &mut IoFolder| {
+                io.iter = None;
+            })?;
+            Ok(vm.new_nil(mc))
+        })
 }

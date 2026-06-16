@@ -1495,6 +1495,7 @@ mod tests {
             vm.register_native_class(mc, crate::runtime::object::build_object_class());
             vm.register_native_class(mc, crate::runtime::class::build_class_class());
             vm.register_native_class(mc, crate::runtime::boolean::build_boolean_class());
+            vm.register_native_class(mc, crate::runtime::block::build_block_class());
 
             for t in [
                 "Nil",
@@ -1504,7 +1505,6 @@ mod tests {
                 "List",
                 "Dictionary",
                 "Regex",
-                "Block",
                 "Method",
                 "Native",
             ] {

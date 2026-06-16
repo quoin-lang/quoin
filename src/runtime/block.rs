@@ -60,4 +60,9 @@ pub fn build_block_class() -> NativeClassBuilder {
             };
             vm.execute_block(mc, block, block_args, Some(self_val))
         })
+        .instance_method("valueWithSelfOrArg:", |vm, mc, args| {
+            let block = arg!(args, Block, 0);
+            let arg_val = args[1];
+            vm.execute_block(mc, block, vec![arg_val], Some(arg_val))
+        })
 }

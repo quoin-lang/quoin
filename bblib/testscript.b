@@ -99,6 +99,9 @@ neg_num = -num;
 my_dict = #{ 'foo': 100 'bar': 200 };
 .print: 'dict =' and: my_dict;
 
+"* list = #(1 2 3 4 5);
+"* .print:'Top half =' and:list.select:{|n| n > 3};
+
 re = #/^[a-z]+$/;
 is_match = re.regex_match: 'gemini';
 .print: 'regex match =' and: is_match;
@@ -147,4 +150,5 @@ file = [IO]File.open: '/etc/motd';
 .print: 'Stdout =' and: [IO]Stdout;
 
 folder = [IO]Folder.open: 'bblib/tests/';
-.print: 'Test files: ' and:folder.select:{true};
+folder.each:{ |p| .print:'Test file: ' and:p };
+
