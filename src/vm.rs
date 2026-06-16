@@ -1629,47 +1629,18 @@ mod tests {
             vm.register_native_class(mc, crate::runtime::boolean::build_boolean_class());
             vm.register_native_class(mc, crate::runtime::block::build_block_class());
             vm.register_native_class(mc, crate::runtime::list::build_list_class());
+            vm.register_native_class(mc, crate::runtime::double::build_double_class());
+            vm.register_native_class(mc, crate::runtime::integer::build_integer_class());
+            vm.register_native_class(mc, crate::runtime::string::build_string_class());
 
             for t in [
                 "Nil",
-                "Integer",
-                "Double",
-                "String",
                 "Map",
                 "Regex",
                 "Method",
                 "Native",
             ] {
-                if t == "Double" || t == "Integer" {
-                    let class_builder = NativeClassBuilder::new(t, Some("Object")).instance_method(
-                        "sqrt",
-                        |vm, mc, args| {
-                            if args.is_empty() {
-                                return Err(BBError::Other("sqrt expects a receiver".to_string()));
-                            }
-                            let payload = match args[0] {
-                                Value::Object(obj) => &obj.borrow().payload,
-                                _ => {
-                                    return Err(BBError::Other(format!(
-                                        "sqrt expected number, got {:?}",
-                                        args[0]
-                                    )));
-                                }
-                            };
-                            match payload {
-                                ObjectPayload::Double(f) => Ok(vm.new_double(mc, f.sqrt())),
-                                ObjectPayload::Int(i) => Ok(vm.new_double(mc, (*i as f64).sqrt())),
-                                _ => Err(BBError::Other(format!(
-                                    "sqrt expected number, got {:?}",
-                                    args[0]
-                                ))),
-                            }
-                        },
-                    );
-                    vm.register_native_class(mc, class_builder);
-                } else {
-                    vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
-                }
+                vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
             }
 
             // Register standard native functions we might need

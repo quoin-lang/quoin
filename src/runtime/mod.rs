@@ -8,3 +8,6 @@ pub mod object;
 pub mod runtime;
 pub mod method;
 pub mod timer;
+pub mod double;
+pub mod integer;
+pub mod string;

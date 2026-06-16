@@ -1,7 +1,6 @@
-use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
-use new_vm::runtime::{block, boolean, class, io, list, native, object, runtime, method, timer};
-use new_vm::value::{Block, NativeClassBuilder, ObjectPayload, Value};
+use new_vm::runtime::{block, boolean, class, io, list, native, object, runtime, method, timer, double, integer, string};
+use new_vm::value::{Block, NativeClassBuilder};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
 
@@ -106,94 +105,18 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
         vm.register_native_class(mc, runtime::build_runtime_class());
         vm.register_native_class(mc, method::build_method_class());
         vm.register_native_class(mc, timer::build_timer_class());
+        vm.register_native_class(mc, double::build_double_class());
+        vm.register_native_class(mc, integer::build_integer_class());
+        vm.register_native_class(mc, string::build_string_class());
 
-        // Register placeholder classes for all of the builtin types.
+        // Register placeholder classes for remaining builtin types.
         for t in [
             "Nil",
-            "Integer",
-            "Double",
-            "String",
             "Map",
             "Regex",
             "Native",
         ] {
-            if t == "Double" || t == "Integer" {
-                let class_builder = NativeClassBuilder::new(t, Some("Object")).instance_method(
-                    "sqrt",
-                    |vm, mc, args| {
-                        if args.is_empty() {
-                            return Err(BBError::Other("sqrt expects a receiver".to_string()));
-                        }
-                        let payload = match args[0] {
-                            Value::Object(obj) => &obj.borrow().payload,
-                            _ => {
-                                return Err(BBError::Other(format!(
-                                    "sqrt expected number, got {:?}",
-                                    args[0]
-                                )));
-                            }
-                        };
-                        match payload {
-                            ObjectPayload::Double(f) => Ok(vm.new_double(mc, f.sqrt())),
-                            ObjectPayload::Int(i) => Ok(vm.new_double(mc, (*i as f64).sqrt())),
-                            _ => Err(BBError::Other(format!(
-                                "sqrt expected number, got {:?}",
-                                args[0]
-                            ))),
-                        }
-                    },
-                );
-                vm.register_native_class(mc, class_builder);
-            } else if t == "String" {
-                let class_builder = NativeClassBuilder::new(t, Some("Object"))
-                    .instance_method("replace:with:", |vm, mc, args| {
-                        if args.len() < 3 {
-                            return Err(BBError::Other("replace:with: expects receiver, pattern, and replacement".to_string()));
-                        }
-                        let receiver = args[0];
-                        let from_val = args[1];
-                        let to_val = args[2];
-
-                        let s_borrow = match receiver {
-                            Value::Object(obj) => match &obj.borrow().payload {
-                                ObjectPayload::String(s) => s.clone(),
-                                _ => return Err(BBError::Other("replace:with: expected String receiver".to_string())),
-                            },
-                            _ => return Err(BBError::Other("replace:with: expected String receiver".to_string())),
-                        };
-
-                        let to_str = match to_val {
-                            Value::Object(obj) => match &obj.borrow().payload {
-                                ObjectPayload::String(s) => s.to_string(),
-                                _ => return Err(BBError::Other("replace:with: expected String replacement".to_string())),
-                            },
-                            _ => return Err(BBError::Other("replace:with: expected String replacement".to_string())),
-                        };
-
-                        if let Value::Object(obj) = from_val
-                            && let ObjectPayload::Regex(r) = &obj.borrow().payload
-                        {
-                            let result = r.0.replace_all(&*s_borrow, &to_str).to_string();
-                            return Ok(vm.new_string(mc, result));
-                        }
-
-                        if let Value::Object(obj) = from_val
-                            && let ObjectPayload::String(s) = &obj.borrow().payload
-                        {
-                            let result = s_borrow.replace(&**s, &to_str);
-                            return Ok(vm.new_string(mc, result));
-                        }
-
-                        Err(BBError::TypeError {
-                            expected: "Regex or String".to_string(),
-                            got: from_val.type_name().to_string(),
-                            msg: "replace:with: expected Regex or String pattern".to_string(),
-                        })
-                    });
-                vm.register_native_class(mc, class_builder);
-            } else {
-                vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
-            }
+            vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
         }
 
         vm
