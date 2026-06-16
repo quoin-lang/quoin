@@ -84,6 +84,8 @@ c2 = counter.value;
 .print: 'c1 =' and: c1;
 .print: 'c2 =' and: c2;
 
+{ |x| x.print }.value:42;
+
 "* Test 4: Unary operators
 flag = true;
 inv_flag = !flag;

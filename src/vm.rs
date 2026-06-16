@@ -567,6 +567,40 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    pub fn execute_block(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        args: Vec<Value<'gc>>,
+        self_val: Option<Value<'gc>>,
+    ) -> Result<Value<'gc>, BBError> {
+        let initial_frame_count = self.frames.len();
+        if let Some(receiver) = self_val {
+            self.start_block_as_method(mc, block, receiver, args);
+        } else {
+            self.start_block(mc, block, args);
+        }
+
+        if self.frames.len() > initial_frame_count {
+            while self.frames.len() > initial_frame_count {
+                match self.step(mc)? {
+                    VmStatus::Running => {}
+                    VmStatus::Finished(_) => {
+                        break;
+                    }
+                    VmStatus::Yeeted(val) => {
+                        return Err(BBError::Other(format!(
+                            "Uncaught exception during block execution: {}",
+                            val
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(self.pop()?)
+    }
+
     pub fn lookup_method(
         &self,
         receiver: Value<'gc>,
@@ -668,22 +702,23 @@ impl<'gc> VmState<'gc> {
             return Some(method);
         }
         for mixin in &class_borrow.mixin_classes {
-            if let Some(method) = self.lookup_in_class_hierarchy_rec(*mixin, selector, class_side, visited) {
+            if let Some(method) =
+                self.lookup_in_class_hierarchy_rec(*mixin, selector, class_side, visited)
+            {
                 return Some(method);
             }
         }
         if let Some(parent) = class_borrow.parent {
-            if let Some(method) = self.lookup_in_class_hierarchy_rec(parent, selector, class_side, visited) {
+            if let Some(method) =
+                self.lookup_in_class_hierarchy_rec(parent, selector, class_side, visited)
+            {
                 return Some(method);
             }
         }
         None
     }
 
-    pub fn get_all_instance_vars(
-        &self,
-        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
-    ) -> Vec<String> {
+    pub fn get_all_instance_vars(&self, class_ref: Gc<'gc, RefLock<Class<'gc>>>) -> Vec<String> {
         let mut vars = Vec::new();
         let mut visited = Vec::new();
         self.collect_instance_vars(class_ref, &mut vars, &mut visited);
@@ -2410,9 +2445,15 @@ mod tests {
                     instance_vars: vec!["x".to_string(), "y".to_string()],
                     instance_methods: {
                         let mut m = HashMap::new();
-                        m.insert("name".to_string(), vm.new_native(mc, NativeFunc::new(|vm, mc, _args| {
-                            Ok(vm.new_string(mc, "Point".to_string()))
-                        })));
+                        m.insert(
+                            "name".to_string(),
+                            vm.new_native(
+                                mc,
+                                NativeFunc::new(|vm, mc, _args| {
+                                    Ok(vm.new_string(mc, "Point".to_string()))
+                                }),
+                            ),
+                        );
                         m
                     },
                     class_methods: HashMap::new(),
@@ -2444,11 +2485,83 @@ mod tests {
 
             // Look up "name" on PType instance -> should find Point's name method
             let _method = vm.lookup_method(Value::Object(obj), "name").unwrap();
-            
+
             // Execute method
-            let ret = vm.call_method(mc, Value::Object(obj), "name", vec![]).unwrap();
+            let ret = vm
+                .call_method(mc, Value::Object(obj), "name", vec![])
+                .unwrap();
             assert_eq!(to_spec(ret), ValueSpec::String("Point".to_string()));
         });
     }
-}
 
+    #[test]
+    fn test_execute_block_helper() {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let vm = VmState::new(mc);
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            // Build a block that adds two arguments (a, b) and returns self + a + b
+            let block = gc!(
+                mc,
+                Block {
+                    name: Some("test_block".to_string()),
+                    is_nested_block: false,
+                    param_names: vec!["a".to_string(), "b".to_string()],
+                    bytecode: vec![
+                        Instruction::LoadLocal("self".to_string()),
+                        Instruction::LoadLocal("a".to_string()),
+                        Instruction::Send("+".to_string(), 1),
+                        Instruction::LoadLocal("b".to_string()),
+                        Instruction::Send("+".to_string(), 1),
+                        Instruction::Return,
+                    ],
+                    parent_env: None,
+                    enclosing_method_id: None,
+                }
+            );
+
+            // Register standard native functions we need (+ operator)
+            let native_val = vm.new_native(mc, NativeFunc(native_add));
+            vm.globals
+                .borrow_mut(mc)
+                .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
+
+            // Execute block with args [10, 20] and self = 100
+            let self_val = vm.new_int(mc, 100);
+            let arg1 = vm.new_int(mc, 10);
+            let arg2 = vm.new_int(mc, 20);
+
+            let res = vm
+                .execute_block(mc, block, vec![arg1, arg2], Some(self_val))
+                .unwrap();
+
+            assert_eq!(to_spec(res), ValueSpec::Int(130));
+
+            // Execute block without self: a + b
+            let block2 = gc!(
+                mc,
+                Block {
+                    name: Some("test_block_no_self".to_string()),
+                    is_nested_block: false,
+                    param_names: vec!["a".to_string(), "b".to_string()],
+                    bytecode: vec![
+                        Instruction::LoadLocal("a".to_string()),
+                        Instruction::LoadLocal("b".to_string()),
+                        Instruction::Send("+".to_string(), 1),
+                        Instruction::Return,
+                    ],
+                    parent_env: None,
+                    enclosing_method_id: None,
+                }
+            );
+
+            let res2 = vm
+                .execute_block(mc, block2, vec![arg1, arg2], None)
+                .unwrap();
+
+            assert_eq!(to_spec(res2), ValueSpec::Int(30));
+        });
+    }
+}

@@ -1,3 +1,4 @@
+pub mod block;
 pub mod boolean;
 pub mod class;
 pub mod io;
