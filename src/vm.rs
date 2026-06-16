@@ -32,7 +32,7 @@ pub struct BuiltinCache<'gc> {
     pub double_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub string_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub list_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
-    pub dict_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
+    pub map_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub regex_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub block_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub native_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
@@ -50,7 +50,7 @@ impl<'gc> BuiltinCache<'gc> {
             double_class: None,
             string_class: None,
             list_class: None,
-            dict_class: None,
+            map_class: None,
             regex_class: None,
             block_class: None,
             native_class: None,
@@ -364,16 +364,16 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
-    pub fn new_dict(&self, mc: &Mutation<'gc>, dict: HashMap<String, Value<'gc>>) -> Value<'gc> {
-        let class = self.builtin_cache.borrow().dict_class;
-        let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Dictionary"));
+    pub fn new_map(&self, mc: &Mutation<'gc>, map: HashMap<String, Value<'gc>>) -> Value<'gc> {
+        let class = self.builtin_cache.borrow().map_class;
+        let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Map"));
         Value::Object(gcl!(
             mc,
             Object {
                 id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
-                payload: ObjectPayload::Dict(gcl!(mc, dict)),
+                payload: ObjectPayload::Map(gcl!(mc, map)),
             }
         ))
     }
@@ -536,7 +536,7 @@ impl<'gc> VmState<'gc> {
                 "Double" => cache.double_class = Some(class_obj),
                 "String" => cache.string_class = Some(class_obj),
                 "List" => cache.list_class = Some(class_obj),
-                "Dictionary" => cache.dict_class = Some(class_obj),
+                "Map" => cache.map_class = Some(class_obj),
                 "Regex" => cache.regex_class = Some(class_obj),
                 "Block" => cache.block_class = Some(class_obj),
                 "Native" => cache.native_class = Some(class_obj),
@@ -606,7 +606,7 @@ impl<'gc> VmState<'gc> {
                 "Double" => cache.double_class = Some(class_obj),
                 "String" => cache.string_class = Some(class_obj),
                 "List" => cache.list_class = Some(class_obj),
-                "Dictionary" => cache.dict_class = Some(class_obj),
+                "Map" => cache.map_class = Some(class_obj),
                 "Regex" => cache.regex_class = Some(class_obj),
                 "Block" => cache.block_class = Some(class_obj),
                 "Native" => cache.native_class = Some(class_obj),
@@ -1260,7 +1260,7 @@ impl<'gc> VmState<'gc> {
                 self.push(list);
                 self.frames[frame_idx].ip += 1;
             }
-            Instruction::NewDict(n) => {
+            Instruction::NewMap(n) => {
                 let mut map = HashMap::new();
                 for _ in 0..n {
                     let val = self.pop()?;
@@ -1273,12 +1273,12 @@ impl<'gc> VmState<'gc> {
                         return Err(BBError::TypeError {
                             expected: "String".to_string(),
                             got: key_val.type_name().to_string(),
-                            msg: format!("Dict keys must be Strings, got: {:?}", key_val),
+                            msg: format!("Map keys must be Strings, got: {:?}", key_val),
                         });
                     }
                 }
-                let dict = self.new_dict(mc, map);
-                self.push(dict);
+                let map_val = self.new_map(mc, map);
+                self.push(map_val);
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::NewRegex => {
@@ -1552,7 +1552,7 @@ mod tests {
         Class(String),
         ClassMeta(String),
         List(Vec<ValueSpec>),
-        Dict(HashMap<String, ValueSpec>),
+        Map(HashMap<String, ValueSpec>),
         Regex(String),
         Block(Option<String>),
         Native,
@@ -1578,13 +1578,13 @@ mod tests {
                         });
                         res.unwrap_or_else(|_| ValueSpec::Instance("List".to_string()))
                     }
-                    ObjectPayload::Dict(d) => {
-                        let dict_specs = d
+                    ObjectPayload::Map(m) => {
+                        let map_specs = m
                             .borrow()
                             .iter()
                             .map(|(k, &v)| (k.clone(), to_spec(v)))
                             .collect();
-                        ValueSpec::Dict(dict_specs)
+                        ValueSpec::Map(map_specs)
                     }
                     ObjectPayload::Regex(r) => ValueSpec::Regex(r.0.as_str().to_string()),
                     ObjectPayload::Block(b) => ValueSpec::Block(b.name.clone()),
@@ -1635,7 +1635,7 @@ mod tests {
                 "Integer",
                 "Double",
                 "String",
-                "Dictionary",
+                "Map",
                 "Regex",
                 "Method",
                 "Native",
@@ -1926,17 +1926,17 @@ mod tests {
     }
 
     #[test]
-    fn test_list_dict_regex() {
+    fn test_list_map_regex() {
         run_test_steps(
             vec![
                 // List of 2 elements: Push 1, Push 2, NewList(2)
                 Instruction::Push(Constant::Int(1)),
                 Instruction::Push(Constant::Int(2)),
                 Instruction::NewList(2),
-                // Dict of 1 pair: Push key "a", Push val 10, NewDict(1)
+                // Map of 1 pair: Push key "a", Push val 10, NewMap(1)
                 Instruction::Push(Constant::String("a".to_string())),
                 Instruction::Push(Constant::Int(10)),
-                Instruction::NewDict(1),
+                Instruction::NewMap(1),
                 // Regex: Push pattern "^ab$", NewRegex
                 Instruction::Push(Constant::String("^ab$".to_string())),
                 Instruction::NewRegex,
@@ -1952,14 +1952,14 @@ mod tests {
                     vec![ValueSpec::List(vec![ValueSpec::Int(1), ValueSpec::Int(2)])]
                 );
 
-                // Dict creation
+                // Map creation
                 vm.step(mc).unwrap();
                 vm.step(mc).unwrap();
-                vm.step(mc).unwrap(); // NewDict(1)
+                vm.step(mc).unwrap(); // NewMap(1)
                 assert_eq!(vm.stack.len(), 2);
-                let mut expected_dict = HashMap::new();
-                expected_dict.insert("a".to_string(), ValueSpec::Int(10));
-                assert_eq!(stack_spec(vm)[1], ValueSpec::Dict(expected_dict));
+                let mut expected_map = HashMap::new();
+                expected_map.insert("a".to_string(), ValueSpec::Int(10));
+                assert_eq!(stack_spec(vm)[1], ValueSpec::Map(expected_map));
 
                 // Regex creation
                 vm.step(mc).unwrap();

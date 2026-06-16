@@ -97,19 +97,19 @@ Mixin <- Iterate <- {
      };
 
      groupBy: -> { |block:Block|
-         dict = #{};
+         map = #{};
          .each:{ |x|
              key = block.valueWithSelfOrArg:x;
 
-             list = dict.at:key;
+             list = map.at:key;
              list.defined?.else:{
                  list = #();
-                 dict.at:key put:list;
+                 map.at:key put:list;
              }
 
              list.add:x;
          };
-         ^dict
+         ^map
      }
 
      contains?: -> { |item|
@@ -195,9 +195,9 @@ Mixin <- Iterate <- {
      }
 
      uniq -> {
-         dict = #{};
-         .each:{ |x| dict.at:x put:true };
-         ^dict.keys
+         map = #{};
+         .each:{ |x| map.at:x put:true };
+         ^map.keys
      }
 
      zip: -> { |it2|
@@ -234,11 +234,11 @@ Mixin <- Iterate <- {
      list -> { self.select:{ true } }
 };
 
-Dictionary <-- {
+Map <-- {
     .meta <-- {
         default -> { #{} }
 
-        fromPairs: -> { |pairs| pairs.reduce:{|d kvp| d.at:kvp.key put:kvp.value } into:#{} }
+        fromPairs: -> { |pairs| pairs.reduce:{|m kvp| m.at:kvp.key put:kvp.value } into:#{} }
     }
 
     can?: -> {|clz| clz==Iterate }
@@ -305,19 +305,19 @@ Dictionary <-- {
      };
 
      groupBy: -> { |block:Block|
-         dict = #{};
+         map = #{};
          .each:{ |x|
              key = block.valueWithSelfOrArg:x;
 
-             list = dict.at:key;
+             list = map.at:key;
              list.defined?.else:{
                  list = #();
-                 dict.at:key put:list;
+                 map.at:key put:list;
              }
 
              list.add:x;
          };
-         ^dict
+         ^map
      }
 
      reduce: -> { |block:Block|
@@ -398,9 +398,9 @@ Dictionary <-- {
      }
 
      uniq -> {
-         dict = #{};
-         .each:{ |x| dict.at:x put:true };
-         ^dict.keys
+         map = #{};
+         .each:{ |x| map.at:x put:true };
+         ^map.keys
      }
 
      join: -> { |sep:String|

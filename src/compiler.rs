@@ -147,15 +147,15 @@ impl Compiler {
                 }
                 bytecode.push(Instruction::NewList(list.values.len()));
             }
-            NodeValue::Dictionary(dict) => {
-                if dict.keys.len() != dict.values.len() {
-                    return Err("Dictionary keys and values count mismatch".to_string());
+            NodeValue::Map(map) => {
+                if map.keys.len() != map.values.len() {
+                    return Err("Map keys and values count mismatch".to_string());
                 }
-                for i in 0..dict.keys.len() {
-                    self.compile_node(&dict.keys[i], bytecode)?;
-                    self.compile_node(&dict.values[i], bytecode)?;
+                for i in 0..map.keys.len() {
+                    self.compile_node(&map.keys[i], bytecode)?;
+                    self.compile_node(&map.values[i], bytecode)?;
                 }
-                bytecode.push(Instruction::NewDict(dict.keys.len()));
+                bytecode.push(Instruction::NewMap(map.keys.len()));
             }
             NodeValue::Regex(re) => {
                 let mut pattern = re.value.clone();
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_lists_dicts_regex() {
+    fn test_compile_lists_maps_regex() {
         // #(1 2)
         let list = Node { source_info: None,
             value: NodeValue::List(ListNode {
@@ -1045,17 +1045,17 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // #{'a': 1}
-        let dict = Node { source_info: None,
-            value: NodeValue::Dictionary(DictionaryNode {
+        let map = Node { source_info: None,
+            value: NodeValue::Map(MapNode {
                 keys: vec![Arc::new(string("a"))],
                 values: vec![Arc::new(int(1))],
             }),
         };
-        let res = compile(vec![dict]).unwrap();
+        let res = compile(vec![map]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::String("a".to_string())));
         expected.push(Instruction::Push(Constant::Int(1)));
-        expected.push(Instruction::NewDict(1));
+        expected.push(Instruction::NewMap(1));
         assert_eq!(res.bytecode, expected);
 
         // #/^[a-z]+$/
@@ -1083,18 +1083,18 @@ mod tests {
             "Encountered Unknown NodeValue (ast_visitor bug)"
         );
 
-        // Dictionary mismatch keys/values returns error
-        let dict_mismatch = Node { source_info: None,
-            value: NodeValue::Dictionary(DictionaryNode {
+        // Map mismatch keys/values returns error
+        let map_mismatch = Node { source_info: None,
+            value: NodeValue::Map(MapNode {
                 keys: vec![Arc::new(string("a"))],
                 values: vec![],
             }),
         };
-        let res = compile(vec![dict_mismatch]);
+        let res = compile(vec![map_mismatch]);
         assert!(res.is_err());
         assert_eq!(
             res.err().unwrap(),
-            "Dictionary keys and values count mismatch"
+            "Map keys and values count mismatch"
         );
     }
 

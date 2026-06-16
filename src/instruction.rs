@@ -42,7 +42,7 @@ pub enum Instruction {
     IfJump(isize),
     ElseJump(isize),
     NewList(usize), // num_elements
-    NewDict(usize), // num_pairs (key/value count)
+    NewMap(usize), // num_pairs (key/value count)
     NewRegex,
     DefineClass {
         name: NamespacedName,

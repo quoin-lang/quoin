@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_and_dict() {
+    fn test_parse_list_and_map() {
         let ast = parse("#(1 2);");
         let expected = val_node(NodeValue::Program(ProgramNode { source_info: None,
             expressions: vec![arc_node(NodeValue::List(ListNode {
@@ -240,7 +240,7 @@ mod tests {
 
         let ast = parse("#{'a': 1};");
         let expected = val_node(NodeValue::Program(ProgramNode { source_info: None,
-            expressions: vec![arc_node(NodeValue::Dictionary(DictionaryNode {
+            expressions: vec![arc_node(NodeValue::Map(MapNode {
                 keys: vec![string_node("a")],
                 values: vec![integer(1)],
             }))],

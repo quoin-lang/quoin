@@ -95,9 +95,9 @@ num = 50;
 neg_num = -num;
 .print: 'num =' and: num and: 'neg_num =' and: neg_num;
 
-"* Test 5: Dicts & Regex
-my_dict = #{ 'foo': 100 'bar': 200 };
-.print: 'dict =' and: my_dict;
+"* Test 5: Maps & Regex
+my_map = #{ 'foo': 100 'bar': 200 };
+.print: 'map =' and: my_map;
 
 list = #(1 2 3 4 5);
 .print:'Top half =' and:list.select:{|n| n > 3};

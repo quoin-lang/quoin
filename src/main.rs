@@ -113,7 +113,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
             "Integer",
             "Double",
             "String",
-            "Dictionary",
+            "Map",
             "Regex",
             "Native",
         ] {

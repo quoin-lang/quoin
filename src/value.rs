@@ -170,7 +170,7 @@ pub enum ObjectPayload<'gc> {
     Int(i64),
     Double(f64),
     String(Gc<'gc, String>),
-    Dict(Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>),
+    Map(Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>),
     Regex(Gc<'gc, GcRegex>),
     Block(Gc<'gc, Block<'gc>>),
     Native(NativeFunc),
@@ -232,7 +232,7 @@ impl<'gc> Value<'gc> {
                     ObjectPayload::Int(_) => "Integer",
                     ObjectPayload::Double(_) => "Double",
                     ObjectPayload::String(_) => "String",
-                    ObjectPayload::Dict(_) => "Dictionary",
+                    ObjectPayload::Map(_) => "Map",
                     ObjectPayload::Regex(_) => "Regex",
                     ObjectPayload::Block(_) => "Block",
                     ObjectPayload::Native(_) => "Native",
@@ -298,7 +298,7 @@ impl<'gc> PartialEq for Value<'gc> {
                     (ObjectPayload::Double(x), ObjectPayload::Int(y)) => *x == (*y as f64),
                     (ObjectPayload::String(x), ObjectPayload::String(y)) => **x == **y,
                     (ObjectPayload::NativeState(x), ObjectPayload::NativeState(y)) => Gc::ptr_eq(*x, *y),
-                    (ObjectPayload::Dict(x), ObjectPayload::Dict(y)) => Gc::ptr_eq(*x, *y),
+                    (ObjectPayload::Map(x), ObjectPayload::Map(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Regex(x), ObjectPayload::Regex(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Block(x), ObjectPayload::Block(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Native(x), ObjectPayload::Native(y)) => {
@@ -328,7 +328,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
                     ObjectPayload::Double(fl) => write!(f, "Float({})", fl),
                     ObjectPayload::String(s) => write!(f, "String({:?})", *s),
                     _ if o_borrow.class_name() == "List" => write!(f, "List(...)"),
-                    ObjectPayload::Dict(_) => write!(f, "Dict(...)"),
+                    ObjectPayload::Map(_) => write!(f, "Map(...)"),
                     ObjectPayload::Regex(r) => write!(f, "{:?}", r),
                     ObjectPayload::Block(b) => write!(f, "Block({:?})", b.name),
                     ObjectPayload::Native(_) => write!(f, "Native(<fn>)"),
@@ -400,8 +400,8 @@ impl<'gc> fmt::Display for Value<'gc> {
                             write!(f, "List(...)")
                         }
                     }
-                    ObjectPayload::Dict(d) => {
-                        let borrowed = d.borrow();
+                    ObjectPayload::Map(m) => {
+                        let borrowed = m.borrow();
                         write!(f, "#{{")?;
                         for (i, (k, v)) in borrowed.iter().enumerate() {
                             if i > 0 {
