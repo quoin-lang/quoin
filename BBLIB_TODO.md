@@ -63,9 +63,9 @@ This document outlines the language features, compiler updates, and VM modificat
   - The compiler and VM must parse, store, and look up namespaced globals.
 
 ## 8. Built-in Core Library Extensions
-- [ ] **Boolean & Nil Logic**:
+- [x] **Boolean & Nil Logic**:
   - Implement `if:`, `else:`, `if:else:`, and `not` purely as methods on the `true`, `false`, and `nil` objects in `bootstrap.b`, rather than using VM-level jump instructions.
-- [ ] **IO Library**:
+- [x] **IO Library**:
   - Implement native classes under `[IO]` namespace: `[IO]Stdout`, `[IO]Stderr`, `[IO]Handle`, and `[IO]Folder`.
 - [ ] **System Utilities**:
   - `Timer.time: { ... }`: Computes elapsed time in milliseconds.
