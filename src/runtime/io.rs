@@ -1,11 +1,12 @@
 use crate::arg;
 use crate::error::BBError;
-use crate::value::{Class, NativeClassBuilder, OpaqueState, Value};
+use crate::value::{NativeClassBuilder, OpaqueState, Value};
 use crate::vm::VmState;
 
-use gc_arena::{Gc, Mutation, RefLock};
+use gc_arena::{Gc, Mutation};
 use std::ffi::OsString;
 use std::fs::{metadata, File, Metadata, ReadDir};
+use std::io::{stderr, stdin, stdout, Stderr, Stdin, Stdout, Write};
 use std::path::PathBuf;
 
 pub struct NativeIoFolder {
@@ -17,8 +18,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Folder", Some("Object"))
         .class_method("open:", |vm, mc, args| {
             let path = arg!(args, String, 1);
-            let clz = arg!(args, Class, 0);
-            new_native_io_folder(vm, mc, clz, path)
+            Ok(new_native_io_folder(vm, mc, path))
         })
         .instance_method("path", |vm, mc, args| {
             args[0]
@@ -39,11 +39,15 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                     .map(|r| r.map_err(|e| BBError::Other(e.to_string())))
             })?;
 
-            let clz = vm.get_builtin_class("[IO]File");
             return Ok(if let Some(entry) = r {
                 let ent = entry?;
                 let os_string = ent.path().into_os_string();
-                new_native_io_file(vm, mc, clz, os_string, ent.metadata().unwrap())?
+                new_native_io_file(
+                    vm,
+                    mc,
+                    os_string,
+                    ent.metadata().map_err(|e| BBError::Other(e.to_string()))?,
+                )
             } else {
                 vm.new_nil(mc)
             });
@@ -59,15 +63,14 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
 fn new_native_io_folder<'a>(
     vm: &mut VmState<'a>,
     mc: &Mutation<'a>,
-    clz: Gc<'a, RefLock<Class<'a>>>,
     path: Gc<'a, String>,
-) -> Result<Value<'a>, BBError> {
+) -> Value<'a> {
     let state = OpaqueState(NativeIoFolder {
         path: OsString::from(path.as_str()),
         iter: Some(std::fs::read_dir(path.as_str()).unwrap()),
     });
 
-    Ok(vm.new_native_state(mc, clz, state))
+    vm.new_native_state(mc, vm.get_builtin_class("[IO]Folder"), state)
 }
 
 pub struct NativeIoFile {
@@ -79,32 +82,29 @@ pub struct NativeIoFile {
 fn new_native_io_file<'a>(
     vm: &mut VmState<'a>,
     mc: &Mutation<'a>,
-    clz: Gc<'a, RefLock<Class<'a>>>,
     path: OsString,
     metadata: Metadata,
-) -> Result<Value<'a>, BBError> {
+) -> Value<'a> {
     let state = OpaqueState(NativeIoFile {
         path,
         metadata,
         file: None,
     });
 
-    Ok(vm.new_native_state(mc, clz, state))
+    vm.new_native_state(mc, vm.get_builtin_class("[IO]File"), state)
 }
 
 pub fn build_io_file_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]File", Some("Object"))
         .class_method("open:", |vm, mc, args| {
             let path = arg!(args, String, 1);
-            let clz = arg!(args, Class, 0);
             let os_string = OsString::from(path.as_str());
             Ok(new_native_io_file(
                 vm,
                 mc,
-                clz,
                 os_string.clone(),
                 metadata(os_string).map_err(|e| BBError::Other(e.to_string()))?,
-            )?)
+            ))
         })
         .instance_method("path", |vm, mc, args| {
             args[0]
@@ -150,5 +150,84 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 .with_native_state(|io: &NativeIoFile| io.metadata.is_file())
                 .map_err(|e| BBError::Other(e.to_string()))
                 .map(|v| vm.new_bool(mc, v))
+        })
+}
+
+pub enum NativeIoHandleWrapper {
+    Stdout(Stdout),
+    Stderr(Stderr),
+    Stdin(Stdin),
+    File(File),
+}
+
+pub struct NativeIoHandle {
+    pub wrapper: NativeIoHandleWrapper,
+}
+
+fn new_native_io_handle_with_wrapper<'a>(
+    vm: &mut VmState<'a>,
+    mc: &Mutation<'a>,
+    wrapper: NativeIoHandleWrapper,
+) -> Value<'a> {
+    vm.new_native_state(
+        mc,
+        vm.get_builtin_class("[IO]Handle"),
+        OpaqueState(NativeIoHandle { wrapper }),
+    )
+}
+
+pub fn build_io_handle_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("[IO]Handle", Some("Object"))
+        .class_method("stdout", |vm, mc, _args| {
+            Ok(new_native_io_handle_with_wrapper(
+                vm,
+                mc,
+                NativeIoHandleWrapper::Stdout(stdout()),
+            ))
+        })
+        .class_method("stderr", |vm, mc, _args| {
+            Ok(new_native_io_handle_with_wrapper(
+                vm,
+                mc,
+                NativeIoHandleWrapper::Stderr(stderr()),
+            ))
+        })
+        .class_method("stdin", |vm, mc, _args| {
+            Ok(new_native_io_handle_with_wrapper(
+                vm,
+                mc,
+                NativeIoHandleWrapper::Stdin(stdin()),
+            ))
+        })
+        .instance_method("s", |vm, mc, args| {
+            let s = args[0].with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+                NativeIoHandleWrapper::Stdout(_) => "[IO]Handle.stdout",
+                NativeIoHandleWrapper::Stderr(_) => "[IO]Handle.stderr",
+                NativeIoHandleWrapper::Stdin(_) => "[IO]Handle.stdin",
+                NativeIoHandleWrapper::File(_) => "[IO]Handle.file",
+            })?;
+            Ok(vm.new_string(mc, s.to_string()))
+        })
+        .instance_method("writeln:", |vm, mc, args| {
+            let s = arg!(args, String, 1);
+            let bytes = format!("{}\n", s).into_bytes();
+
+            args[0].with_native_state_mut(mc, |h: &mut NativeIoHandle| match &mut h.wrapper {
+                NativeIoHandleWrapper::Stdout(out) => {
+                    out.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
+                },
+                NativeIoHandleWrapper::Stderr(err) => {
+                    err.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
+                },
+                NativeIoHandleWrapper::Stdin(_) => Err(BBError::Other("can't write to stdin!".to_string())),
+                NativeIoHandleWrapper::File(f) => {
+                    f.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
+                },
+            })??;
+
+            Ok(vm.new_nil(mc))
         })
 }
