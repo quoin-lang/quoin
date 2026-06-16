@@ -1,9 +1,12 @@
 use crate::error::BBError;
 use crate::instruction::{Constant, Instruction};
 use crate::runtime::list::NativeListState;
+use crate::runtime::map::NativeMapState;
+use crate::runtime::method::NativeMethodState;
+use crate::runtime::regex::NativeRegexState;
 use crate::value::{
-    AnyCollect, Block, Class, EnvFrame, GcRegex, GcUlid, NamespacedName, NativeClass, NativeFunc,
-    Object, ObjectPayload, Value,
+    AnyCollect, Block, Class, EnvFrame, GcUlid, NamespacedName, NativeClass, NativeFunc, Object,
+    ObjectPayload, Value,
 };
 use crate::{gc, gcl};
 
@@ -180,7 +183,9 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         // Create the new object
         let obj = vm.new_object(mc, self.class_obj);
 
-        let has_init = vm.lookup_in_class_hierarchy(self.class_obj, "init", false).is_some();
+        let has_init = vm
+            .lookup_in_class_hierarchy(self.class_obj, "init", false)
+            .is_some();
         if has_init {
             vm.call_method(mc, Value::Object(obj), "init", Vec::new())?;
         }
@@ -367,13 +372,14 @@ impl<'gc> VmState<'gc> {
     pub fn new_map(&self, mc: &Mutation<'gc>, map: HashMap<String, Value<'gc>>) -> Value<'gc> {
         let class = self.builtin_cache.borrow().map_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Map"));
+        let boxed_state: Box<dyn AnyCollect> = Box::new(NativeMapState::new(map));
         Value::Object(gcl!(
             mc,
             Object {
                 id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
-                payload: ObjectPayload::Map(gcl!(mc, map)),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
     }
@@ -381,13 +387,14 @@ impl<'gc> VmState<'gc> {
     pub fn new_regex(&self, mc: &Mutation<'gc>, regex: regex::Regex) -> Value<'gc> {
         let class = self.builtin_cache.borrow().regex_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Regex"));
+        let boxed_state: Box<dyn AnyCollect> = Box::new(NativeRegexState::new(regex));
         Value::Object(gcl!(
             mc,
             Object {
                 id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
-                payload: ObjectPayload::Regex(gc!(mc, GcRegex(regex))),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
     }
@@ -428,7 +435,7 @@ impl<'gc> VmState<'gc> {
         is_extension: bool,
     ) -> Value<'gc> {
         let class = self.get_or_create_builtin_class(mc, "Method");
-        let state = crate::runtime::method::NativeMethodState::new(selector, block, is_extension);
+        let state = NativeMethodState::new(selector, block, is_extension);
         let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
             mc,
@@ -466,7 +473,7 @@ impl<'gc> VmState<'gc> {
                     ObjectPayload::NativeState(state_cell) => {
                         let state_ref = state_cell.borrow();
                         let any_ref = (**state_ref).as_any();
-                        if let Some(method_state) = any_ref.downcast_ref::<crate::runtime::method::NativeMethodState>() {
+                        if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
                             let block_val = method_state.get_block();
                             if let Value::Object(block_obj) = block_val
                                 && let ObjectPayload::Block(b) = &block_obj.borrow().payload
@@ -483,13 +490,19 @@ impl<'gc> VmState<'gc> {
         if let Some(block) = init_block {
             let mut init_args = Vec::new();
             for param in &block.param_names {
-                let val = env_borrow.vars.get(param).copied().unwrap_or_else(|| self.new_nil(mc));
+                let val = env_borrow
+                    .vars
+                    .get(param)
+                    .copied()
+                    .unwrap_or_else(|| self.new_nil(mc));
                 init_args.push(val);
             }
             self.call_method(mc, Value::Object(obj), "init:", init_args)?;
         } else {
             // Call init if it exists
-            let has_init = self.lookup_in_class_hierarchy(obj.borrow().class, "init", false).is_some();
+            let has_init = self
+                .lookup_in_class_hierarchy(obj.borrow().class, "init", false)
+                .is_some();
             if has_init {
                 self.call_method(mc, Value::Object(obj), "init", Vec::new())?;
             }
@@ -753,9 +766,7 @@ impl<'gc> VmState<'gc> {
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
-                    if let Some(method_state) =
-                        any_ref.downcast_ref::<crate::runtime::method::NativeMethodState>()
-                    {
+                    if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
                         let block_val = method_state.get_block();
                         if let Value::Object(block_obj) = block_val
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
@@ -1140,7 +1151,8 @@ impl<'gc> VmState<'gc> {
                         let parent_env = self.frames.last().map(|f| f.env);
                         let enclosing_method_id =
                             self.frames.last().and_then(|f| f.enclosing_method_id);
-                        let block = Block { name: sb.name.clone(),
+                        let block = Block {
+                            name: sb.name.clone(),
                             is_nested_block: sb.is_nested_block,
                             param_names: sb.param_names.clone(),
                             bytecode: sb.bytecode.clone(),
@@ -1363,7 +1375,7 @@ impl<'gc> VmState<'gc> {
                 let self_val = self.pop()?;
                 if self_val.is_nil() {
                     return Err(BBError::Other(
-                        "Cannot extend nil or non-existent class/object".to_string()
+                        "Cannot extend nil or non-existent class/object".to_string(),
                     ));
                 }
                 return if let Value::Object(obj) = block_val
@@ -1516,8 +1528,8 @@ impl<'gc> VmState<'gc> {
 mod tests {
     use super::*;
     use crate::instruction::{Constant, StaticBlock};
-    use crate::value::{NativeClassBuilder, OpaqueState};
     use crate::parser::ast_visitor::NodeValue;
+    use crate::value::{NativeClassBuilder, OpaqueState};
     use gc_arena::{Arena, Rootable};
 
     fn native_add<'gc>(
@@ -1578,15 +1590,23 @@ mod tests {
                         });
                         res.unwrap_or_else(|_| ValueSpec::Instance("List".to_string()))
                     }
-                    ObjectPayload::Map(m) => {
-                        let map_specs = m
-                            .borrow()
-                            .iter()
-                            .map(|(k, &v)| (k.clone(), to_spec(v)))
-                            .collect();
-                        ValueSpec::Map(map_specs)
+                    _ if borrowed.class_name() == "Map" => {
+                        let res = val.with_native_state::<NativeMapState, _, _>(|m| {
+                            let map_specs = m
+                                .get_map()
+                                .iter()
+                                .map(|(k, &v)| (k.clone(), to_spec(v)))
+                                .collect();
+                            ValueSpec::Map(map_specs)
+                        });
+                        res.unwrap_or_else(|_| ValueSpec::Instance("Map".to_string()))
                     }
-                    ObjectPayload::Regex(r) => ValueSpec::Regex(r.0.as_str().to_string()),
+                    _ if borrowed.class_name() == "Regex" => {
+                        let res = val.with_native_state::<NativeRegexState, _, _>(|r| {
+                            ValueSpec::Regex(r.regex.as_str().to_string())
+                        });
+                        res.unwrap_or_else(|_| ValueSpec::Instance("Regex".to_string()))
+                    }
                     ObjectPayload::Block(b) => ValueSpec::Block(b.name.clone()),
                     ObjectPayload::Native(_) => ValueSpec::Native,
                     ObjectPayload::Instance | ObjectPayload::NativeState(_) => {
@@ -1636,10 +1656,7 @@ mod tests {
             vm.register_native_class(mc, crate::runtime::map::build_map_class());
             vm.register_native_class(mc, crate::runtime::regex::build_regex_class());
 
-            for t in [
-                "Method",
-                "Native",
-            ] {
+            for t in ["Method", "Native"] {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
             }
 
@@ -1649,7 +1666,8 @@ mod tests {
                 .borrow_mut(mc)
                 .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
 
-            let static_block = StaticBlock { source_info: None,
+            let static_block = StaticBlock {
+                source_info: None,
                 name: Some("test_main".to_string()),
                 is_nested_block: false,
                 param_names: Vec::new(),
@@ -1657,7 +1675,9 @@ mod tests {
             };
             let block = gc!(
                 mc,
-                Block { source_info: None, name: static_block.name.clone(),
+                Block {
+                    source_info: None,
+                    name: static_block.name.clone(),
                     is_nested_block: static_block.is_nested_block,
                     param_names: static_block.param_names.clone(),
                     bytecode: static_block.bytecode.clone(),
@@ -1964,7 +1984,8 @@ mod tests {
     fn test_block_execution_and_returns() {
         // We will push a block constant, then send "value" to it.
         // The block bytecode will load its parameter, add 1 to it, and return.
-        let block_static = StaticBlock { source_info: None,
+        let block_static = StaticBlock {
+            source_info: None,
             name: Some("test_block".to_string()),
             is_nested_block: false,
             param_names: vec!["x".to_string()],
@@ -2037,7 +2058,8 @@ mod tests {
 
         // Block 2: nested block
         // Bytecode: Push(999), MethodReturn
-        let block_nested = StaticBlock { source_info: None,
+        let block_nested = StaticBlock {
+            source_info: None,
             name: Some("nested".to_string()),
             is_nested_block: true,
             param_names: Vec::new(),
@@ -2049,7 +2071,8 @@ mod tests {
 
         // Block 1: method
         // Bytecode: Push(Block(nested)), Send("value", 0), Push(100), Return
-        let block_method = StaticBlock { source_info: None,
+        let block_method = StaticBlock {
+            source_info: None,
             name: Some("method".to_string()),
             is_nested_block: false, // enclosing_method_id will be this frame's ID
             param_names: Vec::new(),
@@ -2091,7 +2114,8 @@ mod tests {
     #[test]
     fn test_non_local_return_callback() {
         // block_nested: Push(777), MethodReturn
-        let block_nested = StaticBlock { source_info: None,
+        let block_nested = StaticBlock {
+            source_info: None,
             name: Some("nested".to_string()),
             is_nested_block: true,
             param_names: Vec::new(),
@@ -2102,7 +2126,8 @@ mod tests {
         };
 
         // block_bar: blk.value, Push(111), Return
-        let block_bar = StaticBlock { source_info: None,
+        let block_bar = StaticBlock {
+            source_info: None,
             name: Some("bar".to_string()),
             is_nested_block: false,
             param_names: vec!["blk".to_string()],
@@ -2115,7 +2140,8 @@ mod tests {
         };
 
         // block_foo: bar.value: block_nested, Push(222), Return
-        let block_foo = StaticBlock { source_info: None,
+        let block_foo = StaticBlock {
+            source_info: None,
             name: Some("foo".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
@@ -2130,7 +2156,9 @@ mod tests {
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc);
-            let bar_block = Block { source_info: None, name: block_bar.name.clone(),
+            let bar_block = Block {
+                source_info: None,
+                name: block_bar.name.clone(),
                 is_nested_block: block_bar.is_nested_block,
                 param_names: block_bar.param_names.clone(),
                 bytecode: block_bar.bytecode.clone(),
@@ -2145,7 +2173,9 @@ mod tests {
 
             let foo_block = gc!(
                 mc,
-                Block { source_info: None, name: block_foo.name.clone(),
+                Block {
+                    source_info: None,
+                    name: block_foo.name.clone(),
                     is_nested_block: block_foo.is_nested_block,
                     param_names: block_foo.param_names.clone(),
                     bytecode: block_foo.bytecode.clone(),
@@ -2187,13 +2217,15 @@ mod tests {
 
     #[test]
     fn test_class_and_method_definition_vm() {
-        let class_block = StaticBlock { source_info: None,
+        let class_block = StaticBlock {
+            source_info: None,
             name: Some("class_block".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
             bytecode: vec![
                 // 1. Define inst method x
-                Instruction::Push(Constant::Block(StaticBlock { source_info: None,
+                Instruction::Push(Constant::Block(StaticBlock {
+                    source_info: None,
                     name: Some("x".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
@@ -2204,7 +2236,8 @@ mod tests {
                 })),
                 Instruction::DefineMethod("x".to_string()),
                 // 2. Override inst method x
-                Instruction::Push(Constant::Block(StaticBlock { source_info: None,
+                Instruction::Push(Constant::Block(StaticBlock {
+                    source_info: None,
                     name: Some("x".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
@@ -2324,14 +2357,16 @@ mod tests {
 
     #[test]
     fn test_primitive_methods_and_overrides() {
-        let custom_true_method = StaticBlock { source_info: None,
+        let custom_true_method = StaticBlock {
+            source_info: None,
             name: Some("custom_true_method".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
             bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
         };
 
-        let class_extension_block = StaticBlock { source_info: None,
+        let class_extension_block = StaticBlock {
+            source_info: None,
             name: Some("class_extension_block".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
@@ -2605,7 +2640,9 @@ mod tests {
             // Build a block that adds two arguments (a, b) and returns self + a + b
             let block = gc!(
                 mc,
-                Block { source_info: None, name: Some("test_block".to_string()),
+                Block {
+                    source_info: None,
+                    name: Some("test_block".to_string()),
                     is_nested_block: false,
                     param_names: vec!["a".to_string(), "b".to_string()],
                     bytecode: vec![
@@ -2641,7 +2678,9 @@ mod tests {
             // Execute block without self: a + b
             let block2 = gc!(
                 mc,
-                Block { source_info: None, name: Some("test_block_no_self".to_string()),
+                Block {
+                    source_info: None,
+                    name: Some("test_block_no_self".to_string()),
                     is_nested_block: false,
                     param_names: vec!["a".to_string(), "b".to_string()],
                     bytecode: vec![
@@ -2666,18 +2705,18 @@ mod tests {
     #[test]
     fn test_cannot_redefine_existing_class() {
         run_test_steps(
-            vec![
-                Instruction::DefineClass {
-                    name: NamespacedName::new(Vec::new(), "Object".to_string()),
-                    parent_name: None,
-                    instance_vars: Vec::new(),
-                },
-            ],
+            vec![Instruction::DefineClass {
+                name: NamespacedName::new(Vec::new(), "Object".to_string()),
+                parent_name: None,
+                instance_vars: Vec::new(),
+            }],
             |vm, mc| {
                 let res = vm.step(mc);
                 assert!(res.is_err());
                 let err_msg = format!("{}", res.err().unwrap());
-                assert!(err_msg.contains("Cannot redefine class [/]Object because it already exists"));
+                assert!(
+                    err_msg.contains("Cannot redefine class [/]Object because it already exists")
+                );
             },
         );
     }
@@ -2687,7 +2726,8 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::Push(Constant::Nil),
-                Instruction::Push(Constant::Block(StaticBlock { source_info: None,
+                Instruction::Push(Constant::Block(StaticBlock {
+                    source_info: None,
                     name: Some("ext_block".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
@@ -2793,26 +2833,27 @@ mod tests {
 
     #[test]
     fn test_error_annotation_and_display() {
-        use crate::parser::parser::parse_building_blocks_string;
         use crate::compiler::Compiler;
+        use crate::parser::parser::parse_building_blocks_string;
 
         let code = "1.foo;";
         let ast = parse_building_blocks_string(code);
         let mut compiler = Compiler::new();
-        let compiled = compiler.compile_program(match &ast.value {
-            NodeValue::Program(p) => p,
-            _ => unreachable!(),
-        }).unwrap();
+        let compiled = compiler
+            .compile_program(match &ast.value {
+                NodeValue::Program(p) => p,
+                _ => unreachable!(),
+            })
+            .unwrap();
 
-        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            VmState::new(mc)
-        });
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc));
 
         arena.mutate_root(|mc, vm| {
             let block = gc!(
                 mc,
                 Block {
-                    source_info: compiled.source_info.clone(), name: compiled.name.clone(),
+                    source_info: compiled.source_info.clone(),
+                    name: compiled.name.clone(),
                     is_nested_block: compiled.is_nested_block,
                     param_names: compiled.param_names.clone(),
                     bytecode: compiled.bytecode.clone(),
@@ -2837,11 +2878,10 @@ mod tests {
 
             let err = err.expect("Expected execution error");
             let err_str = err.to_string();
-            
+
             // Check that the error message displays the source information
             assert!(err_str.contains("at <string>:1:1"));
             assert!(err_str.contains("1.foo;"));
         });
     }
 }
-

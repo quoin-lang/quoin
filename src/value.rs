@@ -1,10 +1,15 @@
 use crate::error::BBError;
 use crate::instruction::Instruction;
+use crate::parser::ast_visitor::IdentifierNode;
+use crate::runtime::list::NativeListState;
+use crate::runtime::map::NativeMapState;
+use crate::runtime::regex::NativeRegexState;
 use crate::vm::VmState;
-
+use gc_arena::collect::Trace;
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
-use regex::Regex;
-use std::collections::HashMap;
+use std::any::Any;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use ulid::Ulid;
@@ -16,25 +21,15 @@ unsafe impl<'gc> Collect<'gc> for GcUlid {
     const NEEDS_TRACE: bool = false;
 }
 
-#[derive(Clone, Collect)]
-#[collect(require_static)]
-pub struct GcRegex(pub Regex);
-
-impl fmt::Debug for GcRegex {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "Regex({})", self.0.as_str())
-    }
-}
-
 pub trait AnyCollect: Debug {
-    fn as_any(&self) -> &dyn std::any::Any;
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-    fn trace_gc<'gc>(&self, cc: &mut dyn gc_arena::collect::Trace<'gc>);
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn trace_gc<'gc>(&self, cc: &mut dyn Trace<'gc>);
 }
 
 unsafe impl<'gc> Collect<'gc> for Box<dyn AnyCollect> {
     const NEEDS_TRACE: bool = true;
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+    fn trace<T: Trace<'gc>>(&self, cc: &mut T) {
         self.as_ref().trace_gc(cc);
     }
 }
@@ -48,15 +43,15 @@ impl<T: 'static> Debug for OpaqueState<T> {
 }
 
 impl<T: 'static> AnyCollect for OpaqueState<T> {
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn Any {
         &self.0
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         &mut self.0
     }
 
-    fn trace_gc<'gc>(&self, _cc: &mut dyn gc_arena::collect::Trace<'gc>) {}
+    fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
 }
 
 #[derive(Clone, Debug, Collect, PartialEq, Eq)]
@@ -99,7 +94,7 @@ impl NamespacedName {
         }
     }
 
-    pub fn from_ast(id: &crate::parser::ast_visitor::IdentifierNode) -> Self {
+    pub fn from_ast(id: &IdentifierNode) -> Self {
         let path = if let Some(ns) = &id.namespace {
             ns.identifiers
                 .iter()
@@ -170,8 +165,6 @@ pub enum ObjectPayload<'gc> {
     Int(i64),
     Double(f64),
     String(Gc<'gc, String>),
-    Map(Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>),
-    Regex(Gc<'gc, GcRegex>),
     Block(Gc<'gc, Block<'gc>>),
     Native(NativeFunc),
     Instance,
@@ -232,13 +225,16 @@ impl<'gc> Value<'gc> {
                     ObjectPayload::Int(_) => "Integer",
                     ObjectPayload::Double(_) => "Double",
                     ObjectPayload::String(_) => "String",
-                    ObjectPayload::Map(_) => "Map",
-                    ObjectPayload::Regex(_) => "Regex",
                     ObjectPayload::Block(_) => "Block",
                     ObjectPayload::Native(_) => "Native",
                     _ => {
-                        if borrowed.class_name() == "List" {
+                        let cn = borrowed.class_name();
+                        if cn == "List" {
                             "List"
+                        } else if cn == "Map" {
+                            "Map"
+                        } else if cn == "Regex" {
+                            "Regex"
                         } else {
                             "Object"
                         }
@@ -297,9 +293,6 @@ impl<'gc> PartialEq for Value<'gc> {
                     (ObjectPayload::Int(x), ObjectPayload::Double(y)) => (*x as f64) == *y,
                     (ObjectPayload::Double(x), ObjectPayload::Int(y)) => *x == (*y as f64),
                     (ObjectPayload::String(x), ObjectPayload::String(y)) => **x == **y,
-                    (ObjectPayload::NativeState(x), ObjectPayload::NativeState(y)) => Gc::ptr_eq(*x, *y),
-                    (ObjectPayload::Map(x), ObjectPayload::Map(y)) => Gc::ptr_eq(*x, *y),
-                    (ObjectPayload::Regex(x), ObjectPayload::Regex(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Block(x), ObjectPayload::Block(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Native(x), ObjectPayload::Native(y)) => {
                         let a_ptr = x.0 as *const ();
@@ -328,8 +321,16 @@ impl<'gc> fmt::Debug for Value<'gc> {
                     ObjectPayload::Double(fl) => write!(f, "Float({})", fl),
                     ObjectPayload::String(s) => write!(f, "String({:?})", *s),
                     _ if o_borrow.class_name() == "List" => write!(f, "List(...)"),
-                    ObjectPayload::Map(_) => write!(f, "Map(...)"),
-                    ObjectPayload::Regex(r) => write!(f, "{:?}", r),
+                    _ if o_borrow.class_name() == "Map" => write!(f, "Map(...)"),
+                    _ if o_borrow.class_name() == "Regex" => {
+                        if let Ok(res) = self.with_native_state::<NativeRegexState, _, _>(|r| {
+                            format!("{:?}", r.regex)
+                        }) {
+                            write!(f, "Regex({})", res)
+                        } else {
+                            write!(f, "Regex(...)")
+                        }
+                    }
                     ObjectPayload::Block(b) => write!(f, "Block({:?})", b.name),
                     ObjectPayload::Native(_) => write!(f, "Native(<fn>)"),
                     _ => {
@@ -343,8 +344,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
 }
 
 thread_local! {
-    static FORMATTING_OBJECTS: std::cell::RefCell<std::collections::HashSet<GcUlid>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
+    static FORMATTING_OBJECTS: RefCell<HashSet<GcUlid>> = RefCell::new(HashSet::new());
 }
 
 struct FormattingGuard {
@@ -366,9 +366,8 @@ impl<'gc> fmt::Display for Value<'gc> {
             Value::ClassMeta(c) => write!(f, "class {} meta", c.borrow().name),
             Value::Object(o) => {
                 let id = o.borrow().id;
-                let already_formatting = FORMATTING_OBJECTS.with(|set| {
-                    !set.borrow_mut().insert(id)
-                });
+                let already_formatting =
+                    FORMATTING_OBJECTS.with(|set| !set.borrow_mut().insert(id));
                 if already_formatting {
                     return write!(f, "{}{{...}}", o.borrow().class.borrow().name);
                 }
@@ -382,7 +381,7 @@ impl<'gc> fmt::Display for Value<'gc> {
                     ObjectPayload::Double(fl) => write!(f, "{}", fl),
                     ObjectPayload::String(s) => write!(f, "{}", **s),
                     _ if o_borrow.class_name() == "List" => {
-                        if let Ok(res) = self.with_native_state::<crate::runtime::list::NativeListState, _, _>(|l| {
+                        if let Ok(res) = self.with_native_state::<NativeListState, _, _>(|l| {
                             let vec = l.get_vec();
                             let mut s = String::new();
                             s.push_str("#(");
@@ -400,18 +399,30 @@ impl<'gc> fmt::Display for Value<'gc> {
                             write!(f, "List(...)")
                         }
                     }
-                    ObjectPayload::Map(m) => {
-                        let borrowed = m.borrow();
-                        write!(f, "#{{")?;
-                        for (i, (k, v)) in borrowed.iter().enumerate() {
-                            if i > 0 {
-                                write!(f, " ")?;
+                    _ if o_borrow.class_name() == "Map" => {
+                        if let Ok(res) = self.with_native_state::<NativeMapState, _, _>(|m| {
+                            let borrowed = m.get_map();
+                            let mut parts = Vec::new();
+                            for (k, v) in borrowed.iter() {
+                                parts.push(format!("{}: {}", k, v));
                             }
-                            write!(f, "{}: {}", k, v)?;
+                            parts.sort();
+                            format!("#{{{}}}", parts.join(" "))
+                        }) {
+                            write!(f, "{}", res)
+                        } else {
+                            write!(f, "Map(...)")
                         }
-                        write!(f, "}}")
                     }
-                    ObjectPayload::Regex(r) => write!(f, "#/{}/", r.0.as_str()),
+                    _ if o_borrow.class_name() == "Regex" => {
+                        if let Ok(pattern) = self.with_native_state::<NativeRegexState, _, _>(|r| {
+                            r.regex.as_str().to_string()
+                        }) {
+                            write!(f, "#/{}/", pattern)
+                        } else {
+                            write!(f, "Regex(...)")
+                        }
+                    }
                     ObjectPayload::Block(b) => {
                         if let Some(ref name) = b.name {
                             write!(f, "<block {}>", name)

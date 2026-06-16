@@ -1,5 +1,7 @@
 use crate::error::BBError;
-use crate::value::{NamespacedName, NativeFunc, ObjectPayload, Value};
+use crate::runtime::list::NativeListState;
+use crate::runtime::regex::NativeRegexState;
+use crate::value::{Class, NamespacedName, NativeFunc, ObjectPayload, Value};
 use crate::vm::VmState;
 
 use gc_arena::Mutation;
@@ -36,33 +38,32 @@ pub fn native_regex_match<'gc>(
             msg: "regex_match expects exactly 2 arguments (regex, string)".to_string(),
         });
     }
-    let (p0, p1) = match (&args[0], &args[1]) {
-        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
-        _ => {
-            return Err(BBError::TypeError {
-                expected: "Object".to_string(),
-                got: format!("{:?} and {:?}", args[0], args[1]),
-                msg: "regex_match expected objects".to_string(),
-            });
-        }
-    };
-    match (p0, p1) {
-        (ObjectPayload::Regex(r), ObjectPayload::String(s)) => {
-            let matched = r.0.is_match(&**s);
-            Ok(vm.new_bool(mc, matched))
-        }
-        _ => Err(format!(
-            "regex_match expects regex and string, got {:?} and {:?}",
-            args[0], args[1]
-        )
-        .into()),
-    }
+    let re_val = args[0];
+    let str_val = args[1];
+
+    let matched = re_val
+        .with_native_state::<NativeRegexState, _, _>(|r| {
+            if let Value::Object(obj) = str_val
+                && let ObjectPayload::String(s) = &obj.borrow().payload
+            {
+                Ok(r.regex.is_match(&**s))
+            } else {
+                Err(BBError::TypeError {
+                    expected: "String".to_string(),
+                    got: str_val.type_name().to_string(),
+                    msg: "regex_match expects a String as the second argument".to_string(),
+                })
+            }
+        })
+        .map_err(|e| BBError::Other(e))??;
+
+    Ok(vm.new_bool(mc, matched))
 }
 
 fn is_instance_of<'gc>(
     vm: &VmState<'gc>,
     val: Value<'gc>,
-    class_obj: gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::Class<'gc>>>,
+    class_obj: gc_arena::Gc<'gc, gc_arena::lock::RefLock<Class<'gc>>>,
 ) -> bool {
     if let Some(val_class) = vm.get_class_for_lookup(val) {
         let mut curr = Some(val_class);
@@ -100,7 +101,9 @@ pub fn native_match<'gc>(
     let has_custom_tilde = if let Some(class_obj) = vm.get_class_for_lookup(lhs) {
         if let Some(method_val) = vm.lookup_in_class_hierarchy(class_obj, "~:", false) {
             let object_key = NamespacedName::new(Vec::new(), "Object".to_string());
-            let default_tilde = if let Some(Value::Class(object_class)) = vm.globals.borrow().get(&object_key).copied() {
+            let default_tilde = if let Some(Value::Class(object_class)) =
+                vm.globals.borrow().get(&object_key).copied()
+            {
                 vm.lookup_in_class_hierarchy(object_class, "~:", false)
             } else {
                 None
@@ -132,19 +135,27 @@ pub fn native_match<'gc>(
         return Ok(vm.new_bool(mc, is_instance_of(vm, lhs, c)));
     }
 
-    if let Value::Object(o1) = lhs
-        && let ObjectPayload::Regex(r) = &o1.borrow().payload
-        && let Value::Object(o2) = rhs
-        && let ObjectPayload::String(s) = &o2.borrow().payload
-    {
-        return Ok(vm.new_bool(mc, r.0.is_match(&**s)));
+    if let Ok(matched) = lhs.with_native_state::<NativeRegexState, _, _>(|r| {
+        if let Value::Object(o2) = rhs
+            && let ObjectPayload::String(s) = &o2.borrow().payload
+        {
+            r.regex.is_match(&**s)
+        } else {
+            false
+        }
+    }) {
+        return Ok(vm.new_bool(mc, matched));
     }
-    if let Value::Object(o1) = rhs
-        && let ObjectPayload::Regex(r) = &o1.borrow().payload
-        && let Value::Object(o2) = lhs
-        && let ObjectPayload::String(s) = &o2.borrow().payload
-    {
-        return Ok(vm.new_bool(mc, r.0.is_match(&**s)));
+    if let Ok(matched) = rhs.with_native_state::<NativeRegexState, _, _>(|r| {
+        if let Value::Object(o2) = lhs
+            && let ObjectPayload::String(s) = &o2.borrow().payload
+        {
+            r.regex.is_match(&**s)
+        } else {
+            false
+        }
+    }) {
+        return Ok(vm.new_bool(mc, matched));
     }
 
     let eq_val = if let Some(method) = vm.lookup_method(lhs, "==:") {
@@ -315,7 +326,6 @@ pub fn native_mod<'gc>(
     mc: &Mutation<'gc>,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
-    use crate::runtime::list::NativeListState;
     if args.len() != 2 {
         return Err(BBError::ArgumentCountMismatch {
             expected: 2,
@@ -340,15 +350,9 @@ pub fn native_mod<'gc>(
             }
             Ok(vm.new_int(mc, a % b))
         }
-        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => {
-            Ok(vm.new_double(mc, a % b))
-        }
-        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => {
-            Ok(vm.new_double(mc, *a as f64 % b))
-        }
-        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => {
-            Ok(vm.new_double(mc, a % *b as f64))
-        }
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, a % b)),
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_double(mc, *a as f64 % b)),
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_double(mc, a % *b as f64)),
         (ObjectPayload::String(s), other) => {
             let mut format_args = Vec::new();
             match other {
@@ -684,7 +688,6 @@ pub fn native_negated<'gc>(
     }
 }
 
-
 pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
     let mut funcs = Vec::new();
 
@@ -725,8 +728,6 @@ pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
         "negated".to_string(),
         vm.new_native(mc, NativeFunc(native_negated)),
     ));
-
-
 
     let mut globals = vm.globals.borrow_mut(mc);
     for (name, val) in funcs {
