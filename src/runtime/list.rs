@@ -68,6 +68,12 @@ pub fn build_list_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_nil(mc))
         })
+        .instance_method("length", |vm, mc, args| {
+            let len = args[0]
+                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
+                .map_err(|e| BBError::Other(e))?;
+            Ok(vm.new_int(mc, len as i64))
+        })
         .instance_method("add:", |_vm, mc, args| {
             args[0]
                 .with_native_state_mut::<NativeListState, _, _>(mc, |l| {

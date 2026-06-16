@@ -59,6 +59,103 @@ pub fn native_regex_match<'gc>(
     }
 }
 
+fn is_instance_of<'gc>(
+    vm: &VmState<'gc>,
+    val: Value<'gc>,
+    class_obj: gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::Class<'gc>>>,
+) -> bool {
+    if let Some(val_class) = vm.get_class_for_lookup(val) {
+        let mut curr = Some(val_class);
+        while let Some(clz) = curr {
+            if gc_arena::Gc::ptr_eq(clz, class_obj) {
+                return true;
+            }
+            for mixin in &clz.borrow().mixin_classes {
+                if gc_arena::Gc::ptr_eq(*mixin, class_obj) {
+                    return true;
+                }
+            }
+            curr = clz.borrow().parent;
+        }
+    }
+    false
+}
+
+// Native helper: match (tilde ~ operator)
+pub fn native_match<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, BBError> {
+    if args.len() != 2 {
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "match expects 2 arguments".to_string(),
+        });
+    }
+
+    let (lhs, rhs) = (args[0], args[1]);
+
+    let has_custom_tilde = if let Some(class_obj) = vm.get_class_for_lookup(lhs) {
+        if let Some(method_val) = vm.lookup_in_class_hierarchy(class_obj, "~:", false) {
+            let object_key = NamespacedName::new(Vec::new(), "Object".to_string());
+            let default_tilde = if let Some(Value::Class(object_class)) = vm.globals.borrow().get(&object_key).copied() {
+                vm.lookup_in_class_hierarchy(object_class, "~:", false)
+            } else {
+                None
+            };
+            Some(method_val) != default_tilde
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if has_custom_tilde {
+        let method = vm.lookup_method(lhs, "~:").unwrap();
+        method.call(vm, mc, args)?;
+        return Ok(vm.pop()?);
+    }
+
+    if let Value::Class(c) = lhs {
+        return Ok(vm.new_bool(mc, is_instance_of(vm, rhs, c)));
+    }
+    if let Value::Class(c) = rhs {
+        return Ok(vm.new_bool(mc, is_instance_of(vm, lhs, c)));
+    }
+    if let Value::ClassMeta(c) = lhs {
+        return Ok(vm.new_bool(mc, is_instance_of(vm, rhs, c)));
+    }
+    if let Value::ClassMeta(c) = rhs {
+        return Ok(vm.new_bool(mc, is_instance_of(vm, lhs, c)));
+    }
+
+    if let Value::Object(o1) = lhs
+        && let ObjectPayload::Regex(r) = &o1.borrow().payload
+        && let Value::Object(o2) = rhs
+        && let ObjectPayload::String(s) = &o2.borrow().payload
+    {
+        return Ok(vm.new_bool(mc, r.0.is_match(&**s)));
+    }
+    if let Value::Object(o1) = rhs
+        && let ObjectPayload::Regex(r) = &o1.borrow().payload
+        && let Value::Object(o2) = lhs
+        && let ObjectPayload::String(s) = &o2.borrow().payload
+    {
+        return Ok(vm.new_bool(mc, r.0.is_match(&**s)));
+    }
+
+    let eq_val = if let Some(method) = vm.lookup_method(lhs, "==:") {
+        method.call(vm, mc, vec![lhs, rhs])?;
+        vm.pop()?
+    } else {
+        vm.new_bool(mc, lhs == rhs)
+    };
+    Ok(eq_val)
+}
+
 // Native helper: add
 pub fn native_add<'gc>(
     vm: &mut VmState<'gc>,
@@ -212,6 +309,141 @@ pub fn native_div<'gc>(
     }
 }
 
+// Native helper: mod
+pub fn native_mod<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, BBError> {
+    use crate::runtime::list::NativeListState;
+    if args.len() != 2 {
+        return Err(BBError::ArgumentCountMismatch {
+            expected: 2,
+            got: args.len(),
+            msg: "mod expects 2 arguments".to_string(),
+        });
+    }
+    let (p0, p1) = match (&args[0], &args[1]) {
+        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
+        _ => {
+            return Err(BBError::TypeError {
+                expected: "Object".to_string(),
+                got: format!("{:?} and {:?}", args[0], args[1]),
+                msg: "mod expected objects".to_string(),
+            });
+        }
+    };
+    match (p0, p1) {
+        (ObjectPayload::Int(a), ObjectPayload::Int(b)) => {
+            if *b == 0 {
+                return Err(BBError::ArithmeticError("Division by zero".to_string()));
+            }
+            Ok(vm.new_int(mc, a % b))
+        }
+        (ObjectPayload::Double(a), ObjectPayload::Double(b)) => {
+            Ok(vm.new_double(mc, a % b))
+        }
+        (ObjectPayload::Int(a), ObjectPayload::Double(b)) => {
+            Ok(vm.new_double(mc, *a as f64 % b))
+        }
+        (ObjectPayload::Double(a), ObjectPayload::Int(b)) => {
+            Ok(vm.new_double(mc, a % *b as f64))
+        }
+        (ObjectPayload::String(s), other) => {
+            let mut format_args = Vec::new();
+            match other {
+                ObjectPayload::NativeState(state_cell) => {
+                    let state_ref = state_cell.borrow();
+                    if let Some(list_state) = state_ref.as_any().downcast_ref::<NativeListState>() {
+                        for val in list_state.get_vec() {
+                            format_args.push(*val);
+                        }
+                    } else {
+                        format_args.push(args[1]);
+                    }
+                }
+                _ => {
+                    format_args.push(args[1]);
+                }
+            }
+
+            let mut result = String::new();
+            let s_str = s.to_string();
+            let mut chars = s_str.chars().peekable();
+            let mut arg_idx = 0;
+
+            while let Some(c) = chars.next() {
+                if c == '%' {
+                    if let Some(&next_c) = chars.peek() {
+                        if next_c.is_digit(10) {
+                            let mut num_str = String::new();
+                            while let Some(&digit) = chars.peek() {
+                                if digit.is_digit(10) {
+                                    num_str.push(digit);
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                            let idx: usize = num_str.parse().unwrap();
+                            if idx > 0 && idx <= format_args.len() {
+                                let val = format_args[idx - 1];
+                                let val_str_val = vm.call_method(mc, val, "s", vec![])?;
+                                let val_str = match val_str_val {
+                                    Value::Object(o) => match &o.borrow().payload {
+                                        ObjectPayload::String(st) => st.to_string(),
+                                        _ => format!("{}", val_str_val),
+                                    },
+                                    _ => format!("{}", val_str_val),
+                                };
+                                result.push_str(&val_str);
+                            }
+                        } else {
+                            if arg_idx < format_args.len() {
+                                let val = format_args[arg_idx];
+                                arg_idx += 1;
+                                let val_str_val = vm.call_method(mc, val, "s", vec![])?;
+                                let val_str = match val_str_val {
+                                    Value::Object(o) => match &o.borrow().payload {
+                                        ObjectPayload::String(st) => st.to_string(),
+                                        _ => format!("{}", val_str_val),
+                                    },
+                                    _ => format!("{}", val_str_val),
+                                };
+                                result.push_str(&val_str);
+                            }
+                        }
+                    } else {
+                        if arg_idx < format_args.len() {
+                            let val = format_args[arg_idx];
+                            arg_idx += 1;
+                            let val_str_val = vm.call_method(mc, val, "s", vec![])?;
+                            let val_str = match val_str_val {
+                                Value::Object(o) => match &o.borrow().payload {
+                                    ObjectPayload::String(st) => st.to_string(),
+                                    _ => format!("{}", val_str_val),
+                                },
+                                _ => format!("{}", val_str_val),
+                            };
+                            result.push_str(&val_str);
+                        } else {
+                            result.push('%');
+                        }
+                    }
+                } else {
+                    result.push(c);
+                }
+            }
+            Ok(vm.new_string(mc, result))
+        }
+        _ => Err(BBError::TypeError {
+            expected: "numeric or string formatting types".to_string(),
+            got: format!("{:?} and {:?}", args[0], args[1]),
+            msg: format!("Cannot modulo/format {:?} and {:?}", args[0], args[1]),
+        }),
+    }
+}
+
 // Native helper: eq
 pub fn native_eq<'gc>(
     vm: &mut VmState<'gc>,
@@ -282,6 +514,7 @@ pub fn native_lt<'gc>(
         (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, a < b)),
         (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) < *b)),
         (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a < (*b as f64))),
+        (ObjectPayload::Bool(a), ObjectPayload::Bool(b)) => Ok(vm.new_bool(mc, *a && !*b)),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -318,6 +551,7 @@ pub fn native_gt<'gc>(
         (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, a > b)),
         (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) > *b)),
         (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a > (*b as f64))),
+        (ObjectPayload::Bool(a), ObjectPayload::Bool(b)) => Ok(vm.new_bool(mc, !*a && *b)),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -354,6 +588,7 @@ pub fn native_le<'gc>(
         (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, a <= b)),
         (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) <= *b)),
         (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a <= (*b as f64))),
+        (ObjectPayload::Bool(a), ObjectPayload::Bool(b)) => Ok(vm.new_bool(mc, *a || !*b)),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -390,6 +625,7 @@ pub fn native_ge<'gc>(
         (ObjectPayload::Double(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, a >= b)),
         (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) >= *b)),
         (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a >= (*b as f64))),
+        (ObjectPayload::Bool(a), ObjectPayload::Bool(b)) => Ok(vm.new_bool(mc, !*a || *b)),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -474,12 +710,14 @@ pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
     funcs.push(("-".to_string(), vm.new_native(mc, NativeFunc(native_sub))));
     funcs.push(("*".to_string(), vm.new_native(mc, NativeFunc(native_mul))));
     funcs.push(("/".to_string(), vm.new_native(mc, NativeFunc(native_div))));
+    funcs.push(("%".to_string(), vm.new_native(mc, NativeFunc(native_mod))));
     funcs.push(("==".to_string(), vm.new_native(mc, NativeFunc(native_eq))));
     funcs.push(("!=".to_string(), vm.new_native(mc, NativeFunc(native_ne))));
     funcs.push(("<".to_string(), vm.new_native(mc, NativeFunc(native_lt))));
     funcs.push((">".to_string(), vm.new_native(mc, NativeFunc(native_gt))));
     funcs.push(("<=".to_string(), vm.new_native(mc, NativeFunc(native_le))));
     funcs.push((">=".to_string(), vm.new_native(mc, NativeFunc(native_ge))));
+    funcs.push(("~".to_string(), vm.new_native(mc, NativeFunc(native_match))));
 
     // Unary
     funcs.push(("!".to_string(), vm.new_native(mc, NativeFunc(native_not))));

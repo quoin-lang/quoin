@@ -774,7 +774,7 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    fn lookup_in_class_hierarchy(
+    pub fn lookup_in_class_hierarchy(
         &self,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         selector: &str,

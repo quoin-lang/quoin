@@ -208,6 +208,34 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_string(mc, s.to_string()))
         })
+        .instance_method("write:", |vm, mc, args| {
+            let s = arg!(args, String, 1);
+            let bytes = s.as_bytes().to_vec();
+
+            args[0].with_native_state_mut(mc, |h: &mut NativeIoHandle| {
+                match &mut h.wrapper {
+                    NativeIoHandleWrapper::Stdout(out) => {
+                        out.write(&bytes)
+                            .map_err(|e| BBError::Other(e.to_string()))?;
+                        Ok(())
+                    }
+                    NativeIoHandleWrapper::Stderr(err) => {
+                        err.write(&bytes)
+                            .map_err(|e| BBError::Other(e.to_string()))?;
+                        Ok(())
+                    }
+                    NativeIoHandleWrapper::Stdin(_) => {
+                        Err(BBError::Other("can't write to stdin!".to_string()))
+                    }
+                    NativeIoHandleWrapper::File(f) => {
+                        f.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
+                        Ok(())
+                    }
+                }
+            })??;
+
+            Ok(vm.new_nil(mc))
+        })
         .instance_method("writeln:", |vm, mc, args| {
             let s = arg!(args, String, 1);
             let bytes = format!("{}\n", s).into_bytes();
