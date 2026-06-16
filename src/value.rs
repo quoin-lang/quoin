@@ -59,6 +59,15 @@ impl<T: 'static> AnyCollect for OpaqueState<T> {
     fn trace_gc<'gc>(&self, _cc: &mut dyn gc_arena::collect::Trace<'gc>) {}
 }
 
+#[derive(Clone, Debug, Collect, PartialEq, Eq)]
+#[collect(require_static)]
+pub struct SourceInfo {
+    pub filename: String,
+    pub line: usize,
+    pub column: usize,
+    pub source_text: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Collect)]
 #[collect(require_static)]
 pub struct NamespacedName {
@@ -411,6 +420,7 @@ pub struct Block<'gc> {
     pub bytecode: Vec<Instruction>,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     pub enclosing_method_id: Option<usize>,
+    pub source_info: Option<SourceInfo>,
 }
 
 #[derive(Collect, Debug)]

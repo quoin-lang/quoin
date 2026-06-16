@@ -4,7 +4,6 @@ use new_vm::runtime::{block, boolean, class, io, list, native, object};
 use new_vm::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
-use std::fs::read_to_string;
 
 use gc_arena::{Arena, Gc, Rootable};
 use glob::glob;
@@ -61,7 +60,7 @@ fn main() {
             })
             .chain(vec![{
                 println!("Loading file: bblib/main.b");
-                parser::parse_building_blocks_string(&read_to_string("bblib/main.b").unwrap())
+                parser::parse_building_blocks_file(&std::path::PathBuf::from("bblib/main.b"))
             }]);
 
         compile_and_run_asts(ast_iter);
@@ -84,7 +83,7 @@ fn main() {
         })
         .chain(vec![{
             println!("Loading file: bblib/testscript.b");
-            parser::parse_building_blocks_string(&read_to_string("bblib/testscript.b").unwrap())
+            parser::parse_building_blocks_file(&std::path::PathBuf::from("bblib/testscript.b"))
         }]);
 
     compile_and_run_asts(ast_iter);
@@ -182,6 +181,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
                     bytecode: program.bytecode.clone(),
                     parent_env: None,
                     enclosing_method_id: None,
+                    source_info: program.source_info.clone(),
                 }
             );
             vm.start_block(mc, main_block, Vec::new());

@@ -1,4 +1,4 @@
-use crate::value::NamespacedName;
+use crate::value::{NamespacedName, SourceInfo};
 use gc_arena::Collect;
 
 #[derive(Clone, Debug, Collect, PartialEq)]
@@ -8,6 +8,7 @@ pub struct StaticBlock {
     pub is_nested_block: bool,
     pub param_names: Vec<String>,
     pub bytecode: Vec<Instruction>,
+    pub source_info: Option<SourceInfo>,
 }
 
 #[derive(Clone, Debug, Collect, PartialEq)]

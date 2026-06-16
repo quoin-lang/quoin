@@ -949,7 +949,30 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    pub fn annotate_error(&self, error: BBError) -> BBError {
+        if matches!(error, BBError::WithSourceInfo { .. }) {
+            return error;
+        }
+        if let Some(frame) = self.frames.last() {
+            if let Some(source_info) = &frame.block.source_info {
+                return BBError::WithSourceInfo {
+                    error: Box::new(error),
+                    source_info: source_info.clone(),
+                };
+            }
+        }
+        error
+    }
+
     pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
+        let res = self.step_internal(mc);
+        if let Err(e) = res {
+            return Err(self.annotate_error(e));
+        }
+        res
+    }
+
+    fn step_internal(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
             // assert_eq!(self.stack.len(), 0, "Stack is not empty! {:?}", self.stack);
@@ -1020,13 +1043,13 @@ impl<'gc> VmState<'gc> {
                         let parent_env = self.frames.last().map(|f| f.env);
                         let enclosing_method_id =
                             self.frames.last().and_then(|f| f.enclosing_method_id);
-                        let block = Block {
-                            name: sb.name.clone(),
+                        let block = Block { name: sb.name.clone(),
                             is_nested_block: sb.is_nested_block,
                             param_names: sb.param_names.clone(),
                             bytecode: sb.bytecode.clone(),
                             parent_env,
                             enclosing_method_id,
+                            source_info: sb.source_info.clone(),
                         };
                         self.new_block(mc, block)
                     }
@@ -1407,6 +1430,7 @@ mod tests {
     use super::*;
     use crate::instruction::{Constant, StaticBlock};
     use crate::value::{NativeClassBuilder, OpaqueState};
+    use crate::parser::ast_visitor::NodeValue;
     use gc_arena::{Arena, Rootable};
 
     fn native_add<'gc>(
@@ -1567,7 +1591,7 @@ mod tests {
                 .borrow_mut(mc)
                 .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
 
-            let static_block = StaticBlock {
+            let static_block = StaticBlock { source_info: None,
                 name: Some("test_main".to_string()),
                 is_nested_block: false,
                 param_names: Vec::new(),
@@ -1575,8 +1599,7 @@ mod tests {
             };
             let block = gc!(
                 mc,
-                Block {
-                    name: static_block.name.clone(),
+                Block { source_info: None, name: static_block.name.clone(),
                     is_nested_block: static_block.is_nested_block,
                     param_names: static_block.param_names.clone(),
                     bytecode: static_block.bytecode.clone(),
@@ -1883,7 +1906,7 @@ mod tests {
     fn test_block_execution_and_returns() {
         // We will push a block constant, then send "value" to it.
         // The block bytecode will load its parameter, add 1 to it, and return.
-        let block_static = StaticBlock {
+        let block_static = StaticBlock { source_info: None,
             name: Some("test_block".to_string()),
             is_nested_block: false,
             param_names: vec!["x".to_string()],
@@ -1956,7 +1979,7 @@ mod tests {
 
         // Block 2: nested block
         // Bytecode: Push(999), MethodReturn
-        let block_nested = StaticBlock {
+        let block_nested = StaticBlock { source_info: None,
             name: Some("nested".to_string()),
             is_nested_block: true,
             param_names: Vec::new(),
@@ -1968,7 +1991,7 @@ mod tests {
 
         // Block 1: method
         // Bytecode: Push(Block(nested)), Send("value", 0), Push(100), Return
-        let block_method = StaticBlock {
+        let block_method = StaticBlock { source_info: None,
             name: Some("method".to_string()),
             is_nested_block: false, // enclosing_method_id will be this frame's ID
             param_names: Vec::new(),
@@ -2010,7 +2033,7 @@ mod tests {
     #[test]
     fn test_non_local_return_callback() {
         // block_nested: Push(777), MethodReturn
-        let block_nested = StaticBlock {
+        let block_nested = StaticBlock { source_info: None,
             name: Some("nested".to_string()),
             is_nested_block: true,
             param_names: Vec::new(),
@@ -2021,7 +2044,7 @@ mod tests {
         };
 
         // block_bar: blk.value, Push(111), Return
-        let block_bar = StaticBlock {
+        let block_bar = StaticBlock { source_info: None,
             name: Some("bar".to_string()),
             is_nested_block: false,
             param_names: vec!["blk".to_string()],
@@ -2034,7 +2057,7 @@ mod tests {
         };
 
         // block_foo: bar.value: block_nested, Push(222), Return
-        let block_foo = StaticBlock {
+        let block_foo = StaticBlock { source_info: None,
             name: Some("foo".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
@@ -2049,8 +2072,7 @@ mod tests {
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc);
-            let bar_block = Block {
-                name: block_bar.name.clone(),
+            let bar_block = Block { source_info: None, name: block_bar.name.clone(),
                 is_nested_block: block_bar.is_nested_block,
                 param_names: block_bar.param_names.clone(),
                 bytecode: block_bar.bytecode.clone(),
@@ -2065,8 +2087,7 @@ mod tests {
 
             let foo_block = gc!(
                 mc,
-                Block {
-                    name: block_foo.name.clone(),
+                Block { source_info: None, name: block_foo.name.clone(),
                     is_nested_block: block_foo.is_nested_block,
                     param_names: block_foo.param_names.clone(),
                     bytecode: block_foo.bytecode.clone(),
@@ -2108,13 +2129,13 @@ mod tests {
 
     #[test]
     fn test_class_and_method_definition_vm() {
-        let class_block = StaticBlock {
+        let class_block = StaticBlock { source_info: None,
             name: Some("class_block".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
             bytecode: vec![
                 // 1. Define inst method x
-                Instruction::Push(Constant::Block(StaticBlock {
+                Instruction::Push(Constant::Block(StaticBlock { source_info: None,
                     name: Some("x".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
@@ -2125,7 +2146,7 @@ mod tests {
                 })),
                 Instruction::DefineMethod("x".to_string()),
                 // 2. Override inst method x
-                Instruction::Push(Constant::Block(StaticBlock {
+                Instruction::Push(Constant::Block(StaticBlock { source_info: None,
                     name: Some("x".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
@@ -2245,14 +2266,14 @@ mod tests {
 
     #[test]
     fn test_primitive_methods_and_overrides() {
-        let custom_true_method = StaticBlock {
+        let custom_true_method = StaticBlock { source_info: None,
             name: Some("custom_true_method".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
             bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
         };
 
-        let class_extension_block = StaticBlock {
+        let class_extension_block = StaticBlock { source_info: None,
             name: Some("class_extension_block".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
@@ -2526,8 +2547,7 @@ mod tests {
             // Build a block that adds two arguments (a, b) and returns self + a + b
             let block = gc!(
                 mc,
-                Block {
-                    name: Some("test_block".to_string()),
+                Block { source_info: None, name: Some("test_block".to_string()),
                     is_nested_block: false,
                     param_names: vec!["a".to_string(), "b".to_string()],
                     bytecode: vec![
@@ -2563,8 +2583,7 @@ mod tests {
             // Execute block without self: a + b
             let block2 = gc!(
                 mc,
-                Block {
-                    name: Some("test_block_no_self".to_string()),
+                Block { source_info: None, name: Some("test_block_no_self".to_string()),
                     is_nested_block: false,
                     param_names: vec!["a".to_string(), "b".to_string()],
                     bytecode: vec![
@@ -2610,7 +2629,7 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::Push(Constant::Nil),
-                Instruction::Push(Constant::Block(StaticBlock {
+                Instruction::Push(Constant::Block(StaticBlock { source_info: None,
                     name: Some("ext_block".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
@@ -2713,4 +2732,58 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn test_error_annotation_and_display() {
+        use crate::parser::parser::parse_building_blocks_string;
+        use crate::compiler::Compiler;
+
+        let code = "1.foo;";
+        let ast = parse_building_blocks_string(code);
+        let mut compiler = Compiler::new();
+        let compiled = compiler.compile_program(match &ast.value {
+            NodeValue::Program(p) => p,
+            _ => unreachable!(),
+        }).unwrap();
+
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            VmState::new(mc)
+        });
+
+        arena.mutate_root(|mc, vm| {
+            let block = gc!(
+                mc,
+                Block {
+                    source_info: compiled.source_info.clone(), name: compiled.name.clone(),
+                    is_nested_block: compiled.is_nested_block,
+                    param_names: compiled.param_names.clone(),
+                    bytecode: compiled.bytecode.clone(),
+                    parent_env: None,
+                    enclosing_method_id: None,
+                }
+            );
+            vm.start_block(mc, block, Vec::new());
+
+            // Run until error. It should fail because Integer/Nil does not have 'foo' method.
+            let mut err = None;
+            loop {
+                match vm.step(mc) {
+                    Ok(VmStatus::Running) => {}
+                    Ok(_) => break,
+                    Err(e) => {
+                        err = Some(e);
+                        break;
+                    }
+                }
+            }
+
+            let err = err.expect("Expected execution error");
+            let err_str = err.to_string();
+            
+            // Check that the error message displays the source information
+            assert!(err_str.contains("at <string>:1:1"));
+            assert!(err_str.contains("1.foo;"));
+        });
+    }
 }
+

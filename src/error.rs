@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::value::SourceInfo;
+
 #[derive(Debug, Clone)]
 pub enum BBError {
     /// Raised when a function or method receives the wrong number of arguments
@@ -29,6 +31,11 @@ pub enum BBError {
     StackUnderflow(String),
     /// Catch-all for generic error strings
     Other(String),
+    /// Wrapper containing source location for execution errors
+    WithSourceInfo {
+        error: Box<BBError>,
+        source_info: SourceInfo,
+    },
 }
 
 impl fmt::Display for BBError {
@@ -55,6 +62,23 @@ impl fmt::Display for BBError {
             BBError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
             BBError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             BBError::Other(msg) => write!(f, "{}", msg),
+            BBError::WithSourceInfo { error, source_info } => {
+                writeln!(f, "{}", error)?;
+                write!(
+                    f,
+                    "  at {}:{}:{}",
+                    source_info.filename, source_info.line, source_info.column + 1
+                )?;
+                if let Some(source_text) = &source_info.source_text {
+                    writeln!(f)?;
+                    writeln!(f, "  |")?;
+                    for line in source_text.lines() {
+                        writeln!(f, "  | {}", line)?;
+                    }
+                    write!(f, "  |")?;
+                }
+                Ok(())
+            }
         }
     }
 }
