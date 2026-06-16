@@ -133,7 +133,7 @@ result = p1.test_nlr;
 
 
 file = [IO]File.open: '/etc/zshrc';
-.print: 'file path =' and: file.path;
+.print: 'file path =' and: file.fullpath;
 .print: 'file class =' and: file.class;
 .print: 'file class name =' and: file.class.name;
 .print: '[/]Object =' and: [/]Object;

@@ -2,7 +2,7 @@ runner = TestRunner.new
 
 [IO]Stdout.write:'Loading tests';
 
-lib = [IO]Folder.path:'../../../bblib/tests';
+lib = [IO]Folder.open:'bblib/tests';
 lib.entries.each:{|f|
     (f.is_file? && f.ext == 'b').if:{
         suite = Runtime.evalFile:f.fullpath;

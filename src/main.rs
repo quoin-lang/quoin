@@ -101,6 +101,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
         vm.register_native_class(mc, block::build_block_class());
         vm.register_native_class(mc, io::build_io_folder_class());
         vm.register_native_class(mc, io::build_io_file_class());
+        vm.register_native_class(mc, io::build_io_handle_class());
         vm.register_native_class(mc, list::build_list_class());
 
         // Register placeholder classes for all of the builtin types.
