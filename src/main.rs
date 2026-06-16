@@ -1,6 +1,6 @@
 use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
-use new_vm::runtime::{block, boolean, class, io, native, object};
+use new_vm::runtime::{block, boolean, class, io, list, native, object};
 use new_vm::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
@@ -101,6 +101,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
         vm.register_native_class(mc, boolean::build_boolean_class());
         vm.register_native_class(mc, block::build_block_class());
         vm.register_native_class(mc, io::build_io_folder_class());
+        vm.register_native_class(mc, list::build_list_class());
 
         // Register placeholder classes for all of the builtin types.
         for t in [
@@ -108,7 +109,6 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
             "Integer",
             "Double",
             "String",
-            "List",
             "Dictionary",
             "Regex",
             "Method",
@@ -222,3 +222,4 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
 
     arena.finish_cycle();
 }
+

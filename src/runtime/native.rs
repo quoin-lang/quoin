@@ -448,88 +448,6 @@ pub fn native_negated<'gc>(
     }
 }
 
-// Native helper: list index lookup (at:)
-pub fn native_list_at<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 2 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 2,
-            got: args.len(),
-            msg: "at expects exactly 2 arguments (receiver, index)".to_string(),
-        });
-    }
-    let (p0, p1) = match (&args[0], &args[1]) {
-        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
-        _ => {
-            return Err(BBError::TypeError {
-                expected: "Object".to_string(),
-                got: format!("{:?} and {:?}", args[0], args[1]),
-                msg: "at expected objects".to_string(),
-            });
-        }
-    };
-    match (p0, p1) {
-        (ObjectPayload::List(l), ObjectPayload::Int(idx)) => {
-            let borrowed = l.borrow();
-            let idx = *idx;
-            if idx >= 0 && idx < borrowed.len() as i64 {
-                Ok(borrowed[idx as usize])
-            } else {
-                Ok(vm.new_nil(mc))
-            }
-        }
-        _ => Err(format!(
-            "at expects list and integer, got {:?} and {:?}",
-            args[0], args[1]
-        )
-        .into()),
-    }
-}
-
-// Native helper: list sliceFrom:
-pub fn native_list_slice_from<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 2 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 2,
-            got: args.len(),
-            msg: "sliceFrom expects exactly 2 arguments (receiver, index)".to_string(),
-        });
-    }
-    let (p0, p1) = match (&args[0], &args[1]) {
-        (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
-        _ => {
-            return Err(BBError::TypeError {
-                expected: "Object".to_string(),
-                got: format!("{:?} and {:?}", args[0], args[1]),
-                msg: "sliceFrom expected objects".to_string(),
-            });
-        }
-    };
-    match (p0, p1) {
-        (ObjectPayload::List(l), ObjectPayload::Int(idx)) => {
-            let borrowed = l.borrow();
-            let start = (*idx).max(0) as usize;
-            let sliced = if start < borrowed.len() {
-                borrowed[start..].to_vec()
-            } else {
-                Vec::new()
-            };
-            Ok(vm.new_list(mc, sliced))
-        }
-        _ => Err(format!(
-            "sliceFrom expects list and integer, got {:?} and {:?}",
-            args[0], args[1]
-        )
-        .into()),
-    }
-}
 
 pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
     let mut funcs = Vec::new();
@@ -570,15 +488,7 @@ pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
         vm.new_native(mc, NativeFunc(native_negated)),
     ));
 
-    // List destructuring
-    funcs.push((
-        "at:".to_string(),
-        vm.new_native(mc, NativeFunc(native_list_at)),
-    ));
-    funcs.push((
-        "sliceFrom:".to_string(),
-        vm.new_native(mc, NativeFunc(native_list_slice_from)),
-    ));
+
 
     let mut globals = vm.globals.borrow_mut(mc);
     for (name, val) in funcs {

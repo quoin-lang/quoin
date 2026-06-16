@@ -1,4 +1,5 @@
 use crate::arg;
+use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};
 
 pub fn build_block_class() -> NativeClassBuilder {
@@ -38,8 +39,8 @@ pub fn build_block_class() -> NativeClassBuilder {
         // })
         .instance_method("valueWithArgs:", |vm, mc, args| {
             let block = arg!(args, Block, 0);
-            let args_list = arg!(args, List, 1);
-            let block_args = args_list.borrow().clone();
+            let block_args =
+                args[1].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())?;
             vm.execute_block(mc, block, block_args, None)
         })
         .instance_method("valueWithSelf:", |vm, mc, args| {
@@ -51,12 +52,11 @@ pub fn build_block_class() -> NativeClassBuilder {
             let block = arg!(args, Block, 0);
             let arg_val = args[1];
             let self_val = args[2];
-            let block_args = match arg_val {
-                Value::Object(obj) => match &obj.borrow().payload {
-                    crate::value::ObjectPayload::List(l) => l.borrow().clone(),
-                    _ => vec![arg_val],
-                },
-                _ => vec![arg_val],
+            let block_args = match arg_val
+                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
+            {
+                Ok(vec) => vec,
+                Err(_) => vec![arg_val],
             };
             vm.execute_block(mc, block, block_args, Some(self_val))
         })

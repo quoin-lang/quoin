@@ -1,5 +1,6 @@
 use crate::error::BBError;
 use crate::instruction::{Constant, Instruction};
+use crate::runtime::list::NativeListState;
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, GcRegex, GcUlid, NamespacedName, NativeClass, NativeFunc,
     Object, ObjectPayload, Value,
@@ -345,13 +346,15 @@ impl<'gc> VmState<'gc> {
     pub fn new_list(&self, mc: &Mutation<'gc>, list: Vec<Value<'gc>>) -> Value<'gc> {
         let class = self.builtin_cache.borrow().list_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "List"));
+        let state = NativeListState::new(list);
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
             mc,
             Object {
                 id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
-                payload: ObjectPayload::List(gcl!(mc, list)),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
     }
@@ -1442,9 +1445,12 @@ mod tests {
                     ObjectPayload::Int(i) => ValueSpec::Int(*i),
                     ObjectPayload::Double(d) => ValueSpec::Double(*d),
                     ObjectPayload::String(s) => ValueSpec::String((**s).clone()),
-                    ObjectPayload::List(l) => {
-                        let list_specs = l.borrow().iter().map(|&v| to_spec(v)).collect();
-                        ValueSpec::List(list_specs)
+                    _ if borrowed.class_name() == "List" => {
+                        let res = val.with_native_state::<NativeListState, _, _>(|l| {
+                            let list_specs = l.get_vec().iter().map(|&v| to_spec(v)).collect();
+                            ValueSpec::List(list_specs)
+                        });
+                        res.unwrap_or_else(|_| ValueSpec::Instance("List".to_string()))
                     }
                     ObjectPayload::Dict(d) => {
                         let dict_specs = d
@@ -1496,13 +1502,13 @@ mod tests {
             vm.register_native_class(mc, crate::runtime::class::build_class_class());
             vm.register_native_class(mc, crate::runtime::boolean::build_boolean_class());
             vm.register_native_class(mc, crate::runtime::block::build_block_class());
+            vm.register_native_class(mc, crate::runtime::list::build_list_class());
 
             for t in [
                 "Nil",
                 "Integer",
                 "Double",
                 "String",
-                "List",
                 "Dictionary",
                 "Regex",
                 "Method",

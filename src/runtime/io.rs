@@ -4,7 +4,7 @@ use crate::value::{NativeClassBuilder, OpaqueState, Value};
 
 use std::fs::ReadDir;
 
-pub struct IoFolder {
+pub struct NativeIoFolder {
     pub path: String,
     pub iter: Option<ReadDir>,
 }
@@ -14,7 +14,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
         .class_method("open:", |vm, mc, args| {
             let path = arg!(args, String, 1);
 
-            let state = OpaqueState::<IoFolder>(IoFolder {
+            let state = OpaqueState(NativeIoFolder {
                 path: path.to_string(),
                 iter: None,
             });
@@ -24,7 +24,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
             Ok(value)
         })
         .instance_method("next", |vm, mc, args| {
-            let r = args[0].with_native_state_mut(mc, |io: &mut IoFolder| {
+            let r = args[0].with_native_state_mut(mc, |io: &mut NativeIoFolder| {
                 if io.iter.is_none() {
                     io.iter = Some(std::fs::read_dir(&io.path).unwrap());
                 }
@@ -42,7 +42,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
             });
         })
         .instance_method("reset", |vm, mc, args| {
-            args[0].with_native_state_mut(mc, |io: &mut IoFolder| {
+            args[0].with_native_state_mut(mc, |io: &mut NativeIoFolder| {
                 io.iter = None;
             })?;
             Ok(vm.new_nil(mc))
