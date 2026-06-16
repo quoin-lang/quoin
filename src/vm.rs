@@ -1632,11 +1632,11 @@ mod tests {
             vm.register_native_class(mc, crate::runtime::double::build_double_class());
             vm.register_native_class(mc, crate::runtime::integer::build_integer_class());
             vm.register_native_class(mc, crate::runtime::string::build_string_class());
+            vm.register_native_class(mc, crate::runtime::nil::build_nil_class());
+            vm.register_native_class(mc, crate::runtime::map::build_map_class());
+            vm.register_native_class(mc, crate::runtime::regex::build_regex_class());
 
             for t in [
-                "Nil",
-                "Map",
-                "Regex",
                 "Method",
                 "Native",
             ] {

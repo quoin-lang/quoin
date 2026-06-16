@@ -11,3 +11,6 @@ pub mod timer;
 pub mod double;
 pub mod integer;
 pub mod string;
+pub mod nil;
+pub mod map;
+pub mod regex;
