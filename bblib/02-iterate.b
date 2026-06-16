@@ -244,8 +244,6 @@ Map <-- {
     }
 
     can?: -> {|clz| clz==Iterate }
-
-    contains?: -> { |kvp:KeyValuePair| (.containsKey?:kvp.key) && ((self.at:kvp.key) == kvp.value) }
 };
 
 List <-- {
@@ -256,6 +254,4 @@ List <-- {
     }
 
     can?: -> {|clz| clz==Iterate }
-
-    count -> { .length }
 }

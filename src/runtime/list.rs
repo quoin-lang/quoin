@@ -68,7 +68,7 @@ pub fn build_list_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_nil(mc))
         })
-        .instance_method("length", |vm, mc, args| {
+        .instance_method("count", |vm, mc, args| {
             let len = args[0]
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
                 .map_err(|e| BBError::Other(e))?;
