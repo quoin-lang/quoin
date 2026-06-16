@@ -1,3 +1,4 @@
+use crate::arg;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 
 use gc_arena::collect::{DynCollect, Trace};
@@ -43,4 +44,26 @@ impl AnyCollect for NativeMapState {
 
 pub fn build_map_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Map", Some("Object"))
+        //
+        .instance_method("containsKey?:", |vm, mc, args| {
+            let key = arg!(args, String, 1).to_string();
+            let b = args[0].with_native_state(|m: &NativeMapState| m.map.contains_key(&key))?;
+            Ok(vm.new_bool(mc, b))
+        })
+        .instance_method("at:", |vm, mc, args| {
+            let key = arg!(args, String, 1).to_string();
+            let value =
+                args[0].with_native_state(|m: &NativeMapState| m.get_map().get(&key).copied())?;
+            Ok(if let Some(v) = value {
+                v
+            } else {
+                vm.new_nil(mc)
+            })
+        })
+        .instance_method("count", |vm, mc, args| {
+            Ok(vm.new_int(
+                mc,
+                args[0].with_native_state(|m: &NativeMapState| m.get_map().len())? as i64,
+            ))
+        })
 }
