@@ -424,6 +424,34 @@ impl Compiler {
         op: &BinaryOperatorNode,
         bytecode: &mut Vec<Instruction>,
     ) -> Result<(), String> {
+        if op.operator == BinaryOperatorType::And {
+            self.compile_node(&op.left, bytecode)?;
+            bytecode.push(Instruction::Dup);
+
+            let mut right_bytecode = Vec::new();
+            self.compile_node(&op.right, &mut right_bytecode)?;
+
+            let offset = 2 + right_bytecode.len() as isize;
+            bytecode.push(Instruction::ElseJump(offset));
+            bytecode.push(Instruction::Pop);
+            bytecode.extend(right_bytecode);
+            return Ok(());
+        }
+
+        if op.operator == BinaryOperatorType::Or {
+            self.compile_node(&op.left, bytecode)?;
+            bytecode.push(Instruction::Dup);
+
+            let mut right_bytecode = Vec::new();
+            self.compile_node(&op.right, &mut right_bytecode)?;
+
+            let offset = 2 + right_bytecode.len() as isize;
+            bytecode.push(Instruction::IfJump(offset));
+            bytecode.push(Instruction::Pop);
+            bytecode.extend(right_bytecode);
+            return Ok(());
+        }
+
         self.compile_node(&op.left, bytecode)?;
         self.compile_node(&op.right, bytecode)?;
 
@@ -438,8 +466,6 @@ impl Compiler {
             BinaryOperatorType::Gt => ">",
             BinaryOperatorType::LtEq => "<=",
             BinaryOperatorType::GtEq => ">=",
-            BinaryOperatorType::And => "&&",
-            BinaryOperatorType::Or => "||",
             BinaryOperatorType::Mod => "%",
             BinaryOperatorType::Match => "~",
             _ => {
@@ -921,6 +947,26 @@ mod tests {
         let res = compile(vec![unary(UnaryOperatorType::Add, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
+        assert_eq!(res.bytecode, expected);
+
+        // x && y
+        let res = compile(vec![binary(BinaryOperatorType::And, local_id("x"), local_id("y"))]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal(ns("x")));
+        expected.push(Instruction::Dup);
+        expected.push(Instruction::ElseJump(3));
+        expected.push(Instruction::Pop);
+        expected.push(Instruction::LoadGlobal(ns("y")));
+        assert_eq!(res.bytecode, expected);
+
+        // x || y
+        let res = compile(vec![binary(BinaryOperatorType::Or, local_id("x"), local_id("y"))]).unwrap();
+        let mut expected = prefix_ops();
+        expected.push(Instruction::LoadGlobal(ns("x")));
+        expected.push(Instruction::Dup);
+        expected.push(Instruction::IfJump(3));
+        expected.push(Instruction::Pop);
+        expected.push(Instruction::LoadGlobal(ns("y")));
         assert_eq!(res.bytecode, expected);
     }
 

@@ -2630,4 +2630,87 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn test_short_circuit_and_or() {
+        // Test: false && (panic!)
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Bool(false)),
+                Instruction::Dup,
+                Instruction::ElseJump(3),
+                Instruction::Pop,
+                Instruction::Push(Constant::Int(99)),
+            ],
+            |vm, mc| {
+                vm.step(mc).unwrap(); // Push false
+                vm.step(mc).unwrap(); // Dup
+                vm.step(mc).unwrap(); // ElseJump (should jump to end, i.e., index 5)
+                assert_eq!(stack_spec(vm), vec![ValueSpec::Bool(false)]);
+                assert_eq!(vm.frames[0].ip, 5);
+            },
+        );
+
+        // Test: true && 42
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Bool(true)),
+                Instruction::Dup,
+                Instruction::ElseJump(3),
+                Instruction::Pop,
+                Instruction::Push(Constant::Int(42)),
+            ],
+            |vm, mc| {
+                vm.step(mc).unwrap(); // Push true
+                vm.step(mc).unwrap(); // Dup
+                vm.step(mc).unwrap(); // ElseJump (should not jump, IP becomes 3)
+                assert_eq!(stack_spec(vm), vec![ValueSpec::Bool(true)]);
+                assert_eq!(vm.frames[0].ip, 3);
+                vm.step(mc).unwrap(); // Pop
+                assert_eq!(vm.stack.len(), 0);
+                vm.step(mc).unwrap(); // Push 42
+                assert_eq!(stack_spec(vm), vec![ValueSpec::Int(42)]);
+            },
+        );
+
+        // Test: true || (panic!)
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Bool(true)),
+                Instruction::Dup,
+                Instruction::IfJump(3),
+                Instruction::Pop,
+                Instruction::Push(Constant::Int(99)),
+            ],
+            |vm, mc| {
+                vm.step(mc).unwrap(); // Push true
+                vm.step(mc).unwrap(); // Dup
+                vm.step(mc).unwrap(); // IfJump (should jump to end, i.e. index 5)
+                assert_eq!(stack_spec(vm), vec![ValueSpec::Bool(true)]);
+                assert_eq!(vm.frames[0].ip, 5);
+            },
+        );
+
+        // Test: false || 42
+        run_test_steps(
+            vec![
+                Instruction::Push(Constant::Bool(false)),
+                Instruction::Dup,
+                Instruction::IfJump(3),
+                Instruction::Pop,
+                Instruction::Push(Constant::Int(42)),
+            ],
+            |vm, mc| {
+                vm.step(mc).unwrap(); // Push false
+                vm.step(mc).unwrap(); // Dup
+                vm.step(mc).unwrap(); // IfJump (should not jump, IP becomes 3)
+                assert_eq!(stack_spec(vm), vec![ValueSpec::Bool(false)]);
+                assert_eq!(vm.frames[0].ip, 3);
+                vm.step(mc).unwrap(); // Pop
+                assert_eq!(vm.stack.len(), 0);
+                vm.step(mc).unwrap(); // Push 42
+                assert_eq!(stack_spec(vm), vec![ValueSpec::Int(42)]);
+            },
+        );
+    }
 }
