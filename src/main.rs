@@ -1,6 +1,6 @@
 use new_vm::error::BBError;
 use new_vm::parser::{ast_visitor, parser};
-use new_vm::runtime::{block, boolean, class, io, list, native, object, runtime, method};
+use new_vm::runtime::{block, boolean, class, io, list, native, object, runtime, method, timer};
 use new_vm::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 use new_vm::vm::{VmState, VmStatus};
 use new_vm::{compiler, gc};
@@ -105,6 +105,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
         vm.register_native_class(mc, list::build_list_class());
         vm.register_native_class(mc, runtime::build_runtime_class());
         vm.register_native_class(mc, method::build_method_class());
+        vm.register_native_class(mc, timer::build_timer_class());
 
         // Register placeholder classes for all of the builtin types.
         for t in [

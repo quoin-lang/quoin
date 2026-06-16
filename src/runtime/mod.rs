@@ -7,3 +7,4 @@ pub mod native;
 pub mod object;
 pub mod runtime;
 pub mod method;
+pub mod timer;
