@@ -73,3 +73,16 @@ This document outlines the language features, compiler updates, and VM modificat
   - `Object.s` overrides: Overriding `s` string representation when converting objects to strings for printing.
 - [x] **Native State Support**:
   - Implement native classes holding arbitrary Rust state inside VM objects, following [native_rust_state_plan.md](file:///Users/damon/code/new-vm/native_rust_state_plan.md).
+
+## 9. Performance Tuning
+- [ ] **Grammar Lookahead Profiling & Tuning**:
+  - Identify parser rules triggering deep lookaheads in ANTLR by profiling parser decisions.
+  - Rewrite ambiguous or complex grammar expressions in `.g4` files to reduce decision path depths.
+- [ ] **Shared DFA Caches Across Threads**:
+  - Configure the parser instance to share the DFA prediction cache globally across all concurrent helper threads, preventing redundant ATN simulation.
+- [ ] **Hashing and Equality Optimization**:
+  - Benchmark swapping `MurmurHasher` with a faster hashing implementation (e.g., `FxHasher` or `ahash`).
+  - Optimize the equality checks for prediction contexts in lookahead caches.
+- [ ] **Alternative Parser Architecture Evaluation**:
+  - Evaluate replacing ANTLR with Tree-sitter for faster full-file compiles using its compiled C engine.
+  - Assess native Rust parser generators (e.g., LALRPOP or Pest) or hand-writing a recursive-descent parser for optimal compiler performance.
