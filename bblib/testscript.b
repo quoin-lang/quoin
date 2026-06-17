@@ -139,8 +139,21 @@ file = [IO]File.open: '/etc/zshrc';
 .print: '[/]Object =' and: [/]Object;
 .print: 'Object == [/]Object =' and: (Object == [/]Object);
 
-[IO]Stdout = 'standard output';
-.print: 'Stdout =' and: [IO]Stdout;
-
 folder = [IO]Folder.open: 'bblib/tests/';
 .print:'Test files =' and:folder.list;
+
+name = 'Damon';
+
+name.case:{
+    .when:'Damon'               do:{ 'Hi Damon'.print          };
+    .when:'Bagel'               do:{ 'Hello delicious'.print   };
+    .when:#/^[A-Z]+$/           do:{ 'NO NEED TO SHOUT'.print  };
+    .when:{|x| x.length > 20 }  do:{ 'YOUR NAME IS LONG'.print };
+
+    .default:{ 'Who are you and what did you do with my bagel'.print };
+};
+
+.print:'Low =' and:('Low' == 5.case:{
+    .when:1..10  do:'Low';
+    .when:11..20 do:'High';
+});

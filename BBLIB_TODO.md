@@ -11,7 +11,7 @@ This document outlines the language features, compiler updates, and VM modificat
   - Object initialization/new:{} logic
 - [x] Bring over AnsiColorizer.cs from the old repo.
   - [ ] Switch to the colorized test suite runner.
-- [ ] Bring over Highlighter from the old repo.
+- [x] Bring over Highlighter from the old repo.
   - [ ] Show highlighted code snippets in stack traces.
 - [ ] Improve stack trace output. (Similar to the C# output.)
 - [ ] Move to a better iterator design that doesn't require mutability.
@@ -21,7 +21,7 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
 - [ ] Confirm `%'string%{eval}' is working.
   - [ ] Make sure it's optimized into string concatenation by the compiler.
-- [ ] Make sure case statements are tested and working.
+- [x] Make sure case statements are tested and working.
 - [ ] Repurpose the Yeet instruction and make sure .../???/!!! are all working.
 - [ ] Formalize an interface for BB error types.
 - [ ] Implement DateTime.
