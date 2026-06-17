@@ -39,7 +39,7 @@ pub struct OpaqueState<T>(pub T);
 
 impl<T: 'static> Debug for OpaqueState<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "OpaqueState({:?})", self)
+        write!(f, "OpaqueState<{}>", std::any::type_name::<T>())
     }
 }
 
@@ -629,3 +629,17 @@ impl NativeClass for NativeClassBuilder {
         self.instance_methods.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opaque_state_debug() {
+        struct Dummy;
+        let state = OpaqueState(Dummy);
+        let debug_str = format!("{:?}", state);
+        assert_eq!(debug_str, "OpaqueState<new_vm::value::tests::test_opaque_state_debug::Dummy>");
+    }
+}
+
