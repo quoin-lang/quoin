@@ -5,8 +5,8 @@
 
         .does:{ TSCNC1 <- {} } resultIn:{ TSCNC1.class == Class };
         .does:{ TSCNC1 <- TSCNC2 <- {} } resultIn:{ TSCNC2.parent == TSCNC1 };
-"*        .does:{ Abc <- TSCNC3 <- {} } throw:'Undefined variable Abc';
-"*        .does:{ TSCNC_Constant <- TSCNC3 <- {} } throw:'Parent of TSCNC3 (TSCNC_Constant) is not a Class';
+        .does:{ Abc <- TSCNC3 <- {} } throw:'Parent class Abc not found';
+        .does:{ TSCNC_Constant <- TSCNC3 <- {} } throw:'Parent TSCNC_Constant is not a Class';
     };
 
     .test:
