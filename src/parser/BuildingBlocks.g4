@@ -5,14 +5,14 @@ grammar BuildingBlocks;
 
 program : (stmt ';'?)+ ;
 
-stmt : METHOD_RETURN richExpr      #MethodReturn
-     | YIELD_RETURN richExpr       #YieldReturn
-     | BLOCK_RETURN richExpr       #BlockReturn
-     | assignment                  #AssignmentStmt
+stmt : METHOD_RETURN expr      #MethodReturn
+     | YIELD_RETURN expr       #YieldReturn
+     | BLOCK_RETURN expr       #BlockReturn
+     | assignment              #AssignmentStmt
      | bang3                   #Bang3Stmt
      | dot3                    #Dot3Stmt
      | huh3                    #Huh3Stmt
-     | richExpr                    #ExprStmt
+     | expr                    #ExprStmt
      ;
 
 bang3 : '!!!' ;
@@ -25,7 +25,7 @@ selector : (ident '+'? ':')+ #SelectorWArgs
          | symbol            #SelectorSymbol
          ;
 
-assignment : lvalue+ '=' richExpr ;
+assignment : lvalue+ '=' expr ;
 
 lvalue : nsvarident              #IdentLValue
        | '*' nsvarident          #SplatLValue
@@ -34,12 +34,7 @@ lvalue : nsvarident              #IdentLValue
        | '(' lvalue+ ')'         #SubLValue
        ;
 
-richExpr : ('.' sig=callSigWithArg)                      #DefCallWArgExpr
-         | subject=expr ('.' sig=callSigWithArg)           #ExprCallWArgExpr
-         | expr                                         #RichExprBase
-         ;
-
-expr : '(' richExpr ')'                             #NestedExpr
+expr : '(' expr ')'                             #NestedExpr
      | '-' expr                                 #UnMinusExpr
      | '+' expr                                 #UnPlusExpr
      | '!' expr                                 #UnBangExpr
@@ -47,13 +42,13 @@ expr : '(' richExpr ')'                             #NestedExpr
      | parent=nsvarident '<-' name=nsvarident
                          '<-' block             #ClassDef2Expr
      | name=nsvarident '<-' block               #ClassDefExpr
-     | nsvarident '<-' richExpr                 #ConstDefExpr
+     | nsvarident '<-' expr                     #ConstDefExpr
      | expr '<--' block                         #ClassExtExpr
      | selector '->' block                      #MethodDefExpr
      | selector '-->' block                     #MethodExtExpr
      | left=expr '..' right=expr                #RangeExpr
-     | ('.' sig=callSigNoArgOrBang)                #DefCallExpr
-     | subject=expr ('.' sig=callSigNoArgOrBang)   #ExprCallExpr
+     | ('.' sig=callSig)                        #DefCallExpr
+     | subject=expr ('.' sig=callSig)           #ExprCallExpr
      | left=expr '+' right=expr                 #AddExpr
      | left=expr '-' right=expr                 #SubExpr
      | left=expr '/' right=expr                 #DivExpr
@@ -68,10 +63,10 @@ expr : '(' richExpr ')'                             #NestedExpr
      | left=expr '||' right=expr                #OrExpr
      | left=expr '==' right=expr                #EqExpr
      | left=expr '!=' right=expr                #NotEqExpr
-     | USER_LIST_START richExpr* ')'            #UserListExpr // :(
-     | '#' '(' richExpr* ')'                        #ListExpr
-     | '#' '<' richExpr* '>'                        #SetExpr
-     | '#' '{' ( k+=richExpr ':' v+=richExpr )* '}'     #DictExpr
+     | USER_LIST_START expr* ')'                #UserListExpr // :(
+     | '#' '(' expr* ')'                        #ListExpr
+     | '#' '<' expr* '>'                        #SetExpr
+     | '#' '{' ( k+=expr ':' v+=expr )* '}'     #DictExpr
      | number                                   #LiteralNumber
      | string                                   #LiteralString
      | symbol                                   #LiteralSymbol
@@ -83,20 +78,10 @@ expr : '(' richExpr ')'                             #NestedExpr
 
 userString : USER_STRING ;
 
-callSig : callSigWithArg              #CallSigWArg
-        | id=ident                    #CallSigNoArg
-        | id=ident '!'                #CallSigNoArgBang
+callSig : (id+=ident ':' val+=expr)+ #CallSigWArg
+        | id=ident                   #CallSigNoArg
+        | id=ident '!'               #CallSigNoArgBang
         ;
-
-callSigWithArg : (id+=ident ':' val+=argExpr) ('.'? id+=ident ':' val+=argExpr)* ;
-
-argExpr : ('.' sig=callSigWithArg)                      #ArgDefCallWArg
-        | expr                                         #ArgExprBase
-        ;
-
-callSigNoArgOrBang : id=ident         #CallSigNoArgNormal
-                   | id=ident '!'     #CallSigNoArgBangNormal
-                   ;
 
 nsvarident : ns=namespace ident #NamespacedIdent
            | '@' ident          #InstanceIdent
