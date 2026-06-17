@@ -73,6 +73,6 @@
 
             newObj = TSCNC8.new;
             #( newObj.c newObj.m newObj.z newObj.b )
-        } equalTo:#( #( 1 11 22 ) 1 22 );
+        } equalTo:#( #( 1 11 22 ) 1 22 11 );
     };
 }

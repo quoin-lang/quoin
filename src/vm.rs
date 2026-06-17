@@ -652,7 +652,7 @@ impl<'gc> VmState<'gc> {
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
                 while self.frames.len() > initial_frame_count {
-                    match self.step(mc)? {
+                    match self.step_internal(mc)? {
                         VmStatus::Running => {}
                         VmStatus::Finished(_) => {
                             break;
@@ -715,7 +715,7 @@ impl<'gc> VmState<'gc> {
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
                 while self.frames.len() > initial_frame_count {
-                    match self.step(mc)? {
+                    match self.step_internal(mc)? {
                         VmStatus::Running => {}
                         VmStatus::Finished(_) => {
                             break;
@@ -795,7 +795,7 @@ impl<'gc> VmState<'gc> {
 
         if self.frames.len() > initial_frame_count {
             while self.frames.len() > initial_frame_count {
-                match self.step(mc)? {
+                match self.step_internal(mc)? {
                     VmStatus::Running => {}
                     VmStatus::Finished(_) => {
                         break;
