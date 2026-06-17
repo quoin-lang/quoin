@@ -1,5 +1,5 @@
 use crate::arg;
-use crate::value::{AnyCollect, NativeClassBuilder, Value};
+use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 
 use gc_arena::collect::{DynCollect, Trace};
 use std::any::Any;
@@ -8,12 +8,16 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub struct NativeMapState {
     pub map: HashMap<String, Value<'static>>,
+    pub iter: Option<std::vec::IntoIter<String>>,
 }
 
 impl NativeMapState {
     pub fn new(map: HashMap<String, Value<'_>>) -> Self {
         let map_static: HashMap<String, Value<'static>> = unsafe { std::mem::transmute(map) };
-        Self { map: map_static }
+        Self {
+            map: map_static,
+            iter: None,
+        }
     }
 
     pub fn get_map<'gc>(&self) -> &HashMap<String, Value<'gc>> {
@@ -73,6 +77,41 @@ pub fn build_map_class() -> NativeClassBuilder {
                 mc,
                 args[0].with_native_state(|m: &NativeMapState| m.get_map().len())? as i64,
             ))
+        })
+        .instance_method("next", |vm, mc, args| {
+            let kv_opt = args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
+                if m.iter.is_none() {
+                    let keys: Vec<String> = m.map.keys().cloned().collect();
+                    m.iter = Some(keys.into_iter());
+                }
+                if let Some(key) = m.iter.as_mut().unwrap().next() {
+                    let val_static = m
+                        .map
+                        .get(&key)
+                        .copied()
+                        .unwrap_or_else(|| unsafe { std::mem::transmute(vm.new_nil(mc)) });
+                    let val_gc = unsafe { std::mem::transmute(val_static) };
+                    Some((key, val_gc))
+                } else {
+                    None
+                }
+            })?;
+
+            if let Some((key, val)) = kv_opt {
+                let kvp_state = NativeKeyValuePairState::new(vm.new_string(mc, key), val);
+                let kvp_class = vm.get_builtin_class("KeyValuePair");
+                let obj = vm.new_native_state(mc, kvp_class, OpaqueState(kvp_state));
+                Ok(obj)
+            } else {
+                Ok(vm.new_nil(mc))
+            }
+        })
+        .instance_method("reset", |vm, mc, args| {
+            args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
+                let keys: Vec<String> = m.map.keys().cloned().collect();
+                m.iter = Some(keys.into_iter());
+            })?;
+            Ok(vm.new_nil(mc))
         })
 }
 
@@ -147,7 +186,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             let key_s_val = vm.call_method(mc, key, "s", vec![])?;
             let key_s = if let Value::Object(obj) = key_s_val
-                && let crate::value::ObjectPayload::String(s) = &obj.borrow().payload
+                && let ObjectPayload::String(s) = &obj.borrow().payload
             {
                 s.to_string()
             } else {
@@ -156,7 +195,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             let val_s_val = vm.call_method(mc, value, "s", vec![])?;
             let val_s = if let Value::Object(obj) = val_s_val
-                && let crate::value::ObjectPayload::String(s) = &obj.borrow().payload
+                && let ObjectPayload::String(s) = &obj.borrow().payload
             {
                 s.to_string()
             } else {
