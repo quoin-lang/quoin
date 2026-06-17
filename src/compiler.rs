@@ -713,6 +713,7 @@ mod tests {
         Node {
             source_info: None,
             value: NodeValue::Identifier(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: name.to_string(),
                 identifier_type: IdentifierType::Local,
@@ -759,6 +760,7 @@ mod tests {
                 arguments: Arc::new(MethodCallArgumentsNode {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
+                            source_info: None,
                             namespace: None,
                             name: selector_name.to_string(),
                             identifier_type: IdentifierType::Local,
@@ -852,6 +854,7 @@ mod tests {
             source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "x".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -870,6 +873,7 @@ mod tests {
             source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "a".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -880,6 +884,7 @@ mod tests {
             source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "b".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -906,6 +911,7 @@ mod tests {
             source_info: None,
             value: NodeValue::SplatLValue(SplatLValueNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "rest".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -956,6 +962,7 @@ mod tests {
             source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "a".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -966,6 +973,7 @@ mod tests {
             source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "b".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -976,6 +984,7 @@ mod tests {
             source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "c".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -1099,6 +1108,7 @@ mod tests {
             name: None,
             arguments: vec![Arc::new(BlockArgNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "x".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -1216,6 +1226,7 @@ mod tests {
             arguments: vec![
                 Arc::new(BlockArgNode {
                     identifier: Arc::new(IdentifierNode {
+                        source_info: None,
                         namespace: None,
                         name: "a".to_string(),
                         identifier_type: IdentifierType::Instance,
@@ -1224,6 +1235,7 @@ mod tests {
                 }),
                 Arc::new(BlockArgNode {
                     identifier: Arc::new(IdentifierNode {
+                        source_info: None,
                         namespace: None,
                         name: "b".to_string(),
                         identifier_type: IdentifierType::Instance,
@@ -1240,11 +1252,13 @@ mod tests {
             source_info: None,
             value: NodeValue::ClassDefinition(ClassDefinitionNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "MyClass".to_string(),
                     identifier_type: IdentifierType::Local,
                 }),
                 parent_identifier: Some(Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "Object".to_string(),
                     identifier_type: IdentifierType::Local,

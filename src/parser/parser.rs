@@ -105,6 +105,7 @@ mod tests {
 
     fn ident(name: &str, identifier_type: IdentifierType) -> Arc<Node> {
         arc_node(NodeValue::Identifier(IdentifierNode {
+            source_info: None,
             namespace: None,
             name: name.to_string(),
             identifier_type,
@@ -208,6 +209,7 @@ mod tests {
         let ast = parse("x = 42;");
         let lval = arc_node(NodeValue::IdentLValue(IdentLValueNode {
             identifier: Arc::new(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: "x".to_string(),
                 identifier_type: IdentifierType::Local,
@@ -289,6 +291,7 @@ mod tests {
     ) -> Arc<BlockArgNode> {
         Arc::new(BlockArgNode {
             identifier: Arc::new(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: name.to_string(),
                 identifier_type,
@@ -304,6 +307,7 @@ mod tests {
     ) -> Arc<BlockDeclNode> {
         Arc::new(BlockDeclNode {
             identifier: Arc::new(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: name.to_string(),
                 identifier_type,
@@ -314,6 +318,7 @@ mod tests {
 
     fn ident_node(name: &str, identifier_type: IdentifierType) -> Arc<IdentifierNode> {
         Arc::new(IdentifierNode {
+            source_info: None,
             namespace: None,
             name: name.to_string(),
             identifier_type,
@@ -325,6 +330,7 @@ mod tests {
         let ast = parse("x.negated;");
         let selector = Arc::new(MethodSelectorNode {
             identifiers: vec![Arc::new(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: "negated".to_string(),
                 identifier_type: IdentifierType::Local,
@@ -400,6 +406,7 @@ mod tests {
         let ast = parse("*rest = x;");
         let lval = arc_node(NodeValue::SplatLValue(SplatLValueNode {
             identifier: Arc::new(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: "rest".to_string(),
                 identifier_type: IdentifierType::Local,
@@ -442,6 +449,7 @@ mod tests {
         let ast = parse("(a *b) = x;");
         let lval_a = arc_node(NodeValue::IdentLValue(IdentLValueNode {
             identifier: Arc::new(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: "a".to_string(),
                 identifier_type: IdentifierType::Local,
@@ -449,6 +457,7 @@ mod tests {
         }));
         let lval_b = arc_node(NodeValue::SplatLValue(SplatLValueNode {
             identifier: Arc::new(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: "b".to_string(),
                 identifier_type: IdentifierType::Local,
@@ -537,6 +546,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::ConstDefinition(ConstDefinitionNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "MY_CONST".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -552,6 +562,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::ClassDefinition(ClassDefinitionNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "MyClass".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -575,11 +586,13 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::ClassDefinition(ClassDefinitionNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "ChildClass".to_string(),
                     identifier_type: IdentifierType::Local,
                 }),
                 parent_identifier: Some(Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "ParentClass".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -625,6 +638,7 @@ mod tests {
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
+                            source_info: None,
                             namespace: None,
                             name: "foo".to_string(),
                             identifier_type: IdentifierType::Local,
@@ -651,6 +665,7 @@ mod tests {
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
+                            source_info: None,
                             namespace: None,
                             name: "foo!".to_string(),
                             identifier_type: IdentifierType::Local,
@@ -678,11 +693,13 @@ mod tests {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![
                             Arc::new(IdentifierNode {
+                                source_info: None,
                                 namespace: None,
                                 name: "foo:".to_string(),
                                 identifier_type: IdentifierType::Local,
                             }),
                             Arc::new(IdentifierNode {
+                                source_info: None,
                                 namespace: None,
                                 name: "bar:".to_string(),
                                 identifier_type: IdentifierType::Local,
@@ -710,6 +727,7 @@ mod tests {
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
+                            source_info: None,
                             namespace: None,
                             name: "foo".to_string(),
                             identifier_type: IdentifierType::Local,
@@ -735,6 +753,7 @@ mod tests {
             expressions: vec![arc_node(NodeValue::MethodExtension(MethodExtensionNode {
                 signature: Arc::new(MethodSelectorNode {
                     identifiers: vec![Arc::new(IdentifierNode {
+                        source_info: None,
                         namespace: None,
                         name: "foo".to_string(),
                         identifier_type: IdentifierType::Local,
@@ -760,6 +779,7 @@ mod tests {
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
+                            source_info: None,
                             namespace: None,
                             name: "nil".to_string(),
                             identifier_type: IdentifierType::Keyword,
@@ -790,6 +810,7 @@ mod tests {
                 arguments: Arc::new(MethodCallArgumentsNode {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
+                            source_info: None,
                             namespace: None,
                             name: "foo".to_string(),
                             identifier_type: IdentifierType::Local,
@@ -810,6 +831,7 @@ mod tests {
                 arguments: Arc::new(MethodCallArgumentsNode {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
+                            source_info: None,
                             namespace: None,
                             name: "foo!".to_string(),
                             identifier_type: IdentifierType::Local,
@@ -830,6 +852,7 @@ mod tests {
                 arguments: Arc::new(MethodCallArgumentsNode {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
+                            source_info: None,
                             namespace: None,
                             name: "foo!".to_string(),
                             identifier_type: IdentifierType::Local,
@@ -851,11 +874,13 @@ mod tests {
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![
                             Arc::new(IdentifierNode {
+                                source_info: None,
                                 namespace: None,
                                 name: "foo".to_string(),
                                 identifier_type: IdentifierType::Local,
                             }),
                             Arc::new(IdentifierNode {
+                                source_info: None,
                                 namespace: None,
                                 name: "bar".to_string(),
                                 identifier_type: IdentifierType::Local,
@@ -874,13 +899,16 @@ mod tests {
         // Namespaced Ident: [foo/bar]baz;
         let ast = parse("[foo/bar]baz;");
         let ns = Arc::new(NamespaceNode {
+            source_info: None,
             identifiers: vec![
                 Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "foo".to_string(),
                     identifier_type: IdentifierType::Local,
                 }),
                 Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "bar".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -890,6 +918,7 @@ mod tests {
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
             expressions: vec![arc_node(NodeValue::Identifier(IdentifierNode {
+                source_info: None,
                 namespace: Some(ns),
                 name: "baz".to_string(),
                 identifier_type: IdentifierType::Namespaced,
@@ -900,11 +929,13 @@ mod tests {
         // Root namespace: [/]baz;
         let ast = parse("[/]baz;");
         let ns = Arc::new(NamespaceNode {
+            source_info: None,
             identifiers: vec![],
         });
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
             expressions: vec![arc_node(NodeValue::Identifier(IdentifierNode {
+                source_info: None,
                 namespace: Some(ns),
                 name: "baz".to_string(),
                 identifier_type: IdentifierType::Namespaced,
@@ -917,6 +948,7 @@ mod tests {
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
             expressions: vec![arc_node(NodeValue::Identifier(IdentifierNode {
+                source_info: None,
                 namespace: None,
                 name: "nil".to_string(),
                 identifier_type: IdentifierType::Local,
@@ -943,6 +975,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::UserString(UserStringNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "MyStr".to_string(),
                     identifier_type: IdentifierType::Local,
@@ -958,6 +991,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::UserList(UserListNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: "MyList".to_string(),
                     identifier_type: IdentifierType::Local,

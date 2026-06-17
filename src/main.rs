@@ -22,6 +22,24 @@ fn main() {
     let args = std::env::args().collect::<Vec<String>>();
 
     if let Some(arg) = args.get(1)
+        && arg == "highlight"
+    {
+        let Some(path) = args.get(2) else {
+            eprintln!("Usage: cargo run -- highlight FILE");
+            std::process::exit(2);
+        };
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading {}: {}", path, e);
+                std::process::exit(1);
+            }
+        };
+        print!("{}", new_vm::highlighter::highlight_to_ansi(&source));
+        return;
+    }
+
+    if let Some(arg) = args.get(1)
         && arg == "test"
     {
         println!("Loading bblib/*.b...");

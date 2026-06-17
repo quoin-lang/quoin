@@ -160,11 +160,23 @@ pub struct DoubleNode {
 pub struct IdentLValueNode {
     pub identifier: Arc<IdentifierNode>,
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct IdentifierNode {
     pub namespace: Option<Arc<NamespaceNode>>,
     pub name: String,
     pub identifier_type: IdentifierType,
+    pub source_info: Option<SourceInfo>,
+}
+
+// source_info is excluded from equality so that AST comparisons (and the
+// parser tests, which compare against source-info-free expected trees) match
+// regardless of where in the source an identifier appeared.
+impl PartialEq for IdentifierNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.namespace == other.namespace
+            && self.name == other.name
+            && self.identifier_type == other.identifier_type
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct IntegerNode {
@@ -202,9 +214,17 @@ pub struct MethodReturnNode {
 pub struct MethodSelectorNode {
     pub identifiers: Vec<Arc<IdentifierNode>>,
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct NamespaceNode {
     pub identifiers: Vec<Arc<IdentifierNode>>,
+    pub source_info: Option<SourceInfo>,
+}
+
+// source_info excluded from equality (see IdentifierNode).
+impl PartialEq for NamespaceNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.identifiers == other.identifiers
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgramNode {
@@ -331,6 +351,8 @@ impl AstVisitor {
             filename: self.filename.clone(),
             line,
             column,
+            start: start_char,
+            end: stop_char + 1,
             source_text,
         })
     }
@@ -367,7 +389,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_MethodReturn(&mut self, ctx: &MethodReturnContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodReturn(MethodReturnNode {
                 value: Arc::new(self.visit(&*ctx.expr().unwrap())),
             }),
@@ -376,7 +398,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_YieldReturn(&mut self, ctx: &YieldReturnContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: YieldReturn(YieldReturnNode {
                 value: Arc::new(self.visit(&*ctx.expr().unwrap())),
             }),
@@ -385,7 +407,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_BlockReturn(&mut self, ctx: &BlockReturnContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: BlockReturn(BlockReturnNode {
                 value: Arc::new(self.visit(&*ctx.expr().unwrap())),
             }),
@@ -396,23 +418,23 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         self.visit(&*ctx.assignment().unwrap())
     }
 
-    fn visit_Bang3Stmt(&mut self, _ctx: &Bang3StmtContext<'a>) -> Self::Return {
+    fn visit_Bang3Stmt(&mut self, ctx: &Bang3StmtContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Bang3,
         }
     }
 
-    fn visit_Dot3Stmt(&mut self, _ctx: &Dot3StmtContext<'a>) -> Self::Return {
+    fn visit_Dot3Stmt(&mut self, ctx: &Dot3StmtContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Dot3,
         }
     }
 
-    fn visit_Huh3Stmt(&mut self, _ctx: &Huh3StmtContext<'a>) -> Self::Return {
+    fn visit_Huh3Stmt(&mut self, ctx: &Huh3StmtContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Huh3,
         }
     }
@@ -426,13 +448,14 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         for node in ctx.ident_all() {
             let id = cast_node!(Identifier(id), id, self.visit(&*node));
             idents.push(Arc::new(IdentifierNode {
+                source_info: id.source_info.clone(),
                 namespace: id.namespace.clone(),
                 name: format!("{}:", id.name),
                 identifier_type: id.identifier_type,
             }));
         }
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodSelector(MethodSelectorNode {
                 identifiers: idents,
             }),
@@ -441,7 +464,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_SelectorNoArgs(&mut self, ctx: &SelectorNoArgsContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodSelector(MethodSelectorNode {
                 identifiers: vec![Arc::new(cast_node!(
                     Identifier(id),
@@ -456,7 +479,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         let node = self.visit(&*ctx.ident().unwrap());
         let ident = Self::add_bang_to_ident(cast_node!(Identifier(id), id, node));
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodSelector(MethodSelectorNode {
                 identifiers: vec![Arc::new(ident)],
             }),
@@ -467,9 +490,10 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         let binding = ctx.symbol().unwrap().get_text();
         let selectorText = binding.trim_start_matches('#').trim_matches('\'');
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodSelector(MethodSelectorNode {
                 identifiers: vec![Arc::new(IdentifierNode {
+                    source_info: self.extract_source_info(ctx),
                     namespace: None,
                     name: String::from(selectorText),
                     identifier_type: IdentifierType::Local,
@@ -486,7 +510,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Assignment(AssignmentNode {
                 lvalues: nodes,
                 rvalue: Arc::new(self.visit(&*ctx.expr().unwrap())),
@@ -496,7 +520,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_IdentLValue(&mut self, ctx: &IdentLValueContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: IdentLValue(IdentLValueNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -509,7 +533,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_SplatLValue(&mut self, ctx: &SplatLValueContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: SplatLValue(SplatLValueNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -520,16 +544,16 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
     }
 
-    fn visit_IgnoredLValue(&mut self, _ctx: &IgnoredLValueContext<'a>) -> Self::Return {
+    fn visit_IgnoredLValue(&mut self, ctx: &IgnoredLValueContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: IgnoredLValue,
         }
     }
 
-    fn visit_IgnoredSplatLValue(&mut self, _ctx: &IgnoredSplatLValueContext<'a>) -> Self::Return {
+    fn visit_IgnoredSplatLValue(&mut self, ctx: &IgnoredSplatLValueContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: IgnoredSplatLValue,
         }
     }
@@ -540,7 +564,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
             lvalues.push(Arc::new(self.visit(&*node)));
         }
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: SubLValue(SubLValueNode { lvalues }),
         }
     }
@@ -548,13 +572,23 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_MulExpr(&mut self, ctx: &MulExprContext<'a>) -> Self::Return {
         let left = self.visit(&*ctx.left.clone().unwrap());
         let right = self.visit(&*ctx.right.clone().unwrap());
-        self.make_binary_operator(BinaryOperatorType::Mul, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Mul,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_AndExpr(&mut self, ctx: &AndExprContext<'a>) -> Self::Return {
         let left = self.visit(&*ctx.left.clone().unwrap());
         let right = self.visit(&*ctx.right.clone().unwrap());
-        self.make_binary_operator(BinaryOperatorType::And, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::And,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_LiteralString(&mut self, ctx: &LiteralStringContext<'a>) -> Self::Return {
@@ -562,7 +596,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         let inner_string = raw_string.substring(1, raw_string.len() - 1).to_string();
         let unescaped_string = Self::unescape(inner_string);
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Str(StringNode {
                 value: unescaped_string,
             }),
@@ -583,9 +617,10 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         let unescaped_string = Self::unescape(string_string.clone());
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: UserString(UserStringNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: ident_string.to_string(),
                     identifier_type: IdentifierType::Local,
@@ -597,7 +632,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_RegexExpr(&mut self, ctx: &RegexExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Regex(RegexNode {
                 value: ctx.REGEXP().unwrap().get_text(),
             }),
@@ -607,13 +642,23 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_GtExpr(&mut self, ctx: &GtExprContext<'a>) -> Self::Return {
         let left = self.visit(&*ctx.left.clone().unwrap());
         let right = self.visit(&*ctx.right.clone().unwrap());
-        self.make_binary_operator(BinaryOperatorType::Gt, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Gt,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_LtExpr(&mut self, ctx: &LtExprContext<'a>) -> Self::Return {
         let left = self.visit(&*ctx.left.clone().unwrap());
         let right = self.visit(&*ctx.right.clone().unwrap());
-        self.make_binary_operator(BinaryOperatorType::Lt, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Lt,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_UserListExpr(&mut self, ctx: &UserListExprContext<'a>) -> Self::Return {
@@ -629,9 +674,10 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: UserList(UserListNode {
                 identifier: Arc::new(IdentifierNode {
+                    source_info: None,
                     namespace: None,
                     name: ident_name,
                     identifier_type: IdentifierType::Local,
@@ -644,12 +690,17 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_LtEqExpr(&mut self, ctx: &LtEqExprContext<'a>) -> Self::Return {
         let left = self.visit(&*ctx.left.clone().unwrap());
         let right = self.visit(&*ctx.right.clone().unwrap());
-        self.make_binary_operator(BinaryOperatorType::LtEq, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::LtEq,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_MethodDefExpr(&mut self, ctx: &MethodDefExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodDefinition(MethodDefinitionNode {
                 signature: Arc::new(cast_node!(
                     MethodSelector(ms),
@@ -665,7 +716,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         let binding = ctx.symbol().unwrap().get_text();
         let symbolText = binding.trim_start_matches('#').trim_matches('\'');
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Symbol(SymbolNode {
                 value: String::from(symbolText),
             }),
@@ -674,7 +725,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_ClassDefExpr(&mut self, ctx: &ClassDefExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: ClassDefinition(ClassDefinitionNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -689,7 +740,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_ExprCallExpr(&mut self, ctx: &ExprCallExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodCall(MethodCallNode {
                 subject: Some(Arc::new(self.visit(&*ctx.subject.clone().unwrap()))),
                 arguments: Arc::new(cast_node!(
@@ -708,14 +759,14 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Set(SetNode { values: exprs }),
         }
     }
 
     fn visit_UnModExpr(&mut self, ctx: &UnModExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: UnaryOperator(UnaryOperatorNode {
                 operator: UnaryOperatorType::Mod,
                 right: Arc::new(self.visit(&*ctx.expr().clone().unwrap())),
@@ -725,7 +776,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_MethodExtExpr(&mut self, ctx: &MethodExtExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodExtension(MethodExtensionNode {
                 signature: Arc::new(cast_node!(
                     MethodSelector(ms),
@@ -749,7 +800,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Map(MapNode { keys, values }),
         }
     }
@@ -761,7 +812,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: List(ListNode { values: exprs }),
         }
     }
@@ -769,18 +820,28 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_SubExpr(&mut self, ctx: &SubExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::Sub, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Sub,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_AddExpr(&mut self, ctx: &AddExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::Add, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Add,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_ConstDefExpr(&mut self, ctx: &ConstDefExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: ConstDefinition(ConstDefinitionNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -795,12 +856,17 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_RangeExpr(&mut self, ctx: &RangeExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::Range, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Range,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_UnPlusExpr(&mut self, ctx: &UnPlusExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: UnaryOperator(UnaryOperatorNode {
                 operator: UnaryOperatorType::Add,
                 right: Arc::new(self.visit(&*ctx.expr().clone().unwrap())),
@@ -811,12 +877,17 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_OrExpr(&mut self, ctx: &OrExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::Or, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Or,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_ClassDef2Expr(&mut self, ctx: &ClassDef2ExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: ClassDefinition(ClassDefinitionNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -836,18 +907,28 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_GtEqExpr(&mut self, ctx: &GtEqExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::GtEq, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::GtEq,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_DivExpr(&mut self, ctx: &DivExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::Div, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Div,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_UnBangExpr(&mut self, ctx: &UnBangExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: UnaryOperator(UnaryOperatorNode {
                 operator: UnaryOperatorType::Bang,
                 right: Arc::new(self.visit(&*ctx.expr().clone().unwrap())),
@@ -858,12 +939,17 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_NotEqExpr(&mut self, ctx: &NotEqExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::NotEq, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::NotEq,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_UnMinusExpr(&mut self, ctx: &UnMinusExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: UnaryOperator(UnaryOperatorNode {
                 operator: UnaryOperatorType::Sub,
                 right: Arc::new(self.visit(&*ctx.expr().clone().unwrap())),
@@ -874,12 +960,17 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_EqExpr(&mut self, ctx: &EqExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::Eq, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Eq,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_ClassExtExpr(&mut self, ctx: &ClassExtExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: ClassExtension(ClassExtensionNode {
                 expression: Arc::new(self.visit(&*ctx.expr().clone().unwrap())),
                 block: Arc::new(cast_node!(Block(b), b, self.visit(&*ctx.block().unwrap()))),
@@ -894,18 +985,28 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_ModExpr(&mut self, ctx: &ModExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::Mod, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Mod,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_MatchExpr(&mut self, ctx: &MatchExprContext<'a>) -> Self::Return {
         let left = self.visit(ctx.left.clone().unwrap().as_ref());
         let right = self.visit(ctx.right.clone().unwrap().as_ref());
-        self.make_binary_operator(BinaryOperatorType::Match, left, right)
+        self.make_binary_operator(
+            BinaryOperatorType::Match,
+            left,
+            right,
+            self.extract_source_info(ctx),
+        )
     }
 
     fn visit_DefCallExpr(&mut self, ctx: &DefCallExprContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodCall(MethodCallNode {
                 subject: None,
                 arguments: Arc::new(cast_node!(
@@ -931,7 +1032,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         };
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: nodeValue,
         }
     }
@@ -948,7 +1049,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodCallArguments(MethodCallArgumentsNode {
                 signature: Arc::new(MethodSelectorNode {
                     identifiers: idents,
@@ -961,7 +1062,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_CallSigNoArg(&mut self, ctx: &CallSigNoArgContext<'a>) -> Self::Return {
         let ident = cast_node!(Identifier(id), id, self.visit(&*ctx.ident().unwrap()));
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodCallArguments(MethodCallArgumentsNode {
                 signature: Arc::new(MethodSelectorNode {
                     identifiers: vec![Arc::new(ident)],
@@ -975,7 +1076,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         let ident = cast_node!(Identifier(id), id, self.visit(&*ctx.ident().unwrap()));
         let ident = Self::add_bang_to_ident(ident);
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: MethodCallArguments(MethodCallArgumentsNode {
                 signature: Arc::new(MethodSelectorNode {
                     identifiers: vec![Arc::new(ident)],
@@ -987,8 +1088,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_NamespacedIdent(&mut self, ctx: &NamespacedIdentContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Identifier(IdentifierNode {
+                source_info: self.extract_source_info(ctx),
                 namespace: Some(Arc::new(cast_node!(
                     Namespace(ns),
                     ns,
@@ -1002,8 +1104,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_InstanceIdent(&mut self, ctx: &InstanceIdentContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Identifier(IdentifierNode {
+                source_info: self.extract_source_info(ctx),
                 namespace: None,
                 name: ctx.ident().unwrap().get_text(),
                 identifier_type: IdentifierType::Instance,
@@ -1013,8 +1116,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_LocalIdent(&mut self, ctx: &LocalIdentContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Identifier(IdentifierNode {
+                source_info: self.extract_source_info(ctx),
                 namespace: None,
                 name: ctx.ident().unwrap().get_text(),
                 identifier_type: IdentifierType::Local,
@@ -1029,17 +1133,19 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
 
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Namespace(NamespaceNode {
+                source_info: self.extract_source_info(ctx),
                 identifiers: idents,
             }),
         }
     }
 
-    fn visit_RootNS(&mut self, _ctx: &RootNSContext<'a>) -> Self::Return {
+    fn visit_RootNS(&mut self, ctx: &RootNSContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Namespace(NamespaceNode {
+                source_info: self.extract_source_info(ctx),
                 identifiers: vec![],
             }),
         }
@@ -1115,16 +1221,16 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
     }
 
-    fn visit_BlockArgIgnored(&mut self, _ctx: &BlockArgIgnoredContext<'a>) -> Self::Return {
+    fn visit_BlockArgIgnored(&mut self, ctx: &BlockArgIgnoredContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: BlockIgnoredArgument,
         }
     }
 
     fn visit_BlockArgTyped(&mut self, ctx: &BlockArgTypedContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: BlockArg(BlockArgNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -1142,7 +1248,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_BlockArgUntyped(&mut self, ctx: &BlockArgUntypedContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: BlockArg(BlockArgNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -1156,7 +1262,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_BlockDeclTyped(&mut self, ctx: &BlockDeclTypedContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: BlockDecl(BlockDeclNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -1174,7 +1280,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_BlockDeclUntyped(&mut self, ctx: &BlockDeclUntypedContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: BlockDecl(BlockDeclNode {
                 identifier: Arc::new(cast_node!(
                     Identifier(id),
@@ -1188,8 +1294,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_ArgIdentInst(&mut self, ctx: &ArgIdentInstContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Identifier(IdentifierNode {
+                source_info: self.extract_source_info(ctx),
                 namespace: None,
                 name: ctx.ident().unwrap().get_text(),
                 identifier_type: IdentifierType::Instance,
@@ -1199,8 +1306,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_ArgIdentNormal(&mut self, ctx: &ArgIdentNormalContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Identifier(IdentifierNode {
+                source_info: self.extract_source_info(ctx),
                 namespace: None,
                 name: ctx.ident().unwrap().get_text(),
                 identifier_type: IdentifierType::Local,
@@ -1210,8 +1318,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_IdentKeyword(&mut self, ctx: &IdentKeywordContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Identifier(IdentifierNode {
+                source_info: self.extract_source_info(ctx),
                 namespace: None,
                 name: ctx.keyword().unwrap().get_text(),
                 identifier_type: IdentifierType::Keyword,
@@ -1221,8 +1330,9 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_IdentOther(&mut self, ctx: &IdentOtherContext<'a>) -> Self::Return {
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Identifier(IdentifierNode {
+                source_info: self.extract_source_info(ctx),
                 namespace: None,
                 name: ctx.IDENT().clone().unwrap().get_text(),
                 identifier_type: IdentifierType::Local,
@@ -1233,7 +1343,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     fn visit_symbol(&mut self, ctx: &SymbolContext<'a>) -> Self::Return {
         let symbolText = ctx.SYMBOL().unwrap().symbol.text.to_string();
         Node {
-            source_info: None,
+            source_info: self.extract_source_info(ctx),
             value: Symbol(SymbolNode {
                 value: symbolText
                     .trim_start_matches(&['#', '\''])
@@ -1262,6 +1372,7 @@ impl AstVisitor {
                 BlockIgnoredArgument => {
                     arguments.push(Arc::new(BlockArgNode {
                         identifier: Arc::new(IdentifierNode {
+                            source_info: None,
                             name: "_".to_string(),
                             namespace: None,
                             identifier_type: IdentifierType::Local,
@@ -1290,9 +1401,15 @@ impl AstVisitor {
         (arguments, decls, decl_block)
     }
 
-    fn make_binary_operator(&mut self, op: BinaryOperatorType, left: Node, right: Node) -> Node {
+    fn make_binary_operator(
+        &mut self,
+        op: BinaryOperatorType,
+        left: Node,
+        right: Node,
+        source_info: Option<SourceInfo>,
+    ) -> Node {
         Node {
-            source_info: None,
+            source_info,
             value: BinaryOperator(BinaryOperatorNode {
                 operator: op,
                 left: Arc::new(left),
@@ -1303,6 +1420,7 @@ impl AstVisitor {
 
     fn add_bang_to_ident(id: IdentifierNode) -> IdentifierNode {
         IdentifierNode {
+            source_info: id.source_info,
             namespace: id.namespace,
             name: id.name + "!",
             identifier_type: id.identifier_type,
@@ -1436,6 +1554,11 @@ impl Node {
             Set(node) => {
                 for val in &mut node.values {
                     Arc::make_mut(val).clear_source_info();
+                }
+            }
+            SubLValue(node) => {
+                for l in &mut node.lvalues {
+                    Arc::make_mut(l).clear_source_info();
                 }
             }
             UnaryOperator(node) => {

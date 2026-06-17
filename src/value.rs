@@ -61,6 +61,10 @@ pub struct SourceInfo {
     pub filename: String,
     pub line: usize,
     pub column: usize,
+    /// Byte offset of the first character of this node in the source text.
+    pub start: usize,
+    /// Byte offset one past the last character of this node (exclusive).
+    pub end: usize,
     pub source_text: Option<String>,
 }
 
