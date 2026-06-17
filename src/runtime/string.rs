@@ -39,6 +39,16 @@ pub fn build_string_class() -> NativeClassBuilder {
             "==:",
             |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
         )
+        .instance_method("<", |vm, mc, args| {
+            let lhs = arg!(args, String, 0);
+            let rhs = arg!(args, String, 1);
+            Ok(vm.new_bool(mc, *lhs < *rhs))
+        })
+        .instance_method(">", |vm, mc, args| {
+            let lhs = arg!(args, String, 0);
+            let rhs = arg!(args, String, 1);
+            Ok(vm.new_bool(mc, *lhs > *rhs))
+        })
         .instance_method("mod", |vm, mc, args| {
             let s_borrow = arg!(args, String, 0);
             let s = s_borrow.to_string();
@@ -209,18 +219,14 @@ pub fn build_string_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, s.to_uppercase()))
         })
         .instance_method("splitString:", |vm, mc, args| {
-            println!("DEBUG splitString: starting, s='{}', pat='{}'", *arg!(args, String, 0), *arg!(args, String, 1));
             let s = arg!(args, String, 0);
             let pat = arg!(args, String, 1);
             let parts: Vec<Value> = s.split(&**pat)
                 .map(|part| {
-                    println!("DEBUG splitString: part='{}'", part);
                     vm.new_string(mc, part.to_string())
                 })
                 .collect();
-            println!("DEBUG splitString: parts len={}", parts.len());
             let res = vm.new_list(mc, parts);
-            println!("DEBUG splitString: list created");
             Ok(res)
         })
 }

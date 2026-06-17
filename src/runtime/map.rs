@@ -100,7 +100,8 @@ pub fn build_map_class() -> NativeClassBuilder {
         .instance_method("next", |vm, mc, args| {
             let kv_opt = args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
                 if m.iter.is_none() {
-                    let keys: Vec<String> = m.map.keys().cloned().collect();
+                    let mut keys: Vec<String> = m.map.keys().cloned().collect();
+                    keys.sort();
                     m.iter = Some(keys.into_iter());
                 }
                 if let Some(key) = m.iter.as_mut().unwrap().next() {
@@ -127,7 +128,8 @@ pub fn build_map_class() -> NativeClassBuilder {
         })
         .instance_method("reset", |vm, mc, args| {
             args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
-                let keys: Vec<String> = m.map.keys().cloned().collect();
+                let mut keys: Vec<String> = m.map.keys().cloned().collect();
+                keys.sort();
                 m.iter = Some(keys.into_iter());
             })?;
             Ok(vm.new_nil(mc))
