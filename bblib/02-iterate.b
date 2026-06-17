@@ -176,9 +176,11 @@ Mixin <- Iterate <- {
      }
 
      uniq -> {
-         map = #{};
-         .each:{ |x| map.at:x.id.s put:x };
-         ^map.values
+         result = #();
+         .each:{ |x|
+             (result.contains?:x).else:{ result.add:x }
+         };
+         ^result
      }
 
      zip: -> { |it2|
