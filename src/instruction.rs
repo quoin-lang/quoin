@@ -30,7 +30,7 @@ pub enum Instruction {
     DefineLocal(String),
     StoreLocal(String),
     LoadGlobal(NamespacedName),
-    StoreGlobal(NamespacedName),
+    StoreGlobal(NamespacedName, bool),
     Push(Constant),
     Pop,
     Dup,

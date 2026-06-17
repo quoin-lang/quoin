@@ -223,7 +223,7 @@ impl Compiler {
                 let ns_name = crate::value::NamespacedName::from_ast(&const_def.identifier);
                 self.compile_node(&const_def.rvalue, bytecode)?;
                 bytecode.push(Instruction::Dup);
-                bytecode.push(Instruction::StoreGlobal(ns_name));
+                bytecode.push(Instruction::StoreGlobal(ns_name, true));
             }
             NodeValue::UserString(user_str) => {
                 let ns_name = crate::value::NamespacedName::from_ast(&user_str.identifier);
@@ -345,7 +345,7 @@ impl Compiler {
                 let id = &ident_lval.identifier;
                 if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced {
                     let ns_name = crate::value::NamespacedName::from_ast(id);
-                    bytecode.push(Instruction::StoreGlobal(ns_name));
+                    bytecode.push(Instruction::StoreGlobal(ns_name, false));
                 } else {
                     let name = &id.name;
                     self.compile_ident_store(&id.identifier_type, name, bytecode);
@@ -368,7 +368,11 @@ impl Compiler {
         name: &String,
         bytecode: &mut Vec<Instruction>,
     ) {
-        if ident_type == &IdentifierType::Instance {
+        let first_char = name.chars().next().unwrap_or('\0');
+        if first_char.is_ascii_uppercase() {
+            let ns_name = crate::value::NamespacedName::new(Vec::new(), name.clone());
+            bytecode.push(Instruction::StoreGlobal(ns_name, false));
+        } else if ident_type == &IdentifierType::Instance {
             bytecode.push(Instruction::StoreField(name.clone()));
         } else if self.is_local(name) {
             bytecode.push(Instruction::StoreLocal(name.clone()));

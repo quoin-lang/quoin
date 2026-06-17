@@ -664,7 +664,6 @@ impl<'gc> VmState<'gc> {
                             )));
                         }
                         Err(BBError::NonLocalReturn) => {
-                            println!("DEBUG call_method Err(NonLocalReturn): frames.len() = {}, initial_frame_count = {}", self.frames.len(), initial_frame_count);
                             if self.frames.len() > initial_frame_count {
                                 continue;
                             } else if self.frames.len() == initial_frame_count {
@@ -828,7 +827,6 @@ impl<'gc> VmState<'gc> {
                         )));
                     }
                     Err(BBError::NonLocalReturn) => {
-                        println!("DEBUG execute_block Err(NonLocalReturn): frames.len() = {}, initial_frame_count = {}", self.frames.len(), initial_frame_count);
                         if self.frames.len() > initial_frame_count {
                             continue;
                         } else if self.frames.len() == initial_frame_count {
@@ -1042,7 +1040,7 @@ impl<'gc> VmState<'gc> {
         if let Value::Object(obj) = method_val {
             match &obj.borrow().payload {
                 ObjectPayload::Block(block) => {
-                    if args.len() != block.param_names.len() {
+                    if args.len() < block.param_names.len() {
                         return false;
                     }
                     for (i, param_type) in block.param_types.iter().enumerate() {
@@ -1062,7 +1060,7 @@ impl<'gc> VmState<'gc> {
                         if let Value::Object(block_obj) = block_val
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
-                            if args.len() != block.param_names.len() {
+                            if args.len() < block.param_names.len() {
                                 return false;
                             }
                             for (i, param_type) in block.param_types.iter().enumerate() {
@@ -1507,12 +1505,22 @@ impl<'gc> VmState<'gc> {
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::DefineLocal(name) => {
+                if name == "true" || name == "false" || name == "nil" {
+                    let err_msg = format!("Can't modify keyword {}", name);
+                    self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+                    return Err(BBError::Other(err_msg));
+                }
                 let val = self.pop()?;
                 let frame = &mut self.frames[frame_idx];
                 frame.env.borrow_mut(mc).vars.insert(name, val);
                 frame.ip += 1;
             }
             Instruction::StoreLocal(name) => {
+                if name == "true" || name == "false" || name == "nil" {
+                    let err_msg = format!("Can't modify keyword {}", name);
+                    self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+                    return Err(BBError::Other(err_msg));
+                }
                 let val = self.pop()?;
                 let frame = &mut self.frames[frame_idx];
                 if !EnvFrame::set(frame.env, mc, &name, val) {
@@ -1530,8 +1538,30 @@ impl<'gc> VmState<'gc> {
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
-            Instruction::StoreGlobal(name) => {
+            Instruction::StoreGlobal(name, is_define) => {
                 let val = self.pop()?;
+                if name.name == "true" || name.name == "false" || name.name == "nil" {
+                    let err_msg = format!("Can't modify keyword {}", name.name);
+                    self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+                    return Err(BBError::Other(err_msg));
+                }
+                let first_char = name.name.chars().next().unwrap_or('\0');
+                if first_char.is_ascii_uppercase() {
+                    let exists = self.globals.borrow().contains_key(&name);
+                    if is_define {
+                        if exists {
+                            let err_msg = format!("Global {} is already defined in this scope", name.to_explicit_string());
+                            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+                            return Err(BBError::Other(err_msg));
+                        }
+                    } else {
+                        if exists {
+                            let err_msg = format!("Can't modify global constant {}", name.to_explicit_string());
+                            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+                            return Err(BBError::Other(err_msg));
+                        }
+                    }
+                }
                 self.globals.borrow_mut(mc).insert(name, val);
                 self.frames[frame_idx].ip += 1;
             }
@@ -1621,16 +1651,12 @@ impl<'gc> VmState<'gc> {
             Instruction::MethodReturn => {
                 let ret_val = self.pop()?;
                 let enclosing_id = self.frames[frame_idx].enclosing_method_id;
-                println!("DEBUG MethodReturn: enclosing_id = {:?}, ret_val = {:?}", enclosing_id, ret_val);
-                println!("DEBUG MethodReturn stack before pop:");
-                for (idx, f) in self.frames.iter().enumerate() {
-                    println!("  idx = {}, id = {}, name = {:?}", idx, f.id, f.block.name);
-                }
+
                 if let Some(target_id) = enclosing_id {
                     let mut ret_val = ret_val;
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
-                        println!("DEBUG MethodReturn pop frame: id = {}, name = {:?}", f.id, f.block.name);
+
                         if let Some(obj) = f.instantiating_obj {
                             let env_borrow = f.env.borrow();
                             self.finalize_instantiation(mc, obj, &env_borrow)?;
@@ -2232,7 +2258,7 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::Push(Constant::Int(77)),
-                Instruction::StoreGlobal(NamespacedName::new(Vec::new(), "g_var".to_string())),
+                Instruction::StoreGlobal(NamespacedName::new(Vec::new(), "g_var".to_string()), false),
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "g_var".to_string())),
             ],
             |vm, mc| {
@@ -2855,7 +2881,7 @@ mod tests {
                 vm.step(mc).unwrap();
                 vm.step(mc).unwrap();
                 assert_eq!(vm.frames.len(), 1);
-                assert_eq!(to_spec(vm.pop().unwrap()), ValueSpec::Nil);
+                assert_eq!(to_spec(vm.pop().unwrap()), ValueSpec::Bool(true));
 
                 vm.step(mc).unwrap();
                 vm.step(mc).unwrap();
