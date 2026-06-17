@@ -201,6 +201,18 @@ pub fn build_list_class() -> NativeClassBuilder {
 
             Ok(vm.new_bool(mc, true))
         })
+        .instance_method("bind:", |vm, mc, args| {
+            let block = arg!(args, Block, 1);
+            let block_args = args[0].with_native_state(|l: &NativeListState| {
+                l.get_vec()
+                    .iter()
+                    .take(block.param_names.len())
+                    .map(|v| unsafe { std::mem::transmute(*v) })
+                    .collect::<Vec<_>>()
+            })?;
+
+            vm.execute_block(mc, block, block_args, None)
+        })
         .instance_method("sort", |vm, mc, args| {
             let mut vec = args[0]
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())

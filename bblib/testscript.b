@@ -136,14 +136,13 @@ file = [IO]File.open: '/etc/zshrc';
 .print: 'file path =' and: file.fullpath;
 .print: 'file class =' and: file.class;
 .print: 'file class name =' and: file.class.name;
-.print: '[/]Object =' and: [ / ]Object;
-.print: 'Object == [/]Object =' and: (Object == [ / ]Object);
+.print: '[/]Object =' and: [/]Object;
+.print: 'Object == [/]Object =' and: (Object == [/]Object);
 
 folder = [IO]Folder.open: 'bblib/tests/';
 .print:'Test files =' and:folder.list;
 
 name = 'Damon';
-
 name.case:{
     .when:'Damon'               do:{ 'Hi Damon'.print          };
     .when:'Bagel'               do:{ 'Hello delicious'.print   };
@@ -153,7 +152,7 @@ name.case:{
     .default:{ 'Who are you and what did you do with my bagel'.print };
 };
 
-.print:'Low =' and:('Low' == 5.case:{
+.print:'Low =' and:'Low' == 5.case:{
     .when:1..10  do:'Low';
     .when:11..20 do:'High';
-});
+};

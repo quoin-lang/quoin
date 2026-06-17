@@ -17,6 +17,7 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Move to a better iterator design that doesn't require mutability.
 - [ ] Rewrite the TestSuite so it doesn't mix the tests into itself, too many conflicts.
 - [ ] List, Regex and Map #bind:{}
+  - [x] List#bind:{}
   - See bblib/presentation/20-method-destructuring.b
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
 - [ ] Confirm `%'string%{eval}' is working.
