@@ -117,7 +117,7 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         }
         let receiver = args[0];
         let method_args = args[1..].to_vec();
-        vm.start_block_as_method(mc, self.block, receiver, method_args, selector);
+        vm.start_block_as_method(mc, self.block, receiver, method_args, selector, true);
         Ok(())
     }
 }
@@ -652,17 +652,28 @@ impl<'gc> VmState<'gc> {
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
                 while self.frames.len() > initial_frame_count {
-                    match self.step_internal(mc)? {
-                        VmStatus::Running => {}
-                        VmStatus::Finished(_) => {
+                    match self.step_internal(mc) {
+                        Ok(VmStatus::Running) => {}
+                        Ok(VmStatus::Finished(_)) => {
                             break;
                         }
-                        VmStatus::Yeeted(val) => {
+                        Ok(VmStatus::Yeeted(val)) => {
                             return Err(BBError::Other(format!(
                                 "Uncaught exception during method call: {}",
                                 val
                             )));
                         }
+                        Err(BBError::NonLocalReturn) => {
+                            println!("DEBUG call_method Err(NonLocalReturn): frames.len() = {}, initial_frame_count = {}", self.frames.len(), initial_frame_count);
+                            if self.frames.len() > initial_frame_count {
+                                continue;
+                            } else if self.frames.len() == initial_frame_count {
+                                break;
+                            } else {
+                                return Err(BBError::NonLocalReturn);
+                            }
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -715,17 +726,27 @@ impl<'gc> VmState<'gc> {
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
                 while self.frames.len() > initial_frame_count {
-                    match self.step_internal(mc)? {
-                        VmStatus::Running => {}
-                        VmStatus::Finished(_) => {
+                    match self.step_internal(mc) {
+                        Ok(VmStatus::Running) => {}
+                        Ok(VmStatus::Finished(_)) => {
                             break;
                         }
-                        VmStatus::Yeeted(val) => {
+                        Ok(VmStatus::Yeeted(val)) => {
                             return Err(BBError::Other(format!(
                                 "Uncaught exception during method call: {}",
                                 val
                             )));
                         }
+                        Err(BBError::NonLocalReturn) => {
+                            if self.frames.len() > initial_frame_count {
+                                continue;
+                            } else if self.frames.len() == initial_frame_count {
+                                break;
+                            } else {
+                                return Err(BBError::NonLocalReturn);
+                            }
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -788,24 +809,35 @@ impl<'gc> VmState<'gc> {
     ) -> Result<Value<'gc>, BBError> {
         let initial_frame_count = self.frames.len();
         if let Some(receiver) = self_val {
-            self.start_block_as_method(mc, block, receiver, args, None);
+            self.start_block_as_method(mc, block, receiver, args, None, false);
         } else {
             self.start_block(mc, block, args, None, None);
         }
 
         if self.frames.len() > initial_frame_count {
             while self.frames.len() > initial_frame_count {
-                match self.step_internal(mc)? {
-                    VmStatus::Running => {}
-                    VmStatus::Finished(_) => {
+                match self.step_internal(mc) {
+                    Ok(VmStatus::Running) => {}
+                    Ok(VmStatus::Finished(_)) => {
                         break;
                     }
-                    VmStatus::Yeeted(val) => {
+                    Ok(VmStatus::Yeeted(val)) => {
                         return Err(BBError::Other(format!(
                             "Uncaught exception during block execution: {}",
                             val
                         )));
                     }
+                    Err(BBError::NonLocalReturn) => {
+                        println!("DEBUG execute_block Err(NonLocalReturn): frames.len() = {}, initial_frame_count = {}", self.frames.len(), initial_frame_count);
+                        if self.frames.len() > initial_frame_count {
+                            continue;
+                        } else if self.frames.len() == initial_frame_count {
+                            break;
+                        } else {
+                            return Err(BBError::NonLocalReturn);
+                        }
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -1224,6 +1256,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         args: Vec<Value<'gc>>,
         selector: Option<String>,
+        is_method_call: bool,
     ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
@@ -1238,7 +1271,13 @@ impl<'gc> VmState<'gc> {
         let env_ref = gcl!(mc, env_frame);
 
         let is_nested_block = block.is_nested_block;
-        let enclosing_method_id = Some(frame_id);
+        let enclosing_method_id = if is_method_call {
+            Some(frame_id)
+        } else if is_nested_block {
+            block.enclosing_method_id
+        } else {
+            Some(frame_id)
+        };
 
         self.frames.push(Frame {
             id: frame_id,
@@ -1436,7 +1475,7 @@ impl<'gc> VmState<'gc> {
         res
     }
 
-    fn step_internal(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
+    pub(crate) fn step_internal(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
             // assert_eq!(self.stack.len(), 0, "Stack is not empty! {:?}", self.stack);
@@ -1582,10 +1621,16 @@ impl<'gc> VmState<'gc> {
             Instruction::MethodReturn => {
                 let ret_val = self.pop()?;
                 let enclosing_id = self.frames[frame_idx].enclosing_method_id;
+                println!("DEBUG MethodReturn: enclosing_id = {:?}, ret_val = {:?}", enclosing_id, ret_val);
+                println!("DEBUG MethodReturn stack before pop:");
+                for (idx, f) in self.frames.iter().enumerate() {
+                    println!("  idx = {}, id = {}, name = {:?}", idx, f.id, f.block.name);
+                }
                 if let Some(target_id) = enclosing_id {
                     let mut ret_val = ret_val;
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
+                        println!("DEBUG MethodReturn pop frame: id = {}, name = {:?}", f.id, f.block.name);
                         if let Some(obj) = f.instantiating_obj {
                             let env_borrow = f.env.borrow();
                             self.finalize_instantiation(mc, obj, &env_borrow)?;
@@ -1756,7 +1801,7 @@ impl<'gc> VmState<'gc> {
                     && let ObjectPayload::Block(block) = &obj.borrow().payload
                 {
                     self.frames[frame_idx].ip += 1;
-                    self.start_block_as_method(mc, *block, self_val, Vec::new(), None);
+                    self.start_block_as_method(mc, *block, self_val, Vec::new(), None, false);
                     self.frames.last_mut().unwrap().return_receiver = true;
                     Ok(VmStatus::Running)
                 } else {

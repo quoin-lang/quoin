@@ -244,15 +244,25 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             let env_ref = vm.frames.last().unwrap().env;
 
             while vm.frames.len() > initial_frame_count {
-                match vm.step(mc)? {
-                    VmStatus::Running => {}
-                    VmStatus::Finished(_) => break,
-                    VmStatus::Yeeted(val) => {
+                match vm.step_internal(mc) {
+                    Ok(VmStatus::Running) => {}
+                    Ok(VmStatus::Finished(_)) => break,
+                    Ok(VmStatus::Yeeted(val)) => {
                         return Err(BBError::Other(format!(
                             "Uncaught exception during block execution: {}",
                             val
                         )));
                     }
+                    Err(BBError::NonLocalReturn) => {
+                        if vm.frames.len() > initial_frame_count {
+                            continue;
+                        } else if vm.frames.len() == initial_frame_count {
+                            break;
+                        } else {
+                            return Err(BBError::NonLocalReturn);
+                        }
+                    }
+                    Err(e) => return Err(e),
                 }
             }
 

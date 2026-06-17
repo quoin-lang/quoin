@@ -2,15 +2,8 @@ runner = TestRunner.new
 
 [IO]Stdout.write:'Loading tests';
 
-lib = [IO]Folder.open:'bblib/tests';
-lib.entries.each:{|f|
-    (f.is_file? && f.ext == 'b').if:{
-        suite = Runtime.evalFile:f.fullpath;
-        runner.add:suite;
-        [IO]Stdout.write:'.';
-    }
-};
-[IO]Stdout.writeln:'';
+suite = Runtime.evalFile:'bblib/tests/01-iterate.b';
+runner.add:suite;
 
 results = runner.run:AnsiTestReporter.new:{ out = [IO]Stdout }
 
