@@ -11,4 +11,8 @@ pub fn build_integer_class() -> NativeClassBuilder {
             let val = arg!(args, Int, 0);
             Ok(vm.new_double(mc, (val as f64).sqrt()))
         })
+        .instance_method(
+            "==:",
+            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+        )
 }

@@ -42,11 +42,13 @@ impl AnyCollect for NativeMethodState {
 pub fn build_method_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Method", Some("Object"))
         .instance_method("selector", |vm, mc, args| {
-            let selector = args[0].with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
+            let selector =
+                args[0].with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
             Ok(vm.new_string(mc, selector))
         })
         .instance_method("extension?", |vm, mc, args| {
-            let is_ext = args[0].with_native_state::<NativeMethodState, _, _>(|m| m.is_extension)?;
+            let is_ext =
+                args[0].with_native_state::<NativeMethodState, _, _>(|m| m.is_extension)?;
             Ok(vm.new_bool(mc, is_ext))
         })
         .instance_method("block", |_vm, _mc, args| {
@@ -54,7 +56,8 @@ pub fn build_method_class() -> NativeClassBuilder {
             Ok(block)
         })
         .instance_method("callOn:", |vm, mc, args| {
-            let block_val = args[0].with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
+            let block_val =
+                args[0].with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
             let receiver = args[1];
             if let Value::Object(obj) = block_val
                 && let crate::value::ObjectPayload::Block(block) = &obj.borrow().payload
@@ -64,4 +67,8 @@ pub fn build_method_class() -> NativeClassBuilder {
                 Err(BBError::Other("Method block is not a Block".to_string()))
             }
         })
+        .instance_method(
+            "==:",
+            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+        )
 }

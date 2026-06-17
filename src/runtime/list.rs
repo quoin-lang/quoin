@@ -167,4 +167,26 @@ pub fn build_list_class() -> NativeClassBuilder {
 
             Ok(vm.new_string(mc, format!("#({})", parts.join(" "))))
         })
+        .instance_method("==:", |vm, mc, args| {
+            let lhs_vec = args[0].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())?;
+            let rhs_vec_res = args[1].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec());
+            let rhs_vec = match rhs_vec_res {
+                Ok(v) => v,
+                Err(_) => return Ok(vm.new_bool(mc, false)),
+            };
+
+            if lhs_vec.len() != rhs_vec.len() {
+                return Ok(vm.new_bool(mc, false));
+            }
+
+            for (i, &lhs_val) in lhs_vec.iter().enumerate() {
+                let rhs_val = rhs_vec[i];
+                let eq_res = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
+                if !eq_res {
+                    return Ok(vm.new_bool(mc, false));
+                }
+            }
+
+            Ok(vm.new_bool(mc, true))
+        })
 }

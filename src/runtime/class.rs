@@ -45,4 +45,7 @@ pub fn build_class_class() -> NativeClassBuilder {
             // TODO: implement this
             Ok(vm.new_nil(mc))
         })
+        .instance_method("==:", |vm, mc, args| {
+            Ok(vm.new_bool(mc, args[0] == args[1]))
+        })
 }

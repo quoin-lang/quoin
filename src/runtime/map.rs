@@ -1,7 +1,11 @@
 use crate::arg;
+use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, OpaqueState, Value};
+use crate::vm::VmStatus;
 
 use gc_arena::collect::{DynCollect, Trace};
+use gc_arena::lock::RefLock;
+use gc_arena::Gc;
 use std::any::Any;
 use std::collections::HashMap;
 
@@ -113,6 +117,33 @@ pub fn build_map_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_nil(mc))
         })
+        .instance_method("==:", |vm, mc, args| {
+            let lhs_map =
+                args[0].with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone())?;
+            let rhs_map_res =
+                args[1].with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone());
+            let rhs_map = match rhs_map_res {
+                Ok(m) => m,
+                Err(_) => return Ok(vm.new_bool(mc, false)),
+            };
+
+            if lhs_map.len() != rhs_map.len() {
+                return Ok(vm.new_bool(mc, false));
+            }
+
+            for (key, &lhs_val) in &lhs_map {
+                let rhs_val = match rhs_map.get(key) {
+                    Some(v) => *v,
+                    None => return Ok(vm.new_bool(mc, false)),
+                };
+                let eq_res = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
+                if !eq_res {
+                    return Ok(vm.new_bool(mc, false));
+                }
+            }
+
+            Ok(vm.new_bool(mc, true))
+        })
 }
 
 #[derive(Debug)]
@@ -169,6 +200,79 @@ impl AnyCollect for NativeKeyValuePairState {
 
 pub fn build_key_value_pair_class() -> NativeClassBuilder {
     NativeClassBuilder::new("KeyValuePair", Some("Object"))
+        .class_method("new:", |vm, mc, args| {
+            let class_obj = match args[0] {
+                Value::Class(c) => c,
+                _ => {
+                    return Err(BBError::TypeError {
+                        expected: "Class".to_string(),
+                        got: args[0].type_name().to_string(),
+                        msg: "new: expects Class receiver".to_string(),
+                    });
+                }
+            };
+            let block = if let Value::Object(obj) = args[1]
+                && let ObjectPayload::Block(b) = &obj.borrow().payload
+            {
+                *b
+            } else {
+                return Err(BBError::TypeError {
+                    expected: "Block".to_string(),
+                    got: args[1].type_name().to_string(),
+                    msg: "new: expects a Block".to_string(),
+                });
+            };
+
+            let initial_frame_count = vm.frames.len();
+            vm.start_block(mc, block, Vec::new(), None, None);
+
+            let env_ref = vm.frames.last().unwrap().env;
+
+            while vm.frames.len() > initial_frame_count {
+                match vm.step(mc)? {
+                    VmStatus::Running => {}
+                    VmStatus::Finished(_) => break,
+                    VmStatus::Yeeted(val) => {
+                        return Err(BBError::Other(format!(
+                            "Uncaught exception during block execution: {}",
+                            val
+                        )));
+                    }
+                }
+            }
+
+            // Pop the block's return value to clean up the stack
+            let _block_ret = vm.pop().map_err(|e| BBError::Other(e))?;
+
+            let env_borrow = env_ref.borrow();
+            let key = env_borrow
+                .vars
+                .get("key")
+                .copied()
+                .unwrap_or_else(|| vm.new_nil(mc));
+            let value = env_borrow
+                .vars
+                .get("value")
+                .copied()
+                .unwrap_or_else(|| vm.new_nil(mc));
+
+            let state = NativeKeyValuePairState::new(key, value);
+            let boxed_state: Box<dyn AnyCollect> = Box::new(state);
+            let obj = vm.new_object(mc, class_obj);
+            obj.borrow_mut(mc).payload =
+                ObjectPayload::NativeState(crate::gc!(mc, RefLock::new(boxed_state)));
+
+            Ok(Value::Object(obj))
+        })
+        .instance_method("init:", |_vm, mc, args| {
+            let key = args[1];
+            let value = args[2];
+            args[0].with_native_state_mut(mc, |kvp: &mut NativeKeyValuePairState| {
+                kvp.set_key(key);
+                kvp.set_value(value);
+            })?;
+            Ok(args[0])
+        })
         .instance_method("key", |_vm, _mc, args| {
             let key = args[0].with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_key())?;
             Ok(key)
@@ -203,5 +307,25 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             };
 
             Ok(vm.new_string(mc, format!("{}:{}", key_s, val_s)))
+        })
+        .instance_method("==:", |vm, mc, args| {
+            let (lhs_key, lhs_val) =
+                args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
+                    (kvp.get_key(), kvp.get_value())
+                })?;
+            let rhs_state = args[1].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
+                (kvp.get_key(), kvp.get_value())
+            });
+            match rhs_state {
+                Ok((rhs_key, rhs_val)) => {
+                    let keys_eq = vm.call_method(mc, lhs_key, "==:", vec![rhs_key])?.is_true();
+                    if !keys_eq {
+                        return Ok(vm.new_bool(mc, false));
+                    }
+                    let vals_eq = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
+                    Ok(vm.new_bool(mc, vals_eq))
+                }
+                Err(_) => Ok(vm.new_bool(mc, false)),
+            }
         })
 }

@@ -4,9 +4,8 @@ use crate::runtime::regex::NativeRegexState;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_string_class() -> NativeClassBuilder {
-    NativeClassBuilder::new("String", Some("Object")).instance_method(
-        "replace:with:",
-        |vm, mc, args| {
+    NativeClassBuilder::new("String", Some("Object"))
+        .instance_method("replace:with:", |vm, mc, args| {
             if args.len() < 3 {
                 return Err(BBError::Other(
                     "replace:with: expects receiver, pattern, and replacement".to_string(),
@@ -34,6 +33,9 @@ pub fn build_string_class() -> NativeClassBuilder {
                 got: from_val.type_name().to_string(),
                 msg: "replace:with: expected Regex or String pattern".to_string(),
             })
-        },
-    )
+        })
+        .instance_method(
+            "==:",
+            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+        )
 }

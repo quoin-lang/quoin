@@ -58,6 +58,14 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_nil(mc))
         })
+        .instance_method("==:", |vm, mc, args| {
+            let lhs_path = args[0].with_native_state(|io: &NativeIoFolder| io.path.clone())?;
+            let rhs_path = args[1].with_native_state(|io: &NativeIoFolder| io.path.clone());
+            match rhs_path {
+                Ok(rhs_path) => Ok(vm.new_bool(mc, lhs_path == rhs_path)),
+                Err(_) => Ok(vm.new_bool(mc, false)),
+            }
+        })
 }
 
 fn new_native_io_folder<'a>(
@@ -150,6 +158,14 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 .with_native_state(|io: &NativeIoFile| io.metadata.is_file())
                 .map_err(|e| BBError::Other(e.to_string()))
                 .map(|v| vm.new_bool(mc, v))
+        })
+        .instance_method("==:", |vm, mc, args| {
+            let lhs_path = args[0].with_native_state(|io: &NativeIoFile| io.path.clone())?;
+            let rhs_path = args[1].with_native_state(|io: &NativeIoFile| io.path.clone());
+            match rhs_path {
+                Ok(rhs_path) => Ok(vm.new_bool(mc, lhs_path == rhs_path)),
+                Err(_) => Ok(vm.new_bool(mc, false)),
+            }
         })
 }
 
@@ -263,5 +279,23 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             })??;
 
             Ok(vm.new_nil(mc))
+        })
+        .instance_method("==:", |vm, mc, args| {
+            let lhs_val = args[0].with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+                NativeIoHandleWrapper::Stdout(_) => Some(0),
+                NativeIoHandleWrapper::Stderr(_) => Some(1),
+                NativeIoHandleWrapper::Stdin(_) => Some(2),
+                NativeIoHandleWrapper::File(_) => None,
+            })?;
+            let rhs_val = args[1].with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+                NativeIoHandleWrapper::Stdout(_) => Some(0),
+                NativeIoHandleWrapper::Stderr(_) => Some(1),
+                NativeIoHandleWrapper::Stdin(_) => Some(2),
+                NativeIoHandleWrapper::File(_) => None,
+            });
+            match rhs_val {
+                Ok(Some(r)) if lhs_val == Some(r) => Ok(vm.new_bool(mc, true)),
+                _ => Ok(vm.new_bool(mc, false)),
+            }
         })
 }

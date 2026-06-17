@@ -65,4 +65,7 @@ pub fn build_block_class() -> NativeClassBuilder {
             let arg_val = args[1];
             vm.execute_block(mc, block, vec![arg_val], Some(arg_val))
         })
+        .instance_method("==:", |vm, mc, args| {
+            Ok(vm.new_bool(mc, args[0] == args[1]))
+        })
 }
