@@ -75,7 +75,7 @@
     };
 
     .test:
-    defined? -> {
+    testDefined -> {
         .isFalse:{ nil.defined? };
         .isTrue:{ 0.defined? };
     };
