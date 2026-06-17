@@ -29,8 +29,10 @@ pub enum BBError {
     NotCallable(String),
     /// Raised when attempting to pop or peek from an empty VM stack
     StackUnderflow(String),
-    /// Catch-all for generic error strings
+    /// Generic other error
     Other(String),
+    /// Raised to propagate non-local returns out of native call stacks
+    NonLocalReturn,
     /// Wrapper containing source location for execution errors
     WithSourceInfo {
         error: Box<BBError>,
@@ -63,6 +65,7 @@ impl fmt::Display for BBError {
             BBError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
             BBError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             BBError::Other(msg) => write!(f, "{}", msg),
+            BBError::NonLocalReturn => write!(f, "Non-local return"),
             BBError::WithSourceInfo { error, source_info, trace } => {
                 writeln!(f, "{}", error)?;
                 write!(

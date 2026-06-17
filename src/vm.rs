@@ -195,12 +195,7 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         // Create the new object
         let obj = vm.new_object(mc, self.class_obj);
 
-        let has_init = vm
-            .lookup_in_class_hierarchy(self.class_obj, "init", false)
-            .is_some();
-        if has_init {
-            vm.call_method(mc, Value::Object(obj), "init", Vec::new())?;
-        }
+        vm.run_all_inits(mc, obj)?;
 
         vm.push(Value::Object(obj));
         Ok(())
@@ -517,13 +512,7 @@ impl<'gc> VmState<'gc> {
             }
             self.call_method(mc, Value::Object(obj), "init:", init_args)?;
         } else {
-            // Call init if it exists
-            let has_init = self
-                .lookup_in_class_hierarchy(obj.borrow().class, "init", false)
-                .is_some();
-            if has_init {
-                self.call_method(mc, Value::Object(obj), "init", Vec::new())?;
-            }
+            self.run_all_inits(mc, obj)?;
         }
 
         Ok(())
@@ -684,6 +673,112 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    pub fn call_method_value(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        method_val: Value<'gc>,
+        selector: &str,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, BBError> {
+        let method: Option<Box<dyn Callable<'gc> + 'gc>> = match method_val {
+            Value::Object(obj) => match &obj.borrow().payload {
+                ObjectPayload::Block(block) => Some(Box::new(BlockCallable { block: *block }) as Box<dyn Callable<'gc> + 'gc>),
+                ObjectPayload::Native(native_fn) => Some(Box::new(NativeCallable(*native_fn)) as Box<dyn Callable<'gc> + 'gc>),
+                ObjectPayload::NativeState(state_cell) => {
+                    let state_ref = state_cell.borrow();
+                    let any_ref = (**state_ref).as_any();
+                    if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
+                        let block_val = method_state.get_block();
+                        if let Value::Object(block_obj) = block_val
+                            && let ObjectPayload::Block(block) = &block_obj.borrow().payload
+                        {
+                            Some(Box::new(BlockCallable { block: *block }) as Box<dyn Callable<'gc> + 'gc>)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
+        if let Some(method) = method {
+            let mut all_args = vec![receiver];
+            all_args.extend(args);
+            let initial_frame_count = self.frames.len();
+            method.call(self, mc, all_args, Some(selector.to_string()))?;
+
+            // let the VM catch up
+            if self.frames.len() > initial_frame_count {
+                while self.frames.len() > initial_frame_count {
+                    match self.step(mc)? {
+                        VmStatus::Running => {}
+                        VmStatus::Finished(_) => {
+                            break;
+                        }
+                        VmStatus::Yeeted(val) => {
+                            return Err(BBError::Other(format!(
+                                "Uncaught exception during method call: {}",
+                                val
+                            )));
+                        }
+                    }
+                }
+            }
+
+            Ok(self.pop()?)
+        } else {
+            Ok(self.new_nil(mc))
+        }
+    }
+
+    fn collect_classes_for_init(
+        &self,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        classes: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
+        visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
+    ) {
+        if visited.iter().any(|c| Gc::ptr_eq(*c, class_ref)) {
+            return;
+        }
+        visited.push(class_ref);
+
+        let class_borrow = class_ref.borrow();
+        if let Some(parent) = class_borrow.parent {
+            self.collect_classes_for_init(parent, classes, visited);
+        }
+        for mixin in &class_borrow.mixin_classes {
+            self.collect_classes_for_init(*mixin, classes, visited);
+        }
+
+        if !classes.iter().any(|c| Gc::ptr_eq(*c, class_ref)) {
+            classes.push(class_ref);
+        }
+    }
+
+    pub fn run_all_inits(
+        &mut self,
+        mc: &Mutation<'gc>,
+        obj: Gc<'gc, RefLock<Object<'gc>>>,
+    ) -> Result<(), BBError> {
+        let mut classes = Vec::new();
+        let mut visited = Vec::new();
+        self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
+
+        let receiver = Value::Object(obj);
+        for clz in classes {
+            let method_opt = clz.borrow().instance_methods.get("init").copied();
+            if let Some(method_val) = method_opt {
+                self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn execute_block(
         &mut self,
         mc: &Mutation<'gc>,
@@ -833,11 +928,9 @@ impl<'gc> VmState<'gc> {
             &class_borrow.instance_methods
         };
         if let Some(method_chain_start) = methods.get(selector).copied() {
-            println!("DEBUG lookup: found method chain for selector='{}' in class '{}'", selector, class_borrow.name);
             let mut curr = Some(method_chain_start);
             while let Some(method_val) = curr {
                 if self.method_matches_arguments(method_val, args) {
-                    println!("DEBUG lookup: method matched!");
                     return Some(method_val);
                 }
                 curr = self.get_next_method_in_chain(method_val);
@@ -1334,6 +1427,9 @@ impl<'gc> VmState<'gc> {
 
     pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
         let res = self.step_internal(mc);
+        if let Err(BBError::NonLocalReturn) = res {
+            return Ok(VmStatus::Running);
+        }
         if let Err(e) = res {
             return Err(self.annotate_error(e));
         }
@@ -1508,6 +1604,7 @@ impl<'gc> VmState<'gc> {
                         self.stack.truncate(base);
                     }
                     self.push(ret_val);
+                    return Err(BBError::NonLocalReturn);
                 } else {
                     return Err("MethodReturn executed outside of a method context".into());
                 }

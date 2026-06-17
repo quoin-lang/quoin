@@ -41,26 +41,6 @@ pub fn build_object_class() -> NativeClassBuilder {
             let false_val = vm.new_bool(mc, false);
             Ok(vm.new_bool(mc, eq_result == false_val))
         })
-        .instance_method(">:", |vm, mc, args| {
-            let lhs = arg!(args, Instance, 0);
-            let rhs = arg!(args, Instance, 1);
-            Ok(vm.new_bool(mc, lhs.borrow().id.0 > rhs.borrow().id.0))
-        })
-        .instance_method(">=:", |vm, mc, args| {
-            let result = vm.call_method(mc, args[0], ">:", vec![args[1]])?.is_true()
-                || vm.call_method(mc, args[0], "==:", vec![args[1]])?.is_true();
-            Ok(vm.new_bool(mc, result))
-        })
-        .instance_method("<:", |vm, mc, args| {
-            let lhs = arg!(args, Instance, 0);
-            let rhs = arg!(args, Instance, 1);
-            Ok(vm.new_bool(mc, lhs.borrow().id.0 < rhs.borrow().id.0))
-        })
-        .instance_method("<=:", |vm, mc, args| {
-            let result = vm.call_method(mc, args[0], "<:", vec![args[1]])?.is_true()
-                || vm.call_method(mc, args[0], "==:", vec![args[1]])?.is_true();
-            Ok(vm.new_bool(mc, result))
-        })
         // TODO: call #init in #new/#new:
         .instance_method("init", |_vm, _mc, args| Ok(args[0]))
         .instance_method("print", |vm, mc, args| {

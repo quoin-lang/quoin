@@ -78,12 +78,12 @@ pub fn build_string_class() -> NativeClassBuilder {
             }
             
             // Get the caller's frame context
-            let caller_frame = vm.frames.last().ok_or_else(|| {
-                BBError::Other("No caller frame found for string interpolation".to_string())
-            })?;
-            let caller_env = Some(caller_frame.env);
-            let caller_receiver = caller_frame.receiver;
-            let enclosing_method_id = caller_frame.enclosing_method_id;
+            let (caller_env, caller_receiver, enclosing_method_id) = {
+                let caller_frame = vm.frames.last().ok_or_else(|| {
+                    BBError::Other("No caller frame found for string interpolation".to_string())
+                })?;
+                (caller_frame.env, caller_frame.receiver, caller_frame.enclosing_method_id)
+            };
             
             let mut result = String::new();
             for part in parts {
@@ -97,7 +97,17 @@ pub fn build_string_class() -> NativeClassBuilder {
                             crate::parser::ast_visitor::NodeValue::Program(p) => p,
                             _ => return Err(BBError::Other("Parsed node is not a ProgramNode".to_string())),
                         };
-                        let mut compiler = crate::compiler::Compiler::new();
+                        
+                        let mut local_names = std::collections::HashSet::new();
+                        let mut current_env = Some(caller_env);
+                        while let Some(env) = current_env {
+                            for name in env.borrow().vars.keys() {
+                                local_names.insert(name.clone());
+                            }
+                            current_env = env.borrow().parent;
+                        }
+
+                        let mut compiler = crate::compiler::Compiler::new_with_locals(local_names);
                         let compiled = compiler.compile_program(program_node).map_err(|e| BBError::Other(e))?;
                         
                         let block = crate::gc!(
@@ -108,7 +118,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                                 param_names: compiled.param_names.clone(),
                                 param_types: compiled.param_types.clone(),
                                 bytecode: compiled.bytecode.clone(),
-                                parent_env: caller_env,
+                                parent_env: Some(caller_env),
                                 enclosing_method_id,
                                 source_info: compiled.source_info.clone(),
                             }

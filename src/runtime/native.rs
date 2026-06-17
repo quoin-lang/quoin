@@ -181,6 +181,14 @@ pub fn native_add<'gc>(
             msg: "add expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, "+:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some("+:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
@@ -221,6 +229,14 @@ pub fn native_sub<'gc>(
             msg: "sub expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, "-:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some("-:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
@@ -257,6 +273,14 @@ pub fn native_mul<'gc>(
             msg: "mul expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, "*:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some("*:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
@@ -293,6 +317,14 @@ pub fn native_div<'gc>(
             msg: "div expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, "/:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some("/:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
@@ -334,6 +366,14 @@ pub fn native_mod<'gc>(
             msg: "mod expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, "%:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some("%:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
@@ -535,6 +575,14 @@ pub fn native_lt<'gc>(
             msg: "lt expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, "<:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some("<:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
@@ -573,6 +621,14 @@ pub fn native_gt<'gc>(
             msg: "gt expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, ">:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some(">:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
@@ -611,6 +667,14 @@ pub fn native_le<'gc>(
             msg: "le expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, "<=:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some("<=:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
@@ -649,6 +713,14 @@ pub fn native_ge<'gc>(
             msg: "ge expects 2 arguments".to_string(),
         });
     }
+
+    let receiver = args[0];
+    let method = vm.lookup_method(receiver, ">=:", &args[1..]);
+    if let Some(method) = method {
+        method.call(vm, mc, args, Some(">=:".to_string()))?;
+        return Ok(vm.pop()?);
+    }
+
     let (p0, p1) = match (&args[0], &args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
         _ => {
