@@ -519,6 +519,7 @@ pub fn native_lt<'gc>(
         (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) < *b)),
         (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a < (*b as f64))),
         (ObjectPayload::Bool(a), ObjectPayload::Bool(b)) => Ok(vm.new_bool(mc, *a && !*b)),
+        (ObjectPayload::String(a), ObjectPayload::String(b)) => Ok(vm.new_bool(mc, **a < **b)),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -556,6 +557,7 @@ pub fn native_gt<'gc>(
         (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) > *b)),
         (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a > (*b as f64))),
         (ObjectPayload::Bool(a), ObjectPayload::Bool(b)) => Ok(vm.new_bool(mc, !*a && *b)),
+        (ObjectPayload::String(a), ObjectPayload::String(b)) => Ok(vm.new_bool(mc, **a > **b)),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -593,6 +595,7 @@ pub fn native_le<'gc>(
         (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) <= *b)),
         (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a <= (*b as f64))),
         (ObjectPayload::Bool(a), ObjectPayload::Bool(b)) => Ok(vm.new_bool(mc, *a || !*b)),
+        (ObjectPayload::String(a), ObjectPayload::String(b)) => Ok(vm.new_bool(mc, **a <= **b)),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
@@ -630,6 +633,7 @@ pub fn native_ge<'gc>(
         (ObjectPayload::Int(a), ObjectPayload::Double(b)) => Ok(vm.new_bool(mc, (*a as f64) >= *b)),
         (ObjectPayload::Double(a), ObjectPayload::Int(b)) => Ok(vm.new_bool(mc, *a >= (*b as f64))),
         (ObjectPayload::Bool(a), ObjectPayload::Bool(b)) => Ok(vm.new_bool(mc, !*a || *b)),
+        (ObjectPayload::String(a), ObjectPayload::String(b)) => Ok(vm.new_bool(mc, **a >= **b)),
         _ => Err(BBError::TypeError {
             expected: "comparable types".to_string(),
             got: format!("{:?} and {:?}", args[0], args[1]),
