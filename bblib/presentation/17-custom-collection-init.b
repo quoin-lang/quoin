@@ -1,0 +1,20 @@
+﻿"* Implementing Ruby %w()
+w <- {
+    .mix:ActAsUserString;
+    new: -> { |s| ^s.trim.split }
+};
+#w' ant bee cat dog elk '; "* => #( 'ant' 'bee' 'cat' 'dog' 'elk' )
+
+"* A Tree data structure would return itself
+"* and maintain its own internal state.
+Tree <- {
+    .mix:ActAsUserList;
+    new: -> { |elements| ... }
+};
+#Tree( 1 2 #(3 4) #(5 #(6 7) ) );
+
+UTF16String <- {
+    .mix:ActAsUserString;
+    new: -> { |bytes| ... }
+};
+#utf16'你好世界';

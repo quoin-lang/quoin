@@ -6,6 +6,22 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
   - In the BB language itself all methods are attached to a class.
 - [ ] Support checking `assertMeetsRequirements:` in calls to `mix:`/`can:`.
+- [ ] Find duplicate bits of code and refactor.
+  - Spinning the VM while executing in a native method.
+  - Object initialization/new:{} logic
+- [ ] Bring over AnsiColorizer.cs from the old repo.
+  - [ ] Switch to the colorized test suite runner.
+- [ ] Bring over Highlighter from the old repo.
+  - [ ] Show highlighted code snippets in stack traces.
+- [ ] Improve stack trace output. (Similar to the C# output.)
+- [ ] Move to a better iterator design that doesn't require mutability.
+- [ ] Rewrite the TestSuite so it doesn't mix the tests into itself, too many conflicts.
+- [ ] List, Regex and Map #bind:{}
+  - See bblib/presentation/20-method-destructuring.b
+- [ ] Think about a better destructuring protocol than assuming `#at:` exists.
+- [ ] Confirm `%'string%{eval}' is working.
+  - [ ] Make sure it's optimized into string concatenation by the compiler.
+- [ ] Make sure case statements are tested and working.
 
 ## Bugs/Odd Behavior
 
@@ -43,6 +59,8 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] **Method Overloading**:
   - Resolve messages by matching both the selector name *and* matching the types of the arguments passed at runtime.
   - E.g., `split: -> { |pat:String| ... }` vs `split: --> { |p:Regex| ... }` must dispatch correctly depending on whether the argument is a `String` or a `Regex`.
+- [ ] Wildcard selector dispatch.
+  - Grab examples from old repo.
 
 ## 5. Non-Local Returns (`^^` operator)
 - [x] **Method-level returns (`^^`)**:

@@ -1,0 +1,32 @@
+﻿"* Regular expressions
+'abcd' ~ #/bc/          "* true
+
+"* Basic JSON support w/ paths
+jsonText = '{"a": [1,{"five":5},3]}'
+jsonObject = (Json.deserialize:jsonText)
+jsonObject.a.second.five    "* 5
+
+Json.serialize:(1..5)   "* '[1,2,3,4,5]'
+Json.format:#{ 'a': 1 'b': 2 }
+"* '{
+"*   "a": 1,
+"*   "b": 2
+"* }'
+
+"* Unit testing! (WIP)
+TestSuite.new.run:{
+    .test:
+    equality -> {                              "* Test is named "equality"
+        .isTrue:{ 42 == 42 };
+        .isFalse:{ 42 != 42 };
+        .is:{ 40 + 2 } equalTo:42;
+        .is:{ 'a'+'b' } equalTo:'ab';
+        .is:{ 'abc' } matching:#/b/;           "* Assertion is named "{ 'abc' }"
+    };
+
+    .test:
+    types -> {
+        .is:{ #IsString |-| 'hi' } a:String;
+        .is:{ #IsInteger |-| 42 } an:Integer;  "* Assertion is named IsInteger
+    };
+};

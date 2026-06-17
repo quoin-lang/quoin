@@ -1,0 +1,18 @@
+﻿('1/2/3'.split:'/').bind:{|a b c|
+    a == '1'
+    b == '2'
+    c == '3'
+};
+
+#{ a: 1 b: 2 c: 3 }.bind:{|a b c|
+    a == 1
+    b == 2
+    c == 3
+};
+
+regexMatch = #/(?<a>\w{3})(?<b>\w{3})(?<c>\w{3})/.match:'foobarbaz'
+regexMatch.bind:{|a b c|
+    a == 'foo'
+    b == 'bar'
+    c == 'baz'
+};

@@ -1,0 +1,9 @@
+﻿Multi <-- {
+    x: ->  { |x:Integer| 'Integer: %' % x }
+    x: --> { |x:String|  'String: %' % x  }
+    x: --> { |x:Object|  'Other: %' % x   }
+};
+
+Multi.new.x:77     "* 'Integer: 77'
+Multi.new.x:'Hi'   "* 'String: Hi'
+Multi.new.x:true   "* 'Other: true'
