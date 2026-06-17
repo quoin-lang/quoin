@@ -118,9 +118,31 @@ pub fn native_match<'gc>(
     };
 
     if has_custom_tilde {
-        let method = vm.lookup_method(lhs, "~:", &args[1..]).unwrap();
-        method.call(vm, mc, args, Some("~:".to_string()))?;
-        return Ok(vm.pop()?);
+        return vm.call_method(mc, lhs, "~:", args[1..].to_vec());
+    }
+
+    if let Value::Object(obj) = lhs
+        && let ObjectPayload::Block(block_gc) = &obj.borrow().payload
+    {
+        let block_gc = *block_gc;
+        let res = if block_gc.param_names.len() == 0 {
+            vm.execute_block(mc, block_gc, Vec::new(), Some(rhs))?
+        } else {
+            vm.execute_block(mc, block_gc, vec![rhs], None)?
+        };
+        return Ok(res);
+    }
+
+    if let Value::Object(obj) = rhs
+        && let ObjectPayload::Block(block_gc) = &obj.borrow().payload
+    {
+        let block_gc = *block_gc;
+        let res = if block_gc.param_names.len() == 0 {
+            vm.execute_block(mc, block_gc, Vec::new(), Some(lhs))?
+        } else {
+            vm.execute_block(mc, block_gc, vec![lhs], None)?
+        };
+        return Ok(res);
     }
 
     if let Value::Class(c) = lhs {
@@ -159,9 +181,8 @@ pub fn native_match<'gc>(
         return Ok(vm.new_bool(mc, matched));
     }
 
-    let eq_val = if let Some(method) = vm.lookup_method(lhs, "==:", &[rhs]) {
-        method.call(vm, mc, vec![lhs, rhs], Some("==:".to_string()))?;
-        vm.pop()?
+    let eq_val = if vm.lookup_method(lhs, "==:", &[rhs]).is_some() {
+        vm.call_method(mc, lhs, "==:", vec![rhs])?
     } else {
         vm.new_bool(mc, lhs == rhs)
     };
@@ -183,10 +204,8 @@ pub fn native_add<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, "+:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some("+:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, "+:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, "+:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
@@ -231,10 +250,8 @@ pub fn native_sub<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, "-:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some("-:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, "-:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, "-:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
@@ -275,10 +292,8 @@ pub fn native_mul<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, "*:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some("*:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, "*:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, "*:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
@@ -319,10 +334,8 @@ pub fn native_div<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, "/:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some("/:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, "/:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, "/:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
@@ -368,10 +381,8 @@ pub fn native_mod<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, "%:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some("%:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, "%:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, "%:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
@@ -535,10 +546,8 @@ pub fn native_eq<'gc>(
     }
 
     let (receiver, other) = (args[0], args[1]);
-    let method = vm.lookup_method(receiver, "==:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some("==:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, "==:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, "==:", args[1..].to_vec());
     }
 
     Ok(vm.new_bool(mc, receiver == other))
@@ -577,10 +586,8 @@ pub fn native_lt<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, "<:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some("<:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, "<:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, "<:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
@@ -623,10 +630,8 @@ pub fn native_gt<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, ">:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some(">:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, ">:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, ">:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
@@ -669,10 +674,8 @@ pub fn native_le<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, "<=:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some("<=:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, "<=:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, "<=:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
@@ -715,10 +718,8 @@ pub fn native_ge<'gc>(
     }
 
     let receiver = args[0];
-    let method = vm.lookup_method(receiver, ">=:", &args[1..]);
-    if let Some(method) = method {
-        method.call(vm, mc, args, Some(">=:".to_string()))?;
-        return Ok(vm.pop()?);
+    if vm.lookup_method(receiver, ">=:", &args[1..]).is_some() {
+        return vm.call_method(mc, receiver, ">=:", args[1..].to_vec());
     }
 
     let (p0, p1) = match (&args[0], &args[1]) {
