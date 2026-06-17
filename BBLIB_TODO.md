@@ -86,3 +86,8 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] **Alternative Parser Architecture Evaluation**:
   - Evaluate replacing ANTLR with Tree-sitter for faster full-file compiles using its compiled C engine.
   - Assess native Rust parser generators (e.g., LALRPOP or Pest) or hand-writing a recursive-descent parser for optimal compiler performance.
+
+## 10. Test Coverage
+- [ ] **Increase Code Coverage**:
+  - Add more integration tests under `bblib/tests/` to target uncovered parts of the compiler, runtime, and VM.
+

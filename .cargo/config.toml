@@ -1,2 +1,3 @@
 [alias]
 cov = ["llvm-cov", "--ignore-filename-regex", "src/parser/generated"]
+cov-test = ["llvm-cov", "--ignore-filename-regex", "src/parser/generated", "run", "--", "test"]
