@@ -48,6 +48,8 @@ use crate::parser::generated::buildingblocksparser::{
     DefCallWArgExprContext,
     ExprCallWArgExprContext,
     RichExprBaseContext, RichExprBaseContextAttrs,
+    ArgDefCallWArgContext,
+    ArgExprBaseContext, ArgExprBaseContextAttrs,
 };
 use crate::parser::generated::buildingblocksvisitor::BuildingBlocksVisitorCompat;
 use crate::value::SourceInfo;
@@ -1055,7 +1057,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         }
 
         let mut exprs: Vec<Arc<Node>> = Vec::new();
-        for node in ctx.expr_all() {
+        for node in ctx.argExpr_all() {
             exprs.push(Arc::new(self.visit(&*node)));
         }
 
@@ -1098,6 +1100,24 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_RichExprBase(&mut self, ctx: &RichExprBaseContext<'a>) -> Self::Return {
+        self.visit(&*ctx.expr().unwrap())
+    }
+
+    fn visit_ArgDefCallWArg(&mut self, ctx: &ArgDefCallWArgContext<'a>) -> Self::Return {
+        Node {
+            source_info: self.extract_source_info(ctx),
+            value: MethodCall(MethodCallNode {
+                subject: None,
+                arguments: Arc::new(cast_node!(
+                    MethodCallArguments(args),
+                    args,
+                    self.visit(&*ctx.sig.clone().unwrap())
+                )),
+            }),
+        }
+    }
+
+    fn visit_ArgExprBase(&mut self, ctx: &ArgExprBaseContext<'a>) -> Self::Return {
         self.visit(&*ctx.expr().unwrap())
     }
 

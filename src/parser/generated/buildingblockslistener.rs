@@ -821,6 +821,30 @@ pub trait BuildingBlocksListener<'input>:
      */
     fn exit_callSigWithArg(&mut self, _ctx: &CallSigWithArgContext<'input>) {}
     /**
+     * Enter a parse tree produced by the {@code ArgDefCallWArg}
+     * labeled alternative in {@link BuildingBlocksParser#argExpr}.
+     * @param ctx the parse tree
+     */
+    fn enter_ArgDefCallWArg(&mut self, _ctx: &ArgDefCallWArgContext<'input>) {}
+    /**
+     * Exit a parse tree produced by the {@code ArgDefCallWArg}
+     * labeled alternative in {@link BuildingBlocksParser#argExpr}.
+     * @param ctx the parse tree
+     */
+    fn exit_ArgDefCallWArg(&mut self, _ctx: &ArgDefCallWArgContext<'input>) {}
+    /**
+     * Enter a parse tree produced by the {@code ArgExprBase}
+     * labeled alternative in {@link BuildingBlocksParser#argExpr}.
+     * @param ctx the parse tree
+     */
+    fn enter_ArgExprBase(&mut self, _ctx: &ArgExprBaseContext<'input>) {}
+    /**
+     * Exit a parse tree produced by the {@code ArgExprBase}
+     * labeled alternative in {@link BuildingBlocksParser#argExpr}.
+     * @param ctx the parse tree
+     */
+    fn exit_ArgExprBase(&mut self, _ctx: &ArgExprBaseContext<'input>) {}
+    /**
      * Enter a parse tree produced by the {@code CallSigNoArgNormal}
      * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
      * @param ctx the parse tree

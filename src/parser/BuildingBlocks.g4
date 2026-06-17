@@ -88,7 +88,11 @@ callSig : callSigWithArg              #CallSigWArg
         | id=ident '!'                #CallSigNoArgBang
         ;
 
-callSigWithArg : (id+=ident ':' val+=expr) ('.'? id+=ident ':' val+=expr)* ;
+callSigWithArg : (id+=ident ':' val+=argExpr) ('.'? id+=ident ':' val+=argExpr)* ;
+
+argExpr : ('.' sig=callSigWithArg)                      #ArgDefCallWArg
+        | expr                                         #ArgExprBase
+        ;
 
 callSigNoArgOrBang : id=ident         #CallSigNoArgNormal
                    | id=ident '!'     #CallSigNoArgBangNormal
