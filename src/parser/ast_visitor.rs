@@ -1261,7 +1261,7 @@ impl AstVisitor {
                 BlockIgnoredArgument => {
                     arguments.push(Arc::new(BlockArgNode {
                         identifier: Arc::new(IdentifierNode {
-                            name: "?".to_string(),
+                            name: "_".to_string(),
                             namespace: None,
                             identifier_type: IdentifierType::Local,
                         }),

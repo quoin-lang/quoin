@@ -940,12 +940,12 @@ mod tests {
         assert_eq!(ast, expected);
 
         // Ignored block arg: { |_| 1; }
-        // Visitor maps Ignored to name "?"
+        // Visitor maps Ignored to name "_"
         let ast = parse("{ |_| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode { source_info: None,
             expressions: vec![arc_node(NodeValue::Block(BlockNode { source_info: None,
                 name: None,
-                arguments: vec![block_arg("?", IdentifierType::Local, None)],
+                arguments: vec![block_arg("_", IdentifierType::Local, None)],
                 decls: vec![],
                 decl_block: None,
                 statements: vec![integer(1)],
