@@ -29,13 +29,10 @@ impl Compiler {
 
     pub fn new_with_locals(locals: HashSet<String>) -> Self {
         Self {
-            scopes: vec![Scope {
-                locals,
-            }],
+            scopes: vec![Scope { locals }],
             temp_counter: 0,
         }
     }
-
 
     fn new_temp_var(&mut self) -> String {
         self.temp_counter += 1;
@@ -270,13 +267,19 @@ impl Compiler {
             match &lval.value {
                 NodeValue::IdentLValue(ident_lval) => {
                     let id = &ident_lval.identifier;
-                    if id.namespace.is_none() && id.identifier_type != IdentifierType::Namespaced && id.identifier_type != IdentifierType::Instance {
+                    if id.namespace.is_none()
+                        && id.identifier_type != IdentifierType::Namespaced
+                        && id.identifier_type != IdentifierType::Instance
+                    {
                         names.push(id.name.clone());
                     }
                 }
                 NodeValue::SplatLValue(splat_lval) => {
                     let id = &splat_lval.identifier;
-                    if id.namespace.is_none() && id.identifier_type != IdentifierType::Namespaced && id.identifier_type != IdentifierType::Instance {
+                    if id.namespace.is_none()
+                        && id.identifier_type != IdentifierType::Namespaced
+                        && id.identifier_type != IdentifierType::Instance
+                    {
                         names.push(id.name.clone());
                     }
                 }
@@ -333,7 +336,6 @@ impl Compiler {
 
         Ok(())
     }
-
 
     fn compile_lvalue_store(
         &mut self,
@@ -661,19 +663,22 @@ mod tests {
 
     // Helpers to easily construct Nodes
     fn int(value: i64) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::Integer(IntegerNode { value }),
         }
     }
 
     fn double(value: f64) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::Double(DoubleNode { value }),
         }
     }
 
     fn string(value: &str) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::Str(StringNode {
                 value: value.to_string(),
             }),
@@ -681,7 +686,8 @@ mod tests {
     }
 
     fn sym(value: &str) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::Symbol(SymbolNode {
                 value: value.to_string(),
             }),
@@ -689,7 +695,8 @@ mod tests {
     }
 
     fn local_id(name: &str) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::Identifier(IdentifierNode {
                 namespace: None,
                 name: name.to_string(),
@@ -699,7 +706,8 @@ mod tests {
     }
 
     fn assign_node(lvals: Vec<Node>, rval: Node) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::Assignment(AssignmentNode {
                 lvalues: lvals.into_iter().map(Arc::new).collect(),
                 rvalue: Arc::new(rval),
@@ -708,7 +716,8 @@ mod tests {
     }
 
     fn binary(op: BinaryOperatorType, left: Node, right: Node) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::BinaryOperator(BinaryOperatorNode {
                 operator: op,
                 left: Arc::new(left),
@@ -718,7 +727,8 @@ mod tests {
     }
 
     fn unary(op: UnaryOperatorType, right: Node) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::UnaryOperator(UnaryOperatorNode {
                 operator: op,
                 right: Arc::new(right),
@@ -727,7 +737,8 @@ mod tests {
     }
 
     fn call(subject: Option<Node>, selector_name: &str, args: Vec<Node>) -> Node {
-        Node { source_info: None,
+        Node {
+            source_info: None,
             value: NodeValue::MethodCall(MethodCallNode {
                 subject: subject.map(Arc::new),
                 arguments: Arc::new(MethodCallArgumentsNode {
@@ -822,7 +833,8 @@ mod tests {
     #[test]
     fn test_compile_assignments() {
         // Single global assignment
-        let lval = Node { source_info: None,
+        let lval = Node {
+            source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
                     namespace: None,
@@ -839,7 +851,8 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // Destructuring assignment (e.g. a b = x)
-        let lval_a = Node { source_info: None,
+        let lval_a = Node {
+            source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
                     namespace: None,
@@ -848,7 +861,8 @@ mod tests {
                 }),
             }),
         };
-        let lval_b = Node { source_info: None,
+        let lval_b = Node {
+            source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
                     namespace: None,
@@ -873,7 +887,8 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // Splat: *rest = x; (under destruct)
-        let lval_rest = Node { source_info: None,
+        let lval_rest = Node {
+            source_info: None,
             value: NodeValue::SplatLValue(SplatLValueNode {
                 identifier: Arc::new(IdentifierNode {
                     namespace: None,
@@ -882,7 +897,8 @@ mod tests {
                 }),
             }),
         };
-        let lval_ignore = Node { source_info: None,
+        let lval_ignore = Node {
+            source_info: None,
             value: NodeValue::IgnoredLValue,
         };
         let res = compile(vec![assign_node(
@@ -901,10 +917,12 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // IgnoredSplatLValue: _ *_ = x;
-        let lval_ignore = Node { source_info: None,
+        let lval_ignore = Node {
+            source_info: None,
             value: NodeValue::IgnoredLValue,
         };
-        let lval_ignore_splat = Node { source_info: None,
+        let lval_ignore_splat = Node {
+            source_info: None,
             value: NodeValue::IgnoredSplatLValue,
         };
         let res = compile(vec![assign_node(
@@ -919,7 +937,8 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // SubLValue: a (b c) = x;
-        let lval_a = Node { source_info: None,
+        let lval_a = Node {
+            source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
                     namespace: None,
@@ -928,7 +947,8 @@ mod tests {
                 }),
             }),
         };
-        let lval_b = Node { source_info: None,
+        let lval_b = Node {
+            source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
                     namespace: None,
@@ -937,7 +957,8 @@ mod tests {
                 }),
             }),
         };
-        let lval_c = Node { source_info: None,
+        let lval_c = Node {
+            source_info: None,
             value: NodeValue::IdentLValue(IdentLValueNode {
                 identifier: Arc::new(IdentifierNode {
                     namespace: None,
@@ -946,7 +967,8 @@ mod tests {
                 }),
             }),
         };
-        let lval_nested = Node { source_info: None,
+        let lval_nested = Node {
+            source_info: None,
             value: NodeValue::SubLValue(SubLValueNode {
                 lvalues: vec![Arc::new(lval_b), Arc::new(lval_c)],
             }),
@@ -1024,7 +1046,12 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // x && y
-        let res = compile(vec![binary(BinaryOperatorType::And, local_id("x"), local_id("y"))]).unwrap();
+        let res = compile(vec![binary(
+            BinaryOperatorType::And,
+            local_id("x"),
+            local_id("y"),
+        )])
+        .unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
@@ -1034,7 +1061,12 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // x || y
-        let res = compile(vec![binary(BinaryOperatorType::Or, local_id("x"), local_id("y"))]).unwrap();
+        let res = compile(vec![binary(
+            BinaryOperatorType::Or,
+            local_id("x"),
+            local_id("y"),
+        )])
+        .unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
@@ -1047,7 +1079,8 @@ mod tests {
     #[test]
     fn test_compile_blocks() {
         // { |x| x + 1 }
-        let block_node = BlockNode { source_info: None,
+        let block_node = BlockNode {
+            source_info: None,
             name: None,
             arguments: vec![Arc::new(BlockArgNode {
                 identifier: Arc::new(IdentifierNode {
@@ -1065,7 +1098,8 @@ mod tests {
                 int(1),
             ))],
         };
-        let res = compile(vec![Node { source_info: None,
+        let res = compile(vec![Node {
+            source_info: None,
             value: NodeValue::Block(block_node),
         }])
         .unwrap();
@@ -1091,7 +1125,8 @@ mod tests {
     #[test]
     fn test_compile_lists_maps_regex() {
         // #(1 2)
-        let list = Node { source_info: None,
+        let list = Node {
+            source_info: None,
             value: NodeValue::List(ListNode {
                 values: vec![Arc::new(int(1)), Arc::new(int(2))],
             }),
@@ -1104,7 +1139,8 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // #{'a': 1}
-        let map = Node { source_info: None,
+        let map = Node {
+            source_info: None,
             value: NodeValue::Map(MapNode {
                 keys: vec![Arc::new(string("a"))],
                 values: vec![Arc::new(int(1))],
@@ -1118,7 +1154,8 @@ mod tests {
         assert_eq!(res.bytecode, expected);
 
         // #/^[a-z]+$/
-        let regex = Node { source_info: None,
+        let regex = Node {
+            source_info: None,
             value: NodeValue::Regex(RegexNode {
                 value: "#/^[a-z]+$/".to_string(),
             }),
@@ -1133,7 +1170,8 @@ mod tests {
     #[test]
     fn test_compile_errors_and_fallbacks() {
         // Unknown NodeValue returns error
-        let res = compile(vec![Node { source_info: None,
+        let res = compile(vec![Node {
+            source_info: None,
             value: NodeValue::Unknown,
         }]);
         assert!(res.is_err());
@@ -1143,7 +1181,8 @@ mod tests {
         );
 
         // Map mismatch keys/values returns error
-        let map_mismatch = Node { source_info: None,
+        let map_mismatch = Node {
+            source_info: None,
             value: NodeValue::Map(MapNode {
                 keys: vec![Arc::new(string("a"))],
                 values: vec![],
@@ -1151,15 +1190,13 @@ mod tests {
         };
         let res = compile(vec![map_mismatch]);
         assert!(res.is_err());
-        assert_eq!(
-            res.err().unwrap(),
-            "Map keys and values count mismatch"
-        );
+        assert_eq!(res.err().unwrap(), "Map keys and values count mismatch");
     }
 
     #[test]
     fn test_compile_class_and_method_definitions() {
-        let block_node = BlockNode { source_info: None,
+        let block_node = BlockNode {
+            source_info: None,
             arguments: vec![
                 Arc::new(BlockArgNode {
                     identifier: Arc::new(IdentifierNode {
@@ -1183,7 +1220,8 @@ mod tests {
             statements: vec![],
             name: None,
         };
-        let class_def = Node { source_info: None,
+        let class_def = Node {
+            source_info: None,
             value: NodeValue::ClassDefinition(ClassDefinitionNode {
                 identifier: Arc::new(IdentifierNode {
                     namespace: None,
@@ -1222,26 +1260,31 @@ mod tests {
     #[test]
     fn test_source_info_propagation() {
         use crate::parser::parser::parse_building_blocks_string;
-        
+
         let code = "{ 1 + 2 };";
         let ast = parse_building_blocks_string(code);
         let mut compiler = Compiler::new();
-        
+
         // The root program node itself should have the source info
         if let NodeValue::Program(ref prog) = ast.value {
             let info = prog.source_info.as_ref().unwrap();
             assert_eq!(info.filename, "<string>");
             assert_eq!(info.line, 1);
             assert_eq!(info.column, 0);
-            assert_eq!(info.source_text.as_ref().map(|s| s.as_str()), Some("{ 1 + 2 };"));
+            assert_eq!(
+                info.source_text.as_ref().map(|s| s.as_str()),
+                Some("{ 1 + 2 };")
+            );
         } else {
             panic!("Expected Program node");
         }
 
-        let compiled = compiler.compile_program(match &ast.value {
-            NodeValue::Program(p) => p,
-            _ => unreachable!(),
-        }).unwrap();
+        let compiled = compiler
+            .compile_program(match &ast.value {
+                NodeValue::Program(p) => p,
+                _ => unreachable!(),
+            })
+            .unwrap();
 
         // The program compiled StaticBlock should have source info
         assert!(compiled.source_info.is_some());
@@ -1258,7 +1301,10 @@ mod tests {
                 assert_eq!(info.filename, "<string>");
                 assert_eq!(info.line, 1);
                 assert_eq!(info.column, 0);
-                assert_eq!(info.source_text.as_ref().map(|s| s.as_str()), Some("{ 1 + 2 }"));
+                assert_eq!(
+                    info.source_text.as_ref().map(|s| s.as_str()),
+                    Some("{ 1 + 2 }")
+                );
             }
         }
         assert!(found_inner_block);

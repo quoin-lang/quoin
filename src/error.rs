@@ -66,12 +66,18 @@ impl fmt::Display for BBError {
             BBError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             BBError::Other(msg) => write!(f, "{}", msg),
             BBError::NonLocalReturn => write!(f, "Non-local return"),
-            BBError::WithSourceInfo { error, source_info, trace } => {
+            BBError::WithSourceInfo {
+                error,
+                source_info,
+                trace,
+            } => {
                 writeln!(f, "{}", error)?;
                 write!(
                     f,
                     "  at {}:{}:{}",
-                    source_info.filename, source_info.line, source_info.column + 1
+                    source_info.filename,
+                    source_info.line,
+                    source_info.column + 1
                 )?;
                 if let Some(source_text) = &source_info.source_text {
                     writeln!(f)?;

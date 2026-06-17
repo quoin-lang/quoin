@@ -1,4 +1,3 @@
-use crate::arg;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {

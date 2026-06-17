@@ -15,7 +15,8 @@ pub fn build_boolean_class() -> NativeClassBuilder {
                 },
             ))
         })
-        .instance_method("==:", |vm, mc, args| {
-            Ok(vm.new_bool(mc, args[0] == args[1]))
-        })
+        .instance_method(
+            "==:",
+            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+        )
 }

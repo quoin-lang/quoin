@@ -1,6 +1,7 @@
 use crate::arg;
 use crate::error::BBError;
 use crate::value::{Block, NativeClassBuilder, Value};
+
 use gc_arena::{Gc, Mutation};
 use std::path::PathBuf;
 
@@ -34,16 +35,21 @@ fn eval_string<'gc>(
     self_val: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
     let ast = crate::parser::parser::parse_building_blocks_string(code);
-    
+
     let mut compiler = crate::compiler::Compiler::new();
     let program_node = match &ast.value {
         crate::parser::ast_visitor::NodeValue::Program(p) => p,
-        _ => return Err(BBError::Other("Expected Program node from parser".to_string())),
+        _ => {
+            return Err(BBError::Other(
+                "Expected Program node from parser".to_string(),
+            ));
+        }
     };
-    
-    let static_block = compiler.compile_program(program_node)
+
+    let static_block = compiler
+        .compile_program(program_node)
         .map_err(|e| BBError::Other(format!("Compilation error: {}", e)))?;
-        
+
     let block = crate::gc!(
         mc,
         Block {
@@ -57,7 +63,7 @@ fn eval_string<'gc>(
             enclosing_method_id: None,
         }
     );
-    
+
     vm.execute_block(mc, block, Vec::new(), self_val)
 }
 
@@ -71,18 +77,23 @@ fn eval_file<'gc>(
     if !path.exists() {
         return Err(BBError::Other(format!("File not found: {}", filename)));
     }
-    
+
     let ast = crate::parser::parser::parse_building_blocks_file(&path);
-    
+
     let mut compiler = crate::compiler::Compiler::new();
     let program_node = match &ast.value {
         crate::parser::ast_visitor::NodeValue::Program(p) => p,
-        _ => return Err(BBError::Other("Expected Program node from parser".to_string())),
+        _ => {
+            return Err(BBError::Other(
+                "Expected Program node from parser".to_string(),
+            ));
+        }
     };
-    
-    let static_block = compiler.compile_program(program_node)
+
+    let static_block = compiler
+        .compile_program(program_node)
         .map_err(|e| BBError::Other(format!("Compilation error: {}", e)))?;
-        
+
     let block = crate::gc!(
         mc,
         Block {
@@ -96,6 +107,6 @@ fn eval_file<'gc>(
             enclosing_method_id: None,
         }
     );
-    
+
     vm.execute_block(mc, block, Vec::new(), self_val)
 }

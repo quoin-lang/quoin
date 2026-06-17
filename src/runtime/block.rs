@@ -74,13 +74,14 @@ pub fn build_block_class() -> NativeClassBuilder {
             let arg_val = args[1];
             vm.execute_block(mc, block, vec![arg_val], Some(arg_val))
         })
-        .instance_method("==:", |vm, mc, args| {
-            Ok(vm.new_bool(mc, args[0] == args[1]))
-        })
+        .instance_method(
+            "==:",
+            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+        )
         .instance_method("catch:", |vm, mc, args| {
             let receiver_block = arg!(args, Block, 0);
             let catch_block = arg!(args, Block, 1);
-            
+
             let initial_frame_count = vm.frames.len();
             match vm.execute_block(mc, receiver_block, Vec::new(), None) {
                 Ok(val) => Ok(val),
@@ -93,7 +94,7 @@ pub fn build_block_class() -> NativeClassBuilder {
                     } else {
                         vm.new_string(mc, format!("{}", e))
                     };
-                    
+
                     vm.execute_block(mc, catch_block, vec![exception_val], None)
                 }
             }
@@ -102,7 +103,7 @@ pub fn build_block_class() -> NativeClassBuilder {
             let receiver_block = arg!(args, Block, 0);
             let catch_block = arg!(args, Block, 1);
             let finally_block = arg!(args, Block, 2);
-            
+
             let initial_frame_count = vm.frames.len();
             let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
             match res {
@@ -119,7 +120,7 @@ pub fn build_block_class() -> NativeClassBuilder {
                     } else {
                         vm.new_string(mc, format!("{}", e))
                     };
-                    
+
                     let catch_res = vm.execute_block(mc, catch_block, vec![exception_val], None);
                     while vm.frames.len() > initial_frame_count {
                         vm.frames.pop();

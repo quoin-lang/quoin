@@ -1,4 +1,5 @@
 use crate::value::{NamespacedName, SourceInfo};
+
 use gc_arena::Collect;
 
 #[derive(Clone, Debug, Collect, PartialEq)]
@@ -43,7 +44,7 @@ pub enum Instruction {
     IfJump(isize),
     ElseJump(isize),
     NewList(usize), // num_elements
-    NewMap(usize), // num_pairs (key/value count)
+    NewMap(usize),  // num_pairs (key/value count)
     NewRegex,
     DefineClass {
         name: NamespacedName,

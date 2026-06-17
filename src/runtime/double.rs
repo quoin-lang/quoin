@@ -11,7 +11,8 @@ pub fn build_double_class() -> NativeClassBuilder {
             let val = arg!(args, Double, 0);
             Ok(vm.new_double(mc, val.sqrt()))
         })
-        .instance_method("==:", |vm, mc, args| {
-            Ok(vm.new_bool(mc, args[0] == args[1]))
-        })
+        .instance_method(
+            "==:",
+            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+        )
 }

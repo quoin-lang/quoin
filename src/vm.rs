@@ -407,7 +407,9 @@ impl<'gc> VmState<'gc> {
             }
         ));
         if let Value::Object(obj) = regex_val {
-            obj.borrow_mut(mc).fields.insert("impl".to_string(), regex_val);
+            obj.borrow_mut(mc)
+                .fields
+                .insert("impl".to_string(), regex_val);
         }
         regex_val
     }
@@ -693,8 +695,12 @@ impl<'gc> VmState<'gc> {
     ) -> Result<Value<'gc>, BBError> {
         let method: Option<Box<dyn Callable<'gc> + 'gc>> = match method_val {
             Value::Object(obj) => match &obj.borrow().payload {
-                ObjectPayload::Block(block) => Some(Box::new(BlockCallable { block: *block }) as Box<dyn Callable<'gc> + 'gc>),
-                ObjectPayload::Native(native_fn) => Some(Box::new(NativeCallable(*native_fn)) as Box<dyn Callable<'gc> + 'gc>),
+                ObjectPayload::Block(block) => {
+                    Some(Box::new(BlockCallable { block: *block }) as Box<dyn Callable<'gc> + 'gc>)
+                }
+                ObjectPayload::Native(native_fn) => {
+                    Some(Box::new(NativeCallable(*native_fn)) as Box<dyn Callable<'gc> + 'gc>)
+                }
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
@@ -703,7 +709,8 @@ impl<'gc> VmState<'gc> {
                         if let Value::Object(block_obj) = block_val
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
-                            Some(Box::new(BlockCallable { block: *block }) as Box<dyn Callable<'gc> + 'gc>)
+                            Some(Box::new(BlockCallable { block: *block })
+                                as Box<dyn Callable<'gc> + 'gc>)
                         } else {
                             None
                         }
@@ -841,7 +848,8 @@ impl<'gc> VmState<'gc> {
         }
 
         Ok(self.pop()?)
-    }    pub fn lookup_method(
+    }
+    pub fn lookup_method(
         &self,
         receiver: Value<'gc>,
         selector: &str,
@@ -853,7 +861,10 @@ impl<'gc> VmState<'gc> {
             }
         }
         if let Value::Class(c) = receiver {
-            if self.lookup_method_in_class_hierarchy(c, selector, true, args).is_none() {
+            if self
+                .lookup_method_in_class_hierarchy(c, selector, true, args)
+                .is_none()
+            {
                 if selector == "new:" {
                     return Some(Box::new(NewCallable { class_obj: c }));
                 }
@@ -865,16 +876,21 @@ impl<'gc> VmState<'gc> {
         let selector_key = NamespacedName::new(Vec::new(), selector.to_string());
         let method_val = match receiver {
             Value::Class(class_obj) => {
-                if let Some(m) = self.lookup_method_in_class_hierarchy(class_obj, selector, true, args) {
+                if let Some(m) =
+                    self.lookup_method_in_class_hierarchy(class_obj, selector, true, args)
+                {
                     Some(m)
                 } else {
                     let class_key = NamespacedName::new(Vec::new(), "Class".to_string());
                     if let Some(Value::Class(class_class)) =
                         self.globals.borrow().get(&class_key).copied()
                     {
-                        if let Some(m) =
-                            self.lookup_method_in_class_hierarchy(class_class, selector, false, args)
-                        {
+                        if let Some(m) = self.lookup_method_in_class_hierarchy(
+                            class_class,
+                            selector,
+                            false,
+                            args,
+                        ) {
                             Some(m)
                         } else {
                             self.globals.borrow().get(&selector_key).copied()
@@ -885,7 +901,9 @@ impl<'gc> VmState<'gc> {
                 }
             }
             Value::ClassMeta(class_obj) => {
-                if let Some(m) = self.lookup_method_in_class_hierarchy(class_obj, selector, true, args) {
+                if let Some(m) =
+                    self.lookup_method_in_class_hierarchy(class_obj, selector, true, args)
+                {
                     Some(m)
                 } else {
                     self.globals.borrow().get(&selector_key).copied()
@@ -893,7 +911,9 @@ impl<'gc> VmState<'gc> {
             }
             Value::Object(obj) => {
                 let class_obj = obj.borrow().class;
-                if let Some(m) = self.lookup_method_in_class_hierarchy(class_obj, selector, false, args) {
+                if let Some(m) =
+                    self.lookup_method_in_class_hierarchy(class_obj, selector, false, args)
+                {
                     Some(m)
                 } else {
                     self.globals.borrow().get(&selector_key).copied()
@@ -935,7 +955,13 @@ impl<'gc> VmState<'gc> {
         args: &[Value<'gc>],
     ) -> Option<Value<'gc>> {
         let mut visited = Vec::new();
-        self.lookup_method_in_class_hierarchy_rec(class_ref, selector, class_side, args, &mut visited)
+        self.lookup_method_in_class_hierarchy_rec(
+            class_ref,
+            selector,
+            class_side,
+            args,
+            &mut visited,
+        )
     }
 
     fn lookup_method_in_class_hierarchy_rec(
@@ -967,15 +993,15 @@ impl<'gc> VmState<'gc> {
             }
         }
         for mixin in &class_borrow.mixin_classes {
-            if let Some(method) =
-                self.lookup_method_in_class_hierarchy_rec(*mixin, selector, class_side, args, visited)
+            if let Some(method) = self
+                .lookup_method_in_class_hierarchy_rec(*mixin, selector, class_side, args, visited)
             {
                 return Some(method);
             }
         }
         if let Some(parent) = class_borrow.parent {
-            if let Some(method) =
-                self.lookup_method_in_class_hierarchy_rec(parent, selector, class_side, args, visited)
+            if let Some(method) = self
+                .lookup_method_in_class_hierarchy_rec(parent, selector, class_side, args, visited)
             {
                 return Some(method);
             }
@@ -1099,7 +1125,8 @@ impl<'gc> VmState<'gc> {
                             curr = next_val_gc;
                             continue;
                         } else {
-                            let new_method_static: Value<'static> = unsafe { std::mem::transmute(new_method) };
+                            let new_method_static: Value<'static> =
+                                unsafe { std::mem::transmute(new_method) };
                             method_state.next = Some(new_method_static);
                             return Ok(());
                         }
@@ -1550,13 +1577,19 @@ impl<'gc> VmState<'gc> {
                     let exists = self.globals.borrow().contains_key(&name);
                     if is_define {
                         if exists {
-                            let err_msg = format!("Global {} is already defined in this scope", name.to_explicit_string());
+                            let err_msg = format!(
+                                "Global {} is already defined in this scope",
+                                name.to_explicit_string()
+                            );
                             self.active_exception = Some(self.new_string(mc, err_msg.clone()));
                             return Err(BBError::Other(err_msg));
                         }
                     } else {
                         if exists {
-                            let err_msg = format!("Can't modify global constant {}", name.to_explicit_string());
+                            let err_msg = format!(
+                                "Can't modify global constant {}",
+                                name.to_explicit_string()
+                            );
                             self.active_exception = Some(self.new_string(mc, err_msg.clone()));
                             return Err(BBError::Other(err_msg));
                         }
@@ -1652,11 +1685,10 @@ impl<'gc> VmState<'gc> {
                 let ret_val = self.pop()?;
                 let enclosing_id = self.frames[frame_idx].enclosing_method_id;
 
-                if let Some(target_id) = enclosing_id {
+                return if let Some(target_id) = enclosing_id {
                     let mut ret_val = ret_val;
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
-
                         if let Some(obj) = f.instantiating_obj {
                             let env_borrow = f.env.borrow();
                             self.finalize_instantiation(mc, obj, &env_borrow)?;
@@ -1675,10 +1707,10 @@ impl<'gc> VmState<'gc> {
                         self.stack.truncate(base);
                     }
                     self.push(ret_val);
-                    return Err(BBError::NonLocalReturn);
+                    Err(BBError::NonLocalReturn)
                 } else {
-                    return Err("MethodReturn executed outside of a method context".into());
-                }
+                    Err("MethodReturn executed outside of a method context".into())
+                };
             }
             Instruction::Yeet => {
                 let yeeted_val = self.pop()?;
@@ -1853,7 +1885,12 @@ impl<'gc> VmState<'gc> {
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
                     if is_class_side {
                         if target_class.borrow().class_methods.contains_key(&selector) {
-                            let existing_val = target_class.borrow().class_methods.get(&selector).copied().unwrap();
+                            let existing_val = target_class
+                                .borrow()
+                                .class_methods
+                                .get(&selector)
+                                .copied()
+                                .unwrap();
                             Self::append_method_to_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
@@ -1867,7 +1904,12 @@ impl<'gc> VmState<'gc> {
                             .instance_methods
                             .contains_key(&selector)
                         {
-                            let existing_val = target_class.borrow().instance_methods.get(&selector).copied().unwrap();
+                            let existing_val = target_class
+                                .borrow()
+                                .instance_methods
+                                .get(&selector)
+                                .copied()
+                                .unwrap();
                             Self::append_method_to_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
@@ -1912,7 +1954,12 @@ impl<'gc> VmState<'gc> {
 
                     if is_class_side {
                         if target_class.borrow().class_methods.contains_key(&selector) {
-                            let existing_val = target_class.borrow().class_methods.get(&selector).copied().unwrap();
+                            let existing_val = target_class
+                                .borrow()
+                                .class_methods
+                                .get(&selector)
+                                .copied()
+                                .unwrap();
                             Self::append_method_to_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
@@ -1921,8 +1968,17 @@ impl<'gc> VmState<'gc> {
                                 .insert(selector, method_obj);
                         }
                     } else {
-                        if target_class.borrow().instance_methods.contains_key(&selector) {
-                            let existing_val = target_class.borrow().instance_methods.get(&selector).copied().unwrap();
+                        if target_class
+                            .borrow()
+                            .instance_methods
+                            .contains_key(&selector)
+                        {
+                            let existing_val = target_class
+                                .borrow()
+                                .instance_methods
+                                .get(&selector)
+                                .copied()
+                                .unwrap();
                             Self::append_method_to_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
@@ -2258,7 +2314,10 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::Push(Constant::Int(77)),
-                Instruction::StoreGlobal(NamespacedName::new(Vec::new(), "g_var".to_string()), false),
+                Instruction::StoreGlobal(
+                    NamespacedName::new(Vec::new(), "g_var".to_string()),
+                    false,
+                ),
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "g_var".to_string())),
             ],
             |vm, mc| {
@@ -2520,7 +2579,7 @@ mod tests {
             name: Some("nested".to_string()),
             is_nested_block: true,
             param_names: Vec::new(),
-                param_types: Vec::new(),
+            param_types: Vec::new(),
             bytecode: vec![
                 Instruction::Push(Constant::Int(999)),
                 Instruction::MethodReturn,
@@ -2534,7 +2593,7 @@ mod tests {
             name: Some("method".to_string()),
             is_nested_block: false, // enclosing_method_id will be this frame's ID
             param_names: Vec::new(),
-                param_types: Vec::new(),
+            param_types: Vec::new(),
             bytecode: vec![
                 Instruction::Push(Constant::Block(block_nested)),
                 Instruction::Send("value".to_string(), 0),
@@ -2578,7 +2637,7 @@ mod tests {
             name: Some("nested".to_string()),
             is_nested_block: true,
             param_names: Vec::new(),
-                param_types: Vec::new(),
+            param_types: Vec::new(),
             bytecode: vec![
                 Instruction::Push(Constant::Int(777)),
                 Instruction::MethodReturn,
@@ -2606,7 +2665,7 @@ mod tests {
             name: Some("foo".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
-                param_types: Vec::new(),
+            param_types: Vec::new(),
             bytecode: vec![
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "bar_func".to_string())),
                 Instruction::Push(Constant::Block(block_nested)),
@@ -2686,7 +2745,7 @@ mod tests {
             name: Some("class_block".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
-                param_types: Vec::new(),
+            param_types: Vec::new(),
             bytecode: vec![
                 // 1. Define inst method x
                 Instruction::Push(Constant::Block(StaticBlock {
@@ -2694,7 +2753,7 @@ mod tests {
                     name: Some("x".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
-                param_types: Vec::new(),
+                    param_types: Vec::new(),
                     bytecode: vec![
                         Instruction::LoadLocal("self".to_string()),
                         Instruction::Return,
@@ -2707,7 +2766,7 @@ mod tests {
                     name: Some("x".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
-                param_types: Vec::new(),
+                    param_types: Vec::new(),
                     bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
                 })),
                 Instruction::OverrideMethod("x".to_string()),
@@ -2829,7 +2888,7 @@ mod tests {
             name: Some("custom_true_method".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
-                param_types: Vec::new(),
+            param_types: Vec::new(),
             bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
         };
 
@@ -2838,7 +2897,7 @@ mod tests {
             name: Some("class_extension_block".to_string()),
             is_nested_block: false,
             param_names: Vec::new(),
-                param_types: Vec::new(),
+            param_types: Vec::new(),
             bytecode: vec![
                 Instruction::Push(Constant::Block(custom_true_method)),
                 Instruction::DefineMethod("custom_true".to_string()),
@@ -3202,7 +3261,7 @@ mod tests {
                     name: Some("ext_block".to_string()),
                     is_nested_block: false,
                     param_names: Vec::new(),
-                param_types: Vec::new(),
+                    param_types: Vec::new(),
                     bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
                 })),
                 Instruction::ExecuteBlockWithSelf,

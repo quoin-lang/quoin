@@ -2,6 +2,7 @@ use crate::arg;
 use crate::error::BBError;
 use crate::runtime::regex::NativeRegexState;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
+
 use gc_arena::Gc;
 
 pub fn build_string_class() -> NativeClassBuilder {
@@ -52,17 +53,17 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("mod", |vm, mc, args| {
             let s_borrow = arg!(args, String, 0);
             let s = s_borrow.to_string();
-            
+
             enum InterpolPart {
                 Lit(String),
                 Expr(String),
             }
-            
+
             let mut parts = Vec::new();
             let chars: Vec<char> = s.chars().collect();
             let mut i = 0;
             while i < chars.len() {
-                if i + 1 < chars.len() && chars[i] == '%' && chars[i+1] == '{' {
+                if i + 1 < chars.len() && chars[i] == '%' && chars[i + 1] == '{' {
                     let mut depth = 1;
                     let mut j = i + 2;
                     while j < chars.len() && depth > 0 {
@@ -74,7 +75,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                         j += 1;
                     }
                     if depth == 0 {
-                        let expr_str: String = chars[i+2 .. j-1].iter().collect();
+                        let expr_str: String = chars[i + 2..j - 1].iter().collect();
                         parts.push(InterpolPart::Expr(expr_str));
                         i = j;
                     } else {
@@ -86,15 +87,19 @@ pub fn build_string_class() -> NativeClassBuilder {
                     i += 1;
                 }
             }
-            
+
             // Get the caller's frame context
             let (caller_env, caller_receiver, enclosing_method_id) = {
                 let caller_frame = vm.frames.last().ok_or_else(|| {
                     BBError::Other("No caller frame found for string interpolation".to_string())
                 })?;
-                (caller_frame.env, caller_frame.receiver, caller_frame.enclosing_method_id)
+                (
+                    caller_frame.env,
+                    caller_frame.receiver,
+                    caller_frame.enclosing_method_id,
+                )
             };
-            
+
             let mut result = String::new();
             for part in parts {
                 match part {
@@ -105,9 +110,13 @@ pub fn build_string_class() -> NativeClassBuilder {
                         let node = crate::parser::parser::parse_building_blocks_string(&expr_str);
                         let program_node = match &node.value {
                             crate::parser::ast_visitor::NodeValue::Program(p) => p,
-                            _ => return Err(BBError::Other("Parsed node is not a ProgramNode".to_string())),
+                            _ => {
+                                return Err(BBError::Other(
+                                    "Parsed node is not a ProgramNode".to_string(),
+                                ));
+                            }
                         };
-                        
+
                         let mut local_names = std::collections::HashSet::new();
                         let mut current_env = Some(caller_env);
                         while let Some(env) = current_env {
@@ -118,8 +127,10 @@ pub fn build_string_class() -> NativeClassBuilder {
                         }
 
                         let mut compiler = crate::compiler::Compiler::new_with_locals(local_names);
-                        let compiled = compiler.compile_program(program_node).map_err(|e| BBError::Other(e))?;
-                        
+                        let compiled = compiler
+                            .compile_program(program_node)
+                            .map_err(|e| BBError::Other(e))?;
+
                         let block = crate::gc!(
                             mc,
                             crate::value::Block {
@@ -133,9 +144,9 @@ pub fn build_string_class() -> NativeClassBuilder {
                                 source_info: compiled.source_info.clone(),
                             }
                         );
-                        
+
                         let val = vm.execute_block(mc, block, Vec::new(), caller_receiver)?;
-                        
+
                         let val_str_val = vm.call_method(mc, val, "s", vec![])?;
                         let val_str = match val_str_val {
                             Value::Object(o) => match &o.borrow().payload {
@@ -148,7 +159,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                     }
                 }
             }
-            
+
             Ok(vm.new_string(mc, result))
         })
         .instance_method("length", |vm, mc, args| {
@@ -186,28 +197,36 @@ pub fn build_string_class() -> NativeClassBuilder {
             let char_idx = match args[2] {
                 Value::Object(obj) => match &obj.borrow().payload {
                     ObjectPayload::Int(idx) => *idx as usize,
-                    _ => return Err(BBError::TypeError {
+                    _ => {
+                        return Err(BBError::TypeError {
+                            expected: "Integer".to_string(),
+                            got: args[2].type_name().to_string(),
+                            msg: "insert:at: expected Integer index".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(BBError::TypeError {
                         expected: "Integer".to_string(),
                         got: args[2].type_name().to_string(),
                         msg: "insert:at: expected Integer index".to_string(),
-                    }),
-                },
-                _ => return Err(BBError::TypeError {
-                    expected: "Integer".to_string(),
-                    got: args[2].type_name().to_string(),
-                    msg: "insert:at: expected Integer index".to_string(),
-                }),
+                    });
+                }
             };
-            
+
             let char_count = s.chars().count();
             let safe_idx = char_idx.min(char_count);
-            
-            let byte_offset: usize = s.char_indices().map(|(idx, _)| idx).nth(safe_idx).unwrap_or(s.len());
-            
+
+            let byte_offset: usize = s
+                .char_indices()
+                .map(|(idx, _)| idx)
+                .nth(safe_idx)
+                .unwrap_or(s.len());
+
             let mut result = s[..byte_offset].to_string();
             result.push_str(&**sub);
             result.push_str(&s[byte_offset..]);
-            
+
             Ok(vm.new_string(mc, result))
         })
         .instance_method("lower", |vm, mc, args| {
@@ -221,10 +240,9 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("splitString:", |vm, mc, args| {
             let s = arg!(args, String, 0);
             let pat = arg!(args, String, 1);
-            let parts: Vec<Value> = s.split(&**pat)
-                .map(|part| {
-                    vm.new_string(mc, part.to_string())
-                })
+            let parts: Vec<Value> = s
+                .split(&**pat)
+                .map(|part| vm.new_string(mc, part.to_string()))
                 .collect();
             let res = vm.new_list(mc, parts);
             Ok(res)

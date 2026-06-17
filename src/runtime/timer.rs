@@ -1,9 +1,11 @@
 use crate::arg;
 use crate::value::{NativeClassBuilder, Value};
+
 use std::time::Instant;
 
 pub fn build_timer_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Timer", Some("Object"))
+        //
         .class_method("time:", |vm, mc, args| {
             let block = arg!(args, Block, 1);
             let start = Instant::now();

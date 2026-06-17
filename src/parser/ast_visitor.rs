@@ -1,8 +1,5 @@
 #![allow(non_snake_case)]
 
-use std::string::String;
-use std::sync::Arc;
-
 use crate::cast_node;
 use crate::parser::ast_visitor::NodeValue::{
     Assignment, Bang3, BinaryOperator, Block, BlockArg, BlockDecl, BlockIgnoredArgument,
@@ -48,12 +45,16 @@ use crate::parser::generated::buildingblocksparser::{
 };
 use crate::parser::generated::buildingblocksvisitor::BuildingBlocksVisitorCompat;
 use crate::value::SourceInfo;
+
+use once_cell::sync::Lazy;
+use regex::Captures;
+use std::string::String;
+use std::sync::Arc;
+use substring::Substring;
+
 use antlr_rust::parser_rule_context::ParserRuleContext;
 use antlr_rust::token::Token;
 use antlr_rust::tree::{ParseTree, ParseTreeVisitorCompat};
-use once_cell::sync::Lazy;
-use regex::Captures;
-use substring::Substring;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub enum IdentifierType {
