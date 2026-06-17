@@ -38,9 +38,9 @@ This document outlines the language features, compiler updates, and VM modificat
   - Update `lookup_method` in the VM to search through mixed-in classes (depth-first or breadth-first) before checking parent classes.
 
 ## 4. Advanced Method Dispatch (Multimethods / Argument Types)
-- [ ] **Typed Block Arguments**:
+- [x] **Typed Block Arguments**:
   - Support parameter type checking inside block headers: `| name:Type |`.
-- [ ] **Method Overloading**:
+- [x] **Method Overloading**:
   - Resolve messages by matching both the selector name *and* matching the types of the arguments passed at runtime.
   - E.g., `split: -> { |pat:String| ... }` vs `split: --> { |p:Regex| ... }` must dispatch correctly depending on whether the argument is a `String` or a `Regex`.
 
@@ -51,9 +51,9 @@ This document outlines the language features, compiler updates, and VM modificat
   - This requires closures (`Block`) to hold a reference to their creator's stack frame, and the VM to unwind frames up to that context.
 
 ## 6. Exception Handling & unwinding (`catch:` and `throw`)
-- [ ] **Throwing Exceptions**:
+- [x] **Throwing Exceptions**:
   - Support `.throw` and `.throw:` on objects.
-- [ ] **Catches**:
+- [x] **Catches**:
   - Support `.catch:{ ... }` blocks.
   - The VM must unwind execution frames back to the nearest enclosing catch block when an exception is thrown.
 
@@ -67,7 +67,7 @@ This document outlines the language features, compiler updates, and VM modificat
   - Implement `if:`, `else:`, `if:else:`, and `not` purely as methods on the `true`, `false`, and `nil` objects in `bootstrap.b`, rather than using VM-level jump instructions.
 - [x] **IO Library**:
   - Implement native classes under `[IO]` namespace: `[IO]Stdout`, `[IO]Stderr`, `[IO]Handle`, and `[IO]Folder`.
-- [ ] **System Utilities**:
+- [x] **System Utilities**:
   - `Timer.time: { ... }`: Computes elapsed time in milliseconds.
   - `Runtime.evalFile: filename`: Loads, compiles, and evaluates a file.
   - `Object.s` overrides: Overriding `s` string representation when converting objects to strings for printing.
