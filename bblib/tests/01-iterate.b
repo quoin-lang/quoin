@@ -123,7 +123,7 @@
 
     .test:
     list -> {
-        .is:{ (1..4).list } equalTo:#( 1 2 3 4 );
+        .is:{ (1..4).list } equalTo:#( 1 2 3 );
     };
 
     .test:

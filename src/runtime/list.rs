@@ -1,3 +1,4 @@
+use crate::arg;
 use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 
@@ -227,18 +228,42 @@ pub fn build_list_class() -> NativeClassBuilder {
             Ok(args[0])
         })
         .instance_method("sort:", |vm, mc, args| {
-            let block = args[1];
+            let block_gc = arg!(args, Block, 1);
             let mut vec = args[0].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec()).map_err(|e| BBError::Other(e))?;
             
-            for i in 1..vec.len() {
-                let mut j = i;
-                while j > 0 {
-                    let res = vm.call_method(mc, block, "valueWithArgs:", vec![vm.new_list(mc, vec![vec[j-1], vec[j]])])?;
-                    if !res.is_true() {
-                        vec.swap(j-1, j);
-                        j -= 1;
-                    } else {
-                        break;
+            let arity = block_gc.param_names.len();
+            if arity == 1 {
+                for i in 1..vec.len() {
+                    let mut j = i;
+                    while j > 0 {
+                        let key_lhs = vm.call_method(mc, args[1], "valueWithArgs:", vec![vm.new_list(mc, vec![vec[j-1]])])?;
+                        let key_rhs = vm.call_method(mc, args[1], "valueWithArgs:", vec![vm.new_list(mc, vec![vec[j]])])?;
+                        let gt_res = if key_lhs.is_nil() {
+                            !key_rhs.is_nil()
+                        } else if key_rhs.is_nil() {
+                            false
+                        } else {
+                            vm.call_method(mc, key_lhs, ">", vec![key_rhs])?.is_true()
+                        };
+                        if gt_res {
+                            vec.swap(j-1, j);
+                            j -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for i in 1..vec.len() {
+                    let mut j = i;
+                    while j > 0 {
+                        let res = vm.call_method(mc, args[1], "valueWithArgs:", vec![vm.new_list(mc, vec![vec[j-1], vec[j]])])?;
+                        if !res.is_true() {
+                            vec.swap(j-1, j);
+                            j -= 1;
+                        } else {
+                            break;
+                        }
                     }
                 }
             }
