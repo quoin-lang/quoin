@@ -181,7 +181,7 @@ pub fn native_match<'gc>(
         return Ok(vm.new_bool(mc, matched));
     }
 
-    let eq_val = if vm.lookup_method(lhs, "==:", &[rhs]).is_some() {
+    let eq_val = if vm.lookup_method(mc, lhs, "==:", &[rhs])?.is_some() {
         vm.call_method(mc, lhs, "==:", vec![rhs])?
     } else {
         vm.new_bool(mc, lhs == rhs)
@@ -204,7 +204,7 @@ pub fn native_add<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, "+:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, "+:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, "+:", args[1..].to_vec());
     }
 
@@ -250,7 +250,7 @@ pub fn native_sub<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, "-:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, "-:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, "-:", args[1..].to_vec());
     }
 
@@ -292,7 +292,7 @@ pub fn native_mul<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, "*:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, "*:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, "*:", args[1..].to_vec());
     }
 
@@ -334,7 +334,7 @@ pub fn native_div<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, "/:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, "/:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, "/:", args[1..].to_vec());
     }
 
@@ -381,7 +381,7 @@ pub fn native_mod<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, "%:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, "%:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, "%:", args[1..].to_vec());
     }
 
@@ -461,16 +461,18 @@ pub fn native_mod<'gc>(
                         {
                             let key_char = next_c;
                             chars.next(); // Consume the character
-                            
+
                             let mut resolved_val = None;
                             let state_ref = state_cell.borrow();
-                            if let Some(map_state) = state_ref.as_any().downcast_ref::<NativeMapState>() {
+                            if let Some(map_state) =
+                                state_ref.as_any().downcast_ref::<NativeMapState>()
+                            {
                                 let key_str = key_char.to_string();
                                 if let Some(val) = map_state.get_map().get(&key_str).copied() {
                                     resolved_val = Some(val);
                                 }
                             }
-                            
+
                             if let Some(val) = resolved_val {
                                 let val_str_val = vm.call_method(mc, val, "s", vec![])?;
                                 let val_str = match val_str_val {
@@ -546,7 +548,7 @@ pub fn native_eq<'gc>(
     }
 
     let (receiver, other) = (args[0], args[1]);
-    if vm.lookup_method(receiver, "==:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, "==:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, "==:", args[1..].to_vec());
     }
 
@@ -586,7 +588,7 @@ pub fn native_lt<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, "<:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, "<:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, "<:", args[1..].to_vec());
     }
 
@@ -630,7 +632,7 @@ pub fn native_gt<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, ">:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, ">:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, ">:", args[1..].to_vec());
     }
 
@@ -674,7 +676,7 @@ pub fn native_le<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, "<=:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, "<=:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, "<=:", args[1..].to_vec());
     }
 
@@ -718,7 +720,7 @@ pub fn native_ge<'gc>(
     }
 
     let receiver = args[0];
-    if vm.lookup_method(receiver, ">=:", &args[1..]).is_some() {
+    if vm.lookup_method(mc, receiver, ">=:", &args[1..])?.is_some() {
         return vm.call_method(mc, receiver, ">=:", args[1..].to_vec());
     }
 

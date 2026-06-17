@@ -24,6 +24,20 @@
         } equalTo:#( 'Integer: 55' 'String: str' 'Other: true' );
     };
 
+    .test:
+    dispatchByBlock -> {
+        .is:{
+            TSMTC3 <- {
+                x: -> { |x {.class==Integer}| 'Integer: %' % (x) }
+                x: --> { |x {.class==String}| 'String: %' % x }
+                x: --> { |x {.class==Object}| 'Other: %' % x }
+                x: --> { |x:Integer {x > 100}| 'Big Integer: %' % x }
+                x: --> { |x:Integer {|n| n < 0}| 'Negative Integer: %' % x }
+            };
+            #( TSMTC3.new.x:55 TSMTC3.new.x:'str' TSMTC3.new.x:true TSMTC3.new.x:150 TSMTC3.new.x:-10 )
+        } equalTo:#( 'Integer: 55' 'String: str' 'Other: true' 'Big Integer: 150' 'Negative Integer: -10' );
+    };
+
 "*    .test:
 "*    dispatchNoMatch -> {
 "*        .does:{

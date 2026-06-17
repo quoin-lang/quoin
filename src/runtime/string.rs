@@ -131,6 +131,23 @@ pub fn build_string_class() -> NativeClassBuilder {
                             .compile_program(program_node)
                             .map_err(|e| BBError::Other(e))?;
 
+                        let decl_block = compiled.decl_block.as_ref().map(|db| {
+                            crate::gc!(
+                                mc,
+                                crate::value::Block {
+                                    name: db.name.clone(),
+                                    is_nested_block: db.is_nested_block,
+                                    param_names: db.param_names.clone(),
+                                    param_types: db.param_types.clone(),
+                                    bytecode: db.bytecode.clone(),
+                                    parent_env: Some(caller_env),
+                                    enclosing_method_id,
+                                    source_info: db.source_info.clone(),
+                                    decl_block: None,
+                                }
+                            )
+                        });
+
                         let block = crate::gc!(
                             mc,
                             crate::value::Block {
@@ -142,6 +159,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                                 parent_env: Some(caller_env),
                                 enclosing_method_id,
                                 source_info: compiled.source_info.clone(),
+                                decl_block,
                             }
                         );
 

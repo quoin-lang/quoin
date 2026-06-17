@@ -88,6 +88,7 @@ impl Compiler {
             param_types: Vec::new(),
             bytecode,
             source_info: program.source_info.clone(),
+            decl_block: None,
         })
     }
 
@@ -621,6 +622,19 @@ impl Compiler {
         }
 
         block_bytecode.push(Instruction::Return);
+
+        let decl_block = if let Some(db) = &block.decl_block {
+            let mut db_bytecode = Vec::new();
+            self.compile_block(db, &mut db_bytecode)?;
+            if let Some(Instruction::Push(Constant::Block(sb))) = db_bytecode.pop() {
+                Some(Box::new(sb))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         self.pop_scope();
 
         let block_name = block.name.as_ref().map(|s| s.value.clone());
@@ -632,6 +646,7 @@ impl Compiler {
             param_types,
             bytecode: block_bytecode,
             source_info: block.source_info.clone(),
+            decl_block,
         };
 
         bytecode.push(Instruction::Push(Constant::Block(static_block)));
@@ -1116,6 +1131,7 @@ mod tests {
                 Instruction::Return,
             ],
             source_info: None,
+            decl_block: None,
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Block(inner_static)));
@@ -1245,6 +1261,7 @@ mod tests {
             param_types: vec![None, None],
             bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
             source_info: None,
+            decl_block: None,
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::DefineClass {

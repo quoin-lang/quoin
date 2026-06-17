@@ -11,6 +11,7 @@ pub struct StaticBlock {
     pub param_types: Vec<Option<String>>,
     pub bytecode: Vec<Instruction>,
     pub source_info: Option<SourceInfo>,
+    pub decl_block: Option<Box<StaticBlock>>,
 }
 
 #[derive(Clone, Debug, Collect, PartialEq)]

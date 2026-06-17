@@ -127,6 +127,22 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
             };
 
             // Convert StaticBlock to Block in GC and start it
+            let decl_block = program.decl_block.as_ref().map(|db| {
+                gc!(
+                    mc,
+                    Block {
+                        name: db.name.clone(),
+                        is_nested_block: db.is_nested_block,
+                        param_names: db.param_names.clone(),
+                        param_types: db.param_types.clone(),
+                        bytecode: db.bytecode.clone(),
+                        parent_env: None,
+                        enclosing_method_id: None,
+                        source_info: db.source_info.clone(),
+                        decl_block: None,
+                    }
+                )
+            });
             let main_block = gc!(
                 mc,
                 Block {
@@ -138,6 +154,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
                     parent_env: None,
                     enclosing_method_id: None,
                     source_info: program.source_info.clone(),
+                    decl_block,
                 }
             );
             vm.start_block(mc, main_block, Vec::new(), None, None);

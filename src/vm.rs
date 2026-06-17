@@ -644,7 +644,7 @@ impl<'gc> VmState<'gc> {
         selector: &str,
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, BBError> {
-        let method = self.lookup_method(receiver, selector, &args);
+        let method = self.lookup_method(mc, receiver, selector, &args)?;
         if let Some(method) = method {
             let mut all_args = vec![receiver];
             all_args.extend(args);
@@ -849,27 +849,101 @@ impl<'gc> VmState<'gc> {
 
         Ok(self.pop()?)
     }
+
+    pub fn execute_validation_block(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        outer_param_names: &[String],
+        args: &[Value<'gc>],
+    ) -> Result<Value<'gc>, BBError> {
+        let initial_frame_count = self.frames.len();
+
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+
+        let mut env_frame = EnvFrame::new(block.parent_env);
+
+        let receiver = args.get(0).copied().unwrap_or_else(|| self.new_nil(mc));
+        env_frame.vars.insert("self".to_string(), receiver);
+
+        for name in &block.param_names {
+            env_frame.vars.insert(name.clone(), receiver);
+        }
+
+        for (name, val) in outer_param_names.iter().zip(args.iter().copied()) {
+            env_frame.vars.insert(name.clone(), val);
+        }
+
+        let env_ref = gcl!(mc, env_frame);
+
+        self.frames.push(Frame {
+            id: frame_id,
+            is_nested_block: block.is_nested_block,
+            enclosing_method_id: Some(frame_id),
+            block,
+            ip: 0,
+            env: env_ref,
+            instantiating_obj: None,
+            receiver: Some(receiver),
+            selector: None,
+            args: args.to_vec(),
+            stack_base: self.stack.len(),
+            return_receiver: false,
+        });
+
+        if self.frames.len() > initial_frame_count {
+            while self.frames.len() > initial_frame_count {
+                match self.step_internal(mc) {
+                    Ok(VmStatus::Running) => {}
+                    Ok(VmStatus::Finished(_)) => {
+                        break;
+                    }
+                    Ok(VmStatus::Yeeted(val)) => {
+                        return Err(BBError::Other(format!(
+                            "Uncaught exception during validation block execution: {}",
+                            val
+                        )));
+                    }
+                    Err(BBError::NonLocalReturn) => {
+                        if self.frames.len() > initial_frame_count {
+                            continue;
+                        } else if self.frames.len() == initial_frame_count {
+                            break;
+                        } else {
+                            return Err(BBError::NonLocalReturn);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        Ok(self.pop()?)
+    }
+
     pub fn lookup_method(
-        &self,
+        &mut self,
+        mc: &Mutation<'gc>,
         receiver: Value<'gc>,
         selector: &str,
         args: &[Value<'gc>],
-    ) -> Option<Box<dyn Callable<'gc> + 'gc>> {
+    ) -> Result<Option<Box<dyn Callable<'gc> + 'gc>>, BBError> {
         if selector == "meta" {
             if let Value::Class(c) = receiver {
-                return Some(Box::new(MetaCallable { class_obj: c }));
+                return Ok(Some(Box::new(MetaCallable { class_obj: c })));
             }
         }
         if let Value::Class(c) = receiver {
             if self
-                .lookup_method_in_class_hierarchy(c, selector, true, args)
+                .lookup_method_in_class_hierarchy(mc, c, selector, true, args)?
                 .is_none()
             {
                 if selector == "new:" {
-                    return Some(Box::new(NewCallable { class_obj: c }));
+                    return Ok(Some(Box::new(NewCallable { class_obj: c })));
                 }
                 if selector == "new" {
-                    return Some(Box::new(NewNoBlockCallable { class_obj: c }));
+                    return Ok(Some(Box::new(NewNoBlockCallable { class_obj: c })));
                 }
             }
         }
@@ -877,7 +951,7 @@ impl<'gc> VmState<'gc> {
         let method_val = match receiver {
             Value::Class(class_obj) => {
                 if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(class_obj, selector, true, args)
+                    self.lookup_method_in_class_hierarchy(mc, class_obj, selector, true, args)?
                 {
                     Some(m)
                 } else {
@@ -886,11 +960,12 @@ impl<'gc> VmState<'gc> {
                         self.globals.borrow().get(&class_key).copied()
                     {
                         if let Some(m) = self.lookup_method_in_class_hierarchy(
+                            mc,
                             class_class,
                             selector,
                             false,
                             args,
-                        ) {
+                        )? {
                             Some(m)
                         } else {
                             self.globals.borrow().get(&selector_key).copied()
@@ -902,7 +977,7 @@ impl<'gc> VmState<'gc> {
             }
             Value::ClassMeta(class_obj) => {
                 if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(class_obj, selector, true, args)
+                    self.lookup_method_in_class_hierarchy(mc, class_obj, selector, true, args)?
                 {
                     Some(m)
                 } else {
@@ -912,19 +987,24 @@ impl<'gc> VmState<'gc> {
             Value::Object(obj) => {
                 let class_obj = obj.borrow().class;
                 if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(class_obj, selector, false, args)
+                    self.lookup_method_in_class_hierarchy(mc, class_obj, selector, false, args)?
                 {
                     Some(m)
                 } else {
                     self.globals.borrow().get(&selector_key).copied()
                 }
             }
-        }?;
+        };
+
+        let method_val = match method_val {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         match method_val {
             Value::Object(obj) => match &obj.borrow().payload {
-                ObjectPayload::Block(block) => Some(Box::new(BlockCallable { block: *block })),
-                ObjectPayload::Native(native_fn) => Some(Box::new(NativeCallable(*native_fn))),
+                ObjectPayload::Block(block) => Ok(Some(Box::new(BlockCallable { block: *block }))),
+                ObjectPayload::Native(native_fn) => Ok(Some(Box::new(NativeCallable(*native_fn)))),
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
@@ -933,29 +1013,31 @@ impl<'gc> VmState<'gc> {
                         if let Value::Object(block_obj) = block_val
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
-                            Some(Box::new(BlockCallable { block: *block }))
+                            Ok(Some(Box::new(BlockCallable { block: *block })))
                         } else {
-                            None
+                            Ok(None)
                         }
                     } else {
-                        None
+                        Ok(None)
                     }
                 }
-                _ => None,
+                _ => Ok(None),
             },
-            _ => None,
+            _ => Ok(None),
         }
     }
 
     pub fn lookup_method_in_class_hierarchy(
-        &self,
+        &mut self,
+        mc: &Mutation<'gc>,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         selector: &str,
         class_side: bool,
         args: &[Value<'gc>],
-    ) -> Option<Value<'gc>> {
+    ) -> Result<Option<Value<'gc>>, BBError> {
         let mut visited = Vec::new();
         self.lookup_method_in_class_hierarchy_rec(
+            mc,
             class_ref,
             selector,
             class_side,
@@ -965,15 +1047,16 @@ impl<'gc> VmState<'gc> {
     }
 
     fn lookup_method_in_class_hierarchy_rec(
-        &self,
+        &mut self,
+        mc: &Mutation<'gc>,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         selector: &str,
         class_side: bool,
         args: &[Value<'gc>],
         visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
-    ) -> Option<Value<'gc>> {
+    ) -> Result<Option<Value<'gc>>, BBError> {
         if visited.iter().any(|c| Gc::ptr_eq(*c, class_ref)) {
-            return None;
+            return Ok(None);
         }
         visited.push(class_ref);
 
@@ -983,30 +1066,157 @@ impl<'gc> VmState<'gc> {
         } else {
             &class_borrow.instance_methods
         };
-        if let Some(method_chain_start) = methods.get(selector).copied() {
-            let mut curr = Some(method_chain_start);
+        let method_chain_start = methods.get(selector).copied();
+        let mixins = class_borrow.mixin_classes.clone();
+        let parent = class_borrow.parent;
+        drop(class_borrow);
+
+        if let Some(chain_start) = method_chain_start {
+            let mut candidates = Vec::new();
+            let mut curr = Some(chain_start);
             while let Some(method_val) = curr {
-                if self.method_matches_arguments(method_val, args) {
-                    return Some(method_val);
-                }
+                candidates.push(method_val);
                 curr = self.get_next_method_in_chain(method_val);
             }
-        }
-        for mixin in &class_borrow.mixin_classes {
-            if let Some(method) = self
-                .lookup_method_in_class_hierarchy_rec(*mixin, selector, class_side, args, visited)
-            {
-                return Some(method);
+
+            let mut err = None;
+            candidates.sort_by(|&a, &b| match self.compare_specificity(a, b) {
+                Ok(ord) => ord,
+                Err(e) => {
+                    err = Some(e);
+                    std::cmp::Ordering::Equal
+                }
+            });
+            if let Some(e) = err {
+                return Err(e);
+            }
+
+            for method_val in candidates {
+                if self.method_matches_arguments(mc, method_val, args)? {
+                    return Ok(Some(method_val));
+                }
             }
         }
-        if let Some(parent) = class_borrow.parent {
-            if let Some(method) = self
-                .lookup_method_in_class_hierarchy_rec(parent, selector, class_side, args, visited)
-            {
-                return Some(method);
+
+        for mixin in mixins {
+            if let Some(method) = self.lookup_method_in_class_hierarchy_rec(
+                mc, mixin, selector, class_side, args, visited,
+            )? {
+                return Ok(Some(method));
             }
         }
-        None
+        if let Some(p) = parent {
+            if let Some(method) = self
+                .lookup_method_in_class_hierarchy_rec(mc, p, selector, class_side, args, visited)?
+            {
+                return Ok(Some(method));
+            }
+        }
+        Ok(None)
+    }
+
+    fn compare_specificity(
+        &self,
+        a: Value<'gc>,
+        b: Value<'gc>,
+    ) -> Result<std::cmp::Ordering, BBError> {
+        let block_a = self.get_block_from_method(a);
+        let block_b = self.get_block_from_method(b);
+        match (block_a, block_b) {
+            (Some(ba), Some(bb)) => {
+                let len = std::cmp::min(ba.param_types.len(), bb.param_types.len());
+                for i in 0..len {
+                    let type_a = &ba.param_types[i];
+                    let type_b = &bb.param_types[i];
+                    match (type_a, type_b) {
+                        (Some(ta), Some(tb)) => {
+                            if ta != tb {
+                                if self.is_subclass_of(ta, tb) {
+                                    return Ok(std::cmp::Ordering::Less);
+                                }
+                                if self.is_subclass_of(tb, ta) {
+                                    return Ok(std::cmp::Ordering::Greater);
+                                }
+                            }
+                        }
+                        (Some(_), None) => {
+                            return Ok(std::cmp::Ordering::Less);
+                        }
+                        (None, Some(_)) => {
+                            return Ok(std::cmp::Ordering::Greater);
+                        }
+                        (None, None) => {}
+                    }
+                }
+                Ok(std::cmp::Ordering::Equal)
+            }
+            _ => Ok(std::cmp::Ordering::Equal),
+        }
+    }
+
+    fn get_block_from_method(&self, method_val: Value<'gc>) -> Option<Gc<'gc, Block<'gc>>> {
+        if let Value::Object(obj) = method_val {
+            match &obj.borrow().payload {
+                ObjectPayload::Block(block) => Some(*block),
+                ObjectPayload::NativeState(state_cell) => {
+                    let state_ref = state_cell.borrow();
+                    let any_ref = (**state_ref).as_any();
+                    if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
+                        let block_val = method_state.get_block();
+                        if let Value::Object(block_obj) = block_val
+                            && let ObjectPayload::Block(block) = &block_obj.borrow().payload
+                        {
+                            Some(*block)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    fn is_subclass_of(&self, sub: &str, super_class: &str) -> bool {
+        if sub == super_class {
+            return true;
+        }
+        if super_class == "Object" {
+            return true;
+        }
+        let sub_key = NamespacedName::new(Vec::new(), sub.to_string());
+        let super_key = NamespacedName::new(Vec::new(), super_class.to_string());
+        let globals = self.globals.borrow();
+        if let Some(Value::Class(sub_clz)) = globals.get(&sub_key)
+            && let Some(Value::Class(super_clz)) = globals.get(&super_key)
+        {
+            return self.is_subclass_of_clz(*sub_clz, *super_clz);
+        }
+        false
+    }
+
+    pub fn is_subclass_of_clz(
+        &self,
+        sub: Gc<'gc, RefLock<Class<'gc>>>,
+        sup: Gc<'gc, RefLock<Class<'gc>>>,
+    ) -> bool {
+        let mut curr = Some(sub);
+        while let Some(clz) = curr {
+            if Gc::ptr_eq(clz, sup) {
+                return true;
+            }
+            for mixin in &clz.borrow().mixin_classes {
+                if Gc::ptr_eq(*mixin, sup) {
+                    return true;
+                }
+            }
+            curr = clz.borrow().parent;
+        }
+        false
     }
 
     pub fn matches_type(&self, val: Value<'gc>, hint: &str) -> bool {
@@ -1032,20 +1242,10 @@ impl<'gc> VmState<'gc> {
 
     pub fn is_instance_of(&self, val: Value<'gc>, class_obj: Gc<'gc, RefLock<Class<'gc>>>) -> bool {
         if let Some(val_class) = self.get_class_for_lookup(val) {
-            let mut curr = Some(val_class);
-            while let Some(clz) = curr {
-                if Gc::ptr_eq(clz, class_obj) {
-                    return true;
-                }
-                for mixin in &clz.borrow().mixin_classes {
-                    if Gc::ptr_eq(*mixin, class_obj) {
-                        return true;
-                    }
-                }
-                curr = clz.borrow().parent;
-            }
+            self.is_subclass_of_clz(val_class, class_obj)
+        } else {
+            false
         }
-        false
     }
 
     fn get_next_method_in_chain(&self, method_val: Value<'gc>) -> Option<Value<'gc>> {
@@ -1062,21 +1262,37 @@ impl<'gc> VmState<'gc> {
         None
     }
 
-    fn method_matches_arguments(&self, method_val: Value<'gc>, args: &[Value<'gc>]) -> bool {
+    fn method_matches_arguments(
+        &mut self,
+        mc: &Mutation<'gc>,
+        method_val: Value<'gc>,
+        args: &[Value<'gc>],
+    ) -> Result<bool, BBError> {
         if let Value::Object(obj) = method_val {
             match &obj.borrow().payload {
                 ObjectPayload::Block(block) => {
                     if args.len() < block.param_names.len() {
-                        return false;
+                        return Ok(false);
                     }
                     for (i, param_type) in block.param_types.iter().enumerate() {
                         if let Some(hint) = param_type {
                             if !self.matches_type(args[i], hint) {
-                                return false;
+                                return Ok(false);
                             }
                         }
                     }
-                    return true;
+                    if let Some(decl_block) = block.decl_block {
+                        let res = self.execute_validation_block(
+                            mc,
+                            decl_block,
+                            &block.param_names,
+                            args,
+                        )?;
+                        if !res.is_true() {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
                 }
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
@@ -1087,23 +1303,34 @@ impl<'gc> VmState<'gc> {
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
                             if args.len() < block.param_names.len() {
-                                return false;
+                                return Ok(false);
                             }
                             for (i, param_type) in block.param_types.iter().enumerate() {
                                 if let Some(hint) = param_type {
                                     if !self.matches_type(args[i], hint) {
-                                        return false;
+                                        return Ok(false);
                                     }
                                 }
                             }
-                            return true;
+                            if let Some(decl_block) = block.decl_block {
+                                let res = self.execute_validation_block(
+                                    mc,
+                                    decl_block,
+                                    &block.param_names,
+                                    args,
+                                )?;
+                                if !res.is_true() {
+                                    return Ok(false);
+                                }
+                            }
+                            return Ok(true);
                         }
                     }
                 }
                 _ => {}
             }
         }
-        true
+        Ok(true)
     }
 
     pub fn append_method_to_chain(
@@ -1609,6 +1836,22 @@ impl<'gc> VmState<'gc> {
                         let parent_env = self.frames.last().map(|f| f.env);
                         let enclosing_method_id =
                             self.frames.last().and_then(|f| f.enclosing_method_id);
+                        let decl_block = sb.decl_block.as_ref().map(|db| {
+                            gc!(
+                                mc,
+                                Block {
+                                    name: db.name.clone(),
+                                    is_nested_block: db.is_nested_block,
+                                    param_names: db.param_names.clone(),
+                                    param_types: db.param_types.clone(),
+                                    bytecode: db.bytecode.clone(),
+                                    parent_env,
+                                    enclosing_method_id,
+                                    source_info: db.source_info.clone(),
+                                    decl_block: None,
+                                }
+                            )
+                        });
                         let block = Block {
                             name: sb.name.clone(),
                             is_nested_block: sb.is_nested_block,
@@ -1618,6 +1861,7 @@ impl<'gc> VmState<'gc> {
                             parent_env,
                             enclosing_method_id,
                             source_info: sb.source_info.clone(),
+                            decl_block,
                         };
                         self.new_block(mc, block)
                     }
@@ -1653,7 +1897,7 @@ impl<'gc> VmState<'gc> {
                     }
                 }
 
-                let method_opt = self.lookup_method(receiver, &selector, &args);
+                let method_opt = self.lookup_method(mc, receiver, &selector, &args)?;
                 if let Some(callable) = method_opt {
                     let mut all_args = vec![receiver];
                     all_args.extend(args);
@@ -2183,6 +2427,7 @@ mod tests {
                 param_names: Vec::new(),
                 param_types: Vec::new(),
                 bytecode: instructions,
+                decl_block: None,
             };
             let block = gc!(
                 mc,
@@ -2195,6 +2440,7 @@ mod tests {
                     bytecode: static_block.bytecode.clone(),
                     parent_env: None,
                     enclosing_method_id: None,
+                    decl_block: None,
                 }
             );
             vm.start_block(mc, block, Vec::new(), None, None);
@@ -2511,6 +2757,7 @@ mod tests {
                 Instruction::Send("+".to_string(), 1),
                 Instruction::Return,
             ],
+            decl_block: None,
         };
 
         run_test_steps(
@@ -2584,6 +2831,7 @@ mod tests {
                 Instruction::Push(Constant::Int(999)),
                 Instruction::MethodReturn,
             ],
+            decl_block: None,
         };
 
         // Block 1: method
@@ -2600,6 +2848,7 @@ mod tests {
                 Instruction::Push(Constant::Int(100)), // this should be skipped due to MethodReturn
                 Instruction::Return,
             ],
+            decl_block: None,
         };
 
         run_test_steps(
@@ -2642,6 +2891,7 @@ mod tests {
                 Instruction::Push(Constant::Int(777)),
                 Instruction::MethodReturn,
             ],
+            decl_block: None,
         };
 
         // block_bar: blk.value, Push(111), Return
@@ -2657,6 +2907,7 @@ mod tests {
                 Instruction::Push(Constant::Int(111)),
                 Instruction::Return,
             ],
+            decl_block: None,
         };
 
         // block_foo: bar.value: block_nested, Push(222), Return
@@ -2673,6 +2924,7 @@ mod tests {
                 Instruction::Push(Constant::Int(222)),
                 Instruction::Return,
             ],
+            decl_block: None,
         };
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
@@ -2686,6 +2938,7 @@ mod tests {
                 bytecode: block_bar.bytecode.clone(),
                 parent_env: None,
                 enclosing_method_id: None,
+                decl_block: None,
             };
             let bar_block_val = vm.new_block(mc, bar_block);
             vm.globals.borrow_mut(mc).insert(
@@ -2704,6 +2957,7 @@ mod tests {
                     bytecode: block_foo.bytecode.clone(),
                     parent_env: None,
                     enclosing_method_id: None,
+                    decl_block: None,
                 }
             );
             vm.start_block(mc, foo_block, Vec::new(), None, None);
@@ -2758,6 +3012,7 @@ mod tests {
                         Instruction::LoadLocal("self".to_string()),
                         Instruction::Return,
                     ],
+                    decl_block: None,
                 })),
                 Instruction::DefineMethod("x".to_string()),
                 // 2. Override inst method x
@@ -2768,10 +3023,12 @@ mod tests {
                     param_names: Vec::new(),
                     param_types: Vec::new(),
                     bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
+                    decl_block: None,
                 })),
                 Instruction::OverrideMethod("x".to_string()),
                 Instruction::Return,
             ],
+            decl_block: None,
         };
 
         run_test_steps(
@@ -2890,6 +3147,7 @@ mod tests {
             param_names: Vec::new(),
             param_types: Vec::new(),
             bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
+            decl_block: None,
         };
 
         let class_extension_block = StaticBlock {
@@ -2904,6 +3162,7 @@ mod tests {
                 Instruction::Push(Constant::Nil),
                 Instruction::Return,
             ],
+            decl_block: None,
         };
 
         run_test_steps(
@@ -3147,7 +3406,10 @@ mod tests {
             let obj = vm.new_object(mc, ptype_class);
 
             // Look up "name" on PType instance -> should find Point's name method
-            let _method = vm.lookup_method(Value::Object(obj), "name", &[]).unwrap();
+            let _method = vm
+                .lookup_method(mc, Value::Object(obj), "name", &[])
+                .unwrap()
+                .unwrap();
 
             // Execute method
             let ret = vm
@@ -3184,6 +3446,7 @@ mod tests {
                     ],
                     parent_env: None,
                     enclosing_method_id: None,
+                    decl_block: None,
                 }
             );
 
@@ -3221,6 +3484,7 @@ mod tests {
                     ],
                     parent_env: None,
                     enclosing_method_id: None,
+                    decl_block: None,
                 }
             );
 
@@ -3263,6 +3527,7 @@ mod tests {
                     param_names: Vec::new(),
                     param_types: Vec::new(),
                     bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
+                    decl_block: None,
                 })),
                 Instruction::ExecuteBlockWithSelf,
             ],
@@ -3380,6 +3645,22 @@ mod tests {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc));
 
         arena.mutate_root(|mc, vm| {
+            let decl_block = compiled.decl_block.as_ref().map(|db| {
+                gc!(
+                    mc,
+                    Block {
+                        source_info: db.source_info.clone(),
+                        name: db.name.clone(),
+                        is_nested_block: db.is_nested_block,
+                        param_names: db.param_names.clone(),
+                        param_types: db.param_types.clone(),
+                        bytecode: db.bytecode.clone(),
+                        parent_env: None,
+                        enclosing_method_id: None,
+                        decl_block: None,
+                    }
+                )
+            });
             let block = gc!(
                 mc,
                 Block {
@@ -3391,6 +3672,7 @@ mod tests {
                     bytecode: compiled.bytecode.clone(),
                     parent_env: None,
                     enclosing_method_id: None,
+                    decl_block,
                 }
             );
             vm.start_block(mc, block, Vec::new(), None, None);

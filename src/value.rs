@@ -486,6 +486,7 @@ pub struct Block<'gc> {
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     pub enclosing_method_id: Option<usize>,
     pub source_info: Option<SourceInfo>,
+    pub decl_block: Option<Gc<'gc, Block<'gc>>>,
 }
 
 #[derive(Collect, Debug)]

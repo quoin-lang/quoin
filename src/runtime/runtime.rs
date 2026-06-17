@@ -50,6 +50,23 @@ fn eval_string<'gc>(
         .compile_program(program_node)
         .map_err(|e| BBError::Other(format!("Compilation error: {}", e)))?;
 
+    let decl_block = static_block.decl_block.as_ref().map(|db| {
+        crate::gc!(
+            mc,
+            Block {
+                source_info: db.source_info.clone(),
+                name: db.name.clone(),
+                is_nested_block: db.is_nested_block,
+                param_names: db.param_names.clone(),
+                param_types: db.param_types.clone(),
+                bytecode: db.bytecode.clone(),
+                parent_env: None,
+                enclosing_method_id: None,
+                decl_block: None,
+            }
+        )
+    });
+
     let block = crate::gc!(
         mc,
         Block {
@@ -61,6 +78,7 @@ fn eval_string<'gc>(
             bytecode: static_block.bytecode.clone(),
             parent_env: None,
             enclosing_method_id: None,
+            decl_block,
         }
     );
 
@@ -94,6 +112,23 @@ fn eval_file<'gc>(
         .compile_program(program_node)
         .map_err(|e| BBError::Other(format!("Compilation error: {}", e)))?;
 
+    let decl_block = static_block.decl_block.as_ref().map(|db| {
+        crate::gc!(
+            mc,
+            Block {
+                source_info: db.source_info.clone(),
+                name: db.name.clone(),
+                is_nested_block: db.is_nested_block,
+                param_names: db.param_names.clone(),
+                param_types: db.param_types.clone(),
+                bytecode: db.bytecode.clone(),
+                parent_env: None,
+                enclosing_method_id: None,
+                decl_block: None,
+            }
+        )
+    });
+
     let block = crate::gc!(
         mc,
         Block {
@@ -105,6 +140,7 @@ fn eval_file<'gc>(
             bytecode: static_block.bytecode.clone(),
             parent_env: None,
             enclosing_method_id: None,
+            decl_block,
         }
     );
 

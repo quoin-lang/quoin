@@ -45,8 +45,16 @@ pub fn build_class_class() -> NativeClassBuilder {
             // TODO: implement this
             Ok(vm.new_nil(mc))
         })
-        .instance_method(
-            "==:",
-            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
-        )
+        .instance_method("==:", |vm, mc, args| {
+            let lhs = args[0];
+            let rhs = args[1];
+            let res = match (lhs, rhs) {
+                (Value::Class(l), Value::Class(r)) => vm.is_subclass_of_clz(l, r),
+                (Value::ClassMeta(l), Value::ClassMeta(r)) => vm.is_subclass_of_clz(l, r),
+                (Value::Class(l), Value::ClassMeta(r)) => vm.is_subclass_of_clz(l, r),
+                (Value::ClassMeta(l), Value::Class(r)) => vm.is_subclass_of_clz(l, r),
+                _ => lhs == rhs,
+            };
+            Ok(vm.new_bool(mc, res))
+        })
 }
