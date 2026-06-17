@@ -20,7 +20,7 @@ use crate::parser::generated::buildingblocksparser::{
     CallSigNoArgContext, CallSigNoArgContextAttrs, CallSigWArgContext, CallSigWArgContextAttrs,
     ClassDef2ExprContext, ClassDef2ExprContextAttrs, ClassDefExprContext, ClassDefExprContextAttrs,
     ClassExtExprContext, ClassExtExprContextAttrs, ConstDefExprContext, ConstDefExprContextAttrs,
-    DefCallExprContext, DefCallExprContextAttrs, DictExprContext, DivExprContext, Dot3StmtContext,
+    DefCallExprContext, DictExprContext, DivExprContext, Dot3StmtContext,
     EqExprContext, ExprCallExprContext, ExprStmtContext, ExprStmtContextAttrs, FullNSContext,
     FullNSContextAttrs, GtEqExprContext, GtExprContext, Huh3StmtContext, IdentKeywordContext,
     IdentKeywordContextAttrs, IdentLValueContext, IdentLValueContextAttrs, IdentOtherContext,
@@ -42,6 +42,12 @@ use crate::parser::generated::buildingblocksparser::{
     UnMinusExprContext, UnMinusExprContextAttrs, UnModExprContext, UnModExprContextAttrs,
     UnPlusExprContext, UnPlusExprContextAttrs, UserListExprContext, UserListExprContextAttrs,
     UserStringExprContext, UserStringExprContextAttrs, YieldReturnContext, YieldReturnContextAttrs,
+    CallSigNoArgBangNormalContext, CallSigNoArgBangNormalContextAttrs,
+    CallSigNoArgNormalContext, CallSigNoArgNormalContextAttrs,
+    CallSigWithArgContext, CallSigWithArgContextAttrs,
+    DefCallWArgExprContext,
+    ExprCallWArgExprContext,
+    RichExprBaseContext, RichExprBaseContextAttrs,
 };
 use crate::parser::generated::buildingblocksvisitor::BuildingBlocksVisitorCompat;
 use crate::value::SourceInfo;
@@ -391,7 +397,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         Node {
             source_info: self.extract_source_info(ctx),
             value: MethodReturn(MethodReturnNode {
-                value: Arc::new(self.visit(&*ctx.expr().unwrap())),
+                value: Arc::new(self.visit(&*ctx.richExpr().unwrap())),
             }),
         }
     }
@@ -400,7 +406,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         Node {
             source_info: self.extract_source_info(ctx),
             value: YieldReturn(YieldReturnNode {
-                value: Arc::new(self.visit(&*ctx.expr().unwrap())),
+                value: Arc::new(self.visit(&*ctx.richExpr().unwrap())),
             }),
         }
     }
@@ -409,7 +415,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
         Node {
             source_info: self.extract_source_info(ctx),
             value: BlockReturn(BlockReturnNode {
-                value: Arc::new(self.visit(&*ctx.expr().unwrap())),
+                value: Arc::new(self.visit(&*ctx.richExpr().unwrap())),
             }),
         }
     }
@@ -440,7 +446,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_ExprStmt(&mut self, ctx: &ExprStmtContext<'a>) -> Self::Return {
-        self.visit(&*ctx.expr().unwrap())
+        self.visit(&*ctx.richExpr().unwrap())
     }
 
     fn visit_SelectorWArgs(&mut self, ctx: &SelectorWArgsContext<'a>) -> Self::Return {
@@ -513,7 +519,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
             source_info: self.extract_source_info(ctx),
             value: Assignment(AssignmentNode {
                 lvalues: nodes,
-                rvalue: Arc::new(self.visit(&*ctx.expr().unwrap())),
+                rvalue: Arc::new(self.visit(&*ctx.richExpr().unwrap())),
             }),
         }
     }
@@ -669,7 +675,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
             .to_string();
 
         let mut values: Vec<Arc<Node>> = Vec::new();
-        for node in ctx.expr_all() {
+        for node in ctx.richExpr_all() {
             values.push(Arc::new(self.visit(&*node)));
         }
 
@@ -754,7 +760,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_SetExpr(&mut self, ctx: &SetExprContext<'a>) -> Self::Return {
         let mut exprs: Vec<Arc<Node>> = Vec::new();
-        for node in ctx.expr_all() {
+        for node in ctx.richExpr_all() {
             exprs.push(Arc::new(self.visit(&*node)));
         }
 
@@ -807,7 +813,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
 
     fn visit_ListExpr(&mut self, ctx: &ListExprContext<'a>) -> Self::Return {
         let mut exprs: Vec<Arc<Node>> = Vec::new();
-        for node in ctx.expr_all() {
+        for node in ctx.richExpr_all() {
             exprs.push(Arc::new(self.visit(&*node)));
         }
 
@@ -848,7 +854,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
                     id,
                     self.visit(&*ctx.nsvarident().unwrap())
                 )),
-                rvalue: Arc::new(self.visit(ctx.expr().clone().unwrap().as_ref())),
+                rvalue: Arc::new(self.visit(ctx.richExpr().clone().unwrap().as_ref())),
             }),
         }
     }
@@ -979,7 +985,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_NestedExpr(&mut self, ctx: &NestedExprContext<'a>) -> Self::Return {
-        self.visit(&*ctx.expr().unwrap())
+        self.visit(&*ctx.richExpr().unwrap())
     }
 
     fn visit_ModExpr(&mut self, ctx: &ModExprContext<'a>) -> Self::Return {
@@ -1012,7 +1018,7 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
                 arguments: Arc::new(cast_node!(
                     MethodCallArguments(args),
                     args,
-                    self.visit(&*ctx.callSig().unwrap())
+                    self.visit(&*ctx.sig.clone().unwrap())
                 )),
             }),
         }
@@ -1038,6 +1044,11 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
     }
 
     fn visit_CallSigWArg(&mut self, ctx: &CallSigWArgContext<'a>) -> Self::Return {
+        let sub_ctx = ctx.callSigWithArg().unwrap();
+        self.visit(&*sub_ctx)
+    }
+
+    fn visit_callSigWithArg(&mut self, ctx: &CallSigWithArgContext<'a>) -> Self::Return {
         let mut idents: Vec<Arc<IdentifierNode>> = Vec::new();
         for node in ctx.ident_all() {
             idents.push(Arc::new(cast_node!(Identifier(id), id, self.visit(&*node))));
@@ -1055,6 +1066,65 @@ impl<'a> BuildingBlocksVisitorCompat<'a> for AstVisitor {
                     identifiers: idents,
                 }),
                 expressions: exprs,
+            }),
+        }
+    }
+
+    fn visit_CallSigNoArgNormal(&mut self, ctx: &CallSigNoArgNormalContext<'a>) -> Self::Return {
+        let ident = cast_node!(Identifier(id), id, self.visit(&*ctx.ident().unwrap()));
+        Node {
+            source_info: self.extract_source_info(ctx),
+            value: MethodCallArguments(MethodCallArgumentsNode {
+                signature: Arc::new(MethodSelectorNode {
+                    identifiers: vec![Arc::new(ident)],
+                }),
+                expressions: vec![],
+            }),
+        }
+    }
+
+    fn visit_CallSigNoArgBangNormal(&mut self, ctx: &CallSigNoArgBangNormalContext<'a>) -> Self::Return {
+        let ident = cast_node!(Identifier(id), id, self.visit(&*ctx.ident().unwrap()));
+        let ident = Self::add_bang_to_ident(ident);
+        Node {
+            source_info: self.extract_source_info(ctx),
+            value: MethodCallArguments(MethodCallArgumentsNode {
+                signature: Arc::new(MethodSelectorNode {
+                    identifiers: vec![Arc::new(ident)],
+                }),
+                expressions: vec![],
+            }),
+        }
+    }
+
+    fn visit_RichExprBase(&mut self, ctx: &RichExprBaseContext<'a>) -> Self::Return {
+        self.visit(&*ctx.expr().unwrap())
+    }
+
+    fn visit_DefCallWArgExpr(&mut self, ctx: &DefCallWArgExprContext<'a>) -> Self::Return {
+        Node {
+            source_info: self.extract_source_info(ctx),
+            value: MethodCall(MethodCallNode {
+                subject: None,
+                arguments: Arc::new(cast_node!(
+                    MethodCallArguments(args),
+                    args,
+                    self.visit(&*ctx.sig.clone().unwrap())
+                )),
+            }),
+        }
+    }
+
+    fn visit_ExprCallWArgExpr(&mut self, ctx: &ExprCallWArgExprContext<'a>) -> Self::Return {
+        Node {
+            source_info: self.extract_source_info(ctx),
+            value: MethodCall(MethodCallNode {
+                subject: Some(Arc::new(self.visit(&*ctx.subject.clone().unwrap()))),
+                arguments: Arc::new(cast_node!(
+                    MethodCallArguments(args),
+                    args,
+                    self.visit(&*ctx.sig.clone().unwrap())
+                )),
             }),
         }
     }

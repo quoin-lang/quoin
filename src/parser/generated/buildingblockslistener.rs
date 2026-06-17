@@ -261,6 +261,42 @@ pub trait BuildingBlocksListener<'input>:
      */
     fn exit_SubLValue(&mut self, _ctx: &SubLValueContext<'input>) {}
     /**
+     * Enter a parse tree produced by the {@code DefCallWArgExpr}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn enter_DefCallWArgExpr(&mut self, _ctx: &DefCallWArgExprContext<'input>) {}
+    /**
+     * Exit a parse tree produced by the {@code DefCallWArgExpr}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn exit_DefCallWArgExpr(&mut self, _ctx: &DefCallWArgExprContext<'input>) {}
+    /**
+     * Enter a parse tree produced by the {@code ExprCallWArgExpr}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn enter_ExprCallWArgExpr(&mut self, _ctx: &ExprCallWArgExprContext<'input>) {}
+    /**
+     * Exit a parse tree produced by the {@code ExprCallWArgExpr}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn exit_ExprCallWArgExpr(&mut self, _ctx: &ExprCallWArgExprContext<'input>) {}
+    /**
+     * Enter a parse tree produced by the {@code RichExprBase}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn enter_RichExprBase(&mut self, _ctx: &RichExprBaseContext<'input>) {}
+    /**
+     * Exit a parse tree produced by the {@code RichExprBase}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn exit_RichExprBase(&mut self, _ctx: &RichExprBaseContext<'input>) {}
+    /**
      * Enter a parse tree produced by the {@code MulExpr}
      * labeled alternative in {@link BuildingBlocksParser#expr}.
      * @param ctx the parse tree
@@ -774,6 +810,40 @@ pub trait BuildingBlocksListener<'input>:
      * @param ctx the parse tree
      */
     fn exit_CallSigNoArgBang(&mut self, _ctx: &CallSigNoArgBangContext<'input>) {}
+    /**
+     * Enter a parse tree produced by {@link BuildingBlocksParser#callSigWithArg}.
+     * @param ctx the parse tree
+     */
+    fn enter_callSigWithArg(&mut self, _ctx: &CallSigWithArgContext<'input>) {}
+    /**
+     * Exit a parse tree produced by {@link BuildingBlocksParser#callSigWithArg}.
+     * @param ctx the parse tree
+     */
+    fn exit_callSigWithArg(&mut self, _ctx: &CallSigWithArgContext<'input>) {}
+    /**
+     * Enter a parse tree produced by the {@code CallSigNoArgNormal}
+     * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
+     * @param ctx the parse tree
+     */
+    fn enter_CallSigNoArgNormal(&mut self, _ctx: &CallSigNoArgNormalContext<'input>) {}
+    /**
+     * Exit a parse tree produced by the {@code CallSigNoArgNormal}
+     * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
+     * @param ctx the parse tree
+     */
+    fn exit_CallSigNoArgNormal(&mut self, _ctx: &CallSigNoArgNormalContext<'input>) {}
+    /**
+     * Enter a parse tree produced by the {@code CallSigNoArgBangNormal}
+     * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
+     * @param ctx the parse tree
+     */
+    fn enter_CallSigNoArgBangNormal(&mut self, _ctx: &CallSigNoArgBangNormalContext<'input>) {}
+    /**
+     * Exit a parse tree produced by the {@code CallSigNoArgBangNormal}
+     * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
+     * @param ctx the parse tree
+     */
+    fn exit_CallSigNoArgBangNormal(&mut self, _ctx: &CallSigNoArgBangNormalContext<'input>) {}
     /**
      * Enter a parse tree produced by the {@code NamespacedIdent}
      * labeled alternative in {@link BuildingBlocksParser#nsvarident}.

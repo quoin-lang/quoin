@@ -204,6 +204,33 @@ pub trait BuildingBlocksVisitor<'input>:
     }
 
     /**
+     * Visit a parse tree produced by the {@code DefCallWArgExpr}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn visit_DefCallWArgExpr(&mut self, ctx: &DefCallWArgExprContext<'input>) {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by the {@code ExprCallWArgExpr}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn visit_ExprCallWArgExpr(&mut self, ctx: &ExprCallWArgExprContext<'input>) {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by the {@code RichExprBase}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn visit_RichExprBase(&mut self, ctx: &RichExprBaseContext<'input>) {
+        self.visit_children(ctx)
+    }
+
+    /**
      * Visit a parse tree produced by the {@code MulExpr}
      * labeled alternative in {@link BuildingBlocksParser#expr}.
      * @param ctx the parse tree
@@ -586,6 +613,32 @@ pub trait BuildingBlocksVisitor<'input>:
      * @param ctx the parse tree
      */
     fn visit_CallSigNoArgBang(&mut self, ctx: &CallSigNoArgBangContext<'input>) {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by {@link BuildingBlocksParser#callSigWithArg}.
+     * @param ctx the parse tree
+     */
+    fn visit_callSigWithArg(&mut self, ctx: &CallSigWithArgContext<'input>) {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by the {@code CallSigNoArgNormal}
+     * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
+     * @param ctx the parse tree
+     */
+    fn visit_CallSigNoArgNormal(&mut self, ctx: &CallSigNoArgNormalContext<'input>) {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by the {@code CallSigNoArgBangNormal}
+     * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
+     * @param ctx the parse tree
+     */
+    fn visit_CallSigNoArgBangNormal(&mut self, ctx: &CallSigNoArgBangNormalContext<'input>) {
         self.visit_children(ctx)
     }
 
@@ -986,6 +1039,33 @@ pub trait BuildingBlocksVisitorCompat<'input>:
     }
 
     /**
+     * Visit a parse tree produced by the {@code DefCallWArgExpr}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn visit_DefCallWArgExpr(&mut self, ctx: &DefCallWArgExprContext<'input>) -> Self::Return {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by the {@code ExprCallWArgExpr}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn visit_ExprCallWArgExpr(&mut self, ctx: &ExprCallWArgExprContext<'input>) -> Self::Return {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by the {@code RichExprBase}
+     * labeled alternative in {@link BuildingBlocksParser#richExpr}.
+     * @param ctx the parse tree
+     */
+    fn visit_RichExprBase(&mut self, ctx: &RichExprBaseContext<'input>) -> Self::Return {
+        self.visit_children(ctx)
+    }
+
+    /**
      * Visit a parse tree produced by the {@code MulExpr}
      * labeled alternative in {@link BuildingBlocksParser#expr}.
      * @param ctx the parse tree
@@ -1372,6 +1452,38 @@ pub trait BuildingBlocksVisitorCompat<'input>:
     }
 
     /**
+     * Visit a parse tree produced by {@link BuildingBlocksParser#callSigWithArg}.
+     * @param ctx the parse tree
+     */
+    fn visit_callSigWithArg(&mut self, ctx: &CallSigWithArgContext<'input>) -> Self::Return {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by the {@code CallSigNoArgNormal}
+     * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
+     * @param ctx the parse tree
+     */
+    fn visit_CallSigNoArgNormal(
+        &mut self,
+        ctx: &CallSigNoArgNormalContext<'input>,
+    ) -> Self::Return {
+        self.visit_children(ctx)
+    }
+
+    /**
+     * Visit a parse tree produced by the {@code CallSigNoArgBangNormal}
+     * labeled alternative in {@link BuildingBlocksParser#callSigNoArgOrBang}.
+     * @param ctx the parse tree
+     */
+    fn visit_CallSigNoArgBangNormal(
+        &mut self,
+        ctx: &CallSigNoArgBangNormalContext<'input>,
+    ) -> Self::Return {
+        self.visit_children(ctx)
+    }
+
+    /**
      * Visit a parse tree produced by the {@code NamespacedIdent}
      * labeled alternative in {@link BuildingBlocksParser#nsvarident}.
      * @param ctx the parse tree
@@ -1679,6 +1791,21 @@ where
         *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
     }
 
+    fn visit_DefCallWArgExpr(&mut self, ctx: &DefCallWArgExprContext<'input>) {
+        let result = <Self as BuildingBlocksVisitorCompat>::visit_DefCallWArgExpr(self, ctx);
+        *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
+    }
+
+    fn visit_ExprCallWArgExpr(&mut self, ctx: &ExprCallWArgExprContext<'input>) {
+        let result = <Self as BuildingBlocksVisitorCompat>::visit_ExprCallWArgExpr(self, ctx);
+        *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
+    }
+
+    fn visit_RichExprBase(&mut self, ctx: &RichExprBaseContext<'input>) {
+        let result = <Self as BuildingBlocksVisitorCompat>::visit_RichExprBase(self, ctx);
+        *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
+    }
+
     fn visit_MulExpr(&mut self, ctx: &MulExprContext<'input>) {
         let result = <Self as BuildingBlocksVisitorCompat>::visit_MulExpr(self, ctx);
         *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
@@ -1891,6 +2018,21 @@ where
 
     fn visit_CallSigNoArgBang(&mut self, ctx: &CallSigNoArgBangContext<'input>) {
         let result = <Self as BuildingBlocksVisitorCompat>::visit_CallSigNoArgBang(self, ctx);
+        *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
+    }
+
+    fn visit_callSigWithArg(&mut self, ctx: &CallSigWithArgContext<'input>) {
+        let result = <Self as BuildingBlocksVisitorCompat>::visit_callSigWithArg(self, ctx);
+        *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
+    }
+
+    fn visit_CallSigNoArgNormal(&mut self, ctx: &CallSigNoArgNormalContext<'input>) {
+        let result = <Self as BuildingBlocksVisitorCompat>::visit_CallSigNoArgNormal(self, ctx);
+        *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
+    }
+
+    fn visit_CallSigNoArgBangNormal(&mut self, ctx: &CallSigNoArgBangNormalContext<'input>) {
+        let result = <Self as BuildingBlocksVisitorCompat>::visit_CallSigNoArgBangNormal(self, ctx);
         *<Self as ParseTreeVisitorCompat>::temp_result(self) = result;
     }
 
