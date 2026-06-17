@@ -1,10 +1,10 @@
 runner = TestRunner.new;
 
 testFolder = ([IO]Folder.open:'bblib/tests');
-"* (testFolder.entries.sort:{|sf|
-"*   (sf.name.split:'-').first.to_integer
-"* }).each:{|ef|
-testFolder.each:{|ef|
+(testFolder
+    .list
+    .sort:{|sf| (sf.name.split:'-').first.to_integer})
+    .each:{|ef|
     (ef.is_file? && (ef.ext == 'b')).if:{
         [IO]Stdout.writeln:'Loading ' + ef.name + '...';
         suite = Runtime.evalFile:ef.fullpath;

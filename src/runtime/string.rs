@@ -50,6 +50,14 @@ pub fn build_string_class() -> NativeClassBuilder {
             let rhs = arg!(args, String, 1);
             Ok(vm.new_bool(mc, *lhs > *rhs))
         })
+        .instance_method("to_integer", |vm, mc, args| {
+            let s = arg!(args, String, 0);
+            Ok(vm.new_int(
+                mc,
+                s.parse::<i64>()
+                    .map_err(|e| BBError::Other(e.to_string()))?,
+            ))
+        })
         .instance_method("mod", |vm, mc, args| {
             let s_borrow = arg!(args, String, 0);
             let s = s_borrow.to_string();
