@@ -22,10 +22,12 @@ NumberRange <- { | @start @end @cur @n |
 
     next -> {
         @cur.defined?.else:{ @cur = @start - @n }
-
         @cur = @cur + @n
-
-        ^(((@cur-@end) < 0) == (@n < 0)).if:{ nil } else:{ @cur }
+        ^(@n > 0).if:{
+            (@cur >= @end).if:{ nil } else:{ @cur }
+        } else:{
+            (@cur <= @end).if:{ nil } else:{ @cur }
+        }
     }
 };
 
