@@ -19,4 +19,4 @@ Block <-- {
    };
 };
 
-{}.class <-- {}   “* Same
+{}.class <-- {}   "* Same
