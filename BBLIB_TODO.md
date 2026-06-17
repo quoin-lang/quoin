@@ -9,7 +9,7 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Find duplicate bits of code and refactor.
   - Spinning the VM while executing in a native method.
   - Object initialization/new:{} logic
-- [ ] Bring over AnsiColorizer.cs from the old repo.
+- [x] Bring over AnsiColorizer.cs from the old repo.
   - [ ] Switch to the colorized test suite runner.
 - [ ] Bring over Highlighter from the old repo.
   - [ ] Show highlighted code snippets in stack traces.
