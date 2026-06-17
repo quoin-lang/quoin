@@ -22,6 +22,16 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Confirm `%'string%{eval}' is working.
   - [ ] Make sure it's optimized into string concatenation by the compiler.
 - [ ] Make sure case statements are tested and working.
+- [ ] Repurpose the Yeet instruction and make sure .../???/!!! are all working.
+- [ ] Formalize an interface for BB error types.
+- [ ] Implement DateTime.
+- [ ] Implement Decimal.
+  - rust_decimal crate
+- [ ] Make sure #symbol types are working.
+- [ ] Language server
+  - [ ] VSCode plugin
+- [ ] Integrate fff into agy
+  - https://github.com/dmtrKovalenko/fff#mcp-server
 
 ## Bugs/Odd Behavior
 
