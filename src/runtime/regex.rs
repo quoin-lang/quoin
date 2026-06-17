@@ -1,4 +1,4 @@
-use crate::value::{AnyCollect, NativeClassBuilder};
+use crate::value::{AnyCollect, NativeClassBuilder, Value};
 
 use gc_arena::collect::Trace;
 use regex::Regex;
@@ -28,7 +28,6 @@ impl AnyCollect for NativeRegexState {
         // No GC references in Regex
     }
 }
-
 pub fn build_regex_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Regex", Some("Object"))
         .instance_method("==:", |vm, mc, args| {
@@ -38,5 +37,14 @@ pub fn build_regex_class() -> NativeClassBuilder {
                 Ok(rhs_pat) => Ok(vm.new_bool(mc, lhs_pat == rhs_pat)),
                 Err(_) => Ok(vm.new_bool(mc, false)),
             }
+        })
+        .instance_method("Split:", |vm, mc, args| {
+            let s = crate::arg!(args, String, 1);
+            let parts: Vec<Value> = args[0].with_native_state(|r: &NativeRegexState| {
+                r.regex.split(&**s)
+                    .map(|part| vm.new_string(mc, part.to_string()))
+                    .collect()
+            })?;
+            Ok(vm.new_list(mc, parts))
         })
 }
