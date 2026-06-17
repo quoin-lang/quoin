@@ -481,6 +481,7 @@ pub struct Block<'gc> {
     pub name: Option<String>,
     pub is_nested_block: bool,
     pub param_names: Vec<String>,
+    pub param_types: Vec<Option<String>>,
     pub bytecode: Vec<Instruction>,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     pub enclosing_method_id: Option<usize>,

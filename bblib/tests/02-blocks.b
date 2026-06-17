@@ -16,7 +16,7 @@
     };
 
     .test:
-    name -> {
+    blockName -> {
         .is:{ {}.name } equalTo:nil;
         .is:{ {#x |-|}.name } equalTo:'x';
         .is:{ {#x |x|}.name } equalTo:'x';

@@ -78,6 +78,7 @@ impl Compiler {
             name: None,
             is_nested_block: false,
             param_names: Vec::new(),
+            param_types: Vec::new(),
             bytecode,
             source_info: program.source_info.clone(),
         })
@@ -254,6 +255,29 @@ impl Compiler {
         Ok(())
     }
 
+    fn collect_lvalue_names(&self, lvalues: &[Arc<Node>], names: &mut Vec<String>) {
+        for lval in lvalues {
+            match &lval.value {
+                NodeValue::IdentLValue(ident_lval) => {
+                    let id = &ident_lval.identifier;
+                    if id.namespace.is_none() && id.identifier_type != IdentifierType::Namespaced && id.identifier_type != IdentifierType::Instance {
+                        names.push(id.name.clone());
+                    }
+                }
+                NodeValue::SplatLValue(splat_lval) => {
+                    let id = &splat_lval.identifier;
+                    if id.namespace.is_none() && id.identifier_type != IdentifierType::Namespaced && id.identifier_type != IdentifierType::Instance {
+                        names.push(id.name.clone());
+                    }
+                }
+                NodeValue::SubLValue(sub_lval) => {
+                    self.collect_lvalue_names(&sub_lval.lvalues, names);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn compile_assignment(
         &mut self,
         assign: &AssignmentNode,
@@ -263,7 +287,22 @@ impl Compiler {
             return Err("Assignment requires at least one target lvalue".to_string());
         }
 
+        let mut target_names = Vec::new();
+        self.collect_lvalue_names(&assign.lvalues, &mut target_names);
+
+        let mut pre_declared = Vec::new();
+        for name in &target_names {
+            if !self.is_local(name) {
+                self.scopes.last_mut().unwrap().locals.insert(name.clone());
+                pre_declared.push(name.clone());
+            }
+        }
+
         self.compile_node(&assign.rvalue, bytecode)?;
+
+        for name in &pre_declared {
+            self.scopes.last_mut().unwrap().locals.remove(name);
+        }
 
         if assign.lvalues.len() == 1 {
             let lval = &assign.lvalues[0];
@@ -284,6 +323,7 @@ impl Compiler {
 
         Ok(())
     }
+
 
     fn compile_lvalue_store(
         &mut self,
@@ -525,11 +565,14 @@ impl Compiler {
         bytecode: &mut Vec<Instruction>,
     ) -> Result<(), String> {
         let mut param_names = Vec::new();
+        let mut param_types = Vec::new();
         let mut locals = HashSet::new();
 
         for arg in &block.arguments {
             let name = arg.identifier.name.clone();
             param_names.push(name.clone());
+            let type_name = arg.type_hint.as_ref().map(|id| id.name.clone());
+            param_types.push(type_name);
             locals.insert(name);
         }
 
@@ -570,6 +613,7 @@ impl Compiler {
             name: block_name,
             is_nested_block: true,
             param_names,
+            param_types,
             bytecode: block_bytecode,
             source_info: block.source_info.clone(),
         };
@@ -1016,6 +1060,7 @@ mod tests {
             name: None,
             is_nested_block: true,
             param_names: vec!["x".to_string()],
+            param_types: vec![None],
             bytecode: vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
@@ -1145,6 +1190,7 @@ mod tests {
             name: None,
             is_nested_block: true,
             param_names: vec!["a".to_string(), "b".to_string()],
+            param_types: vec![None, None],
             bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
             source_info: None,
         };

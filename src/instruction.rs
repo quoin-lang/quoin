@@ -7,6 +7,7 @@ pub struct StaticBlock {
     pub name: Option<String>,
     pub is_nested_block: bool,
     pub param_names: Vec<String>,
+    pub param_types: Vec<Option<String>>,
     pub bytecode: Vec<Instruction>,
     pub source_info: Option<SourceInfo>,
 }

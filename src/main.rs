@@ -133,6 +133,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
                     name: program.name.clone(),
                     is_nested_block: program.is_nested_block,
                     param_names: program.param_names.clone(),
+                    param_types: program.param_types.clone(),
                     bytecode: program.bytecode.clone(),
                     parent_env: None,
                     enclosing_method_id: None,

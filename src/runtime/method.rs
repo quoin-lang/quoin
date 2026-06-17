@@ -7,6 +7,7 @@ pub struct NativeMethodState {
     pub selector: String,
     pub block: Value<'static>,
     pub is_extension: bool,
+    pub next: Option<Value<'static>>,
 }
 
 impl NativeMethodState {
@@ -16,6 +17,7 @@ impl NativeMethodState {
             selector,
             block: block_static,
             is_extension,
+            next: None,
         }
     }
 
@@ -36,6 +38,10 @@ impl AnyCollect for NativeMethodState {
     fn trace_gc<'gc>(&self, cc: &mut dyn gc_arena::collect::Trace<'gc>) {
         let block_gc: &Value<'gc> = unsafe { std::mem::transmute(&self.block) };
         block_gc.dyn_trace(cc);
+        if let Some(next) = &self.next {
+            let next_gc: &Value<'gc> = unsafe { std::mem::transmute(next) };
+            next_gc.dyn_trace(cc);
+        }
     }
 }
 

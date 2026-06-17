@@ -80,5 +80,8 @@ pub fn build_object_class() -> NativeClassBuilder {
             Ok(vm.new_nil(mc))
         })
         // TODO: implement throw properly
-        .instance_method("throw", |_vm, _mc, args| Err(format!("{}", args[0]).into()))
+        .instance_method("throw", |vm, _mc, args| {
+            vm.active_exception = Some(args[0]);
+            Err(format!("{}", args[0]).into())
+        })
 }

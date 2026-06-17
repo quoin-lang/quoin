@@ -1,5 +1,6 @@
 use crate::error::BBError;
 use crate::runtime::list::NativeListState;
+use crate::runtime::map::NativeMapState;
 use crate::runtime::regex::NativeRegexState;
 use crate::value::{Class, NamespacedName, NativeFunc, ObjectPayload, Value};
 use crate::vm::VmState;
@@ -117,7 +118,7 @@ pub fn native_match<'gc>(
     };
 
     if has_custom_tilde {
-        let method = vm.lookup_method(lhs, "~:").unwrap();
+        let method = vm.lookup_method(lhs, "~:", &args[1..]).unwrap();
         method.call(vm, mc, args, Some("~:".to_string()))?;
         return Ok(vm.pop()?);
     }
@@ -158,7 +159,7 @@ pub fn native_match<'gc>(
         return Ok(vm.new_bool(mc, matched));
     }
 
-    let eq_val = if let Some(method) = vm.lookup_method(lhs, "==:") {
+    let eq_val = if let Some(method) = vm.lookup_method(lhs, "==:", &[rhs]) {
         method.call(vm, mc, vec![lhs, rhs], Some("==:".to_string()))?;
         vm.pop()?
     } else {
@@ -402,6 +403,37 @@ pub fn native_mod<'gc>(
                                 };
                                 result.push_str(&val_str);
                             }
+                        } else if next_c.is_alphabetic()
+                            && let Value::Object(obj) = args[1]
+                            && let ObjectPayload::NativeState(state_cell) = &obj.borrow().payload
+                            && state_cell.borrow().as_any().is::<NativeMapState>()
+                        {
+                            let key_char = next_c;
+                            chars.next(); // Consume the character
+                            
+                            let mut resolved_val = None;
+                            let state_ref = state_cell.borrow();
+                            if let Some(map_state) = state_ref.as_any().downcast_ref::<NativeMapState>() {
+                                let key_str = key_char.to_string();
+                                if let Some(val) = map_state.get_map().get(&key_str).copied() {
+                                    resolved_val = Some(val);
+                                }
+                            }
+                            
+                            if let Some(val) = resolved_val {
+                                let val_str_val = vm.call_method(mc, val, "s", vec![])?;
+                                let val_str = match val_str_val {
+                                    Value::Object(o) => match &o.borrow().payload {
+                                        ObjectPayload::String(st) => st.to_string(),
+                                        _ => format!("{}", val_str_val),
+                                    },
+                                    _ => format!("{}", val_str_val),
+                                };
+                                result.push_str(&val_str);
+                            } else {
+                                result.push('%');
+                                result.push(key_char);
+                            }
                         } else {
                             if arg_idx < format_args.len() {
                                 let val = format_args[arg_idx];
@@ -463,7 +495,7 @@ pub fn native_eq<'gc>(
     }
 
     let (receiver, other) = (args[0], args[1]);
-    let method = vm.lookup_method(receiver, "==:");
+    let method = vm.lookup_method(receiver, "==:", &args[1..]);
     if let Some(method) = method {
         method.call(vm, mc, args, Some("==:".to_string()))?;
         return Ok(vm.pop()?);

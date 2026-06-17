@@ -68,4 +68,45 @@ pub fn build_block_class() -> NativeClassBuilder {
         .instance_method("==:", |vm, mc, args| {
             Ok(vm.new_bool(mc, args[0] == args[1]))
         })
+        .instance_method("catch:", |vm, mc, args| {
+            let receiver_block = arg!(args, Block, 0);
+            let catch_block = arg!(args, Block, 1);
+            
+            match vm.execute_block(mc, receiver_block, Vec::new(), None) {
+                Ok(val) => Ok(val),
+                Err(e) => {
+                    let exception_val = if let Some(val) = vm.active_exception.take() {
+                        val
+                    } else {
+                        vm.new_string(mc, format!("{}", e))
+                    };
+                    
+                    vm.execute_block(mc, catch_block, vec![exception_val], None)
+                }
+            }
+        })
+        .instance_method("catch:finally:", |vm, mc, args| {
+            let receiver_block = arg!(args, Block, 0);
+            let catch_block = arg!(args, Block, 1);
+            let finally_block = arg!(args, Block, 2);
+            
+            let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
+            match res {
+                Ok(val) => {
+                    vm.execute_block(mc, finally_block, Vec::new(), None)?;
+                    Ok(val)
+                }
+                Err(e) => {
+                    let exception_val = if let Some(val) = vm.active_exception.take() {
+                        val
+                    } else {
+                        vm.new_string(mc, format!("{}", e))
+                    };
+                    
+                    let catch_res = vm.execute_block(mc, catch_block, vec![exception_val], None);
+                    vm.execute_block(mc, finally_block, Vec::new(), None)?;
+                    catch_res
+                }
+            }
+        })
 }
