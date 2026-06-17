@@ -27,6 +27,16 @@ impl Compiler {
         }
     }
 
+    pub fn new_with_locals(locals: HashSet<String>) -> Self {
+        Self {
+            scopes: vec![Scope {
+                locals,
+            }],
+            temp_counter: 0,
+        }
+    }
+
+
     fn new_temp_var(&mut self) -> String {
         self.temp_counter += 1;
         format!("__bb_temp_{}", self.temp_counter)
