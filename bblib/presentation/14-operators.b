@@ -1,4 +1,4 @@
-﻿"* Binary operators: + - * / == != > >= < <= .. % ~
+"* Binary operators: + - * / == != > >= < <= .. % ~
 "* Unary operators: + - ! %
 
 1.abs    "* Call(1, 'abs')

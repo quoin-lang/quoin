@@ -1,4 +1,4 @@
-﻿Case <- {
+Case <- {
     .meta <-- {
         for:with: -> { |obj block:Block|
             {

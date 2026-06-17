@@ -1,4 +1,4 @@
-﻿(1 < 10).if:{ 'True'.puts }
+(1 < 10).if:{ 'True'.puts }
        else:{ 'False'.puts }
 
 i = 1

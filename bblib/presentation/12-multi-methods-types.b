@@ -1,4 +1,4 @@
-﻿Multi <-- {
+Multi <-- {
     x: ->  { |x:Integer| 'Integer: %' % x }
     x: --> { |x:String|  'String: %' % x  }
     x: --> { |x:Object|  'Other: %' % x   }

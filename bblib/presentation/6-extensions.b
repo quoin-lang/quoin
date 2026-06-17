@@ -1,4 +1,4 @@
-﻿Person <-- { |@notes|
+Person <-- { |@notes|
     notes -> { @notes }
 
     s --> { @notes }

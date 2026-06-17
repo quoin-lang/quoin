@@ -1,4 +1,4 @@
-﻿Multi <-- {
+Multi <-- {
     y: ->  { |x  { x > 5 }| 'High: %' % x }
     y: --> { |x  { x < 5 }| 'Low: %' % x  }
     y: --> { |x { x == 5 }| 'Five: %' % x }

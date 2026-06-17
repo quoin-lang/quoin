@@ -1,4 +1,4 @@
-﻿"* Implementing Ruby %w()
+"* Implementing Ruby %w()
 w <- {
     .mix:ActAsUserString;
     new: -> { |s| ^s.trim.split }

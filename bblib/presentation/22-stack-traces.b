@@ -1,4 +1,4 @@
-﻿Bad <- {
+Bad <- {
     doWork: -> { |n| (n > 2).if:{ 'NO'.throw } else:{ (n*10).puts } }
 }
 

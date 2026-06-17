@@ -1,4 +1,4 @@
-﻿name.case:{
+name.case:{
     .when:'Damon'               do:{ 'Hi Damon'.puts          };
     .when:'Bagel'               do:{ 'Hello delicious'.puts   };
     .when:#/^[A-Z]+$/           do:{ 'NO NEED TO SHOUT'.puts  };

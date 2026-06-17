@@ -1,4 +1,4 @@
-﻿"* This exists in the standard library as NumberRange.
+"* This exists in the standard library as NumberRange.
 MyRange <- { |@start @end @current|
     .mix:Iterate;
 

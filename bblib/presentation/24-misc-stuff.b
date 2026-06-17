@@ -1,4 +1,4 @@
-﻿"* Regular expressions
+"* Regular expressions
 'abcd' ~ #/bc/          "* true
 
 "* Basic JSON support w/ paths

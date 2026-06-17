@@ -1,4 +1,4 @@
-﻿'foo%baz' % 'bar'                     "* 'foobarbaz'
+'foo%baz' % 'bar'                     "* 'foobarbaz'
 'foo%1%2' % #('bar' 'baz')            "* 'foobarbaz'
 'foo%c%b' % #{ 'b':'bar' 'c':'baz' }  "* 'foobazbar'
 

@@ -1,4 +1,4 @@
-﻿Person <- Employee <- { |@title|
+Person <- Employee <- { |@title|
     init: --> { |title|
         @title = title
     }

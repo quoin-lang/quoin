@@ -1,4 +1,4 @@
-﻿Person <- { |@name @age|
+Person <- { |@name @age|
     init: -> { |name age|
         @name = name
         @age = age

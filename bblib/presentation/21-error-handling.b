@@ -1,4 +1,4 @@
-﻿{ Error.throw }.catch:{ |e:Error| e == Error "(Class)" }
+{ Error.throw }.catch:{ |e:Error| e == Error "(Class)" }
 { 42.throw    }.catch:{ |n|       n == 42              }
 
 Error <- CustomError <- {}
