@@ -20,13 +20,13 @@ TestSuite.new.run:{
         .isTrue:{ 42 == 42 };
         .isFalse:{ 42 != 42 };
         .is:{ 40 + 2 } equalTo:42;
-        .is:{ 'a'+'b' } equalTo:'ab';
-        .is:{ 'abc' } matching:#/b/;           "* Assertion is named "{ 'abc' }"
+        .is:{ 'a' + 'b' } equalTo:'ab';
+        .is:{ 'abc' } matching:#/b/; "* Assertion is named "{ 'abc' }"
     };
 
     .test:
     types -> {
-        .is:{ #IsString |-| 'hi' } a:String;
-        .is:{ #IsInteger |-| 42 } an:Integer;  "* Assertion is named IsInteger
+        .is:{ #IsString | - | 'hi' } a:String;
+        .is:{ #IsInteger | - | 42 } an:Integer; "* Assertion is named IsInteger
     };
 };

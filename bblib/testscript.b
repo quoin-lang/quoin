@@ -1,19 +1,19 @@
 Point <- { | @x @y |
-  .meta <-- {
-    newX:y: -> { |x y|
-      .new: { x = x; y = y }
+    .meta <-- {
+        newX:y: -> { |x y|
+            .new: { x = x; y = y }
+        }
     }
-  }
 
-  x -> { @x }
-  y -> { @y }
-  name -> { 'Point' }
+    x -> { @x }
+    y -> { @y }
+    name -> { 'Point' }
 
-  dist: -> { |other|
-    dx = @x - other.x;
-    dy = @y - other.y;
-    ((dx * dx) + (dy * dy)).sqrt
-  }
+    dist: -> { |other|
+        dx = @x - other.x;
+        dy = @y - other.y;
+        ((dx * dx) + (dy * dy)).sqrt
+    }
 };
 
 Point <- Point3D <- { | @z |
@@ -49,10 +49,10 @@ p3.print;
 .print:p3.class.parent.name;
 .print:p3.class.parent.parent;
 .print:p3.class.parent.parent.name;
-.print:(p3.id==p3.id);
-.print:(p3.id!=p1.id);
-.print:(p3.class==p3.class);
-.print:(p3.class!=p1.class);
+.print:(p3.id == p3.id);
+.print:(p3.id != p1.id);
+.print:(p3.class == p3.class);
+.print:(p3.class != p1.class);
 p3.print:'p3.x =' and: p3.x;
 p3.print:'p3.y =' and: p3.y;
 p3.print:'p3.z =' and: p3.z;
@@ -64,18 +64,18 @@ z = x + y;
 .print: 'z = x + y =' and: z;
 
 "* Test 2: List destructuring
-a b *rest = #(100 200 300 400 500);
+a b * rest = #(100 200 300 400 500);
 .print: 'a =' and: a;
 .print: 'b =' and: b;
 .print: 'rest =' and: rest;
 
 "* Test 3: Lexical scopes and blocks/closures
 make_counter = { |initial|
-  count = initial;
-  {
-    count = count + 1;
-    count
-  }
+    count = initial;
+    {
+        count = count + 1;
+        count
+    }
 };
 
 counter = make_counter.value: 10;
@@ -108,20 +108,20 @@ is_match = re.regex_match: 'gemini';
 
 "* Test 6: Non-local return (^^)
 Point <-- {
-  test_nlr -> {
-    bar_func = { |blk|
-      blk.value;
-      .print: 'Inside bar: should NOT reach here!';
-      111
-    };
+    test_nlr -> {
+        bar_func = { |blk|
+            blk.value;
+            .print: 'Inside bar: should NOT reach here!';
+            111
+        };
 
-    nested_block = {
-      ^^ 777
-    };
-    bar_func.value: nested_block;
-    .print: 'Inside foo: should NOT reach here!';
-    222
-  }
+        nested_block = {
+            ^^ 777
+        };
+        bar_func.value: nested_block;
+        .print: 'Inside foo: should NOT reach here!';
+        222
+    }
 };
 
 .print: 'New Point=' and:Point.new;
@@ -136,8 +136,8 @@ file = [IO]File.open: '/etc/zshrc';
 .print: 'file path =' and: file.fullpath;
 .print: 'file class =' and: file.class;
 .print: 'file class name =' and: file.class.name;
-.print: '[/]Object =' and: [/]Object;
-.print: 'Object == [/]Object =' and: (Object == [/]Object);
+.print: '[/]Object =' and: [ / ]Object;
+.print: 'Object == [/]Object =' and: (Object == [ / ]Object);
 
 folder = [IO]Folder.open: 'bblib/tests/';
 .print:'Test files =' and:folder.list;

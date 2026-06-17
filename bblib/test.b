@@ -34,19 +34,19 @@ Mixin <- BuiltinAssertions <- {
         ^r
     }
 
-    isTrue: -> { |block:Block| .recordResult:{true==block.value} evidence:#(true '!=' '{code}') block:block }
-    isFalse: -> { |block:Block| .recordResult:{false==block.value} evidence:#(false '!=' '{code}') block:block }
+    isTrue: -> { |block:Block| .recordResult:{true == block.value} evidence:#(true '!=' '{code}') block:block }
+    isFalse: -> { |block:Block| .recordResult:{false == block.value} evidence:#(false '!=' '{code}') block:block }
 
     is:a: -> {|block:Block expected| actual = block.value; .recordResult:{actual ~ expected} evidence:#(expected '!~' actual) block:block }
     is:an: -> {|block:Block expected| .is:block a:expected }
 
-    is:equalTo: -> {|block:Block expected| actual = block.value; .recordResult:{expected==actual} evidence:#(expected '!=' actual) block:block }
-    is:notEqualTo: -> {|block:Block expected| actual = block.value; .recordResult:{expected!=actual} evidence:#(expected '==' actual) block:block }
+    is:equalTo: -> {|block:Block expected| actual = block.value; .recordResult:{expected == actual} evidence:#(expected '!=' actual) block:block }
+    is:notEqualTo: -> {|block:Block expected| actual = block.value; .recordResult:{expected != actual} evidence:#(expected '==' actual) block:block }
 
-    is:lessThan: -> {|block:Block expected| actual = block.value; .recordResult:{actual<expected} evidence:#(actual 'not <' expected) block:block }
-    is:greaterThan: -> {|block:Block expected| actual = block.value; .recordResult:{actual>expected} evidence:#(actual 'not >' expected) block:block }
-    is:lessThanOrEqualTo: -> {|block:Block expected| actual = block.value; .recordResult:{actual<=expected} evidence:#(actual 'not <=' expected) block:block }
-    is:greaterThanOrEqualTo: -> {|block:Block expected| actual = block.value; .recordResult:{actual>=expected} evidence:#(actual 'not >=' expected) block:block }
+    is:lessThan: -> {|block:Block expected| actual = block.value; .recordResult:{actual < expected} evidence:#(actual 'not <' expected) block:block }
+    is:greaterThan: -> {|block:Block expected| actual = block.value; .recordResult:{actual > expected} evidence:#(actual 'not >' expected) block:block }
+    is:lessThanOrEqualTo: -> {|block:Block expected| actual = block.value; .recordResult:{actual < = expected} evidence:#(actual 'not <=' expected) block:block }
+    is:greaterThanOrEqualTo: -> {|block:Block expected| actual = block.value; .recordResult:{actual > = expected} evidence:#(actual 'not >=' expected) block:block }
 
     does:match: -> {|block:Block expected| actual = block.value; .recordResult:{actual ~ expected} evidence:#(expected 'didn\'t match' actual) block:block }
     does:notMatch: -> {|block:Block expected| actual = block.value; .recordResult:{!(actual ~ expected)} evidence:#(expected 'matched' actual) block:block }
@@ -54,20 +54,20 @@ Mixin <- BuiltinAssertions <- {
     does:resultIn: -> {|block:Block expectedBlock:Block|
         block.value;
         .recordResult:{expectedBlock.value == true}
-             evidence:#('{code}' 'does not result in' '{code}')
-                block:block
+            evidence:#('{code}' 'does not result in' '{code}')
+            block:block
     }
 
     does:throw: -> {|block:Block expectedError|
         actualError = nil;
-        { #doesThrowBlock |-| block.value }.catch:{#doesThrowCatchBlock |x| actualError = x };
+        { #doesThrowBlock | - | block.value }.catch:{#doesThrowCatchBlock |x| actualError = x };
         .recordResult:{ expectedError ~ actualError }
-             evidence:#(
-                actualError.s
-                'was thrown instead of'
-                expectedError
-            )
-                block:block
+            evidence:#(
+            actualError.s
+            'was thrown instead of'
+            expectedError
+        )
+            block:block
     }
 }
 
@@ -200,13 +200,13 @@ TestReporter <- {
     .abstract!;
 
     startSuite: -> { |suite:TestSuite| ... }
-    endSuite:elapsed:   -> { |suite:TestSuite elapsed| ... }
+    endSuite:elapsed: -> { |suite:TestSuite elapsed| ... }
 
     startTest: -> { |test:Test| ... }
-    endTest:   -> { |result:TestResult| ... }
+    endTest: -> { |result:TestResult| ... }
 
     startAssertion: -> { |assertion| ... }
-    endAssertion:   -> { |result| ... }
+    endAssertion: -> { |result| ... }
 };
 
 TestReporter <- PlainTestReporter <- { |@out @currentSuite|
@@ -225,8 +225,8 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
             @currentSuite.name
             passes
             failures
-            testsElapsed*1000.0
-            elapsed*1000.0
+            testsElapsed * 1000.0
+            elapsed * 1000.0
         )
     }
 
@@ -236,8 +236,8 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
 
     endTest: --> { |result:TestResult|
         @out.write:' %1ms (%2ms)' % #(
-            result.elapsed*1000.0
-            result.wallElapsed*1000.0
+            result.elapsed * 1000.0
+            result.wallElapsed * 1000.0
         )
         (result.failures.any?).if:{
             outTemp = @out;
@@ -257,13 +257,13 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
                 )
             };
         }
-        else:{
+            else:{
             @out.writeln:' % passed' % result.passes.count
         }
     }
 
     startAssertion: --> { |assertion| }
-    endAssertion:   --> { |assertionResult|
+    endAssertion: --> { |assertionResult|
         @out.write:assertionResult.passed?.if:{'.'} else:{'!'}
     }
 };
@@ -316,13 +316,13 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite|
             );
             failedTests.each:{ |ft| outTemp.write:#ANSI'[$#5fd7af;bw[%$]]     ' % suiteName; outTemp.writeln:ft };
         }
-        else:{
+            else:{
             @out.writeln:#ANSI' $#69ff61[% passed$]' % result.passes.count
         }
     }
 
     startAssertion: --> { |assertion| }
-    endAssertion:   --> { |assertionResult|
+    endAssertion: --> { |assertionResult|
         @out.write:assertionResult.passed?.if:{#ANSI'$#69ff61[.$]'} else:{#ANSI'$#ff6961[!$]'}
     }
 };

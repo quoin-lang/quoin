@@ -1,4 +1,4 @@
-block = { 42*43 }
+block = { 42 * 43 }
 block.value == 1806
 
 blockWithArgs = { |a b| a > b }

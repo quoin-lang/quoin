@@ -10,13 +10,13 @@ false <-- {
 };
 
 Block <-- {
-   whileDo: -> { |block|
-       s = self
-       s.value.if:{
-           block.value;
-           ^^s.whileDo:block;
-       };
-   };
+    whileDo: -> { |block|
+        s = self
+        s.value.if:{
+            block.value;
+            ^^s.whileDo:block;
+        };
+    };
 };
 
 {}.class <-- {}   "* Same

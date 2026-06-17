@@ -5,9 +5,9 @@
 3 * 4    "* Call(3, '*:', 4)
 
 FakeNumber <- {
-    #'+:' ->  { |n:Object|      42 }
+    #'+:' -> { |n:Object|      42 }
     #'+:' --> { |n:FakeNumber|  99 }
-    #'-:' ->  { |n:Object|      42 }
+    #'-:' -> { |n:Object|      42 }
     #'-:' --> { |n:FakeNumber| -99 }
 }
 

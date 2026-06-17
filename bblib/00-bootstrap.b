@@ -88,22 +88,22 @@ Nil <-- {
 };
 
 Block <-- {
-   whileDo: -> { |block|
-       s = self
-       s.value.if:{
-           block.value;
-           ^^s.whileDo:block;
-       };
-   };
+    whileDo: -> { |block|
+        s = self
+        s.value.if:{
+            block.value;
+            ^^s.whileDo:block;
+        };
+    };
 
-   whileDefinedDo: -> { |block|
-       s = self
-       v = s.value
-       v.defined?.if:{
-           block.value:v;
-           ^^s.whileDefinedDo:block;
-       };
-   };
+    whileDefinedDo: -> { |block|
+        s = self
+        v = s.value
+        v.defined?.if:{
+            block.value:v;
+            ^^s.whileDefinedDo:block;
+        };
+    };
 };
 
 ANSI <- { |@string|
