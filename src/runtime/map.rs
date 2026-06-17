@@ -82,6 +82,21 @@ pub fn build_map_class() -> NativeClassBuilder {
                 args[0].with_native_state(|m: &NativeMapState| m.get_map().len())? as i64,
             ))
         })
+        .instance_method("keys", |vm, mc, args| {
+            let keys_vec = args[0].with_native_state(|m: &NativeMapState| {
+                m.get_map()
+                    .keys()
+                    .map(|v| vm.new_string(mc, v.clone()))
+                    .collect::<Vec<_>>()
+            })?;
+            Ok(vm.new_list(mc, keys_vec))
+        })
+        .instance_method("values", |vm, mc, args| {
+            let values_vec = args[0].with_native_state(|m: &NativeMapState| {
+                m.get_map().values().map(|v| *v).collect::<Vec<_>>()
+            })?;
+            Ok(vm.new_list(mc, values_vec))
+        })
         .instance_method("next", |vm, mc, args| {
             let kv_opt = args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
                 if m.iter.is_none() {
