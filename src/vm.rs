@@ -29,6 +29,7 @@ pub struct Frame<'gc> {
     pub selector: Option<String>,
     pub args: Vec<Value<'gc>>,
     pub stack_base: usize,
+    pub return_receiver: bool,
 }
 
 #[derive(Collect)]
@@ -832,9 +833,11 @@ impl<'gc> VmState<'gc> {
             &class_borrow.instance_methods
         };
         if let Some(method_chain_start) = methods.get(selector).copied() {
+            println!("DEBUG lookup: found method chain for selector='{}' in class '{}'", selector, class_borrow.name);
             let mut curr = Some(method_chain_start);
             while let Some(method_val) = curr {
                 if self.method_matches_arguments(method_val, args) {
+                    println!("DEBUG lookup: method matched!");
                     return Some(method_val);
                 }
                 curr = self.get_next_method_in_chain(method_val);
@@ -1117,6 +1120,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args,
             stack_base: self.stack.len(),
+            return_receiver: false,
         });
     }
 
@@ -1155,6 +1159,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args,
             stack_base: self.stack.len(),
+            return_receiver: false,
         });
     }
 
@@ -1210,6 +1215,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args: Vec::new(),
             stack_base: self.stack.len(),
+            return_receiver: false,
         });
     }
 
@@ -1470,6 +1476,10 @@ impl<'gc> VmState<'gc> {
                     let env_borrow = popped_frame.env.borrow();
                     self.finalize_instantiation(mc, obj, &env_borrow)?;
                     ret_val = Value::Object(obj);
+                } else if popped_frame.return_receiver {
+                    if let Some(rx) = popped_frame.receiver {
+                        ret_val = rx;
+                    }
                 }
                 self.push(ret_val);
             }
@@ -1477,11 +1487,17 @@ impl<'gc> VmState<'gc> {
                 let ret_val = self.pop()?;
                 let enclosing_id = self.frames[frame_idx].enclosing_method_id;
                 if let Some(target_id) = enclosing_id {
+                    let mut ret_val = ret_val;
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
                         if let Some(obj) = f.instantiating_obj {
                             let env_borrow = f.env.borrow();
                             self.finalize_instantiation(mc, obj, &env_borrow)?;
+                            ret_val = Value::Object(obj);
+                        } else if f.return_receiver {
+                            if let Some(rx) = f.receiver {
+                                ret_val = rx;
+                            }
                         }
                         if f.id == target_id {
                             target_stack_base = Some(f.stack_base);
@@ -1644,6 +1660,7 @@ impl<'gc> VmState<'gc> {
                 {
                     self.frames[frame_idx].ip += 1;
                     self.start_block_as_method(mc, *block, self_val, Vec::new(), None);
+                    self.frames.last_mut().unwrap().return_receiver = true;
                     Ok(VmStatus::Running)
                 } else {
                     Err(BBError::TypeError {
