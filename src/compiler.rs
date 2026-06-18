@@ -1,5 +1,5 @@
 use crate::instruction::{Constant, Instruction, StaticBlock};
-use crate::parser::ast_visitor::{
+use crate::parser::ast::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, IdentifierType,
     MethodCallNode, MethodSelectorNode, Node, NodeValue, ProgramNode, UnaryOperatorNode,
     UnaryOperatorType,
@@ -727,7 +727,7 @@ impl Compiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::ast_visitor::*;
+    use crate::parser::ast::*;
     use crate::value::NamespacedName;
     use std::sync::Arc;
 
@@ -1351,7 +1351,7 @@ mod tests {
 
     #[test]
     fn test_source_info_propagation() {
-        use crate::parser::parser::parse_building_blocks_string;
+        use crate::parser::parse_building_blocks_string;
 
         let code = "{ 1 + 2 };";
         let ast = parse_building_blocks_string(code);

@@ -34,11 +34,11 @@ fn eval_string<'gc>(
     _filename: &str,
     self_val: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
-    let ast = crate::parser::parser::parse_building_blocks_string(code);
+    let ast = crate::parser::parse_building_blocks_string(code);
 
     let mut compiler = crate::compiler::Compiler::new();
     let program_node = match &ast.value {
-        crate::parser::ast_visitor::NodeValue::Program(p) => p,
+        crate::parser::ast::NodeValue::Program(p) => p,
         _ => {
             return Err(BBError::Other(
                 "Expected Program node from parser".to_string(),
@@ -98,11 +98,11 @@ fn eval_file<'gc>(
         return Err(BBError::Other(format!("File not found: {}", filename)));
     }
 
-    let ast = crate::parser::parser::parse_building_blocks_file(&path);
+    let ast = crate::parser::parse_building_blocks_file(&path);
 
     let mut compiler = crate::compiler::Compiler::new();
     let program_node = match &ast.value {
-        crate::parser::ast_visitor::NodeValue::Program(p) => p,
+        crate::parser::ast::NodeValue::Program(p) => p,
         _ => {
             return Err(BBError::Other(
                 "Expected Program node from parser".to_string(),

@@ -2362,7 +2362,7 @@ impl<'gc> VmState<'gc> {
 mod tests {
     use super::*;
     use crate::instruction::{Constant, StaticBlock};
-    use crate::parser::ast_visitor::NodeValue;
+    use crate::parser::ast::NodeValue;
     use crate::value::{NativeClassBuilder, OpaqueState};
     use gc_arena::{Arena, Rootable};
 
@@ -3729,7 +3729,7 @@ mod tests {
     #[test]
     fn test_error_annotation_and_display() {
         use crate::compiler::Compiler;
-        use crate::parser::parser::parse_building_blocks_string;
+        use crate::parser::parse_building_blocks_string;
 
         let code = "1.foo;";
         let ast = parse_building_blocks_string(code);

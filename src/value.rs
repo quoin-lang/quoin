@@ -1,6 +1,6 @@
 use crate::error::BBError;
 use crate::instruction::Instruction;
-use crate::parser::ast_visitor::IdentifierNode;
+use crate::parser::ast::IdentifierNode;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
 use crate::runtime::regex::NativeRegexState;

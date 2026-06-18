@@ -115,9 +115,9 @@ pub fn build_string_class() -> NativeClassBuilder {
                         result.push_str(&lit);
                     }
                     InterpolPart::Expr(expr_str) => {
-                        let node = crate::parser::parser::parse_building_blocks_string(&expr_str);
+                        let node = crate::parser::parse_building_blocks_string(&expr_str);
                         let program_node = match &node.value {
-                            crate::parser::ast_visitor::NodeValue::Program(p) => p,
+                            crate::parser::ast::NodeValue::Program(p) => p,
                             _ => {
                                 return Err(BBError::Other(
                                     "Parsed node is not a ProgramNode".to_string(),

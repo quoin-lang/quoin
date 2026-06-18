@@ -1,8 +1,9 @@
 #![allow(non_snake_case)]
 
-use crate::parser::ast_visitor::{AstVisitor, Node, NodeValue};
-use crate::parser::generated::buildingblockslexer::BuildingBlocksLexer;
-use crate::parser::generated::buildingblocksparser::BuildingBlocksParser;
+use crate::parser::ast::{Node, NodeValue};
+use crate::parser::antlr::ast_visitor::AstVisitor;
+use crate::parser::antlr::generated::buildingblockslexer::BuildingBlocksLexer;
+use crate::parser::antlr::generated::buildingblocksparser::BuildingBlocksParser;
 
 use std::fs::File;
 use std::io::Read;
@@ -83,7 +84,7 @@ pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
 #[cfg(test)]
 mod tests {
     use super::parse_building_blocks_string;
-    use crate::parser::ast_visitor::*;
+    use crate::parser::ast::*;
     use std::sync::Arc;
 
     fn parse(code: &str) -> Node {

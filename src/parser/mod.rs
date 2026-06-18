@@ -1,14 +1,11 @@
-pub mod ast_visitor;
-pub mod parser;
+pub mod ast;
+pub use ast::*;
 
-#[allow(warnings)]
-#[allow(clippy::all)]
-pub mod generated {
-    pub mod buildingblockslexer;
-    mod buildingblockslistener;
-    pub mod buildingblocksparser;
-    pub mod buildingblocksvisitor;
-}
+pub mod antlr;
+
+// Public entry points for parsing, maintaining same interface
+pub use antlr::parser::parse_building_blocks_file;
+pub use antlr::parser::parse_building_blocks_string;
 
 #[macro_export]
 macro_rules! cast_node {

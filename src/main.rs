@@ -1,4 +1,4 @@
-use new_vm::parser::{ast_visitor, parser};
+use new_vm::parser::{ast, parse_building_blocks_file};
 use new_vm::runtime::{
     block, boolean, class, double, integer, io, list, map, method, native, nil, object, regex,
     runtime, string, timer,
@@ -9,7 +9,7 @@ use new_vm::{compiler, gc};
 
 use gc_arena::{Arena, Gc, Rootable};
 use glob::glob;
-use new_vm::parser::ast_visitor::Node;
+use new_vm::parser::ast::Node;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionStatus {
@@ -52,7 +52,7 @@ fn main() {
                     || (!path_s.starts_with("bblib/test") && !path_s.ends_with("main.b"))
                 {
                     println!("Loading file: {}", path_s);
-                    let node = parser::parse_building_blocks_file(&path_buf);
+                    let node = parse_building_blocks_file(&path_buf);
                     Some(node)
                 } else {
                     None
@@ -60,7 +60,7 @@ fn main() {
             })
             .chain(vec![{
                 println!("Loading file: bblib/main.b");
-                parser::parse_building_blocks_file(&std::path::PathBuf::from("bblib/main.b"))
+                parse_building_blocks_file(&std::path::PathBuf::from("bblib/main.b"))
             }]);
 
         compile_and_run_asts(ast_iter);
@@ -75,7 +75,7 @@ fn main() {
             let path_s = path_buf.display().to_string();
             if !path_s.starts_with("bblib/test") && !path_s.ends_with("main.b") {
                 println!("Loading file: {}", path_s);
-                let node = parser::parse_building_blocks_file(&path_buf);
+                let node = parse_building_blocks_file(&path_buf);
                 Some(node)
             } else {
                 None
@@ -84,7 +84,7 @@ fn main() {
         .chain(vec![{
             let script_path = args.get(1).map(|s| s.as_str()).unwrap_or("bblib/testscript.b");
             println!("Loading file: {}", script_path);
-            parser::parse_building_blocks_file(&std::path::PathBuf::from(script_path))
+            parse_building_blocks_file(&std::path::PathBuf::from(script_path))
         }]);
 
     compile_and_run_asts(ast_iter);
@@ -131,7 +131,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
 
         arena.mutate_root(|mc, vm| {
             let program_node = match &ast.value {
-                ast_visitor::NodeValue::Program(p) => p,
+                ast::NodeValue::Program(p) => p,
                 _ => {
                     panic!("Error: Root AST node is not a ProgramNode");
                 }
