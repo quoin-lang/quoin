@@ -1,7 +1,8 @@
-use std::error::Error;
-use std::fmt;
-
+use crate::highlighter::{HighlightParser, HighlightSpan};
+use crate::parser::parse_building_blocks_string;
 use crate::value::SourceInfo;
+use std::error::Error;
+use std::{cmp, fmt, fs};
 
 #[derive(Debug, Clone)]
 pub enum BBError {
@@ -38,7 +39,53 @@ pub enum BBError {
         error: Box<BBError>,
         source_info: SourceInfo,
         trace: Vec<String>,
+        supports_color: bool,
     },
+}
+
+fn get_highlighted_range(
+    filename: &str,
+    start: usize,
+    end: usize,
+    fallback_text: &str,
+    supports_color: bool,
+) -> String {
+    if !supports_color {
+        return fallback_text.to_string();
+    }
+    if let Ok(content) = fs::read_to_string(filename) {
+        let parse_and_highlight = || -> Option<String> {
+            let program = parse_building_blocks_string(&content);
+            let mut parser = HighlightParser::new(&content);
+            let spans = parser.highlight_program(&program);
+
+            let mut snippet_spans = Vec::new();
+            for span in spans {
+                let overlap_start = cmp::max(span.start, start);
+                let overlap_end = cmp::min(span.end, end);
+                if overlap_start < overlap_end {
+                    snippet_spans.push(HighlightSpan {
+                        start: overlap_start - start,
+                        end: overlap_end - start,
+                        htype: span.htype,
+                        counter: span.counter,
+                    });
+                }
+            }
+            let snippet_text = content.get(start..end)?;
+            Some(crate::highlighter::format_ansi(snippet_text, snippet_spans))
+        };
+        if let Some(res) = parse_and_highlight() {
+            return res;
+        }
+    }
+    let parse_and_highlight_fallback = || -> Option<String> {
+        let program = parse_building_blocks_string(fallback_text);
+        let mut parser = HighlightParser::new(fallback_text);
+        let spans = parser.highlight_program(&program);
+        Some(crate::highlighter::format_ansi(fallback_text, spans))
+    };
+    parse_and_highlight_fallback().unwrap_or_else(|| fallback_text.to_string())
 }
 
 impl fmt::Display for BBError {
@@ -70,22 +117,60 @@ impl fmt::Display for BBError {
                 error,
                 source_info,
                 trace,
+                supports_color,
             } => {
                 writeln!(f, "{}", error)?;
-                write!(
-                    f,
-                    "  at {}:{}:{}",
-                    source_info.filename,
-                    source_info.line,
-                    source_info.column + 1
-                )?;
+
+                let at_str = if *supports_color {
+                    crate::ansi_colorizer::colorize("$#808080[at$]")
+                } else {
+                    "at".to_string()
+                };
+
+                let formatted_loc = if *supports_color {
+                    format!(
+                        "{}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                        source_info.filename,
+                        source_info.line,
+                        source_info.column + 1
+                    )
+                } else {
+                    format!(
+                        "{}:{}:{}",
+                        source_info.filename,
+                        source_info.line,
+                        source_info.column + 1
+                    )
+                };
+                let formatted_loc_colorized = if *supports_color {
+                    crate::ansi_colorizer::colorize(&formatted_loc)
+                } else {
+                    formatted_loc
+                };
+
+                write!(f, "  {} {}", at_str, formatted_loc_colorized)?;
+
                 if let Some(source_text) = &source_info.source_text {
+                    let pipe = if *supports_color {
+                        crate::ansi_colorizer::colorize("$#808080[|$]")
+                    } else {
+                        "|".to_string()
+                    };
                     writeln!(f)?;
-                    writeln!(f, "  |")?;
-                    for line in source_text.lines() {
-                        writeln!(f, "  | {}", line)?;
+                    writeln!(f, "  {}", pipe)?;
+
+                    let highlighted_text = get_highlighted_range(
+                        &source_info.filename,
+                        source_info.start,
+                        source_info.end,
+                        source_text,
+                        *supports_color,
+                    );
+
+                    for line in highlighted_text.lines() {
+                        writeln!(f, "  {} {}", pipe, line)?;
                     }
-                    write!(f, "  |")?;
+                    write!(f, "  {}", pipe)?;
                 }
                 if !trace.is_empty() {
                     for frame_str in trace {

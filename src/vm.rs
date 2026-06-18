@@ -9,11 +9,14 @@ use crate::value::{
     AnyCollect, Block, Class, EnvFrame, GcUlid, NamespacedName, NativeClass, NativeFunc, Object,
     ObjectPayload, Value,
 };
-use crate::{gc, gcl};
+use crate::{ansi_colorizer, gc, gcl};
+use std::{cmp, fs};
 
-use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use crate::highlighter::{format_ansi, HighlightParser, HighlightSpan};
+use crate::parser::parse_building_blocks_string;
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use regex::Regex;
-use std::cmp::{Ordering, min};
+use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::path::Path;
@@ -1768,9 +1771,29 @@ impl<'gc> VmState<'gc> {
                 .or(frame.block.source_info.as_ref())
                 .cloned();
             if let Some(source_info) = active_source_info {
-                let mut trace = Vec::new();
+                let supports_color = self.options.supports_color;
+
+                let colorize_selector = |sel: &str, cls: &str| -> String {
+                    if supports_color {
+                        format!("$#ab82ff[{}$]$#808080[:$]$#5fd7af[{}$]", sel, cls)
+                    } else {
+                        format!("{}:{}", sel, cls)
+                    }
+                };
+                let colorize_simple = |sel: &str| -> String {
+                    if supports_color {
+                        format!("$#ab82ff[{}$]", sel)
+                    } else {
+                        sel.to_string()
+                    }
+                };
+
+                let mut frames_info = Vec::new();
                 let n = self.frames.len();
                 for (i, f) in self.frames.iter().enumerate().rev() {
+                    if i == n - 1 {
+                        continue;
+                    }
                     let frame_ip = if f.ip > 0 { f.ip - 1 } else { 0 };
 
                     let si_opt = f
@@ -1778,18 +1801,8 @@ impl<'gc> VmState<'gc> {
                         .source_map
                         .get(frame_ip)
                         .and_then(|opt| opt.as_ref())
-                        .or(f.block.source_info.as_ref());
-
-                    let formatted_loc = if let Some(si) = si_opt {
-                        let display_filename = Path::new(&si.filename)
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or(&si.filename)
-                            .to_string();
-                        format!(" in {}:{}:{}", display_filename, si.line, si.column)
-                    } else {
-                        "".to_string()
-                    };
+                        .or(f.block.source_info.as_ref())
+                        .cloned();
 
                     let formatted_selector = if let Some(Instruction::Send(selector, num_args)) =
                         f.block.bytecode.get(frame_ip)
@@ -1825,23 +1838,55 @@ impl<'gc> VmState<'gc> {
                                     if p.ends_with(':') {
                                         p.pop();
                                     }
-                                    formatted_parts.push(format!("{}:{}", p, arg.class_name()));
+                                    formatted_parts.push(colorize_selector(&p, &arg.class_name()));
                                 } else {
-                                    formatted_parts.push(part.clone());
+                                    formatted_parts.push(colorize_simple(part));
                                 }
                             }
                             formatted_parts.join(" ")
                         } else {
-                            selector.clone()
+                            colorize_simple(selector)
                         }
                     } else if i == 0 {
-                        "(top)".to_string()
+                        colorize_simple("(top)")
                     } else {
-                        f.selector.clone().unwrap_or_else(|| "value".to_string())
+                        let sel_str = f.selector.clone().unwrap_or_else(|| "value".to_string());
+                        colorize_simple(&sel_str)
                     };
 
-                    let frame_str = format!("at {}{}", formatted_selector, formatted_loc);
-                    trace.push(frame_str);
+                    let formatted_loc = if let Some(si) = &si_opt {
+                        let display_filename = Path::new(&si.filename)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&si.filename)
+                            .to_string();
+                        if supports_color {
+                            format!(
+                                " $#808080[in$] {}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                                display_filename, si.line, si.column
+                            )
+                        } else {
+                            format!(" in {}:{}:{}", display_filename, si.line, si.column)
+                        }
+                    } else {
+                        "".to_string()
+                    };
+
+                    let at_str = if supports_color {
+                        "$#808080[at$]"
+                    } else {
+                        "at"
+                    };
+                    let prefix_colored =
+                        format!("{} {}{}", at_str, formatted_selector, formatted_loc);
+                    let prefix_plain = if supports_color {
+                        ansi_colorizer::decolorize(&ansi_colorizer::colorize(&prefix_colored))
+                    } else {
+                        prefix_colored.clone()
+                    };
+                    let plain_len = prefix_plain.chars().count();
+
+                    frames_info.push((prefix_colored, plain_len, si_opt));
                 }
 
                 // Always append the (top) frame at the bottom if it was not already the only frame formatted as (top)
@@ -1857,34 +1902,224 @@ impl<'gc> VmState<'gc> {
                         .source_map
                         .get(first_ip)
                         .and_then(|opt| opt.as_ref())
-                        .or(first_frame.block.source_info.as_ref());
+                        .or(first_frame.block.source_info.as_ref())
+                        .cloned();
 
-                    let formatted_loc = if let Some(si) = si_opt {
+                    let formatted_selector = colorize_simple("(top)");
+
+                    let formatted_loc = if let Some(si) = &si_opt {
                         let display_filename = Path::new(&si.filename)
                             .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or(&si.filename)
                             .to_string();
-                        format!(" in {}:{}:{}", display_filename, si.line, si.column)
+                        if supports_color {
+                            format!(
+                                " $#808080[in$] {}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                                display_filename, si.line, si.column
+                            )
+                        } else {
+                            format!(" in {}:{}:{}", display_filename, si.line, si.column)
+                        }
                     } else {
                         "".to_string()
                     };
-                    let top_frame_str = format!("at (top){}", formatted_loc);
+
+                    let at_str = if supports_color {
+                        "$#808080[at$]"
+                    } else {
+                        "at"
+                    };
+                    let prefix_colored =
+                        format!("{} {}{}", at_str, formatted_selector, formatted_loc);
+                    let prefix_plain = if supports_color {
+                        ansi_colorizer::decolorize(&ansi_colorizer::colorize(&prefix_colored))
+                    } else {
+                        prefix_colored.clone()
+                    };
+                    let plain_len = prefix_plain.chars().count();
 
                     // Only push if the last trace element is not already representing (top) at the same location
-                    if trace.last() != Some(&top_frame_str) {
-                        trace.push(top_frame_str);
+                    let is_dup = if let Some(last_info) = frames_info.last() {
+                        last_info.0 == prefix_colored
+                    } else {
+                        false
+                    };
+
+                    if !is_dup {
+                        frames_info.push((prefix_colored, plain_len, si_opt));
                     }
+                }
+
+                let max_l = frames_info.iter().map(|info| info.1).max().unwrap_or(0);
+                let target_alignment = cmp::max(54, max_l + 2);
+
+                let mut trace = Vec::new();
+                for (prefix_colored, plain_len, si_opt) in frames_info {
+                    let mut line = if supports_color {
+                        ansi_colorizer::colorize(&prefix_colored)
+                    } else {
+                        prefix_colored
+                    };
+
+                    if let Some(si) = si_opt {
+                        if let Some(snippet) = self.get_highlighted_snippet(
+                            &si.filename,
+                            si.line.saturating_sub(1),
+                            si.column,
+                            si.start,
+                            si.end,
+                            si.source_text.as_ref(),
+                        ) {
+                            let padding_len = target_alignment.saturating_sub(plain_len);
+                            let padding: String = " ".repeat(padding_len);
+                            let separator = if supports_color {
+                                ansi_colorizer::colorize("$#808080[<$]")
+                            } else {
+                                "<".to_string()
+                            };
+                            line = format!("{}{}{} {}", line, padding, separator, snippet);
+                        }
+                    }
+                    trace.push(line);
                 }
 
                 return BBError::WithSourceInfo {
                     error: Box::new(error),
                     source_info: source_info.clone(),
                     trace,
+                    supports_color,
                 };
             }
         }
         error
+    }
+
+    fn get_highlighted_snippet(
+        &self,
+        filename: &str,
+        line_idx: usize,
+        column: usize,
+        node_start_offset: usize,
+        node_end_offset: usize,
+        source_text: Option<&String>,
+    ) -> Option<String> {
+        let supports_color = self.options.supports_color;
+        let content = match fs::read_to_string(filename) {
+            Ok(s) => s,
+            Err(_) => {
+                if let Some(text) = source_text {
+                    let w = 41;
+                    let snippet_text = if text.chars().count() > w {
+                        let sliced: String = text.chars().take(w).collect();
+                        sliced
+                    } else {
+                        text.clone()
+                    };
+                    if supports_color {
+                        let parse_and_highlight = || -> Option<String> {
+                            let program = parse_building_blocks_string(&snippet_text);
+                            let mut parser = HighlightParser::new(&snippet_text);
+                            let spans = parser.highlight_program(&program);
+                            Some(format_ansi(&snippet_text, spans))
+                        };
+                        if let Some(hl) = parse_and_highlight() {
+                            return Some(hl);
+                        }
+                    }
+                    return Some(snippet_text);
+                }
+                return None;
+            }
+        };
+
+        let mut current_line = 0;
+        let mut line_start_byte = 0;
+        let mut line_end_byte = content.len();
+        for (i, c) in content.char_indices() {
+            if c == '\n' {
+                if current_line == line_idx {
+                    line_end_byte = i;
+                    break;
+                }
+                current_line += 1;
+                line_start_byte = i + 1;
+            }
+        }
+        if current_line != line_idx {
+            if current_line == line_idx && line_start_byte <= content.len() {
+                line_end_byte = content.len();
+            } else {
+                return None;
+            }
+        }
+
+        if line_end_byte > line_start_byte && content.as_bytes()[line_end_byte - 1] == b'\r' {
+            line_end_byte -= 1;
+        }
+
+        let line_str = &content[line_start_byte..line_end_byte];
+        let line_chars: Vec<(usize, char)> = line_str.char_indices().collect();
+        let line_char_count = line_chars.len();
+
+        let node_text = content
+            .get(node_start_offset..node_end_offset)
+            .unwrap_or("");
+        let node_char_count = node_text.chars().count();
+
+        let start_col = cmp::min(column, line_char_count);
+        let end_col = cmp::min(start_col + node_char_count, line_char_count);
+
+        let node_center = start_col + (end_col - start_col) / 2;
+        let w = 41;
+        let mut win_start = node_center.saturating_sub(w / 2);
+        let mut win_end = win_start + w;
+        if win_end > line_char_count {
+            let overflow = win_end - line_char_count;
+            win_start = win_start.saturating_sub(overflow);
+            win_end = line_char_count;
+        }
+
+        let get_char_byte_offset = |char_idx: usize| -> usize {
+            if char_idx >= line_char_count {
+                line_end_byte
+            } else {
+                line_start_byte + line_chars[char_idx].0
+            }
+        };
+
+        let win_start_byte = get_char_byte_offset(win_start);
+        let win_end_byte = get_char_byte_offset(win_end);
+        let snippet_text = &content[win_start_byte..win_end_byte];
+
+        if supports_color {
+            let parse_and_highlight = || -> Option<String> {
+                let program = parse_building_blocks_string(&content);
+                let mut parser = HighlightParser::new(&content);
+                let spans = parser.highlight_program(&program);
+
+                let mut snippet_spans = Vec::new();
+                for span in spans {
+                    let overlap_start = cmp::max(span.start, win_start_byte);
+                    let overlap_end = cmp::min(span.end, win_end_byte);
+                    if overlap_start < overlap_end {
+                        snippet_spans.push(HighlightSpan {
+                            start: overlap_start - win_start_byte,
+                            end: overlap_end - win_start_byte,
+                            htype: span.htype,
+                            counter: span.counter,
+                        });
+                    }
+                }
+                Some(format_ansi(snippet_text, snippet_spans))
+            };
+
+            if let Some(highlighted) = parse_and_highlight() {
+                return Some(highlighted);
+            }
+        }
+
+        Some(snippet_text.to_string())
     }
 
     pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
@@ -3920,6 +4155,86 @@ mod tests {
     }
 
     #[test]
+    fn test_error_annotation_with_color() {
+        use crate::compiler::Compiler;
+        use crate::parser::parse_building_blocks_string;
+
+        let code = "1.foo;";
+        let ast = parse_building_blocks_string(code);
+        let mut compiler = Compiler::new();
+        let compiled = compiler
+            .compile_program(match &ast.value {
+                NodeValue::Program(p) => p,
+                _ => unreachable!(),
+            })
+            .unwrap();
+
+        let mut options = VmOptions::default();
+        options.supports_color = true;
+
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, options));
+
+        arena.mutate_root(|mc, vm| {
+            let decl_block = compiled.decl_block.as_ref().map(|db| {
+                gc!(
+                    mc,
+                    Block {
+                        source_info: db.source_info.clone(),
+                        name: db.name.clone(),
+                        is_nested_block: db.is_nested_block,
+                        param_names: db.param_names.clone(),
+                        param_types: db.param_types.clone(),
+                        bytecode: db.bytecode.clone(),
+                        parent_env: None,
+                        enclosing_method_id: None,
+                        decl_block: None,
+                        source_map: db.source_map.clone(),
+                    }
+                )
+            });
+            let block = gc!(
+                mc,
+                Block {
+                    source_info: compiled.source_info.clone(),
+                    name: compiled.name.clone(),
+                    is_nested_block: compiled.is_nested_block,
+                    param_names: compiled.param_names.clone(),
+                    param_types: compiled.param_types.clone(),
+                    bytecode: compiled.bytecode.clone(),
+                    parent_env: None,
+                    enclosing_method_id: None,
+                    decl_block,
+                    source_map: compiled.source_map.clone(),
+                }
+            );
+            vm.start_block(mc, block, Vec::new(), None, None);
+
+            // Run until error.
+            let mut err = None;
+            loop {
+                match vm.step(mc) {
+                    Ok(VmStatus::Running) => {}
+                    Ok(_) => break,
+                    Err(e) => {
+                        err = Some(e);
+                        break;
+                    }
+                }
+            }
+
+            let err = err.expect("Expected execution error");
+            let err_str = err.to_string();
+
+            // Check that the error message contains the ANSI escape codes
+            // Selector is purple (38;2;171;130;255)
+            // Filename text has colon gray (38;2;128;128;128)
+            // Numbers are light blue (38;2;0;191;255)
+            assert!(err_str.contains("\x1b[38;2;171;130;255mfoo\x1b[0;00;22;39;49m"));
+            assert!(err_str.contains("\x1b[38;2;0;191;255m1\x1b[0;00;22;39;49m"));
+        });
+    }
+
+    #[test]
     fn test_vm_to_s() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, VmOptions::default());
@@ -4042,7 +4357,9 @@ mod tests {
 
             // Check options map has supports_color
             let key_color = vm.new_string(mc, "supports_color".to_string());
-            let mapped_color = vm.call_method(mc, opts_val, "at:", vec![key_color]).unwrap();
+            let mapped_color = vm
+                .call_method(mc, opts_val, "at:", vec![key_color])
+                .unwrap();
             assert_eq!(to_spec(mapped_color), ValueSpec::Bool(true));
         });
     }

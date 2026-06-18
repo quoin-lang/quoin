@@ -10,14 +10,17 @@ This document outlines the language features, compiler updates, and VM modificat
   - Spinning the VM while executing in a native method.
   - Object initialization/new:{} logic
 - [x] Bring over AnsiColorizer.cs from the old repo.
-  - [ ] Switch to the colorized test suite runner.
+  - [x] Switch to the colorized test suite runner.
 - [x] Bring over Highlighter from the old repo.
-  - [ ] Show highlighted code snippets in stack traces.
-- [ ] Improve stack trace output. (Similar to the C# output.)
+- [x] Improve stack trace output. (Similar to the C# output.)
+  - [x] Show highlighted block snippets to the right.
 - [ ] Move to a better iterator design that doesn't require mutability.
+  - [ ] Use generators now that the VM supports them.
 - [ ] Rewrite the TestSuite so it doesn't mix the tests into itself, too many conflicts.
 - [ ] List, Regex and Map #bind:{}
   - [x] List#bind:{}
+  - [ ] Regex#bind:{}
+  - [ ] Map#bind:{}
   - See bblib/presentation/20-method-destructuring.b
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
 - [x] Confirm `%'string%{eval}' is working.
