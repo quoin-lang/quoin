@@ -124,6 +124,44 @@ pub fn build_list_class() -> NativeClassBuilder {
                 })
                 .map_err(|e| BBError::Other(e))?
         })
+        .instance_method("at:put:", |_vm, mc, args| {
+            let idx = match args[1] {
+                Value::Object(obj) => match &obj.borrow().payload {
+                    ObjectPayload::Int(i) => *i,
+                    _ => {
+                        return Err(BBError::TypeError {
+                            expected: "Integer".to_string(),
+                            got: args[1].type_name().to_string(),
+                            msg: "at:put: expects integer index".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(BBError::TypeError {
+                        expected: "Integer".to_string(),
+                        got: args[1].type_name().to_string(),
+                        msg: "at:put: expects integer index".to_string(),
+                    });
+                }
+            };
+            let val = args[2];
+            args[0]
+                .with_native_state_mut(mc, |l: &mut NativeListState| {
+                    let vec = l.get_vec_mut();
+                    if idx >= 0 && idx < vec.len() as i64 {
+                        vec[idx as usize] = val;
+                        Ok(())
+                    } else {
+                        Err(BBError::Other(format!(
+                            "Index out of bounds: index is {}, but length is {}",
+                            idx,
+                            vec.len()
+                        )))
+                    }
+                })
+                .map_err(|e| BBError::Other(e))??;
+            Ok(args[0])
+        })
         .instance_method("sliceFrom:", |vm, mc, args| {
             let idx = match args[1] {
                 Value::Object(obj) => match &obj.borrow().payload {

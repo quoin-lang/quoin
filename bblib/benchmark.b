@@ -1,0 +1,126 @@
+Fib <- {
+    .meta <-- {
+        value: -> { |n|
+            (n <= 1).if: { ^n }
+                       else: { ^(.value:(n - 1)) + (.value:(n - 2)) }
+        }
+    }
+};
+
+Sieve <- {
+    .meta <-- {
+        primesUpTo: -> { |limit|
+            is_prime = #();
+            i = 0;
+            { i <= limit }.whileDo: {
+                is_prime.add: true;
+                i = i + 1;
+            };
+
+            is_prime.at:0 put: false;
+            is_prime.at:1 put: false;
+
+            p = 2;
+            { p * p <= limit }.whileDo: {
+                (is_prime.at:p).if: {
+                    i = p * p;
+                    { i <= limit }.whileDo: {
+                        is_prime.at:i put: false;
+                        i = i + p;
+                    };
+                };
+                p = p + 1;
+            };
+
+            primes = #();
+            i = 2;
+            { i <= limit }.whileDo: {
+                (is_prime.at:i).if: {
+                    primes.add: i;
+                };
+                i = i + 1;
+            };
+            ^primes
+        }
+    }
+};
+
+TreeNode <- { | @left @right @item |
+    init: -> { |item left right|
+        @item = item;
+        @left = left;
+        @right = right;
+    }
+
+    check -> {
+        @left.defined?.if: { ^@item + @left.check - @right.check }
+                     else: { ^@item }
+    }
+};
+
+TreeBenchmark <- {
+    .meta <-- {
+        powerOfTwo: -> { |p|
+            res = 1;
+            i = 0;
+            { i < p }.whileDo: {
+                res = res * 2;
+                i = i + 1;
+            };
+            ^res
+        }
+
+        run: -> { |max_depth|
+            min_depth = 4;
+            
+            long_lived_tree = TreeBenchmark.makeTree:0 depth:max_depth;
+            
+            depth = min_depth;
+            { depth <= max_depth }.whileDo: {
+                iterations = TreeBenchmark.powerOfTwo:(max_depth - depth + min_depth);
+                check_sum = 0;
+                
+                i = 1;
+                { i <= iterations }.whileDo: {
+                    t = TreeBenchmark.makeTree:i depth:depth;
+                    check_sum = check_sum + t.check;
+                    t = TreeBenchmark.makeTree:-i depth:depth;
+                    check_sum = check_sum + t.check;
+                    i = i + 1;
+                };
+                depth = depth + 2;
+            };
+        }
+
+        makeTree:depth: -> { |item depth|
+            (depth > 0).if: {
+                left = TreeBenchmark.makeTree:(2 * item - 1) depth:(depth - 1);
+                right = TreeBenchmark.makeTree:(2 * item) depth:(depth - 1);
+                ^TreeNode.new:{ item=item; left=left; right=right }
+            } else: {
+                ^TreeNode.new:{ item=item }
+            }
+        }
+    }
+};
+
+Benchmark <- {
+    .meta <-- {
+        run:block:iterations: -> { |name block iterations|
+            .print: 'Running: ' + name;
+            total = 0;
+            i = 1;
+            { i <= iterations }.whileDo: {
+                elapsed = Timer.time:block;
+                .print: '  Iteration ' + i.s + ': ' + elapsed.s + ' ms';
+                total = total + elapsed;
+                i = i + 1;
+            };
+            avg = total / iterations;
+            .print: '  Average: ' + avg.s + ' ms';
+            .print: '--------------------------------------------------';
+            ^avg
+        }
+    }
+};
+"* End of benchmark definitions"

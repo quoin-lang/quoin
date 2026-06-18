@@ -651,6 +651,25 @@ impl<'gc> VmState<'gc> {
             }
         }
     }
+    pub fn start_method_call(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        selector: &str,
+        args: Vec<Value<'gc>>,
+    ) -> Result<usize, BBError> {
+        let method = self.lookup_method(mc, receiver, selector, &args)?;
+        if let Some(method) = method {
+            let mut all_args = vec![receiver];
+            all_args.extend(args);
+            let initial_frame_count = self.frames.len();
+            method.call(self, mc, all_args, Some(selector.to_string()))?;
+            Ok(initial_frame_count)
+        } else {
+            Err(BBError::Other(format!("Method {} not found on receiver", selector)))
+        }
+    }
+
     pub fn call_method(
         &mut self,
         mc: &Mutation<'gc>,
