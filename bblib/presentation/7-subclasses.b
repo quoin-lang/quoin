@@ -14,5 +14,5 @@ damonEmployee = Employee.new:{
     title = 'Lead Software Engineer'
 }
 
-damonEmployee.s.puts   "* Damon, Lead Software Engineering, 39 years old
+damonEmployee.s.print   "* Damon, Lead Software Engineering, 39 years old
 "* Damon, Lead Software Engineering, 39 years old

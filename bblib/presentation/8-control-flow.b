@@ -1,5 +1,5 @@
-(1 < 10).if:{ 'True'.puts }
-       else:{ 'False'.puts }
+(1 < 10).if:{ 'True'.print }
+       else:{ 'False'.print }
 
 i = 1
-{ i < 5 }.whileDo:{ i.puts; i = i+1 }
+{ i < 5 }.whileDo:{ i.print; i = i+1 }

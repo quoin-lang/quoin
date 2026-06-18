@@ -15,5 +15,5 @@ damonPerson = Person.new:{
     age = 39       "* Narrator: He's not 39
 }
 
-damonEmployee.s.puts
+damonEmployee.s.print
 "* Damon, 39 years old

@@ -1,5 +1,5 @@
-#( 1 2 3 ).each:{ |n| n.puts }
-(1..4).each:{ |n| n.puts }       "* Same
+#( 1 2 3 ).each:{ |n| n.print }
+(1..4).each:{ |n| n.print }       "* Same
 
 "* All of the below is implemented in terms of .each:
 

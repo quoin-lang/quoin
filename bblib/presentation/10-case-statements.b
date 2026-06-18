@@ -1,10 +1,10 @@
 name.case:{
-    .when:'Damon'               do:{ 'Hi Damon'.puts          };
-    .when:'Bagel'               do:{ 'Hello delicious'.puts   };
-    .when:#/^[A-Z]+$/           do:{ 'NO NEED TO SHOUT'.puts  };
-    .when:{|x| x.length > 20 }  do:{ 'YOUR NAME IS LONG'.puts };
+    .when:'Damon'               do:{ 'Hi Damon'.print          };
+    .when:'Bagel'               do:{ 'Hello delicious'.print   };
+    .when:#/^[A-Z]+$/           do:{ 'NO NEED TO SHOUT'.print  };
+    .when:{|x| x.length > 20 }  do:{ 'YOUR NAME IS LONG'.print };
 
-    .default:{ 'Who are you and what did you do with my bagel'.puts };
+    .default:{ 'Who are you and what did you do with my bagel'.print };
 };
 
 'Low' == 5.case:{
