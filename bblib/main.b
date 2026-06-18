@@ -14,6 +14,6 @@ testFolder = ([IO]Folder.open:'bblib/tests');
 
 runner.add:Runtime.evalFile:'bblib/tests/01-iterate.b';
 
-results = runner.run:PlainTestReporter.new:{ out = [IO]Stdout }
+results = runner.run:AnsiTestReporter.new:{ out = [IO]Stdout }
 
 results.none?:{|tr| tr.failures.any? }

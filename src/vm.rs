@@ -362,6 +362,17 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
+    #[allow(clippy::wrong_self_convention)]
+    pub fn to_s(&mut self, mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Value<'gc>, BBError> {
+        match value {
+            Value::Object(_) => self.call_method(mc, value, "s", vec![]),
+            Value::Class(_) | Value::ClassMeta(_) => {
+                let display = value.to_string();
+                Ok(self.new_string(mc, display))
+            }
+        }
+    }
+
     pub fn new_list(&self, mc: &Mutation<'gc>, list: Vec<Value<'gc>>) -> Value<'gc> {
         let class = self.builtin_cache.borrow().list_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "List"));
@@ -3696,6 +3707,65 @@ mod tests {
             // Check that the error message displays the source information
             assert!(err_str.contains("at <string>:1:1"));
             assert!(err_str.contains("1.foo;"));
+        });
+    }
+
+    #[test]
+    fn test_vm_to_s() {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc);
+            vm.register_native_class(mc, crate::runtime::object::build_object_class());
+            vm.register_native_class(mc, crate::runtime::class::build_class_class());
+            vm.register_native_class(mc, crate::runtime::boolean::build_boolean_class());
+            vm.register_native_class(mc, crate::runtime::block::build_block_class());
+            vm.register_native_class(mc, crate::runtime::list::build_list_class());
+            vm.register_native_class(mc, crate::runtime::double::build_double_class());
+            vm.register_native_class(mc, crate::runtime::integer::build_integer_class());
+            vm.register_native_class(mc, crate::runtime::string::build_string_class());
+            vm.register_native_class(mc, crate::runtime::nil::build_nil_class());
+            vm.register_native_class(mc, crate::runtime::map::build_map_class());
+            vm.register_native_class(mc, crate::runtime::map::build_key_value_pair_class());
+            vm.register_native_class(mc, crate::runtime::regex::build_regex_class());
+            for t in ["Method", "Native"] {
+                vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
+            }
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            // Test 1: Value::Class Display Output
+            let string_class = vm.get_builtin_class("String");
+            let class_val = Value::Class(string_class);
+            let result = vm.to_s(mc, class_val).unwrap();
+            assert_eq!(
+                to_spec(result),
+                ValueSpec::String("class String".to_string())
+            );
+
+            // Test 2: Value::ClassMeta Display Output
+            let class_meta_val = Value::ClassMeta(string_class);
+            let result = vm.to_s(mc, class_meta_val).unwrap();
+            assert_eq!(
+                to_spec(result),
+                ValueSpec::String("class String meta".to_string())
+            );
+
+            // Test 3: Value::Object (Int / String / Nil / Bool)
+            let int_val = vm.new_int(mc, 42);
+            let result = vm.to_s(mc, int_val).unwrap();
+            assert_eq!(to_spec(result), ValueSpec::String("42".to_string()));
+
+            let bool_val = vm.new_bool(mc, true);
+            let result = vm.to_s(mc, bool_val).unwrap();
+            assert_eq!(to_spec(result), ValueSpec::String("true".to_string()));
+
+            let nil_val = vm.new_nil(mc);
+            let result = vm.to_s(mc, nil_val).unwrap();
+            assert_eq!(to_spec(result), ValueSpec::String("nil".to_string()));
+
+            let string_val = vm.new_string(mc, "hello".to_string());
+            let result = vm.to_s(mc, string_val).unwrap();
+            assert_eq!(to_spec(result), ValueSpec::String("hello".to_string()));
         });
     }
 }

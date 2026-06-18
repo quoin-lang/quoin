@@ -192,6 +192,38 @@ fn new_native_io_handle_with_wrapper<'a>(
     )
 }
 
+fn get_io_string<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    val: Value<'gc>,
+) -> Result<String, BBError> {
+    if let Value::Object(obj) = val {
+        let payload = obj.borrow().payload;
+        if let crate::value::ObjectPayload::String(s) = payload {
+            return Ok(s.to_string());
+        }
+        let is_ansi = obj.borrow().class.borrow().name.name == "ANSI";
+        if is_ansi {
+            let string_val = vm.call_method(mc, val, "string", vec![])?;
+            if let Value::Object(o) = string_val {
+                if let crate::value::ObjectPayload::String(st) = &o.borrow().payload {
+                    return Ok(crate::ansi_colorizer::colorize(st));
+                }
+            }
+            return Err(BBError::TypeError {
+                expected: "String".to_string(),
+                got: string_val.type_name().to_string(),
+                msg: "Expected string return from ANSI#string".to_string(),
+            });
+        }
+    }
+    Err(BBError::TypeError {
+        expected: "String or ANSI".to_string(),
+        got: val.type_name().to_string(),
+        msg: format!("Expected String or ANSI (got {:?})", val),
+    })
+}
+
 pub fn build_io_handle_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Handle", Some("Object"))
         .class_method("stdout", |vm, mc, _args| {
@@ -225,8 +257,8 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, s.to_string()))
         })
         .instance_method("write:", |vm, mc, args| {
-            let s = arg!(args, String, 1);
-            let bytes = s.as_bytes().to_vec();
+            let s = get_io_string(vm, mc, args[1])?;
+            let bytes = s.into_bytes();
 
             args[0].with_native_state_mut(mc, |h: &mut NativeIoHandle| {
                 match &mut h.wrapper {
@@ -253,7 +285,7 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             Ok(vm.new_nil(mc))
         })
         .instance_method("writeln:", |vm, mc, args| {
-            let s = arg!(args, String, 1);
+            let s = get_io_string(vm, mc, args[1])?;
             let bytes = format!("{}\n", s).into_bytes();
 
             args[0].with_native_state_mut(mc, |h: &mut NativeIoHandle| {
@@ -299,3 +331,46 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             }
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::Value;
+    use crate::vm::VmState;
+    use gc_arena::{Arena, Rootable};
+
+    #[test]
+    fn test_get_io_string_ansi() {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc);
+            vm.register_native_class(mc, crate::runtime::object::build_object_class());
+            vm.register_native_class(mc, crate::runtime::class::build_class_class());
+            vm.register_native_class(mc, crate::runtime::string::build_string_class());
+            
+            // Build and register the ANSI class
+            let ansi_builder = NativeClassBuilder::new("ANSI", Some("Object"))
+                .instance_method("string", |vm, mc, _args| {
+                    Ok(vm.new_string(mc, "$bw[bold text$]".to_string()))
+                });
+            vm.register_native_class(mc, ansi_builder);
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            // Test 1: BB String
+            let string_val = vm.new_string(mc, "hello".to_string());
+            let s = get_io_string(vm, mc, string_val).unwrap();
+            assert_eq!(s, "hello");
+
+            // Test 2: ANSI Instance
+            let ansi_class = vm.get_builtin_class("ANSI");
+            let ansi_instance = Value::Object(vm.new_object(mc, ansi_class));
+            let s = get_io_string(vm, mc, ansi_instance).unwrap();
+            
+            // colorized version of "$bw[bold text$]" starts with "\x1b[" and ends with reset code
+            assert!(s.contains("bold text"));
+            assert!(s.contains("\x1b["));
+        });
+    }
+}
+
