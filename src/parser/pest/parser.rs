@@ -42,15 +42,60 @@ static PRATT_PARSER: Lazy<PrattParser<Rule>> = Lazy::new(|| {
         .op(Op::prefix(prefix_op))
 });
 
+struct LineOffsetTable {
+    line_starts: Vec<usize>,
+}
+
+impl LineOffsetTable {
+    fn new(text: &str) -> Self {
+        let mut line_starts = vec![0];
+        for (i, c) in text.char_indices() {
+            if c == '\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        Self { line_starts }
+    }
+
+    fn find_line_col(&self, byte_offset: usize, text: &str) -> (usize, usize) {
+        let idx = self.line_starts.partition_point(|&pos| pos <= byte_offset);
+        let line_idx = idx.saturating_sub(1);
+        let line_start_pos = self.line_starts[line_idx];
+        let line = line_idx + 1;
+        let col = text.get(line_start_pos..byte_offset)
+            .map(|s| s.chars().count())
+            .unwrap_or(0) + 1;
+        (line, col)
+    }
+}
+
+use std::cell::RefCell;
+
+thread_local! {
+    static LINE_OFFSET_TABLE: RefCell<Option<LineOffsetTable>> = RefCell::new(None);
+}
+
 pub fn parse_building_blocks_string(code: &str) -> Node {
     let code = code.strip_prefix('\u{FEFF}').unwrap_or(code);
+    
+    let table = LineOffsetTable::new(code);
+    LINE_OFFSET_TABLE.with(|cell| {
+        *cell.borrow_mut() = Some(table);
+    });
+
     let mut pairs = match BuildingBlocksParser::parse(Rule::program, code) {
         Ok(p) => p,
-        Err(e) => panic!("Pest parsing error: {}", e),
+        Err(e) => {
+            LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
+            panic!("Pest parsing error: {}", e);
+        }
     };
 
     let program_pair = pairs.next().unwrap();
-    parse_program(program_pair, "<string>", code)
+    let res = parse_program(program_pair, "<string>", code);
+    
+    LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
+    res
 }
 
 pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
@@ -71,20 +116,34 @@ pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
         .unwrap_or(&contents)
         .to_string();
 
-    let filename_clone = filename.clone();
-    let contents_clone = contents.clone();
+    let table = LineOffsetTable::new(&contents);
+    LINE_OFFSET_TABLE.with(|cell| {
+        *cell.borrow_mut() = Some(table);
+    });
 
-    let mut pairs = match BuildingBlocksParser::parse(Rule::program, &contents_clone) {
+    let mut pairs = match BuildingBlocksParser::parse(Rule::program, &contents) {
         Ok(p) => p,
-        Err(e) => panic!("Pest parsing error in file {}: {}", filename_clone, e),
+        Err(e) => {
+            LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
+            panic!("Pest parsing error in file {}: {}", filename, e);
+        }
     };
 
     let program_pair = pairs.next().unwrap();
-    parse_program(program_pair, &filename_clone, &contents_clone)
+    let res = parse_program(program_pair, &filename, &contents);
+
+    LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
+    res
 }
 
 fn extract_source_info(span: pest::Span, filename: &str, source_text: &str) -> Option<SourceInfo> {
-    let (line, col) = span.start_pos().line_col();
+    let (line, col) = LINE_OFFSET_TABLE.with(|cell| {
+        if let Some(ref table) = *cell.borrow() {
+            table.find_line_col(span.start(), source_text)
+        } else {
+            span.start_pos().line_col()
+        }
+    });
     let text = source_text
         .get(span.start()..span.end())
         .map(|x| x.to_string());
@@ -2081,5 +2140,32 @@ mod tests {
             }))],
         }));
         assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn test_line_offset_table() {
+        let text = "line 1\nline 2\n💖 line 3\n\nline 5";
+        let table = super::LineOffsetTable::new(text);
+
+        // "line 1" is on line 1.
+        assert_eq!(table.find_line_col(0, text), (1, 1)); // 'l'
+        assert_eq!(table.find_line_col(5, text), (1, 6)); // '1'
+        assert_eq!(table.find_line_col(6, text), (1, 7)); // '\n'
+
+        // "line 2" is on line 2.
+        assert_eq!(table.find_line_col(7, text), (2, 1)); // 'l'
+        assert_eq!(table.find_line_col(13, text), (2, 7)); // '\n'
+
+        // "💖 line 3" is on line 3.
+        assert_eq!(table.find_line_col(14, text), (3, 1)); // '💖' (UTF-8 index starts at 14)
+        assert_eq!(table.find_line_col(18, text), (3, 2)); // ' ' (UTF-8 💖 is 4 bytes, so space is at 18)
+        assert_eq!(table.find_line_col(19, text), (3, 3)); // 'l'
+        assert_eq!(table.find_line_col(25, text), (3, 9)); // '\n'
+
+        // Empty line 4.
+        assert_eq!(table.find_line_col(26, text), (4, 1)); // '\n'
+
+        // "line 5" is on line 5.
+        assert_eq!(table.find_line_col(27, text), (5, 1)); // 'l'
     }
 }
