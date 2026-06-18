@@ -1,10 +1,10 @@
 1 + 2 == 3
 - 4.abs == 4
-‘Hello World’.print
+'Hello World'.print
 { 3 * 4 }.value == 12
-( true ).if:{ ‘true is true’.print }
+( true ).if:{ 'true is true'.print }
 #( 1 2 3 )
-#{ ‘a’: 10 ‘b’: 10 + 10 }
+#{ 'a': 10 'b': 10 + 10 }
 "Inline comment" "* Comment to EOL
 
 "* Only three "special" identifiers.
