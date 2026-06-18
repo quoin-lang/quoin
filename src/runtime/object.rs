@@ -1,3 +1,4 @@
+use crate::error::BBError;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {
@@ -18,7 +19,7 @@ pub fn build_object_class() -> NativeClassBuilder {
             if let Some(c) = vm.get_class_for_lookup(receiver) {
                 Ok(Value::Class(c))
             } else {
-                Err(crate::error::BBError::Other(format!(
+                Err(BBError::Other(format!(
                     "Class not found for type {}",
                     receiver.type_name()
                 )))

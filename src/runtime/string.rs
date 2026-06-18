@@ -1,9 +1,13 @@
 use crate::arg;
+use crate::compiler::Compiler;
 use crate::error::BBError;
+use crate::parser::ast::NodeValue;
+use crate::parser::parse_building_blocks_string;
 use crate::runtime::regex::NativeRegexState;
-use crate::value::{NativeClassBuilder, ObjectPayload, Value};
+use crate::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 
 use gc_arena::Gc;
+use std::collections::HashSet;
 
 pub fn build_string_class() -> NativeClassBuilder {
     NativeClassBuilder::new("String", Some("Object"))
@@ -115,9 +119,9 @@ pub fn build_string_class() -> NativeClassBuilder {
                         result.push_str(&lit);
                     }
                     InterpolPart::Expr(expr_str) => {
-                        let node = crate::parser::parse_building_blocks_string(&expr_str);
+                        let node = parse_building_blocks_string(&expr_str);
                         let program_node = match &node.value {
-                            crate::parser::ast::NodeValue::Program(p) => p,
+                            NodeValue::Program(p) => p,
                             _ => {
                                 return Err(BBError::Other(
                                     "Parsed node is not a ProgramNode".to_string(),
@@ -125,7 +129,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                             }
                         };
 
-                        let mut local_names = std::collections::HashSet::new();
+                        let mut local_names = HashSet::new();
                         let mut current_env = Some(caller_env);
                         while let Some(env) = current_env {
                             for name in env.borrow().vars.keys() {
@@ -134,7 +138,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                             current_env = env.borrow().parent;
                         }
 
-                        let mut compiler = crate::compiler::Compiler::new_with_locals(local_names);
+                        let mut compiler = Compiler::new_with_locals(local_names);
                         let compiled = compiler
                             .compile_program(program_node)
                             .map_err(|e| BBError::Other(e))?;
@@ -142,7 +146,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                         let decl_block = compiled.decl_block.as_ref().map(|db| {
                             crate::gc!(
                                 mc,
-                                crate::value::Block {
+                                Block {
                                     name: db.name.clone(),
                                     is_nested_block: db.is_nested_block,
                                     param_names: db.param_names.clone(),
@@ -159,7 +163,7 @@ pub fn build_string_class() -> NativeClassBuilder {
 
                         let block = crate::gc!(
                             mc,
-                            crate::value::Block {
+                            Block {
                                 name: compiled.name.clone(),
                                 is_nested_block: compiled.is_nested_block,
                                 param_names: compiled.param_names.clone(),

@@ -2,6 +2,10 @@ use crate::arg;
 use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 
+use gc_arena::collect::{DynCollect, Trace};
+use std::any::Any;
+use std::mem::transmute;
+
 #[derive(Debug)]
 pub struct NativeListState {
     pub idx: usize,
@@ -10,7 +14,7 @@ pub struct NativeListState {
 
 impl NativeListState {
     pub fn new(vec: Vec<Value<'_>>) -> Self {
-        let vec_static: Vec<Value<'static>> = unsafe { std::mem::transmute(vec) };
+        let vec_static: Vec<Value<'static>> = unsafe { transmute(vec) };
         Self {
             idx: 0,
             vec: vec_static,
@@ -18,27 +22,26 @@ impl NativeListState {
     }
 
     pub fn get_vec<'gc>(&self) -> &[Value<'gc>] {
-        unsafe { std::mem::transmute(&self.vec[..]) }
+        unsafe { transmute(&self.vec[..]) }
     }
 
     pub fn get_vec_mut<'gc>(&mut self) -> &mut Vec<Value<'gc>> {
-        unsafe { std::mem::transmute(&mut self.vec) }
+        unsafe { transmute(&mut self.vec) }
     }
 }
 
 impl AnyCollect for NativeListState {
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 
-    fn trace_gc<'gc>(&self, cc: &mut dyn gc_arena::collect::Trace<'gc>) {
-        use gc_arena::collect::DynCollect;
+    fn trace_gc<'gc>(&self, cc: &mut dyn Trace<'gc>) {
         for val in &self.vec {
-            let val_gc: &Value<'gc> = unsafe { std::mem::transmute(val) };
+            let val_gc: &Value<'gc> = unsafe { transmute(val) };
             val_gc.dyn_trace(cc);
         }
     }
@@ -58,7 +61,7 @@ pub fn build_list_class() -> NativeClassBuilder {
             })?;
 
             Ok(if let Some(val) = val_opt {
-                unsafe { std::mem::transmute(val) }
+                unsafe { transmute(val) }
             } else {
                 vm.new_nil(mc)
             })
@@ -261,7 +264,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                 l.get_vec()
                     .iter()
                     .take(block.param_names.len())
-                    .map(|v| unsafe { std::mem::transmute(*v) })
+                    .map(|v| unsafe { transmute(*v) })
                     .collect::<Vec<_>>()
             })?;
 
@@ -320,9 +323,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                     while j > 0 {
                         let active_args = vm.active_native_args.last().unwrap();
                         let val_prev = active_args[0]
-                            .with_native_state::<NativeListState, _, _>(|l| {
-                                l.get_vec()[j - 1]
-                            })
+                            .with_native_state::<NativeListState, _, _>(|l| l.get_vec()[j - 1])
                             .map_err(|e| BBError::Other(e))?;
 
                         let key_lhs = vm.call_method(
@@ -335,9 +336,7 @@ pub fn build_list_class() -> NativeClassBuilder {
 
                         let active_args = vm.active_native_args.last().unwrap();
                         let val_curr = active_args[0]
-                            .with_native_state::<NativeListState, _, _>(|l| {
-                                l.get_vec()[j]
-                            })
+                            .with_native_state::<NativeListState, _, _>(|l| l.get_vec()[j])
                             .map_err(|e| BBError::Other(e))?;
 
                         let key_rhs = vm.call_method(

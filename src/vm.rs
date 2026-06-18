@@ -1,5 +1,5 @@
 use crate::error::BBError;
-use crate::fiber::Fiber;
+use crate::fiber::{Fiber, VMYielder, YieldReason};
 use crate::instruction::{Constant, Instruction};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
@@ -11,8 +11,12 @@ use crate::value::{
 };
 use crate::{gc, gcl};
 
-use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use regex::Regex;
+use std::cmp::{min, Ordering};
 use std::collections::HashMap;
+use std::mem::transmute;
+use std::path::Path;
 use ulid::Ulid;
 
 #[derive(Collect)]
@@ -232,9 +236,9 @@ impl<'gc> Callable<'gc> for NativeCallable {
 }
 
 impl<'gc> VmState<'gc> {
-    pub unsafe fn get_yielder(&self) -> Option<&crate::fiber::VMYielder<'gc>> {
+    pub unsafe fn get_yielder(&self) -> Option<&VMYielder<'gc>> {
         self.yielder
-            .map(|ptr| unsafe { &*(ptr as *const crate::fiber::VMYielder<'gc>) })
+            .map(|ptr| unsafe { &*(ptr as *const VMYielder<'gc>) })
     }
 
     pub fn new(mc: &Mutation<'gc>) -> Self {
@@ -429,7 +433,7 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
-    pub fn new_regex(&self, mc: &Mutation<'gc>, regex: regex::Regex) -> Value<'gc> {
+    pub fn new_regex(&self, mc: &Mutation<'gc>, regex: Regex) -> Value<'gc> {
         let class = self.builtin_cache.borrow().regex_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Regex"));
         let boxed_state: Box<dyn AnyCollect> = Box::new(NativeRegexState::new(regex));
@@ -718,7 +722,7 @@ impl<'gc> VmState<'gc> {
                     match self.step_internal(mc) {
                         Ok(VmStatus::Running) => {
                             if let Some(yielder) = unsafe { self.get_yielder() } {
-                                yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                                yielder.suspend(YieldReason::CooperativeYield);
                             }
                         }
                         Ok(VmStatus::Finished(_)) => {
@@ -801,7 +805,7 @@ impl<'gc> VmState<'gc> {
                     match self.step_internal(mc) {
                         Ok(VmStatus::Running) => {
                             if let Some(yielder) = unsafe { self.get_yielder() } {
-                                yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                                yielder.suspend(YieldReason::CooperativeYield);
                             }
                         }
                         Ok(VmStatus::Finished(_)) => {
@@ -895,7 +899,7 @@ impl<'gc> VmState<'gc> {
                 match self.step_internal(mc) {
                     Ok(VmStatus::Running) => {
                         if let Some(yielder) = unsafe { self.get_yielder() } {
-                            yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                            yielder.suspend(YieldReason::CooperativeYield);
                         }
                     }
                     Ok(VmStatus::Finished(_)) => {
@@ -971,7 +975,7 @@ impl<'gc> VmState<'gc> {
                 match self.step_internal(mc) {
                     Ok(VmStatus::Running) => {
                         if let Some(yielder) = unsafe { self.get_yielder() } {
-                            yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                            yielder.suspend(YieldReason::CooperativeYield);
                         }
                     }
                     Ok(VmStatus::Finished(_)) => {
@@ -1165,7 +1169,7 @@ impl<'gc> VmState<'gc> {
                 Ok(ord) => ord,
                 Err(e) => {
                     err = Some(e);
-                    std::cmp::Ordering::Equal
+                    Ordering::Equal
                 }
             });
             if let Some(e) = err {
@@ -1196,16 +1200,12 @@ impl<'gc> VmState<'gc> {
         Ok(None)
     }
 
-    fn compare_specificity(
-        &self,
-        a: Value<'gc>,
-        b: Value<'gc>,
-    ) -> Result<std::cmp::Ordering, BBError> {
+    fn compare_specificity(&self, a: Value<'gc>, b: Value<'gc>) -> Result<Ordering, BBError> {
         let block_a = self.get_block_from_method(a);
         let block_b = self.get_block_from_method(b);
         match (block_a, block_b) {
             (Some(ba), Some(bb)) => {
-                let len = std::cmp::min(ba.param_types.len(), bb.param_types.len());
+                let len = min(ba.param_types.len(), bb.param_types.len());
                 for i in 0..len {
                     let type_a = &ba.param_types[i];
                     let type_b = &bb.param_types[i];
@@ -1213,25 +1213,25 @@ impl<'gc> VmState<'gc> {
                         (Some(ta), Some(tb)) => {
                             if ta != tb {
                                 if self.is_subclass_of(ta, tb) {
-                                    return Ok(std::cmp::Ordering::Less);
+                                    return Ok(Ordering::Less);
                                 }
                                 if self.is_subclass_of(tb, ta) {
-                                    return Ok(std::cmp::Ordering::Greater);
+                                    return Ok(Ordering::Greater);
                                 }
                             }
                         }
                         (Some(_), None) => {
-                            return Ok(std::cmp::Ordering::Less);
+                            return Ok(Ordering::Less);
                         }
                         (None, Some(_)) => {
-                            return Ok(std::cmp::Ordering::Greater);
+                            return Ok(Ordering::Greater);
                         }
                         (None, None) => {}
                     }
                 }
-                Ok(std::cmp::Ordering::Equal)
+                Ok(Ordering::Equal)
             }
-            _ => Ok(std::cmp::Ordering::Equal),
+            _ => Ok(Ordering::Equal),
         }
     }
 
@@ -1336,7 +1336,7 @@ impl<'gc> VmState<'gc> {
                 let state_ref = state_cell.borrow();
                 let any_ref = (**state_ref).as_any();
                 if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
-                    return method_state.next.map(|n| unsafe { std::mem::transmute(n) });
+                    return method_state.next.map(|n| unsafe { transmute(n) });
                 }
             }
         }
@@ -1429,13 +1429,13 @@ impl<'gc> VmState<'gc> {
                     let any_mut = state_ref.as_any_mut();
                     if let Some(method_state) = any_mut.downcast_mut::<NativeMethodState>() {
                         if let Some(next_val) = method_state.next {
-                            let next_val_gc: Value<'gc> = unsafe { std::mem::transmute(next_val) };
+                            let next_val_gc: Value<'gc> = unsafe { transmute(next_val) };
                             drop(state_ref);
                             curr = next_val_gc;
                             continue;
                         } else {
                             let new_method_static: Value<'static> =
-                                unsafe { std::mem::transmute(new_method) };
+                                unsafe { transmute(new_method) };
                             method_state.next = Some(new_method_static);
                             return Ok(());
                         }
@@ -1770,7 +1770,7 @@ impl<'gc> VmState<'gc> {
                         .or(f.block.source_info.as_ref());
 
                     let formatted_loc = if let Some(si) = si_opt {
-                        let display_filename = std::path::Path::new(&si.filename)
+                        let display_filename = Path::new(&si.filename)
                             .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or(&si.filename)
@@ -1849,7 +1849,7 @@ impl<'gc> VmState<'gc> {
                         .or(first_frame.block.source_info.as_ref());
 
                     let formatted_loc = if let Some(si) = si_opt {
-                        let display_filename = std::path::Path::new(&si.filename)
+                        let display_filename = Path::new(&si.filename)
                             .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or(&si.filename)
@@ -2189,8 +2189,7 @@ impl<'gc> VmState<'gc> {
                 if let Value::Object(obj) = pattern_val
                     && let ObjectPayload::String(s) = &obj.borrow().payload
                 {
-                    let re =
-                        regex::Regex::new(&**s).map_err(|e| format!("Invalid regex: {}", e))?;
+                    let re = Regex::new(&**s).map_err(|e| format!("Invalid regex: {}", e))?;
                     let regex_val = self.new_regex(mc, re);
                     self.push(regex_val);
                 } else {

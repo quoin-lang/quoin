@@ -1,16 +1,25 @@
+use crate::compiler::Compiler;
 use crate::error::BBError;
-use crate::parser::{ast, parse_building_blocks_file};
+use crate::fiber::{Fiber, VMContext, YieldReason};
+use crate::gc;
+use crate::highlighter::highlight_to_ansi;
+use crate::parser::ast::Node;
+use crate::parser::{parse_building_blocks_file, NodeValue};
 use crate::runtime::{
     block, boolean, class, double, integer, io, list, map, method, native, nil, object, regex,
     runtime, string, timer,
 };
-use crate::value::{Block, NativeClassBuilder};
+use crate::value::{Block, NamespacedName, NativeClassBuilder};
 use crate::vm::{VmState, VmStatus};
-use crate::{compiler, gc};
 
-use crate::parser::ast::Node;
+use corosensei::CoroutineResult;
 use gc_arena::{Arena, Gc, Rootable};
 use glob::glob;
+use std::fs::read_to_string;
+use std::iter::once_with;
+use std::path::PathBuf;
+use std::process::exit;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionStatus {
@@ -73,16 +82,16 @@ impl VmRunner {
             VmRunnerMode::Highlight => {
                 let Some(ref path) = self.options.target_path else {
                     eprintln!("Usage: cargo run -- highlight FILE");
-                    std::process::exit(2);
+                    exit(2);
                 };
-                let source = match std::fs::read_to_string(path) {
+                let source = match read_to_string(path) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("Error reading {}: {}", path, e);
-                        std::process::exit(1);
+                        exit(1);
                     }
                 };
-                print!("{}", crate::highlighter::highlight_to_ansi(&source));
+                print!("{}", highlight_to_ansi(&source));
                 Ok(())
             }
             VmRunnerMode::Test => {
@@ -104,9 +113,9 @@ impl VmRunner {
                             None
                         }
                     })
-                    .chain(std::iter::once_with(|| {
+                    .chain(once_with(|| {
                         println!("Loading file: bblib/main.b");
-                        parse_building_blocks_file(&std::path::PathBuf::from("bblib/main.b"))
+                        parse_building_blocks_file(&PathBuf::from("bblib/main.b"))
                     }));
 
                 self.compile_and_run_asts(ast_iter);
@@ -130,9 +139,9 @@ impl VmRunner {
                             None
                         }
                     })
-                    .chain(std::iter::once_with(|| {
+                    .chain(once_with(|| {
                         println!("Loading file: bblib/benchmark.b");
-                        parse_building_blocks_file(&std::path::PathBuf::from("bblib/benchmark.b"))
+                        parse_building_blocks_file(&PathBuf::from("bblib/benchmark.b"))
                     }));
 
                 self.compile_and_benchmark(ast_iter);
@@ -156,14 +165,14 @@ impl VmRunner {
                             None
                         }
                     })
-                    .chain(std::iter::once_with(|| {
+                    .chain(once_with(|| {
                         let script_path = self
                             .options
                             .target_path
                             .as_deref()
                             .unwrap_or("bblib/testscript.b");
                         println!("Loading file: {}", script_path);
-                        parse_building_blocks_file(&std::path::PathBuf::from(script_path))
+                        parse_building_blocks_file(&PathBuf::from(script_path))
                     }));
 
                 self.compile_and_run_asts(ast_iter);
@@ -212,13 +221,13 @@ impl VmRunner {
 
             arena.mutate_root(|mc, vm| {
                 let program_node = match &ast.value {
-                    ast::NodeValue::Program(p) => p,
+                    NodeValue::Program(p) => p,
                     _ => {
                         panic!("Error: Root AST node is not a ProgramNode");
                     }
                 };
 
-                let mut compiler = compiler::Compiler::new();
+                let mut compiler = Compiler::new();
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {
@@ -260,7 +269,7 @@ impl VmRunner {
                 );
                 vm.start_block(mc, main_block, Vec::new(), None, None);
 
-                let fiber = crate::fiber::Fiber::new(move |yielder, mut ctx| {
+                let fiber = Fiber::new(move |yielder, mut ctx| {
                     let (vm, _mc) = unsafe { ctx.get() };
                     vm.yielder = Some(yielder as *const _ as *const ());
 
@@ -269,7 +278,7 @@ impl VmRunner {
                         match vm.step(_mc) {
                             Ok(VmStatus::Running) => {
                                 vm.yielder = None;
-                                ctx = yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                                ctx = yielder.suspend(YieldReason::CooperativeYield);
                                 let (vm, _mc) = unsafe { ctx.get() };
                                 vm.yielder = Some(yielder as *const _ as *const ());
                             }
@@ -301,26 +310,24 @@ impl VmRunner {
                     let mut opt = fiber.coroutine.borrow_mut();
                     let coro = opt.as_mut().expect("Coroutine already finished");
 
-                    let ctx = crate::fiber::VMContext {
+                    let ctx = VMContext {
                         vm: vm as *mut _,
                         mc: mc as *const _,
                     };
 
                     match coro.resume(ctx) {
-                        corosensei::CoroutineResult::Yield(
-                            crate::fiber::YieldReason::CooperativeYield,
-                        ) => Ok(ExecutionStatus::Running),
-                        corosensei::CoroutineResult::Yield(
-                            crate::fiber::YieldReason::CallBlock { .. },
-                        ) => Ok(ExecutionStatus::Running),
-                        corosensei::CoroutineResult::Yield(crate::fiber::YieldReason::Return(
-                            val,
-                        )) => {
+                        CoroutineResult::Yield(YieldReason::CooperativeYield) => {
+                            Ok(ExecutionStatus::Running)
+                        }
+                        CoroutineResult::Yield(YieldReason::CallBlock { .. }) => {
+                            Ok(ExecutionStatus::Running)
+                        }
+                        CoroutineResult::Yield(YieldReason::Return(val)) => {
                             vm.active_fiber = None;
                             vm.push(val);
                             Ok(ExecutionStatus::Finished)
                         }
-                        corosensei::CoroutineResult::Return(res) => {
+                        CoroutineResult::Return(res) => {
                             vm.active_fiber = None;
                             match res {
                                 Ok(val) => {
@@ -369,7 +376,7 @@ impl VmRunner {
             let receiver = vm
                 .globals
                 .borrow()
-                .get(&crate::value::NamespacedName::parse(receiver_name))
+                .get(&NamespacedName::parse(receiver_name))
                 .copied()
                 .unwrap_or_else(|| panic!("{} not found", receiver_name));
             let args = arg_ints
@@ -381,7 +388,7 @@ impl VmRunner {
         });
 
         arena.mutate_root(|mc, vm| {
-            let fiber = crate::fiber::Fiber::new(move |yielder, mut ctx| {
+            let fiber = Fiber::new(move |yielder, mut ctx| {
                 let (vm, _mc) = unsafe { ctx.get() };
                 vm.yielder = Some(yielder as *const _ as *const ());
 
@@ -390,7 +397,7 @@ impl VmRunner {
                     match vm.step(_mc) {
                         Ok(VmStatus::Running) => {
                             vm.yielder = None;
-                            ctx = yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                            ctx = yielder.suspend(YieldReason::CooperativeYield);
                             let (vm, _mc) = unsafe { ctx.get() };
                             vm.yielder = Some(yielder as *const _ as *const ());
                         }
@@ -413,7 +420,7 @@ impl VmRunner {
         });
 
         let alloc_before = arena.mutate_root(|mc, _| mc.metrics().total_gc_allocation());
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
 
         let mut step_count = 0;
         loop {
@@ -425,24 +432,20 @@ impl VmRunner {
                 let mut opt = fiber.coroutine.borrow_mut();
                 let coro = opt.as_mut().expect("Coroutine already finished");
 
-                let ctx = crate::fiber::VMContext {
+                let ctx = VMContext {
                     vm: vm as *mut _,
                     mc: mc as *const _,
                 };
 
                 match coro.resume(ctx) {
-                    corosensei::CoroutineResult::Yield(
-                        crate::fiber::YieldReason::CooperativeYield,
-                    ) => Ok(false),
-                    corosensei::CoroutineResult::Yield(crate::fiber::YieldReason::CallBlock {
-                        ..
-                    }) => Ok(false),
-                    corosensei::CoroutineResult::Yield(crate::fiber::YieldReason::Return(val)) => {
+                    CoroutineResult::Yield(YieldReason::CooperativeYield) => Ok(false),
+                    CoroutineResult::Yield(YieldReason::CallBlock { .. }) => Ok(false),
+                    CoroutineResult::Yield(YieldReason::Return(val)) => {
                         vm.active_fiber = None;
                         vm.push(val);
                         Ok(true)
                     }
-                    corosensei::CoroutineResult::Return(res) => {
+                    CoroutineResult::Return(res) => {
                         vm.active_fiber = None;
                         match res {
                             Ok(val) => {
@@ -520,13 +523,13 @@ impl VmRunner {
 
             arena.mutate_root(|mc, vm| {
                 let program_node = match &ast.value {
-                    ast::NodeValue::Program(p) => p,
+                    NodeValue::Program(p) => p,
                     _ => {
                         panic!("Error: Root AST node is not a ProgramNode");
                     }
                 };
 
-                let mut compiler = compiler::Compiler::new();
+                let mut compiler = Compiler::new();
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {

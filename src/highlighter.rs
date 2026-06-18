@@ -16,15 +16,17 @@
 //!     scope (the C# version keyed on node identity, which never matched across
 //!     distinct occurrences); this gives same-named identifiers a stable color.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use crate::ansi_colorizer;
+use crate::parser::ast::{
+    BlockNode, IdentifierNode, IdentifierType, MethodCallNode, Node, NodeValue,
+};
+use crate::parser::parse_building_blocks_string;
+use crate::value::SourceInfo;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-
-use crate::ansi_colorizer;
-use crate::parser::ast::{BlockNode, IdentifierNode, IdentifierType, Node, NodeValue};
-use crate::value::SourceInfo;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
@@ -279,7 +281,7 @@ impl<'a> HighlightParser<'a> {
     fn highlight_method_call(
         &mut self,
         expr: &Node,
-        call: &crate::parser::ast::MethodCallNode,
+        call: &MethodCallNode,
         depth: usize,
     ) -> Vec<HighlightSpan> {
         let mut spans = Vec::new();
@@ -706,7 +708,7 @@ pub fn format_ansi(source: &str, mut spans: Vec<HighlightSpan>) -> String {
 
 /// Convenience: parse, highlight, and ANSI-format a source string.
 pub fn highlight_to_ansi(source: &str) -> String {
-    let program = crate::parser::parse_building_blocks_string(source);
+    let program = parse_building_blocks_string(source);
     let mut parser = HighlightParser::new(source);
     let spans = parser.highlight_program(&program);
     format_ansi(source, spans)
@@ -721,7 +723,7 @@ mod tests {
     }
 
     fn highlight(source: &str) -> Vec<HighlightSpan> {
-        let program = crate::parser::parse_building_blocks_string(source);
+        let program = parse_building_blocks_string(source);
         let mut parser = HighlightParser::new(source);
         parser.highlight_program(&program)
     }

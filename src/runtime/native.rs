@@ -5,7 +5,8 @@ use crate::runtime::regex::NativeRegexState;
 use crate::value::{Class, NamespacedName, NativeFunc, ObjectPayload, Value};
 use crate::vm::VmState;
 
-use gc_arena::Mutation;
+use gc_arena::lock::RefLock;
+use gc_arena::{Gc, Mutation};
 use std::collections::HashMap;
 
 // Native helper: print
@@ -65,16 +66,16 @@ pub fn native_regex_match<'gc>(
 fn is_instance_of<'gc>(
     vm: &VmState<'gc>,
     val: Value<'gc>,
-    class_obj: gc_arena::Gc<'gc, gc_arena::lock::RefLock<Class<'gc>>>,
+    class_obj: Gc<'gc, RefLock<Class<'gc>>>,
 ) -> bool {
     if let Some(val_class) = vm.get_class_for_lookup(val) {
         let mut curr = Some(val_class);
         while let Some(clz) = curr {
-            if gc_arena::Gc::ptr_eq(clz, class_obj) {
+            if Gc::ptr_eq(clz, class_obj) {
                 return true;
             }
             for mixin in &clz.borrow().mixin_classes {
-                if gc_arena::Gc::ptr_eq(*mixin, class_obj) {
+                if Gc::ptr_eq(*mixin, class_obj) {
                     return true;
                 }
             }

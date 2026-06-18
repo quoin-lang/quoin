@@ -1,6 +1,8 @@
 use crate::error::BBError;
 use crate::value::{Block, Value};
 use crate::vm::VmState;
+
+use corosensei::stack::DefaultStack;
 use gc_arena::{Collect, Gc, Mutation};
 use std::cell::RefCell;
 
@@ -9,7 +11,7 @@ pub type VMCoroutine<'gc> = corosensei::ScopedCoroutine<
     VMContext<'gc>,
     YieldReason<'gc>,
     Result<Value<'gc>, BBError>,
-    corosensei::stack::DefaultStack,
+    DefaultStack,
 >;
 pub type VMYielder<'gc> = corosensei::Yielder<VMContext<'gc>, YieldReason<'gc>>;
 

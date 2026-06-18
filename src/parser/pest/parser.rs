@@ -2,17 +2,17 @@ use crate::parser::ast::NodeValue::*;
 use crate::parser::ast::*;
 use crate::value::SourceInfo;
 
-use std::fs::File;
-use std::io::Read;
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use once_cell::sync::Lazy;
 use pest::iterators::Pair;
 use pest::pratt_parser::PrattParser;
 use pest::Parser;
 use pest_derive::Parser;
 use regex::Captures;
+use std::cell::RefCell;
+use std::fs::File;
+use std::io::Read;
+use std::path::PathBuf;
+use std::sync::Arc;
 use substring::Substring;
 
 #[derive(Parser)]
@@ -62,14 +62,14 @@ impl LineOffsetTable {
         let line_idx = idx.saturating_sub(1);
         let line_start_pos = self.line_starts[line_idx];
         let line = line_idx + 1;
-        let col = text.get(line_start_pos..byte_offset)
+        let col = text
+            .get(line_start_pos..byte_offset)
             .map(|s| s.chars().count())
-            .unwrap_or(0) + 1;
+            .unwrap_or(0)
+            + 1;
         (line, col)
     }
 }
-
-use std::cell::RefCell;
 
 thread_local! {
     static LINE_OFFSET_TABLE: RefCell<Option<LineOffsetTable>> = RefCell::new(None);
@@ -77,7 +77,7 @@ thread_local! {
 
 pub fn parse_building_blocks_string(code: &str) -> Node {
     let code = code.strip_prefix('\u{FEFF}').unwrap_or(code);
-    
+
     let table = LineOffsetTable::new(code);
     LINE_OFFSET_TABLE.with(|cell| {
         *cell.borrow_mut() = Some(table);
@@ -93,7 +93,7 @@ pub fn parse_building_blocks_string(code: &str) -> Node {
 
     let program_pair = pairs.next().unwrap();
     let res = parse_program(program_pair, "<string>", code);
-    
+
     LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
     res
 }

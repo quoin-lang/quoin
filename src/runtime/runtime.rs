@@ -1,6 +1,10 @@
 use crate::arg;
+use crate::compiler::Compiler;
 use crate::error::BBError;
+use crate::parser::ast::NodeValue;
+use crate::parser::{parse_building_blocks_file, parse_building_blocks_string};
 use crate::value::{Block, NativeClassBuilder, Value};
+use crate::vm::VmState;
 
 use gc_arena::{Gc, Mutation};
 use std::path::PathBuf;
@@ -28,17 +32,17 @@ pub fn build_runtime_class() -> NativeClassBuilder {
 }
 
 fn eval_string<'gc>(
-    vm: &mut crate::vm::VmState<'gc>,
+    vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     code: &str,
     _filename: &str,
     self_val: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, BBError> {
-    let ast = crate::parser::parse_building_blocks_string(code);
+    let ast = parse_building_blocks_string(code);
 
-    let mut compiler = crate::compiler::Compiler::new();
+    let mut compiler = Compiler::new();
     let program_node = match &ast.value {
-        crate::parser::ast::NodeValue::Program(p) => p,
+        NodeValue::Program(p) => p,
         _ => {
             return Err(BBError::Other(
                 "Expected Program node from parser".to_string(),
@@ -88,7 +92,7 @@ fn eval_string<'gc>(
 }
 
 fn eval_file<'gc>(
-    vm: &mut crate::vm::VmState<'gc>,
+    vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     filename: &str,
     self_val: Option<Value<'gc>>,
@@ -98,11 +102,11 @@ fn eval_file<'gc>(
         return Err(BBError::Other(format!("File not found: {}", filename)));
     }
 
-    let ast = crate::parser::parse_building_blocks_file(&path);
+    let ast = parse_building_blocks_file(&path);
 
-    let mut compiler = crate::compiler::Compiler::new();
+    let mut compiler = Compiler::new();
     let program_node = match &ast.value {
-        crate::parser::ast::NodeValue::Program(p) => p,
+        NodeValue::Program(p) => p,
         _ => {
             return Err(BBError::Other(
                 "Expected Program node from parser".to_string(),

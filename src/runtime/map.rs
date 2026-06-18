@@ -3,21 +3,23 @@ use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::VmStatus;
 
-use gc_arena::Gc;
 use gc_arena::collect::{DynCollect, Trace};
 use gc_arena::lock::RefLock;
+use gc_arena::Gc;
 use std::any::Any;
 use std::collections::HashMap;
+use std::mem::transmute;
+use std::vec::IntoIter;
 
 #[derive(Debug)]
 pub struct NativeMapState {
     pub map: HashMap<String, Value<'static>>,
-    pub iter: Option<std::vec::IntoIter<String>>,
+    pub iter: Option<IntoIter<String>>,
 }
 
 impl NativeMapState {
     pub fn new(map: HashMap<String, Value<'_>>) -> Self {
-        let map_static: HashMap<String, Value<'static>> = unsafe { std::mem::transmute(map) };
+        let map_static: HashMap<String, Value<'static>> = unsafe { transmute(map) };
         Self {
             map: map_static,
             iter: None,
@@ -25,11 +27,11 @@ impl NativeMapState {
     }
 
     pub fn get_map<'gc>(&self) -> &HashMap<String, Value<'gc>> {
-        unsafe { std::mem::transmute(&self.map) }
+        unsafe { transmute(&self.map) }
     }
 
     pub fn get_map_mut<'gc>(&mut self) -> &mut HashMap<String, Value<'gc>> {
-        unsafe { std::mem::transmute(&mut self.map) }
+        unsafe { transmute(&mut self.map) }
     }
 }
 
@@ -44,7 +46,7 @@ impl AnyCollect for NativeMapState {
 
     fn trace_gc<'gc>(&self, cc: &mut dyn Trace<'gc>) {
         for val in self.map.values() {
-            let val_gc: &Value<'gc> = unsafe { std::mem::transmute(val) };
+            let val_gc: &Value<'gc> = unsafe { transmute(val) };
             val_gc.dyn_trace(cc);
         }
     }
@@ -109,8 +111,8 @@ pub fn build_map_class() -> NativeClassBuilder {
                         .map
                         .get(&key)
                         .copied()
-                        .unwrap_or_else(|| unsafe { std::mem::transmute(vm.new_nil(mc)) });
-                    let val_gc = unsafe { std::mem::transmute(val_static) };
+                        .unwrap_or_else(|| unsafe { transmute(vm.new_nil(mc)) });
+                    let val_gc = unsafe { transmute(val_static) };
                     Some((key, val_gc))
                 } else {
                     None
@@ -178,8 +180,8 @@ pub struct NativeKeyValuePairState {
 
 impl NativeKeyValuePairState {
     pub fn new(key: Value<'_>, value: Value<'_>) -> Self {
-        let key_static: Value<'static> = unsafe { std::mem::transmute(key) };
-        let value_static: Value<'static> = unsafe { std::mem::transmute(value) };
+        let key_static: Value<'static> = unsafe { transmute(key) };
+        let value_static: Value<'static> = unsafe { transmute(value) };
         Self {
             key: key_static,
             value: value_static,
@@ -187,20 +189,20 @@ impl NativeKeyValuePairState {
     }
 
     pub fn get_key<'gc>(&self) -> Value<'gc> {
-        unsafe { std::mem::transmute(self.key) }
+        unsafe { transmute(self.key) }
     }
 
     pub fn get_value<'gc>(&self) -> Value<'gc> {
-        unsafe { std::mem::transmute(self.value) }
+        unsafe { transmute(self.value) }
     }
 
     pub fn set_key(&mut self, key: Value) {
-        let key_static: Value<'static> = unsafe { std::mem::transmute(key) };
+        let key_static: Value<'static> = unsafe { transmute(key) };
         self.key = key_static;
     }
 
     pub fn set_value(&mut self, value: Value) {
-        let value_static: Value<'static> = unsafe { std::mem::transmute(value) };
+        let value_static: Value<'static> = unsafe { transmute(value) };
         self.value = value_static;
     }
 }
@@ -215,9 +217,9 @@ impl AnyCollect for NativeKeyValuePairState {
     }
 
     fn trace_gc<'gc>(&self, cc: &mut dyn Trace<'gc>) {
-        let key_gc: &Value<'gc> = unsafe { std::mem::transmute(&self.key) };
+        let key_gc: &Value<'gc> = unsafe { transmute(&self.key) };
         key_gc.dyn_trace(cc);
-        let value_gc: &Value<'gc> = unsafe { std::mem::transmute(&self.value) };
+        let value_gc: &Value<'gc> = unsafe { transmute(&self.value) };
         value_gc.dyn_trace(cc);
     }
 }
@@ -327,7 +329,8 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             Ok(value)
         })
         .instance_method("s", |vm, mc, args| {
-            let key = args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
+            let key =
+                args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
 
             let key_s_val = vm.call_method(mc, key, "s", vec![])?;
             let key_s = if let Value::Object(obj) = key_s_val
@@ -339,7 +342,8 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             };
 
             let active_receiver = vm.active_native_args.last().unwrap()[0];
-            let value = active_receiver.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
+            let value = active_receiver
+                .with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
 
             let val_s_val = vm.call_method(mc, value, "s", vec![])?;
             let val_s = if let Value::Object(obj) = val_s_val
@@ -353,8 +357,10 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, format!("{}:{}", key_s, val_s)))
         })
         .instance_method("==:", |vm, mc, args| {
-            let lhs_key = args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
-            let rhs_key_res = args[1].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key());
+            let lhs_key =
+                args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
+            let rhs_key_res =
+                args[1].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key());
             let rhs_key = match rhs_key_res {
                 Ok(k) => k,
                 Err(_) => return Ok(vm.new_bool(mc, false)),
@@ -368,8 +374,10 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             let active_lhs = vm.active_native_args.last().unwrap()[0];
             let active_rhs = vm.active_native_args.last().unwrap()[1];
 
-            let lhs_val = active_lhs.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
-            let rhs_val = active_rhs.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
+            let lhs_val = active_lhs
+                .with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
+            let rhs_val = active_rhs
+                .with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
 
             let vals_eq = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
             Ok(vm.new_bool(mc, vals_eq))

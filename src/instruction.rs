@@ -1,15 +1,17 @@
 use crate::value::{NamespacedName, SourceInfo};
 
 use gc_arena::Collect;
+use std::ops::Deref;
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SharedBytecode(pub std::rc::Rc<Vec<Instruction>>);
+pub struct SharedBytecode(pub Rc<Vec<Instruction>>);
 
 unsafe impl<'gc> Collect<'gc> for SharedBytecode {
     const NEEDS_TRACE: bool = false;
 }
 
-impl std::ops::Deref for SharedBytecode {
+impl Deref for SharedBytecode {
     type Target = [Instruction];
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -18,7 +20,7 @@ impl std::ops::Deref for SharedBytecode {
 
 impl From<Vec<Instruction>> for SharedBytecode {
     fn from(v: Vec<Instruction>) -> Self {
-        SharedBytecode(std::rc::Rc::new(v))
+        SharedBytecode(Rc::new(v))
     }
 }
 
@@ -35,13 +37,13 @@ impl PartialEq<SharedBytecode> for Vec<Instruction> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SharedSourceMap(pub std::rc::Rc<Vec<Option<SourceInfo>>>);
+pub struct SharedSourceMap(pub Rc<Vec<Option<SourceInfo>>>);
 
 unsafe impl<'gc> Collect<'gc> for SharedSourceMap {
     const NEEDS_TRACE: bool = false;
 }
 
-impl std::ops::Deref for SharedSourceMap {
+impl Deref for SharedSourceMap {
     type Target = [Option<SourceInfo>];
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -50,7 +52,7 @@ impl std::ops::Deref for SharedSourceMap {
 
 impl From<Vec<Option<SourceInfo>>> for SharedSourceMap {
     fn from(v: Vec<Option<SourceInfo>>) -> Self {
-        SharedSourceMap(std::rc::Rc::new(v))
+        SharedSourceMap(Rc::new(v))
     }
 }
 

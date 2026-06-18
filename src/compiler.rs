@@ -7,6 +7,7 @@ use crate::parser::ast::{
 use crate::value::{NamespacedName, SourceInfo};
 
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct CodeBlock {
@@ -129,10 +130,10 @@ impl Compiler {
             is_nested_block: false,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: SharedBytecode(std::rc::Rc::new(cb.bytecode)),
+            bytecode: SharedBytecode(Rc::new(cb.bytecode)),
             source_info: program.source_info.clone(),
             decl_block: None,
-            source_map: SharedSourceMap(std::rc::Rc::new(cb.source_map)),
+            source_map: SharedSourceMap(Rc::new(cb.source_map)),
         })
     }
 
@@ -702,10 +703,10 @@ impl Compiler {
             is_nested_block: true,
             param_names,
             param_types,
-            bytecode: SharedBytecode(std::rc::Rc::new(block_bytecode.bytecode)),
+            bytecode: SharedBytecode(Rc::new(block_bytecode.bytecode)),
             source_info: block.source_info.clone(),
             decl_block,
-            source_map: SharedSourceMap(std::rc::Rc::new(block_bytecode.source_map)),
+            source_map: SharedSourceMap(Rc::new(block_bytecode.source_map)),
         };
 
         bytecode.push(Instruction::Push(Constant::Block(static_block)));
@@ -728,7 +729,9 @@ impl Compiler {
 mod tests {
     use super::*;
     use crate::parser::ast::*;
+    use crate::parser::parse_building_blocks_string;
     use crate::value::NamespacedName;
+
     use std::sync::Arc;
 
     fn ns(name: &str) -> NamespacedName {
@@ -840,7 +843,7 @@ mod tests {
         };
         let mut block = compiler.compile_program(&program)?;
         if block.bytecode.last() == Some(&Instruction::Return) {
-            std::rc::Rc::make_mut(&mut block.bytecode.0).pop();
+            Rc::make_mut(&mut block.bytecode.0).pop();
         }
         Ok(block)
     }
@@ -1193,7 +1196,7 @@ mod tests {
             is_nested_block: true,
             param_names: vec!["x".to_string()],
             param_types: vec![None],
-            bytecode: SharedBytecode(std::rc::Rc::new(vec![
+            bytecode: SharedBytecode(Rc::new(vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
                 Instruction::Send("+".to_string(), 1),
@@ -1201,7 +1204,7 @@ mod tests {
             ])),
             source_info: None,
             decl_block: None,
-            source_map: SharedSourceMap(std::rc::Rc::new(vec![None; 4])),
+            source_map: SharedSourceMap(Rc::new(vec![None; 4])),
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Block(inner_static)));
@@ -1333,13 +1336,13 @@ mod tests {
             is_nested_block: true,
             param_names: vec!["a".to_string(), "b".to_string()],
             param_types: vec![None, None],
-            bytecode: SharedBytecode(std::rc::Rc::new(vec![
+            bytecode: SharedBytecode(Rc::new(vec![
                 Instruction::Push(Constant::Nil),
                 Instruction::Return,
             ])),
             source_info: None,
             decl_block: None,
-            source_map: SharedSourceMap(std::rc::Rc::new(vec![None; 2])),
+            source_map: SharedSourceMap(Rc::new(vec![None; 2])),
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::DefineClass {
@@ -1354,8 +1357,6 @@ mod tests {
 
     #[test]
     fn test_source_info_propagation() {
-        use crate::parser::parse_building_blocks_string;
-
         let code = "{ 1 + 2 };";
         let ast = parse_building_blocks_string(code);
         let mut compiler = Compiler::new();

@@ -1,11 +1,11 @@
-use crate::arg;
 use crate::error::BBError;
-use crate::value::{NativeClassBuilder, OpaqueState, Value};
+use crate::value::{NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::VmState;
+use crate::{ansi_colorizer, arg};
 
 use gc_arena::{Gc, Mutation};
 use std::ffi::OsString;
-use std::fs::{metadata, File, Metadata, ReadDir};
+use std::fs::{metadata, read_dir, File, Metadata, ReadDir};
 use std::io::{stderr, stdin, stdout, Stderr, Stdin, Stdout, Write};
 use std::path::PathBuf;
 
@@ -30,7 +30,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
         .instance_method("next", |vm, mc, args| {
             let r = args[0].with_native_state_mut(mc, |io: &mut NativeIoFolder| {
                 if io.iter.is_none() {
-                    io.iter = Some(std::fs::read_dir(&io.path).unwrap());
+                    io.iter = Some(read_dir(&io.path).unwrap());
                 }
                 io.iter
                     .as_mut()
@@ -75,7 +75,7 @@ fn new_native_io_folder<'a>(
 ) -> Value<'a> {
     let state = OpaqueState(NativeIoFolder {
         path: OsString::from(path.as_str()),
-        iter: Some(std::fs::read_dir(path.as_str()).unwrap()),
+        iter: Some(read_dir(path.as_str()).unwrap()),
     });
 
     vm.new_native_state(mc, vm.get_builtin_class("[IO]Folder"), state)
@@ -202,15 +202,15 @@ fn get_io_string<'gc>(
 
     if let Value::Object(obj) = val {
         let payload = obj.borrow().payload;
-        if let crate::value::ObjectPayload::String(s) = payload {
+        if let ObjectPayload::String(s) = payload {
             return Ok(s.to_string());
         }
         let is_ansi = obj.borrow().class.borrow().name.name == "ANSI";
         if is_ansi {
             let string_val = vm.call_method(mc, val, "string", vec![])?;
             if let Value::Object(o) = string_val {
-                if let crate::value::ObjectPayload::String(st) = &o.borrow().payload {
-                    return Ok(crate::ansi_colorizer::colorize(st));
+                if let ObjectPayload::String(st) = &o.borrow().payload {
+                    return Ok(ansi_colorizer::colorize(st));
                 }
             }
             return Err(BBError::TypeError {
@@ -264,25 +264,25 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             let bytes = s.into_bytes();
 
             let active_receiver = vm.active_native_args.last().unwrap()[0];
-            active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| {
-                match &mut h.wrapper {
-                    NativeIoHandleWrapper::Stdout(out) => {
-                        out.write(&bytes)
-                            .map_err(|e| BBError::Other(e.to_string()))?;
-                        Ok(())
-                    }
-                    NativeIoHandleWrapper::Stderr(err) => {
-                        err.write(&bytes)
-                            .map_err(|e| BBError::Other(e.to_string()))?;
-                        Ok(())
-                    }
-                    NativeIoHandleWrapper::Stdin(_) => {
-                        Err(BBError::Other("can't write to stdin!".to_string()))
-                    }
-                    NativeIoHandleWrapper::File(f) => {
-                        f.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
-                        Ok(())
-                    }
+            active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| match &mut h
+                .wrapper
+            {
+                NativeIoHandleWrapper::Stdout(out) => {
+                    out.write(&bytes)
+                        .map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
+                }
+                NativeIoHandleWrapper::Stderr(err) => {
+                    err.write(&bytes)
+                        .map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
+                }
+                NativeIoHandleWrapper::Stdin(_) => {
+                    Err(BBError::Other("can't write to stdin!".to_string()))
+                }
+                NativeIoHandleWrapper::File(f) => {
+                    f.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
                 }
             })??;
 
@@ -293,25 +293,25 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             let bytes = format!("{}\n", s).into_bytes();
 
             let active_receiver = vm.active_native_args.last().unwrap()[0];
-            active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| {
-                match &mut h.wrapper {
-                    NativeIoHandleWrapper::Stdout(out) => {
-                        out.write(&bytes)
-                            .map_err(|e| BBError::Other(e.to_string()))?;
-                        Ok(())
-                    }
-                    NativeIoHandleWrapper::Stderr(err) => {
-                        err.write(&bytes)
-                            .map_err(|e| BBError::Other(e.to_string()))?;
-                        Ok(())
-                    }
-                    NativeIoHandleWrapper::Stdin(_) => {
-                        Err(BBError::Other("can't write to stdin!".to_string()))
-                    }
-                    NativeIoHandleWrapper::File(f) => {
-                        f.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
-                        Ok(())
-                    }
+            active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| match &mut h
+                .wrapper
+            {
+                NativeIoHandleWrapper::Stdout(out) => {
+                    out.write(&bytes)
+                        .map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
+                }
+                NativeIoHandleWrapper::Stderr(err) => {
+                    err.write(&bytes)
+                        .map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
+                }
+                NativeIoHandleWrapper::Stdin(_) => {
+                    Err(BBError::Other("can't write to stdin!".to_string()))
+                }
+                NativeIoHandleWrapper::File(f) => {
+                    f.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
+                    Ok(())
                 }
             })??;
 
@@ -340,18 +340,20 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{class, object, string};
     use crate::value::Value;
     use crate::vm::VmState;
+
     use gc_arena::{Arena, Rootable};
 
     #[test]
     fn test_get_io_string_ansi() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc);
-            vm.register_native_class(mc, crate::runtime::object::build_object_class());
-            vm.register_native_class(mc, crate::runtime::class::build_class_class());
-            vm.register_native_class(mc, crate::runtime::string::build_string_class());
-            
+            vm.register_native_class(mc, object::build_object_class());
+            vm.register_native_class(mc, class::build_class_class());
+            vm.register_native_class(mc, string::build_string_class());
+
             // Build and register the ANSI class
             let ansi_builder = NativeClassBuilder::new("ANSI", Some("Object"))
                 .instance_method("string", |vm, mc, _args| {
@@ -371,11 +373,10 @@ mod tests {
             let ansi_class = vm.get_builtin_class("ANSI");
             let ansi_instance = Value::Object(vm.new_object(mc, ansi_class));
             let s = get_io_string(vm, mc, ansi_instance).unwrap();
-            
+
             // colorized version of "$bw[bold text$]" starts with "\x1b[" and ends with reset code
             assert!(s.contains("bold text"));
             assert!(s.contains("\x1b["));
         });
     }
 }
-
