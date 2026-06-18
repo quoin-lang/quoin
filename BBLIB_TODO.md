@@ -112,7 +112,7 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] **Hashing and Equality Optimization**:
   - Benchmark swapping `MurmurHasher` with a faster hashing implementation (e.g., `FxHasher` or `ahash`).
   - Optimize the equality checks for prediction contexts in lookahead caches.
-- [ ] **Alternative Parser Architecture Evaluation**:
+- [x] **Alternative Parser Architecture Evaluation**:
   - Evaluate replacing ANTLR with Tree-sitter for faster full-file compiles using its compiled C engine.
   - Assess native Rust parser generators (e.g., LALRPOP or Pest) or hand-writing a recursive-descent parser for optimal compiler performance.
 
