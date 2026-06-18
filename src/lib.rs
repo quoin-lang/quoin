@@ -1,9 +1,11 @@
 pub mod ansi_colorizer;
 pub mod compiler;
 pub mod error;
+pub mod fiber;
 pub mod highlighter;
 pub mod instruction;
 pub mod parser;
+pub mod runner;
 pub mod runtime;
 pub mod value;
 pub mod vm;

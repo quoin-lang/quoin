@@ -18,3 +18,5 @@ ulid = "1.2.1"
 glob = "0.3.3"
 pest = "2.8.6"
 pest_derive = "2.8.6"
+corosensei = "0.1.4"
+

@@ -1,4 +1,5 @@
 use crate::error::BBError;
+use crate::fiber::Fiber;
 use crate::instruction::{Constant, Instruction};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
@@ -10,7 +11,7 @@ use crate::value::{
 };
 use crate::{gc, gcl};
 
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use std::collections::HashMap;
 use ulid::Ulid;
 
@@ -81,6 +82,10 @@ pub struct VmState<'gc> {
     pub active_exception: Option<Value<'gc>>,
     pub last_send_receiver: Option<Value<'gc>>,
     pub last_send_args: Vec<Value<'gc>>,
+
+    #[collect(require_static)]
+    pub yielder: Option<*const ()>,
+    pub active_fiber: Option<Gc<'gc, Fiber<'gc>>>,
 }
 
 pub enum VmStatus<'gc> {
@@ -220,6 +225,11 @@ impl<'gc> Callable<'gc> for NativeCallable {
 }
 
 impl<'gc> VmState<'gc> {
+    pub unsafe fn get_yielder(&self) -> Option<&crate::fiber::VMYielder<'gc>> {
+        self.yielder
+            .map(|ptr| unsafe { &*(ptr as *const crate::fiber::VMYielder<'gc>) })
+    }
+
     pub fn new(mc: &Mutation<'gc>) -> Self {
         Self {
             stack: Vec::new(),
@@ -230,6 +240,8 @@ impl<'gc> VmState<'gc> {
             active_exception: None,
             last_send_receiver: None,
             last_send_args: Vec::new(),
+            yielder: None,
+            active_fiber: None,
         }
     }
 
@@ -691,7 +703,11 @@ impl<'gc> VmState<'gc> {
             if self.frames.len() > initial_frame_count {
                 while self.frames.len() > initial_frame_count {
                     match self.step_internal(mc) {
-                        Ok(VmStatus::Running) => {}
+                        Ok(VmStatus::Running) => {
+                            if let Some(yielder) = unsafe { self.get_yielder() } {
+                                yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                            }
+                        }
                         Ok(VmStatus::Finished(_)) => {
                             break;
                         }
@@ -769,7 +785,11 @@ impl<'gc> VmState<'gc> {
             if self.frames.len() > initial_frame_count {
                 while self.frames.len() > initial_frame_count {
                     match self.step_internal(mc) {
-                        Ok(VmStatus::Running) => {}
+                        Ok(VmStatus::Running) => {
+                            if let Some(yielder) = unsafe { self.get_yielder() } {
+                                yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                            }
+                        }
                         Ok(VmStatus::Finished(_)) => {
                             break;
                         }
@@ -859,7 +879,11 @@ impl<'gc> VmState<'gc> {
         if self.frames.len() > initial_frame_count {
             while self.frames.len() > initial_frame_count {
                 match self.step_internal(mc) {
-                    Ok(VmStatus::Running) => {}
+                    Ok(VmStatus::Running) => {
+                        if let Some(yielder) = unsafe { self.get_yielder() } {
+                            yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                        }
+                    }
                     Ok(VmStatus::Finished(_)) => {
                         break;
                     }
@@ -931,7 +955,11 @@ impl<'gc> VmState<'gc> {
         if self.frames.len() > initial_frame_count {
             while self.frames.len() > initial_frame_count {
                 match self.step_internal(mc) {
-                    Ok(VmStatus::Running) => {}
+                    Ok(VmStatus::Running) => {
+                        if let Some(yielder) = unsafe { self.get_yielder() } {
+                            yielder.suspend(crate::fiber::YieldReason::CooperativeYield);
+                        }
+                    }
                     Ok(VmStatus::Finished(_)) => {
                         break;
                     }
