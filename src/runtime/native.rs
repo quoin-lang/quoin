@@ -169,16 +169,12 @@ pub fn native_match<'gc>(
     }) {
         return Ok(vm.new_bool(mc, matched));
     }
-    if let Ok(matched) = rhs.with_native_state::<NativeRegexState, _, _>(|r| {
+    if let Ok(_) = rhs.with_native_state::<NativeRegexState, _, _>(|_| ()) {
         if let Value::Object(o2) = lhs
-            && let ObjectPayload::String(s) = &o2.borrow().payload
+            && let ObjectPayload::String(_) = &o2.borrow().payload
         {
-            r.regex.is_match(&**s)
-        } else {
-            false
+            return native_match(vm, mc, vec![rhs, lhs]);
         }
-    }) {
-        return Ok(vm.new_bool(mc, matched));
     }
 
     let eq_val = if vm.lookup_method(mc, lhs, "==:", &[rhs])?.is_some() {
