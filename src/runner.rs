@@ -19,58 +19,58 @@ enum ExecutionStatus {
     Yeeted,
 }
 
-pub struct VmOptions {
-    pub mode: VmMode,
+pub struct VmRunnerOptions {
+    pub mode: VmRunnerMode,
     pub target_path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VmMode {
+pub enum VmRunnerMode {
     Highlight,
     Test,
     Benchmark,
     Run,
 }
 
-impl VmOptions {
+impl VmRunnerOptions {
     pub fn parse(args: &[String]) -> Self {
         if let Some(arg) = args.get(1) {
             if arg == "highlight" {
                 return Self {
-                    mode: VmMode::Highlight,
+                    mode: VmRunnerMode::Highlight,
                     target_path: args.get(2).cloned(),
                 };
             } else if arg == "test" {
                 return Self {
-                    mode: VmMode::Test,
+                    mode: VmRunnerMode::Test,
                     target_path: None,
                 };
             } else if arg == "benchmark" {
                 return Self {
-                    mode: VmMode::Benchmark,
+                    mode: VmRunnerMode::Benchmark,
                     target_path: None,
                 };
             }
         }
         Self {
-            mode: VmMode::Run,
+            mode: VmRunnerMode::Run,
             target_path: args.get(1).cloned(),
         }
     }
 }
 
 pub struct VmRunner {
-    options: VmOptions,
+    options: VmRunnerOptions,
 }
 
 impl VmRunner {
-    pub fn new(options: VmOptions) -> Self {
+    pub fn new(options: VmRunnerOptions) -> Self {
         Self { options }
     }
 
     pub fn run(&self) -> Result<(), BBError> {
         match self.options.mode {
-            VmMode::Highlight => {
+            VmRunnerMode::Highlight => {
                 let Some(ref path) = self.options.target_path else {
                     eprintln!("Usage: cargo run -- highlight FILE");
                     std::process::exit(2);
@@ -85,7 +85,7 @@ impl VmRunner {
                 print!("{}", crate::highlighter::highlight_to_ansi(&source));
                 Ok(())
             }
-            VmMode::Test => {
+            VmRunnerMode::Test => {
                 println!("Loading bblib/*.b...");
                 let ast_iter = glob("bblib/*.b")
                     .unwrap()
@@ -112,7 +112,7 @@ impl VmRunner {
                 self.compile_and_run_asts(ast_iter);
                 Ok(())
             }
-            VmMode::Benchmark => {
+            VmRunnerMode::Benchmark => {
                 println!("Loading bblib/*.b...");
                 let ast_iter = glob("bblib/*.b")
                     .unwrap()
@@ -138,7 +138,7 @@ impl VmRunner {
                 self.compile_and_benchmark(ast_iter);
                 Ok(())
             }
-            VmMode::Run => {
+            VmRunnerMode::Run => {
                 println!("Loading bblib/*.b...");
                 let ast_iter = glob("bblib/*.b")
                     .unwrap()
