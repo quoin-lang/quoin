@@ -7,6 +7,7 @@ use crate::value::{Block, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
 use gc_arena::{Gc, Mutation};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub fn build_runtime_class() -> NativeClassBuilder {
@@ -28,6 +29,26 @@ pub fn build_runtime_class() -> NativeClassBuilder {
             let filename = arg!(args, String, 1);
             let self_val = args[2];
             eval_file(vm, mc, &filename, Some(self_val))
+        })
+        .class_method("arguments", |vm, mc, _args| {
+            let args_list = vm
+                .options
+                .arguments
+                .iter()
+                .map(|s| vm.new_string(mc, s.clone()))
+                .collect::<Vec<_>>();
+            Ok(vm.new_list(mc, args_list))
+        })
+        .class_method("options", |vm, mc, _args| {
+            let mut map = HashMap::new();
+            let args_list = vm
+                .options
+                .arguments
+                .iter()
+                .map(|s| vm.new_string(mc, s.clone()))
+                .collect::<Vec<_>>();
+            map.insert("arguments".to_string(), vm.new_list(mc, args_list));
+            Ok(vm.new_map(mc, map))
         })
 }
 

@@ -5,8 +5,8 @@ use crate::{ansi_colorizer, arg};
 
 use gc_arena::{Gc, Mutation};
 use std::ffi::OsString;
-use std::fs::{metadata, read_dir, File, Metadata, ReadDir};
-use std::io::{stderr, stdin, stdout, Stderr, Stdin, Stdout, Write};
+use std::fs::{File, Metadata, ReadDir, metadata, read_dir};
+use std::io::{Stderr, Stdin, Stdout, Write, stderr, stdin, stdout};
 use std::path::PathBuf;
 
 pub struct NativeIoFolder {
@@ -342,14 +342,14 @@ mod tests {
     use super::*;
     use crate::runtime::{class, object, string};
     use crate::value::Value;
-    use crate::vm::VmState;
+    use crate::vm::{VmOptions, VmState};
 
     use gc_arena::{Arena, Rootable};
 
     #[test]
     fn test_get_io_string_ansi() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc);
+            let mut vm = VmState::new(mc, VmOptions::default());
             vm.register_native_class(mc, object::build_object_class());
             vm.register_native_class(mc, class::build_class_class());
             vm.register_native_class(mc, string::build_string_class());

@@ -3,9 +3,9 @@ use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::VmStatus;
 
+use gc_arena::Gc;
 use gc_arena::collect::{DynCollect, Trace};
 use gc_arena::lock::RefLock;
-use gc_arena::Gc;
 use std::any::Any;
 use std::collections::HashMap;
 use std::mem::transmute;

@@ -11,9 +11,9 @@ use crate::value::{
 };
 use crate::{gc, gcl};
 
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use regex::Regex;
-use std::cmp::{min, Ordering};
+use std::cmp::{Ordering, min};
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::path::Path;
@@ -74,6 +74,12 @@ impl<'gc> BuiltinCache<'gc> {
     }
 }
 
+#[derive(Clone, Debug, Default, Collect)]
+#[collect(require_static)]
+pub struct VmOptions {
+    pub arguments: Vec<String>,
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct VmState<'gc> {
@@ -92,6 +98,9 @@ pub struct VmState<'gc> {
     pub yielder: Option<*const ()>,
     pub active_fiber: Option<Gc<'gc, Fiber<'gc>>>,
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+
+    #[collect(require_static)]
+    pub options: VmOptions,
 }
 
 pub enum VmStatus<'gc> {
@@ -241,7 +250,7 @@ impl<'gc> VmState<'gc> {
             .map(|ptr| unsafe { &*(ptr as *const VMYielder<'gc>) })
     }
 
-    pub fn new(mc: &Mutation<'gc>) -> Self {
+    pub fn new(mc: &Mutation<'gc>, options: VmOptions) -> Self {
         Self {
             stack: Vec::new(),
             frames: Vec::new(),
@@ -255,6 +264,7 @@ impl<'gc> VmState<'gc> {
             yielder: None,
             active_fiber: None,
             last_popped_env: None,
+            options,
         }
     }
 
@@ -2574,7 +2584,7 @@ mod tests {
         F: for<'gc> FnOnce(&mut VmState<'gc>, &Mutation<'gc>),
     {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc);
+            let mut vm = VmState::new(mc, VmOptions::default());
 
             // Register standard classes first, so that they exist when new_xxx helper methods are called.
             vm.register_native_class(mc, build_object_class());
@@ -3116,7 +3126,7 @@ mod tests {
         };
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc);
+            let mut vm = VmState::new(mc, VmOptions::default());
             let bar_block = Block {
                 source_info: None,
                 name: block_bar.name.clone(),
@@ -3462,7 +3472,7 @@ mod tests {
     #[test]
     fn test_namespaced_native_class() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc);
+            let mut vm = VmState::new(mc, VmOptions::default());
 
             // Build a namespaced native class [IO]File
             let file_builder = NativeClassBuilder::new("[IO]File", Some("Object"))
@@ -3495,7 +3505,7 @@ mod tests {
     #[test]
     fn test_native_state_holding_rust_state() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc);
+            let mut vm = VmState::new(mc, VmOptions::default());
 
             // Build native class [IO]Resource
             let resource_builder = NativeClassBuilder::new("[IO]Resource", Some("Object"))
@@ -3553,7 +3563,7 @@ mod tests {
     #[test]
     fn test_mixin_method_lookup_and_instance_vars() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let vm = VmState::new(mc);
+            let vm = VmState::new(mc, VmOptions::default());
             vm
         });
 
@@ -3622,7 +3632,7 @@ mod tests {
     #[test]
     fn test_execute_block_helper() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let vm = VmState::new(mc);
+            let vm = VmState::new(mc, VmOptions::default());
             vm
         });
 
@@ -3848,7 +3858,8 @@ mod tests {
             })
             .unwrap();
 
-        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc));
+        let mut arena =
+            Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
 
         arena.mutate_root(|mc, vm| {
             let decl_block = compiled.decl_block.as_ref().map(|db| {
@@ -3910,7 +3921,7 @@ mod tests {
     #[test]
     fn test_vm_to_s() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc);
+            let mut vm = VmState::new(mc, VmOptions::default());
             vm.register_native_class(mc, build_object_class());
             vm.register_native_class(mc, build_class_class());
             vm.register_native_class(mc, build_boolean_class());
@@ -3963,6 +3974,63 @@ mod tests {
             let string_val = vm.new_string(mc, "hello".to_string());
             let result = vm.to_s(mc, string_val).unwrap();
             assert_eq!(to_spec(result), ValueSpec::String("hello".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_vm_options_at_runtime() {
+        let options = VmOptions {
+            arguments: vec!["foo".to_string(), "bar".to_string()],
+        };
+
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, options);
+            vm.register_native_class(mc, build_object_class());
+            vm.register_native_class(mc, build_class_class());
+            vm.register_native_class(mc, build_boolean_class());
+            vm.register_native_class(mc, build_block_class());
+            vm.register_native_class(mc, build_list_class());
+            vm.register_native_class(mc, build_double_class());
+            vm.register_native_class(mc, build_integer_class());
+            vm.register_native_class(mc, build_string_class());
+            vm.register_native_class(mc, build_nil_class());
+            vm.register_native_class(mc, build_map_class());
+            vm.register_native_class(mc, build_key_value_pair_class());
+            vm.register_native_class(mc, build_regex_class());
+            vm.register_native_class(mc, crate::runtime::runtime::build_runtime_class());
+            for t in ["Method", "Native"] {
+                vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
+            }
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            // Check that Runtime.arguments returns the list ["foo", "bar"]
+            let runtime_class = vm.get_builtin_class("Runtime");
+            let args_val = vm
+                .call_method(mc, Value::Class(runtime_class), "arguments", vec![])
+                .unwrap();
+
+            // args_val should be a List of strings
+            let count_val = vm.call_method(mc, args_val, "count", vec![]).unwrap();
+            assert_eq!(to_spec(count_val), ValueSpec::Int(2));
+
+            let arg0 = vm.call_method(mc, args_val, "next", vec![]).unwrap();
+            assert_eq!(to_spec(arg0), ValueSpec::String("foo".to_string()));
+
+            let arg1 = vm.call_method(mc, args_val, "next", vec![]).unwrap();
+            assert_eq!(to_spec(arg1), ValueSpec::String("bar".to_string()));
+
+            // Check options method
+            let opts_val = vm
+                .call_method(mc, Value::Class(runtime_class), "options", vec![])
+                .unwrap();
+            // opts_val should be a Map
+            let key = vm.new_string(mc, "arguments".to_string());
+            let mapped_args = vm.call_method(mc, opts_val, "at:", vec![key]).unwrap();
+
+            let mapped_count = vm.call_method(mc, mapped_args, "count", vec![]).unwrap();
+            assert_eq!(to_spec(mapped_count), ValueSpec::Int(2));
         });
     }
 }

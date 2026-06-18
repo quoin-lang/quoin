@@ -4,13 +4,13 @@ use crate::fiber::{Fiber, VMContext, YieldReason};
 use crate::gc;
 use crate::highlighter::highlight_to_ansi;
 use crate::parser::ast::Node;
-use crate::parser::{parse_building_blocks_file, NodeValue};
+use crate::parser::{NodeValue, parse_building_blocks_file};
 use crate::runtime::{
     block, boolean, class, double, integer, io, list, map, method, native, nil, object, regex,
     runtime, string, timer,
 };
 use crate::value::{Block, NamespacedName, NativeClassBuilder};
-use crate::vm::{VmState, VmStatus};
+use crate::vm::{VmOptions, VmState, VmStatus};
 
 use corosensei::CoroutineResult;
 use gc_arena::{Arena, Gc, Rootable};
@@ -31,6 +31,7 @@ enum ExecutionStatus {
 pub struct VmRunnerOptions {
     pub mode: VmRunnerMode,
     pub target_path: Option<String>,
+    pub vm_options: VmOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,27 +44,40 @@ pub enum VmRunnerMode {
 
 impl VmRunnerOptions {
     pub fn parse(args: &[String]) -> Self {
+        let mut mode = VmRunnerMode::Run;
+        let mut target_path = None;
+        let mut vm_args = Vec::new();
+
         if let Some(arg) = args.get(1) {
             if arg == "highlight" {
-                return Self {
-                    mode: VmRunnerMode::Highlight,
-                    target_path: args.get(2).cloned(),
-                };
+                mode = VmRunnerMode::Highlight;
+                target_path = args.get(2).cloned();
+                if args.len() > 3 {
+                    vm_args = args[3..].to_vec();
+                }
             } else if arg == "test" {
-                return Self {
-                    mode: VmRunnerMode::Test,
-                    target_path: None,
-                };
+                mode = VmRunnerMode::Test;
+                if args.len() > 2 {
+                    vm_args = args[2..].to_vec();
+                }
             } else if arg == "benchmark" {
-                return Self {
-                    mode: VmRunnerMode::Benchmark,
-                    target_path: None,
-                };
+                mode = VmRunnerMode::Benchmark;
+                if args.len() > 2 {
+                    vm_args = args[2..].to_vec();
+                }
+            } else {
+                mode = VmRunnerMode::Run;
+                target_path = Some(arg.clone());
+                if args.len() > 2 {
+                    vm_args = args[2..].to_vec();
+                }
             }
         }
+
         Self {
-            mode: VmRunnerMode::Run,
-            target_path: args.get(1).cloned(),
+            mode,
+            target_path,
+            vm_options: VmOptions { arguments: vm_args },
         }
     }
 }
@@ -183,7 +197,7 @@ impl VmRunner {
 
     fn compile_and_run_asts(&self, ast_iter: impl Iterator<Item = Node>) {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc);
+            let mut vm = VmState::new(mc, self.options.vm_options.clone());
 
             native::register_native_funcs(&mut vm, mc);
 
@@ -485,7 +499,7 @@ impl VmRunner {
 
     fn compile_and_benchmark(&self, ast_iter: impl Iterator<Item = Node>) {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc);
+            let mut vm = VmState::new(mc, self.options.vm_options.clone());
 
             native::register_native_funcs(&mut vm, mc);
 
