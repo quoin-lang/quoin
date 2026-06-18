@@ -1,3 +1,5 @@
+#![allow(no_gc_across_yield)]
+
 use crate::error::BBError;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
@@ -125,11 +127,9 @@ pub fn native_match<'gc>(
         && let ObjectPayload::Block(block_gc) = &obj.borrow().payload
     {
         let block_gc = *block_gc;
-        let res = if block_gc.param_names.len() == 0 {
-            vm.execute_block(mc, block_gc, Vec::new(), Some(rhs))?
-        } else {
-            vm.execute_block(mc, block_gc, vec![rhs], None)?
-        };
+        let self_val = if block_gc.param_names.len() == 0 { Some(rhs) } else { None };
+        let block_args = if block_gc.param_names.len() == 0 { Vec::new() } else { vec![rhs] };
+        let res = vm.execute_block(mc, block_gc, block_args, self_val)?;
         return Ok(res);
     }
 
@@ -137,11 +137,9 @@ pub fn native_match<'gc>(
         && let ObjectPayload::Block(block_gc) = &obj.borrow().payload
     {
         let block_gc = *block_gc;
-        let res = if block_gc.param_names.len() == 0 {
-            vm.execute_block(mc, block_gc, Vec::new(), Some(lhs))?
-        } else {
-            vm.execute_block(mc, block_gc, vec![lhs], None)?
-        };
+        let self_val = if block_gc.param_names.len() == 0 { Some(lhs) } else { None };
+        let block_args = if block_gc.param_names.len() == 0 { Vec::new() } else { vec![lhs] };
+        let res = vm.execute_block(mc, block_gc, block_args, self_val)?;
         return Ok(res);
     }
 

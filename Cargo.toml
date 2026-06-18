@@ -2,7 +2,16 @@
 name = "new-vm"
 version = "0.1.0"
 edition = "2024"
+[workspace]
+members = [
+    ".",
+    "lint/no_gc_across_yield",
+]
 
+[workspace.metadata.dylint]
+libraries = [
+    { path = "lint/no_gc_across_yield" }
+]
 [profile.profiling]
 inherits = "release"
 debug = true

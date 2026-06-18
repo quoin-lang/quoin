@@ -1,3 +1,5 @@
+#![allow(no_gc_across_yield)]
+
 use crate::arg;
 use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};

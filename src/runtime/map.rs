@@ -1,3 +1,5 @@
+#![allow(no_gc_across_yield)]
+
 use crate::arg;
 use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, OpaqueState, Value};

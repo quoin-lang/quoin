@@ -1,3 +1,5 @@
+#![allow(unknown_lints)]
+
 pub mod ansi_colorizer;
 pub mod compiler;
 pub mod error;

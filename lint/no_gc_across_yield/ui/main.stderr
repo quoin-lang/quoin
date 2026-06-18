@@ -1,0 +1,15 @@
+warning: GC value held and used across a fiber yield point
+  --> $DIR/main.rs:11:13
+   |
+LL |     let _ = local_val; // Use local_val after suspend!
+   |             ^^^^^^^^^
+   |
+help: The variable of type `Value<'_>` is held across a yield point. Consider flushing it or moving its use.
+  --> $DIR/main.rs:9:9
+   |
+LL |     let local_val = val;
+   |         ^^^^^^^^^
+   = note: `#[warn(no_gc_across_yield)]` on by default
+
+warning: 1 warning emitted
+

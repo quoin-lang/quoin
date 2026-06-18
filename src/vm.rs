@@ -82,6 +82,7 @@ pub struct VmState<'gc> {
     pub active_exception: Option<Value<'gc>>,
     pub last_send_receiver: Option<Value<'gc>>,
     pub last_send_args: Vec<Value<'gc>>,
+    pub active_native_args: Vec<Vec<Value<'gc>>>,
 
     #[collect(require_static)]
     pub yielder: Option<*const ()>,
@@ -201,9 +202,11 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         // Create the new object
         let obj = vm.new_object(mc, self.class_obj);
 
-        vm.run_all_inits(mc, obj)?;
-
         vm.push(Value::Object(obj));
+        if let Err(e) = vm.run_all_inits(mc, obj) {
+            vm.pop().ok();
+            return Err(e);
+        }
         Ok(())
     }
 }
@@ -218,7 +221,10 @@ impl<'gc> Callable<'gc> for NativeCallable {
         args: Vec<Value<'gc>>,
         _selector: Option<String>,
     ) -> Result<(), BBError> {
-        let ret = self.0.0(vm, mc, args)?;
+        vm.active_native_args.push(args.clone());
+        let ret = self.0.0(vm, mc, args);
+        vm.active_native_args.pop();
+        let ret = ret?;
         vm.push(ret);
         Ok(())
     }
@@ -240,6 +246,7 @@ impl<'gc> VmState<'gc> {
             active_exception: None,
             last_send_receiver: None,
             last_send_args: Vec::new(),
+            active_native_args: Vec::new(),
             yielder: None,
             active_fiber: None,
         }
@@ -378,6 +385,7 @@ impl<'gc> VmState<'gc> {
     }
 
     #[allow(clippy::wrong_self_convention)]
+    #[allow(no_gc_across_yield)]
     pub fn to_s(&mut self, mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Value<'gc>, BBError> {
         match value {
             Value::Object(_) => self.call_method(mc, value, "s", vec![]),
@@ -489,6 +497,7 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
+    #[allow(no_gc_across_yield)]
     fn finalize_instantiation(
         &mut self,
         mc: &Mutation<'gc>,
@@ -663,6 +672,7 @@ impl<'gc> VmState<'gc> {
             }
         }
     }
+    #[allow(no_gc_across_yield)]
     pub fn start_method_call(
         &mut self,
         mc: &Mutation<'gc>,
@@ -685,6 +695,7 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    #[allow(no_gc_across_yield)]
     pub fn call_method(
         &mut self,
         mc: &Mutation<'gc>,
@@ -737,6 +748,7 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    #[allow(no_gc_across_yield)]
     pub fn call_method_value(
         &mut self,
         mc: &Mutation<'gc>,
@@ -986,6 +998,7 @@ impl<'gc> VmState<'gc> {
         Ok(self.pop()?)
     }
 
+    #[allow(no_gc_across_yield)]
     pub fn lookup_method(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1091,6 +1104,7 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    #[allow(no_gc_across_yield)]
     pub fn lookup_method_in_class_hierarchy(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1110,6 +1124,7 @@ impl<'gc> VmState<'gc> {
         )
     }
 
+    #[allow(no_gc_across_yield)]
     fn lookup_method_in_class_hierarchy_rec(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1326,6 +1341,7 @@ impl<'gc> VmState<'gc> {
         None
     }
 
+    #[allow(no_gc_across_yield)]
     fn method_matches_arguments(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1869,6 +1885,7 @@ impl<'gc> VmState<'gc> {
         res
     }
 
+    #[allow(no_gc_across_yield)]
     pub(crate) fn step_internal(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
@@ -2061,9 +2078,10 @@ impl<'gc> VmState<'gc> {
                 let popped_frame = self.frames.pop().unwrap();
                 self.stack.truncate(popped_frame.stack_base);
                 if let Some(obj) = popped_frame.instantiating_obj {
+                    self.push(Value::Object(obj));
                     let env_borrow = popped_frame.env.borrow();
                     self.finalize_instantiation(mc, obj, &env_borrow)?;
-                    ret_val = Value::Object(obj);
+                    ret_val = self.pop()?;
                 } else if popped_frame.return_receiver {
                     if let Some(rx) = popped_frame.receiver {
                         ret_val = rx;
@@ -2080,9 +2098,10 @@ impl<'gc> VmState<'gc> {
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
                         if let Some(obj) = f.instantiating_obj {
+                            self.push(Value::Object(obj));
                             let env_borrow = f.env.borrow();
                             self.finalize_instantiation(mc, obj, &env_borrow)?;
-                            ret_val = Value::Object(obj);
+                            ret_val = self.pop()?;
                         } else if f.return_receiver {
                             if let Some(rx) = f.receiver {
                                 ret_val = rx;
