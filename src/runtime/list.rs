@@ -196,41 +196,57 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| BBError::Other(e))?
         })
         .instance_method("s", |vm, mc, args| {
-            let parts = args[0]
-                .with_native_state::<NativeListState, _, _>(|l| {
-                    let mut parts = Vec::new();
-                    for val in l.get_vec() {
-                        let result = vm.call_method(mc, *val, "s", vec![])?;
-                        if let Value::Object(obj) = result {
-                            if let ObjectPayload::String(s) = &obj.borrow().payload {
-                                parts.push(s.to_string());
-                                continue;
-                            }
-                        }
-                        parts.push(format!("{}", result))
+            let len = args[0]
+                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
+                .map_err(|e| BBError::Other(e))?;
+
+            let mut parts = Vec::new();
+            for i in 0..len {
+                let val = args[0]
+                    .with_native_state::<NativeListState, _, _>(|l| l.get_vec().get(i).copied())
+                    .map_err(|e| BBError::Other(e))?
+                    .ok_or_else(|| BBError::Other("Index out of bounds".to_string()))?;
+
+                let result = vm.call_method(mc, val, "s", vec![])?;
+                let part = if let Value::Object(obj) = result {
+                    if let ObjectPayload::String(s) = &obj.borrow().payload {
+                        s.to_string()
+                    } else {
+                        format!("{}", result)
                     }
-                    Ok::<Vec<String>, BBError>(parts)
-                })
-                .map_err(|e| BBError::Other(e))??;
+                } else {
+                    format!("{}", result)
+                };
+                parts.push(part);
+            }
 
             Ok(vm.new_string(mc, format!("#({})", parts.join(" "))))
         })
         .instance_method("==:", |vm, mc, args| {
-            let lhs_vec =
-                args[0].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())?;
-            let rhs_vec_res =
-                args[1].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec());
-            let rhs_vec = match rhs_vec_res {
-                Ok(v) => v,
+            let lhs_len = args[0]
+                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
+                .map_err(|e| BBError::Other(e))?;
+            let rhs_len_res =
+                args[1].with_native_state::<NativeListState, _, _>(|l| l.get_vec().len());
+            let rhs_len = match rhs_len_res {
+                Ok(len) => len,
                 Err(_) => return Ok(vm.new_bool(mc, false)),
             };
 
-            if lhs_vec.len() != rhs_vec.len() {
+            if lhs_len != rhs_len {
                 return Ok(vm.new_bool(mc, false));
             }
 
-            for (i, &lhs_val) in lhs_vec.iter().enumerate() {
-                let rhs_val = rhs_vec[i];
+            for i in 0..lhs_len {
+                let lhs_val = args[0]
+                    .with_native_state::<NativeListState, _, _>(|l| l.get_vec().get(i).copied())
+                    .map_err(|e| BBError::Other(e))?
+                    .ok_or_else(|| BBError::Other("Index out of bounds".to_string()))?;
+                let rhs_val = args[1]
+                    .with_native_state::<NativeListState, _, _>(|l| l.get_vec().get(i).copied())
+                    .map_err(|e| BBError::Other(e))?
+                    .ok_or_else(|| BBError::Other("Index out of bounds".to_string()))?;
+
                 let eq_res = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
                 if !eq_res {
                     return Ok(vm.new_bool(mc, false));
@@ -252,22 +268,33 @@ pub fn build_list_class() -> NativeClassBuilder {
             vm.execute_block(mc, block, block_args, None)
         })
         .instance_method("sort", |vm, mc, args| {
-            let mut vec = args[0]
-                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
+            let len = args[0]
+                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
                 .map_err(|e| BBError::Other(e))?;
 
-            for i in 1..vec.len() {
+            for i in 1..len {
                 let mut j = i;
                 while j > 0 {
-                    let gt_res = if vec[j - 1].is_nil() {
-                        !vec[j].is_nil()
-                    } else if vec[j].is_nil() {
+                    let (val_prev, val_curr) = args[0]
+                        .with_native_state::<NativeListState, _, _>(|l| {
+                            (l.get_vec()[j - 1], l.get_vec()[j])
+                        })
+                        .map_err(|e| BBError::Other(e))?;
+
+                    let gt_res = if val_prev.is_nil() {
+                        !val_curr.is_nil()
+                    } else if val_curr.is_nil() {
                         false
                     } else {
-                        vm.call_method(mc, vec[j - 1], ">", vec![vec[j]])?.is_true()
+                        vm.call_method(mc, val_prev, ">", vec![val_curr])?.is_true()
                     };
+
                     if gt_res {
-                        vec.swap(j - 1, j);
+                        args[0]
+                            .with_native_state_mut(mc, |l: &mut NativeListState| {
+                                l.get_vec_mut().swap(j - 1, j);
+                            })
+                            .map_err(|e| BBError::Other(e))?;
                         j -= 1;
                     } else {
                         break;
@@ -275,37 +302,41 @@ pub fn build_list_class() -> NativeClassBuilder {
                 }
             }
 
-            args[0]
-                .with_native_state_mut(mc, |l: &mut NativeListState| {
-                    *l.get_vec_mut() = vec;
-                })
-                .map_err(|e| BBError::Other(e))?;
-
             Ok(args[0])
         })
         .instance_method("sort:", |vm, mc, args| {
             let block_gc = arg!(args, Block, 1);
-            let mut vec = args[0]
-                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
+            let len = args[0]
+                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
                 .map_err(|e| BBError::Other(e))?;
 
             let arity = block_gc.param_names.len();
             if arity == 1 {
-                for i in 1..vec.len() {
+                for i in 1..len {
                     let mut j = i;
                     while j > 0 {
+                        let (val_prev, val_curr) = args[0]
+                            .with_native_state::<NativeListState, _, _>(|l| {
+                                (l.get_vec()[j - 1], l.get_vec()[j])
+                            })
+                            .map_err(|e| BBError::Other(e))?;
+
                         let key_lhs = vm.call_method(
                             mc,
                             args[1],
                             "valueWithArgs:",
-                            vec![vm.new_list(mc, vec![vec[j - 1]])],
+                            vec![vm.new_list(mc, vec![val_prev])],
                         )?;
+                        vm.push(key_lhs);
+
                         let key_rhs = vm.call_method(
                             mc,
                             args[1],
                             "valueWithArgs:",
-                            vec![vm.new_list(mc, vec![vec[j]])],
+                            vec![vm.new_list(mc, vec![val_curr])],
                         )?;
+                        let key_lhs = vm.pop()?;
+
                         let gt_res = if key_lhs.is_nil() {
                             !key_rhs.is_nil()
                         } else if key_rhs.is_nil() {
@@ -313,8 +344,13 @@ pub fn build_list_class() -> NativeClassBuilder {
                         } else {
                             vm.call_method(mc, key_lhs, ">", vec![key_rhs])?.is_true()
                         };
+
                         if gt_res {
-                            vec.swap(j - 1, j);
+                            args[0]
+                                .with_native_state_mut(mc, |l: &mut NativeListState| {
+                                    l.get_vec_mut().swap(j - 1, j);
+                                })
+                                .map_err(|e| BBError::Other(e))?;
                             j -= 1;
                         } else {
                             break;
@@ -322,17 +358,28 @@ pub fn build_list_class() -> NativeClassBuilder {
                     }
                 }
             } else {
-                for i in 1..vec.len() {
+                for i in 1..len {
                     let mut j = i;
                     while j > 0 {
+                        let (val_prev, val_curr) = args[0]
+                            .with_native_state::<NativeListState, _, _>(|l| {
+                                (l.get_vec()[j - 1], l.get_vec()[j])
+                            })
+                            .map_err(|e| BBError::Other(e))?;
+
                         let res = vm.call_method(
                             mc,
                             args[1],
                             "valueWithArgs:",
-                            vec![vm.new_list(mc, vec![vec[j - 1], vec[j]])],
+                            vec![vm.new_list(mc, vec![val_prev, val_curr])],
                         )?;
+
                         if !res.is_true() {
-                            vec.swap(j - 1, j);
+                            args[0]
+                                .with_native_state_mut(mc, |l: &mut NativeListState| {
+                                    l.get_vec_mut().swap(j - 1, j);
+                                })
+                                .map_err(|e| BBError::Other(e))?;
                             j -= 1;
                         } else {
                             break;
@@ -340,12 +387,6 @@ pub fn build_list_class() -> NativeClassBuilder {
                     }
                 }
             }
-
-            args[0]
-                .with_native_state_mut(mc, |l: &mut NativeListState| {
-                    *l.get_vec_mut() = vec;
-                })
-                .map_err(|e| BBError::Other(e))?;
 
             Ok(args[0])
         })

@@ -3,9 +3,9 @@ use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::VmStatus;
 
+use gc_arena::Gc;
 use gc_arena::collect::{DynCollect, Trace};
 use gc_arena::lock::RefLock;
-use gc_arena::Gc;
 use std::any::Any;
 use std::collections::HashMap;
 
@@ -148,11 +148,18 @@ pub fn build_map_class() -> NativeClassBuilder {
                 return Ok(vm.new_bool(mc, false));
             }
 
-            for (key, &lhs_val) in &lhs_map {
-                let rhs_val = match rhs_map.get(key) {
-                    Some(v) => *v,
-                    None => return Ok(vm.new_bool(mc, false)),
-                };
+            let keys: Vec<String> = lhs_map.keys().cloned().collect();
+            for key in keys {
+                let lhs_val = args[0]
+                    .with_native_state::<NativeMapState, _, _>(|m| m.get_map().get(&key).copied())
+                    .map_err(|e| BBError::Other(e))?
+                    .ok_or_else(|| BBError::Other("Key missing in lhs".to_string()))?;
+
+                let rhs_val = args[1]
+                    .with_native_state::<NativeMapState, _, _>(|m| m.get_map().get(&key).copied())
+                    .map_err(|e| BBError::Other(e))?
+                    .ok_or_else(|| BBError::Other("Key missing in rhs".to_string()))?;
+
                 let eq_res = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
                 if !eq_res {
                     return Ok(vm.new_bool(mc, false));

@@ -108,8 +108,10 @@ pub fn build_block_class() -> NativeClassBuilder {
             let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
             match res {
                 Ok(val) => {
-                    vm.execute_block(mc, finally_block, Vec::new(), None)?;
-                    Ok(val)
+                    vm.push(val);
+                    let finally_res = vm.execute_block(mc, finally_block, Vec::new(), None);
+                    let val = vm.pop()?;
+                    finally_res.map(|_| val)
                 }
                 Err(e) => {
                     while vm.frames.len() > initial_frame_count {
@@ -125,7 +127,32 @@ pub fn build_block_class() -> NativeClassBuilder {
                     while vm.frames.len() > initial_frame_count {
                         vm.frames.pop();
                     }
-                    vm.execute_block(mc, finally_block, Vec::new(), None)?;
+
+                    // Root catch_res if Ok
+                    let ok_val = match &catch_res {
+                        Ok(val) => Some(*val),
+                        Err(_) => None,
+                    };
+                    if let Some(val) = ok_val {
+                        vm.push(val);
+                    }
+
+                    let finally_res = vm.execute_block(mc, finally_block, Vec::new(), None);
+
+                    let catch_res = if let Some(_) = ok_val {
+                        let val = vm.pop()?;
+                        if finally_res.is_err() {
+                            finally_res.map(|_| val)
+                        } else {
+                            Ok(val)
+                        }
+                    } else {
+                        if finally_res.is_err() {
+                            finally_res.map(|_| vm.new_nil(mc))
+                        } else {
+                            catch_res
+                        }
+                    };
                     catch_res
                 }
             }
