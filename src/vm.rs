@@ -666,7 +666,10 @@ impl<'gc> VmState<'gc> {
             method.call(self, mc, all_args, Some(selector.to_string()))?;
             Ok(initial_frame_count)
         } else {
-            Err(BBError::Other(format!("Method {} not found on receiver", selector)))
+            Err(BBError::Other(format!(
+                "Method {} not found on receiver",
+                selector
+            )))
         }
     }
 
@@ -1700,7 +1703,10 @@ impl<'gc> VmState<'gc> {
         }
         if let Some(frame) = self.frames.last() {
             let active_ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
-            let active_source_info = frame.block.source_map.get(active_ip)
+            let active_source_info = frame
+                .block
+                .source_map
+                .get(active_ip)
                 .and_then(|opt| opt.as_ref())
                 .or(frame.block.source_info.as_ref())
                 .cloned();
@@ -1710,7 +1716,10 @@ impl<'gc> VmState<'gc> {
                 for (i, f) in self.frames.iter().enumerate().rev() {
                     let frame_ip = if f.ip > 0 { f.ip - 1 } else { 0 };
 
-                    let si_opt = f.block.source_map.get(frame_ip)
+                    let si_opt = f
+                        .block
+                        .source_map
+                        .get(frame_ip)
                         .and_then(|opt| opt.as_ref())
                         .or(f.block.source_info.as_ref());
 
@@ -1725,7 +1734,9 @@ impl<'gc> VmState<'gc> {
                         "".to_string()
                     };
 
-                    let formatted_selector = if let Some(Instruction::Send(selector, num_args)) = f.block.bytecode.get(frame_ip) {
+                    let formatted_selector = if let Some(Instruction::Send(selector, num_args)) =
+                        f.block.bytecode.get(frame_ip)
+                    {
                         let args_vec = if *num_args > 0 {
                             if i == n - 1 {
                                 self.last_send_args.clone()
@@ -1779,11 +1790,18 @@ impl<'gc> VmState<'gc> {
                 // Always append the (top) frame at the bottom if it was not already the only frame formatted as (top)
                 if n > 0 {
                     let first_frame = &self.frames[0];
-                    let first_ip = if first_frame.ip > 0 { first_frame.ip - 1 } else { 0 };
-                    let si_opt = first_frame.block.source_map.get(first_ip)
+                    let first_ip = if first_frame.ip > 0 {
+                        first_frame.ip - 1
+                    } else {
+                        0
+                    };
+                    let si_opt = first_frame
+                        .block
+                        .source_map
+                        .get(first_ip)
                         .and_then(|opt| opt.as_ref())
                         .or(first_frame.block.source_info.as_ref());
-                    
+
                     let formatted_loc = if let Some(si) = si_opt {
                         let display_filename = std::path::Path::new(&si.filename)
                             .file_name()
@@ -1795,7 +1813,7 @@ impl<'gc> VmState<'gc> {
                         "".to_string()
                     };
                     let top_frame_str = format!("at (top){}", formatted_loc);
-                    
+
                     // Only push if the last trace element is not already representing (top) at the same location
                     if trace.last() != Some(&top_frame_str) {
                         trace.push(top_frame_str);
@@ -2380,8 +2398,19 @@ impl<'gc> VmState<'gc> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instruction::{Constant, StaticBlock};
+    use crate::instruction::{Constant, SharedBytecode, SharedSourceMap, StaticBlock};
     use crate::parser::ast::NodeValue;
+    use crate::runtime::block::build_block_class;
+    use crate::runtime::boolean::build_boolean_class;
+    use crate::runtime::class::build_class_class;
+    use crate::runtime::double::build_double_class;
+    use crate::runtime::integer::build_integer_class;
+    use crate::runtime::list::build_list_class;
+    use crate::runtime::map::{build_key_value_pair_class, build_map_class};
+    use crate::runtime::nil::build_nil_class;
+    use crate::runtime::object::build_object_class;
+    use crate::runtime::regex::build_regex_class;
+    use crate::runtime::string::build_string_class;
     use crate::value::{NativeClassBuilder, OpaqueState};
     use gc_arena::{Arena, Rootable};
 
@@ -2497,18 +2526,18 @@ mod tests {
             let mut vm = VmState::new(mc);
 
             // Register standard classes first, so that they exist when new_xxx helper methods are called.
-            vm.register_native_class(mc, crate::runtime::object::build_object_class());
-            vm.register_native_class(mc, crate::runtime::class::build_class_class());
-            vm.register_native_class(mc, crate::runtime::boolean::build_boolean_class());
-            vm.register_native_class(mc, crate::runtime::block::build_block_class());
-            vm.register_native_class(mc, crate::runtime::list::build_list_class());
-            vm.register_native_class(mc, crate::runtime::double::build_double_class());
-            vm.register_native_class(mc, crate::runtime::integer::build_integer_class());
-            vm.register_native_class(mc, crate::runtime::string::build_string_class());
-            vm.register_native_class(mc, crate::runtime::nil::build_nil_class());
-            vm.register_native_class(mc, crate::runtime::map::build_map_class());
-            vm.register_native_class(mc, crate::runtime::map::build_key_value_pair_class());
-            vm.register_native_class(mc, crate::runtime::regex::build_regex_class());
+            vm.register_native_class(mc, build_object_class());
+            vm.register_native_class(mc, build_class_class());
+            vm.register_native_class(mc, build_boolean_class());
+            vm.register_native_class(mc, build_block_class());
+            vm.register_native_class(mc, build_list_class());
+            vm.register_native_class(mc, build_double_class());
+            vm.register_native_class(mc, build_integer_class());
+            vm.register_native_class(mc, build_string_class());
+            vm.register_native_class(mc, build_nil_class());
+            vm.register_native_class(mc, build_map_class());
+            vm.register_native_class(mc, build_key_value_pair_class());
+            vm.register_native_class(mc, build_regex_class());
 
             for t in ["Method", "Native"] {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
@@ -2526,10 +2555,10 @@ mod tests {
                 is_nested_block: false,
                 param_names: Vec::new(),
                 param_types: Vec::new(),
-                bytecode: instructions,
+                bytecode: instructions.into(),
                 decl_block: None,
-                source_map: Vec::new(),
-        };
+                source_map: SharedSourceMap::from(Vec::new()),
+            };
             let block = gc!(
                 mc,
                 Block {
@@ -2542,7 +2571,7 @@ mod tests {
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
-                    source_map: Vec::new(),
+                    source_map: SharedSourceMap::from(Vec::new()),
                 }
             );
             vm.start_block(mc, block, Vec::new(), None, None);
@@ -2853,14 +2882,14 @@ mod tests {
             is_nested_block: false,
             param_names: vec!["x".to_string()],
             param_types: vec![None],
-            bytecode: vec![
+            bytecode: SharedBytecode::from(vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
                 Instruction::Send("+".to_string(), 1),
                 Instruction::Return,
-            ],
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         run_test_steps(
@@ -2930,12 +2959,12 @@ mod tests {
             is_nested_block: true,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: vec![
+            bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Int(999)),
                 Instruction::MethodReturn,
-            ],
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         // Block 1: method
@@ -2946,14 +2975,14 @@ mod tests {
             is_nested_block: false, // enclosing_method_id will be this frame's ID
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: vec![
+            bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Block(block_nested)),
                 Instruction::Send("value".to_string(), 0),
                 Instruction::Push(Constant::Int(100)), // this should be skipped due to MethodReturn
                 Instruction::Return,
-            ],
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         run_test_steps(
@@ -2992,12 +3021,12 @@ mod tests {
             is_nested_block: true,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: vec![
+            bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Int(777)),
                 Instruction::MethodReturn,
-            ],
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         // block_bar: blk.value, Push(111), Return
@@ -3007,14 +3036,14 @@ mod tests {
             is_nested_block: false,
             param_names: vec!["blk".to_string()],
             param_types: vec![None],
-            bytecode: vec![
+            bytecode: SharedBytecode::from(vec![
                 Instruction::LoadLocal("blk".to_string()),
                 Instruction::Send("value".to_string(), 0),
                 Instruction::Push(Constant::Int(111)),
                 Instruction::Return,
-            ],
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         // block_foo: bar.value: block_nested, Push(222), Return
@@ -3024,15 +3053,15 @@ mod tests {
             is_nested_block: false,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: vec![
+            bytecode: SharedBytecode::from(vec![
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "bar_func".to_string())),
                 Instruction::Push(Constant::Block(block_nested)),
                 Instruction::Send("value:".to_string(), 1),
                 Instruction::Push(Constant::Int(222)),
                 Instruction::Return,
-            ],
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
@@ -3047,8 +3076,8 @@ mod tests {
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-                source_map: Vec::new(),
-                };
+                source_map: SharedSourceMap::from(Vec::new()),
+            };
             let bar_block_val = vm.new_block(mc, bar_block);
             vm.globals.borrow_mut(mc).insert(
                 NamespacedName::new(Vec::new(), "bar_func".to_string()),
@@ -3067,7 +3096,7 @@ mod tests {
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
-                    source_map: Vec::new(),
+                    source_map: SharedSourceMap::from(Vec::new()),
                 }
             );
             vm.start_block(mc, foo_block, Vec::new(), None, None);
@@ -3110,7 +3139,7 @@ mod tests {
             is_nested_block: false,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: vec![
+            bytecode: SharedBytecode::from(vec![
                 // 1. Define inst method x
                 Instruction::Push(Constant::Block(StaticBlock {
                     source_info: None,
@@ -3121,10 +3150,11 @@ mod tests {
                     bytecode: vec![
                         Instruction::LoadLocal("self".to_string()),
                         Instruction::Return,
-                    ],
+                    ]
+                    .into(),
                     decl_block: None,
-                    source_map: Vec::new(),
-        })),
+                    source_map: Vec::new().into(),
+                })),
                 Instruction::DefineMethod("x".to_string()),
                 // 2. Override inst method x
                 Instruction::Push(Constant::Block(StaticBlock {
@@ -3133,15 +3163,16 @@ mod tests {
                     is_nested_block: false,
                     param_names: Vec::new(),
                     param_types: Vec::new(),
-                    bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
+                    bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return]
+                        .into(),
                     decl_block: None,
-                    source_map: Vec::new(),
-        })),
+                    source_map: Vec::new().into(),
+                })),
                 Instruction::OverrideMethod("x".to_string()),
                 Instruction::Return,
-            ],
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         run_test_steps(
@@ -3259,9 +3290,12 @@ mod tests {
             is_nested_block: false,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
+            bytecode: SharedBytecode::from(vec![
+                Instruction::Push(Constant::Int(42)),
+                Instruction::Return,
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         let class_extension_block = StaticBlock {
@@ -3270,14 +3304,14 @@ mod tests {
             is_nested_block: false,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: vec![
+            bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Block(custom_true_method)),
                 Instruction::DefineMethod("custom_true".to_string()),
                 Instruction::Push(Constant::Nil),
                 Instruction::Return,
-            ],
+            ]),
             decl_block: None,
-            source_map: Vec::new(),
+            source_map: SharedSourceMap::from(Vec::new()),
         };
 
         run_test_steps(
@@ -3551,18 +3585,18 @@ mod tests {
                     is_nested_block: false,
                     param_names: vec!["a".to_string(), "b".to_string()],
                     param_types: vec![None, None],
-                    bytecode: vec![
+                    bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal("self".to_string()),
                         Instruction::LoadLocal("a".to_string()),
                         Instruction::Send("+".to_string(), 1),
                         Instruction::LoadLocal("b".to_string()),
                         Instruction::Send("+".to_string(), 1),
                         Instruction::Return,
-                    ],
+                    ]),
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
-                    source_map: Vec::new(),
+                    source_map: SharedSourceMap::from(Vec::new()),
                 }
             );
 
@@ -3592,16 +3626,16 @@ mod tests {
                     is_nested_block: false,
                     param_names: vec!["a".to_string(), "b".to_string()],
                     param_types: vec![None, None],
-                    bytecode: vec![
+                    bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal("a".to_string()),
                         Instruction::LoadLocal("b".to_string()),
                         Instruction::Send("+".to_string(), 1),
                         Instruction::Return,
-                    ],
+                    ]),
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
-                    source_map: Vec::new(),
+                    source_map: SharedSourceMap::from(Vec::new()),
                 }
             );
 
@@ -3643,10 +3677,13 @@ mod tests {
                     is_nested_block: false,
                     param_names: Vec::new(),
                     param_types: Vec::new(),
-                    bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
+                    bytecode: SharedBytecode::from(vec![
+                        Instruction::Push(Constant::Nil),
+                        Instruction::Return,
+                    ]),
                     decl_block: None,
-                    source_map: Vec::new(),
-        })),
+                    source_map: SharedSourceMap::from(Vec::new()),
+                })),
                 Instruction::ExecuteBlockWithSelf,
             ],
             |vm, mc| {
@@ -3823,18 +3860,18 @@ mod tests {
     fn test_vm_to_s() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc);
-            vm.register_native_class(mc, crate::runtime::object::build_object_class());
-            vm.register_native_class(mc, crate::runtime::class::build_class_class());
-            vm.register_native_class(mc, crate::runtime::boolean::build_boolean_class());
-            vm.register_native_class(mc, crate::runtime::block::build_block_class());
-            vm.register_native_class(mc, crate::runtime::list::build_list_class());
-            vm.register_native_class(mc, crate::runtime::double::build_double_class());
-            vm.register_native_class(mc, crate::runtime::integer::build_integer_class());
-            vm.register_native_class(mc, crate::runtime::string::build_string_class());
-            vm.register_native_class(mc, crate::runtime::nil::build_nil_class());
-            vm.register_native_class(mc, crate::runtime::map::build_map_class());
-            vm.register_native_class(mc, crate::runtime::map::build_key_value_pair_class());
-            vm.register_native_class(mc, crate::runtime::regex::build_regex_class());
+            vm.register_native_class(mc, build_object_class());
+            vm.register_native_class(mc, build_class_class());
+            vm.register_native_class(mc, build_boolean_class());
+            vm.register_native_class(mc, build_block_class());
+            vm.register_native_class(mc, build_list_class());
+            vm.register_native_class(mc, build_double_class());
+            vm.register_native_class(mc, build_integer_class());
+            vm.register_native_class(mc, build_string_class());
+            vm.register_native_class(mc, build_nil_class());
+            vm.register_native_class(mc, build_map_class());
+            vm.register_native_class(mc, build_key_value_pair_class());
+            vm.register_native_class(mc, build_regex_class());
             for t in ["Method", "Native"] {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
             }

@@ -1,10 +1,10 @@
-use crate::instruction::{Constant, Instruction, StaticBlock};
+use crate::instruction::{Constant, Instruction, SharedBytecode, SharedSourceMap, StaticBlock};
 use crate::parser::ast::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, IdentifierType,
     MethodCallNode, MethodSelectorNode, Node, NodeValue, ProgramNode, UnaryOperatorNode,
     UnaryOperatorType,
 };
-use crate::value::SourceInfo;
+use crate::value::{NamespacedName, SourceInfo};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -129,10 +129,10 @@ impl Compiler {
             is_nested_block: false,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode: cb.bytecode,
+            bytecode: SharedBytecode(std::rc::Rc::new(cb.bytecode)),
             source_info: program.source_info.clone(),
             decl_block: None,
-            source_map: cb.source_map,
+            source_map: SharedSourceMap(std::rc::Rc::new(cb.source_map)),
         })
     }
 
@@ -174,12 +174,12 @@ impl Compiler {
                     }
                 } else if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced
                 {
-                    let ns_name = crate::value::NamespacedName::from_ast(id);
+                    let ns_name = NamespacedName::from_ast(id);
                     bytecode.push(Instruction::LoadGlobal(ns_name));
                 } else if self.is_local(&id.name) {
                     bytecode.push(Instruction::LoadLocal(id.name.clone()));
                 } else {
-                    let ns_name = crate::value::NamespacedName::new(Vec::new(), id.name.clone());
+                    let ns_name = NamespacedName::new(Vec::new(), id.name.clone());
                     bytecode.push(Instruction::LoadGlobal(ns_name));
                 }
             }
@@ -231,11 +231,11 @@ impl Compiler {
                 bytecode.push(Instruction::NewRegex);
             }
             NodeValue::ClassDefinition(class_def) => {
-                let name = crate::value::NamespacedName::from_ast(&class_def.identifier);
+                let name = NamespacedName::from_ast(&class_def.identifier);
                 let parent_name = class_def
                     .parent_identifier
                     .as_ref()
-                    .map(|id| crate::value::NamespacedName::from_ast(id));
+                    .map(|id| NamespacedName::from_ast(id));
                 let mut instance_vars = Vec::new();
                 for arg in &class_def.block.arguments {
                     instance_vars.push(arg.identifier.name.clone());
@@ -274,19 +274,19 @@ impl Compiler {
                 bytecode.push(Instruction::OverrideMethod(selector));
             }
             NodeValue::ConstDefinition(const_def) => {
-                let ns_name = crate::value::NamespacedName::from_ast(&const_def.identifier);
+                let ns_name = NamespacedName::from_ast(&const_def.identifier);
                 self.compile_node(&const_def.rvalue, bytecode)?;
                 bytecode.push(Instruction::Dup);
                 bytecode.push(Instruction::StoreGlobal(ns_name, true));
             }
             NodeValue::UserString(user_str) => {
-                let ns_name = crate::value::NamespacedName::from_ast(&user_str.identifier);
+                let ns_name = NamespacedName::from_ast(&user_str.identifier);
                 bytecode.push(Instruction::LoadGlobal(ns_name));
                 bytecode.push(Instruction::Push(Constant::String(user_str.value.clone())));
                 bytecode.push(Instruction::Send("newUserString:".to_string(), 1));
             }
             NodeValue::UserList(user_list) => {
-                let ns_name = crate::value::NamespacedName::from_ast(&user_list.identifier);
+                let ns_name = NamespacedName::from_ast(&user_list.identifier);
                 bytecode.push(Instruction::LoadGlobal(ns_name));
                 for val in &user_list.values {
                     self.compile_node(val, bytecode)?;
@@ -403,7 +403,7 @@ impl Compiler {
             NodeValue::IdentLValue(ident_lval) => {
                 let id = &ident_lval.identifier;
                 if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced {
-                    let ns_name = crate::value::NamespacedName::from_ast(id);
+                    let ns_name = NamespacedName::from_ast(id);
                     bytecode.push(Instruction::StoreGlobal(ns_name, false));
                 } else {
                     let name = &id.name;
@@ -429,7 +429,7 @@ impl Compiler {
     ) {
         let first_char = name.chars().next().unwrap_or('\0');
         if first_char.is_ascii_uppercase() {
-            let ns_name = crate::value::NamespacedName::new(Vec::new(), name.clone());
+            let ns_name = NamespacedName::new(Vec::new(), name.clone());
             bytecode.push(Instruction::StoreGlobal(ns_name, false));
         } else if ident_type == &IdentifierType::Instance {
             bytecode.push(Instruction::StoreField(name.clone()));
@@ -702,10 +702,10 @@ impl Compiler {
             is_nested_block: true,
             param_names,
             param_types,
-            bytecode: block_bytecode.bytecode,
+            bytecode: SharedBytecode(std::rc::Rc::new(block_bytecode.bytecode)),
             source_info: block.source_info.clone(),
             decl_block,
-            source_map: block_bytecode.source_map,
+            source_map: SharedSourceMap(std::rc::Rc::new(block_bytecode.source_map)),
         };
 
         bytecode.push(Instruction::Push(Constant::Block(static_block)));
@@ -840,7 +840,7 @@ mod tests {
         };
         let mut block = compiler.compile_program(&program)?;
         if block.bytecode.last() == Some(&Instruction::Return) {
-            block.bytecode.pop();
+            std::rc::Rc::make_mut(&mut block.bytecode.0).pop();
         }
         Ok(block)
     }
@@ -1193,15 +1193,15 @@ mod tests {
             is_nested_block: true,
             param_names: vec!["x".to_string()],
             param_types: vec![None],
-            bytecode: vec![
+            bytecode: SharedBytecode(std::rc::Rc::new(vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
                 Instruction::Send("+".to_string(), 1),
                 Instruction::Return,
-            ],
+            ])),
             source_info: None,
             decl_block: None,
-            source_map: vec![None; 4],
+            source_map: SharedSourceMap(std::rc::Rc::new(vec![None; 4])),
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Block(inner_static)));
@@ -1333,10 +1333,13 @@ mod tests {
             is_nested_block: true,
             param_names: vec!["a".to_string(), "b".to_string()],
             param_types: vec![None, None],
-            bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
+            bytecode: SharedBytecode(std::rc::Rc::new(vec![
+                Instruction::Push(Constant::Nil),
+                Instruction::Return,
+            ])),
             source_info: None,
             decl_block: None,
-            source_map: vec![None; 2],
+            source_map: SharedSourceMap(std::rc::Rc::new(vec![None; 2])),
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::DefineClass {
@@ -1385,7 +1388,7 @@ mod tests {
 
         // Let's find the inner block pushed in the bytecode
         let mut found_inner_block = false;
-        for instr in compiled.bytecode {
+        for instr in compiled.bytecode.iter().cloned() {
             if let Instruction::Push(Constant::Block(sb)) = instr {
                 found_inner_block = true;
                 assert!(sb.source_info.is_some());

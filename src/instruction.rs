@@ -2,6 +2,70 @@ use crate::value::{NamespacedName, SourceInfo};
 
 use gc_arena::Collect;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedBytecode(pub std::rc::Rc<Vec<Instruction>>);
+
+unsafe impl<'gc> Collect<'gc> for SharedBytecode {
+    const NEEDS_TRACE: bool = false;
+}
+
+impl std::ops::Deref for SharedBytecode {
+    type Target = [Instruction];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Vec<Instruction>> for SharedBytecode {
+    fn from(v: Vec<Instruction>) -> Self {
+        SharedBytecode(std::rc::Rc::new(v))
+    }
+}
+
+impl PartialEq<Vec<Instruction>> for SharedBytecode {
+    fn eq(&self, other: &Vec<Instruction>) -> bool {
+        self.0.as_ref() == other
+    }
+}
+
+impl PartialEq<SharedBytecode> for Vec<Instruction> {
+    fn eq(&self, other: &SharedBytecode) -> bool {
+        self == other.0.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedSourceMap(pub std::rc::Rc<Vec<Option<SourceInfo>>>);
+
+unsafe impl<'gc> Collect<'gc> for SharedSourceMap {
+    const NEEDS_TRACE: bool = false;
+}
+
+impl std::ops::Deref for SharedSourceMap {
+    type Target = [Option<SourceInfo>];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Vec<Option<SourceInfo>>> for SharedSourceMap {
+    fn from(v: Vec<Option<SourceInfo>>) -> Self {
+        SharedSourceMap(std::rc::Rc::new(v))
+    }
+}
+
+impl PartialEq<Vec<Option<SourceInfo>>> for SharedSourceMap {
+    fn eq(&self, other: &Vec<Option<SourceInfo>>) -> bool {
+        self.0.as_ref() == other
+    }
+}
+
+impl PartialEq<SharedSourceMap> for Vec<Option<SourceInfo>> {
+    fn eq(&self, other: &SharedSourceMap) -> bool {
+        self == other.0.as_ref()
+    }
+}
+
 #[derive(Clone, Debug, Collect, PartialEq)]
 #[collect(require_static)]
 pub struct StaticBlock {
@@ -9,10 +73,10 @@ pub struct StaticBlock {
     pub is_nested_block: bool,
     pub param_names: Vec<String>,
     pub param_types: Vec<Option<String>>,
-    pub bytecode: Vec<Instruction>,
+    pub bytecode: SharedBytecode,
     pub source_info: Option<SourceInfo>,
     pub decl_block: Option<Box<StaticBlock>>,
-    pub source_map: Vec<Option<SourceInfo>>,
+    pub source_map: SharedSourceMap,
 }
 
 #[derive(Clone, Debug, Collect, PartialEq)]

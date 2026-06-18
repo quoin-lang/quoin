@@ -1,5 +1,5 @@
 use crate::error::BBError;
-use crate::instruction::Instruction;
+use crate::instruction::{SharedBytecode, SharedSourceMap};
 use crate::parser::ast::IdentifierNode;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
@@ -494,12 +494,12 @@ pub struct Block<'gc> {
     pub is_nested_block: bool,
     pub param_names: Vec<String>,
     pub param_types: Vec<Option<String>>,
-    pub bytecode: Vec<Instruction>,
+    pub bytecode: SharedBytecode,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     pub enclosing_method_id: Option<usize>,
     pub source_info: Option<SourceInfo>,
     pub decl_block: Option<Gc<'gc, Block<'gc>>>,
-    pub source_map: Vec<Option<SourceInfo>>,
+    pub source_map: SharedSourceMap,
 }
 
 #[derive(Collect, Debug)]
@@ -652,7 +652,9 @@ mod tests {
         struct Dummy;
         let state = OpaqueState(Dummy);
         let debug_str = format!("{:?}", state);
-        assert_eq!(debug_str, "OpaqueState<new_vm::value::tests::test_opaque_state_debug::Dummy>");
+        assert_eq!(
+            debug_str,
+            "OpaqueState<new_vm::value::tests::test_opaque_state_debug::Dummy>"
+        );
     }
 }
-
