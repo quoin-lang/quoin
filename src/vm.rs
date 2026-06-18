@@ -78,6 +78,7 @@ impl<'gc> BuiltinCache<'gc> {
 #[collect(require_static)]
 pub struct VmOptions {
     pub arguments: Vec<String>,
+    pub supports_color: bool,
 }
 
 #[derive(Collect)]
@@ -3981,6 +3982,7 @@ mod tests {
     fn test_vm_options_at_runtime() {
         let options = VmOptions {
             arguments: vec!["foo".to_string(), "bar".to_string()],
+            supports_color: true,
         };
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
@@ -4031,6 +4033,17 @@ mod tests {
 
             let mapped_count = vm.call_method(mc, mapped_args, "count", vec![]).unwrap();
             assert_eq!(to_spec(mapped_count), ValueSpec::Int(2));
+
+            // Check supportsColor method
+            let supports_color_val = vm
+                .call_method(mc, Value::Class(runtime_class), "supportsColor", vec![])
+                .unwrap();
+            assert_eq!(to_spec(supports_color_val), ValueSpec::Bool(true));
+
+            // Check options map has supports_color
+            let key_color = vm.new_string(mc, "supports_color".to_string());
+            let mapped_color = vm.call_method(mc, opts_val, "at:", vec![key_color]).unwrap();
+            assert_eq!(to_spec(mapped_color), ValueSpec::Bool(true));
         });
     }
 }

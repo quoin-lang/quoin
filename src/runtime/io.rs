@@ -260,10 +260,22 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, s.to_string()))
         })
         .instance_method("write:", |vm, mc, args| {
-            let s = get_io_string(vm, mc, args[1])?;
+            let mut s = get_io_string(vm, mc, args[1])?;
+            let active_receiver = vm.active_native_args.last().unwrap()[0];
+
+            let is_stdout_or_stderr = active_receiver
+                .with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+                    NativeIoHandleWrapper::Stdout(_) | NativeIoHandleWrapper::Stderr(_) => true,
+                    _ => false,
+                })
+                .map_err(|e| BBError::Other(e))?;
+
+            if is_stdout_or_stderr && !vm.options.supports_color {
+                s = ansi_colorizer::decolorize(&s);
+            }
+
             let bytes = s.into_bytes();
 
-            let active_receiver = vm.active_native_args.last().unwrap()[0];
             active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| match &mut h
                 .wrapper
             {
@@ -289,10 +301,22 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             Ok(vm.new_nil(mc))
         })
         .instance_method("writeln:", |vm, mc, args| {
-            let s = get_io_string(vm, mc, args[1])?;
+            let mut s = get_io_string(vm, mc, args[1])?;
+            let active_receiver = vm.active_native_args.last().unwrap()[0];
+
+            let is_stdout_or_stderr = active_receiver
+                .with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+                    NativeIoHandleWrapper::Stdout(_) | NativeIoHandleWrapper::Stderr(_) => true,
+                    _ => false,
+                })
+                .map_err(|e| BBError::Other(e))?;
+
+            if is_stdout_or_stderr && !vm.options.supports_color {
+                s = ansi_colorizer::decolorize(&s);
+            }
+
             let bytes = format!("{}\n", s).into_bytes();
 
-            let active_receiver = vm.active_native_args.last().unwrap()[0];
             active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| match &mut h
                 .wrapper
             {

@@ -77,7 +77,10 @@ impl VmRunnerOptions {
         Self {
             mode,
             target_path,
-            vm_options: VmOptions { arguments: vm_args },
+            vm_options: VmOptions {
+                arguments: vm_args,
+                supports_color: false,
+            },
         }
     }
 }
