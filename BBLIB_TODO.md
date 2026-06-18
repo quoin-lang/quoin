@@ -20,7 +20,7 @@ This document outlines the language features, compiler updates, and VM modificat
   - [x] List#bind:{}
   - See bblib/presentation/20-method-destructuring.b
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
-- [ ] Confirm `%'string%{eval}' is working.
+- [x] Confirm `%'string%{eval}' is working.
   - [ ] Make sure it's optimized into string concatenation by the compiler.
 - [x] Make sure case statements are tested and working.
 - [ ] Repurpose the Yeet instruction and make sure .../???/!!! are all working.
@@ -28,10 +28,10 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Implement DateTime.
 - [ ] Implement Decimal.
   - rust_decimal crate
-- [ ] Make sure #symbol types are working.
+- [x] Make sure #symbol types are working.
 - [ ] Language server
   - [ ] VSCode plugin
-- [ ] Integrate fff into agy
+- [x] Integrate fff into agy
   - https://github.com/dmtrKovalenko/fff#mcp-server
 
 ## Bugs/Odd Behavior
