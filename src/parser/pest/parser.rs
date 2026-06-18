@@ -1,46 +1,58 @@
-#![allow(non_snake_case)]
-
-use crate::parser::ast::{Node, NodeValue};
-use crate::parser::antlr::ast_visitor::AstVisitor;
-use crate::parser::antlr::generated::buildingblockslexer::BuildingBlocksLexer;
-use crate::parser::antlr::generated::buildingblocksparser::BuildingBlocksParser;
+use crate::parser::ast::*;
+use crate::parser::ast::NodeValue::*;
+use crate::value::SourceInfo;
 
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 
-use antlr_rust::common_token_stream::CommonTokenStream;
-use antlr_rust::tree::ParseTreeVisitorCompat;
-use antlr_rust::InputStream;
+use once_cell::sync::Lazy;
+use pest::iterators::Pair;
+use pest::pratt_parser::PrattParser;
+use pest::Parser;
+use pest_derive::Parser;
+use regex::Captures;
+use substring::Substring;
+
+#[derive(Parser)]
+#[grammar = "parser/pest/BuildingBlocks.pest"]
+pub struct BuildingBlocksParser;
+
+static PRATT_PARSER: Lazy<PrattParser<Rule>> = Lazy::new(|| {
+    use pest::pratt_parser::{Assoc, Op};
+    use Rule::*;
+
+    PrattParser::new()
+        .op(Op::infix(op_or, Assoc::Left))
+        .op(Op::infix(op_and, Assoc::Left))
+        .op(Op::infix(op_eq, Assoc::Left) | Op::infix(op_ne, Assoc::Left))
+        .op(Op::infix(op_lt, Assoc::Left) | Op::infix(op_le, Assoc::Left) | Op::infix(op_gt, Assoc::Left) | Op::infix(op_ge, Assoc::Left))
+        .op(Op::infix(op_match, Assoc::Left))
+        .op(Op::infix(op_mul, Assoc::Left) | Op::infix(op_div, Assoc::Left) | Op::infix(op_mod, Assoc::Left))
+        .op(Op::infix(op_add, Assoc::Left) | Op::infix(op_sub, Assoc::Left))
+        .op(Op::postfix(postfix_op))
+        .op(Op::infix(op_range, Assoc::Left))
+        .op(Op::infix(op_class_ext, Assoc::Left))
+        .op(Op::prefix(prefix_op))
+});
 
 pub fn parse_building_blocks_string(code: &str) -> Node {
     let code = code.strip_prefix('\u{FEFF}').unwrap_or(code);
-    let lexer = BuildingBlocksLexer::new(InputStream::new(code));
-    let mut parser = BuildingBlocksParser::new(CommonTokenStream::new(lexer));
-
-    let root = parser.program().unwrap();
-
-    let mut visitor = AstVisitor {
-        x: Node {
-            source_info: None,
-            value: NodeValue::Unknown,
-        },
-        filename: "<string>".to_string(),
-        source_text: code.to_string(),
+    let mut pairs = match BuildingBlocksParser::parse(Rule::program, code) {
+        Ok(p) => p,
+        Err(e) => panic!("Pest parsing error: {}", e),
     };
 
-    let visitor_result = visitor.visit(&*root);
-
-    // println!("PROGRAM> {:?}", visitor_result);
-
-    visitor_result
+    let program_pair = pairs.next().unwrap();
+    parse_program(program_pair, "<string>", code)
 }
 
 pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
     let filename = path.display().to_string();
 
-    let mut file = match File::open(&path) {
+    let mut file = match File::open(path) {
         Err(why) => panic!("couldn't open {}: {}", filename, why),
         Ok(file) => file,
     };
@@ -53,34 +65,975 @@ pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
     let contents = contents.strip_prefix('\u{FEFF}').unwrap_or(&contents).to_string();
 
     let builder = thread::Builder::new()
-        .name("parser".into())
+        .name("pest_parser".into())
         .stack_size(32 * 1024 * 1024); // 32MB of stack space
 
+    let filename_clone = filename.clone();
+    let contents_clone = contents.clone();
     let handler = builder
         .spawn(move || {
-            let lexer = BuildingBlocksLexer::new(InputStream::new(contents.as_str()));
-            let mut parser = BuildingBlocksParser::new(CommonTokenStream::new(lexer));
-
-            let root = parser.program().unwrap();
-
-            let mut visitor = AstVisitor {
-                x: Node {
-                    source_info: None,
-                    value: NodeValue::Unknown,
-                },
-                filename,
-                source_text: contents.clone(),
+            let mut pairs = match BuildingBlocksParser::parse(Rule::program, &contents_clone) {
+                Ok(p) => p,
+                Err(e) => panic!("Pest parsing error in file {}: {}", filename_clone, e),
             };
 
-            let visitor_result = visitor.visit(&*root);
-
-            // println!("PROGRAM> {:?}", visitor_result);
-
-            visitor_result
+            let program_pair = pairs.next().unwrap();
+            parse_program(program_pair, &filename_clone, &contents_clone)
         })
         .unwrap();
 
     handler.join().unwrap()
+}
+
+fn extract_source_info(span: pest::Span, filename: &str, source_text: &str) -> Option<SourceInfo> {
+    let (line, col) = span.start_pos().line_col();
+    let text = source_text.get(span.start()..span.end()).map(|x| x.to_string());
+    Some(SourceInfo {
+        filename: filename.to_string(),
+        line,
+        column: col - 1, // 0-indexed to match ANTLR
+        start: span.start(),
+        end: span.end(),
+        source_text: text,
+    })
+}
+
+fn combine_source_info(
+    first: &Option<SourceInfo>,
+    second: &Option<SourceInfo>,
+    source_text: &str,
+) -> Option<SourceInfo> {
+    match (first, second) {
+        (Some(f), Some(s)) => {
+            let combined_text = source_text.get(f.start..s.end).map(|x| x.to_string());
+            Some(SourceInfo {
+                filename: f.filename.clone(),
+                line: f.line,
+                column: f.column,
+                start: f.start,
+                end: s.end,
+                source_text: combined_text,
+            })
+        }
+        (Some(f), None) => Some(f.clone()),
+        (None, Some(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn parse_program(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let source_info = extract_source_info(pair.as_span(), filename, source_text);
+    let mut stmts = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::stmt => {
+                stmts.push(Arc::new(parse_stmt(inner, filename, source_text)));
+            }
+            Rule::EOI => {}
+            _ => unreachable!("Unexpected rule in program: {:?}", inner.as_rule()),
+        }
+    }
+    Node {
+        source_info: source_info.clone(),
+        value: Program(ProgramNode {
+            expressions: stmts,
+            source_info,
+        }),
+    }
+}
+
+fn parse_stmt(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let inner = pair.into_inner().next().unwrap();
+    let source_info = extract_source_info(inner.as_span(), filename, source_text);
+    match inner.as_rule() {
+        Rule::method_return => {
+            let expr = inner.into_inner().next().unwrap();
+            Node {
+                source_info,
+                value: MethodReturn(MethodReturnNode {
+                    value: Arc::new(parse_expr(expr, filename, source_text)),
+                }),
+            }
+        }
+        Rule::yield_return => {
+            let expr = inner.into_inner().next().unwrap();
+            Node {
+                source_info,
+                value: YieldReturn(YieldReturnNode {
+                    value: Arc::new(parse_expr(expr, filename, source_text)),
+                }),
+            }
+        }
+        Rule::block_return => {
+            let expr = inner.into_inner().next().unwrap();
+            Node {
+                source_info,
+                value: BlockReturn(BlockReturnNode {
+                    value: Arc::new(parse_expr(expr, filename, source_text)),
+                }),
+            }
+        }
+        Rule::assignment => parse_assignment(inner, filename, source_text),
+        Rule::bang3 => Node {
+            source_info,
+            value: Bang3,
+        },
+        Rule::dot3 => Node {
+            source_info,
+            value: Dot3,
+        },
+        Rule::huh3 => Node {
+            source_info,
+            value: Huh3,
+        },
+        Rule::expr => parse_expr(inner, filename, source_text),
+        _ => unreachable!(),
+    }
+}
+
+fn parse_assignment(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let source_info = extract_source_info(pair.as_span(), filename, source_text);
+    let mut inner_pairs: Vec<_> = pair.into_inner().collect();
+    let rvalue = inner_pairs.pop().unwrap();
+    let lvalues: Vec<_> = inner_pairs
+        .into_iter()
+        .map(|lv| Arc::new(parse_lvalue(lv, filename, source_text)))
+        .collect();
+    Node {
+        source_info,
+        value: Assignment(AssignmentNode {
+            lvalues,
+            rvalue: Arc::new(parse_expr(rvalue, filename, source_text)),
+        }),
+    }
+}
+
+fn parse_lvalue(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let inner = pair.into_inner().next().unwrap();
+    let source_info = extract_source_info(inner.as_span(), filename, source_text);
+    match inner.as_rule() {
+        Rule::splat_ignored_lvalue => Node {
+            source_info,
+            value: IgnoredSplatLValue,
+        },
+        Rule::splat_lvalue => {
+            let nsvar = inner.into_inner().next().unwrap();
+            Node {
+                source_info,
+                value: SplatLValue(SplatLValueNode {
+                    identifier: Arc::new(parse_nsvarident(nsvar, filename, source_text)),
+                }),
+            }
+        }
+        Rule::ignored_lvalue => Node {
+            source_info,
+            value: IgnoredLValue,
+        },
+        Rule::ident_lvalue => {
+            let nsvar = inner.into_inner().next().unwrap();
+            Node {
+                source_info,
+                value: IdentLValue(IdentLValueNode {
+                    identifier: Arc::new(parse_nsvarident(nsvar, filename, source_text)),
+                }),
+            }
+        }
+        Rule::sub_lvalue => {
+            let lvs: Vec<_> = inner
+                .into_inner()
+                .map(|lv| Arc::new(parse_lvalue(lv, filename, source_text)))
+                .collect();
+            Node {
+                source_info,
+                value: SubLValue(SubLValueNode { lvalues: lvs }),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_expr(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let pairs = pair.into_inner();
+    PRATT_PARSER
+        .map_primary(|primary| parse_primary(primary, filename, source_text))
+        .map_prefix(|op, rhs| {
+            let op_str = op.as_str();
+            let op_type = match op_str {
+                "-" => UnaryOperatorType::Sub,
+                "+" => UnaryOperatorType::Add,
+                "!" => UnaryOperatorType::Bang,
+                "%" => UnaryOperatorType::Mod,
+                _ => UnaryOperatorType::Unknown,
+            };
+            let source_info = combine_source_info(
+                &extract_source_info(op.as_span(), filename, source_text),
+                &rhs.source_info,
+                source_text,
+            );
+            Node {
+                source_info,
+                value: UnaryOperator(UnaryOperatorNode {
+                    operator: op_type,
+                    right: Arc::new(rhs),
+                }),
+            }
+        })
+        .map_postfix(|lhs, op| {
+            let call_sig = op.into_inner().next().unwrap();
+            let sig_args = parse_call_sig(call_sig, filename, source_text);
+            let end_span = sig_args
+                .signature
+                .identifiers
+                .last()
+                .and_then(|id| id.source_info.as_ref())
+                .map(|si| si.end)
+                .unwrap_or_else(|| lhs.source_info.as_ref().map(|si| si.end).unwrap_or(0));
+            let source_info = combine_source_info(
+                &lhs.source_info,
+                &Some(SourceInfo {
+                    filename: filename.to_string(),
+                    line: 0,
+                    column: 0,
+                    start: lhs.source_info.as_ref().map(|si| si.start).unwrap_or(0),
+                    end: end_span,
+                    source_text: None,
+                }),
+                source_text,
+            );
+            Node {
+                source_info,
+                value: MethodCall(MethodCallNode {
+                    subject: Some(Arc::new(lhs)),
+                    arguments: Arc::new(sig_args),
+                }),
+            }
+        })
+        .map_infix(|lhs, op, rhs| {
+            let source_info = combine_source_info(&lhs.source_info, &rhs.source_info, source_text);
+            match op.as_rule() {
+                Rule::op_class_ext => {
+                    let block_node = match rhs.value {
+                        Block(b) => b,
+                        _ => unreachable!("Class extension right hand side must be a block"),
+                    };
+                    Node {
+                        source_info,
+                        value: ClassExtension(ClassExtensionNode {
+                            expression: Arc::new(lhs),
+                            block: Arc::new(block_node),
+                        }),
+                    }
+                }
+                Rule::op_range => {
+                    Node {
+                        source_info,
+                        value: BinaryOperator(BinaryOperatorNode {
+                            operator: BinaryOperatorType::Range,
+                            left: Arc::new(lhs),
+                            right: Arc::new(rhs),
+                        }),
+                    }
+                }
+                _ => {
+                    let op_type = match op.as_rule() {
+                        Rule::op_or => BinaryOperatorType::Or,
+                        Rule::op_and => BinaryOperatorType::And,
+                        Rule::op_eq => BinaryOperatorType::Eq,
+                        Rule::op_ne => BinaryOperatorType::NotEq,
+                        Rule::op_lt => BinaryOperatorType::Lt,
+                        Rule::op_le => BinaryOperatorType::LtEq,
+                        Rule::op_gt => BinaryOperatorType::Gt,
+                        Rule::op_ge => BinaryOperatorType::GtEq,
+                        Rule::op_match => BinaryOperatorType::Match,
+                        Rule::op_add => BinaryOperatorType::Add,
+                        Rule::op_sub => BinaryOperatorType::Sub,
+                        Rule::op_mul => BinaryOperatorType::Mul,
+                        Rule::op_div => BinaryOperatorType::Div,
+                        Rule::op_mod => BinaryOperatorType::Mod,
+                        _ => BinaryOperatorType::Unknown,
+                    };
+                    Node {
+                        source_info,
+                        value: BinaryOperator(BinaryOperatorNode {
+                            operator: op_type,
+                            left: Arc::new(lhs),
+                            right: Arc::new(rhs),
+                        }),
+                    }
+                }
+            }
+        })
+        .parse(pairs)
+}
+
+fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let inner = pair.into_inner().next().unwrap();
+    let source_info = extract_source_info(inner.as_span(), filename, source_text);
+    match inner.as_rule() {
+        Rule::nested_expr => {
+            let expr = inner.into_inner().next().unwrap();
+            parse_expr(expr, filename, source_text)
+        }
+        Rule::user_list_expr => {
+            let mut pairs = inner.into_inner();
+            let start_pair = pairs.next().unwrap(); // USER_LIST_START
+            let start_str = start_pair.as_str();
+            let ident_name = start_str
+                .trim_start_matches('#')
+                .trim_end_matches('(')
+                .to_string();
+
+            let mut values = Vec::new();
+            for expr in pairs {
+                values.push(Arc::new(parse_expr(expr, filename, source_text)));
+            }
+            Node {
+                source_info,
+                value: UserList(UserListNode {
+                    identifier: Arc::new(IdentifierNode {
+                        source_info: None,
+                        namespace: None,
+                        name: ident_name,
+                        identifier_type: IdentifierType::Local,
+                    }),
+                    values,
+                }),
+            }
+        }
+        Rule::list_expr => {
+            let values: Vec<_> = inner
+                .into_inner()
+                .map(|expr| Arc::new(parse_expr(expr, filename, source_text)))
+                .collect();
+            Node {
+                source_info,
+                value: List(ListNode { values }),
+            }
+        }
+        Rule::set_expr => {
+            let values: Vec<_> = inner
+                .into_inner()
+                .map(|expr| Arc::new(parse_expr(expr, filename, source_text)))
+                .collect();
+            Node {
+                source_info,
+                value: Set(SetNode { values }),
+            }
+        }
+        Rule::dict_expr => {
+            let mut keys = Vec::new();
+            let mut values = Vec::new();
+            let mut pairs = inner.into_inner();
+            while let Some(k) = pairs.next() {
+                let v = pairs.next().unwrap();
+                keys.push(Arc::new(parse_expr(k, filename, source_text)));
+                values.push(Arc::new(parse_expr(v, filename, source_text)));
+            }
+            Node {
+                source_info,
+                value: Map(MapNode { keys, values }),
+            }
+        }
+        Rule::number_expr => {
+            let raw = inner.as_str();
+            if raw.contains('.') {
+                let val: f64 = raw.parse().unwrap();
+                Node {
+                    source_info,
+                    value: Double(DoubleNode { value: val }),
+                }
+            } else {
+                let val: i64 = raw.parse().unwrap();
+                Node {
+                    source_info,
+                    value: Integer(IntegerNode { value: val }),
+                }
+            }
+        }
+        Rule::string_expr => {
+            let raw = inner.as_str();
+            let string_val = raw.substring(1, raw.len() - 1).to_string();
+            let unescaped = unescape(string_val);
+            Node {
+                source_info,
+                value: Str(StringNode { value: unescaped }),
+            }
+        }
+        Rule::symbol_expr => {
+            let raw_symbol = inner.as_str();
+            let symbol_val = raw_symbol
+                .trim_start_matches(&['#', '\''])
+                .trim_end_matches('\'')
+                .to_string();
+            Node {
+                source_info,
+                value: Symbol(SymbolNode { value: symbol_val }),
+            }
+        }
+        Rule::definition_expr => {
+            parse_definition_expr(inner, filename, source_text)
+        }
+        Rule::block_expr => {
+            let block_pair = inner.into_inner().next().unwrap();
+            parse_block(block_pair, filename, source_text)
+        }
+        Rule::def_call_expr => {
+            let call_sig_pair = inner.into_inner().next().unwrap();
+            let sig_args = parse_call_sig(call_sig_pair, filename, source_text);
+            Node {
+                source_info,
+                value: MethodCall(MethodCallNode {
+                    subject: None,
+                    arguments: Arc::new(sig_args),
+                }),
+            }
+        }
+        Rule::nsvarident_expr => {
+            let nsvar = inner.into_inner().next().unwrap();
+            let id = parse_nsvarident(nsvar, filename, source_text);
+            Node {
+                source_info,
+                value: Identifier(id),
+            }
+        }
+        Rule::regex_expr => {
+            let raw_regex = inner.as_str().to_string();
+            Node {
+                source_info,
+                value: Regex(RegexNode { value: raw_regex }),
+            }
+        }
+        Rule::user_string_expr => {
+            let raw_string = inner.as_str();
+            let string_start = raw_string
+                .find('\'')
+                .unwrap_or_else(|| panic!("Invalid user string: {}", raw_string));
+            let ident_string = raw_string.substring(1, string_start);
+            let string_string = raw_string
+                .substring(string_start + 1, raw_string.len() - 1)
+                .to_string();
+            let unescaped_string = unescape(string_string);
+            Node {
+                source_info,
+                value: UserString(UserStringNode {
+                    identifier: Arc::new(IdentifierNode {
+                        source_info: None,
+                        namespace: None,
+                        name: ident_string.to_string(),
+                        identifier_type: IdentifierType::Local,
+                    }),
+                    value: unescaped_string,
+                }),
+            }
+        }
+        _ => unreachable!("Unexpected primary expression rule: {:?}", inner.as_rule()),
+    }
+}
+
+fn parse_block(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let source_info = extract_source_info(pair.as_span(), filename, source_text);
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::named_block_w_decls => {
+            let mut pairs = inner.into_inner();
+            let sym = pairs.next().unwrap();
+            let raw_symbol = sym.as_str();
+            let symbol_val = raw_symbol
+                .trim_start_matches(&['#', '\''])
+                .trim_end_matches('\'')
+                .to_string();
+            let symbol_node = SymbolNode { value: symbol_val };
+            let block_decls = pairs.next().unwrap();
+            let (arguments, decls, decl_block) =
+                parse_block_decls(block_decls, filename, source_text);
+            let mut statements = Vec::new();
+            for stmt in pairs {
+                statements.push(Arc::new(parse_stmt(stmt, filename, source_text)));
+            }
+            Node {
+                source_info: source_info.clone(),
+                value: Block(BlockNode {
+                    arguments,
+                    decls,
+                    decl_block,
+                    statements,
+                    name: Some(Arc::new(symbol_node)),
+                    source_info,
+                }),
+            }
+        }
+        Rule::block_w_decls => {
+            let mut pairs = inner.into_inner();
+            let block_decls = pairs.next().unwrap();
+            let (arguments, decls, decl_block) =
+                parse_block_decls(block_decls, filename, source_text);
+            let mut statements = Vec::new();
+            for stmt in pairs {
+                statements.push(Arc::new(parse_stmt(stmt, filename, source_text)));
+            }
+            Node {
+                source_info: source_info.clone(),
+                value: Block(BlockNode {
+                    arguments,
+                    decls,
+                    decl_block,
+                    statements,
+                    name: None,
+                    source_info,
+                }),
+            }
+        }
+        Rule::block_no_decls => {
+            let pairs = inner.into_inner();
+            let mut statements = Vec::new();
+            for stmt in pairs {
+                statements.push(Arc::new(parse_stmt(stmt, filename, source_text)));
+            }
+            Node {
+                source_info: source_info.clone(),
+                value: Block(BlockNode {
+                    arguments: vec![],
+                    decls: vec![],
+                    decl_block: None,
+                    statements,
+                    name: None,
+                    source_info,
+                }),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_block_decls(
+    pair: Pair<Rule>,
+    filename: &str,
+    source_text: &str,
+) -> (
+    Vec<Arc<BlockArgNode>>,
+    Vec<Arc<BlockDeclNode>>,
+    Option<Arc<BlockNode>>,
+) {
+    let mut arguments = Vec::new();
+    let mut decls = Vec::new();
+    let mut decl_block = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::op_dash => {}
+            Rule::block_arg => {
+                let arg = parse_block_arg(inner, filename, source_text);
+                arguments.push(Arc::new(arg));
+            }
+            Rule::block => {
+                let blk = parse_block(inner, filename, source_text);
+                if let Block(b) = blk.value {
+                    decl_block = Some(Arc::new(b));
+                } else {
+                    unreachable!();
+                }
+            }
+            Rule::block_decl => {
+                let decl = parse_block_decl(inner, filename, source_text);
+                decls.push(Arc::new(decl));
+            }
+            _ => unreachable!(),
+        }
+    }
+    (arguments, decls, decl_block)
+}
+
+fn parse_block_arg(pair: Pair<Rule>, filename: &str, source_text: &str) -> BlockArgNode {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::block_arg_ignored => BlockArgNode {
+            identifier: Arc::new(IdentifierNode {
+                source_info: None,
+                namespace: None,
+                name: "_".to_string(),
+                identifier_type: IdentifierType::Local,
+            }),
+            type_hint: None,
+        },
+        Rule::block_arg_typed => {
+            let mut inner_pairs = inner.into_inner();
+            let arg_id = inner_pairs.next().unwrap();
+            let type_hint_id = inner_pairs.next().unwrap();
+            BlockArgNode {
+                identifier: Arc::new(parse_arg_ident(arg_id, filename, source_text)),
+                type_hint: Some(Arc::new(parse_ident(type_hint_id, filename, source_text))),
+            }
+        }
+        Rule::block_arg_untyped => {
+            let arg_id = inner.into_inner().next().unwrap();
+            BlockArgNode {
+                identifier: Arc::new(parse_arg_ident(arg_id, filename, source_text)),
+                type_hint: None,
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_block_decl(pair: Pair<Rule>, filename: &str, source_text: &str) -> BlockDeclNode {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::block_decl_typed => {
+            let mut inner_pairs = inner.into_inner();
+            let arg_id = inner_pairs.next().unwrap();
+            let type_hint_id = inner_pairs.next().unwrap();
+            BlockDeclNode {
+                identifier: Arc::new(parse_arg_ident(arg_id, filename, source_text)),
+                type_hint: Some(Arc::new(parse_ident(type_hint_id, filename, source_text))),
+            }
+        }
+        Rule::block_decl_untyped => {
+            let arg_id = inner.into_inner().next().unwrap();
+            BlockDeclNode {
+                identifier: Arc::new(parse_arg_ident(arg_id, filename, source_text)),
+                type_hint: None,
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_arg_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> IdentifierNode {
+    let inner = pair.into_inner().next().unwrap();
+    let source_info = extract_source_info(inner.as_span(), filename, source_text);
+    match inner.as_rule() {
+        Rule::arg_ident_inst => {
+            let ident_pair = inner.into_inner().next().unwrap();
+            IdentifierNode {
+                source_info,
+                namespace: None,
+                name: ident_pair.as_str().to_string(),
+                identifier_type: IdentifierType::Instance,
+            }
+        }
+        Rule::arg_ident_normal => {
+            let ident_pair = inner.into_inner().next().unwrap();
+            IdentifierNode {
+                source_info,
+                namespace: None,
+                name: ident_pair.as_str().to_string(),
+                identifier_type: IdentifierType::Local,
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> IdentifierNode {
+    let source_info = extract_source_info(pair.as_span(), filename, source_text);
+    let inner = pair.into_inner().next().unwrap();
+    let name = inner.as_str().to_string();
+    let identifier_type = match inner.as_rule() {
+        Rule::keyword => IdentifierType::Keyword,
+        _ => IdentifierType::Local,
+    };
+    IdentifierNode {
+        source_info,
+        namespace: None,
+        name,
+        identifier_type,
+    }
+}
+
+fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let source_info = extract_source_info(pair.as_span(), filename, source_text);
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::class_def_2 => {
+            let mut pairs = inner.into_inner();
+            let parent_id = parse_nsvarident(pairs.next().unwrap(), filename, source_text);
+            let child_id = parse_nsvarident(pairs.next().unwrap(), filename, source_text);
+            let block_pair = pairs.next().unwrap();
+            let block_node = match parse_block(block_pair, filename, source_text).value {
+                Block(b) => b,
+                _ => unreachable!(),
+            };
+            Node {
+                source_info,
+                value: ClassDefinition(ClassDefinitionNode {
+                    identifier: Arc::new(child_id),
+                    parent_identifier: Some(Arc::new(parent_id)),
+                    block: Arc::new(block_node),
+                }),
+            }
+        }
+        Rule::class_def => {
+            let mut pairs = inner.into_inner();
+            let child_id = parse_nsvarident(pairs.next().unwrap(), filename, source_text);
+            let block_pair = pairs.next().unwrap();
+            let block_node = match parse_block(block_pair, filename, source_text).value {
+                Block(b) => b,
+                _ => unreachable!(),
+            };
+            Node {
+                source_info,
+                value: ClassDefinition(ClassDefinitionNode {
+                    identifier: Arc::new(child_id),
+                    parent_identifier: None,
+                    block: Arc::new(block_node),
+                }),
+            }
+        }
+        Rule::const_def => {
+            let mut pairs = inner.into_inner();
+            let id = parse_nsvarident(pairs.next().unwrap(), filename, source_text);
+            let expr_pair = pairs.next().unwrap();
+            Node {
+                source_info,
+                value: ConstDefinition(ConstDefinitionNode {
+                    identifier: Arc::new(id),
+                    rvalue: Arc::new(parse_expr(expr_pair, filename, source_text)),
+                }),
+            }
+        }
+        Rule::method_def => {
+            let mut pairs = inner.into_inner();
+            let selector_pair = pairs.next().unwrap();
+            let selector = parse_selector(selector_pair, filename, source_text);
+            let block_pair = pairs.next().unwrap();
+            let block_node = match parse_block(block_pair, filename, source_text).value {
+                Block(b) => b,
+                _ => unreachable!(),
+            };
+            Node {
+                source_info,
+                value: MethodDefinition(MethodDefinitionNode {
+                    signature: Arc::new(selector),
+                    block: Arc::new(block_node),
+                }),
+            }
+        }
+        Rule::method_ext => {
+            let mut pairs = inner.into_inner();
+            let selector_pair = pairs.next().unwrap();
+            let selector = parse_selector(selector_pair, filename, source_text);
+            let block_pair = pairs.next().unwrap();
+            let block_node = match parse_block(block_pair, filename, source_text).value {
+                Block(b) => b,
+                _ => unreachable!(),
+            };
+            Node {
+                source_info,
+                value: MethodExtension(MethodExtensionNode {
+                    signature: Arc::new(selector),
+                    block: Arc::new(block_node),
+                }),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_selector(pair: Pair<Rule>, filename: &str, source_text: &str) -> MethodSelectorNode {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::selector_w_args => {
+            let mut identifiers = Vec::new();
+            for id_pair in inner.into_inner() {
+                let id = parse_ident(id_pair, filename, source_text);
+                identifiers.push(Arc::new(IdentifierNode {
+                    source_info: id.source_info.clone(),
+                    namespace: id.namespace.clone(),
+                    name: format!("{}:", id.name),
+                    identifier_type: id.identifier_type,
+                }));
+            }
+            MethodSelectorNode { identifiers }
+        }
+        Rule::selector_no_args_bang => {
+            let id_pair = inner.into_inner().next().unwrap();
+            let id = parse_ident(id_pair, filename, source_text);
+            MethodSelectorNode {
+                identifiers: vec![Arc::new(IdentifierNode {
+                    source_info: id.source_info.clone(),
+                    namespace: id.namespace.clone(),
+                    name: format!("{}!", id.name),
+                    identifier_type: id.identifier_type,
+                })],
+            }
+        }
+        Rule::selector_no_args => {
+            let id_pair = inner.into_inner().next().unwrap();
+            let id = parse_ident(id_pair, filename, source_text);
+            MethodSelectorNode {
+                identifiers: vec![Arc::new(id)],
+            }
+        }
+        Rule::selector_symbol => {
+            let sym_pair = inner.into_inner().next().unwrap();
+            let raw_sym = sym_pair.as_str();
+            let name = raw_sym
+                .trim_start_matches('#')
+                .trim_matches('\'')
+                .to_string();
+            let source_info = extract_source_info(sym_pair.as_span(), filename, source_text);
+            MethodSelectorNode {
+                identifiers: vec![Arc::new(IdentifierNode {
+                    source_info,
+                    namespace: None,
+                    name,
+                    identifier_type: IdentifierType::Local,
+                })],
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_call_sig(pair: Pair<Rule>, filename: &str, source_text: &str) -> MethodCallArgumentsNode {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::call_sig_w_arg => {
+            let mut idents = Vec::new();
+            let mut exprs = Vec::new();
+            let mut pairs = inner.into_inner();
+            while let Some(id_pair) = pairs.next() {
+                let expr_pair = pairs.next().unwrap();
+                let id = parse_ident(id_pair, filename, source_text);
+                idents.push(Arc::new(id));
+                exprs.push(Arc::new(parse_expr(expr_pair, filename, source_text)));
+            }
+            MethodCallArgumentsNode {
+                signature: Arc::new(MethodSelectorNode { identifiers: idents }),
+                expressions: exprs,
+            }
+        }
+        Rule::call_sig_no_arg_bang => {
+            let id_pair = inner.into_inner().next().unwrap();
+            let id = parse_ident(id_pair, filename, source_text);
+            MethodCallArgumentsNode {
+                signature: Arc::new(MethodSelectorNode {
+                    identifiers: vec![Arc::new(IdentifierNode {
+                        source_info: id.source_info.clone(),
+                        namespace: id.namespace.clone(),
+                        name: format!("{}!", id.name),
+                        identifier_type: id.identifier_type,
+                    })],
+                }),
+                expressions: vec![],
+            }
+        }
+        Rule::call_sig_no_arg => {
+            let id_pair = inner.into_inner().next().unwrap();
+            let id = parse_ident(id_pair, filename, source_text);
+            MethodCallArgumentsNode {
+                signature: Arc::new(MethodSelectorNode {
+                    identifiers: vec![Arc::new(id)],
+                }),
+                expressions: vec![],
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_nsvarident(pair: Pair<Rule>, filename: &str, source_text: &str) -> IdentifierNode {
+    let inner = pair.into_inner().next().unwrap();
+    let source_info = extract_source_info(inner.as_span(), filename, source_text);
+    match inner.as_rule() {
+        Rule::namespaced_ident => {
+            let mut inner_pairs = inner.into_inner();
+            let ns_pair = inner_pairs.next().unwrap();
+            let id_pair = inner_pairs.next().unwrap();
+            let ns_node = parse_namespace(ns_pair, filename, source_text);
+            let id = parse_ident(id_pair, filename, source_text);
+            IdentifierNode {
+                source_info,
+                namespace: Some(Arc::new(ns_node)),
+                name: id.name,
+                identifier_type: IdentifierType::Namespaced,
+            }
+        }
+        Rule::instance_ident => {
+            let id_pair = inner.into_inner().next().unwrap();
+            let id = parse_ident(id_pair, filename, source_text);
+            IdentifierNode {
+                source_info,
+                namespace: None,
+                name: id.name,
+                identifier_type: IdentifierType::Instance,
+            }
+        }
+        Rule::local_ident => {
+            let id_pair = inner.into_inner().next().unwrap();
+            let id = parse_ident(id_pair, filename, source_text);
+            IdentifierNode {
+                source_info,
+                namespace: None,
+                name: id.name,
+                identifier_type: IdentifierType::Local,
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn parse_namespace(pair: Pair<Rule>, filename: &str, source_text: &str) -> NamespaceNode {
+    let source_info = extract_source_info(pair.as_span(), filename, source_text);
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::root_ns => NamespaceNode {
+            source_info,
+            identifiers: vec![],
+        },
+        Rule::full_ns => {
+            let idents: Vec<_> = inner
+                .into_inner()
+                .map(|id_pair| Arc::new(parse_ident(id_pair, filename, source_text)))
+                .collect();
+            NamespaceNode {
+                source_info,
+                identifiers: idents,
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn unescape(s: String) -> String {
+    static ESCAPED_CHAR: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new("\\\\(u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]|[\\\\tnr\"'])").unwrap()
+    });
+
+    ESCAPED_CHAR
+        .replace_all(s.as_str(), |caps: &Captures| {
+            let s = caps[1].to_string();
+            match s.as_str().substring(0, 1) {
+                "n" => "\n".to_string(),
+                "r" => "\r".to_string(),
+                "t" => "\t".to_string(),
+                "u" => {
+                    let maybe_char = unicode_from_hex(s.substring(1, s.len()).to_string());
+                    match maybe_char {
+                        Some(x) => x.to_string(),
+                        None => panic!("Invalid unicode escape sequence \\u{s}"),
+                    }
+                }
+                "x" => {
+                    let maybe_char = unicode_from_hex(s.substring(1, s.len()).to_string());
+                    match maybe_char {
+                        Some(x) => x.to_string(),
+                        None => panic!("Invalid unicode escape sequence \\x{s}"),
+                    }
+                }
+                _ => s,
+            }
+        })
+        .to_string()
+}
+
+fn unicode_from_hex(s: String) -> Option<char> {
+    let char_num: u32 = match u32::from_str_radix(s.as_str(), 16) {
+        Ok(n) => n,
+        Err(e) => panic!("Invalid unicode hex value \\x{s}: {}", e),
+    };
+
+    char::from_u32(char_num)
 }
 
 #[cfg(test)]

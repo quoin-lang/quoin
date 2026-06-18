@@ -1,0 +1,232 @@
+// Pest Grammar for BuildingBlocks
+
+// Skipped rules (whitespace and comments)
+WHITESPACE = _{ " " | "\r" | "\n" | "\t" }
+
+COMMENT = _{
+    ("\"" ~ "*" ~ (!"\n" ~ ANY)*)
+  | ("\"" ~ "\"")
+  | ("\"" ~ !"*" ~ ("\\" ~ "\"" | !"\"" ~ ANY)* ~ "\"")
+}
+
+// Lexer Rules (Atomic)
+IDENT_PREFIX = _{ 'a'..'z' | 'A'..'Z' | "_" }
+IDENT_REST   = _{ 'a'..'z' | 'A'..'Z' | '0'..'9' | "?" | "_" }
+IDENT        = @{ IDENT_PREFIX ~ IDENT_REST* }
+
+XIDENT       = @{ IDENT_PREFIX ~ (IDENT_REST | ":")* }
+
+USER_LIST_START = @{ "#" ~ IDENT ~ "(" }
+
+SYMBOL       = @{ "#" ~ (STRING | XIDENT) }
+
+ESCAPE_SEQUENCE = _{ "\\" ~ ("t" | "n" | "r" | "\"" | "'" | "\\") | "\\" ~ ("u" | "x") ~ ASCII_HEX_DIGIT{4} }
+STRING          = @{ "'" ~ ( !("'" | "\\") ~ ANY | ESCAPE_SEQUENCE )* ~ "'" }
+
+REGEX_ESCAPE_SEQUENCE = _{ "\\" ~ ('a'..'z' | 'A'..'Z' | '0'..'9' | "\\") | "\\" ~ ("u" | "x") ~ ASCII_HEX_DIGIT{4} }
+REGEXP                = @{ "#" ~ "/" ~ ( !("/" | "\\") ~ ANY | REGEX_ESCAPE_SEQUENCE )* ~ "/" }
+
+USER_STRING           = @{ "#" ~ IDENT ~ STRING }
+
+INT    = _{ "0" | '1'..'9' ~ ASCII_DIGIT* }
+NUMBER = @{ INT ~ ("." ~ ASCII_DIGIT+)? | ("." ~ ASCII_DIGIT+) }
+
+keyword = @{ ("nil" | "true" | "false") ~ !IDENT_REST }
+
+// Definition operators with negative lookahead to prevent greedy prefix matching
+op_def  = _{ "<" ~ "-" ~ !"-" }
+op_meth = _{ "-" ~ ">" ~ !"-" }
+
+// Parser Rules
+
+program = { SOI ~ (stmt ~ ";"?)+ ~ EOI }
+
+stmt = {
+    method_return
+  | yield_return
+  | block_return
+  | assignment
+  | bang3
+  | dot3
+  | huh3
+  | expr
+}
+
+method_return = { "^" ~ "^" ~ expr }
+yield_return  = { "^" ~ ">" ~ expr }
+block_return  = { "^" ~ expr }
+
+bang3 = { "!" ~ "!" ~ "!" }
+dot3  = { "." ~ "." ~ "." }
+huh3  = { "?" ~ "?" ~ "?" }
+
+assignment = { lvalue+ ~ "=" ~ expr }
+
+lvalue = {
+    splat_ignored_lvalue
+  | splat_lvalue
+  | ignored_lvalue
+  | ident_lvalue
+  | sub_lvalue
+}
+splat_ignored_lvalue = { "*" ~ "_" }
+splat_lvalue         = { "*" ~ nsvarident }
+ignored_lvalue       = { "_" }
+ident_lvalue         = { nsvarident }
+sub_lvalue           = { "(" ~ lvalue+ ~ ")" }
+
+expr = { prefix_op* ~ primary ~ postfix_op* ~ (infix_op ~ prefix_op* ~ primary ~ postfix_op*)* }
+
+infix_op = _{
+    op_or
+  | op_and
+  | op_eq | op_ne
+  | op_class_ext | op_le | op_lt | op_ge | op_gt
+  | op_match
+  | op_add | op_sub
+  | op_mul | op_div | op_mod
+  | op_range
+}
+op_or        = { "|" ~ "|" }
+op_and       = { "&" ~ "&" }
+op_eq        = { "=" ~ "=" }
+op_ne        = { "!" ~ "=" }
+op_le        = { "<" ~ "=" }
+op_lt        = { "<" ~ !"-" ~ !"=" }
+op_ge        = { ">" ~ "=" }
+op_gt        = { ">" ~ !"=" }
+op_match     = { "~" }
+op_add       = { "+" }
+op_sub       = { "-" }
+op_mul       = { "*" }
+op_div       = { "/" }
+op_mod       = { "%" }
+op_range     = { "." ~ "." }
+op_class_ext = { "<" ~ "-" ~ "-" }
+
+prefix_op = { "+" | "-" | "!" | "%" }
+
+postfix_op = { "." ~ call_sig }
+
+// Re-ordered choices: definition_expr and user_string_expr must be tried before symbols/identifiers
+primary = {
+    nested_expr
+  | user_list_expr
+  | list_expr
+  | set_expr
+  | dict_expr
+  | definition_expr
+  | number_expr
+  | string_expr
+  | user_string_expr
+  | symbol_expr
+  | block_expr
+  | def_call_expr
+  | nsvarident_expr
+  | regex_expr
+}
+
+nested_expr      = { "(" ~ expr ~ ")" }
+user_list_expr   = { USER_LIST_START ~ expr* ~ ")" }
+list_expr        = { "#" ~ "(" ~ expr* ~ ")" }
+set_expr         = { "#" ~ "<" ~ expr* ~ ">" }
+dict_expr        = { "#" ~ "{" ~ ( expr ~ ":" ~ expr )* ~ "}" }
+number_expr      = { NUMBER }
+string_expr      = { STRING }
+symbol_expr      = { symbol }
+block_expr       = { block }
+def_call_expr    = { "." ~ call_sig }
+nsvarident_expr  = { nsvarident }
+regex_expr       = { REGEXP }
+user_string_expr = { USER_STRING }
+
+definition_expr = {
+    class_def_2
+  | class_def
+  | const_def
+  | method_def
+  | method_ext
+}
+class_def_2 = { nsvarident ~ op_def ~ nsvarident ~ op_def ~ block }
+class_def   = { nsvarident ~ op_def ~ block }
+const_def   = { nsvarident ~ op_def ~ expr }
+method_def  = { selector ~ op_meth ~ block }
+method_ext  = { selector ~ "-" ~ "-" ~ ">" ~ block }
+
+selector = {
+    selector_w_args
+  | selector_no_args_bang
+  | selector_no_args
+  | selector_symbol
+}
+selector_w_args       = { (ident ~ "+"? ~ ":")+ }
+selector_no_args_bang = { ident ~ "!" ~ !"=" }
+selector_no_args      = { ident }
+selector_symbol       = { symbol }
+
+call_sig = {
+    call_sig_w_arg
+  | call_sig_no_arg_bang
+  | call_sig_no_arg
+}
+call_sig_w_arg       = { (ident ~ ":" ~ expr)+ }
+call_sig_no_arg_bang = { ident ~ "!" ~ !"=" }
+call_sig_no_arg      = { ident }
+
+nsvarident = {
+    namespaced_ident
+  | instance_ident
+  | local_ident
+}
+namespaced_ident = { namespace ~ ident }
+instance_ident   = { "@" ~ ident }
+local_ident      = { ident }
+
+namespace = {
+    root_ns
+  | full_ns
+}
+root_ns = { "[" ~ "/" ~ "]" }
+full_ns = { "[" ~ ident ~ ("/" ~ ident)* ~ "/"? ~ "]" }
+
+ident = { keyword | IDENT }
+
+symbol = @{ "#" ~ (STRING | XIDENT) }
+
+block = {
+    named_block_w_decls
+  | block_w_decls
+  | block_no_decls
+}
+named_block_w_decls = { "{" ~ symbol ~ block_decls ~ (stmt ~ ";"?)* ~ "}" }
+block_w_decls       = { "{" ~ block_decls ~ (stmt ~ ";"?)* ~ "}" }
+block_no_decls      = { "{" ~ (stmt ~ ";"?)* ~ "}" }
+
+op_dash = { "-" }
+block_decls = {
+    "|" ~ block_arg* ~ block? ~ op_dash ~ block_decl* ~ "|"
+  | "|" ~ block_arg* ~ block? ~ "|"
+}
+
+block_arg = {
+    block_arg_ignored
+  | block_arg_typed
+  | block_arg_untyped
+}
+block_arg_ignored = { "_" }
+block_arg_typed   = { arg_ident ~ ":" ~ ident }
+block_arg_untyped = { arg_ident }
+
+block_decl = {
+    block_decl_typed
+  | block_decl_untyped
+}
+block_decl_typed   = { arg_ident ~ ":" ~ ident }
+block_decl_untyped = { arg_ident }
+
+arg_ident = {
+    arg_ident_inst
+  | arg_ident_normal
+}
+arg_ident_inst   = { "@" ~ ident }
+arg_ident_normal = { ident }
