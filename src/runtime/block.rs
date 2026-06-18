@@ -1,5 +1,3 @@
-#![allow(no_gc_across_yield)]
-
 use crate::arg;
 use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};
@@ -82,12 +80,14 @@ pub fn build_block_class() -> NativeClassBuilder {
         )
         .instance_method("catch:", |vm, mc, args| {
             let receiver_block = arg!(args, Block, 0);
-            let catch_block = arg!(args, Block, 1);
 
             let initial_frame_count = vm.frames.len();
-            match vm.execute_block(mc, receiver_block, Vec::new(), None) {
+            let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
+            match res {
                 Ok(val) => Ok(val),
                 Err(e) => {
+                    let active_args = vm.active_native_args.last().unwrap();
+                    let catch_block = arg!(active_args, Block, 1);
                     while vm.frames.len() > initial_frame_count {
                         vm.frames.pop();
                     }
@@ -103,14 +103,14 @@ pub fn build_block_class() -> NativeClassBuilder {
         })
         .instance_method("catch:finally:", |vm, mc, args| {
             let receiver_block = arg!(args, Block, 0);
-            let catch_block = arg!(args, Block, 1);
-            let finally_block = arg!(args, Block, 2);
 
             let initial_frame_count = vm.frames.len();
             let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
             match res {
                 Ok(val) => {
                     vm.push(val);
+                    let active_args = vm.active_native_args.last().unwrap();
+                    let finally_block = arg!(active_args, Block, 2);
                     let finally_res = vm.execute_block(mc, finally_block, Vec::new(), None);
                     let val = vm.pop()?;
                     finally_res.map(|_| val)
@@ -125,34 +125,41 @@ pub fn build_block_class() -> NativeClassBuilder {
                         vm.new_string(mc, format!("{}", e))
                     };
 
+                    let active_args = vm.active_native_args.last().unwrap();
+                    let catch_block = arg!(active_args, Block, 1);
                     let catch_res = vm.execute_block(mc, catch_block, vec![exception_val], None);
                     while vm.frames.len() > initial_frame_count {
                         vm.frames.pop();
                     }
 
-                    // Root catch_res if Ok
-                    let ok_val = match &catch_res {
-                        Ok(val) => Some(*val),
-                        Err(_) => None,
+                    // Root catch_res if Ok using stack
+                    let catch_res_err = match catch_res {
+                        Ok(val) => {
+                            vm.push(val);
+                            Ok(())
+                        }
+                        Err(err) => Err(err),
                     };
-                    if let Some(val) = ok_val {
-                        vm.push(val);
-                    }
 
+                    let active_args = vm.active_native_args.last().unwrap();
+                    let finally_block = arg!(active_args, Block, 2);
                     let finally_res = vm.execute_block(mc, finally_block, Vec::new(), None);
 
-                    let catch_res = if let Some(_) = ok_val {
-                        let val = vm.pop()?;
-                        if finally_res.is_err() {
-                            finally_res.map(|_| val)
-                        } else {
-                            Ok(val)
+                    let catch_res = match catch_res_err {
+                        Ok(()) => {
+                            let val = vm.pop()?;
+                            if finally_res.is_err() {
+                                finally_res.map(|_| val)
+                            } else {
+                                Ok(val)
+                            }
                         }
-                    } else {
-                        if finally_res.is_err() {
-                            finally_res.map(|_| vm.new_nil(mc))
-                        } else {
-                            catch_res
+                        Err(err) => {
+                            if finally_res.is_err() {
+                                finally_res.map(|_| vm.new_nil(mc))
+                            } else {
+                                Err(err)
+                            }
                         }
                     };
                     catch_res

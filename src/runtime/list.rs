@@ -1,5 +1,3 @@
-#![allow(no_gc_across_yield)]
-
 use crate::arg;
 use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
@@ -277,7 +275,8 @@ pub fn build_list_class() -> NativeClassBuilder {
             for i in 1..len {
                 let mut j = i;
                 while j > 0 {
-                    let (val_prev, val_curr) = args[0]
+                    let active_args = vm.active_native_args.last().unwrap();
+                    let (val_prev, val_curr) = active_args[0]
                         .with_native_state::<NativeListState, _, _>(|l| {
                             (l.get_vec()[j - 1], l.get_vec()[j])
                         })
@@ -292,7 +291,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                     };
 
                     if gt_res {
-                        args[0]
+                        let active_args = vm.active_native_args.last().unwrap();
+                        active_args[0]
                             .with_native_state_mut(mc, |l: &mut NativeListState| {
                                 l.get_vec_mut().swap(j - 1, j);
                             })
@@ -304,7 +304,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                 }
             }
 
-            Ok(args[0])
+            let active_args = vm.active_native_args.last().unwrap();
+            Ok(active_args[0])
         })
         .instance_method("sort:", |vm, mc, args| {
             let block_gc = arg!(args, Block, 1);
@@ -317,23 +318,31 @@ pub fn build_list_class() -> NativeClassBuilder {
                 for i in 1..len {
                     let mut j = i;
                     while j > 0 {
-                        let (val_prev, val_curr) = args[0]
+                        let active_args = vm.active_native_args.last().unwrap();
+                        let val_prev = active_args[0]
                             .with_native_state::<NativeListState, _, _>(|l| {
-                                (l.get_vec()[j - 1], l.get_vec()[j])
+                                l.get_vec()[j - 1]
                             })
                             .map_err(|e| BBError::Other(e))?;
 
                         let key_lhs = vm.call_method(
                             mc,
-                            args[1],
+                            active_args[1],
                             "valueWithArgs:",
                             vec![vm.new_list(mc, vec![val_prev])],
                         )?;
                         vm.push(key_lhs);
 
+                        let active_args = vm.active_native_args.last().unwrap();
+                        let val_curr = active_args[0]
+                            .with_native_state::<NativeListState, _, _>(|l| {
+                                l.get_vec()[j]
+                            })
+                            .map_err(|e| BBError::Other(e))?;
+
                         let key_rhs = vm.call_method(
                             mc,
-                            args[1],
+                            active_args[1],
                             "valueWithArgs:",
                             vec![vm.new_list(mc, vec![val_curr])],
                         )?;
@@ -348,7 +357,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                         };
 
                         if gt_res {
-                            args[0]
+                            let active_args = vm.active_native_args.last().unwrap();
+                            active_args[0]
                                 .with_native_state_mut(mc, |l: &mut NativeListState| {
                                     l.get_vec_mut().swap(j - 1, j);
                                 })
@@ -363,7 +373,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                 for i in 1..len {
                     let mut j = i;
                     while j > 0 {
-                        let (val_prev, val_curr) = args[0]
+                        let active_args = vm.active_native_args.last().unwrap();
+                        let (val_prev, val_curr) = active_args[0]
                             .with_native_state::<NativeListState, _, _>(|l| {
                                 (l.get_vec()[j - 1], l.get_vec()[j])
                             })
@@ -371,13 +382,14 @@ pub fn build_list_class() -> NativeClassBuilder {
 
                         let res = vm.call_method(
                             mc,
-                            args[1],
+                            active_args[1],
                             "valueWithArgs:",
                             vec![vm.new_list(mc, vec![val_prev, val_curr])],
                         )?;
 
                         if !res.is_true() {
-                            args[0]
+                            let active_args = vm.active_native_args.last().unwrap();
+                            active_args[0]
                                 .with_native_state_mut(mc, |l: &mut NativeListState| {
                                     l.get_vec_mut().swap(j - 1, j);
                                 })
@@ -390,6 +402,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                 }
             }
 
-            Ok(args[0])
+            let active_args = vm.active_native_args.last().unwrap();
+            Ok(active_args[0])
         })
 }

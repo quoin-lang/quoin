@@ -87,6 +87,7 @@ pub struct VmState<'gc> {
     #[collect(require_static)]
     pub yielder: Option<*const ()>,
     pub active_fiber: Option<Gc<'gc, Fiber<'gc>>>,
+    pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 }
 
 pub enum VmStatus<'gc> {
@@ -249,6 +250,7 @@ impl<'gc> VmState<'gc> {
             active_native_args: Vec::new(),
             yielder: None,
             active_fiber: None,
+            last_popped_env: None,
         }
     }
 
@@ -1904,7 +1906,8 @@ impl<'gc> VmState<'gc> {
             None => {
                 // Implicit return Nil
                 let ret_val = self.new_nil(mc);
-                self.frames.pop();
+                let popped = self.frames.pop().unwrap();
+                self.last_popped_env = Some(popped.env);
                 self.push(ret_val);
                 return Ok(VmStatus::Running);
             }
@@ -2076,6 +2079,7 @@ impl<'gc> VmState<'gc> {
             Instruction::Return | Instruction::BlockReturn => {
                 let mut ret_val = self.pop()?;
                 let popped_frame = self.frames.pop().unwrap();
+                self.last_popped_env = Some(popped_frame.env);
                 self.stack.truncate(popped_frame.stack_base);
                 if let Some(obj) = popped_frame.instantiating_obj {
                     self.push(Value::Object(obj));
@@ -2097,6 +2101,7 @@ impl<'gc> VmState<'gc> {
                     let mut ret_val = ret_val;
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
+                        self.last_popped_env = Some(f.env);
                         if let Some(obj) = f.instantiating_obj {
                             self.push(Value::Object(obj));
                             let env_borrow = f.env.borrow();

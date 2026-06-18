@@ -1,5 +1,3 @@
-#![allow(no_gc_across_yield)]
-
 use crate::arg;
 use crate::error::BBError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, OpaqueState, Value};
@@ -227,16 +225,13 @@ impl AnyCollect for NativeKeyValuePairState {
 pub fn build_key_value_pair_class() -> NativeClassBuilder {
     NativeClassBuilder::new("KeyValuePair", Some("Object"))
         .class_method("new:", |vm, mc, args| {
-            let class_obj = match args[0] {
-                Value::Class(c) => c,
-                _ => {
-                    return Err(BBError::TypeError {
-                        expected: "Class".to_string(),
-                        got: args[0].type_name().to_string(),
-                        msg: "new: expects Class receiver".to_string(),
-                    });
-                }
-            };
+            if !matches!(args[0], Value::Class(_)) {
+                return Err(BBError::TypeError {
+                    expected: "Class".to_string(),
+                    got: args[0].type_name().to_string(),
+                    msg: "new: expects Class receiver".to_string(),
+                });
+            }
             let block = if let Value::Object(obj) = args[1]
                 && let ObjectPayload::Block(b) = &obj.borrow().payload
             {
@@ -251,8 +246,6 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             let initial_frame_count = vm.frames.len();
             vm.start_block(mc, block, Vec::new(), None, None);
-
-            let env_ref = vm.frames.last().unwrap().env;
 
             while vm.frames.len() > initial_frame_count {
                 match vm.step_internal(mc) {
@@ -280,6 +273,10 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             // Pop the block's return value to clean up the stack
             let _block_ret = vm.pop().map_err(|e| BBError::Other(e))?;
 
+            // Retrieve environment from the last popped frame recorded in VmState
+            let env_ref = vm.last_popped_env.ok_or_else(|| {
+                BBError::Other("Missing environment from block execution".to_string())
+            })?;
             let env_borrow = env_ref.borrow();
             let key = env_borrow
                 .vars
@@ -294,6 +291,17 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             let state = NativeKeyValuePairState::new(key, value);
             let boxed_state: Box<dyn AnyCollect> = Box::new(state);
+            let active_class_val = vm.active_native_args.last().unwrap()[0];
+            let class_obj = match active_class_val {
+                Value::Class(c) => c,
+                _ => {
+                    return Err(BBError::TypeError {
+                        expected: "Class".to_string(),
+                        got: active_class_val.type_name().to_string(),
+                        msg: "new: expects Class receiver".to_string(),
+                    });
+                }
+            };
             let obj = vm.new_object(mc, class_obj);
             obj.borrow_mut(mc).payload =
                 ObjectPayload::NativeState(crate::gc!(mc, RefLock::new(boxed_state)));
@@ -319,10 +327,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             Ok(value)
         })
         .instance_method("s", |vm, mc, args| {
-            let (key, value) =
-                args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
-                    (kvp.get_key(), kvp.get_value())
-                })?;
+            let key = args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
 
             let key_s_val = vm.call_method(mc, key, "s", vec![])?;
             let key_s = if let Value::Object(obj) = key_s_val
@@ -332,6 +337,9 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             } else {
                 format!("{}", key_s_val)
             };
+
+            let active_receiver = vm.active_native_args.last().unwrap()[0];
+            let value = active_receiver.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
 
             let val_s_val = vm.call_method(mc, value, "s", vec![])?;
             let val_s = if let Value::Object(obj) = val_s_val
@@ -345,23 +353,25 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, format!("{}:{}", key_s, val_s)))
         })
         .instance_method("==:", |vm, mc, args| {
-            let (lhs_key, lhs_val) =
-                args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
-                    (kvp.get_key(), kvp.get_value())
-                })?;
-            let rhs_state = args[1].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
-                (kvp.get_key(), kvp.get_value())
-            });
-            match rhs_state {
-                Ok((rhs_key, rhs_val)) => {
-                    let keys_eq = vm.call_method(mc, lhs_key, "==:", vec![rhs_key])?.is_true();
-                    if !keys_eq {
-                        return Ok(vm.new_bool(mc, false));
-                    }
-                    let vals_eq = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
-                    Ok(vm.new_bool(mc, vals_eq))
-                }
-                Err(_) => Ok(vm.new_bool(mc, false)),
+            let lhs_key = args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
+            let rhs_key_res = args[1].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key());
+            let rhs_key = match rhs_key_res {
+                Ok(k) => k,
+                Err(_) => return Ok(vm.new_bool(mc, false)),
+            };
+
+            let keys_eq = vm.call_method(mc, lhs_key, "==:", vec![rhs_key])?.is_true();
+            if !keys_eq {
+                return Ok(vm.new_bool(mc, false));
             }
+
+            let active_lhs = vm.active_native_args.last().unwrap()[0];
+            let active_rhs = vm.active_native_args.last().unwrap()[1];
+
+            let lhs_val = active_lhs.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
+            let rhs_val = active_rhs.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
+
+            let vals_eq = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
+            Ok(vm.new_bool(mc, vals_eq))
         })
 }

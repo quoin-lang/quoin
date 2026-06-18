@@ -1,5 +1,3 @@
-#![allow(no_gc_across_yield)]
-
 use crate::arg;
 use crate::error::BBError;
 use crate::value::{NativeClassBuilder, OpaqueState, Value};
@@ -199,6 +197,9 @@ fn get_io_string<'gc>(
     mc: &Mutation<'gc>,
     val: Value<'gc>,
 ) -> Result<String, BBError> {
+    let val_type_name = val.type_name().to_string();
+    let val_debug = format!("{:?}", val);
+
     if let Value::Object(obj) = val {
         let payload = obj.borrow().payload;
         if let crate::value::ObjectPayload::String(s) = payload {
@@ -221,8 +222,8 @@ fn get_io_string<'gc>(
     }
     Err(BBError::TypeError {
         expected: "String or ANSI".to_string(),
-        got: val.type_name().to_string(),
-        msg: format!("Expected String or ANSI (got {:?})", val),
+        got: val_type_name,
+        msg: format!("Expected String or ANSI (got {})", val_debug),
     })
 }
 
@@ -262,7 +263,8 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             let s = get_io_string(vm, mc, args[1])?;
             let bytes = s.into_bytes();
 
-            args[0].with_native_state_mut(mc, |h: &mut NativeIoHandle| {
+            let active_receiver = vm.active_native_args.last().unwrap()[0];
+            active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| {
                 match &mut h.wrapper {
                     NativeIoHandleWrapper::Stdout(out) => {
                         out.write(&bytes)
@@ -290,7 +292,8 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             let s = get_io_string(vm, mc, args[1])?;
             let bytes = format!("{}\n", s).into_bytes();
 
-            args[0].with_native_state_mut(mc, |h: &mut NativeIoHandle| {
+            let active_receiver = vm.active_native_args.last().unwrap()[0];
+            active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| {
                 match &mut h.wrapper {
                     NativeIoHandleWrapper::Stdout(out) => {
                         out.write(&bytes)
