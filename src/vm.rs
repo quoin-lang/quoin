@@ -1,6 +1,8 @@
 use crate::error::BBError;
 use crate::fiber::{Fiber, VMYielder, YieldReason};
+use crate::highlighter::{format_ansi, HighlightParser, HighlightSpan};
 use crate::instruction::{Constant, Instruction};
+use crate::parser::parse_building_blocks_string;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::method::NativeMethodState;
@@ -10,16 +12,13 @@ use crate::value::{
     ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, gc, gcl};
-use std::{cmp, fs};
 
-use crate::highlighter::{format_ansi, HighlightParser, HighlightSpan};
-use crate::parser::parse_building_blocks_string;
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use regex::Regex;
-use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::path::Path;
+use std::{cmp, fs};
 use ulid::Ulid;
 
 #[derive(Collect)]
@@ -82,6 +81,7 @@ impl<'gc> BuiltinCache<'gc> {
 pub struct VmOptions {
     pub arguments: Vec<String>,
     pub supports_color: bool,
+    pub console_width: Option<u16>,
 }
 
 #[derive(Collect)]
@@ -1183,7 +1183,7 @@ impl<'gc> VmState<'gc> {
                 Ok(ord) => ord,
                 Err(e) => {
                     err = Some(e);
-                    Ordering::Equal
+                    cmp::Ordering::Equal
                 }
             });
             if let Some(e) = err {
@@ -1214,12 +1214,12 @@ impl<'gc> VmState<'gc> {
         Ok(None)
     }
 
-    fn compare_specificity(&self, a: Value<'gc>, b: Value<'gc>) -> Result<Ordering, BBError> {
+    fn compare_specificity(&self, a: Value<'gc>, b: Value<'gc>) -> Result<cmp::Ordering, BBError> {
         let block_a = self.get_block_from_method(a);
         let block_b = self.get_block_from_method(b);
         match (block_a, block_b) {
             (Some(ba), Some(bb)) => {
-                let len = min(ba.param_types.len(), bb.param_types.len());
+                let len = cmp::min(ba.param_types.len(), bb.param_types.len());
                 for i in 0..len {
                     let type_a = &ba.param_types[i];
                     let type_b = &bb.param_types[i];
@@ -1227,25 +1227,25 @@ impl<'gc> VmState<'gc> {
                         (Some(ta), Some(tb)) => {
                             if ta != tb {
                                 if self.is_subclass_of(ta, tb) {
-                                    return Ok(Ordering::Less);
+                                    return Ok(cmp::Ordering::Less);
                                 }
                                 if self.is_subclass_of(tb, ta) {
-                                    return Ok(Ordering::Greater);
+                                    return Ok(cmp::Ordering::Greater);
                                 }
                             }
                         }
                         (Some(_), None) => {
-                            return Ok(Ordering::Less);
+                            return Ok(cmp::Ordering::Less);
                         }
                         (None, Some(_)) => {
-                            return Ok(Ordering::Greater);
+                            return Ok(cmp::Ordering::Greater);
                         }
                         (None, None) => {}
                     }
                 }
-                Ok(Ordering::Equal)
+                Ok(cmp::Ordering::Equal)
             }
-            _ => Ok(Ordering::Equal),
+            _ => Ok(cmp::Ordering::Equal),
         }
     }
 
@@ -1954,6 +1954,11 @@ impl<'gc> VmState<'gc> {
                 let max_l = frames_info.iter().map(|info| info.1).max().unwrap_or(0);
                 let target_alignment = cmp::max(54, max_l + 2);
 
+                let console_width = self.options.console_width.unwrap_or(80) as usize;
+                let available_width = console_width.saturating_sub(target_alignment + 4);
+                let show_snippet = available_width >= 15;
+                let w = available_width;
+
                 let mut trace = Vec::new();
                 for (prefix_colored, plain_len, si_opt) in frames_info {
                     let mut line = if supports_color {
@@ -1963,22 +1968,25 @@ impl<'gc> VmState<'gc> {
                     };
 
                     if let Some(si) = si_opt {
-                        if let Some(snippet) = self.get_highlighted_snippet(
-                            &si.filename,
-                            si.line.saturating_sub(1),
-                            si.column,
-                            si.start,
-                            si.end,
-                            si.source_text.as_ref(),
-                        ) {
-                            let padding_len = target_alignment.saturating_sub(plain_len);
-                            let padding: String = " ".repeat(padding_len);
-                            let separator = if supports_color {
-                                ansi_colorizer::colorize("$#808080[<$]")
-                            } else {
-                                "<".to_string()
-                            };
-                            line = format!("{}{}{} {}", line, padding, separator, snippet);
+                        if show_snippet {
+                            if let Some(snippet) = self.get_highlighted_snippet(
+                                &si.filename,
+                                si.line.saturating_sub(1),
+                                si.column,
+                                si.start,
+                                si.end,
+                                si.source_text.as_ref(),
+                                w,
+                            ) {
+                                let padding_len = target_alignment.saturating_sub(plain_len);
+                                let padding: String = " ".repeat(padding_len);
+                                let separator = if supports_color {
+                                    ansi_colorizer::colorize("$#808080[<$]")
+                                } else {
+                                    "<".to_string()
+                                };
+                                line = format!("{}{}{} {}", line, padding, separator, snippet);
+                            }
                         }
                     }
                     trace.push(line);
@@ -2003,13 +2011,13 @@ impl<'gc> VmState<'gc> {
         node_start_offset: usize,
         node_end_offset: usize,
         source_text: Option<&String>,
+        w: usize,
     ) -> Option<String> {
         let supports_color = self.options.supports_color;
         let content = match fs::read_to_string(filename) {
             Ok(s) => s,
             Err(_) => {
                 if let Some(text) = source_text {
-                    let w = 41;
                     let snippet_text = if text.chars().count() > w {
                         let sliced: String = text.chars().take(w).collect();
                         sliced
@@ -2071,7 +2079,6 @@ impl<'gc> VmState<'gc> {
         let end_col = cmp::min(start_col + node_char_count, line_char_count);
 
         let node_center = start_col + (end_col - start_col) / 2;
-        let w = 41;
         let mut win_start = node_center.saturating_sub(w / 2);
         let mut win_end = win_start + w;
         if win_end > line_char_count {
@@ -4235,6 +4242,62 @@ mod tests {
     }
 
     #[test]
+    fn test_error_annotation_with_console_width() {
+        use crate::compiler::Compiler;
+        use crate::parser::parse_building_blocks_string;
+
+        let code = "1.foo;";
+        let ast = parse_building_blocks_string(code);
+        let mut compiler = Compiler::new();
+        let compiled = compiler
+            .compile_program(match &ast.value {
+                NodeValue::Program(p) => p,
+                _ => unreachable!(),
+            })
+            .unwrap();
+
+        let mut options = VmOptions::default();
+        options.console_width = Some(120);
+
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, options));
+
+        arena.mutate_root(|mc, vm| {
+            let block = gc!(
+                mc,
+                Block {
+                    source_info: compiled.source_info.clone(),
+                    name: compiled.name.clone(),
+                    is_nested_block: compiled.is_nested_block,
+                    param_names: compiled.param_names.clone(),
+                    param_types: compiled.param_types.clone(),
+                    bytecode: compiled.bytecode.clone(),
+                    parent_env: None,
+                    enclosing_method_id: None,
+                    decl_block: None,
+                    source_map: compiled.source_map.clone(),
+                }
+            );
+            vm.start_block(mc, block, Vec::new(), None, None);
+
+            // Run until error.
+            let mut err = None;
+            loop {
+                match vm.step(mc) {
+                    Ok(VmStatus::Running) => {}
+                    Ok(_) => break,
+                    Err(e) => {
+                        err = Some(e);
+                        break;
+                    }
+                }
+            }
+
+            let err = err.expect("Expected execution error");
+            assert!(matches!(err, BBError::WithSourceInfo { .. }));
+        });
+    }
+
+    #[test]
     fn test_vm_to_s() {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, VmOptions::default());
@@ -4298,6 +4361,7 @@ mod tests {
         let options = VmOptions {
             arguments: vec!["foo".to_string(), "bar".to_string()],
             supports_color: true,
+            console_width: None,
         };
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {

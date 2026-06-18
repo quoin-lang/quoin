@@ -14,6 +14,9 @@ fn main() {
 
     options.vm_options.supports_color = supports_color;
 
+    let console_width = console::Term::stdout().size_checked().map(|(_, cols)| cols);
+    options.vm_options.console_width = console_width;
+
     let runner = VmRunner::new(options);
 
     if let Err(e) = runner.run() {

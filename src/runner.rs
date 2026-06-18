@@ -80,6 +80,7 @@ impl VmRunnerOptions {
             vm_options: VmOptions {
                 arguments: vm_args,
                 supports_color: false,
+                console_width: None,
             },
         }
     }
