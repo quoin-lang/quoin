@@ -1,12 +1,11 @@
-use crate::parser::ast::*;
 use crate::parser::ast::NodeValue::*;
+use crate::parser::ast::*;
 use crate::value::SourceInfo;
 
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::thread;
 
 use once_cell::sync::Lazy;
 use pest::iterators::Pair;
@@ -21,16 +20,21 @@ use substring::Substring;
 pub struct BuildingBlocksParser;
 
 static PRATT_PARSER: Lazy<PrattParser<Rule>> = Lazy::new(|| {
-    use pest::pratt_parser::{Assoc, Op};
     use Rule::*;
+    use pest::pratt_parser::{Assoc, Op};
 
     PrattParser::new()
         .op(Op::infix(op_or, Assoc::Left))
         .op(Op::infix(op_and, Assoc::Left))
         .op(Op::infix(op_eq, Assoc::Left) | Op::infix(op_ne, Assoc::Left))
-        .op(Op::infix(op_lt, Assoc::Left) | Op::infix(op_le, Assoc::Left) | Op::infix(op_gt, Assoc::Left) | Op::infix(op_ge, Assoc::Left))
+        .op(Op::infix(op_lt, Assoc::Left)
+            | Op::infix(op_le, Assoc::Left)
+            | Op::infix(op_gt, Assoc::Left)
+            | Op::infix(op_ge, Assoc::Left))
         .op(Op::infix(op_match, Assoc::Left))
-        .op(Op::infix(op_mul, Assoc::Left) | Op::infix(op_div, Assoc::Left) | Op::infix(op_mod, Assoc::Left))
+        .op(Op::infix(op_mul, Assoc::Left)
+            | Op::infix(op_div, Assoc::Left)
+            | Op::infix(op_mod, Assoc::Left))
         .op(Op::infix(op_add, Assoc::Left) | Op::infix(op_sub, Assoc::Left))
         .op(Op::postfix(postfix_op))
         .op(Op::infix(op_range, Assoc::Left))
@@ -62,32 +66,28 @@ pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
         Ok(_) => {}
         Err(why) => panic!("couldn't read {}: {}", filename, why),
     };
-    let contents = contents.strip_prefix('\u{FEFF}').unwrap_or(&contents).to_string();
-
-    let builder = thread::Builder::new()
-        .name("pest_parser".into())
-        .stack_size(32 * 1024 * 1024); // 32MB of stack space
+    let contents = contents
+        .strip_prefix('\u{FEFF}')
+        .unwrap_or(&contents)
+        .to_string();
 
     let filename_clone = filename.clone();
     let contents_clone = contents.clone();
-    let handler = builder
-        .spawn(move || {
-            let mut pairs = match BuildingBlocksParser::parse(Rule::program, &contents_clone) {
-                Ok(p) => p,
-                Err(e) => panic!("Pest parsing error in file {}: {}", filename_clone, e),
-            };
 
-            let program_pair = pairs.next().unwrap();
-            parse_program(program_pair, &filename_clone, &contents_clone)
-        })
-        .unwrap();
+    let mut pairs = match BuildingBlocksParser::parse(Rule::program, &contents_clone) {
+        Ok(p) => p,
+        Err(e) => panic!("Pest parsing error in file {}: {}", filename_clone, e),
+    };
 
-    handler.join().unwrap()
+    let program_pair = pairs.next().unwrap();
+    parse_program(program_pair, &filename_clone, &contents_clone)
 }
 
 fn extract_source_info(span: pest::Span, filename: &str, source_text: &str) -> Option<SourceInfo> {
     let (line, col) = span.start_pos().line_col();
-    let text = source_text.get(span.start()..span.end()).map(|x| x.to_string());
+    let text = source_text
+        .get(span.start()..span.end())
+        .map(|x| x.to_string());
     Some(SourceInfo {
         filename: filename.to_string(),
         line,
@@ -324,16 +324,14 @@ fn parse_expr(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                         }),
                     }
                 }
-                Rule::op_range => {
-                    Node {
-                        source_info,
-                        value: BinaryOperator(BinaryOperatorNode {
-                            operator: BinaryOperatorType::Range,
-                            left: Arc::new(lhs),
-                            right: Arc::new(rhs),
-                        }),
-                    }
-                }
+                Rule::op_range => Node {
+                    source_info,
+                    value: BinaryOperator(BinaryOperatorNode {
+                        operator: BinaryOperatorType::Range,
+                        left: Arc::new(lhs),
+                        right: Arc::new(rhs),
+                    }),
+                },
                 _ => {
                     let op_type = match op.as_rule() {
                         Rule::op_or => BinaryOperatorType::Or,
@@ -470,9 +468,7 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                 value: Symbol(SymbolNode { value: symbol_val }),
             }
         }
-        Rule::definition_expr => {
-            parse_definition_expr(inner, filename, source_text)
-        }
+        Rule::definition_expr => parse_definition_expr(inner, filename, source_text),
         Rule::block_expr => {
             let block_pair = inner.into_inner().next().unwrap();
             parse_block(block_pair, filename, source_text)
@@ -899,7 +895,9 @@ fn parse_call_sig(pair: Pair<Rule>, filename: &str, source_text: &str) -> Method
                 exprs.push(Arc::new(parse_expr(expr_pair, filename, source_text)));
             }
             MethodCallArgumentsNode {
-                signature: Arc::new(MethodSelectorNode { identifiers: idents }),
+                signature: Arc::new(MethodSelectorNode {
+                    identifiers: idents,
+                }),
                 expressions: exprs,
             }
         }
@@ -997,7 +995,8 @@ fn parse_namespace(pair: Pair<Rule>, filename: &str, source_text: &str) -> Names
 
 fn unescape(s: String) -> String {
     static ESCAPED_CHAR: Lazy<regex::Regex> = Lazy::new(|| {
-        regex::Regex::new("\\\\(u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]|[\\\\tnr\"'])").unwrap()
+        regex::Regex::new("\\\\(u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]|[\\\\tnr\"'])")
+            .unwrap()
     });
 
     ESCAPED_CHAR
