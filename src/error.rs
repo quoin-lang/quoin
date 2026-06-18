@@ -88,13 +88,9 @@ impl fmt::Display for BBError {
                     write!(f, "  |")?;
                 }
                 if !trace.is_empty() {
-                    writeln!(f)?;
-                    writeln!(f, "VM Stack Trace:")?;
-                    for (i, frame_str) in trace.iter().enumerate() {
-                        if i > 0 {
-                            writeln!(f)?;
-                        }
-                        write!(f, "    {}", frame_str)?;
+                    for frame_str in trace {
+                        writeln!(f)?;
+                        write!(f, "  {}", frame_str)?;
                     }
                 }
                 Ok(())

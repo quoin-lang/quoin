@@ -82,8 +82,9 @@ fn main() {
             }
         })
         .chain(vec![{
-            println!("Loading file: bblib/testscript.b");
-            parser::parse_building_blocks_file(&std::path::PathBuf::from("bblib/testscript.b"))
+            let script_path = args.get(1).map(|s| s.as_str()).unwrap_or("bblib/testscript.b");
+            println!("Loading file: {}", script_path);
+            parser::parse_building_blocks_file(&std::path::PathBuf::from(script_path))
         }]);
 
     compile_and_run_asts(ast_iter);
@@ -158,6 +159,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
                         enclosing_method_id: None,
                         source_info: db.source_info.clone(),
                         decl_block: None,
+                        source_map: db.source_map.clone(),
                     }
                 )
             });
@@ -173,6 +175,7 @@ fn compile_and_run_asts(ast_iter: impl Iterator<Item = Node>) {
                     enclosing_method_id: None,
                     source_info: program.source_info.clone(),
                     decl_block,
+                    source_map: program.source_map.clone(),
                 }
             );
             vm.start_block(mc, main_block, Vec::new(), None, None);

@@ -12,7 +12,6 @@ use crate::{gc, gcl};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::collections::HashMap;
-use substring::Substring;
 use ulid::Ulid;
 
 #[derive(Collect)]
@@ -80,6 +79,8 @@ pub struct VmState<'gc> {
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_exception: Option<Value<'gc>>,
+    pub last_send_receiver: Option<Value<'gc>>,
+    pub last_send_args: Vec<Value<'gc>>,
 }
 
 pub enum VmStatus<'gc> {
@@ -227,6 +228,8 @@ impl<'gc> VmState<'gc> {
             next_frame_id: 1,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_exception: None,
+            last_send_receiver: None,
+            last_send_args: Vec::new(),
         }
     }
 
@@ -1677,46 +1680,109 @@ impl<'gc> VmState<'gc> {
             return error;
         }
         if let Some(frame) = self.frames.last() {
-            if let Some(source_info) = &frame.block.source_info {
+            let active_ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
+            let active_source_info = frame.block.source_map.get(active_ip)
+                .and_then(|opt| opt.as_ref())
+                .or(frame.block.source_info.as_ref())
+                .cloned();
+            if let Some(source_info) = active_source_info {
                 let mut trace = Vec::new();
-                for f in self.frames.iter().rev() {
-                    let mut parts: Vec<String> = Vec::new();
-                    if let Some(receiver) = f.receiver {
-                        parts.push(
-                            format!("receiver={}", receiver)
-                                .substring(0, 30)
-                                .to_string(),
-                        );
-                    }
-                    if let Some(selector) = &f.selector {
-                        parts.push(format!("selector='{}'", selector));
-                    }
-                    if !f.args.is_empty() {
-                        let formatted_args: Vec<String> =
-                            f.args.iter().map(|a| format!("{}", a)).collect();
-                        parts.push(
-                            format!("args=[{}]", formatted_args.join(", "))
-                                .substring(0, 30)
-                                .to_string(),
-                        );
-                    }
-                    let loc = if let Some(source_info) = &f.block.source_info {
-                        format!(
-                            " at {}:{}:{}",
-                            source_info.filename,
-                            source_info.line,
-                            source_info.column + 1
-                        )
+                let n = self.frames.len();
+                for (i, f) in self.frames.iter().enumerate().rev() {
+                    let frame_ip = if f.ip > 0 { f.ip - 1 } else { 0 };
+
+                    let si_opt = f.block.source_map.get(frame_ip)
+                        .and_then(|opt| opt.as_ref())
+                        .or(f.block.source_info.as_ref());
+
+                    let formatted_loc = if let Some(si) = si_opt {
+                        let display_filename = std::path::Path::new(&si.filename)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&si.filename)
+                            .to_string();
+                        format!(" in {}:{}:{}", display_filename, si.line, si.column)
                     } else {
                         "".to_string()
                     };
-                    let frame_str = if parts.is_empty() {
-                        loc.trim_start().to_string()
+
+                    let formatted_selector = if let Some(Instruction::Send(selector, num_args)) = f.block.bytecode.get(frame_ip) {
+                        let args_vec = if *num_args > 0 {
+                            if i == n - 1 {
+                                self.last_send_args.clone()
+                            } else {
+                                self.frames[i + 1].args.clone()
+                            }
+                        } else {
+                            Vec::new()
+                        };
+
+                        if !args_vec.is_empty() {
+                            let mut parts = Vec::new();
+                            let mut current = String::new();
+                            for c in selector.chars() {
+                                current.push(c);
+                                if c == ':' {
+                                    parts.push(current);
+                                    current = String::new();
+                                }
+                            }
+                            if !current.is_empty() {
+                                parts.push(current);
+                            }
+
+                            let mut formatted_parts = Vec::new();
+                            for (idx, part) in parts.iter().enumerate() {
+                                if let Some(arg) = args_vec.get(idx) {
+                                    let mut p = part.clone();
+                                    if p.ends_with(':') {
+                                        p.pop();
+                                    }
+                                    formatted_parts.push(format!("{}:{}", p, arg.class_name()));
+                                } else {
+                                    formatted_parts.push(part.clone());
+                                }
+                            }
+                            formatted_parts.join(" ")
+                        } else {
+                            selector.clone()
+                        }
+                    } else if i == 0 {
+                        "(top)".to_string()
                     } else {
-                        format!("{}{}", parts.join(", "), loc)
+                        f.selector.clone().unwrap_or_else(|| "value".to_string())
                     };
+
+                    let frame_str = format!("at {}{}", formatted_selector, formatted_loc);
                     trace.push(frame_str);
                 }
+
+                // Always append the (top) frame at the bottom if it was not already the only frame formatted as (top)
+                if n > 0 {
+                    let first_frame = &self.frames[0];
+                    let first_ip = if first_frame.ip > 0 { first_frame.ip - 1 } else { 0 };
+                    let si_opt = first_frame.block.source_map.get(first_ip)
+                        .and_then(|opt| opt.as_ref())
+                        .or(first_frame.block.source_info.as_ref());
+                    
+                    let formatted_loc = if let Some(si) = si_opt {
+                        let display_filename = std::path::Path::new(&si.filename)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&si.filename)
+                            .to_string();
+                        format!(" in {}:{}:{}", display_filename, si.line, si.column)
+                    } else {
+                        "".to_string()
+                    };
+                    let top_frame_str = format!("at (top){}", formatted_loc);
+                    
+                    // Only push if the last trace element is not already representing (top) at the same location
+                    if trace.last() != Some(&top_frame_str) {
+                        trace.push(top_frame_str);
+                    }
+                }
+
                 return BBError::WithSourceInfo {
                     error: Box::new(error),
                     source_info: source_info.clone(),
@@ -1860,6 +1926,7 @@ impl<'gc> VmState<'gc> {
                                     enclosing_method_id,
                                     source_info: db.source_info.clone(),
                                     decl_block: None,
+                                    source_map: db.source_map.clone(),
                                 }
                             )
                         });
@@ -1873,6 +1940,7 @@ impl<'gc> VmState<'gc> {
                             enclosing_method_id,
                             source_info: sb.source_info.clone(),
                             decl_block,
+                            source_map: sb.source_map.clone(),
                         };
                         self.new_block(mc, block)
                     }
@@ -1897,6 +1965,8 @@ impl<'gc> VmState<'gc> {
                 args.reverse();
 
                 let receiver = self.pop()?;
+                self.last_send_receiver = Some(receiver);
+                self.last_send_args = args.clone();
                 self.frames[frame_idx].ip += 1; // Advance caller frame IP
 
                 if let Value::Object(obj) = receiver
@@ -2439,7 +2509,8 @@ mod tests {
                 param_types: Vec::new(),
                 bytecode: instructions,
                 decl_block: None,
-            };
+                source_map: Vec::new(),
+        };
             let block = gc!(
                 mc,
                 Block {
@@ -2452,6 +2523,7 @@ mod tests {
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
+                    source_map: Vec::new(),
                 }
             );
             vm.start_block(mc, block, Vec::new(), None, None);
@@ -2769,6 +2841,7 @@ mod tests {
                 Instruction::Return,
             ],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         run_test_steps(
@@ -2843,6 +2916,7 @@ mod tests {
                 Instruction::MethodReturn,
             ],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         // Block 1: method
@@ -2860,6 +2934,7 @@ mod tests {
                 Instruction::Return,
             ],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         run_test_steps(
@@ -2903,6 +2978,7 @@ mod tests {
                 Instruction::MethodReturn,
             ],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         // block_bar: blk.value, Push(111), Return
@@ -2919,6 +2995,7 @@ mod tests {
                 Instruction::Return,
             ],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         // block_foo: bar.value: block_nested, Push(222), Return
@@ -2936,6 +3013,7 @@ mod tests {
                 Instruction::Return,
             ],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
@@ -2950,7 +3028,8 @@ mod tests {
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-            };
+                source_map: Vec::new(),
+                };
             let bar_block_val = vm.new_block(mc, bar_block);
             vm.globals.borrow_mut(mc).insert(
                 NamespacedName::new(Vec::new(), "bar_func".to_string()),
@@ -2969,6 +3048,7 @@ mod tests {
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
+                    source_map: Vec::new(),
                 }
             );
             vm.start_block(mc, foo_block, Vec::new(), None, None);
@@ -3024,7 +3104,8 @@ mod tests {
                         Instruction::Return,
                     ],
                     decl_block: None,
-                })),
+                    source_map: Vec::new(),
+        })),
                 Instruction::DefineMethod("x".to_string()),
                 // 2. Override inst method x
                 Instruction::Push(Constant::Block(StaticBlock {
@@ -3035,11 +3116,13 @@ mod tests {
                     param_types: Vec::new(),
                     bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
                     decl_block: None,
-                })),
+                    source_map: Vec::new(),
+        })),
                 Instruction::OverrideMethod("x".to_string()),
                 Instruction::Return,
             ],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         run_test_steps(
@@ -3159,6 +3242,7 @@ mod tests {
             param_types: Vec::new(),
             bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         let class_extension_block = StaticBlock {
@@ -3174,6 +3258,7 @@ mod tests {
                 Instruction::Return,
             ],
             decl_block: None,
+            source_map: Vec::new(),
         };
 
         run_test_steps(
@@ -3458,6 +3543,7 @@ mod tests {
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
+                    source_map: Vec::new(),
                 }
             );
 
@@ -3496,6 +3582,7 @@ mod tests {
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
+                    source_map: Vec::new(),
                 }
             );
 
@@ -3539,7 +3626,8 @@ mod tests {
                     param_types: Vec::new(),
                     bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
                     decl_block: None,
-                })),
+                    source_map: Vec::new(),
+        })),
                 Instruction::ExecuteBlockWithSelf,
             ],
             |vm, mc| {
@@ -3669,6 +3757,7 @@ mod tests {
                         parent_env: None,
                         enclosing_method_id: None,
                         decl_block: None,
+                        source_map: db.source_map.clone(),
                     }
                 )
             });
@@ -3684,6 +3773,7 @@ mod tests {
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block,
+                    source_map: compiled.source_map.clone(),
                 }
             );
             vm.start_block(mc, block, Vec::new(), None, None);
@@ -3706,7 +3796,7 @@ mod tests {
 
             // Check that the error message displays the source information
             assert!(err_str.contains("at <string>:1:1"));
-            assert!(err_str.contains("1.foo;"));
+            assert!(err_str.contains("1.foo"));
         });
     }
 

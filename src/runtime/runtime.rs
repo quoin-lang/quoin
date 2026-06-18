@@ -63,6 +63,7 @@ fn eval_string<'gc>(
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
+                source_map: db.source_map.clone(),
             }
         )
     });
@@ -79,6 +80,7 @@ fn eval_string<'gc>(
             parent_env: None,
             enclosing_method_id: None,
             decl_block,
+            source_map: static_block.source_map.clone(),
         }
     );
 
@@ -125,6 +127,7 @@ fn eval_file<'gc>(
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
+                source_map: db.source_map.clone(),
             }
         )
     });
@@ -141,6 +144,7 @@ fn eval_file<'gc>(
             parent_env: None,
             enclosing_method_id: None,
             decl_block,
+            source_map: static_block.source_map.clone(),
         }
     );
 

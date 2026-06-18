@@ -218,6 +218,14 @@ impl<'gc> Value<'gc> {
         }
     }
 
+    pub fn class_name(&self) -> String {
+        match self {
+            Value::Class(_) => "Class".to_string(),
+            Value::ClassMeta(_) => "ClassMeta".to_string(),
+            Value::Object(obj) => obj.borrow().class_name(),
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Class(_) => "Class",
@@ -491,6 +499,7 @@ pub struct Block<'gc> {
     pub enclosing_method_id: Option<usize>,
     pub source_info: Option<SourceInfo>,
     pub decl_block: Option<Gc<'gc, Block<'gc>>>,
+    pub source_map: Vec<Option<SourceInfo>>,
 }
 
 #[derive(Collect, Debug)]

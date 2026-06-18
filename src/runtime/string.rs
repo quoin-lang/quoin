@@ -152,6 +152,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                                     enclosing_method_id,
                                     source_info: db.source_info.clone(),
                                     decl_block: None,
+                                    source_map: db.source_map.clone(),
                                 }
                             )
                         });
@@ -168,6 +169,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                                 enclosing_method_id,
                                 source_info: compiled.source_info.clone(),
                                 decl_block,
+                                source_map: compiled.source_map.clone(),
                             }
                         );
 

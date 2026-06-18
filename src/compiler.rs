@@ -4,9 +4,49 @@ use crate::parser::ast_visitor::{
     MethodCallNode, MethodSelectorNode, Node, NodeValue, ProgramNode, UnaryOperatorNode,
     UnaryOperatorType,
 };
+use crate::value::SourceInfo;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+
+pub struct CodeBlock {
+    pub bytecode: Vec<Instruction>,
+    pub source_map: Vec<Option<SourceInfo>>,
+    pub current_source: Option<SourceInfo>,
+}
+
+impl CodeBlock {
+    pub fn new() -> Self {
+        Self {
+            bytecode: Vec::new(),
+            source_map: Vec::new(),
+            current_source: None,
+        }
+    }
+
+    pub fn push(&mut self, inst: Instruction) {
+        self.bytecode.push(inst);
+        self.source_map.push(self.current_source.clone());
+    }
+
+    pub fn pop(&mut self) -> Option<Instruction> {
+        self.source_map.pop();
+        self.bytecode.pop()
+    }
+
+    pub fn extend(&mut self, other: CodeBlock) {
+        self.bytecode.extend(other.bytecode);
+        self.source_map.extend(other.source_map);
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytecode.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytecode.is_empty()
+    }
+}
 
 struct Scope {
     locals: HashSet<String>,
@@ -60,39 +100,55 @@ impl Compiler {
     }
 
     pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, String> {
-        let mut bytecode = Vec::new();
+        let mut cb = CodeBlock::new();
 
         // Define default top-level self = nil
-        bytecode.push(Instruction::Push(Constant::Nil));
-        bytecode.push(Instruction::DefineLocal("self".to_string()));
+        cb.current_source = program.source_info.clone();
+        cb.push(Instruction::Push(Constant::Nil));
+        cb.push(Instruction::DefineLocal("self".to_string()));
         self.scopes[0].locals.insert("self".to_string());
 
         let len = program.expressions.len();
         for (idx, expr) in program.expressions.iter().enumerate() {
-            self.compile_node(expr, &mut bytecode)?;
+            cb.current_source = expr.source_info.clone();
+            self.compile_node(expr, &mut cb)?;
             if idx < len - 1 {
-                bytecode.push(Instruction::Pop);
+                cb.push(Instruction::Pop);
             }
         }
 
+        cb.current_source = program.source_info.clone();
         if len == 0 {
-            bytecode.push(Instruction::Push(Constant::Nil));
+            cb.push(Instruction::Push(Constant::Nil));
         }
 
-        bytecode.push(Instruction::Return);
+        cb.push(Instruction::Return);
 
         Ok(StaticBlock {
             name: None,
             is_nested_block: false,
             param_names: Vec::new(),
             param_types: Vec::new(),
-            bytecode,
+            bytecode: cb.bytecode,
             source_info: program.source_info.clone(),
             decl_block: None,
+            source_map: cb.source_map,
         })
     }
 
-    fn compile_node(&mut self, node: &Node, bytecode: &mut Vec<Instruction>) -> Result<(), String> {
+    fn compile_node(&mut self, node: &Node, bytecode: &mut CodeBlock) -> Result<(), String> {
+        let prev_source = bytecode.current_source.clone();
+        bytecode.current_source = node.source_info.clone();
+        let res = self.compile_node_internal(node, bytecode);
+        bytecode.current_source = prev_source;
+        res
+    }
+
+    fn compile_node_internal(
+        &mut self,
+        node: &Node,
+        bytecode: &mut CodeBlock,
+    ) -> Result<(), String> {
         match &node.value {
             NodeValue::Integer(n) => {
                 bytecode.push(Instruction::Push(Constant::Int(n.value)));
@@ -295,7 +351,7 @@ impl Compiler {
     fn compile_assignment(
         &mut self,
         assign: &AssignmentNode,
-        bytecode: &mut Vec<Instruction>,
+        bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         if assign.lvalues.is_empty() {
             return Err("Assignment requires at least one target lvalue".to_string());
@@ -341,7 +397,7 @@ impl Compiler {
     fn compile_lvalue_store(
         &mut self,
         lval: &Node,
-        bytecode: &mut Vec<Instruction>,
+        bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         match &lval.value {
             NodeValue::IdentLValue(ident_lval) => {
@@ -369,7 +425,7 @@ impl Compiler {
         &mut self,
         ident_type: &IdentifierType,
         name: &String,
-        bytecode: &mut Vec<Instruction>,
+        bytecode: &mut CodeBlock,
     ) {
         let first_char = name.chars().next().unwrap_or('\0');
         if first_char.is_ascii_uppercase() {
@@ -389,7 +445,7 @@ impl Compiler {
         &mut self,
         lvalues: &[Arc<Node>],
         temp_var: &str,
-        bytecode: &mut Vec<Instruction>,
+        bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         for (i, lval) in lvalues.iter().enumerate() {
             match &lval.value {
@@ -448,7 +504,7 @@ impl Compiler {
     fn compile_method_call(
         &mut self,
         call: &MethodCallNode,
-        bytecode: &mut Vec<Instruction>,
+        bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         let args = &call.arguments;
 
@@ -488,13 +544,14 @@ impl Compiler {
     fn compile_binary_operator(
         &mut self,
         op: &BinaryOperatorNode,
-        bytecode: &mut Vec<Instruction>,
+        bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         if op.operator == BinaryOperatorType::And {
             self.compile_node(&op.left, bytecode)?;
             bytecode.push(Instruction::Dup);
 
-            let mut right_bytecode = Vec::new();
+            let mut right_bytecode = CodeBlock::new();
+            right_bytecode.current_source = bytecode.current_source.clone();
             self.compile_node(&op.right, &mut right_bytecode)?;
 
             let offset = 2 + right_bytecode.len() as isize;
@@ -508,7 +565,8 @@ impl Compiler {
             self.compile_node(&op.left, bytecode)?;
             bytecode.push(Instruction::Dup);
 
-            let mut right_bytecode = Vec::new();
+            let mut right_bytecode = CodeBlock::new();
+            right_bytecode.current_source = bytecode.current_source.clone();
             self.compile_node(&op.right, &mut right_bytecode)?;
 
             let offset = 2 + right_bytecode.len() as isize;
@@ -550,7 +608,7 @@ impl Compiler {
     fn compile_unary_operator(
         &mut self,
         op: &UnaryOperatorNode,
-        bytecode: &mut Vec<Instruction>,
+        bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         // Compile operand (receiver)
         self.compile_node(&op.right, bytecode)?;
@@ -576,11 +634,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_block(
-        &mut self,
-        block: &BlockNode,
-        bytecode: &mut Vec<Instruction>,
-    ) -> Result<(), String> {
+    fn compile_block(&mut self, block: &BlockNode, bytecode: &mut CodeBlock) -> Result<(), String> {
         let mut param_names = Vec::new();
         let mut param_types = Vec::new();
         let mut locals = HashSet::new();
@@ -602,7 +656,8 @@ impl Compiler {
 
         self.push_scope(locals);
 
-        let mut block_bytecode = Vec::new();
+        let mut block_bytecode = CodeBlock::new();
+        block_bytecode.current_source = block.source_info.clone();
 
         for name in &decls_names {
             block_bytecode.push(Instruction::Push(Constant::Nil));
@@ -611,12 +666,14 @@ impl Compiler {
 
         let len = block.statements.len();
         for (idx, stmt) in block.statements.iter().enumerate() {
+            block_bytecode.current_source = stmt.source_info.clone();
             self.compile_node(stmt, &mut block_bytecode)?;
             if idx < len - 1 {
                 block_bytecode.push(Instruction::Pop);
             }
         }
 
+        block_bytecode.current_source = block.source_info.clone();
         if len == 0 {
             block_bytecode.push(Instruction::Push(Constant::Nil));
         }
@@ -624,7 +681,8 @@ impl Compiler {
         block_bytecode.push(Instruction::Return);
 
         let decl_block = if let Some(db) = &block.decl_block {
-            let mut db_bytecode = Vec::new();
+            let mut db_bytecode = CodeBlock::new();
+            db_bytecode.current_source = db.source_info.clone();
             self.compile_block(db, &mut db_bytecode)?;
             if let Some(Instruction::Push(Constant::Block(sb))) = db_bytecode.pop() {
                 Some(Box::new(sb))
@@ -644,9 +702,10 @@ impl Compiler {
             is_nested_block: true,
             param_names,
             param_types,
-            bytecode: block_bytecode,
+            bytecode: block_bytecode.bytecode,
             source_info: block.source_info.clone(),
             decl_block,
+            source_map: block_bytecode.source_map,
         };
 
         bytecode.push(Instruction::Push(Constant::Block(static_block)));
@@ -1142,6 +1201,7 @@ mod tests {
             ],
             source_info: None,
             decl_block: None,
+            source_map: vec![None; 4],
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Block(inner_static)));
@@ -1276,6 +1336,7 @@ mod tests {
             bytecode: vec![Instruction::Push(Constant::Nil), Instruction::Return],
             source_info: None,
             decl_block: None,
+            source_map: vec![None; 2],
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::DefineClass {
