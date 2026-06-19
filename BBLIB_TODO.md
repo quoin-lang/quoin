@@ -3,6 +3,8 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the BuildingBlocks standard library (`bblib`) files and test suites.
 
 ## Misc
+- [ ] Change the file extension to `.bub` everywhere.
+  - Don't forget to update the plugin.
 - [ ] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
   - In the BB language itself all methods are attached to a class.
 - [ ] Support checking `assertMeetsRequirements:` in calls to `mix:`/`can:`.
