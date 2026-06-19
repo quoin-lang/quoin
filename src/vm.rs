@@ -1800,6 +1800,52 @@ impl<'gc> VmState<'gc> {
             return Err(BBError::Other("Invalid method object in chain".to_string()));
         }
     }
+
+    /// Add `new_method` to a selector's method chain. A plain *unguarded* variant
+    /// (no `decl_block`) whose parameter types match an existing unguarded variant
+    /// *replaces* that variant's block in place — a true redefinition, so a later
+    /// `-->` (or a repeated `->`) overrides instead of silently shadowing. Guarded
+    /// and type-differentiated variants are appended, preserving definition order
+    /// for multimethod dispatch.
+    fn replace_or_append_method_in_chain(
+        &self,
+        mc: &Mutation<'gc>,
+        chain_start: Value<'gc>,
+        new_method: Value<'gc>,
+    ) -> Result<(), BBError> {
+        let new_block = self.get_block_from_method(new_method);
+        if let Some(nb) = new_block
+            && nb.decl_block.is_none()
+        {
+            let new_param_types = nb.param_types.clone();
+            let new_block_val =
+                new_method.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
+            let mut curr = Some(chain_start);
+            while let Some(node) = curr {
+                let is_match = self
+                    .get_block_from_method(node)
+                    .map(|eb| eb.decl_block.is_none() && eb.param_types == new_param_types)
+                    .unwrap_or(false);
+                if is_match {
+                    if let Value::Object(obj) = node {
+                        let obj_ref = obj.borrow();
+                        if let ObjectPayload::NativeState(state_cell) = &obj_ref.payload {
+                            let mut state_ref = state_cell.borrow_mut(mc);
+                            if let Some(ms) =
+                                state_ref.as_any_mut().downcast_mut::<NativeMethodState>()
+                            {
+                                ms.block = unsafe { transmute(new_block_val) };
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                curr = self.get_next_method_in_chain(node);
+            }
+        }
+        Self::append_method_to_chain(mc, chain_start, new_method)
+    }
+
     pub fn lookup_in_class_hierarchy(
         &self,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
@@ -2953,7 +2999,7 @@ impl<'gc> VmState<'gc> {
                                 .get(&selector)
                                 .copied()
                                 .unwrap();
-                            Self::append_method_to_chain(mc, existing_val, method_obj)?;
+                            self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
@@ -2972,7 +3018,7 @@ impl<'gc> VmState<'gc> {
                                 .get(&selector)
                                 .copied()
                                 .unwrap();
-                            Self::append_method_to_chain(mc, existing_val, method_obj)?;
+                            self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
@@ -3022,7 +3068,7 @@ impl<'gc> VmState<'gc> {
                                 .get(&selector)
                                 .copied()
                                 .unwrap();
-                            Self::append_method_to_chain(mc, existing_val, method_obj)?;
+                            self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
@@ -3041,7 +3087,7 @@ impl<'gc> VmState<'gc> {
                                 .get(&selector)
                                 .copied()
                                 .unwrap();
-                            Self::append_method_to_chain(mc, existing_val, method_obj)?;
+                            self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)

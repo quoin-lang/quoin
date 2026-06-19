@@ -97,12 +97,12 @@ this first.
    the surrounding method.
 7. **Block arity is unchecked.** Too few arguments → missing params are `nil`; too
    many → extras are ignored. No error either way.
-8. **`->`/`-->` don't replace a method (known bug).** Both append a variant to the
-   multimethod chain; for equal specificity the **first-defined wins**, so a
-   same-signature redefinition (even with `-->`) is dead code. Override only by
-   defining a *more specific* typed/guarded variant. (Fix tracked in
-   `BBLIB_TODO.md` → Bugs/Odd Behavior: dispatch should tie-break in reverse
-   definition order.)
+8. **Redefining overrides; type/guard variants coexist.** A later same-signature
+   definition (same param types, no guard) *replaces* the earlier — `bar -> {1}`
+   then `bar --> {2}` makes `bar` return `2`. Variants that differ by parameter type
+   or carry a guard are kept as distinct multimethods, dispatched by argument;
+   equal-specificity **guarded** variants are tried in definition order, so define
+   specific guards before a catch-all.
 9. **`new:{}` doesn't capture lexical scope, and `super` doesn't exist.** An empty
    `new:{}` leaves fields `nil`; only explicit assignment binds a field (its RHS is
    lexical, but it never mutates the outer variable). A plain-assignment

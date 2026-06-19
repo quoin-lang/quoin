@@ -38,6 +38,23 @@
         } equalTo:#( 'Integer: 55' 'String: str' 'Other: true' 'Big Integer: 150' 'Negative Integer: -10' );
     };
 
+    .test:
+    overridesSameSignature -> {
+        "* A later same-signature (unguarded) definition replaces the earlier one,
+        "* whether via --> or a repeated ->. Type- and guard-differentiated variants
+        "* are unaffected (see dispatchTypePriority / dispatchByBlock).
+        .is:{
+            TSMTC4 <- { bar -> { 1 } };
+            TSMTC4 <-- { bar --> { 2 } };
+            TSMTC4.new.bar
+        } equalTo:2;
+        .is:{
+            TSMTC5 <- { bar -> { 'a' } };
+            TSMTC5 <-- { bar -> { 'b' } };
+            TSMTC5.new.bar
+        } equalTo:'b';
+    };
+
 "*    .test:
 "*    dispatchNoMatch -> {
 "*        .does:{

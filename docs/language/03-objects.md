@@ -59,18 +59,14 @@ n <-- { greet -> { 'hi from this 42' } }       "* only this object gains greet
 n.greet                                        "* 'hi from this 42'
 ```
 
-> **⚠ Gotcha — `->` and `-->` do not replace a method (suspected bug).** Both
-> operators *append a variant* to the selector's multimethod chain; they do not
-> overwrite an existing definition. For variants of equal specificity (e.g. two
-> untyped definitions of the same selector) the **first-defined one wins**, so a
-> later same-signature definition is dead code — even with `-->`. (`-->`'s only
-> distinct effect today is to require the selector to already exist.) The intended
-> fix is for dispatch to resolve equal-specificity ties in *reverse* definition
-> order so the latest wins (tracked in `BBLIB_TODO.md` → *Bugs/Odd Behavior*). Until
-> then, to actually change behavior, define a *more specific* variant (see §13)
-> rather than redefining the same signature. A **subclass** overriding an inherited
-> method (as `Point3D` does with `dist:` above) does work — the subclass receiver is
-> more specific than the parent, so it isn't an equal-specificity tie.
+> **Note — redefining vs. adding a variant.** Within one class, a later definition
+> with the **same signature** (same parameter types, no guard) *replaces* the
+> earlier one: `bar -> {1}` then `bar --> {2}` makes `bar` return `2`. `-->`
+> additionally requires the selector to already exist in the hierarchy. Definitions
+> that differ by **parameter type** or carry a **guard** are instead kept as
+> distinct *multimethod* variants (§13) and dispatched by argument, not replaced. (A
+> subclass defining an inherited method — as `Point3D` does with `dist:` above —
+> takes precedence for its own instances via method resolution; see §12.)
 
 ---
 
@@ -155,11 +151,11 @@ describe:'hi'      "* 'str hi'
 Type-based variants are the right tool when you want different behavior per
 argument type; the dispatcher chooses the most specific match.
 
-> **⚠ Gotcha — equal-specificity variants silently shadow.** If two variants are
-> equally specific (e.g. both untyped, or both `:Object`), the one defined *first*
-> always wins and the others are unreachable — no error is raised. Differentiate
-> variants by type or guard, and remember `-->` does not override a same-signature
-> method (§10).
+> **⚠ Gotcha — order matters for equal-specificity guarded variants.** Among
+> variants that match the same argument with equal type-specificity, **guarded**
+> variants are tried in *definition order* (first match wins) — so define the
+> specific guards before a catch-all. (Two variants with the **same signature and no
+> guard** don't coexist: the later one *replaces* the earlier — §10.)
 
 ---
 
