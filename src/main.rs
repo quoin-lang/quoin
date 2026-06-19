@@ -1,4 +1,4 @@
-use new_vm::runner::{VmRunner, VmRunnerOptions};
+use building_blocks_vm::runner::{VmRunner, VmRunnerOptions};
 
 use std::{env, process};
 

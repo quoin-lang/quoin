@@ -286,7 +286,7 @@ impl VmRunner {
 
 ### Refactored `src/main.rs`
 ```rust
-use new_vm::runner::{VmRunner, VmOptions};
+use building_blocks_vm::runner::{VmRunner, VmOptions};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

@@ -114,7 +114,7 @@ This document outlines the language features, compiler updates, and VM modificat
   - `Runtime.evalFile: filename`: Loads, compiles, and evaluates a file.
   - `Object.s` overrides: Overriding `s` string representation when converting objects to strings for printing.
 - [x] **Native State Support**:
-  - Implement native classes holding arbitrary Rust state inside VM objects, following [native_rust_state_plan.md](file:///Users/damon/code/new-vm/native_rust_state_plan.md).
+  - Implement native classes holding arbitrary Rust state inside VM objects, following [native_rust_state_plan.md](file:///Users/damon/code/building_blocks_vm/native_rust_state_plan.md).
 
 ## 9. Performance Tuning
 - [x] **Alternative Parser Architecture Evaluation**:

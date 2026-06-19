@@ -654,7 +654,7 @@ mod tests {
         let debug_str = format!("{:?}", state);
         assert_eq!(
             debug_str,
-            "OpaqueState<new_vm::value::tests::test_opaque_state_debug::Dummy>"
+            "OpaqueState<building_blocks_vm::value::tests::test_opaque_state_debug::Dummy>"
         );
     }
 }

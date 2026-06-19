@@ -1,5 +1,5 @@
 [package]
-name = "new-vm"
+name = "building_blocks_vm"
 version = "0.1.0"
 edition = "2024"
 [workspace]

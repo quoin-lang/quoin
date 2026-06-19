@@ -150,6 +150,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "building_blocks_vm"
+version = "0.1.0"
+dependencies = [
+ "antlr-rust",
+ "cargo-llvm-cov",
+ "console",
+ "corosensei",
+ "gc-arena",
+ "glob",
+ "once_cell",
+ "pest",
+ "pest_derive",
+ "regex",
+ "substring",
+ "ulid",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1001,24 +1019,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a198f9589efc03f544388dfc4a19fe8af4323662b62f598b8dcfdac62c14771c"
 dependencies = [
  "byteorder",
-]
-
-[[package]]
-name = "new-vm"
-version = "0.1.0"
-dependencies = [
- "antlr-rust",
- "cargo-llvm-cov",
- "console",
- "corosensei",
- "gc-arena",
- "glob",
- "once_cell",
- "pest",
- "pest_derive",
- "regex",
- "substring",
- "ulid",
 ]
 
 [[package]]
