@@ -61,7 +61,9 @@ Mixin <- BuiltinAssertions <- {
     does:throw: -> {|block:Block expectedError|
         actualError = nil;
         { #doesThrowBlock | - | block.value }.catch:{#doesThrowCatchBlock |x| actualError = x };
-        .recordResult:{ expectedError ~ actualError }
+        "* Match either the thrown value/type directly (e.g. an error Class) or
+        "* its string form (e.g. a regex against the message)."
+        .recordResult:{ (expectedError ~ actualError) || (expectedError ~ actualError.s) }
             evidence:#(
             actualError.s
             'was thrown instead of'

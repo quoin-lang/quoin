@@ -2026,6 +2026,17 @@ impl<'gc> VmState<'gc> {
     }
 
     pub fn annotate_error(&self, error: BBError) -> BBError {
+        // An uncaught BB throw reaches here as `Thrown`; surface the actual
+        // thrown value (which lives in `active_exception`) for display.
+        let error = if matches!(error, BBError::Thrown) {
+            let msg = match self.active_exception {
+                Some(v) => format!("{}", v),
+                None => "uncaught exception".to_string(),
+            };
+            BBError::Other(msg)
+        } else {
+            error
+        };
         if matches!(error, BBError::WithSourceInfo { .. }) {
             return error;
         }
@@ -2269,6 +2280,57 @@ impl<'gc> VmState<'gc> {
             }
         }
         error
+    }
+
+    /// Build a BB `Error` instance of the named class with `message`/`payload`.
+    /// Falls back to a plain string if the class isn't registered yet (e.g. an
+    /// error fired during bootstrap before the Error hierarchy is defined).
+    pub fn make_error(
+        &self,
+        mc: &Mutation<'gc>,
+        class_name: &str,
+        message: &str,
+        payload: Option<Value<'gc>>,
+    ) -> Value<'gc> {
+        let key = NamespacedName::new(Vec::new(), class_name.to_string());
+        let class_opt = self.globals.borrow().get(&key).copied();
+        if let Some(Value::Class(cls)) = class_opt {
+            let obj = self.new_object(mc, cls);
+            let msg_val = self.new_string(mc, message.to_string());
+            obj.borrow_mut(mc)
+                .fields
+                .insert("message".to_string(), msg_val);
+            if let Some(p) = payload {
+                obj.borrow_mut(mc).fields.insert("payload".to_string(), p);
+            }
+            Value::Object(obj)
+        } else {
+            self.new_string(mc, message.to_string())
+        }
+    }
+
+    /// Convert an internal `BBError` into the BB value a `catch:` handler should
+    /// receive. Structured variants become typed `Error` objects so guest code
+    /// can dispatch on them; everything else stays a descriptive string.
+    pub fn bberror_to_value(&self, mc: &Mutation<'gc>, error: &BBError) -> Value<'gc> {
+        match error {
+            BBError::TypeError { msg, .. } => self.make_error(mc, "TypeError", msg, None),
+            BBError::ArgumentCountMismatch { msg, .. } => {
+                self.make_error(mc, "ArgumentError", msg, None)
+            }
+            BBError::ArithmeticError(msg) => self.make_error(mc, "ArithmeticError", msg, None),
+            BBError::MessageNotUnderstood {
+                receiver, selector, ..
+            } => {
+                let msg = format!("no method '{}' for {}", selector, receiver);
+                self.make_error(mc, "MessageNotUnderstood", &msg, None)
+            }
+            BBError::WithSourceInfo { error, .. } => self.bberror_to_value(mc, error),
+            other => {
+                let s = format!("{}", other);
+                self.new_string(mc, s)
+            }
+        }
     }
 
     fn get_highlighted_snippet(
@@ -2590,11 +2652,11 @@ impl<'gc> VmState<'gc> {
                     all_args.extend(args);
                     callable.call(self, mc, all_args, Some(selector.clone()))?;
                 } else {
-                    return Err(format!(
-                        "Message not understood: receiver={:?}, selector='{}', args={:?}",
-                        receiver, selector, args
-                    )
-                    .into());
+                    return Err(BBError::MessageNotUnderstood {
+                        receiver: receiver.class_name(),
+                        selector: selector.clone(),
+                        args: args.iter().map(|a| a.class_name()).collect(),
+                    });
                 }
             }
             Instruction::Return | Instruction::BlockReturn => {

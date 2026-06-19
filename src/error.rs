@@ -32,6 +32,10 @@ pub enum BBError {
     StackUnderflow(String),
     /// Generic other error
     Other(String),
+    /// Marker that a BB-level exception value has been parked in
+    /// `VmState.active_exception` (set by `throw`). Carries no payload — the
+    /// thrown value travels in the GC-rooted `active_exception` slot, not here.
+    Thrown,
     /// Raised to propagate non-local returns out of native call stacks
     NonLocalReturn,
     /// Wrapper containing source location for execution errors
@@ -112,6 +116,7 @@ impl fmt::Display for BBError {
             BBError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
             BBError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             BBError::Other(msg) => write!(f, "{}", msg),
+            BBError::Thrown => write!(f, "thrown exception"),
             BBError::NonLocalReturn => write!(f, "Non-local return"),
             BBError::WithSourceInfo {
                 error,

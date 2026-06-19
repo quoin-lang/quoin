@@ -31,7 +31,10 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Make the `^>` yield operator usable in expression position (currently statement-only in the grammar, so the resume value can only be captured as a block's final expression or via the longer `Fiber.yield:` form). Add `yield_return` to `expr`/`primary` and handle precedence.
 - [ ] Have the `LoadGlobal` instruction consult the `BuiltinCache`. Currently it always does a `HashMap<NamespacedName, Value>` lookup against `globals` (see `vm.rs` `Instruction::LoadGlobal`); builtin classes (`Fiber`, `List`, `Integer`, etc.) could be served from the cache to avoid hashing the name on every load (e.g. for the `^>` -> `Fiber.yield:` lowering). `BuiltinCache` may need to be keyed more generally by name to cover all builtins.
 - [ ] Repurpose the Yeet instruction and make sure .../???/!!! are all working.
-- [ ] Formalize an interface for BB error types.
+- [x] Formalize an interface for BB error types.
+  - `Error` base (`message`/`payload`, class-side `throw:`/`throw:payload:`) + core subtypes (`TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`) in `00-bootstrap.b`. Catch-by-type via `case`/`~`.
+  - Runtime now raises structured errors: `BBError::Thrown` marker (value rides in `active_exception`), and `vm.bberror_to_value` maps internal `BBError` variants to typed BB `Error` objects at the `catch:` boundary. `does:throw:` widened to match by value/type or message string.
+  - [ ] Future: give the VM more fine-grained internal error variants and route more raise sites through typed BB errors.
 - [ ] Implement DateTime.
 - [ ] Implement Decimal.
   - rust_decimal crate

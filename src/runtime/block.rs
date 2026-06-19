@@ -94,7 +94,7 @@ pub fn build_block_class() -> NativeClassBuilder {
                     let exception_val = if let Some(val) = vm.active_exception.take() {
                         val
                     } else {
-                        vm.new_string(mc, format!("{}", e))
+                        vm.bberror_to_value(mc, &e)
                     };
 
                     vm.execute_block(mc, catch_block, vec![exception_val], None)
@@ -122,7 +122,7 @@ pub fn build_block_class() -> NativeClassBuilder {
                     let exception_val = if let Some(val) = vm.active_exception.take() {
                         val
                     } else {
-                        vm.new_string(mc, format!("{}", e))
+                        vm.bberror_to_value(mc, &e)
                     };
 
                     let active_args = vm.active_native_args.last().unwrap();

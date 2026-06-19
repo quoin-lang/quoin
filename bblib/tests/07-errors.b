@@ -55,4 +55,22 @@
         .does:{ WidgetError.throw:'broke' } throw:WidgetError;
         .does:{ WidgetError.throw:'broke' } throw:Error;
     };
+
+    "* Internal runtime errors now surface as structured Error objects you can
+    "* dispatch on - and they're still matchable by message via does:throw:."
+    .test:
+    runtimeTypeErrorIsStructured -> {
+        caught = nil;
+        { #(1 2).at:'x' }.catch:{ |e| caught = e };
+        .isTrue:{ caught.class == TypeError };
+        .isTrue:{ TypeError ~ caught };
+        .does:{ #(1 2).at:'x' } throw:TypeError;
+        .does:{ #(1 2).at:'x' } throw:#/integer/;
+    };
+
+    .test:
+    runtimeMessageNotUnderstood -> {
+        .does:{ 5.bogusMethodXyz } throw:MessageNotUnderstood;
+        .does:{ 5.bogusMethodXyz } throw:#/bogusMethodXyz/;
+    };
 }
