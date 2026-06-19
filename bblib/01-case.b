@@ -19,8 +19,12 @@ Case <- { |@subject|
         }
     };
 
-    default: -> { |block|
+    default: -> { |block:Block|
         block.value.throw
+    };
+
+    default: --> { |value:Object|
+        value.throw
     };
 };
 
