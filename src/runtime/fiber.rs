@@ -18,8 +18,17 @@ pub enum FiberStatus {
     Suspended,
     /// Currently executing, or an ancestor of the currently executing fiber.
     Running,
-    /// The block has returned; the fiber can no longer be resumed.
+    /// The block returned normally; the fiber can no longer be resumed.
     Done,
+    /// The block raised an uncaught error; the fiber can no longer be resumed.
+    Failed,
+}
+
+impl FiberStatus {
+    /// True once the fiber has terminated (whether normally or via an error).
+    pub fn is_terminated(self) -> bool {
+        matches!(self, FiberStatus::Done | FiberStatus::Failed)
+    }
 }
 
 /// Native backing state for a guest `Fiber`.
@@ -38,6 +47,10 @@ pub struct NativeFiberState {
     stack: Vec<Value<'static>>,
     frames: Vec<Frame<'static>>,
     native_args: Vec<Vec<Value<'static>>>,
+    /// Final return value once the fiber completes normally.
+    result: Option<Value<'static>>,
+    /// The error value once the fiber fails.
+    error: Option<Value<'static>>,
 }
 
 impl NativeFiberState {
@@ -50,7 +63,27 @@ impl NativeFiberState {
             stack: Vec::new(),
             frames: Vec::new(),
             native_args: Vec::new(),
+            result: None,
+            error: None,
         }
+    }
+
+    pub fn set_result<'gc>(&mut self, val: Value<'gc>) {
+        self.result = Some(unsafe { transmute::<Value<'gc>, Value<'static>>(val) });
+    }
+
+    pub fn result<'gc>(&self) -> Option<Value<'gc>> {
+        self.result
+            .map(|v| unsafe { transmute::<Value<'static>, Value<'gc>>(v) })
+    }
+
+    pub fn set_error<'gc>(&mut self, val: Value<'gc>) {
+        self.error = Some(unsafe { transmute::<Value<'gc>, Value<'static>>(val) });
+    }
+
+    pub fn error<'gc>(&self) -> Option<Value<'gc>> {
+        self.error
+            .map(|v| unsafe { transmute::<Value<'static>, Value<'gc>>(v) })
     }
 
     pub fn coro<'gc>(&self) -> Gc<'gc, Fiber<'gc>> {
@@ -130,6 +163,14 @@ impl AnyCollect for NativeFiberState {
                 val_gc.dyn_trace(cc);
             }
         }
+        if let Some(v) = &self.result {
+            let v_gc: &Value<'gc> = unsafe { transmute(v) };
+            v_gc.dyn_trace(cc);
+        }
+        if let Some(v) = &self.error {
+            let v_gc: &Value<'gc> = unsafe { transmute(v) };
+            v_gc.dyn_trace(cc);
+        }
     }
 }
 
@@ -167,6 +208,10 @@ pub fn build_fiber_class() -> NativeClassBuilder {
             let nil = vm.new_nil(mc);
             vm.fiber_yield(mc, nil)
         })
+        // Fiber.current -> the running fiber, or nil from the main program.
+        .class_method("current", |vm, mc, _args| {
+            Ok(vm.current_fiber.unwrap_or_else(|| vm.new_nil(mc)))
+        })
         // f.resume / f.resume:value -> run until the next yield or completion.
         .instance_method("resume", |vm, mc, args| {
             let nil = vm.new_nil(mc);
@@ -178,8 +223,11 @@ pub fn build_fiber_class() -> NativeClassBuilder {
         .instance_method("done?", |vm, mc, args| {
             Ok(vm.new_bool(mc, status_of(args[0])? == FiberStatus::Done))
         })
+        .instance_method("failed?", |vm, mc, args| {
+            Ok(vm.new_bool(mc, status_of(args[0])? == FiberStatus::Failed))
+        })
         .instance_method("alive?", |vm, mc, args| {
-            Ok(vm.new_bool(mc, status_of(args[0])? != FiberStatus::Done))
+            Ok(vm.new_bool(mc, !status_of(args[0])?.is_terminated()))
         })
         .instance_method("status", |vm, mc, args| {
             let name = match status_of(args[0])? {
@@ -187,7 +235,22 @@ pub fn build_fiber_class() -> NativeClassBuilder {
                 FiberStatus::Suspended => "suspended",
                 FiberStatus::Running => "running",
                 FiberStatus::Done => "done",
+                FiberStatus::Failed => "failed",
             };
             Ok(vm.new_string(mc, name.to_string()))
+        })
+        // The fiber's final return value (nil unless it completed normally).
+        .instance_method("result", |vm, mc, args| {
+            let r = args[0]
+                .with_native_state::<NativeFiberState, _, _>(|s| s.result())
+                .map_err(BBError::Other)?;
+            Ok(r.unwrap_or_else(|| vm.new_nil(mc)))
+        })
+        // The error value if the fiber failed (nil otherwise).
+        .instance_method("error", |vm, mc, args| {
+            let e = args[0]
+                .with_native_state::<NativeFiberState, _, _>(|s| s.error())
+                .map_err(BBError::Other)?;
+            Ok(e.unwrap_or_else(|| vm.new_nil(mc)))
         })
 }

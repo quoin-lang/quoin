@@ -86,18 +86,62 @@
         .is:{ f.resume } equalTo:'done';
     };
 
-    "* Resuming a finished fiber is an error.
+    "* Resuming a finished fiber is an error, raised as a typed FiberError.
     .test:
     resumingFinishedFiberThrows -> {
         f = Fiber.new:{ 42 };
         .is:{ f.resume } equalTo:42;
+        .does:{ f.resume } throw:FiberError;
         .does:{ f.resume } throw:#/finished Fiber/;
     };
 
     "* yield only makes sense inside a running fiber.
     .test:
     yieldOutsideFiberThrows -> {
+        .does:{ Fiber.yield:1 } throw:FiberError;
         .does:{ Fiber.yield:1 } throw:#/outside of a Fiber/;
+    };
+
+    "* Fiber.current is the running fiber, or nil in the main program.
+    .test:
+    fiberCurrent -> {
+        .isFalse:{ Fiber.current.defined? };
+        f = Fiber.new:{ ^>Fiber.current };
+        .isTrue:{ f.resume == f };
+    };
+
+    "* A completed fiber exposes its final return value and status.
+    .test:
+    completedFiberHasResult -> {
+        f = Fiber.new:{ Fiber.yield:1; 'final' };
+        f.resume;
+        f.resume;
+        .isTrue:{ f.done? };
+        .isFalse:{ f.failed? };
+        .is:{ f.status } equalTo:'done';
+        .is:{ f.result } equalTo:'final';
+    };
+
+    "* A fiber whose block throws is `failed`, re-raises to the resumer, and
+    "* records the error value.
+    .test:
+    failedFiberRecordsError -> {
+        f = Fiber.new:{ TypeError.throw:'boom' };
+        caught = nil;
+        { f.resume }.catch:{ |e| caught = e };
+        .isTrue:{ f.failed? };
+        .is:{ f.status } equalTo:'failed';
+        .isTrue:{ TypeError ~ caught };
+        .isTrue:{ TypeError ~ f.error };
+    };
+
+    "* A fiber cannot resume itself.
+    .test:
+    cannotResumeSelf -> {
+        "* a fresh self-resuming fiber per assertion (resuming fails it)"
+        makeSelfResumer = { f = nil; f = Fiber.new:{ f.resume }; f };
+        .does:{ makeSelfResumer.value.resume } throw:FiberError;
+        .does:{ makeSelfResumer.value.resume } throw:#/resume itself/;
     };
 
     "* The `^>` operator is sugar for `Fiber.yield:` and behaves identically.

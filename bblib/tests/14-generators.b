@@ -66,4 +66,15 @@
         .is:{ (1..4).zip:(10..14) } equalTo:#( #(1 10) #(2 11) #(3 12) );
         .is:{ (1..6).drop:3 } equalTo:#(4 5);
     };
+
+    "* Lazy combinators return Generators that compose and stay lazy - they work
+    "* even on infinite sources (nested fibers all the way down)."
+    .test:
+    lazyCombinators -> {
+        naturals = Generator.from:{ n = 0; { true }.whileDo:{ ^>n; n = n + 1 } };
+        .is:{ (naturals.lazySelect:{ |x| x % 2 == 0 }).take:4 } equalTo:#(0 2 4 6);
+        .is:{ (naturals.lazyCollect:{ |x| x * x }).take:4 } equalTo:#(0 1 4 9);
+        "* a lazyCollect over a finite list, then forced"
+        .is:{ (#(1 2 3).lazyCollect:{ |x| x + 10 }).list } equalTo:#(11 12 13);
+    };
 }

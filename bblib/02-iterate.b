@@ -99,6 +99,18 @@ Mixin <- Iterate <- {
         ^l
     }
 
+    "* Lazy variants return a Generator instead of a materialized list, so they
+    "* compose into pipelines and work on infinite sources (consume with take:)."
+    lazyCollect: -> { |f|
+        src = self;
+        Generator.from:{ src.each:{ |x| ^>(f.valueWithSelfOrArg:x) } }
+    }
+
+    lazySelect: -> { |p|
+        src = self;
+        Generator.from:{ src.each:{ |x| (p.valueWithSelfOrArg:x).if:{ ^>x } } }
+    }
+
     flatten -> {
         l = #();
         .each:{ |x|

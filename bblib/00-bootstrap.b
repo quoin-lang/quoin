@@ -61,6 +61,7 @@ Error <- ArgumentError <- {};
 Error <- MessageNotUnderstood <- {};
 Error <- ArithmeticError <- {};
 Error <- IndexError <- {};
+Error <- FiberError <- {};
 
 Double <-- {
     .meta <-- {

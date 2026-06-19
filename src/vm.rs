@@ -991,21 +991,21 @@ impl<'gc> VmState<'gc> {
     ) -> Result<Value<'gc>, BBError> {
         match self.fiber_status(fiber_val)? {
             FiberStatus::Done => {
-                return Err(BBError::Other("cannot resume a finished Fiber".to_string()));
+                return Err(self.raise_fiber_error(mc, "cannot resume a finished Fiber"));
             }
-            FiberStatus::Running => {
-                return Err(BBError::Other(
-                    "cannot resume a Fiber that is already running".to_string(),
-                ));
+            FiberStatus::Failed => {
+                return Err(self.raise_fiber_error(mc, "cannot resume a failed Fiber"));
             }
             _ => {}
         }
-        // Resuming the current fiber or one of its ancestors would form a cycle.
-        if self.current_fiber == Some(fiber_val)
-            || self.resume_stack.iter().any(|f| *f == Some(fiber_val))
-        {
-            return Err(BBError::Other(
-                "cannot resume a Fiber that is already running".to_string(),
+        // The only Running fiber is the current one; ancestors are Suspended.
+        if self.current_fiber == Some(fiber_val) {
+            return Err(self.raise_fiber_error(mc, "a Fiber cannot resume itself"));
+        }
+        if self.resume_stack.iter().any(|f| *f == Some(fiber_val)) {
+            return Err(self.raise_fiber_error(
+                mc,
+                "cannot resume a Fiber that is currently resuming this one (would deadlock)",
             ));
         }
 
@@ -1037,9 +1037,7 @@ impl<'gc> VmState<'gc> {
         value: Value<'gc>,
     ) -> Result<Value<'gc>, BBError> {
         if self.current_fiber.is_none() {
-            return Err(BBError::Other(
-                "Fiber.yield: called outside of a Fiber".to_string(),
-            ));
+            return Err(self.raise_fiber_error(mc, "Fiber.yield: called outside of a Fiber"));
         }
 
         let saved = self.yielder;
@@ -1062,6 +1060,14 @@ impl<'gc> VmState<'gc> {
         fiber_val
             .with_native_state::<NativeFiberState, _, _>(|s| s.status)
             .map_err(BBError::Other)
+    }
+
+    /// Park a structured `FiberError` in `active_exception` and return the
+    /// `Thrown` signal, so fiber misuse is catchable by type in BB code.
+    fn raise_fiber_error(&mut self, mc: &Mutation<'gc>, msg: &str) -> BBError {
+        let err = self.make_error(mc, "FiberError", msg, None);
+        self.active_exception = Some(err);
+        BBError::Thrown
     }
 
     fn set_fiber_status(&self, mc: &Mutation<'gc>, fiber_val: Value<'gc>, status: FiberStatus) {
@@ -1189,10 +1195,31 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         result: Result<Value<'gc>, BBError>,
     ) -> Result<(), BBError> {
-        if let Some(of) = self.current_fiber {
-            self.set_fiber_status(mc, of, FiberStatus::Done);
+        // Record the outcome on the finished fiber for `result`/`error`/`status`.
+        if let Some(finished) = self.current_fiber {
+            match &result {
+                Ok(val) => {
+                    let v = *val;
+                    self.set_fiber_status(mc, finished, FiberStatus::Done);
+                    let _ = finished
+                        .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.set_result(v));
+                }
+                Err(e) => {
+                    // The error value is the parked BB exception, or a converted
+                    // internal error. Peek (don't take) so the resumer still sees it.
+                    let err_val = match self.active_exception {
+                        Some(v) => v,
+                        None => self.bberror_to_value(mc, e),
+                    };
+                    self.set_fiber_status(mc, finished, FiberStatus::Failed);
+                    let _ = finished
+                        .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
+                            s.set_error(err_val)
+                        });
+                }
+            }
         }
-        // The finished fiber's context is discarded.
+        // The finished fiber's execution context is discarded.
         self.stack.clear();
         self.frames.clear();
         self.active_native_args.clear();

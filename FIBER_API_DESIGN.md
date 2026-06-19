@@ -7,8 +7,10 @@ VM's stackful fibers to the BuildingBlocks (BB) language as a first-class
 `corosensei` stackful coroutines so the GC could run during long native calls.
 That work gave the *host* a single fiber; this feature gives the *guest* many.
 
-Status: **Phase 1 implemented and shipped.** All BB test suites and Rust unit
-tests pass; see [Testing](#9-testing).
+Status: **Phases 1–3 implemented and shipped** (core fibers, the `^>` operator,
+the iteration redesign + Generator/Iterator bridge, and the Phase 2
+introspection/diagnostics layer). All BB test suites and Rust unit tests pass;
+see [Testing](#9-testing).
 
 ---
 
@@ -64,8 +66,6 @@ untouched and no "bubbling" through nested coroutines is required.
 - **Preemption / scheduling fairness.** Fibers are cooperative; control moves
   only on explicit `resume`/`yield`.
 - **Cross-thread fibers.** The VM is single-threaded; fibers are too.
-- **`Generator`/`Iterate` integration and `Fiber.current`** — deferred to a
-  later phase (see [§10](#10-phasing--future-work)).
 
 ---
 
@@ -77,6 +77,7 @@ untouched and no "bubbling" through nested coroutines is required.
 | `Fiber.new:aBlock` | Construct an unstarted fiber wrapping `aBlock`. Status `created`. Does not run. |
 | `Fiber.yield:value` | Suspend the running fiber; `value` becomes the result of the resumer's `resume`. Returns the value passed to the next `resume:`. |
 | `Fiber.yield` | `Fiber.yield:nil`. |
+| `Fiber.current` | The fiber currently running, or `nil` in the main program. |
 
 `Fiber.yield:` is **dynamic** — it acts on whichever fiber is currently running,
 so the block keeps its natural parameter list. Calling it when no fiber is
@@ -103,17 +104,24 @@ f.resume:10   "=> 10"   f.resume   "=> 11"
 | Selector | Behavior |
 |---|---|
 | `f.resume` / `f.resume:value` | Start or continue `f`. On the **first** resume, `value` is bound to the block's parameter(s). On **subsequent** resumes, `value` becomes the result of the in-fiber `Fiber.yield:` expression. Returns the next yielded value, or the block's final return value on completion. |
-| `f.done?` | `true` once the block has returned. |
-| `f.alive?` | `!done?`. |
-| `f.status` | `'created'` \| `'suspended'` \| `'running'` \| `'done'`. |
+| `f.done?` | `true` once the block has returned normally. |
+| `f.failed?` | `true` once the block has raised an uncaught error. |
+| `f.alive?` | `true` until the fiber terminates (done or failed). |
+| `f.result` | The block's final return value once `done` (else `nil`). |
+| `f.error` | The error value once `failed` (else `nil`). |
+| `f.status` | `'created'` \| `'suspended'` \| `'running'` \| `'done'` \| `'failed'`. |
 
 ### Semantics and edge cases
 - **First resume binds parameters.** `Fiber.new:{ |x| ... }` then `f.resume:42`
   binds `x = 42`. `f.resume` with no argument binds `nil`.
 - **Completion.** When the block returns, that value comes out of the final
   `resume` and the fiber transitions to `done`.
-- **Resuming a finished fiber** raises `"cannot resume a finished Fiber"`.
-- **`yield` outside a fiber** raises `"Fiber.yield: called outside of a Fiber"`.
+- **Misuse raises a typed `FiberError`** (a subclass of `Error`, catchable by
+  type): resuming a finished/failed fiber, a fiber resuming itself, resuming a
+  fiber currently resuming this one, or `yield` outside a fiber. Each carries a
+  distinct message.
+- **An uncaught error in the block** marks the fiber `failed`, re-raises to the
+  resumer's `resume` call, and is retained in `f.error`.
 - **Re-entrant resume.** Resuming a fiber that is currently running, or that is
   an ancestor on the resume chain, raises `"cannot resume a Fiber that is
   already running"` (prevents cycles).
@@ -387,11 +395,16 @@ Additional validation performed during development:
     `someIterable.iterator`, backed by a fiber running `each:` with one element
     of look-ahead.
 
+  Plus lazy combinators `lazyCollect:` / `lazySelect:` that return `Generator`s,
+  so pipelines stay lazy and compose over infinite sources.
+
   Covered by `bblib/tests/14-generators.b` (custom `each:`-only collection,
   `nil` elements, re-entrancy, `Generator`, infinite generator + `take:`,
-  external `Iterator`, `zip:`/`drop:`).
-- **Phase 2 (future):** `Fiber.current`; richer error/status surface; tighter
-  double-resume diagnostics.
+  external `Iterator`, `zip:`/`drop:`, lazy combinators).
+- **Phase 2 (done):** `Fiber.current`; richer status/result surface
+  (`failed?`/`result`/`error`, `status` gains `'failed'`); typed `FiberError`
+  with distinct double-resume / yield-outside diagnostics. Tests in
+  `bblib/tests/13-fibers.b`.
 
 ### Known limitations
 - Guest fibers are unavailable in benchmark mode (that driver bypasses the
