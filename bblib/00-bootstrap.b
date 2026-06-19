@@ -40,13 +40,27 @@ Mixin <- ActAsUserString <- {
     .sealed!;
 };
 
-Error <- {
-    s --> { .class.name }
+Error <- { |@message @payload|
+    .meta <-- {
+        "* Convenience constructors that build an instance and immediately throw,
+        "* e.g. `TypeError.throw:'expected an Integer'`. Inherited by subclasses.
+        throw: -> { |msg| ^(.new:{ message = msg }).throw }
+        throw:payload: -> { |msg p| ^(.new:{ message = msg; payload = p }).throw }
+    }
 
-    payload -> { @errorData.payload }
-    stackframes -> { @errorData.stackframes }
-    format -> { @errorData.format }
+    message -> { @message }
+    payload -> { @payload }
+
+    s --> { .class.name.s + ': ' + @message.s }
 };
+
+"* Core error types. These mirror the VM's internal error kinds so the runtime
+"* can later raise them directly (see BBLIB_TODO). User code subclasses `Error`.
+Error <- TypeError <- {};
+Error <- ArgumentError <- {};
+Error <- MessageNotUnderstood <- {};
+Error <- ArithmeticError <- {};
+Error <- IndexError <- {};
 
 Double <-- {
     .meta <-- {
