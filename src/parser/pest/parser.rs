@@ -32,12 +32,16 @@ static PRATT_PARSER: Lazy<PrattParser<Rule>> = Lazy::new(|| {
             | Op::infix(op_gt, Assoc::Left)
             | Op::infix(op_ge, Assoc::Left))
         .op(Op::infix(op_match, Assoc::Left))
+        // Precedence increases downward (pest: first `.op` binds loosest). Range
+        // is looser than arithmetic so `2..n+1` means `2..(n+1)`; multiplicative
+        // binds tighter than additive; postfix `.method` binds tighter than any
+        // infix operator so `a.x * b.y` is `(a.x) * (b.y)`.
+        .op(Op::infix(op_range, Assoc::Left))
+        .op(Op::infix(op_add, Assoc::Left) | Op::infix(op_sub, Assoc::Left))
         .op(Op::infix(op_mul, Assoc::Left)
             | Op::infix(op_div, Assoc::Left)
             | Op::infix(op_mod, Assoc::Left))
-        .op(Op::infix(op_add, Assoc::Left) | Op::infix(op_sub, Assoc::Left))
         .op(Op::postfix(postfix_op))
-        .op(Op::infix(op_range, Assoc::Left))
         .op(Op::infix(op_class_ext, Assoc::Left))
         .op(Op::prefix(prefix_op))
 });

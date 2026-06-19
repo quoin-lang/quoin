@@ -46,10 +46,12 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 | `%` (prefix) | String interpolation (→ `mod`) |
 | `+` (prefix) | No-op |
 
-### Operator precedence (current, **buggy** — see Gotcha #1)
+### Operator precedence
 
 Loosest → tightest, all left-associative:
-`||` · `&&` · `== !=` · `< <= > >=` · `~` · `* / %` · `+ -` · `..` · `<--`
+`||` · `&&` · `== !=` · `< <= > >=` · `~` · `..` · `+ -` · `* / %` · `<--`.
+Postfix sends (`.method`) bind tighter than any infix operator; prefix operators
+(`-` `!` `%`) bind tightest.
 
 ---
 
@@ -76,10 +78,10 @@ Loosest → tightest, all left-associative:
 The consolidated list of surprising behaviors. If you're producing BB code, read
 this first.
 
-1. **Operator precedence is currently wrong (known bug).** `+`/`-` bind *tighter*
-   than `*`/`/`/`%`; `..` binds tighter than arithmetic; arithmetic binds tighter
-   than comparison. `2 + 3 * 4` is `20`; `2 .. 3 + 1` **errors**.
-   **→ Parenthesize every mixed-operator expression.** (`BBLIB_TODO.md` → Bugs.)
+1. **Operator precedence is conventional** (`* / %` tighter than `+ -` tighter than
+   comparison tighter than `&&`/`||`), with two specifics: **range `..` is looser
+   than arithmetic** (`2 .. n + 1` = `2 .. (n + 1)`), and **postfix `.method` binds
+   tighter than any infix operator** (`1 .. list.count` = `1 .. (list.count)`).
 2. **`"` always starts a comment** — there are no double-quoted strings. A `"…"`
    block comment spans newlines, so a **stray `"` silently swallows code** until
    the next quote. Strings are `'…'`.

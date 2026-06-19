@@ -194,7 +194,7 @@ parenthesize an operator expression that you want to pass as a single argument
 > - **Prefix** operators are no-argument sends on the operand: `-x`→`negated`, `!x`→`!`, `%x`→`mod`, `+x`→ no-op.
 > - **Infix** operators are one-argument sends and are **all left-associative**.
 > - Most infix operators are overridable methods on the receiver's type; `&&`/`||` are special short-circuit forms (not method sends).
-> - **Precedence, loosest → tightest:** `||` · `&&` · `== !=` · `< <= > >=` · `~` · `* / %` · `+ -` · `..` · `<--`
+> - **Precedence, loosest → tightest:** `||` · `&&` · `== !=` · `< <= > >=` · `~` · `..` · `+ -` · `* / %` · `<--`. Postfix sends (`.method`) bind tighter than any infix operator.
 
 ### Desugaring
 
@@ -211,14 +211,13 @@ parenthesize an operator expression that you want to pass as a single argument
 Operators are therefore per-type customizable: define `+:` on your class and `+`
 works on its instances.
 
-> **⚠ Gotcha — operator precedence is currently WRONG (known bug).** The precedence
-> ordering is non-standard and **will change**. Today:
-> - `+` and `-` bind **tighter** than `*` `/` `%`: `2 + 3 * 4` is **20** (`(2+3)*4`), and `2 * 3 + 4` is **14**.
-> - Arithmetic binds tighter than comparison: `1 + 2 == 3` is `true`.
-> - `..` binds tighter than arithmetic: `2 .. 3 + 1` **errors** (parses as `(2..3) + 1`).
->
-> **Until this is fixed, parenthesize every mixed-operator expression.** Tracked in
-> `BBLIB_TODO.md` → *Bugs/Odd Behavior* (fix deferred until this doc is complete).
+> **Note — precedence is conventional, with two specifics worth knowing.**
+> Multiplicative (`* / %`) binds tighter than additive (`+ -`), which binds tighter
+> than comparison, which binds tighter than `&&`/`||` — as you'd expect, so
+> `2 + 3 * 4` is `14` and `1 + 2 == 3` is `true`. Beyond that: **range `..` is looser
+> than arithmetic**, so `2 .. n + 1` means `2 .. (n + 1)`; and **postfix `.method`
+> binds tighter than every infix operator**, so `1 .. list.count` is
+> `1 .. (list.count)` and `a.x * b.y` is `(a.x) * (b.y)`.
 
 ---
 
