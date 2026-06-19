@@ -1,13 +1,13 @@
 use crate::compiler::Compiler;
 use crate::error::BBError;
-use crate::fiber::{Fiber, VMContext, YieldReason};
+use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
 use crate::highlighter::highlight_to_ansi;
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_building_blocks_file};
 use crate::runtime::{
-    block, boolean, class, double, integer, io, list, map, method, native, nil, object, regex,
-    runtime, string, timer,
+    block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method, native,
+    nil, object, regex, runtime, string, timer,
 };
 use crate::value::{Block, NamespacedName, NativeClassBuilder};
 use crate::vm::{VmOptions, VmState, VmStatus};
@@ -223,6 +223,7 @@ impl VmRunner {
             vm.register_native_class(mc, map::build_map_class());
             vm.register_native_class(mc, map::build_key_value_pair_class());
             vm.register_native_class(mc, regex::build_regex_class());
+            vm.register_native_class(mc, fiber_class::build_fiber_class());
 
             for t in ["Native"] {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
@@ -287,57 +288,46 @@ impl VmRunner {
                 );
                 vm.start_block(mc, main_block, Vec::new(), None, None);
 
-                let fiber = Fiber::new(move |yielder, mut ctx| {
-                    let (vm, _mc) = unsafe { ctx.get() };
-                    vm.yielder = Some(yielder as *const _ as *const ());
-
-                    loop {
-                        let (vm, _mc) = unsafe { ctx.get() };
-                        match vm.step(_mc) {
-                            Ok(VmStatus::Running) => {
-                                vm.yielder = None;
-                                ctx = yielder.suspend(YieldReason::CooperativeYield);
-                                let (vm, _mc) = unsafe { ctx.get() };
-                                vm.yielder = Some(yielder as *const _ as *const ());
-                            }
-                            Ok(VmStatus::Finished(val)) => {
-                                vm.yielder = None;
-                                return Ok(val);
-                            }
-                            Ok(VmStatus::Yeeted(val)) => {
-                                vm.yielder = None;
-                                return Err(BBError::Other(format!("Uncaught exception: {}", val)));
-                            }
-                            Err(err) => {
-                                vm.yielder = None;
-                                return Err(err);
-                            }
-                        }
-                    }
-                });
+                let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
                 vm.active_fiber = Some(gc!(mc, fiber));
             });
 
             let mut step_count = 0;
             loop {
                 let status = arena.mutate_root(|mc, vm| {
-                    let Some(fiber) = vm.active_fiber else {
-                        return Ok(ExecutionStatus::Finished);
+                    // Resume the coroutine of the currently-running fiber: a guest
+                    // `Fiber` if one is active, otherwise the main program (#0).
+                    let coro_holder = match vm.current_fiber {
+                        None => match vm.active_fiber {
+                            Some(f) => f,
+                            None => return Ok(ExecutionStatus::Finished),
+                        },
+                        Some(fv) => fv
+                            .with_native_state::<fiber_class::NativeFiberState, _, _>(|s| s.coro())
+                            .map_err(BBError::Other)?,
                     };
-
-                    let mut opt = fiber.coroutine.borrow_mut();
-                    let coro = opt.as_mut().expect("Coroutine already finished");
 
                     let ctx = VMContext {
                         vm: vm as *mut _,
                         mc: mc as *const _,
                     };
+                    let res = {
+                        let mut opt = coro_holder.coroutine.borrow_mut();
+                        let coro = opt.as_mut().expect("Coroutine already finished");
+                        coro.resume(ctx)
+                    };
 
-                    match coro.resume(ctx) {
-                        CoroutineResult::Yield(YieldReason::CooperativeYield) => {
+                    match res {
+                        CoroutineResult::Yield(YieldReason::CooperativeYield)
+                        | CoroutineResult::Yield(YieldReason::CallBlock { .. }) => {
                             Ok(ExecutionStatus::Running)
                         }
-                        CoroutineResult::Yield(YieldReason::CallBlock { .. }) => {
+                        CoroutineResult::Yield(YieldReason::ResumeFiber { fiber, arg }) => {
+                            vm.do_resume_switch(mc, fiber, arg)?;
+                            Ok(ExecutionStatus::Running)
+                        }
+                        CoroutineResult::Yield(YieldReason::YieldFiber { value }) => {
+                            vm.do_yield_switch(mc, value)?;
                             Ok(ExecutionStatus::Running)
                         }
                         CoroutineResult::Yield(YieldReason::Return(val)) => {
@@ -346,13 +336,20 @@ impl VmRunner {
                             Ok(ExecutionStatus::Finished)
                         }
                         CoroutineResult::Return(res) => {
-                            vm.active_fiber = None;
-                            match res {
-                                Ok(val) => {
-                                    vm.push(val);
-                                    Ok(ExecutionStatus::Finished)
+                            if vm.current_fiber.is_some() {
+                                // A guest fiber's block returned; hand the result
+                                // back to its resumer and keep scheduling.
+                                vm.do_fiber_done(mc, res)?;
+                                Ok(ExecutionStatus::Running)
+                            } else {
+                                vm.active_fiber = None;
+                                match res {
+                                    Ok(val) => {
+                                        vm.push(val);
+                                        Ok(ExecutionStatus::Finished)
+                                    }
+                                    Err(err) => Err(err),
                                 }
-                                Err(err) => Err(err),
                             }
                         }
                     }
@@ -458,6 +455,11 @@ impl VmRunner {
                 match coro.resume(ctx) {
                     CoroutineResult::Yield(YieldReason::CooperativeYield) => Ok(false),
                     CoroutineResult::Yield(YieldReason::CallBlock { .. }) => Ok(false),
+                    // Guest fibers are not used by the benchmark harness.
+                    CoroutineResult::Yield(YieldReason::ResumeFiber { .. })
+                    | CoroutineResult::Yield(YieldReason::YieldFiber { .. }) => {
+                        panic!("guest fibers are not supported in benchmark mode")
+                    }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
                         vm.active_fiber = None;
                         vm.push(val);
@@ -525,6 +527,7 @@ impl VmRunner {
             vm.register_native_class(mc, map::build_map_class());
             vm.register_native_class(mc, map::build_key_value_pair_class());
             vm.register_native_class(mc, regex::build_regex_class());
+            vm.register_native_class(mc, fiber_class::build_fiber_class());
 
             for t in ["Native"] {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));

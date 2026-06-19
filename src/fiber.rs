@@ -1,6 +1,6 @@
 use crate::error::BBError;
 use crate::value::{Block, Value};
-use crate::vm::VmState;
+use crate::vm::{VmState, VmStatus};
 
 use corosensei::stack::DefaultStack;
 use gc_arena::{Collect, Gc, Mutation};
@@ -24,6 +24,55 @@ pub enum YieldReason<'gc> {
     },
     CooperativeYield,
     Return(Value<'gc>),
+    /// A guest fiber is resuming another guest fiber. Bubbles to the scheduler,
+    /// which switches execution contexts to `fiber`, delivering `arg`.
+    ResumeFiber {
+        fiber: Value<'gc>,
+        arg: Value<'gc>,
+    },
+    /// The running guest fiber is suspending and handing `value` back to whoever
+    /// resumed it. Bubbles to the scheduler.
+    YieldFiber {
+        value: Value<'gc>,
+    },
+}
+
+/// The standard VM driver loop, shared by the main program and every guest
+/// `Fiber`. Each runs as its own `corosensei` coroutine; this body just steps
+/// the VM over the *current* execution context and cooperatively suspends so
+/// the scheduler can run the GC. Fiber resume/yield happen deeper in `step`
+/// (inside the native `Fiber` methods) and bubble up as `YieldReason`s, so they
+/// are transparent here.
+pub fn run_vm_loop<'gc>(
+    yielder: &VMYielder<'gc>,
+    mut ctx: VMContext<'gc>,
+) -> Result<Value<'gc>, BBError> {
+    let (vm, _mc) = unsafe { ctx.get() };
+    vm.yielder = Some(yielder as *const _ as *const ());
+
+    loop {
+        let (vm, mc) = unsafe { ctx.get() };
+        match vm.step(mc) {
+            Ok(VmStatus::Running) => {
+                vm.yielder = None;
+                ctx = yielder.suspend(YieldReason::CooperativeYield);
+                let (vm, _mc) = unsafe { ctx.get() };
+                vm.yielder = Some(yielder as *const _ as *const ());
+            }
+            Ok(VmStatus::Finished(val)) => {
+                vm.yielder = None;
+                return Ok(val);
+            }
+            Ok(VmStatus::Yeeted(val)) => {
+                vm.yielder = None;
+                return Err(BBError::Other(format!("Uncaught exception: {}", val)));
+            }
+            Err(err) => {
+                vm.yielder = None;
+                return Err(err);
+            }
+        }
+    }
 }
 
 /// A wrapper around raw pointers to VMState and Mutation contexts.

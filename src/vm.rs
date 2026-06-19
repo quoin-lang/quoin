@@ -3,6 +3,7 @@ use crate::fiber::{Fiber, VMYielder, YieldReason};
 use crate::highlighter::{format_ansi, HighlightParser, HighlightSpan};
 use crate::instruction::{Constant, Instruction};
 use crate::parser::parse_building_blocks_string;
+use crate::runtime::fiber::{FiberStatus, NativeFiberState};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::method::NativeMethodState;
@@ -102,6 +103,25 @@ pub struct VmState<'gc> {
     pub yielder: Option<*const ()>,
     pub active_fiber: Option<Gc<'gc, Fiber<'gc>>>,
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+
+    // --- Guest fiber scheduler state ---
+    /// The guest `Fiber` currently executing, or `None` when the main program
+    /// (fiber #0) is running. The scheduler in the driver keeps this in sync.
+    pub current_fiber: Option<Value<'gc>>,
+    /// Chain of resumers: each entry is whoever resumed the fiber above it
+    /// (`None` == the main program). A `yield` pops this to find who to return to.
+    pub resume_stack: Vec<Option<Value<'gc>>>,
+    /// One-slot mailbox for the value handed across a fiber switch (the arg to
+    /// `resume:`, or the value out of `yield:`). Written by the scheduler, read
+    /// by the resumed coroutine.
+    pub fiber_transfer: Option<Value<'gc>>,
+    /// Saved execution context for the main program while a guest fiber runs.
+    pub main_saved_stack: Vec<Value<'gc>>,
+    pub main_saved_frames: Vec<Frame<'gc>>,
+    pub main_saved_native_args: Vec<Vec<Value<'gc>>>,
+    /// An error raised inside a guest fiber, delivered to its resumer.
+    #[collect(require_static)]
+    pub fiber_error: Option<BBError>,
 
     #[collect(require_static)]
     pub options: VmOptions,
@@ -268,6 +288,13 @@ impl<'gc> VmState<'gc> {
             yielder: None,
             active_fiber: None,
             last_popped_env: None,
+            current_fiber: None,
+            resume_stack: Vec::new(),
+            fiber_transfer: None,
+            main_saved_stack: Vec::new(),
+            main_saved_frames: Vec::new(),
+            main_saved_native_args: Vec::new(),
+            fiber_error: None,
             options,
         }
     }
@@ -940,6 +967,247 @@ impl<'gc> VmState<'gc> {
         }
 
         Ok(self.pop()?)
+    }
+
+    // =====================================================================
+    // Guest fiber support
+    //
+    // `fiber_resume` / `fiber_yield` run inside native `Fiber` methods (deep in
+    // `step`). They bubble a `YieldReason` up to the scheduler in the driver,
+    // which performs the actual context switch via the `*_switch` helpers below
+    // and re-enters the appropriate coroutine. The transfer value rides in the
+    // GC-rooted `fiber_transfer` slot, so nothing is held only on the suspended
+    // native stack across the yield.
+    // =====================================================================
+
+    /// Resume `fiber_val`, delivering `arg`. Returns the value the fiber yields,
+    /// or its final return value when it completes. Called from `f.resume[:]`.
+    #[allow(no_gc_across_yield)]
+    pub fn fiber_resume(
+        &mut self,
+        mc: &Mutation<'gc>,
+        fiber_val: Value<'gc>,
+        arg: Value<'gc>,
+    ) -> Result<Value<'gc>, BBError> {
+        match self.fiber_status(fiber_val)? {
+            FiberStatus::Done => {
+                return Err(BBError::Other("cannot resume a finished Fiber".to_string()));
+            }
+            FiberStatus::Running => {
+                return Err(BBError::Other(
+                    "cannot resume a Fiber that is already running".to_string(),
+                ));
+            }
+            _ => {}
+        }
+        // Resuming the current fiber or one of its ancestors would form a cycle.
+        if self.current_fiber == Some(fiber_val)
+            || self.resume_stack.iter().any(|f| *f == Some(fiber_val))
+        {
+            return Err(BBError::Other(
+                "cannot resume a Fiber that is already running".to_string(),
+            ));
+        }
+
+        let saved = self.yielder;
+        if let Some(yielder) = unsafe { self.get_yielder() } {
+            yielder.suspend(YieldReason::ResumeFiber {
+                fiber: fiber_val,
+                arg,
+            });
+        } else {
+            return Err(BBError::Other(
+                "Fiber.resume called outside the VM scheduler".to_string(),
+            ));
+        }
+        self.yielder = saved;
+
+        if let Some(err) = self.fiber_error.take() {
+            return Err(err);
+        }
+        Ok(self.fiber_transfer.take().unwrap_or_else(|| self.new_nil(mc)))
+    }
+
+    /// Suspend the running fiber, handing `value` to whoever resumed it. Returns
+    /// the value passed to the next `resume:`. Called from `Fiber.yield[:]`.
+    #[allow(no_gc_across_yield)]
+    pub fn fiber_yield(
+        &mut self,
+        mc: &Mutation<'gc>,
+        value: Value<'gc>,
+    ) -> Result<Value<'gc>, BBError> {
+        if self.current_fiber.is_none() {
+            return Err(BBError::Other(
+                "Fiber.yield: called outside of a Fiber".to_string(),
+            ));
+        }
+
+        let saved = self.yielder;
+        if let Some(yielder) = unsafe { self.get_yielder() } {
+            yielder.suspend(YieldReason::YieldFiber { value });
+        } else {
+            return Err(BBError::Other(
+                "Fiber.yield: called outside the VM scheduler".to_string(),
+            ));
+        }
+        self.yielder = saved;
+
+        if let Some(err) = self.fiber_error.take() {
+            return Err(err);
+        }
+        Ok(self.fiber_transfer.take().unwrap_or_else(|| self.new_nil(mc)))
+    }
+
+    fn fiber_status(&self, fiber_val: Value<'gc>) -> Result<FiberStatus, BBError> {
+        fiber_val
+            .with_native_state::<NativeFiberState, _, _>(|s| s.status)
+            .map_err(BBError::Other)
+    }
+
+    fn set_fiber_status(&self, mc: &Mutation<'gc>, fiber_val: Value<'gc>, status: FiberStatus) {
+        let _ = fiber_val
+            .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.status = status);
+    }
+
+    /// Save the live VM execution context into the slot for `who` (`None` = main).
+    fn save_fiber_context(
+        &mut self,
+        mc: &Mutation<'gc>,
+        who: Option<Value<'gc>>,
+    ) -> Result<(), BBError> {
+        let stack = std::mem::take(&mut self.stack);
+        let frames = std::mem::take(&mut self.frames);
+        let native_args = std::mem::take(&mut self.active_native_args);
+        match who {
+            None => {
+                self.main_saved_stack = stack;
+                self.main_saved_frames = frames;
+                self.main_saved_native_args = native_args;
+            }
+            Some(f) => {
+                f.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
+                    s.set_context(stack, frames, native_args)
+                })
+                .map_err(BBError::Other)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load the saved context for `who` (`None` = main) into the live VM fields.
+    fn load_fiber_context(
+        &mut self,
+        mc: &Mutation<'gc>,
+        who: Option<Value<'gc>>,
+    ) -> Result<(), BBError> {
+        let (stack, frames, native_args) = match who {
+            None => (
+                std::mem::take(&mut self.main_saved_stack),
+                std::mem::take(&mut self.main_saved_frames),
+                std::mem::take(&mut self.main_saved_native_args),
+            ),
+            Some(f) => f
+                .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.take_context())
+                .map_err(BBError::Other)?,
+        };
+        self.stack = stack;
+        self.frames = frames;
+        self.active_native_args = native_args;
+        Ok(())
+    }
+
+    /// Scheduler: switch from the running coroutine to `fiber_val`, delivering
+    /// `arg`. Pushes the caller onto the resume stack.
+    pub fn do_resume_switch(
+        &mut self,
+        mc: &Mutation<'gc>,
+        fiber_val: Value<'gc>,
+        arg: Value<'gc>,
+    ) -> Result<(), BBError> {
+        let outgoing = self.current_fiber;
+        self.save_fiber_context(mc, outgoing)?;
+        if let Some(of) = outgoing {
+            self.set_fiber_status(mc, of, FiberStatus::Suspended);
+        }
+        self.resume_stack.push(outgoing);
+        self.current_fiber = Some(fiber_val);
+
+        let started = fiber_val
+            .with_native_state::<NativeFiberState, _, _>(|s| s.started)
+            .map_err(BBError::Other)?;
+
+        self.load_fiber_context(mc, Some(fiber_val))?;
+
+        if started {
+            self.fiber_transfer = Some(arg);
+        } else {
+            // First activation: bind `arg` to the block's parameters.
+            let block_val = fiber_val
+                .with_native_state::<NativeFiberState, _, _>(|s| s.block())
+                .map_err(BBError::Other)?;
+            let block_gc = match block_val {
+                Value::Object(obj) => match &obj.borrow().payload {
+                    ObjectPayload::Block(b) => *b,
+                    _ => return Err(BBError::Other("Fiber target is not a Block".to_string())),
+                },
+                _ => return Err(BBError::Other("Fiber target is not a Block".to_string())),
+            };
+            self.start_block(mc, block_gc, vec![arg], None, None);
+            fiber_val
+                .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.started = true)
+                .map_err(BBError::Other)?;
+        }
+        self.set_fiber_status(mc, fiber_val, FiberStatus::Running);
+        Ok(())
+    }
+
+    /// Scheduler: the running fiber yielded `value`; return control to its resumer.
+    pub fn do_yield_switch(
+        &mut self,
+        mc: &Mutation<'gc>,
+        value: Value<'gc>,
+    ) -> Result<(), BBError> {
+        let outgoing = self.current_fiber;
+        self.save_fiber_context(mc, outgoing)?;
+        if let Some(of) = outgoing {
+            self.set_fiber_status(mc, of, FiberStatus::Suspended);
+        }
+        let resumer = self.resume_stack.pop().unwrap_or(None);
+        self.current_fiber = resumer;
+        self.load_fiber_context(mc, resumer)?;
+        if let Some(rf) = resumer {
+            self.set_fiber_status(mc, rf, FiberStatus::Running);
+        }
+        self.fiber_transfer = Some(value);
+        Ok(())
+    }
+
+    /// Scheduler: the running fiber's block returned (or errored); mark it done
+    /// and return control to its resumer with the result.
+    pub fn do_fiber_done(
+        &mut self,
+        mc: &Mutation<'gc>,
+        result: Result<Value<'gc>, BBError>,
+    ) -> Result<(), BBError> {
+        if let Some(of) = self.current_fiber {
+            self.set_fiber_status(mc, of, FiberStatus::Done);
+        }
+        // The finished fiber's context is discarded.
+        self.stack.clear();
+        self.frames.clear();
+        self.active_native_args.clear();
+
+        let resumer = self.resume_stack.pop().unwrap_or(None);
+        self.current_fiber = resumer;
+        self.load_fiber_context(mc, resumer)?;
+        if let Some(rf) = resumer {
+            self.set_fiber_status(mc, rf, FiberStatus::Running);
+        }
+        match result {
+            Ok(val) => self.fiber_transfer = Some(val),
+            Err(err) => self.fiber_error = Some(err),
+        }
+        Ok(())
     }
 
     pub fn execute_validation_block(

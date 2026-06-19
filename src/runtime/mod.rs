@@ -2,6 +2,7 @@ pub mod block;
 pub mod boolean;
 pub mod class;
 pub mod double;
+pub mod fiber;
 pub mod integer;
 pub mod io;
 pub mod list;
