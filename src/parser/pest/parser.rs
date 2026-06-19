@@ -214,15 +214,6 @@ fn parse_stmt(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                 }),
             }
         }
-        Rule::yield_return => {
-            let expr = inner.into_inner().next().unwrap();
-            Node {
-                source_info,
-                value: YieldReturn(YieldReturnNode {
-                    value: Arc::new(parse_expr(expr, filename, source_text)),
-                }),
-            }
-        }
         Rule::block_return => {
             let expr = inner.into_inner().next().unwrap();
             Node {
@@ -430,6 +421,15 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         Rule::nested_expr => {
             let expr = inner.into_inner().next().unwrap();
             parse_expr(expr, filename, source_text)
+        }
+        Rule::yield_return => {
+            let expr = inner.into_inner().next().unwrap();
+            Node {
+                source_info,
+                value: YieldReturn(YieldReturnNode {
+                    value: Arc::new(parse_expr(expr, filename, source_text)),
+                }),
+            }
         }
         Rule::user_list_expr => {
             let mut pairs = inner.into_inner();

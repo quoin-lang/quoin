@@ -43,7 +43,6 @@ program = { SOI ~ (stmt ~ ";"?)+ ~ EOI }
 
 stmt = {
     method_return
-  | yield_return
   | block_return
   | assignment
   | bang3
@@ -54,7 +53,7 @@ stmt = {
 
 method_return = { "^" ~ "^" ~ expr }
 yield_return  = { "^" ~ ">" ~ expr }
-block_return  = { "^" ~ expr }
+block_return  = { "^" ~ !">" ~ expr }
 
 bang3 = { "!" ~ "!" ~ "!" }
 dot3  = { "." ~ "." ~ "." }
@@ -111,6 +110,7 @@ postfix_op = { "." ~ call_sig }
 // Re-ordered choices: definition_expr and user_string_expr must be tried before symbols/identifiers
 primary = {
     nested_expr
+  | yield_return
   | user_list_expr
   | list_expr
   | set_expr

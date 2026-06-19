@@ -87,10 +87,10 @@ running (i.e. from the main program) raises an error.
 `^> expr` is sugar for `Fiber.yield:expr`. The compiler lowers it to exactly
 that send (`LoadGlobal(Fiber)`, evaluate `expr`, `Send "yield:"`), so it has
 identical behavior — including the "yield outside a Fiber" error and the
-two-way value pass. It is currently **statement-only** (it lives in the grammar's
-`stmt`, not `expr`), so its resume value is observable when it is a block's final
-statement; to capture a resume value mid-block, use the `Fiber.yield:` method
-form. Promoting `^>` to expression position is tracked in `BBLIB_TODO.md`.
+two-way value pass. It is usable in **expression position** (it lives in the
+grammar's `primary`), so its resume value can be captured anywhere, e.g.
+`a = ^> v`. Its operand binds greedily like `Fiber.yield:` (`^> a + b` yields
+`a + b`); parenthesize to scope it, e.g. `(^> a) + b`.
 
 ```
 f = Fiber.new:{ |start|

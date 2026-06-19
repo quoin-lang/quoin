@@ -28,7 +28,8 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Confirm `%'string%{eval}' is working.
   - [ ] Make sure it's optimized into string concatenation by the compiler.
 - [x] Make sure case statements are tested and working.
-- [ ] Make the `^>` yield operator usable in expression position (currently statement-only in the grammar, so the resume value can only be captured as a block's final expression or via the longer `Fiber.yield:` form). Add `yield_return` to `expr`/`primary` and handle precedence.
+- [x] Make the `^>` yield operator usable in expression position.
+  - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.
 - [ ] Have the `LoadGlobal` instruction consult the `BuiltinCache`. Currently it always does a `HashMap<NamespacedName, Value>` lookup against `globals` (see `vm.rs` `Instruction::LoadGlobal`); builtin classes (`Fiber`, `List`, `Integer`, etc.) could be served from the cache to avoid hashing the name on every load (e.g. for the `^>` -> `Fiber.yield:` lowering). `BuiltinCache` may need to be keyed more generally by name to cover all builtins.
 - [ ] Repurpose the Yeet instruction and make sure .../???/!!! are all working.
 - [x] Formalize an interface for BB error types.

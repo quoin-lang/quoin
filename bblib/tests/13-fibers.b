@@ -171,4 +171,16 @@
         .is:{ f.resume } equalTo:300;
         .is:{ f.resume } equalTo:'done';
     };
+
+    "* `^>` is usable in expression position now, so the resume value can be
+    "* captured mid-block (not just as a block's final statement).
+    .test:
+    yieldOperatorInExpressionPosition -> {
+        f = Fiber.new:{ |x|
+            a = ^> (x + 1);
+            (a + 100)
+        };
+        .is:{ f.resume:10 } equalTo:11;
+        .is:{ f.resume:5 } equalTo:105;
+    };
 }
