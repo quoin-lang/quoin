@@ -47,30 +47,26 @@ pub fn run_vm_loop<'gc>(
     yielder: &VMYielder<'gc>,
     mut ctx: VMContext<'gc>,
 ) -> Result<Value<'gc>, BBError> {
-    let (vm, _mc) = unsafe { ctx.get() };
-    vm.yielder = Some(yielder as *const _ as *const ());
+    // Record this coroutine's yielder in its fiber's slot (and make it live).
+    // From here on the driver restores `vm.yielder` from that slot before every
+    // resume, so it can never be left pointing at a different/freed coroutine.
+    let yptr = yielder as *const _ as *const ();
+    {
+        let (vm, mc) = unsafe { ctx.get() };
+        vm.register_yielder(mc, yptr);
+    }
 
     loop {
         let (vm, mc) = unsafe { ctx.get() };
         match vm.step(mc) {
             Ok(VmStatus::Running) => {
-                vm.yielder = None;
                 ctx = yielder.suspend(YieldReason::CooperativeYield);
-                let (vm, _mc) = unsafe { ctx.get() };
-                vm.yielder = Some(yielder as *const _ as *const ());
             }
-            Ok(VmStatus::Finished(val)) => {
-                vm.yielder = None;
-                return Ok(val);
-            }
+            Ok(VmStatus::Finished(val)) => return Ok(val),
             Ok(VmStatus::Yeeted(val)) => {
-                vm.yielder = None;
                 return Err(BBError::Other(format!("Uncaught exception: {}", val)));
             }
-            Err(err) => {
-                vm.yielder = None;
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         }
     }
 }

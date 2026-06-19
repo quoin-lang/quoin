@@ -302,15 +302,24 @@ design upholds it:
   governs the new suspend sites; `fiber_resume`/`fiber_yield` get the same
   audited `#[allow]` as `call_method`.
 
-### The `vm.yielder` correctness subtlety
-`vm.yielder` must always point to the *currently running* coroutine's yielder.
-After a fiber switch and a switch back, a coroutine resumes deep inside its
-native `fiber_resume`/`fiber_yield` — not at the closure top that normally sets
-`vm.yielder`. The helpers therefore **save `vm.yielder` to a local before
-`suspend` and restore it after**. Since the local lives on that coroutine's own
-native stack, it survives the suspension, guaranteeing `vm.yielder` is correct
-whenever any coroutine runs (including for nested `CooperativeYield`s in
-`execute_block`).
+### The `vm.yielder` correctness subtlety (driver-owned)
+`vm.yielder` must always point to the *currently running* coroutine's yielder,
+and it must never point at a coroutine that has been GC-collected (whose stack is
+then unmapped). It is therefore **owned by the scheduler, not juggled per-call**:
+
+- Each coroutine records its own yielder once, at the top of `run_vm_loop`, into
+  a per-fiber slot — `VmState.main_yielder` for fiber #0, a field in
+  `NativeFiberState` for guest fibers (`register_yielder`).
+- The driver sets `vm.yielder = current_fiber_yielder()` immediately **before
+  every `coro.resume`**, sourcing it from that slot.
+
+Because the running coroutine is always GC-rooted (via `current_fiber` /
+`active_fiber`), the loaded pointer is always live. This replaced an earlier
+save/restore-in-`fiber_resume`/`fiber_yield` scheme that could, under some
+interleavings of fiber switches and `CooperativeYield`, leave `vm.yielder`
+pointing at a guest fiber which was subsequently collected — a use-after-free
+that surfaced as a SIGSEGV in `corosensei`'s `switch_yield` during a later
+routine yield.
 
 ### The `vm`/`mc` pointer subtlety
 As in the existing nested step-loops, native code continues to use its `&mut

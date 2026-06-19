@@ -51,6 +51,9 @@ pub struct NativeFiberState {
     result: Option<Value<'static>>,
     /// The error value once the fiber fails.
     error: Option<Value<'static>>,
+    /// This coroutine's `Yielder`, stored as a raw address. The scheduler loads
+    /// it into `VmState.yielder` before resuming this fiber. Not GC data.
+    yielder: Option<usize>,
 }
 
 impl NativeFiberState {
@@ -65,7 +68,16 @@ impl NativeFiberState {
             native_args: Vec::new(),
             result: None,
             error: None,
+            yielder: None,
         }
+    }
+
+    pub fn set_yielder(&mut self, ptr: *const ()) {
+        self.yielder = Some(ptr as usize);
+    }
+
+    pub fn yielder(&self) -> Option<*const ()> {
+        self.yielder.map(|u| u as *const ())
     }
 
     pub fn set_result<'gc>(&mut self, val: Value<'gc>) {

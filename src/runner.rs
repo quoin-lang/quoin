@@ -307,6 +307,10 @@ impl VmRunner {
                             .map_err(BBError::Other)?,
                     };
 
+                    // Point `vm.yielder` at the coroutine we're about to run,
+                    // sourced from its own GC-rooted slot, so it never dangles.
+                    vm.yielder = vm.current_fiber_yielder();
+
                     let ctx = VMContext {
                         vm: vm as *mut _,
                         mc: mc as *const _,

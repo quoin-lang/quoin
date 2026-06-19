@@ -99,8 +99,13 @@ pub struct VmState<'gc> {
     pub last_send_args: Vec<Value<'gc>>,
     pub active_native_args: Vec<Vec<Value<'gc>>>,
 
+    /// Yielder of the *currently running* coroutine. Set by the driver from the
+    /// running fiber's stored slot before every resume, so it can never dangle.
     #[collect(require_static)]
     pub yielder: Option<*const ()>,
+    /// The main program coroutine's yielder (the per-fiber slot for fiber #0).
+    #[collect(require_static)]
+    pub main_yielder: Option<*const ()>,
     pub active_fiber: Option<Gc<'gc, Fiber<'gc>>>,
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
@@ -274,6 +279,33 @@ impl<'gc> VmState<'gc> {
             .map(|ptr| unsafe { &*(ptr as *const VMYielder<'gc>) })
     }
 
+    /// Record the running coroutine's yielder into the current fiber's slot (or
+    /// the main slot) and make it live. Called once at the top of `run_vm_loop`.
+    pub fn register_yielder(&mut self, mc: &Mutation<'gc>, ptr: *const ()) {
+        match self.current_fiber {
+            None => self.main_yielder = Some(ptr),
+            Some(f) => {
+                let _ = f.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
+                    s.set_yielder(ptr)
+                });
+            }
+        }
+        self.yielder = Some(ptr);
+    }
+
+    /// The stored yielder for whichever fiber is current (main if `None`). The
+    /// driver loads this into `self.yielder` before resuming, guaranteeing it
+    /// always points at the live, GC-rooted coroutine being run.
+    pub fn current_fiber_yielder(&self) -> Option<*const ()> {
+        match self.current_fiber {
+            None => self.main_yielder,
+            Some(f) => f
+                .with_native_state::<NativeFiberState, _, _>(|s| s.yielder())
+                .ok()
+                .flatten(),
+        }
+    }
+
     pub fn new(mc: &Mutation<'gc>, options: VmOptions) -> Self {
         Self {
             stack: Vec::new(),
@@ -286,6 +318,7 @@ impl<'gc> VmState<'gc> {
             last_send_args: Vec::new(),
             active_native_args: Vec::new(),
             yielder: None,
+            main_yielder: None,
             active_fiber: None,
             last_popped_env: None,
             current_fiber: None,
@@ -1009,7 +1042,6 @@ impl<'gc> VmState<'gc> {
             ));
         }
 
-        let saved = self.yielder;
         if let Some(yielder) = unsafe { self.get_yielder() } {
             yielder.suspend(YieldReason::ResumeFiber {
                 fiber: fiber_val,
@@ -1020,7 +1052,7 @@ impl<'gc> VmState<'gc> {
                 "Fiber.resume called outside the VM scheduler".to_string(),
             ));
         }
-        self.yielder = saved;
+        // On resume the driver has already restored `self.yielder` for us.
 
         if let Some(err) = self.fiber_error.take() {
             return Err(err);
@@ -1040,7 +1072,6 @@ impl<'gc> VmState<'gc> {
             return Err(self.raise_fiber_error(mc, "Fiber.yield: called outside of a Fiber"));
         }
 
-        let saved = self.yielder;
         if let Some(yielder) = unsafe { self.get_yielder() } {
             yielder.suspend(YieldReason::YieldFiber { value });
         } else {
@@ -1048,7 +1079,7 @@ impl<'gc> VmState<'gc> {
                 "Fiber.yield: called outside the VM scheduler".to_string(),
             ));
         }
-        self.yielder = saved;
+        // On resume the driver has already restored `self.yielder` for us.
 
         if let Some(err) = self.fiber_error.take() {
             return Err(err);
