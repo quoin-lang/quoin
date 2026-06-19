@@ -41,7 +41,6 @@ pub fn build_object_class() -> NativeClassBuilder {
             let false_val = vm.new_bool(mc, false);
             Ok(vm.new_bool(mc, eq_result == false_val))
         })
-        // TODO: call #init in #new/#new:
         .instance_method("init", |_vm, _mc, args| Ok(args[0]))
         .instance_method("print", |vm, mc, args| {
             let s_result = vm.call_method(mc, args[0], "s", vec![])?;

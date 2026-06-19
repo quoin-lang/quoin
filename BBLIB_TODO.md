@@ -3,11 +3,12 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the BuildingBlocks standard library (`bblib`) files and test suites.
 
 ## Misc
-- [ ] Change the file extension to `.bub` everywhere.
+- [x] Change the file extension to `.bub` everywhere.
   - Don't forget to update the plugin.
 - [ ] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
   - In the BB language itself all methods are attached to a class.
 - [ ] Support checking `assertMeetsRequirements:` in calls to `mix:`/`can:`.
+  - Implement `Class#can?:SELECTOR`.
 - [ ] Find duplicate bits of code and refactor.
   - Spinning the VM while executing in a native method.
   - Object initialization/new:{} logic
@@ -46,6 +47,10 @@ This document outlines the language features, compiler updates, and VM modificat
   - [ ] VSCode plugin
 - [x] Integrate fff into agy
   - https://github.com/dmtrKovalenko/fff#mcp-server
+- [ ] Write a document fully explaining the language semantics, including all corner cases.
+  - Capture the subtle/surprising behaviors here as they surface so they can be folded into the doc.
+  - **`new:{}` block initialization & lexical scope.** Instance variables are *not* pre-bound inside a `new:{}` block, so an empty `new:{}` leaves every field at its default (`nil`) — it does **not** silently capture a same-named variable from the surrounding scope. Only an explicit assignment binds a field. The right-hand side of such an assignment resolves up the lexical chain (so `{ x = x }` copies the enclosing `x` into the field), but the assignment itself binds in the block's own frame and never mutates the enclosing variable. Corollary: a plain-assignment `init:` like `init: -> {|a| @a = a }` is redundant — field population already sets `@a` from the block before `init:` runs — so it behaves identically to the default no-op `init`.
+  - **`init`/`init:` run the whole chain.** `new`/`new:{}` invoke the initializer of every class in the hierarchy (ancestors and mixins included), base→derived, with `init:` preferred over `init` per class. A derived `init:` no longer shadows/skips an ancestor or mixin `init`.
 
 ## Bugs/Odd Behavior
 

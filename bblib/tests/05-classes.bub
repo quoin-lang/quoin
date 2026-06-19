@@ -50,6 +50,58 @@
     };
 
     .test:
+    runsAncestorInitOnBlockInit -> {
+        "* `new:` must still run an ancestor's `init`, even when the subclass
+        "* defines `init:`. Each class's initializer pulls the block fields it
+        "* names; the subclass need not redeclare the parent's params.
+        .is:{
+            TSCNC_AB <- { |@x|
+                init -> { @x = 100 }
+                x -> { @x }
+            };
+            TSCNC_AB <- TSCNC_ABSub <- { |@y|
+                init: -> { |y| @y = y }
+                y -> { @y }
+            };
+            o = TSCNC_ABSub.new: { y = 5 };
+            #( o.x o.y )
+        } equalTo:#( 100 5 );
+    };
+
+    .test:
+    runsMixinInitOnBlockInit -> {
+        "* Same rule for a mixin's `init` when the class defines `init:`.
+        .is:{
+            TSCNC_MixI <- { |@m|
+                init -> { @m = 9 }
+                m -> { @m }
+            };
+            TSCNC_MixSub <- { |@y|
+                .mix:TSCNC_MixI;
+                init: -> { |y| @y = y }
+                y -> { @y }
+            };
+            o = TSCNC_MixSub.new: { y = 7 };
+            #( o.m o.y )
+        } equalTo:#( 9 7 );
+    };
+
+    .test:
+    blockInitRequiresExplicitAssignment -> {
+        "* An empty `new:{}` must NOT capture a same-named variable from the
+        "* surrounding scope; only explicit assignment binds a field. The RHS of
+        "* an assignment still resolves up the lexical chain, and the assignment
+        "* does not mutate the enclosing variable.
+        TSCNC_Cap <- { |@a|
+            a -> { @a }
+        };
+        a = 42;
+        .is:{ (TSCNC_Cap.new:{}).a.defined? } equalTo:false;
+        .is:{ (TSCNC_Cap.new:{ a = a }).a } equalTo:42;
+        .does:{ TSCNC_Cap.new:{ a = 99 } } resultIn:{ a == 42 };
+    };
+
+    .test:
     mixins -> {
         .is:{
             TSCNC7 <- { |@a @b|

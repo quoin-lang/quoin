@@ -591,48 +591,63 @@ impl<'gc> VmState<'gc> {
             }
         }
 
-        // Call init: if it exists
-        let init_val = self.lookup_in_class_hierarchy(obj.borrow().class, "init:", false);
-        let mut init_block = None;
-        if let Some(val) = init_val {
-            if let Value::Object(ref io) = val {
-                match &io.borrow().payload {
-                    ObjectPayload::Block(b) => {
-                        init_block = Some(b.clone());
-                    }
-                    ObjectPayload::NativeState(state_cell) => {
-                        let state_ref = state_cell.borrow();
-                        let any_ref = (**state_ref).as_any();
-                        if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
-                            let block_val = method_state.get_block();
-                            if let Value::Object(block_obj) = block_val
-                                && let ObjectPayload::Block(b) = &block_obj.borrow().payload
-                            {
-                                init_block = Some(b.clone());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // Run each class's initializer base->derived (parents, then mixins, then
+        // self), mirroring `run_all_inits` for the no-block path. A class that
+        // defines `init:` receives the block fields it names (matched by param
+        // name); otherwise its zero-arg `init` runs. Running the whole chain means
+        // an ancestor or mixin initializer is never skipped just because a more
+        // derived class happens to define `init:`.
+        let mut classes = Vec::new();
+        let mut visited = Vec::new();
+        self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
 
-        if let Some(block) = init_block {
-            let mut init_args = Vec::new();
-            for param in &block.param_names {
-                let val = env_borrow
-                    .vars
-                    .get(param)
-                    .copied()
-                    .unwrap_or_else(|| self.new_nil(mc));
-                init_args.push(val);
+        let receiver = Value::Object(obj);
+        for clz in classes {
+            let init_colon = clz.borrow().instance_methods.get("init:").copied();
+            if let Some(method_val) = init_colon {
+                let param_names = self.init_param_names(method_val).unwrap_or_default();
+                let mut init_args = Vec::new();
+                for param in &param_names {
+                    let val = env_borrow
+                        .vars
+                        .get(param)
+                        .copied()
+                        .unwrap_or_else(|| self.new_nil(mc));
+                    init_args.push(val);
+                }
+                self.call_method_value(mc, receiver, method_val, "init:", init_args)?;
+            } else if let Some(method_val) = clz.borrow().instance_methods.get("init").copied() {
+                self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
             }
-            self.call_method(mc, Value::Object(obj), "init:", init_args)?;
-        } else {
-            self.run_all_inits(mc, obj)?;
         }
 
         Ok(())
+    }
+
+    /// Parameter names of a method's underlying block, used so `init:` can be fed
+    /// the `new:{}` block fields it declares by name. Handles both plain block
+    /// methods and native-wrapped method state.
+    fn init_param_names(&self, method_val: Value<'gc>) -> Option<Vec<String>> {
+        let Value::Object(io) = method_val else {
+            return None;
+        };
+        let io_ref = io.borrow();
+        match &io_ref.payload {
+            ObjectPayload::Block(b) => Some(b.param_names.clone()),
+            ObjectPayload::NativeState(state_cell) => {
+                let state_ref = state_cell.borrow();
+                let any_ref = (**state_ref).as_any();
+                let method_state = any_ref.downcast_ref::<NativeMethodState>()?;
+                if let Value::Object(block_obj) = method_state.get_block()
+                    && let ObjectPayload::Block(b) = &block_obj.borrow().payload
+                {
+                    Some(b.param_names.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     pub fn get_or_create_builtin_class(
@@ -1979,27 +1994,13 @@ impl<'gc> VmState<'gc> {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
 
-        let mut env_frame = EnvFrame::new(block.parent_env);
-        // Bind all instance variables as local variables in this block, initialized from the parent env or current fields
-        let vars = self.get_all_instance_vars(obj.borrow().class);
-        for var in &vars {
-            let val = if let Some(parent) = block.parent_env {
-                EnvFrame::get(parent, var).unwrap_or_else(|| {
-                    obj.borrow()
-                        .fields
-                        .get(var)
-                        .copied()
-                        .unwrap_or_else(|| self.new_nil(mc))
-                })
-            } else {
-                obj.borrow()
-                    .fields
-                    .get(var)
-                    .copied()
-                    .unwrap_or_else(|| self.new_nil(mc))
-            };
-            env_frame.vars.insert(var.clone(), val);
-        }
+        // The block runs in a fresh frame over its lexical parent only. Instance
+        // variables are deliberately NOT pre-bound here: an empty `new:{}` block
+        // must leave fields at their default (nil) rather than silently capturing
+        // a same-named variable from the surrounding scope. A bare instance-var
+        // name therefore reads up the lexical chain, and an explicit assignment is
+        // what binds the field (see StoreLocal's instantiation-frame handling).
+        let env_frame = EnvFrame::new(block.parent_env);
         let env_ref = gcl!(mc, env_frame);
 
         let is_nested_block = block.is_nested_block;
@@ -2580,7 +2581,14 @@ impl<'gc> VmState<'gc> {
                 }
                 let val = self.pop()?;
                 let frame = &mut self.frames[frame_idx];
-                if !EnvFrame::set(frame.env, mc, &name, val) {
+                // Assignments inside a `new:{}` block always bind in this frame:
+                // they initialize the new object (fields and `init:` args), so they
+                // must not walk up the lexical chain and mutate an enclosing
+                // variable that happens to share the name. RHS reads still resolve
+                // lexically (LoadLocal), so `{ x = x }` copies the outer `x`.
+                if frame.instantiating_obj.is_some() {
+                    frame.env.borrow_mut(mc).vars.insert(name, val);
+                } else if !EnvFrame::set(frame.env, mc, &name, val) {
                     frame.env.borrow_mut(mc).vars.insert(name, val);
                 }
                 frame.ip += 1;
