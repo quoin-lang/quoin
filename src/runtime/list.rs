@@ -8,17 +8,13 @@ use std::mem::transmute;
 
 #[derive(Debug)]
 pub struct NativeListState {
-    pub idx: usize,
     pub vec: Vec<Value<'static>>,
 }
 
 impl NativeListState {
     pub fn new(vec: Vec<Value<'_>>) -> Self {
         let vec_static: Vec<Value<'static>> = unsafe { transmute(vec) };
-        Self {
-            idx: 0,
-            vec: vec_static,
-        }
+        Self { vec: vec_static }
     }
 
     pub fn get_vec<'gc>(&self) -> &[Value<'gc>] {
@@ -49,29 +45,6 @@ impl AnyCollect for NativeListState {
 
 pub fn build_list_class() -> NativeClassBuilder {
     NativeClassBuilder::new("List", Some("Object"))
-        .instance_method("next", |vm, mc, args| {
-            let val_opt = args[0].with_native_state_mut(mc, |l: &mut NativeListState| {
-                if l.idx < l.vec.len() {
-                    let val = l.vec[l.idx];
-                    l.idx += 1;
-                    Some(val)
-                } else {
-                    None
-                }
-            })?;
-
-            Ok(if let Some(val) = val_opt {
-                unsafe { transmute(val) }
-            } else {
-                vm.new_nil(mc)
-            })
-        })
-        .instance_method("reset", |vm, mc, args| {
-            args[0].with_native_state_mut(mc, |l: &mut NativeListState| {
-                l.idx = 0;
-            })?;
-            Ok(vm.new_nil(mc))
-        })
         .instance_method("count", |vm, mc, args| {
             let len = args[0]
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())

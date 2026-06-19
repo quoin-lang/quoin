@@ -372,10 +372,26 @@ Additional validation performed during development:
 
 - **Phase 1 (done):** `new:`, `resume`/`resume:`, `yield`/`yield:`, `done?`/
   `alive?`/`status`; scheduler refactor; GC rooting; tests.
-- **Phase 2:** `Fiber.current`; richer error/status surface; tighter
+- **`^>` yield operator (done):** `^> expr` is sugar for `Fiber.yield:expr`,
+  lowered to that send by the compiler (see [§3](#3-surface-api)).
+- **Phase 3 — iteration redesign + Generator/Iterator bridge (done):** The
+  `Iterate` protocol was simplified to a single required method, `each:`
+  (dropping the `next`/`reset` mutable cursor), which made iteration re-entrant
+  and `nil`-safe. The fiber bridges iteration in both directions, in
+  `bblib/02-iterate.b`:
+  - **`Generator`** — a `^>`-yielding block as an iterable (`Generator.from:`);
+    its `each:` runs the block in a fiber and forwards each yield to the
+    consumer. Consumed lazily through an `Iterator` (e.g. `.take:`), so even
+    infinite generators work.
+  - **`Iterator`** — external pull iteration (`hasNext?` / `next`), produced by
+    `someIterable.iterator`, backed by a fiber running `each:` with one element
+    of look-ahead.
+
+  Covered by `bblib/tests/14-generators.b` (custom `each:`-only collection,
+  `nil` elements, re-entrancy, `Generator`, infinite generator + `take:`,
+  external `Iterator`, `zip:`/`drop:`).
+- **Phase 2 (future):** `Fiber.current`; richer error/status surface; tighter
   double-resume diagnostics.
-- **Phase 3:** a `Generator` type bridging `yield` to the `Iterate` mixin, so a
-  yielding block can lazily drive `each:` / `collect:` / etc.
 
 ### Known limitations
 - Guest fibers are unavailable in benchmark mode (that driver bypasses the

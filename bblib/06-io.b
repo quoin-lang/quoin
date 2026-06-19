@@ -3,4 +3,11 @@
 
 [IO]Folder <-- {
     .mix:Iterate;
+
+    "* Folder is a native directory stream; drive its native cursor to satisfy
+    "* the each:-based Iterate protocol.
+    each: -> { |b|
+        { .next }.whileDefinedDo:{ |e| b.valueWithSelfOrArg:e };
+        .reset
+    }
 };

@@ -1,6 +1,6 @@
 use crate::arg;
 use crate::error::BBError;
-use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, OpaqueState, Value};
+use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmStatus;
 
 use gc_arena::Gc;
@@ -9,21 +9,16 @@ use gc_arena::lock::RefLock;
 use std::any::Any;
 use std::collections::HashMap;
 use std::mem::transmute;
-use std::vec::IntoIter;
 
 #[derive(Debug)]
 pub struct NativeMapState {
     pub map: HashMap<String, Value<'static>>,
-    pub iter: Option<IntoIter<String>>,
 }
 
 impl NativeMapState {
     pub fn new(map: HashMap<String, Value<'_>>) -> Self {
         let map_static: HashMap<String, Value<'static>> = unsafe { transmute(map) };
-        Self {
-            map: map_static,
-            iter: None,
-        }
+        Self { map: map_static }
     }
 
     pub fn get_map<'gc>(&self) -> &HashMap<String, Value<'gc>> {
@@ -98,43 +93,6 @@ pub fn build_map_class() -> NativeClassBuilder {
                 m.get_map().values().map(|v| *v).collect::<Vec<_>>()
             })?;
             Ok(vm.new_list(mc, values_vec))
-        })
-        .instance_method("next", |vm, mc, args| {
-            let kv_opt = args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
-                if m.iter.is_none() {
-                    let mut keys: Vec<String> = m.map.keys().cloned().collect();
-                    keys.sort();
-                    m.iter = Some(keys.into_iter());
-                }
-                if let Some(key) = m.iter.as_mut().unwrap().next() {
-                    let val_static = m
-                        .map
-                        .get(&key)
-                        .copied()
-                        .unwrap_or_else(|| unsafe { transmute(vm.new_nil(mc)) });
-                    let val_gc = unsafe { transmute(val_static) };
-                    Some((key, val_gc))
-                } else {
-                    None
-                }
-            })?;
-
-            if let Some((key, val)) = kv_opt {
-                let kvp_state = NativeKeyValuePairState::new(vm.new_string(mc, key), val);
-                let kvp_class = vm.get_builtin_class("KeyValuePair");
-                let obj = vm.new_native_state(mc, kvp_class, OpaqueState(kvp_state));
-                Ok(obj)
-            } else {
-                Ok(vm.new_nil(mc))
-            }
-        })
-        .instance_method("reset", |vm, mc, args| {
-            args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
-                let mut keys: Vec<String> = m.map.keys().cloned().collect();
-                keys.sort();
-                m.iter = Some(keys.into_iter());
-            })?;
-            Ok(vm.new_nil(mc))
         })
         .instance_method("==:", |vm, mc, args| {
             let lhs_map =

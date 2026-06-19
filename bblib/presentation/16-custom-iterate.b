@@ -1,14 +1,15 @@
 "* This exists in the standard library as NumberRange.
-MyRange <- { |@start @end @current|
+MyRange <- { |@start @end|
     .mix:Iterate;
 
     init: -> { |start end|
-        @current = start - 1; @start = start; @end = end
+        @start = start; @end = end
     }
 
-    "* Only one method required to implement Iterate:
-    next -> {
-        (@current > = @end - 1).if:{nil} else:{@current = @current + 1}
+    "* Only one method required to implement Iterate: call the block per element.
+    each: -> { |b|
+        i = @start;
+        { i < @end }.whileDo:{ b.valueWithSelfOrArg:i; i = i + 1 }
     }
 }
 

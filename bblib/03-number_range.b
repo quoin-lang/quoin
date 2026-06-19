@@ -1,4 +1,4 @@
-NumberRange <- { | @start @end @cur @n |
+NumberRange <- { | @start @end @n |
     .sealed!;
 
     .can:Iterate;
@@ -18,15 +18,11 @@ NumberRange <- { | @start @end @cur @n |
                       else:{ (n >= @start) && (n < @end) }
     }
 
-    reset -> { @cur = @start - @n }
-
-    next -> {
-        @cur.defined?.else:{ @cur = @start - @n }
-        @cur = @cur + @n
-        ^(@n > 0).if:{
-            (@cur >= @end).if:{ nil } else:{ @cur }
-        } else:{
-            (@cur <= @end).if:{ nil } else:{ @cur }
+    each: -> { |b|
+        i = @start;
+        { (@n > 0).if:{ i < @end } else:{ i > @end } }.whileDo:{
+            b.valueWithSelfOrArg:i;
+            i = i + @n;
         }
     }
 };

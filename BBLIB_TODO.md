@@ -14,8 +14,10 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Bring over Highlighter from the old repo.
 - [x] Improve stack trace output. (Similar to the C# output.)
   - [x] Show highlighted block snippets to the right.
-- [ ] Move to a better iterator design that doesn't require mutability.
-  - [ ] Use generators now that the VM supports them.
+- [x] Move to a better iterator design that doesn't require mutability.
+  - Iterate now requires only `each:`; `next`/`reset` cursor removed. Re-entrant, nil-safe.
+  - [x] Use generators now that the VM supports them.
+    - Added `Generator` (yield-block as iterable) and a fiber-backed external `Iterator` (`hasNext?`/`next`) in `bblib/02-iterate.b`.
 - [ ] Rewrite the TestSuite so it doesn't mix the tests into itself, too many conflicts.
 - [ ] List, Regex and Map #bind:{}
   - [x] List#bind:{}

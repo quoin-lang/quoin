@@ -4664,10 +4664,12 @@ mod tests {
             let count_val = vm.call_method(mc, args_val, "count", vec![]).unwrap();
             assert_eq!(to_spec(count_val), ValueSpec::Int(2));
 
-            let arg0 = vm.call_method(mc, args_val, "next", vec![]).unwrap();
+            let idx0 = vm.new_int(mc, 0);
+            let arg0 = vm.call_method(mc, args_val, "at:", vec![idx0]).unwrap();
             assert_eq!(to_spec(arg0), ValueSpec::String("foo".to_string()));
 
-            let arg1 = vm.call_method(mc, args_val, "next", vec![]).unwrap();
+            let idx1 = vm.new_int(mc, 1);
+            let arg1 = vm.call_method(mc, args_val, "at:", vec![idx1]).unwrap();
             assert_eq!(to_spec(arg1), ValueSpec::String("bar".to_string()));
 
             // Check options method

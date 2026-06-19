@@ -1,12 +1,14 @@
-Mixin <- Iterate <- {
-    each: -> { |eachBlock:Block|
-        it = self
-        { it.next }.whileDefinedDo:{ |eachItem|
-            eachBlock.valueWithSelfOrArg:eachItem
-        };
-        it.reset
-    };
+"
+Iteration protocol.
 
+An iterable implements a single method: `each:`, which calls its block once per
+element (via `valueWithSelfOrArg:`). Everything else - the combinators below, the
+external `Iterator` (pull / hasNext?+next), and `Generator` (a yield-block as an
+iterable) - is derived from `each:`. No `next`/`reset` cursor, so iteration is
+re-entrant and `nil` is a perfectly valid element.
+"
+
+Mixin <- Iterate <- {
     collect: -> {|collectBlock:Block|
         l = #();
         .each:{ |collectItem|
@@ -22,7 +24,6 @@ Mixin <- Iterate <- {
     };
 
     all?: -> {|allBlock:Block|
-        it = self;
         .each:{ |x|
             (allBlock.valueWithSelfOrArg:x).else:{ ^^false };
         };
@@ -36,7 +37,10 @@ Mixin <- Iterate <- {
         ^true
     };
 
-    any? -> { .count > 0 };
+    any? -> {
+        .each:{ |_| ^^true };
+        ^false
+    };
 
     any?: -> {|block:Block|
         .each:{ |x|
@@ -59,14 +63,41 @@ Mixin <- Iterate <- {
 
     detect: -> { |block|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^x } };
+        ^nil
     }
 
-    first -> { .reset; .next }
-    second -> { .first; .next }
-    third -> { .second; .next }
-    fourth -> { .third; .next }
-    fifth -> { .fourth; .next }
+    nth: -> { |n|
+        i = 0;
+        .each:{ |x| (i == n).if:{ ^^x }; i = i + 1 };
+        ^nil
+    }
+
+    first -> { .nth:0 }
+    second -> { .nth:1 }
+    third -> { .nth:2 }
+    fourth -> { .nth:3 }
+    fifth -> { .nth:4 }
     last -> { .reduce:{|_ n| n } }
+
+    "* External (pull-style) iteration, backed by a fiber over `each:`."
+    iterator -> { Iterator.over:self }
+
+    take: -> { |n|
+        l = #();
+        it = .iterator;
+        i = 0;
+        { (i < n) && it.hasNext? }.whileDo:{ l.add:it.next; i = i + 1 };
+        ^l
+    }
+
+    drop: -> { |n|
+        l = #();
+        it = .iterator;
+        i = 0;
+        { (i < n) && it.hasNext? }.whileDo:{ it.next; i = i + 1 };
+        { it.hasNext? }.whileDo:{ l.add:it.next };
+        ^l
+    }
 
     flatten -> {
         l = #();
@@ -183,15 +214,12 @@ Mixin <- Iterate <- {
         ^result
     }
 
-    zip: -> { |it2|
+    zip: -> { |other|
         r = #();
-        it1 = self
-        val1 = it1.next
-        val2 = it2.next
-        { val1.defined? && val2.defined? }.whileDo:{
-            r.add:#( val1 val2 );
-            val1 = it1.next
-            val2 = it2.next
+        a = .iterator;
+        b = other.iterator;
+        { a.hasNext? && b.hasNext? }.whileDo:{
+            r.add:#( a.next b.next );
         }
         ^r
     }
@@ -217,6 +245,58 @@ Mixin <- Iterate <- {
     list -> { self.select:{ true } }
 };
 
+"
+External, pull-style iterator over any `each:`-able. Backed by a fiber: running
+the iterable's `each:` inside a fiber turns each element into a `^>` yield, so we
+can pull one at a time. One element of look-ahead lets `hasNext?` work; `done` is
+decided by the fiber finishing, not by a sentinel value, so `nil` elements are
+fine.
+"
+Iterator <- { |@fiber @nextVal @hasNext|
+    .meta <-- {
+        over: -> { |it|
+            src = it;
+            ^.new:{ fiber = Fiber.new:{ src.each:{ |x| ^>x } } }
+        }
+    }
+
+    init -> { .advance }
+
+    advance -> {
+        v = @fiber.resume;
+        @fiber.done?.if:{ @hasNext = false }
+            else:{ @hasNext = true; @nextVal = v }
+    }
+
+    hasNext? -> { @hasNext }
+
+    next -> {
+        @hasNext.else:{ 'Iterator exhausted'.throw };
+        r = @nextVal;
+        .advance;
+        ^r
+    }
+};
+
+"
+A `Generator` turns a yielding block into an iterable: its `each:` runs the block
+in a fiber and forwards every `^>` to the consumer. Consumed lazily through an
+`Iterator` (e.g. `.take:`), so even infinite generators are usable.
+"
+Iterate <- Generator <- { |@genBlock|
+    .meta <-- {
+        from: -> { |b:Block| ^.new:{ genBlock = b } }
+    }
+
+    each: -> { |consumer|
+        f = Fiber.new:@genBlock;
+        { f.alive? }.whileDo:{
+            v = f.resume;
+            f.done?.else:{ consumer.valueWithSelfOrArg:v }
+        }
+    }
+};
+
 Map <-- {
     .can:Iterate;
 
@@ -224,6 +304,12 @@ Map <-- {
         default -> { #{} }
 
         fromPairs: -> { |pairs| pairs.reduce:{|m kvp| m.at:kvp.key put:kvp.value } into:#{} }
+    }
+
+    "* Iterate in sorted key order for deterministic results."
+    each: -> { |b|
+        src = self;
+        .keys.sort.each:{ |k| b.valueWithSelfOrArg:(KeyValuePair.new:{ key = k; value = src.at:k }) }
     }
 
     can?: -> {|clz| clz == Iterate }
@@ -234,6 +320,15 @@ List <-- {
 
     .meta <-- {
         default -> { #() }
+    }
+
+    each: -> { |b|
+        i = 0;
+        n = .count;
+        { i < n }.whileDo:{
+            b.valueWithSelfOrArg:(.at:i);
+            i = i + 1;
+        }
     }
 
     can?: -> {|clz| clz == Iterate }
