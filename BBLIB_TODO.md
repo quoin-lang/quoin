@@ -9,6 +9,10 @@ This document outlines the language features, compiler updates, and VM modificat
   - In the BB language itself all methods are attached to a class.
 - [ ] Support checking `assertMeetsRequirements:` in calls to `mix:`/`can:`.
   - Implement `Class#can?:SELECTOR`.
+- [ ] Implement the class-marker methods (currently parsed and callable but no-ops / missing):
+  - `sealed!` — currently a no-op (`src/runtime/class.rs`). Should forbid further extension of the class or mixin (no more `<--`, `->`/`-->`, `.mix:`), raising a clear error on attempts.
+  - `abstract!` — new marker, like `sealed!` but for construction: forbid instantiating the class itself via `new`/`new:` (a concrete subclass may still be instantiated). Raise a clear error, e.g. `Cannot instantiate abstract class X`.
+- [ ] Implement the `#< … >` set literal, or remove it. The grammar parses it (`set_expr` in `src/parser/pest/BuildingBlocks.pest`) but the compiler rejects it (`Unsupported NodeValue: Set`, which panics). Either add a `Set` type + runtime support, or drop the grammar rule so the syntax is a clean parse error instead of a panic.
 - [ ] Find duplicate bits of code and refactor.
   - Spinning the VM while executing in a native method.
   - Object initialization/new:{} logic
