@@ -99,4 +99,32 @@
     yieldOutsideFiberThrows -> {
         .does:{ Fiber.yield:1 } throw:#/outside of a Fiber/;
     };
+
+    "* The `^>` operator is sugar for `Fiber.yield:` and behaves identically.
+    .test:
+    yieldOperatorMatchesYieldMethod -> {
+        f = Fiber.new:{ |start|
+            n = start;
+            { true }.whileDo:{
+                ^> n;
+                n = n + 1;
+            }
+        };
+        .is:{ f.resume:10 } equalTo:10;
+        .is:{ f.resume } equalTo:11;
+        .is:{ f.resume } equalTo:12;
+    };
+
+    "* `^>` yields from inside a native iterator too, just like the method form.
+    .test:
+    yieldOperatorFromInsideEach -> {
+        f = Fiber.new:{
+            #(1 2 3).each:{ |x| ^> (x * 100) };
+            'done'
+        };
+        .is:{ f.resume } equalTo:100;
+        .is:{ f.resume } equalTo:200;
+        .is:{ f.resume } equalTo:300;
+        .is:{ f.resume } equalTo:'done';
+    };
 }

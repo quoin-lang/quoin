@@ -82,6 +82,23 @@ untouched and no "bubbling" through nested coroutines is required.
 so the block keeps its natural parameter list. Calling it when no fiber is
 running (i.e. from the main program) raises an error.
 
+#### The `^>` yield operator
+`^> expr` is sugar for `Fiber.yield:expr`. The compiler lowers it to exactly
+that send (`LoadGlobal(Fiber)`, evaluate `expr`, `Send "yield:"`), so it has
+identical behavior — including the "yield outside a Fiber" error and the
+two-way value pass. It is currently **statement-only** (it lives in the grammar's
+`stmt`, not `expr`), so its resume value is observable when it is a block's final
+statement; to capture a resume value mid-block, use the `Fiber.yield:` method
+form. Promoting `^>` to expression position is tracked in `BBLIB_TODO.md`.
+
+```
+f = Fiber.new:{ |start|
+    n = start;
+    { true }.whileDo:{ ^> n; n = n + 1 }
+};
+f.resume:10   "=> 10"   f.resume   "=> 11"
+```
+
 ### Instance side
 | Selector | Behavior |
 |---|---|

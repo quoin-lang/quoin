@@ -207,6 +207,17 @@ impl Compiler {
                 self.compile_node(&ret.value, bytecode)?;
                 bytecode.push(Instruction::MethodReturn);
             }
+            NodeValue::YieldReturn(ret) => {
+                // `^> expr` is sugar for `Fiber.yield:expr`: suspend the current
+                // fiber, hand `expr` out to the resumer, and evaluate to whatever
+                // the next `resume:` passes back in.
+                bytecode.push(Instruction::LoadGlobal(NamespacedName::new(
+                    Vec::new(),
+                    "Fiber".to_string(),
+                )));
+                self.compile_node(&ret.value, bytecode)?;
+                bytecode.push(Instruction::Send("yield:".to_string(), 1));
+            }
             NodeValue::List(list) => {
                 for item in &list.values {
                     self.compile_node(item, bytecode)?;
