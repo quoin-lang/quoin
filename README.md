@@ -1,6 +1,6 @@
 # BuildingBlocks
 
-BuildingBlocks (`.b`) is a small, dynamically-typed, object-oriented language in
+BuildingBlocks (extension `.bub`) is a small, dynamically-typed, object-oriented language in
 the Smalltalk tradition: everything is an object, everything happens by sending
 messages, and control flow is just blocks responding to messages. It runs on a
 stack-based bytecode VM written in Rust, with a tracing garbage collector and
@@ -277,7 +277,7 @@ The implementation lives in `src/` and is a classic compile-to-bytecode VM,
 extended with a GC-aware execution model and stackful fibers.
 
 ```
-source (.b)  →  parse  →  compile  →  bytecode  →  VM step loop  →  result
+source (.bub)  →  parse  →  compile  →  bytecode  →  VM step loop  →  result
                                           │
                               gc-arena heap · corosensei fibers
 ```
@@ -398,5 +398,5 @@ cargo run -- ...     # see src/runner.rs for modes: run / test / benchmark / hig
 ```
 
 The `bblib/` directory holds the standard library and bootstrap code
-(`00-bootstrap.b` … `06-io.b`), a guided language tour under
+(`00-bootstrap.bub` … `06-io.bub`), a guided language tour under
 `bblib/presentation/`, and the test suite under `bblib/tests/`.

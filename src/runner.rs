@@ -113,16 +113,16 @@ impl VmRunner {
                 Ok(())
             }
             VmRunnerMode::Test => {
-                println!("Loading bblib/*.b...");
-                let ast_iter = glob("bblib/*.b")
+                println!("Loading bblib/*.bub...");
+                let ast_iter = glob("bblib/*.bub")
                     .unwrap()
                     .filter_map(|p| {
                         let path_buf = p.unwrap();
                         let path_s = path_buf.display().to_string();
-                        if path_s == "bblib/test.b"
+                        if path_s == "bblib/test.bub"
                             || (!path_s.starts_with("bblib/test")
-                                && !path_s.ends_with("main.b")
-                                && !path_s.ends_with("benchmark.b"))
+                                && !path_s.ends_with("main.bub")
+                                && !path_s.ends_with("benchmark.bub"))
                         {
                             println!("Loading file: {}", path_s);
                             let node = parse_building_blocks_file(&path_buf);
@@ -132,23 +132,23 @@ impl VmRunner {
                         }
                     })
                     .chain(once_with(|| {
-                        println!("Loading file: bblib/main.b");
-                        parse_building_blocks_file(&PathBuf::from("bblib/main.b"))
+                        println!("Loading file: bblib/main.bub");
+                        parse_building_blocks_file(&PathBuf::from("bblib/main.bub"))
                     }));
 
                 self.compile_and_run_asts(ast_iter);
                 Ok(())
             }
             VmRunnerMode::Benchmark => {
-                println!("Loading bblib/*.b...");
-                let ast_iter = glob("bblib/*.b")
+                println!("Loading bblib/*.bub...");
+                let ast_iter = glob("bblib/*.bub")
                     .unwrap()
                     .filter_map(|p| {
                         let path_buf = p.unwrap();
                         let path_s = path_buf.display().to_string();
                         if !path_s.starts_with("bblib/test")
-                            && !path_s.ends_with("main.b")
-                            && !path_s.ends_with("benchmark.b")
+                            && !path_s.ends_with("main.bub")
+                            && !path_s.ends_with("benchmark.bub")
                         {
                             println!("Loading file: {}", path_s);
                             let node = parse_building_blocks_file(&path_buf);
@@ -158,23 +158,23 @@ impl VmRunner {
                         }
                     })
                     .chain(once_with(|| {
-                        println!("Loading file: bblib/benchmark.b");
-                        parse_building_blocks_file(&PathBuf::from("bblib/benchmark.b"))
+                        println!("Loading file: bblib/benchmark.bub");
+                        parse_building_blocks_file(&PathBuf::from("bblib/benchmark.bub"))
                     }));
 
                 self.compile_and_benchmark(ast_iter);
                 Ok(())
             }
             VmRunnerMode::Run => {
-                println!("Loading bblib/*.b...");
-                let ast_iter = glob("bblib/*.b")
+                println!("Loading bblib/*.bub...");
+                let ast_iter = glob("bblib/*.bub")
                     .unwrap()
                     .filter_map(|p| {
                         let path_buf = p.unwrap();
                         let path_s = path_buf.display().to_string();
                         if !path_s.starts_with("bblib/test")
-                            && !path_s.ends_with("main.b")
-                            && !path_s.ends_with("benchmark.b")
+                            && !path_s.ends_with("main.bub")
+                            && !path_s.ends_with("benchmark.bub")
                         {
                             println!("Loading file: {}", path_s);
                             let node = parse_building_blocks_file(&path_buf);
@@ -188,7 +188,7 @@ impl VmRunner {
                             .options
                             .target_path
                             .as_deref()
-                            .unwrap_or("bblib/testscript.b");
+                            .unwrap_or("bblib/testscript.bub");
                         println!("Loading file: {}", script_path);
                         parse_building_blocks_file(&PathBuf::from(script_path))
                     }));

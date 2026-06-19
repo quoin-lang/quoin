@@ -4,7 +4,7 @@ runner = TestRunner.new
 
 lib = [IO]Folder.open:'bblib/tests';
 lib.entries.each:{|f|
-    (f.is_file? && f.ext == 'b').if:{
+    (f.is_file? && f.ext == 'bub').if:{
         suite = Runtime.evalFile:f.fullpath;
         runner.add:suite;
         [IO]Stdout.write:'.';

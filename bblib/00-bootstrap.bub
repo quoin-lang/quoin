@@ -1,5 +1,5 @@
 "
-Basic stuff that needs to be loaded first. Everything else should try to be self-contained within its .b file.
+Basic stuff that needs to be loaded first. Everything else should try to be self-contained within its .bub file.
 "
 
 true <-- {

@@ -368,7 +368,7 @@ outer.resume  "=> 'a'"   outer.resume  "=> 'b'"   outer.resume  "=> 'inner-done'
 
 ## 9. Testing
 
-`bblib/tests/13-fibers.b` — 8 tests / 25 assertions:
+`bblib/tests/13-fibers.bub` — 8 tests / 25 assertions:
 - `yieldsValuesInOrder` — first-resume parameter binding + ordered yields.
 - `returnsFinalValueThenIsDone` — final return value + `done?` transition.
 - `twoWayCommunication` — values passed both directions.
@@ -395,7 +395,7 @@ Additional validation performed during development:
   `Iterate` protocol was simplified to a single required method, `each:`
   (dropping the `next`/`reset` mutable cursor), which made iteration re-entrant
   and `nil`-safe. The fiber bridges iteration in both directions, in
-  `bblib/02-iterate.b`:
+  `bblib/02-iterate.bub`:
   - **`Generator`** — a `^>`-yielding block as an iterable (`Generator.from:`);
     its `each:` runs the block in a fiber and forwards each yield to the
     consumer. Consumed lazily through an `Iterator` (e.g. `.take:`), so even
@@ -407,13 +407,13 @@ Additional validation performed during development:
   Plus lazy combinators `lazyCollect:` / `lazySelect:` that return `Generator`s,
   so pipelines stay lazy and compose over infinite sources.
 
-  Covered by `bblib/tests/14-generators.b` (custom `each:`-only collection,
+  Covered by `bblib/tests/14-generators.bub` (custom `each:`-only collection,
   `nil` elements, re-entrancy, `Generator`, infinite generator + `take:`,
   external `Iterator`, `zip:`/`drop:`, lazy combinators).
 - **Phase 2 (done):** `Fiber.current`; richer status/result surface
   (`failed?`/`result`/`error`, `status` gains `'failed'`); typed `FiberError`
   with distinct double-resume / yield-outside diagnostics. Tests in
-  `bblib/tests/13-fibers.b`.
+  `bblib/tests/13-fibers.bub`.
 
 ### Known limitations
 - Guest fibers are unavailable in benchmark mode (that driver bypasses the

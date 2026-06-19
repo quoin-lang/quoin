@@ -19,13 +19,13 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Move to a better iterator design that doesn't require mutability.
   - Iterate now requires only `each:`; `next`/`reset` cursor removed. Re-entrant, nil-safe.
   - [x] Use generators now that the VM supports them.
-    - Added `Generator` (yield-block as iterable) and a fiber-backed external `Iterator` (`hasNext?`/`next`) in `bblib/02-iterate.b`.
+    - Added `Generator` (yield-block as iterable) and a fiber-backed external `Iterator` (`hasNext?`/`next`) in `bblib/02-iterate.bub`.
 - [ ] Rewrite the TestSuite so it doesn't mix the tests into itself, too many conflicts.
 - [ ] List, Regex and Map #bind:{}
   - [x] List#bind:{}
   - [ ] Regex#bind:{}
   - [ ] Map#bind:{}
-  - See bblib/presentation/20-method-destructuring.b
+  - See bblib/presentation/20-method-destructuring.bub
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
 - [x] Confirm `%'string%{eval}' is working.
   - [ ] Make sure it's optimized into string concatenation by the compiler.
@@ -35,8 +35,8 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Have the `LoadGlobal` instruction consult the `BuiltinCache`. Currently it always does a `HashMap<NamespacedName, Value>` lookup against `globals` (see `vm.rs` `Instruction::LoadGlobal`); builtin classes (`Fiber`, `List`, `Integer`, etc.) could be served from the cache to avoid hashing the name on every load (e.g. for the `^>` -> `Fiber.yield:` lowering). `BuiltinCache` may need to be keyed more generally by name to cover all builtins.
 - [ ] Repurpose the Yeet instruction and make sure .../???/!!! are all working.
 - [x] Formalize an interface for BB error types.
-  - `Error` base (`message`/`payload`, class-side `throw:`/`throw:payload:`) + core subtypes (`TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`) in `00-bootstrap.b`. Catch-by-type via `case`/`~`.
-  - Runtime now raises structured errors: `BBError::Thrown` marker (value rides in `active_exception`), and `vm.bberror_to_value` maps internal `BBError` variants to typed BB `Error` objects at the `catch:` boundary. `does:throw:` widened to match by value/type or message string.
+  - `Error` base (`message`/`payload`, class-side `throw:`/`throw:payload:`) + core subtypes (`TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`) in `00-bootstrap.bub`. Catch-by-type via `case`/`~`.
+  - Runtime now raises structured errors: `BBError::Thrown` marker (value rides in `active_exception`), and `vm.buberror_to_value` maps internal `BBError` variants to typed BB `Error` objects at the `catch:` boundary. `does:throw:` widened to match by value/type or message string.
   - [ ] Future: give the VM more fine-grained internal error variants and route more raise sites through typed BB errors.
 - [ ] Implement DateTime.
 - [ ] Implement Decimal.
@@ -106,7 +106,7 @@ This document outlines the language features, compiler updates, and VM modificat
 
 ## 8. Built-in Core Library Extensions
 - [x] **Boolean & Nil Logic**:
-  - Implement `if:`, `else:`, `if:else:`, and `not` purely as methods on the `true`, `false`, and `nil` objects in `bootstrap.b`, rather than using VM-level jump instructions.
+  - Implement `if:`, `else:`, `if:else:`, and `not` purely as methods on the `true`, `false`, and `nil` objects in `bootstrap.bub`, rather than using VM-level jump instructions.
 - [x] **IO Library**:
   - Implement native classes under `[IO]` namespace: `[IO]Stdout`, `[IO]Stderr`, `[IO]Handle`, and `[IO]Folder`.
 - [x] **System Utilities**:
