@@ -24,6 +24,13 @@ false <-- {
 
 Object <-- {
     defined? -> { true }
+
+    "* Everything except nil/false is truthy, so `!self` is false here; nil and
+    "* the booleans override. (`-self` is handled per numeric type, not here.)
+    #'!' -> { false }
+
+    "* Unary plus (`+self`) is identity for every type.
+    #'+' -> { self }
 };
 
 Mixin <- {
@@ -72,6 +79,9 @@ Double <-- {
 
     next -> { self + 1.0 }
 
+    "* Unary minus (`-self`). `0 - self` promotes through Integer#-:, yielding a Double.
+    #'-' -> { 0 - self }
+
     abs -> { (self < 0).if:{ -self } else:{ self } }
 };
 
@@ -84,6 +94,9 @@ Integer <-- {
 
     next -> { self + 1 }
 
+    "* Unary minus (`-self`).
+    #'-' -> { 0 - self }
+
     abs -> { (self < 0).if:{ -self } else:{ self } }
 };
 
@@ -94,6 +107,8 @@ Nil <-- {
 
     s --> { '' }
     defined? --> { false }
+
+    #'!' -> { true }
 
     #'+:' -> { |_| self }
     #'-:' -> { |_| self }

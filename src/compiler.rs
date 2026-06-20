@@ -272,22 +272,12 @@ impl Compiler {
                 bytecode.push(Instruction::ExecuteBlockWithSelf);
             }
             NodeValue::MethodDefinition(method_def) => {
-                let mut selector = self.reconstruct_selector(&method_def.signature)?;
-                if selector == "-" && method_def.block.arguments.is_empty() {
-                    selector = "negated".to_string();
-                } else if selector == "+" && method_def.block.arguments.is_empty() {
-                    selector = "posated".to_string();
-                }
+                let selector = self.reconstruct_selector(&method_def.signature)?;
                 self.compile_block(&method_def.block, bytecode)?;
                 bytecode.push(Instruction::DefineMethod(selector));
             }
             NodeValue::MethodExtension(method_ext) => {
-                let mut selector = self.reconstruct_selector(&method_ext.signature)?;
-                if selector == "-" && method_ext.block.arguments.is_empty() {
-                    selector = "negated".to_string();
-                } else if selector == "+" && method_ext.block.arguments.is_empty() {
-                    selector = "posated".to_string();
-                }
+                let selector = self.reconstruct_selector(&method_ext.signature)?;
                 self.compile_block(&method_ext.block, bytecode)?;
                 bytecode.push(Instruction::OverrideMethod(selector));
             }
@@ -636,9 +626,11 @@ impl Compiler {
                 bytecode.push(Instruction::Send("!".to_string(), 0));
             }
             UnaryOperatorType::Sub => {
-                bytecode.push(Instruction::Send("negated".to_string(), 0));
+                bytecode.push(Instruction::Send("-".to_string(), 0));
             }
-            UnaryOperatorType::Add => {} // Unary + is a no-op
+            UnaryOperatorType::Add => {
+                bytecode.push(Instruction::Send("+".to_string(), 0));
+            }
             UnaryOperatorType::Mod => {
                 bytecode.push(Instruction::Send("mod".to_string(), 0));
             }
@@ -1132,7 +1124,7 @@ mod tests {
         let res = compile(vec![unary(UnaryOperatorType::Sub, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
-        expected.push(Instruction::Send("negated".to_string(), 0));
+        expected.push(Instruction::Send("-".to_string(), 0));
         assert_eq!(res.bytecode, expected);
 
         // !x
@@ -1142,10 +1134,11 @@ mod tests {
         expected.push(Instruction::Send("!".to_string(), 0));
         assert_eq!(res.bytecode, expected);
 
-        // +x (no-op)
+        // +x
         let res = compile(vec![unary(UnaryOperatorType::Add, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
+        expected.push(Instruction::Send("+".to_string(), 0));
         assert_eq!(res.bytecode, expected);
 
         // x && y

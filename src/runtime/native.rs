@@ -546,45 +546,6 @@ pub fn native_mod<'gc>(
     }
 }
 
-// Native helper: eq
-pub fn native_eq<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 2 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 2,
-            got: args.len(),
-            msg: "eq expects 2 arguments".to_string(),
-        });
-    }
-
-    // Global fallback for `==:` — primitive identity/value equality. Any class or
-    // user `==:` is resolved class-first before this is reached (Object#==: exists,
-    // so in practice this is rarely hit); no delegation here (it would recurse).
-    let active_args = vm.active_native_args.last().unwrap();
-    Ok(vm.new_bool(mc, active_args[0] == active_args[1]))
-}
-
-// Native helper: ne
-pub fn native_ne<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 2 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 2,
-            got: args.len(),
-            msg: "ne expects 2 arguments".to_string(),
-        });
-    }
-    let eq_result = native_eq(vm, mc, args)?;
-    let false_val = vm.new_bool(mc, false);
-    Ok(vm.new_bool(mc, eq_result == false_val))
-}
-
 // Native helper: lt
 pub fn native_lt<'gc>(
     vm: &mut VmState<'gc>,
@@ -757,56 +718,6 @@ pub fn native_ge<'gc>(
     }
 }
 
-// Native helper: logic not
-pub fn native_not<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 1 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 1,
-            got: args.len(),
-            msg: "not expects exactly 1 argument (receiver)".to_string(),
-        });
-    }
-    Ok(vm.new_bool(mc, !args[0].is_truthy()))
-}
-
-// Native helper: negated
-pub fn native_negated<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    args: Vec<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    if args.len() != 1 {
-        return Err(BBError::ArgumentCountMismatch {
-            expected: 1,
-            got: args.len(),
-            msg: "negated expects exactly 1 argument (receiver)".to_string(),
-        });
-    }
-    let payload = match &args[0] {
-        Value::Object(obj) => &obj.borrow().payload,
-        _ => {
-            return Err(BBError::TypeError {
-                expected: "Object".to_string(),
-                got: args[0].type_name().to_string(),
-                msg: "negated expected an object".to_string(),
-            });
-        }
-    };
-    match payload {
-        ObjectPayload::Int(i) => Ok(vm.new_int(mc, -*i)),
-        ObjectPayload::Double(f) => Ok(vm.new_double(mc, -*f)),
-        _ => Err(BBError::TypeError {
-            expected: "Integer or Double".to_string(),
-            got: args[0].type_name().to_string(),
-            msg: format!("negated expects integer or double, got {:?}", args[0]),
-        }),
-    }
-}
-
 pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
     let mut funcs = Vec::new();
 
@@ -833,20 +744,11 @@ pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
     funcs.push(("*:".to_string(), vm.new_native(mc, NativeFunc(native_mul))));
     funcs.push(("/:".to_string(), vm.new_native(mc, NativeFunc(native_div))));
     funcs.push(("%:".to_string(), vm.new_native(mc, NativeFunc(native_mod))));
-    funcs.push(("==:".to_string(), vm.new_native(mc, NativeFunc(native_eq))));
-    funcs.push(("!=:".to_string(), vm.new_native(mc, NativeFunc(native_ne))));
     funcs.push(("<:".to_string(), vm.new_native(mc, NativeFunc(native_lt))));
     funcs.push((">:".to_string(), vm.new_native(mc, NativeFunc(native_gt))));
     funcs.push(("<=:".to_string(), vm.new_native(mc, NativeFunc(native_le))));
     funcs.push((">=:".to_string(), vm.new_native(mc, NativeFunc(native_ge))));
     funcs.push(("~".to_string(), vm.new_native(mc, NativeFunc(native_match))));
-
-    // Unary
-    funcs.push(("!".to_string(), vm.new_native(mc, NativeFunc(native_not))));
-    funcs.push((
-        "negated".to_string(),
-        vm.new_native(mc, NativeFunc(native_negated)),
-    ));
 
     let mut globals = vm.globals.borrow_mut(mc);
     for (name, val) in funcs {
