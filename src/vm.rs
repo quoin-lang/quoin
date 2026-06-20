@@ -6,9 +6,9 @@ use crate::parser::parse_building_blocks_string;
 use crate::runtime::fiber::{FiberStatus, NativeFiberState};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
-use crate::runtime::set::NativeSetState;
 use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
+use crate::runtime::set::NativeSetState;
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, GcUlid, NamespacedName, NativeClass, NativeFunc, Object,
     ObjectPayload, Value,
@@ -310,9 +310,8 @@ impl<'gc> VmState<'gc> {
         match self.current_fiber {
             None => self.main_yielder = Some(ptr),
             Some(f) => {
-                let _ = f.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
-                    s.set_yielder(ptr)
-                });
+                let _ =
+                    f.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.set_yielder(ptr));
             }
         }
         self.yielder = Some(ptr);
@@ -1251,7 +1250,10 @@ impl<'gc> VmState<'gc> {
         if let Some(err) = self.fiber_error.take() {
             return Err(err);
         }
-        Ok(self.fiber_transfer.take().unwrap_or_else(|| self.new_nil(mc)))
+        Ok(self
+            .fiber_transfer
+            .take()
+            .unwrap_or_else(|| self.new_nil(mc)))
     }
 
     /// Suspend the running fiber, handing `value` to whoever resumed it. Returns
@@ -1278,7 +1280,10 @@ impl<'gc> VmState<'gc> {
         if let Some(err) = self.fiber_error.take() {
             return Err(err);
         }
-        Ok(self.fiber_transfer.take().unwrap_or_else(|| self.new_nil(mc)))
+        Ok(self
+            .fiber_transfer
+            .take()
+            .unwrap_or_else(|| self.new_nil(mc)))
     }
 
     fn fiber_status(&self, fiber_val: Value<'gc>) -> Result<FiberStatus, BBError> {
@@ -1296,8 +1301,8 @@ impl<'gc> VmState<'gc> {
     }
 
     fn set_fiber_status(&self, mc: &Mutation<'gc>, fiber_val: Value<'gc>, status: FiberStatus) {
-        let _ = fiber_val
-            .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.status = status);
+        let _ =
+            fiber_val.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.status = status);
     }
 
     /// Save the live VM execution context into the slot for `who` (`None` = main).
@@ -1437,10 +1442,9 @@ impl<'gc> VmState<'gc> {
                         None => self.bberror_to_value(mc, e),
                     };
                     self.set_fiber_status(mc, finished, FiberStatus::Failed);
-                    let _ = finished
-                        .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
-                            s.set_error(err_val)
-                        });
+                    let _ = finished.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
+                        s.set_error(err_val)
+                    });
                 }
             }
         }
@@ -2011,7 +2015,8 @@ impl<'gc> VmState<'gc> {
                             if let Some(ms) =
                                 state_ref.as_any_mut().downcast_mut::<NativeMethodState>()
                             {
-                                ms.body = MethodBody::UserBlock(unsafe { transmute(new_block_val) });
+                                ms.body =
+                                    MethodBody::UserBlock(unsafe { transmute(new_block_val) });
                             }
                         }
                     }
@@ -3620,7 +3625,7 @@ mod tests {
     #[test]
     fn test_symbol_interning_pointer_equality() {
         // Pull the inner interned string out of a symbol value.
-        fn inner<'gc>(v: Value<'gc>) -> Gc<'gc, String> {
+        fn inner(v: Value) -> Gc<String> {
             match v {
                 Value::Object(obj) => match obj.borrow().payload {
                     ObjectPayload::Symbol(s) => s,
@@ -3656,8 +3661,8 @@ mod tests {
             );
 
             // Sanity: BB-level equality agrees with identity.
-            assert!(a == b);
-            assert!(a != c);
+            assert_eq!(a, b);
+            assert_ne!(a, c);
         });
     }
 
@@ -3828,10 +3833,16 @@ mod tests {
             };
 
             let int_arg = vm.new_int(mc, 5);
-            check(vm.call_method(mc, recv, "kind:", vec![int_arg]).unwrap(), "int");
+            check(
+                vm.call_method(mc, recv, "kind:", vec![int_arg]).unwrap(),
+                "int",
+            );
 
             let str_arg = vm.new_string(mc, "hi".to_string());
-            check(vm.call_method(mc, recv, "kind:", vec![str_arg]).unwrap(), "str");
+            check(
+                vm.call_method(mc, recv, "kind:", vec![str_arg]).unwrap(),
+                "str",
+            );
         });
     }
 

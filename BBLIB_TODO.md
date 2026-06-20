@@ -3,8 +3,16 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the BuildingBlocks standard library (`bblib`) files and test suites.
 
 ## Misc
+- [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
+- [ ] Design an installer.
+  - [ ] Come up with a better name than "Building Blocks", something unique.
+  - [ ] Come up with a shorter name for the binary.
+  - [ ] Support installing the binary and support files to `/usr/local/bin` or something.
+  - [ ] Create a more general purpose way of determining what to load by default on start.
+- [ ] Support importing files explicitly.
+  - [ ] When the installer work is done, search for files in standard locations + wherever the binary is installed.
 - [x] Change the file extension to `.bub` everywhere.
-  - Don't forget to update the plugin.
+  - [x] Don't forget to update the plugin.
 - [ ] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
   - In the BB language itself all methods are attached to a class.
 - [x] Wire `assertMeetsRequirements:` into `mix:` so a mixin can declare requirements its host class must satisfy.
@@ -28,6 +36,8 @@ This document outlines the language features, compiler updates, and VM modificat
       - [ ] **Demote natives to BB where possible.** During each batch (or as a pass once the native funcs are migrated), audit which methods need no actual Rust capability and could just be plain BB methods — once everything is a method send, many natives are redundant. Examples: *derived* operators (`>=` as `!(self < x)`, `<=`/`!=` similarly, `>` as `x < self`), and natives that only compose other sends. Moving them to `bblib` shrinks the native surface and keeps the semantics in one place (one definition, overridable, no `arg!`/`active_native_args` plumbing). Keep native only what genuinely needs Rust (raw arithmetic, FFI, native state). Weigh against the hot-path perf cost of BB-level dispatch for the busiest operators.
     - [ ] Remaining candidates are *single-type checks* (manual "must be Integer, else TypeError" → one typed variant, wrong type → MNU): `List#at:`, `String#insert:at:`, and similar. Mechanical cleanup, not multi-dispatch; do case-by-case with coverage (some, like `List#at:`, are on hot/core paths).
   - [ ] Future (enabled by the total order): ambiguity detection — flag two distinct candidates tied at the lowest score instead of silently taking the first.
+  - [ ] When no method match is found but the _selector_ does exist, display the candidates that were filtered out by dispatch in the MNU error message.
+    - Gives the user a hint in case the method does exist but the arguments were wrong.
 - [x] Implement the `#< … >` set literal. Added a native `Set` type (`src/runtime/set.rs`, `NativeSetState`) mirroring `List`/`Map`: insertion-ordered, unique by `==:`, with `count`/`add:`/`remove:`/`contains?:`/`each:`/`s`/`==:`; `Set` mixes in `Iterate` and gets `union:`/`intersection:`/`difference:`/`subset?:`/`superset?:` in `bblib/02-iterate.bub`. Literal compiles via a new `NewSet(n)` instruction (deduped by `==:`). The closing `>` collided with the greater-than operator, so the grammar now excludes `>`/`>=` from set elements (`set_elem`/`set_infix_op` in `BuildingBlocks.pest`) — a bare `>` ends the set; parenthesize to use `>` in an element. Tests in `bblib/tests/15-sets.bub`; docs updated.
 - [ ] Find duplicate bits of code and refactor.
   - Spinning the VM while executing in a native method.
@@ -48,8 +58,9 @@ This document outlines the language features, compiler updates, and VM modificat
   - [ ] Map#bind:{}
   - See bblib/presentation/20-method-destructuring.bub
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
+  - use an Iterator?
 - [x] Confirm `%'string%{eval}' is working.
-  - [ ] Make sure it's optimized into string concatenation by the compiler.
+  - [ ] Optimize it into string concatenation by the compiler.
 - [x] Make sure case statements are tested and working.
 - [x] Make the `^>` yield operator usable in expression position.
   - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.
@@ -65,9 +76,9 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Make sure #symbol types are working.
 - [ ] Language server
   - [ ] VSCode plugin
-- [x] Integrate fff into agy
+- [ ] Integrate fff into claude for non-Rust searches
   - https://github.com/dmtrKovalenko/fff#mcp-server
-- [ ] Write a document fully explaining the language semantics, including all corner cases.
+- [x] Write a document fully explaining the language semantics, including all corner cases.
   - Capture the subtle/surprising behaviors here as they surface so they can be folded into the doc.
   - **`new:{}` block initialization & lexical scope.** Instance variables are *not* pre-bound inside a `new:{}` block, so an empty `new:{}` leaves every field at its default (`nil`) — it does **not** silently capture a same-named variable from the surrounding scope. Only an explicit assignment binds a field. The right-hand side of such an assignment resolves up the lexical chain (so `{ x = x }` copies the enclosing `x` into the field), but the assignment itself binds in the block's own frame and never mutates the enclosing variable. Corollary: a plain-assignment `init:` like `init: -> {|a| @a = a }` is redundant — field population already sets `@a` from the block before `init:` runs — so it behaves identically to the default no-op `init`.
   - **`init`/`init:` run the whole chain.** `new`/`new:{}` invoke the initializer of every class in the hierarchy (ancestors and mixins included), base→derived, with `init:` preferred over `init` per class. A derived `init:` no longer shadows/skips an ancestor or mixin `init`.
@@ -141,7 +152,7 @@ This document outlines the language features, compiler updates, and VM modificat
   - `Runtime.evalFile: filename`: Loads, compiles, and evaluates a file.
   - `Object.s` overrides: Overriding `s` string representation when converting objects to strings for printing.
 - [x] **Native State Support**:
-  - Implement native classes holding arbitrary Rust state inside VM objects, following [native_rust_state_plan.md](file:///Users/damon/code/building_blocks_vm/native_rust_state_plan.md).
+  - Implement native classes holding arbitrary Rust state inside VM objects.
 
 ## 9. Performance Tuning
 - [x] **Alternative Parser Architecture Evaluation**:

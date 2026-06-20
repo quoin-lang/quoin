@@ -8,7 +8,7 @@ use crate::runtime::set::NativeSetState;
 use crate::vm::VmState;
 
 use gc_arena::collect::Trace;
-use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -269,18 +269,12 @@ impl<'gc> Value<'gc> {
                     ObjectPayload::Symbol(_) => "Symbol",
                     ObjectPayload::Block(_) => "Block",
                     ObjectPayload::Native(_) => "Native",
-                    _ => {
-                        let cn = borrowed.class_name();
-                        if cn == "List" {
-                            "List"
-                        } else if cn == "Map" {
-                            "Map"
-                        } else if cn == "Regex" {
-                            "Regex"
-                        } else {
-                            "Object"
-                        }
-                    }
+                    _ => match borrowed.class_name().as_str() {
+                        "List" => "List",
+                        "Map" => "Map",
+                        "Regex" => "Regex",
+                        _ => "Object",
+                    },
                 }
             }
         }
@@ -651,11 +645,8 @@ pub struct NativeClassBuilder {
     instance_methods: Vec<NativeMethodDef>,
 }
 
-type NativeFn = for<'a> fn(
-    &mut VmState<'a>,
-    &Mutation<'a>,
-    Vec<Value<'a>>,
-) -> Result<Value<'a>, BBError>;
+type NativeFn =
+    for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, BBError>;
 
 fn type_hints(param_types: &[&str]) -> Option<Vec<Option<String>>> {
     Some(param_types.iter().map(|t| Some(t.to_string())).collect())
