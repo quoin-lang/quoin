@@ -1,5 +1,5 @@
-"* Regular expressions
-'abcd' ~ #/bc/          "* true
+"* Regular expressions. The matcher (regex/class/block) goes on the left of `~`.
+#/bc/ ~ 'abcd'          "* true
 
 "* Basic JSON support w/ paths
 jsonText = '{"a": [1,{"five":5},3]}'

@@ -34,12 +34,25 @@ pub fn build_string_class() -> NativeClassBuilder {
             "==:",
             |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
         )
-        // Concatenation: `a + b` -> `Send(a, "+:", [b])`. Only a String RHS matches;
-        // any other RHS falls through (-> MNU once the `native_add` global is gone).
+        // Concatenation: `a + b` -> `Send(a, "+:", [b])`. A String RHS concatenates
+        // directly (the fast path); any other RHS is coerced via `.s` by the untyped
+        // fallback below, so `'n = ' + 5` or `'m = ' + aMap` work.
         .typed_instance_method("+:", &["String"], |vm, mc, args| {
             let a = arg!(args, String, 0);
             let b = arg!(args, String, 1);
             Ok(vm.new_string(mc, format!("{}{}", *a, *b)))
+        })
+        .instance_method("+:", |vm, mc, args| {
+            let a = arg!(args, String, 0).to_string();
+            let b_val = vm.call_method(mc, args[1], "s", vec![])?;
+            let b = match b_val {
+                Value::Object(o) => match &o.borrow().payload {
+                    ObjectPayload::String(st) => st.to_string(),
+                    _ => format!("{}", b_val),
+                },
+                _ => format!("{}", b_val),
+            };
+            Ok(vm.new_string(mc, format!("{}{}", a, b)))
         })
         // `a % b` -> `Send(a, "%:", [b])`: printf-like formatting. A List RHS supplies
         // positional args (`%1`, `%2`, … and bare `%`); a Map RHS additionally supplies

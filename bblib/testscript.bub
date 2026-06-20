@@ -24,50 +24,50 @@ PType <- {
     .mix:Point;
 };
 
-.print:'PType.name =' and:PType.new.name;
+('PType.name = ' + PType.new.name).print;
 
 p1 = Point.newX: 3 y: 4;
 p2 = Point.newX: 0 y: 0;
-.print: 'p1.x =' and: p1.x;
-.print: 'p1.y =' and: p1.y;
+('p1.x = ' + p1.x).print;
+('p1.y = ' + p1.y).print;
 d = p1.dist: p2;
-.print: 'distance =' and: d;
+('distance = ' + d).print;
 p1.print;
-.print: 'p1.id =' and: p1.id;
-.print: 'p2.id =' and: p2.id;
-.print: 'p1.id =' and: p1.id;
-.print: 'p2.id =' and: p2.id;
+('p1.id = ' + p1.id).print;
+('p2.id = ' + p2.id).print;
+('p1.id = ' + p1.id).print;
+('p2.id = ' + p2.id).print;
 
 p3 = Point3D.new: { |x y z| x = 10; y = 20; z = 30 };
 p3.print;
-.print:p3.class;
-.print:p3.class.s;
-.print:p3.class.name;
-.print:p3.class.class;
-.print:p3.class.class.name;
-.print:p3.class.parent;
-.print:p3.class.parent.name;
-.print:p3.class.parent.parent;
-.print:p3.class.parent.parent.name;
-.print:(p3.id == p3.id);
-.print:(p3.id != p1.id);
-.print:(p3.class == p3.class);
-.print:(p3.class != p1.class);
-p3.print:'p3.x =' and: p3.x;
-p3.print:'p3.y =' and: p3.y;
-p3.print:'p3.z =' and: p3.z;
+p3.class.print;
+p3.class.s.print;
+p3.class.name.print;
+p3.class.class.print;
+p3.class.class.name.print;
+p3.class.parent.print;
+p3.class.parent.name.print;
+p3.class.parent.parent.print;
+p3.class.parent.parent.name.print;
+(p3.id == p3.id).print;
+(p3.id != p1.id).print;
+(p3.class == p3.class).print;
+(p3.class != p1.class).print;
+('p3.x = ' + p3.x).print;
+('p3.y = ' + p3.y).print;
+('p3.z = ' + p3.z).print;
 
 "* Test 1: Simple assignments, variables, and operators
 x = 10;
 y = 20;
 z = x + y;
-.print: 'z = x + y =' and: z;
+('z = x + y = ' + z).print;
 
 "* Test 2: List destructuring
 a b * rest = #(100 200 300 400 500);
-.print: 'a =' and: a;
-.print: 'b =' and: b;
-.print: 'rest =' and: rest;
+('a = ' + a).print;
+('b = ' + b).print;
+('rest = ' + rest).print;
 
 "* Test 3: Lexical scopes and blocks/closures
 make_counter = { |initial|
@@ -81,37 +81,37 @@ make_counter = { |initial|
 counter = make_counter.value: 10;
 c1 = counter.value;
 c2 = counter.value;
-.print: 'c1 =' and: c1;
-.print: 'c2 =' and: c2;
+('c1 = ' + c1).print;
+('c2 = ' + c2).print;
 
 { |x| x.print }.value:42;
 
 "* Test 4: Unary operators
 flag = true;
 inv_flag = !flag;
-.print: 'flag =' and: flag and: 'inv_flag =' and: inv_flag;
+('flag = ' + flag + ' inv_flag = ' + inv_flag).print;
 
 num = 50;
 neg_num = -num;
-.print: 'num =' and: num and: 'neg_num =' and: neg_num;
+('num = ' + num + ' neg_num = ' + neg_num).print;
 
 "* Test 5: Maps & Regex
 my_map = #{ 'foo': 100 'bar': 200 };
-.print: 'map =' and: my_map;
+('map = ' + my_map).print;
 
 list = #(1 2 3 4 5);
-.print:'Top half =' and:list.select:{|n| n > 3};
+('Top half = ' + (list.select:{|n| n > 3})).print;
 
 re = #/^[a-z]+$/;
-is_match = re.regex_match: 'gemini';
-.print: 'regex match =' and: is_match;
+is_match = re ~ 'gemini';
+('regex match = ' + is_match).print;
 
 "* Test 6: Non-local return (^^)
 Point <-- {
     test_nlr -> {
         bar_func = { |blk|
             blk.value;
-            .print: 'Inside bar: should NOT reach here!';
+            'Inside bar: should NOT reach here!'.print;
             111
         };
 
@@ -119,28 +119,28 @@ Point <-- {
             ^^ 777
         };
         bar_func.value: nested_block;
-        .print: 'Inside foo: should NOT reach here!';
+        'Inside foo: should NOT reach here!'.print;
         222
     }
 };
 
-.print: 'New Point=' and:Point.new;
+('New Point= ' + Point.new).print;
 
 result = p1.test_nlr;
-.print: 'Result of non-local return =' and: result;
+('Result of non-local return = ' + result).print;
 
 "* Test 7: Namespaces
 
 
 file = [IO]File.open: '/etc/zshrc';
-.print: 'file path =' and: file.fullpath;
-.print: 'file class =' and: file.class;
-.print: 'file class name =' and: file.class.name;
-.print: '[/]Object =' and: [/]Object;
-.print: 'Object == [/]Object =' and: (Object == [/]Object);
+('file path = ' + file.fullpath).print;
+('file class = ' + file.class).print;
+('file class name = ' + file.class.name).print;
+('[/]Object = ' + [/]Object).print;
+('Object == [/]Object = ' + (Object == [/]Object)).print;
 
 folder = [IO]Folder.open: 'bblib/tests/';
-.print:'Test files =' and:folder.list;
+('Test files = ' + folder.list).print;
 
 name = 'Damon';
 name.case:{
@@ -152,7 +152,7 @@ name.case:{
     .default:{ 'Who are you and what did you do with my bagel'.print };
 };
 
-.print:'Low =' and:'Low' == 5.case:{
+('Low = ' + ('Low' == 5.case:{
     .when:1..10  do:'Low';
     .when:11..20 do:'High';
-};
+})).print;

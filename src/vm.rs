@@ -68,7 +68,6 @@ pub struct BuiltinCache<'gc> {
     pub map_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub regex_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub block_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
-    pub native_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub nil_val: Option<Value<'gc>>,
     pub true_val: Option<Value<'gc>>,
     pub false_val: Option<Value<'gc>>,
@@ -86,7 +85,6 @@ impl<'gc> BuiltinCache<'gc> {
             map_class: None,
             regex_class: None,
             block_class: None,
-            native_class: None,
             nil_val: None,
             true_val: None,
             false_val: None,
@@ -670,20 +668,6 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
-    pub fn new_native(&self, mc: &Mutation<'gc>, func: NativeFunc) -> Value<'gc> {
-        let class = self.builtin_cache.borrow().native_class;
-        let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Native"));
-        Value::Object(gcl!(
-            mc,
-            Object {
-                id: GcUlid(Ulid::new()),
-                class,
-                fields: HashMap::new(),
-                payload: ObjectPayload::Native(func),
-            }
-        ))
-    }
-
     pub fn new_method(
         &self,
         mc: &Mutation<'gc>,
@@ -842,7 +826,6 @@ impl<'gc> VmState<'gc> {
                 "Map" => cache.map_class = Some(class_obj),
                 "Regex" => cache.regex_class = Some(class_obj),
                 "Block" => cache.block_class = Some(class_obj),
-                "Native" => cache.native_class = Some(class_obj),
                 _ => {}
             }
             class_obj
@@ -926,7 +909,6 @@ impl<'gc> VmState<'gc> {
                 "Map" => cache.map_class = Some(class_obj),
                 "Regex" => cache.regex_class = Some(class_obj),
                 "Block" => cache.block_class = Some(class_obj),
-                "Native" => cache.native_class = Some(class_obj),
                 _ => {}
             }
         }
@@ -1020,9 +1002,6 @@ impl<'gc> VmState<'gc> {
             Value::Object(obj) => match &obj.borrow().payload {
                 ObjectPayload::Block(block) => {
                     Some(Box::new(BlockCallable { block: *block }) as Box<dyn Callable<'gc> + 'gc>)
-                }
-                ObjectPayload::Native(native_fn) => {
-                    Some(Box::new(NativeCallable(*native_fn)) as Box<dyn Callable<'gc> + 'gc>)
                 }
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
@@ -1649,7 +1628,6 @@ impl<'gc> VmState<'gc> {
         match method_val {
             Value::Object(obj) => match &obj.borrow().payload {
                 ObjectPayload::Block(block) => Ok(Some(Box::new(BlockCallable { block: *block }))),
-                ObjectPayload::Native(native_fn) => Ok(Some(Box::new(NativeCallable(*native_fn)))),
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
@@ -3429,7 +3407,6 @@ mod tests {
         Map(HashMap<String, ValueSpec>),
         Regex(String),
         Block(Option<String>),
-        Native,
         Instance(String),
     }
 
@@ -3471,7 +3448,6 @@ mod tests {
                         res.unwrap_or_else(|_| ValueSpec::Instance("Regex".to_string()))
                     }
                     ObjectPayload::Block(b) => ValueSpec::Block(b.name.clone()),
-                    ObjectPayload::Native(_) => ValueSpec::Native,
                     ObjectPayload::Instance | ObjectPayload::NativeState(_) => {
                         ValueSpec::Instance(borrowed.class.borrow().name.to_string())
                     }
@@ -3520,12 +3496,12 @@ mod tests {
             vm.register_native_class(mc, build_key_value_pair_class());
             vm.register_native_class(mc, build_regex_class());
 
-            for t in ["Method", "Native"] {
+            for t in ["Method"] {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
             }
 
             // Register standard native functions we might need
-            let native_val = vm.new_native(mc, NativeFunc(native_add));
+            let native_val = vm.new_native_method(mc, "+".to_string(), NativeFunc(native_add), None);
             vm.globals
                 .borrow_mut(mc)
                 .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
@@ -3753,10 +3729,10 @@ mod tests {
 
     #[test]
     fn test_native_methods_are_chainable() {
-        // Phase 2a: native methods are now `Method` chain nodes (`NativeState`
-        // wrapping a native body), not bare `ObjectPayload::Native`. So another
-        // variant can be appended onto a native method's chain — which previously
-        // errored "Invalid method object in chain" (overriding e.g. List#count).
+        // Native methods are `Method` chain nodes (`NativeState` wrapping a native
+        // body), so another variant can be appended onto a native method's chain —
+        // which previously errored "Invalid method object in chain" (overriding e.g.
+        // List#count). (Bare native-function objects no longer exist at all.)
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, VmOptions::default());
             vm.register_native_class(mc, build_object_class());
@@ -3772,7 +3748,7 @@ mod tests {
                 .copied()
                 .expect("Object should have a native can?: method");
 
-            // A native method is a chainable node, not a bare ObjectPayload::Native.
+            // A native method is a chainable NativeState node.
             match native_method {
                 Value::Object(o) => assert!(
                     matches!(&o.borrow().payload, ObjectPayload::NativeState(_)),
@@ -4723,11 +4699,13 @@ mod tests {
                         let mut m = HashMap::new();
                         m.insert(
                             "name".to_string(),
-                            vm.new_native(
+                            vm.new_native_method(
                                 mc,
+                                "name".to_string(),
                                 NativeFunc::new(|vm, mc, _args| {
                                     Ok(vm.new_string(mc, "Point".to_string()))
                                 }),
+                                None,
                             ),
                         );
                         m
@@ -4806,7 +4784,7 @@ mod tests {
             );
 
             // Register standard native functions we need (+ operator)
-            let native_val = vm.new_native(mc, NativeFunc(native_add));
+            let native_val = vm.new_native_method(mc, "+".to_string(), NativeFunc(native_add), None);
             vm.globals
                 .borrow_mut(mc)
                 .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
@@ -5214,7 +5192,7 @@ mod tests {
             vm.register_native_class(mc, build_map_class());
             vm.register_native_class(mc, build_key_value_pair_class());
             vm.register_native_class(mc, build_regex_class());
-            for t in ["Method", "Native"] {
+            for t in ["Method"] {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
             }
             vm
@@ -5280,7 +5258,7 @@ mod tests {
             vm.register_native_class(mc, build_key_value_pair_class());
             vm.register_native_class(mc, build_regex_class());
             vm.register_native_class(mc, crate::runtime::runtime::build_runtime_class());
-            for t in ["Method", "Native"] {
+            for t in ["Method"] {
                 vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
             }
             vm

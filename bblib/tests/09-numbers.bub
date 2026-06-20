@@ -1,8 +1,8 @@
 (TestSuite.new:{ name = 'Numbers' }).add:{
     .test:
     literals -> {
-        .does:{ 1000000000 } match:Integer;
-"*        .does:{ 1000000000000 } match:Decimal;
+        .is:{ 1000000000 } a:Integer;
+"*        .is:{ 1000000000000 } a:Decimal;
     };
 
     .test:

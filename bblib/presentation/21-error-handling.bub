@@ -2,7 +2,7 @@
 { 42.throw    }.catch:{ |n|       n == 42              };
 
 Error <- CustomError <- {}
-{ CustomError.new.throw }.catch:{ |ex:CustomError| ex ~ CustomError };
+{ CustomError.new.throw }.catch:{ |ex:CustomError| CustomError ~ ex };
 
 { CustomError.new.throw }
     .catch:  { |ex:CustomError| "Logic for CustomError"     }

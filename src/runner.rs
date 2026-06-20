@@ -6,10 +6,10 @@ use crate::highlighter::highlight_to_ansi;
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_building_blocks_file};
 use crate::runtime::{
-    block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method, native,
+    block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method,
     nil, object, regex, runtime, set, string, symbol, timer,
 };
-use crate::value::{Block, NamespacedName, NativeClassBuilder};
+use crate::value::{Block, NamespacedName};
 use crate::vm::{VmOptions, VmState, VmStatus};
 
 use corosensei::CoroutineResult;
@@ -203,8 +203,6 @@ impl VmRunner {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
 
-            native::register_native_funcs(&mut vm, mc);
-
             vm.register_native_class(mc, object::build_object_class());
             vm.register_native_class(mc, class::build_class_class());
             vm.register_native_class(mc, boolean::build_boolean_class());
@@ -226,10 +224,6 @@ impl VmRunner {
             vm.register_native_class(mc, map::build_key_value_pair_class());
             vm.register_native_class(mc, regex::build_regex_class());
             vm.register_native_class(mc, fiber_class::build_fiber_class());
-
-            for t in ["Native"] {
-                vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
-            }
 
             vm
         });
@@ -513,8 +507,6 @@ impl VmRunner {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
 
-            native::register_native_funcs(&mut vm, mc);
-
             vm.register_native_class(mc, object::build_object_class());
             vm.register_native_class(mc, class::build_class_class());
             vm.register_native_class(mc, boolean::build_boolean_class());
@@ -536,10 +528,6 @@ impl VmRunner {
             vm.register_native_class(mc, map::build_key_value_pair_class());
             vm.register_native_class(mc, regex::build_regex_class());
             vm.register_native_class(mc, fiber_class::build_fiber_class());
-
-            for t in ["Native"] {
-                vm.register_native_class(mc, NativeClassBuilder::new(t, Some("Object")));
-            }
 
             vm
         });

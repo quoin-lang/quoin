@@ -37,7 +37,7 @@ Mixin <- BuiltinAssertions <- {
     isTrue: -> { |block:Block| .recordResult:{true == block.value} evidence:#(true '!=' '{code}') block:block }
     isFalse: -> { |block:Block| .recordResult:{false == block.value} evidence:#(false '!=' '{code}') block:block }
 
-    is:a: -> {|block:Block expected| actual = block.value; .recordResult:{actual ~ expected} evidence:#(expected '!~' actual) block:block }
+    is:a: -> {|block:Block expected| actual = block.value; .recordResult:{expected ~ actual} evidence:#(expected '!~' actual) block:block }
     is:an: -> {|block:Block expected| .is:block a:expected }
 
     is:equalTo: -> {|block:Block expected| actual = block.value; .recordResult:{expected == actual} evidence:#(expected '!=' actual) block:block }

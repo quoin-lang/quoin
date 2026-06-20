@@ -45,6 +45,12 @@ Object <-- {
     #'>=:' -> { |x| !(self < x) }
 };
 
+"* A class used as a match pattern (`Integer ~ x` / case `when:Integer`) is an
+"* instance-of test. `~` dispatches on the left (the pattern), so this covers it.
+Class <-- {
+    #'~:' -> { |x| x.can?:self }
+};
+
 Mixin <- {
     .meta <-- {
         assertMeetsRequirements: -> {}
@@ -130,6 +136,11 @@ Nil <-- {
 };
 
 Block <-- {
+    "* A block used as a match pattern (`{|n| n > 5} ~ x` / case `when:`) runs as a
+    "* predicate: the subject is passed as the argument and as `self`, so both
+    "* `{|n| ...}` and `{ . ... }` guard forms work.
+    #'~:' -> { |x| .valueWithSelfOrArg:x }
+
     whileDo: -> { |block|
         s = self
         s.value.if:{

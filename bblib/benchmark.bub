@@ -107,18 +107,18 @@ TreeBenchmark <- {
 Benchmark <- {
     .meta <-- {
         run:block:iterations: -> { |name block iterations|
-            .print: 'Running: ' + name;
+            ('Running: ' + name).print;
             total = 0;
             i = 1;
             { i <= iterations }.whileDo: {
                 elapsed = Timer.time:block;
-                .print: '  Iteration ' + i.s + ': ' + elapsed.s + ' ms';
+                ('  Iteration ' + i + ': ' + elapsed + ' ms').print;
                 total = total + elapsed;
                 i = i + 1;
             };
             avg = total / iterations;
-            .print: '  Average: ' + avg.s + ' ms';
-            .print: '--------------------------------------------------';
+            ('  Average: ' + avg + ' ms').print;
+            '--------------------------------------------------'.print;
             ^avg
         }
     }

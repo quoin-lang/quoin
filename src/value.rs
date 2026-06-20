@@ -175,7 +175,6 @@ pub enum ObjectPayload<'gc> {
     /// occurrences of the same name, so symbols compare by pointer identity.
     Symbol(Gc<'gc, String>),
     Block(Gc<'gc, Block<'gc>>),
-    Native(NativeFunc),
     Instance,
     NativeState(Gc<'gc, RefLock<Box<dyn AnyCollect>>>),
 }
@@ -268,7 +267,6 @@ impl<'gc> Value<'gc> {
                     ObjectPayload::String(_) => "String",
                     ObjectPayload::Symbol(_) => "Symbol",
                     ObjectPayload::Block(_) => "Block",
-                    ObjectPayload::Native(_) => "Native",
                     _ => match borrowed.class_name().as_str() {
                         "List" => "List",
                         "Map" => "Map",
@@ -331,11 +329,6 @@ impl<'gc> PartialEq for Value<'gc> {
                     (ObjectPayload::String(x), ObjectPayload::String(y)) => **x == **y,
                     (ObjectPayload::Symbol(x), ObjectPayload::Symbol(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Block(x), ObjectPayload::Block(y)) => Gc::ptr_eq(*x, *y),
-                    (ObjectPayload::Native(x), ObjectPayload::Native(y)) => {
-                        let a_ptr = x.0 as *const ();
-                        let b_ptr = y.0 as *const ();
-                        a_ptr == b_ptr
-                    }
                     _ => a_borrow.id == b_borrow.id,
                 }
             }
@@ -382,7 +375,6 @@ impl<'gc> fmt::Debug for Value<'gc> {
                         }
                     }
                     ObjectPayload::Block(b) => write!(f, "Block({:?})", b.name),
-                    ObjectPayload::Native(_) => write!(f, "Native(<fn>)"),
                     _ => {
                         let name = o_borrow.class.borrow().name.clone();
                         write!(f, "Object({}, {{{:?}}})", name, o_borrow.fields)
@@ -515,7 +507,6 @@ impl<'gc> fmt::Display for Value<'gc> {
                             write!(f, "<block>")
                         }
                     }
-                    ObjectPayload::Native(_) => write!(f, "<native fn>"),
                     _ => {
                         let name = o_borrow.class.borrow().name.clone();
                         write!(f, "{}{{", name)?;

@@ -1,4 +1,4 @@
-use crate::value::{AnyCollect, NativeClassBuilder, Value};
+use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 
 use gc_arena::collect::Trace;
 use regex::Regex;
@@ -39,6 +39,20 @@ pub fn build_regex_class() -> NativeClassBuilder {
                 Ok(rhs_pat) => Ok(vm.new_bool(mc, lhs_pat == rhs_pat)),
                 Err(_) => Ok(vm.new_bool(mc, false)),
             }
+        })
+        // `pattern ~ str` -> `Send(pattern, "~:", [str])`: true if the regex matches.
+        // A non-String operand never matches (mirrors the old `native_match`).
+        .instance_method("~:", |vm, mc, args| {
+            let matched = args[0].with_native_state(|r: &NativeRegexState| {
+                if let Value::Object(o) = args[1]
+                    && let ObjectPayload::String(s) = &o.borrow().payload
+                {
+                    r.regex.is_match(&**s)
+                } else {
+                    false
+                }
+            })?;
+            Ok(vm.new_bool(mc, matched))
         })
         .instance_method("Split:", |vm, mc, args| {
             let s = crate::arg!(args, String, 1);

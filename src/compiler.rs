@@ -599,7 +599,7 @@ impl Compiler {
             BinaryOperatorType::LtEq => "<=:",
             BinaryOperatorType::GtEq => ">=:",
             BinaryOperatorType::Mod => "%:",
-            BinaryOperatorType::Match => "~",
+            BinaryOperatorType::Match => "~:",
             BinaryOperatorType::Range => "..:",
             _ => {
                 return Err(format!(
