@@ -3,7 +3,7 @@
     .test:
     customEachOnly -> {
         GTColl <- { |@items|
-            .can:Iterate;
+            .mix:Iterate;
             each: -> { |b| @items.each:{ |x| b.valueWithSelfOrArg:x } }
         };
         c = GTColl.new:{ items = #(1 2 3 4) };

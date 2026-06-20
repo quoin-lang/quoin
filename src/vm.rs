@@ -1526,7 +1526,29 @@ impl<'gc> VmState<'gc> {
                 {
                     Some(m)
                 } else {
-                    self.globals.borrow().get(&selector_key).copied()
+                    // A metaclass acts as if it subclasses Object: fall through to
+                    // Object's instance methods so it responds to the universal
+                    // protocol (can?:, s, ==:, …). We use Object rather than the
+                    // "Class" class because Class methods (new, name, …) assume a
+                    // real Class receiver.
+                    let object_key = NamespacedName::new(Vec::new(), "Object".to_string());
+                    if let Some(Value::Class(object_class)) =
+                        self.globals.borrow().get(&object_key).copied()
+                    {
+                        if let Some(m) = self.lookup_method_in_class_hierarchy(
+                            mc,
+                            object_class,
+                            selector,
+                            false,
+                            args,
+                        )? {
+                            Some(m)
+                        } else {
+                            self.globals.borrow().get(&selector_key).copied()
+                        }
+                    } else {
+                        self.globals.borrow().get(&selector_key).copied()
+                    }
                 }
             }
             Value::Object(obj) => {

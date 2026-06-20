@@ -1,0 +1,40 @@
+(TestSuite.new:{ name = 'Can' }).add:{
+    .test:
+    respondsToSelector -> {
+        "* A Symbol or String argument asks: does the receiver implement this method?
+        .is:{ #(1 2 3).can?:#count } equalTo:true;
+        .is:{ #(1 2 3).can?:'count' } equalTo:true;     "* string works too
+        .is:{ #(1 2 3).can?:#bogusXyz } equalTo:false;
+        .is:{ 42.can?:#abs } equalTo:true;
+        .is:{ 42.can?:#nope } equalTo:false;
+    };
+
+    .test:
+    userDefinedMethods -> {
+        CTest <- { foo -> { 1 } };
+        .is:{ CTest.new.can?:#foo } equalTo:true;
+        .is:{ CTest.new.can?:#bar } equalTo:false;
+        .is:{ CTest.can?:#foo } equalTo:true;           "* class: do its instances respond?
+    };
+
+    .test:
+    isAClassOrMixin -> {
+        "* A Class argument asks: is the receiver an instance of / does it mix that class?
+        .is:{ #(1 2 3).can?:List } equalTo:true;
+        .is:{ #(1 2 3).can?:Iterate } equalTo:true;     "* List mixes Iterate
+        .is:{ #(1 2 3).can?:Map } equalTo:false;
+    };
+
+    .test:
+    metaclassMethods -> {
+        "* `ClassName.meta.can?:` checks class-side (meta) methods, not instance ones.
+        CMetaTest <- {
+            .meta <-- { make -> { 42 } }
+            inst -> { 1 }
+        };
+        .is:{ CMetaTest.meta.can?:#make } equalTo:true;     "* class-side method
+        .is:{ CMetaTest.meta.can?:'make' } equalTo:true;     "* string works too
+        .is:{ CMetaTest.meta.can?:#nope } equalTo:false;
+        .is:{ CMetaTest.meta.can?:#inst } equalTo:false;     "* instance method is not class-side
+    };
+}

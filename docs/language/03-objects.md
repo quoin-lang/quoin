@@ -108,10 +108,10 @@ class's `init:` receiving the block fields whose names match its parameters.
 
 > **Rules**
 > - **Method lookup order**: the receiver's own class → its mixins (in the order added) → its parent, recursing upward. The most-derived definition wins.
-> - `.mix:M` mixes class `M` into the current class; `.can:M` is an exact alias. Mixed-in methods and instance vars are included.
+> - `.mix:M` mixes class `M` into the current class; its methods and instance vars are included. (There is no `.can:` alias — use `.mix:`.)
 > - **Initializer order is the dual of lookup**: base → derived (parent, then mixins, then self), so ancestors initialize first (§11).
 > - `.sealed!` is currently a **no-op** (intended to forbid further extension; not yet enforced).
-> - `.can?:` is **not implemented**.
+> - `obj.can?:X` is **overloaded**: a `Symbol`/`String` selector asks *"does it implement that method?"*; a `Class` asks *"is it an instance of / does it mix in that class?"* — e.g. `list.can?:#each:`, `list.can?:'each:'`, `list.can?:Iterate`. Works on instance, class, and metaclass receivers.
 > - The built-in `ActAsUserList` / `ActAsUserString` mixins are what enable the `#Name( … )` and `#Name'…'` custom-literal forms.
 
 ```buildingblocks
@@ -125,9 +125,8 @@ Widget <- {
 Widget.new.hello       "* 'hi from Widget'   (found via the mixin)
 ```
 
-> **⚠ Gotcha — `.sealed!` and `.can?:` don't do anything yet.** `.sealed!` parses
-> and runs but does not actually seal the class, and `.can?:` is absent (calling it
-> is a `MessageNotUnderstood`). Don't rely on either for correctness.
+> **⚠ Gotcha — `.sealed!` doesn't do anything yet.** `.sealed!` parses and runs but
+> does not actually seal the class; don't rely on it for correctness.
 
 ---
 

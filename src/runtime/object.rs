@@ -25,6 +25,40 @@ pub fn build_object_class() -> NativeClassBuilder {
                 )))
             }
         })
+        // `can?:` is overloaded by argument:
+        //   - a Symbol or String selector -> does the receiver implement that method?
+        //     (instance methods for an instance or class receiver; class-side
+        //     methods for a metaclass receiver)
+        //   - a Class -> is the receiver an instance of / does it mix in that class?
+        .instance_method("can?:", |vm, mc, args| {
+            let receiver = args[0];
+            let cap = args[1];
+            let responds = if let Value::Class(c) = cap {
+                vm.is_instance_of(receiver, c)
+            } else {
+                let name = match cap {
+                    Value::Object(obj) => match &obj.borrow().payload {
+                        ObjectPayload::Symbol(s) | ObjectPayload::String(s) => Some((**s).clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let name = name.ok_or_else(|| BBError::TypeError {
+                    expected: "Symbol, String, or Class".to_string(),
+                    got: cap.type_name().to_string(),
+                    msg: "can?: expects a selector (symbol or string) or a class".to_string(),
+                })?;
+                match receiver {
+                    Value::Object(obj) => {
+                        let class = obj.borrow().class;
+                        vm.lookup_in_class_hierarchy(class, &name, false).is_some()
+                    }
+                    Value::Class(c) => vm.lookup_in_class_hierarchy(c, &name, false).is_some(),
+                    Value::ClassMeta(c) => vm.lookup_in_class_hierarchy(c, &name, true).is_some(),
+                }
+            };
+            Ok(vm.new_bool(mc, responds))
+        })
         .instance_method("~:", |vm, mc, args| {
             vm.call_method(mc, args[0], "==:", vec![args[1]])
         })

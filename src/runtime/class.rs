@@ -31,12 +31,6 @@ pub fn build_class_class() -> NativeClassBuilder {
             clz.borrow_mut(mc).mixin_classes.push(mixin);
             Ok(Value::Class(mixin))
         })
-        .instance_method("can:", |_vm, mc, args| {
-            let clz = arg!(args, Class, 0);
-            let mixin = arg!(args, Class, 1);
-            clz.borrow_mut(mc).mixin_classes.push(mixin);
-            Ok(Value::Class(mixin))
-        })
         .instance_method("sealed!", |vm, mc, _args| {
             // TODO: implement this
             Ok(vm.new_nil(mc))

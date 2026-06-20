@@ -1,7 +1,7 @@
 NumberRange <- { | @start @end @n |
     .sealed!;
 
-    .can:Iterate;
+    .mix:Iterate;
 
     init: -> {|start end|
         @start = start

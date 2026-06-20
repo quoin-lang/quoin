@@ -7,10 +7,9 @@ This document outlines the language features, compiler updates, and VM modificat
   - Don't forget to update the plugin.
 - [ ] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
   - In the BB language itself all methods are attached to a class.
-- [ ] Support checking `assertMeetsRequirements:` in calls to `mix:`/`can:`.
-  - Implement `Class#can?:SELECTOR`. Now that `Symbol` is a real interned type (`#sym`),
-    `can?:` should accept either a symbol or a string and normalize (e.g. via `.s`) to a
-    selector name before lookup.
+- [ ] Wire `assertMeetsRequirements:` into `mix:` (and subclassing) so a mixin can declare requirements its host class must satisfy.
+  - [x] Implemented `can?:` (`src/runtime/object.rs`), overloaded by argument: a Symbol/String selector asks "does the receiver implement that method?" (instance/class methods for instance/class receivers, class-side for metaclass); a Class asks "is-a / mixes in?". Removed the `.can:` alias for `.mix:` to disambiguate (`.can:` call sites converted; obsolete `can?: -> {|clz| clz == Iterate}` defs removed). To make `ClassName.meta.can?:` reachable, a metaclass (`ClassMeta`) receiver now falls through to `Object`'s instance methods in dispatch (`src/vm.rs`) — i.e. metaclasses act as if they subclass `Object` (gaining `can?:`, `s`, `==:`, …). Tests in `bblib/tests/17-can.bub`.
+  - [ ] Have `mix:` invoke the mixin's class-side `assertMeetsRequirements:` (which can now use `can?:`) and throw if unmet; reconcile with the unused `implements?:` in `bblib/test.bub`.
 - [ ] Implement the class-marker methods (currently parsed and callable but no-ops / missing):
   - `sealed!` — currently a no-op (`src/runtime/class.rs`). Should forbid further extension of the class or mixin (no more `<--`, `->`/`-->`, `.mix:`), raising a clear error on attempts.
   - `abstract!` — new marker, like `sealed!` but for construction: forbid instantiating the class itself via `new`/`new:` (a concrete subclass may still be instantiated). Raise a clear error, e.g. `Cannot instantiate abstract class X`.

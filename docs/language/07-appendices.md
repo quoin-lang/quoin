@@ -107,8 +107,7 @@ this first.
    `new:{}` leaves fields `nil`; only explicit assignment binds a field (its RHS is
    lexical, but it never mutates the outer variable). A plain-assignment
    `init: { |a| @a = a }` is redundant. A child sets a parent's field via `@field`.
-10. **Some surface forms are stubs.** `.sealed!` is a no-op and `.can?:` is not
-    implemented.
+10. **`.sealed!` is a stub.** It parses and runs but doesn't actually seal the class.
 11. **`case:` matches with `~`, not `==`.** Ranges, regexes, classes, and predicate
     blocks all match; the first matching `when:` wins. Order clauses
     most-specific-first.
@@ -136,7 +135,7 @@ this first.
   type or guard; dispatch picks the most specific match (ties → first defined).
 - **Eigenclass / singleton** — a per-object class created by `value <-- { … }`,
   holding methods for just that one object (named `$Type` internally).
-- **Mixin** — a class included into another with `.mix:` / `.can:`; its methods and
+- **Mixin** — a class included into another with `.mix:`; its methods and
   instance vars participate in lookup (before the parent).
 - **Block** — a first-class closure `{ … }`; the unit of deferred code used for
   control flow, iteration, and initialization.

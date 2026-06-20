@@ -122,7 +122,7 @@ Block <-- {
 };
 
 ANSI <- { |@string|
-    .can:ActAsUserString;
+    .mix:ActAsUserString;
 
     .meta <-- {
         default -> { #ANSI'' }

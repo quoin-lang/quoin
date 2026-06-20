@@ -310,7 +310,7 @@ Iterate <- Generator <- { |@genBlock|
 };
 
 Map <-- {
-    .can:Iterate;
+    .mix:Iterate;
 
     .meta <-- {
         default -> { #{} }
@@ -323,12 +323,10 @@ Map <-- {
         src = self;
         .keys.sort.each:{ |k| b.valueWithSelfOrArg:(KeyValuePair.new:{ key = k; value = src.at:k }) }
     }
-
-    can?: -> {|clz| clz == Iterate }
 };
 
 List <-- {
-    .can:Iterate;
+    .mix:Iterate;
 
     .meta <-- {
         default -> { #() }
@@ -342,20 +340,16 @@ List <-- {
             i = i + 1;
         }
     }
-
-    can?: -> {|clz| clz == Iterate }
 }
 
 Set <-- {
-    .can:Iterate;
+    .mix:Iterate;
 
     .meta <-- {
         default -> { #<> }
     }
 
     "* each: is implemented natively (Set#each: in src/runtime/set.rs).
-
-    can?: -> {|clz| clz == Iterate }
 
     "* Set algebra, built on the native add:/contains?: and the Iterate combinators.
     union: -> { |other|
