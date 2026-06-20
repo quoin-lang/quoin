@@ -1,0 +1,13 @@
+[package]
+name = "quoin"
+version = "0.0.0"
+edition = "2021"
+description = "Reserved name for the Quoin programming language — a Smalltalk-inspired language on a Rust VM. Work in progress; nothing to use here yet."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quoinlang/quoin"
+homepage = "https://quoinlang.dev"
+readme = "README.md"
+keywords = ["language", "smalltalk", "vm", "interpreter", "quoin"]
+categories = ["development-tools"]
+
+[dependencies]
