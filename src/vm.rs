@@ -1685,22 +1685,21 @@ impl<'gc> VmState<'gc> {
                 curr = self.get_next_method_in_chain(method_val);
             }
 
-            let mut err = None;
-            candidates.sort_by(|&a, &b| match self.compare_specificity(a, b) {
-                Ok(ord) => ord,
-                Err(e) => {
-                    err = Some(e);
-                    cmp::Ordering::Equal
+            // Score each applicable candidate and pick the lowest score. We only
+            // replace `best` on a *strictly* lower score, so ties go to the
+            // first-defined — this preserves ordered-guard dispatch (define the
+            // specific guards before a catch-all). The hierarchy walk below still
+            // lets a derived class override a base class regardless of score.
+            let mut best: Option<(Value<'gc>, i64)> = None;
+            for &method_val in &candidates {
+                if let Some(score) = self.match_score(mc, method_val, args)?
+                    && best.map_or(true, |(_, bs)| score < bs)
+                {
+                    best = Some((method_val, score));
                 }
-            });
-            if let Some(e) = err {
-                return Err(e);
             }
-
-            for method_val in candidates {
-                if self.method_matches_arguments(mc, method_val, args)? {
-                    return Ok(Some(method_val));
-                }
+            if let Some((method_val, _)) = best {
+                return Ok(Some(method_val));
             }
         }
 
@@ -1721,39 +1720,95 @@ impl<'gc> VmState<'gc> {
         Ok(None)
     }
 
-    fn compare_specificity(&self, a: Value<'gc>, b: Value<'gc>) -> Result<cmp::Ordering, BBError> {
-        let block_a = self.get_block_from_method(a);
-        let block_b = self.get_block_from_method(b);
-        match (block_a, block_b) {
-            (Some(ba), Some(bb)) => {
-                let len = cmp::min(ba.param_types.len(), bb.param_types.len());
-                for i in 0..len {
-                    let type_a = &ba.param_types[i];
-                    let type_b = &bb.param_types[i];
-                    match (type_a, type_b) {
-                        (Some(ta), Some(tb)) => {
-                            if ta != tb {
-                                if self.is_subclass_of(ta, tb) {
-                                    return Ok(cmp::Ordering::Less);
-                                }
-                                if self.is_subclass_of(tb, ta) {
-                                    return Ok(cmp::Ordering::Greater);
-                                }
-                            }
-                        }
-                        (Some(_), None) => {
-                            return Ok(cmp::Ordering::Less);
-                        }
-                        (None, Some(_)) => {
-                            return Ok(cmp::Ordering::Greater);
-                        }
-                        (None, None) => {}
-                    }
-                }
-                Ok(cmp::Ordering::Equal)
-            }
-            _ => Ok(cmp::Ordering::Equal),
+    /// Score how well a method variant applies to `args` — lower is more specific.
+    /// Returns `None` if it doesn't apply (a typed parameter's argument isn't
+    /// assignable, a guard fails, or there are too few arguments).
+    ///
+    /// The score sums, over parameters: a typed parameter's class-hierarchy
+    /// distance from the argument's class to the declared type (exact match = 0,
+    /// +1 per hop up); an untyped parameter contributes a large constant so a typed
+    /// parameter always beats an untyped one. Parameter types and guard are read
+    /// through `get_block_from_method`, so this is agnostic to how a method is
+    /// stored: a legacy native method (no block) is treated as an untyped fallback
+    /// that matches anything — once native methods carry signatures they will score
+    /// by type like any other variant. (This replaces the old pairwise
+    /// `compare_specificity`, which wasn't a total order.)
+    fn match_score(
+        &mut self,
+        mc: &Mutation<'gc>,
+        method_val: Value<'gc>,
+        args: &[Value<'gc>],
+    ) -> Result<Option<i64>, BBError> {
+        const UNTYPED_PARAM_SCORE: i64 = 1_000_000;
+        let block = match self.get_block_from_method(method_val) {
+            Some(b) => b,
+            None => return Ok(Some(i64::MAX)), // legacy native method: ranked last
+        };
+        if args.len() < block.param_names.len() {
+            return Ok(None);
         }
+        let mut score: i64 = 0;
+        for (i, param_type) in block.param_types.iter().enumerate() {
+            match param_type {
+                Some(hint) => match self.type_distance(args[i], hint) {
+                    Some(d) => score += d,
+                    None => return Ok(None),
+                },
+                None => score += UNTYPED_PARAM_SCORE,
+            }
+        }
+        if let Some(decl_block) = block.decl_block {
+            let res = self.execute_validation_block(mc, decl_block, &block.param_names, args)?;
+            if !res.is_true() {
+                return Ok(None);
+            }
+        }
+        Ok(Some(score))
+    }
+
+    /// Class-hierarchy distance from `val`'s class to the class named `hint` (0 if
+    /// `val` is directly of that type), or `None` if `val` isn't an instance of it.
+    /// A mixin counts as one hop from the class that mixes it in.
+    fn type_distance(&self, val: Value<'gc>, hint: &str) -> Option<i64> {
+        // Fast path / exact match. Also the only thing that matches a `Class` or
+        // `ClassMeta` value (whose `get_class_for_lookup` returns the class itself,
+        // not a class named "Class") — mirrors matches_type's `type_name == hint`.
+        if val.type_name() == hint {
+            return Some(0);
+        }
+        let val_class = self.get_class_for_lookup(val)?;
+        // Resolve the hint to a class so we can match by identity; fall back to
+        // matching by name when it isn't a known global (mirrors matches_type).
+        let target = match self
+            .globals
+            .borrow()
+            .get(&NamespacedName::new(Vec::new(), hint.to_string()))
+            .copied()
+        {
+            Some(Value::Class(c)) => Some(c),
+            _ => None,
+        };
+        let matches = |clz: Gc<'gc, RefLock<Class<'gc>>>| match target {
+            Some(t) => Gc::ptr_eq(clz, t),
+            None => clz.borrow().name.name == hint,
+        };
+        let mut curr = Some(val_class);
+        let mut dist: i64 = 0;
+        while let Some(clz) = curr {
+            if matches(clz) {
+                return Some(dist);
+            }
+            let (mixins, parent) = {
+                let b = clz.borrow();
+                (b.mixin_classes.clone(), b.parent)
+            };
+            if mixins.iter().any(|m| matches(*m)) {
+                return Some(dist + 1);
+            }
+            curr = parent;
+            dist += 1;
+        }
+        None
     }
 
     fn get_block_from_method(&self, method_val: Value<'gc>) -> Option<Gc<'gc, Block<'gc>>> {
@@ -1783,24 +1838,6 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    fn is_subclass_of(&self, sub: &str, super_class: &str) -> bool {
-        if sub == super_class {
-            return true;
-        }
-        if super_class == "Object" {
-            return true;
-        }
-        let sub_key = NamespacedName::new(Vec::new(), sub.to_string());
-        let super_key = NamespacedName::new(Vec::new(), super_class.to_string());
-        let globals = self.globals.borrow();
-        if let Some(Value::Class(sub_clz)) = globals.get(&sub_key)
-            && let Some(Value::Class(super_clz)) = globals.get(&super_key)
-        {
-            return self.is_subclass_of_clz(*sub_clz, *super_clz);
-        }
-        false
-    }
-
     pub fn is_subclass_of_clz(
         &self,
         sub: Gc<'gc, RefLock<Class<'gc>>>,
@@ -1817,27 +1854,6 @@ impl<'gc> VmState<'gc> {
                 }
             }
             curr = clz.borrow().parent;
-        }
-        false
-    }
-
-    pub fn matches_type(&self, val: Value<'gc>, hint: &str) -> bool {
-        if hint == "Object" {
-            return true;
-        }
-        if val.type_name() == hint {
-            return true;
-        }
-        if hint == "Boolean" && val.type_name() == "Boolean" {
-            return true;
-        }
-        let key = NamespacedName::new(Vec::new(), hint.to_string());
-        if let Some(global_val) = self.globals.borrow().get(&key).copied() {
-            if let Value::Class(c) = global_val {
-                if self.is_instance_of(val, c) {
-                    return true;
-                }
-            }
         }
         false
     }
@@ -1862,78 +1878,6 @@ impl<'gc> VmState<'gc> {
             }
         }
         None
-    }
-
-    #[allow(no_gc_across_yield)]
-    fn method_matches_arguments(
-        &mut self,
-        mc: &Mutation<'gc>,
-        method_val: Value<'gc>,
-        args: &[Value<'gc>],
-    ) -> Result<bool, BBError> {
-        if let Value::Object(obj) = method_val {
-            match &obj.borrow().payload {
-                ObjectPayload::Block(block) => {
-                    if args.len() < block.param_names.len() {
-                        return Ok(false);
-                    }
-                    for (i, param_type) in block.param_types.iter().enumerate() {
-                        if let Some(hint) = param_type {
-                            if !self.matches_type(args[i], hint) {
-                                return Ok(false);
-                            }
-                        }
-                    }
-                    if let Some(decl_block) = block.decl_block {
-                        let res = self.execute_validation_block(
-                            mc,
-                            decl_block,
-                            &block.param_names,
-                            args,
-                        )?;
-                        if !res.is_true() {
-                            return Ok(false);
-                        }
-                    }
-                    return Ok(true);
-                }
-                ObjectPayload::NativeState(state_cell) => {
-                    let state_ref = state_cell.borrow();
-                    let any_ref = (**state_ref).as_any();
-                    if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
-                        let block_val = method_state.get_block();
-                        if let Value::Object(block_obj) = block_val
-                            && let ObjectPayload::Block(block) = &block_obj.borrow().payload
-                        {
-                            if args.len() < block.param_names.len() {
-                                return Ok(false);
-                            }
-                            for (i, param_type) in block.param_types.iter().enumerate() {
-                                if let Some(hint) = param_type {
-                                    if !self.matches_type(args[i], hint) {
-                                        return Ok(false);
-                                    }
-                                }
-                            }
-                            if let Some(decl_block) = block.decl_block {
-                                let res = self.execute_validation_block(
-                                    mc,
-                                    decl_block,
-                                    &block.param_names,
-                                    args,
-                                )?;
-                                if !res.is_true() {
-                                    return Ok(false);
-                                }
-                            }
-                            return Ok(true);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(true)
     }
 
     pub fn append_method_to_chain(

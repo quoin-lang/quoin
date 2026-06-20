@@ -55,6 +55,20 @@
         } equalTo:'b';
     };
 
+    .test:
+    dispatchOnClassArg -> {
+        "* A `:Class`-typed parameter must match a Class *value* (e.g. `Integer`),
+        "* not just instances. Regression: scored dispatch's hierarchy-distance must
+        "* treat a Class value as being of type Class rather than walking that
+        "* class's own ancestry looking for a class named "Class".
+        TSMTC_DC <- {
+            kindOf: -> { |x:Class| 'a class' }
+            kindOf: --> { |x:Object| 'an object' }
+        };
+        .is:{ TSMTC_DC.new.kindOf:Integer } equalTo:'a class';   "* a Class -> :Class (distance 0) beats :Object (distance 1)
+        .is:{ TSMTC_DC.new.kindOf:5 } equalTo:'an object';        "* an instance -> only :Object matches
+    };
+
 "*    .test:
 "*    dispatchNoMatch -> {
 "*        .does:{
