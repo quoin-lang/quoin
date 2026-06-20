@@ -230,13 +230,9 @@ pub fn native_add<'gc>(
         });
     }
 
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, "+:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], "+:", vec![active_args[1]]);
-    }
-
+    // Global fallback for `+:` (the binary-plus selector) — reached only when the
+    // receiver's class has no matching `+:` method (class-first dispatch already
+    // resolved any class/user `+:`, so no delegation here; it would just recurse).
     let active_args = vm.active_native_args.last().unwrap();
     let (p0, p1) = match (&active_args[0], &active_args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
@@ -277,13 +273,6 @@ pub fn native_sub<'gc>(
             got: args.len(),
             msg: "sub expects 2 arguments".to_string(),
         });
-    }
-
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, "-:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], "-:", vec![active_args[1]]);
     }
 
     let active_args = vm.active_native_args.last().unwrap();
@@ -327,13 +316,6 @@ pub fn native_mul<'gc>(
         });
     }
 
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, "*:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], "*:", vec![active_args[1]]);
-    }
-
     let active_args = vm.active_native_args.last().unwrap();
     let (p0, p1) = match (&active_args[0], &active_args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
@@ -373,13 +355,6 @@ pub fn native_div<'gc>(
             got: args.len(),
             msg: "div expects 2 arguments".to_string(),
         });
-    }
-
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, "/:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], "/:", vec![active_args[1]]);
     }
 
     let active_args = vm.active_native_args.last().unwrap();
@@ -426,13 +401,6 @@ pub fn native_mod<'gc>(
             got: args.len(),
             msg: "mod expects 2 arguments".to_string(),
         });
-    }
-
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, "%:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], "%:", vec![active_args[1]]);
     }
 
     let active_args = vm.active_native_args.last().unwrap();
@@ -592,13 +560,9 @@ pub fn native_eq<'gc>(
         });
     }
 
-    let receiver = args[0];
-    let other = args[1];
-    if vm.lookup_method(mc, receiver, "==:", &[other])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], "==:", vec![active_args[1]]);
-    }
-
+    // Global fallback for `==:` — primitive identity/value equality. Any class or
+    // user `==:` is resolved class-first before this is reached (Object#==: exists,
+    // so in practice this is rarely hit); no delegation here (it would recurse).
     let active_args = vm.active_native_args.last().unwrap();
     Ok(vm.new_bool(mc, active_args[0] == active_args[1]))
 }
@@ -633,13 +597,6 @@ pub fn native_lt<'gc>(
             got: args.len(),
             msg: "lt expects 2 arguments".to_string(),
         });
-    }
-
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, "<:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], "<:", vec![active_args[1]]);
     }
 
     let active_args = vm.active_native_args.last().unwrap();
@@ -685,13 +642,6 @@ pub fn native_gt<'gc>(
         });
     }
 
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, ">:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], ">:", vec![active_args[1]]);
-    }
-
     let active_args = vm.active_native_args.last().unwrap();
     let (p0, p1) = match (&active_args[0], &active_args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
@@ -735,13 +685,6 @@ pub fn native_le<'gc>(
         });
     }
 
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, "<=:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], "<=:", vec![active_args[1]]);
-    }
-
     let active_args = vm.active_native_args.last().unwrap();
     let (p0, p1) = match (&active_args[0], &active_args[1]) {
         (Value::Object(o1), Value::Object(o2)) => (&o1.borrow().payload, &o2.borrow().payload),
@@ -783,13 +726,6 @@ pub fn native_ge<'gc>(
             got: args.len(),
             msg: "ge expects 2 arguments".to_string(),
         });
-    }
-
-    let receiver = args[0];
-    let arg1 = args[1];
-    if vm.lookup_method(mc, receiver, ">=:", &[arg1])?.is_some() {
-        let active_args = vm.active_native_args.last().unwrap();
-        return vm.call_method(mc, active_args[0], ">=:", vec![active_args[1]]);
     }
 
     let active_args = vm.active_native_args.last().unwrap();
@@ -892,17 +828,17 @@ pub fn register_native_funcs<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>) {
     ));
 
     // Operators
-    funcs.push(("+".to_string(), vm.new_native(mc, NativeFunc(native_add))));
-    funcs.push(("-".to_string(), vm.new_native(mc, NativeFunc(native_sub))));
-    funcs.push(("*".to_string(), vm.new_native(mc, NativeFunc(native_mul))));
-    funcs.push(("/".to_string(), vm.new_native(mc, NativeFunc(native_div))));
-    funcs.push(("%".to_string(), vm.new_native(mc, NativeFunc(native_mod))));
-    funcs.push(("==".to_string(), vm.new_native(mc, NativeFunc(native_eq))));
-    funcs.push(("!=".to_string(), vm.new_native(mc, NativeFunc(native_ne))));
-    funcs.push(("<".to_string(), vm.new_native(mc, NativeFunc(native_lt))));
-    funcs.push((">".to_string(), vm.new_native(mc, NativeFunc(native_gt))));
-    funcs.push(("<=".to_string(), vm.new_native(mc, NativeFunc(native_le))));
-    funcs.push((">=".to_string(), vm.new_native(mc, NativeFunc(native_ge))));
+    funcs.push(("+:".to_string(), vm.new_native(mc, NativeFunc(native_add))));
+    funcs.push(("-:".to_string(), vm.new_native(mc, NativeFunc(native_sub))));
+    funcs.push(("*:".to_string(), vm.new_native(mc, NativeFunc(native_mul))));
+    funcs.push(("/:".to_string(), vm.new_native(mc, NativeFunc(native_div))));
+    funcs.push(("%:".to_string(), vm.new_native(mc, NativeFunc(native_mod))));
+    funcs.push(("==:".to_string(), vm.new_native(mc, NativeFunc(native_eq))));
+    funcs.push(("!=:".to_string(), vm.new_native(mc, NativeFunc(native_ne))));
+    funcs.push(("<:".to_string(), vm.new_native(mc, NativeFunc(native_lt))));
+    funcs.push((">:".to_string(), vm.new_native(mc, NativeFunc(native_gt))));
+    funcs.push(("<=:".to_string(), vm.new_native(mc, NativeFunc(native_le))));
+    funcs.push((">=:".to_string(), vm.new_native(mc, NativeFunc(native_ge))));
     funcs.push(("~".to_string(), vm.new_native(mc, NativeFunc(native_match))));
 
     // Unary

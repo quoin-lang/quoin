@@ -598,17 +598,17 @@ impl Compiler {
         self.compile_node(&op.right, bytecode)?;
 
         let selector = match op.operator {
-            BinaryOperatorType::Add => "+",
-            BinaryOperatorType::Sub => "-",
-            BinaryOperatorType::Mul => "*",
-            BinaryOperatorType::Div => "/",
-            BinaryOperatorType::Eq => "==",
-            BinaryOperatorType::NotEq => "!=",
-            BinaryOperatorType::Lt => "<",
-            BinaryOperatorType::Gt => ">",
-            BinaryOperatorType::LtEq => "<=",
-            BinaryOperatorType::GtEq => ">=",
-            BinaryOperatorType::Mod => "%",
+            BinaryOperatorType::Add => "+:",
+            BinaryOperatorType::Sub => "-:",
+            BinaryOperatorType::Mul => "*:",
+            BinaryOperatorType::Div => "/:",
+            BinaryOperatorType::Eq => "==:",
+            BinaryOperatorType::NotEq => "!=:",
+            BinaryOperatorType::Lt => "<:",
+            BinaryOperatorType::Gt => ">:",
+            BinaryOperatorType::LtEq => "<=:",
+            BinaryOperatorType::GtEq => ">=:",
+            BinaryOperatorType::Mod => "%:",
             BinaryOperatorType::Match => "~",
             BinaryOperatorType::Range => "..:",
             _ => {
@@ -1125,7 +1125,7 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Push(Constant::Int(2)));
-        expected.push(Instruction::Send("+".to_string(), 1));
+        expected.push(Instruction::Send("+:".to_string(), 1));
         assert_eq!(res.bytecode, expected);
 
         // -x
@@ -1216,7 +1216,7 @@ mod tests {
             bytecode: SharedBytecode(Rc::new(vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
-                Instruction::Send("+".to_string(), 1),
+                Instruction::Send("+:".to_string(), 1),
                 Instruction::Return,
             ])),
             source_info: None,

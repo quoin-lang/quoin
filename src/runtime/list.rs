@@ -263,7 +263,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                     } else if val_curr.is_nil() {
                         false
                     } else {
-                        vm.call_method(mc, val_prev, ">", vec![val_curr])?.is_true()
+                        vm.call_method(mc, val_prev, ">:", vec![val_curr])?.is_true()
                     };
 
                     if gt_res {
@@ -325,7 +325,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                         } else if key_rhs.is_nil() {
                             false
                         } else {
-                            vm.call_method(mc, key_lhs, ">", vec![key_rhs])?.is_true()
+                            vm.call_method(mc, key_lhs, ">:", vec![key_rhs])?.is_true()
                         };
 
                         if gt_res {

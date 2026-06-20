@@ -32,12 +32,14 @@ pub fn build_string_class() -> NativeClassBuilder {
             "==:",
             |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
         )
-        .instance_method("<", |vm, mc, args| {
+        // Binary comparison uses the `:` keyword selectors (the compiler lowers
+        // `a < b` to `Send(a, "<:", [b])`).
+        .instance_method("<:", |vm, mc, args| {
             let lhs = arg!(args, String, 0);
             let rhs = arg!(args, String, 1);
             Ok(vm.new_bool(mc, *lhs < *rhs))
         })
-        .instance_method(">", |vm, mc, args| {
+        .instance_method(">:", |vm, mc, args| {
             let lhs = arg!(args, String, 0);
             let rhs = arg!(args, String, 1);
             Ok(vm.new_bool(mc, *lhs > *rhs))

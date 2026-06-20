@@ -181,6 +181,30 @@ pub enum ObjectPayload<'gc> {
 }
 
 impl<'gc> Value<'gc> {
+    /// The integer value if this is an `Integer`, else `None`.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Object(o) => match &o.borrow().payload {
+                ObjectPayload::Int(i) => Some(*i),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The value as `f64`, promoting an `Integer` to floating point. `None` if not
+    /// numeric. The shared coercion helper for arithmetic operator variants.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::Object(o) => match &o.borrow().payload {
+                ObjectPayload::Int(i) => Some(*i as f64),
+                ObjectPayload::Double(d) => Some(*d),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn is_nil(&self) -> bool {
         if let Value::Object(obj) = self
             && let ObjectPayload::Nil = &obj.borrow().payload
