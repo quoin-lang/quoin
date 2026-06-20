@@ -18,8 +18,8 @@
     .test:
     blockName -> {
         .is:{ {}.name } equalTo:nil;
-        .is:{ {#x |-|}.name } equalTo:'x';
-        .is:{ {#x |x|}.name } equalTo:'x';
+        .is:{ {#x |-|}.name } equalTo:#x;       "* Block#name returns a symbol
+        .is:{ {#x |x|}.name } equalTo:#x;
     };
 
     .test:

@@ -171,6 +171,9 @@ pub enum ObjectPayload<'gc> {
     Int(i64),
     Double(f64),
     String(Gc<'gc, String>),
+    /// An interned symbol (`#foo`). The inner string is shared across all
+    /// occurrences of the same name, so symbols compare by pointer identity.
+    Symbol(Gc<'gc, String>),
     Block(Gc<'gc, Block<'gc>>),
     Native(NativeFunc),
     Instance,
@@ -239,6 +242,7 @@ impl<'gc> Value<'gc> {
                     ObjectPayload::Int(_) => "Integer",
                     ObjectPayload::Double(_) => "Double",
                     ObjectPayload::String(_) => "String",
+                    ObjectPayload::Symbol(_) => "Symbol",
                     ObjectPayload::Block(_) => "Block",
                     ObjectPayload::Native(_) => "Native",
                     _ => {
@@ -307,6 +311,7 @@ impl<'gc> PartialEq for Value<'gc> {
                     (ObjectPayload::Int(x), ObjectPayload::Double(y)) => (*x as f64) == *y,
                     (ObjectPayload::Double(x), ObjectPayload::Int(y)) => *x == (*y as f64),
                     (ObjectPayload::String(x), ObjectPayload::String(y)) => **x == **y,
+                    (ObjectPayload::Symbol(x), ObjectPayload::Symbol(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Block(x), ObjectPayload::Block(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Native(x), ObjectPayload::Native(y)) => {
                         let a_ptr = x.0 as *const ();
@@ -334,6 +339,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
                     ObjectPayload::Int(i) => write!(f, "Int({})", i),
                     ObjectPayload::Double(fl) => write!(f, "Float({})", fl),
                     ObjectPayload::String(s) => write!(f, "String({:?})", *s),
+                    ObjectPayload::Symbol(s) => write!(f, "#{}", **s),
                     _ if o_borrow.class_name() == "List" => write!(f, "List(...)"),
                     _ if o_borrow.class_name() == "Map" => write!(f, "Map(...)"),
                     _ if o_borrow.class_name() == "Set" => write!(f, "Set(...)"),
@@ -406,6 +412,7 @@ impl<'gc> fmt::Display for Value<'gc> {
                     ObjectPayload::Int(i) => write!(f, "{}", i),
                     ObjectPayload::Double(fl) => write!(f, "{}", fl),
                     ObjectPayload::String(s) => write!(f, "{}", **s),
+                    ObjectPayload::Symbol(s) => write!(f, "#{}", **s),
                     _ if o_borrow.class_name() == "List" => {
                         if let Ok(res) = self.with_native_state::<NativeListState, _, _>(|l| {
                             let vec = l.get_vec();

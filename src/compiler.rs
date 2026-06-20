@@ -161,7 +161,7 @@ impl Compiler {
                 bytecode.push(Instruction::Push(Constant::String(s.value.clone())));
             }
             NodeValue::Symbol(s) => {
-                bytecode.push(Instruction::Push(Constant::String(s.value.clone())));
+                bytecode.push(Instruction::Push(Constant::Symbol(s.value.clone())));
             }
             NodeValue::Identifier(id) => {
                 if id.identifier_type == IdentifierType::Instance {
@@ -892,7 +892,7 @@ mod tests {
 
         let res = compile(vec![sym("mysym")]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::Push(Constant::String("mysym".to_string())));
+        expected.push(Instruction::Push(Constant::Symbol("mysym".to_string())));
         assert_eq!(res.bytecode, expected);
     }
 

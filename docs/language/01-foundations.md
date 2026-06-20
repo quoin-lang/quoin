@@ -121,8 +121,11 @@ statement.
 - **Strings** use single quotes. Escapes: `\t \n \r \" \' \\`, plus `\uXXXX` and
   `\xXXXX` (four hex digits). Plain strings do **not** interpolate; interpolation
   is a separate `%` form (see [§19](06-library-and-reference.md)).
-- **Symbols** are selectors-as-data: `#name`, multi-part `#when:do:`, or a quoted
-  form `#'+:'` for operators and otherwise-unspellable names.
+- **Symbols** are interned selector-like names: `#name`, multi-part `#when:do:`,
+  or a quoted form `#'+:'` for operators and otherwise-unspellable names. They are a
+  **distinct type** (`#foo.class == Symbol`), compared by identity — `#foo == #foo`
+  is true, but `#foo == 'foo'` is **false**; `#foo.s` yields the name `'foo'`.
+  `Block#name` and `Method#selector` (alias `Method#name`) return symbols.
 - **Lists** are space-separated (no commas): `#(1 2 3)`. **Maps** pair `key: value`
   and are string-keyed: `#{ 'foo': 100 'bar': 200 }`. **Sets** are space-separated
   and hold unique elements (deduplicated by `==:`): `#<1 2 3>`, empty `#<>`.

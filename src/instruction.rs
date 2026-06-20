@@ -89,6 +89,7 @@ pub enum Constant {
     Int(i64),
     Double(f64),
     String(String),
+    Symbol(String),
     Block(StaticBlock),
 }
 

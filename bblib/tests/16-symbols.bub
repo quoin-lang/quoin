@@ -1,0 +1,35 @@
+(TestSuite.new:{ name = 'Symbols' }).add:{
+    .test:
+    classAndStringForm -> {
+        .is:{ #foo.class } equalTo:Symbol;
+        .is:{ #foo.s } equalTo:'foo';            "* the name, without the leading #
+        .is:{ #foo.asString } equalTo:'foo';
+        .is:{ #foo.asSymbol } equalTo:#foo;
+    };
+
+    .test:
+    equalityIsByIdentity -> {
+        .is:{ #foo == #foo } equalTo:true;       "* interned: same value
+        .is:{ #foo == #bar } equalTo:false;
+        "* A symbol is NOT equal to the string of the same name.
+        .is:{ #foo == 'foo' } equalTo:false;
+        .is:{ 'foo' == #foo } equalTo:false;
+    };
+
+    .test:
+    multiPartAndOperatorSymbols -> {
+        .is:{ #when:do: == #when:do: } equalTo:true;
+        .is:{ #when:do:.class } equalTo:Symbol;
+        .is:{ #'+:'.s } equalTo:'+:';
+        .is:{ #'+:'.class } equalTo:Symbol;
+    };
+
+    .test:
+    blockAndMethodNamesAreSymbols -> {
+        .is:{ {#blk |-|}.name } equalTo:#blk;
+        .is:{ {#blk |-|}.name.class } equalTo:Symbol;
+        .is:{ (z -> {}).selector } equalTo:#z;
+        .is:{ (z -> {}).selector.class } equalTo:Symbol;
+        .is:{ {}.name } equalTo:nil;             "* an unnamed block has no name
+    };
+}

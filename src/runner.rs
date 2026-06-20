@@ -7,7 +7,7 @@ use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_building_blocks_file};
 use crate::runtime::{
     block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method, native,
-    nil, object, regex, runtime, set, string, timer,
+    nil, object, regex, runtime, set, string, symbol, timer,
 };
 use crate::value::{Block, NamespacedName, NativeClassBuilder};
 use crate::vm::{VmOptions, VmState, VmStatus};
@@ -220,6 +220,7 @@ impl VmRunner {
             vm.register_native_class(mc, double::build_double_class());
             vm.register_native_class(mc, integer::build_integer_class());
             vm.register_native_class(mc, string::build_string_class());
+            vm.register_native_class(mc, symbol::build_symbol_class());
             vm.register_native_class(mc, nil::build_nil_class());
             vm.register_native_class(mc, map::build_map_class());
             vm.register_native_class(mc, map::build_key_value_pair_class());
@@ -529,6 +530,7 @@ impl VmRunner {
             vm.register_native_class(mc, double::build_double_class());
             vm.register_native_class(mc, integer::build_integer_class());
             vm.register_native_class(mc, string::build_string_class());
+            vm.register_native_class(mc, symbol::build_symbol_class());
             vm.register_native_class(mc, nil::build_nil_class());
             vm.register_native_class(mc, map::build_map_class());
             vm.register_native_class(mc, map::build_key_value_pair_class());

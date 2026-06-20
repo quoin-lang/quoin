@@ -8,7 +8,9 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
   - In the BB language itself all methods are attached to a class.
 - [ ] Support checking `assertMeetsRequirements:` in calls to `mix:`/`can:`.
-  - Implement `Class#can?:SELECTOR`.
+  - Implement `Class#can?:SELECTOR`. Now that `Symbol` is a real interned type (`#sym`),
+    `can?:` should accept either a symbol or a string and normalize (e.g. via `.s`) to a
+    selector name before lookup.
 - [ ] Implement the class-marker methods (currently parsed and callable but no-ops / missing):
   - `sealed!` — currently a no-op (`src/runtime/class.rs`). Should forbid further extension of the class or mixin (no more `<--`, `->`/`-->`, `.mix:`), raising a clear error on attempts.
   - `abstract!` — new marker, like `sealed!` but for construction: forbid instantiating the class itself via `new`/`new:` (a concrete subclass may still be instantiated). Raise a clear error, e.g. `Cannot instantiate abstract class X`.

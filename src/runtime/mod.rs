@@ -15,4 +15,5 @@ pub mod regex;
 pub mod runtime;
 pub mod set;
 pub mod string;
+pub mod symbol;
 pub mod timer;

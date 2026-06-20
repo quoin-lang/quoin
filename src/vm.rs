@@ -92,6 +92,9 @@ pub struct VmState<'gc> {
     pub stack: Vec<Value<'gc>>,
     pub frames: Vec<Frame<'gc>>,
     pub globals: Gc<'gc, RefLock<HashMap<NamespacedName, Value<'gc>>>>,
+    /// Intern pool for symbols: one canonical `Symbol` value per name, so symbols
+    /// compare by identity. Rooted here and traced as part of `VmState`.
+    pub symbol_table: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
     pub next_frame_id: usize,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
@@ -312,6 +315,7 @@ impl<'gc> VmState<'gc> {
             stack: Vec::new(),
             frames: Vec::new(),
             globals: gcl!(mc, HashMap::new()),
+            symbol_table: gcl!(mc, HashMap::new()),
             next_frame_id: 1,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_exception: None,
@@ -463,6 +467,28 @@ impl<'gc> VmState<'gc> {
                 payload: ObjectPayload::String(gc!(mc, s)),
             }
         ))
+    }
+
+    /// Return the interned `Symbol` value for `name`, creating it on first use.
+    /// All occurrences of the same name share one value, so symbols compare by
+    /// identity.
+    pub fn new_symbol(&self, mc: &Mutation<'gc>, name: String) -> Value<'gc> {
+        let existing = self.symbol_table.borrow().get(&name).copied();
+        if let Some(sym) = existing {
+            return sym;
+        }
+        let class = self.get_or_create_builtin_class(mc, "Symbol");
+        let sym = Value::Object(gcl!(
+            mc,
+            Object {
+                id: GcUlid(Ulid::new()),
+                class,
+                fields: HashMap::new(),
+                payload: ObjectPayload::Symbol(gc!(mc, name.clone())),
+            }
+        ));
+        self.symbol_table.borrow_mut(mc).insert(name, sym);
+        sym
     }
 
     #[allow(clippy::wrong_self_convention)]
@@ -2770,6 +2796,7 @@ impl<'gc> VmState<'gc> {
                     Constant::Int(i) => self.new_int(mc, i),
                     Constant::Double(f) => self.new_double(mc, f),
                     Constant::String(s) => self.new_string(mc, s.clone()),
+                    Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
                     Constant::Block(sb) => {
                         let parent_env = self.frames.last().map(|f| f.env);
                         let enclosing_method_id =
@@ -3285,6 +3312,7 @@ mod tests {
         Int(i64),
         Double(f64),
         String(String),
+        Symbol(String),
         Class(String),
         ClassMeta(String),
         List(Vec<ValueSpec>),
@@ -3307,6 +3335,7 @@ mod tests {
                     ObjectPayload::Int(i) => ValueSpec::Int(*i),
                     ObjectPayload::Double(d) => ValueSpec::Double(*d),
                     ObjectPayload::String(s) => ValueSpec::String((**s).clone()),
+                    ObjectPayload::Symbol(s) => ValueSpec::Symbol((**s).clone()),
                     _ if borrowed.class_name() == "List" => {
                         let res = val.with_native_state::<NativeListState, _, _>(|l| {
                             let list_specs = l.get_vec().iter().map(|&v| to_spec(v)).collect();
@@ -3481,6 +3510,50 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn test_symbol_interning_pointer_equality() {
+        // Pull the inner interned string out of a symbol value.
+        fn inner<'gc>(v: Value<'gc>) -> Gc<'gc, String> {
+            match v {
+                Value::Object(obj) => match obj.borrow().payload {
+                    ObjectPayload::Symbol(s) => s,
+                    _ => panic!("expected a Symbol payload"),
+                },
+                _ => panic!("expected an Object value"),
+            }
+        }
+
+        run_test_steps(Vec::new(), |vm, mc| {
+            let a = vm.new_symbol(mc, "foo".to_string());
+            let b = vm.new_symbol(mc, "foo".to_string());
+            let c = vm.new_symbol(mc, "bar".to_string());
+
+            // Same name => the inner Gc<String> is pointer-identical (real interning,
+            // not the `id`/content fallbacks in Value::eq).
+            assert!(
+                Gc::ptr_eq(inner(a), inner(b)),
+                "interned symbols of the same name must share the inner Gc<String>"
+            );
+            // ...and the whole canonical Object is shared too.
+            match (a, b) {
+                (Value::Object(oa), Value::Object(ob)) => assert!(
+                    Gc::ptr_eq(oa, ob),
+                    "interned symbols of the same name must be the same Object"
+                ),
+                _ => panic!("symbols must be Object values"),
+            }
+            // Different names => distinct pointers.
+            assert!(
+                !Gc::ptr_eq(inner(a), inner(c)),
+                "symbols of different names must not share a pointer"
+            );
+
+            // Sanity: BB-level equality agrees with identity.
+            assert!(a == b);
+            assert!(a != c);
+        });
     }
 
     #[test]

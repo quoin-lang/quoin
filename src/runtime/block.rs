@@ -22,7 +22,7 @@ pub fn build_block_class() -> NativeClassBuilder {
         .instance_method("name", |vm, mc, args| {
             let block = arg!(args, Block, 0);
             if let Some(name) = &block.name {
-                Ok(vm.new_string(mc, name.clone()))
+                Ok(vm.new_symbol(mc, name.clone()))
             } else {
                 Ok(vm.new_nil(mc))
             }

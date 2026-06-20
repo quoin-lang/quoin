@@ -53,7 +53,12 @@ pub fn build_method_class() -> NativeClassBuilder {
         .instance_method("selector", |vm, mc, args| {
             let selector =
                 args[0].with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
-            Ok(vm.new_string(mc, selector))
+            Ok(vm.new_symbol(mc, selector))
+        })
+        .instance_method("name", |vm, mc, args| {
+            let selector =
+                args[0].with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
+            Ok(vm.new_symbol(mc, selector))
         })
         .instance_method("extension?", |vm, mc, args| {
             let is_ext =

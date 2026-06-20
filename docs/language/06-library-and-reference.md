@@ -28,6 +28,11 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 `keys`, `values`, `==:`. Iterating yields **KeyValuePair** objects (`key`,
 `value`, `s`, `==:`).
 
+**Symbol** (`src/runtime/symbol.rs`) — literal `#name` / `#multi:part:` / `#'…'`;
+**interned** (compared by identity), a distinct type from String. Methods: `s`
+(→ the name, no `#`), `asString`, `asSymbol`, `==:`. `Block#name` and
+`Method#selector`/`name` return symbols.
+
 **Set** (`src/runtime/set.rs`, algebra in `bblib/02-iterate.bub`) — literal
 `#< … >`, unique by `==:`, insertion-ordered; `count`, `add:`, `remove:`,
 `contains?:`, `each:`, `s`, `==:` (order-independent), plus `union:`,
