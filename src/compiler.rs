@@ -234,6 +234,12 @@ impl Compiler {
                 }
                 bytecode.push(Instruction::NewMap(map.keys.len()));
             }
+            NodeValue::Set(set) => {
+                for item in &set.values {
+                    self.compile_node(item, bytecode)?;
+                }
+                bytecode.push(Instruction::NewSet(set.values.len()));
+            }
             NodeValue::Regex(re) => {
                 let mut pattern = re.value.clone();
                 if pattern.starts_with("#/") && pattern.ends_with('/') {

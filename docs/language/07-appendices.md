@@ -18,7 +18,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 | `#/ … /` | Regex |
 | `#Name'…'` | User string (e.g. `#ANSI'…'`) |
 | `#Name( … )` | User list |
-| `#< … >` | Set literal — **parses but unimplemented** (compile error) |
+| `#< … >` | Set literal (unique elements); a bare `>` ends the set — parenthesize `>`/`>=` elements |
 | `@name` | Instance variable |
 | `[NS]Name` `[/]Name` | Namespaced global / root global |
 | `_` | Ignore (in lvalues and block params) |
@@ -107,8 +107,8 @@ this first.
    `new:{}` leaves fields `nil`; only explicit assignment binds a field (its RHS is
    lexical, but it never mutates the outer variable). A plain-assignment
    `init: { |a| @a = a }` is redundant. A child sets a parent's field via `@field`.
-10. **Some surface forms are stubs.** `.sealed!` is a no-op, `.can?:` is not
-    implemented, and the `#< >` set literal fails to compile.
+10. **Some surface forms are stubs.** `.sealed!` is a no-op and `.can?:` is not
+    implemented.
 11. **`case:` matches with `~`, not `==`.** Ranges, regexes, classes, and predicate
     blocks all match; the first matching `when:` wins. Order clauses
     most-specific-first.

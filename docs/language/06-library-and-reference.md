@@ -28,6 +28,12 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 `keys`, `values`, `==:`. Iterating yields **KeyValuePair** objects (`key`,
 `value`, `s`, `==:`).
 
+**Set** (`src/runtime/set.rs`, algebra in `bblib/02-iterate.bub`) — literal
+`#< … >`, unique by `==:`, insertion-ordered; `count`, `add:`, `remove:`,
+`contains?:`, `each:`, `s`, `==:` (order-independent), plus `union:`,
+`intersection:`, `difference:`, `subset?:`, `superset?:` and all `Iterate`
+combinators. Membership is O(n) — a simple reference set, not hashed.
+
 **Range / NumberRange** (`bblib/03-number_range.bub`) — built by `a..b`; `each:`
 (forward or backward), `~:` (membership), `s`. **Half-open** (inclusive start,
 exclusive end). Plus `Iterate` combinators.
@@ -107,7 +113,7 @@ root = [/]Object        "* explicit root; same as bare `Object`
 |---|---|
 | `00-bootstrap.bub` | `true`/`false`/`nil` behavior, `Object`, `Mixin`, the `Error` hierarchy, `Block` loops (`whileDo:`, `whileDefinedDo:`), numeric helpers, the `ANSI` class. (Primitive payloads/dispatch are native.) |
 | `01-case.bub` | `Case` and `Object#case:` pattern matching (built on the native `~` operator). |
-| `02-iterate.bub` | The `Iterate` mixin and every combinator, plus `Generator` and the external `Iterator`. (List/Map storage is native.) |
+| `02-iterate.bub` | The `Iterate` mixin and every combinator, plus `Generator`, the external `Iterator`, and `Set` algebra (`union:`/`intersection:`/…). (List/Map/Set storage is native.) |
 | `03-number_range.bub` | `NumberRange` (`a..b`), its `each:` and `~:` membership. |
 | `04-string.bub` | String conveniences over the native string methods (e.g. `split:`). |
 | `05-regex.bub` | Regex conveniences over the native regex methods (e.g. `split:`). |

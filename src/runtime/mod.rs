@@ -13,5 +13,6 @@ pub mod nil;
 pub mod object;
 pub mod regex;
 pub mod runtime;
+pub mod set;
 pub mod string;
 pub mod timer;

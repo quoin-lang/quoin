@@ -6,6 +6,7 @@ use crate::parser::parse_building_blocks_string;
 use crate::runtime::fiber::{FiberStatus, NativeFiberState};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
+use crate::runtime::set::NativeSetState;
 use crate::runtime::method::NativeMethodState;
 use crate::runtime::regex::NativeRegexState;
 use crate::value::{
@@ -505,6 +506,86 @@ impl<'gc> VmState<'gc> {
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
+    }
+
+    pub fn new_set(&self, mc: &Mutation<'gc>, set: Vec<Value<'gc>>) -> Value<'gc> {
+        let class = self.get_or_create_builtin_class(mc, "Set");
+        let boxed_state: Box<dyn AnyCollect> = Box::new(NativeSetState::new(set));
+        Value::Object(gcl!(
+            mc,
+            Object {
+                id: GcUlid(Ulid::new()),
+                class,
+                fields: HashMap::new(),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
+            }
+        ))
+    }
+
+    /// True if `set_val` already contains a value equal (by BB `==:`) to `value`.
+    pub fn set_contains(
+        &mut self,
+        mc: &Mutation<'gc>,
+        set_val: Value<'gc>,
+        value: Value<'gc>,
+    ) -> Result<bool, BBError> {
+        let len = set_val
+            .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
+            .map_err(|e| BBError::Other(e))?;
+        for i in 0..len {
+            let elem = set_val
+                .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
+                .map_err(|e| BBError::Other(e))?;
+            if self.call_method(mc, elem, "==:", vec![value])?.is_true() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Insert `value` into `set_val` unless an equal element is already present.
+    /// Returns whether a new element was added.
+    pub fn set_add(
+        &mut self,
+        mc: &Mutation<'gc>,
+        set_val: Value<'gc>,
+        value: Value<'gc>,
+    ) -> Result<bool, BBError> {
+        if self.set_contains(mc, set_val, value)? {
+            Ok(false)
+        } else {
+            set_val
+                .with_native_state_mut::<NativeSetState, _, _>(mc, |s| s.get_vec_mut().push(value))
+                .map_err(|e| BBError::Other(e))?;
+            Ok(true)
+        }
+    }
+
+    /// Remove the first element of `set_val` equal (by `==:`) to `value`.
+    /// Returns whether an element was removed.
+    pub fn set_remove(
+        &mut self,
+        mc: &Mutation<'gc>,
+        set_val: Value<'gc>,
+        value: Value<'gc>,
+    ) -> Result<bool, BBError> {
+        let len = set_val
+            .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
+            .map_err(|e| BBError::Other(e))?;
+        for i in 0..len {
+            let elem = set_val
+                .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
+                .map_err(|e| BBError::Other(e))?;
+            if self.call_method(mc, elem, "==:", vec![value])?.is_true() {
+                set_val
+                    .with_native_state_mut::<NativeSetState, _, _>(mc, |s| {
+                        s.get_vec_mut().remove(i);
+                    })
+                    .map_err(|e| BBError::Other(e))?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn new_regex(&self, mc: &Mutation<'gc>, regex: Regex) -> Value<'gc> {
@@ -2877,6 +2958,21 @@ impl<'gc> VmState<'gc> {
                 }
                 let map_val = self.new_map(mc, map);
                 self.push(map_val);
+                self.frames[frame_idx].ip += 1;
+            }
+            Instruction::NewSet(n) => {
+                let mut raw = Vec::new();
+                for _ in 0..n {
+                    raw.push(self.pop()?);
+                }
+                raw.reverse();
+                // Build by inserting through set_add so the literal is deduplicated
+                // by `==:`, the same way `add:` enforces uniqueness at runtime.
+                let set_val = self.new_set(mc, Vec::new());
+                for v in raw {
+                    self.set_add(mc, set_val, v)?;
+                }
+                self.push(set_val);
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::NewRegex => {

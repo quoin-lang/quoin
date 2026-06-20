@@ -86,6 +86,22 @@ infix_op = _{
   | op_mul | op_div | op_mod
   | op_range
 }
+
+// Inside a `#< ... >` set literal the closing `>` collides with the greater-than
+// operator, so `>` and `>=` are excluded from set elements: a bare `>` always
+// terminates the set. Parenthesize an element that needs them, e.g.
+// `#<(a > b) c>`. All other operators are allowed in set elements.
+set_infix_op = _{
+    op_or
+  | op_and
+  | op_eq | op_ne
+  | op_class_ext | op_le | op_lt
+  | op_match
+  | op_add | op_sub
+  | op_mul | op_div | op_mod
+  | op_range
+}
+set_elem = { prefix_op* ~ primary ~ postfix_op* ~ (set_infix_op ~ prefix_op* ~ primary ~ postfix_op*)* }
 op_or        = { "|" ~ "|" }
 op_and       = { "&" ~ "&" }
 op_eq        = { "=" ~ "=" }
@@ -129,7 +145,7 @@ primary = {
 nested_expr      = { "(" ~ expr ~ ")" }
 user_list_expr   = { USER_LIST_START ~ expr* ~ ")" }
 list_expr        = { "#" ~ "(" ~ expr* ~ ")" }
-set_expr         = { "#" ~ "<" ~ expr* ~ ">" }
+set_expr         = { "#" ~ "<" ~ set_elem* ~ ">" }
 dict_expr        = { "#" ~ "{" ~ ( expr ~ ":" ~ expr )* ~ "}" }
 number_expr      = { NUMBER }
 string_expr      = { STRING }

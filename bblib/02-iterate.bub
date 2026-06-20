@@ -345,3 +345,39 @@ List <-- {
 
     can?: -> {|clz| clz == Iterate }
 }
+
+Set <-- {
+    .can:Iterate;
+
+    .meta <-- {
+        default -> { #<> }
+    }
+
+    "* each: is implemented natively (Set#each: in src/runtime/set.rs).
+
+    can?: -> {|clz| clz == Iterate }
+
+    "* Set algebra, built on the native add:/contains?: and the Iterate combinators.
+    union: -> { |other|
+        r = #<>;
+        .each:{ |x| r.add:x };
+        other.each:{ |x| r.add:x };
+        r
+    }
+
+    intersection: -> { |other|
+        r = #<>;
+        .each:{ |x| (other.contains?:x).if:{ r.add:x } };
+        r
+    }
+
+    difference: -> { |other|
+        r = #<>;
+        .each:{ |x| (other.contains?:x).else:{ r.add:x } };
+        r
+    }
+
+    subset?: -> { |other| .all?:{ |x| other.contains?:x } }
+
+    superset?: -> { |other| other.subset?:self }
+}

@@ -107,6 +107,7 @@ statement.
 > | Symbol | `#name`, `#multi:part:`, `#'…'` | `#x`, `#when:do:`, `#'+:'` |
 > | List | `#( … )` space-separated | `#(1 2 3)`, `#()` |
 > | Map | `#{ key: value … }` | `#{ 'a': 1 'b': 2 }` |
+> | Set | `#< … >` space-separated, unique | `#<1 2 3>`, `#<>` |
 > | Range | `a..b` (half-open) | `1..5`, `5..1` |
 > | Regex | `#/…/` | `#/^[a-z]+$/` |
 > | User string | `#Name'…'` | `#ANSI'…'` |
@@ -123,13 +124,16 @@ statement.
 - **Symbols** are selectors-as-data: `#name`, multi-part `#when:do:`, or a quoted
   form `#'+:'` for operators and otherwise-unspellable names.
 - **Lists** are space-separated (no commas): `#(1 2 3)`. **Maps** pair `key: value`
-  and are string-keyed: `#{ 'foo': 100 'bar': 200 }`.
+  and are string-keyed: `#{ 'foo': 100 'bar': 200 }`. **Sets** are space-separated
+  and hold unique elements (deduplicated by `==:`): `#<1 2 3>`, empty `#<>`.
 - **Ranges** are covered in §6 and Part VI; note they are **half-open** (the end is
   excluded).
 
-> **⚠ Gotcha — `#< … >` set literals are not implemented.** The grammar parses a
-> `#< … >` form, but the compiler rejects it (`Unsupported NodeValue: Set`) and the
-> program panics. Don't use it; there is no set literal today.
+> **⚠ Gotcha — inside `#< … >`, a bare `>` ends the set.** Because the closing `>`
+> would otherwise collide with the greater-than operator, `>` and `>=` are not
+> treated as operators inside a set literal — the first bare `>` terminates it. To
+> use them in an element, parenthesize: `#<(a > b) c>` is a two-element set. Every
+> other operator works unparenthesized (`#<a + b  c>`).
 
 ---
 

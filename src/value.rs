@@ -4,6 +4,7 @@ use crate::parser::ast::IdentifierNode;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
 use crate::runtime::regex::NativeRegexState;
+use crate::runtime::set::NativeSetState;
 use crate::vm::VmState;
 
 use gc_arena::collect::Trace;
@@ -335,6 +336,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
                     ObjectPayload::String(s) => write!(f, "String({:?})", *s),
                     _ if o_borrow.class_name() == "List" => write!(f, "List(...)"),
                     _ if o_borrow.class_name() == "Map" => write!(f, "Map(...)"),
+                    _ if o_borrow.class_name() == "Set" => write!(f, "Set(...)"),
                     _ if o_borrow.class_name() == "Regex" => {
                         if let Ok(res) = self.with_native_state::<NativeRegexState, _, _>(|r| {
                             format!("{:?}", r.regex)
@@ -436,6 +438,25 @@ impl<'gc> fmt::Display for Value<'gc> {
                             write!(f, "{}", res)
                         } else {
                             write!(f, "Map(...)")
+                        }
+                    }
+                    _ if o_borrow.class_name() == "Set" => {
+                        if let Ok(res) = self.with_native_state::<NativeSetState, _, _>(|s| {
+                            let vec = s.get_vec();
+                            let mut out = String::new();
+                            out.push_str("#<");
+                            for (i, val) in vec.iter().enumerate() {
+                                if i > 0 {
+                                    out.push(' ');
+                                }
+                                out.push_str(&format!("{}", val));
+                            }
+                            out.push('>');
+                            out
+                        }) {
+                            write!(f, "{}", res)
+                        } else {
+                            write!(f, "Set(...)")
                         }
                     }
                     _ if o_borrow.class_name() == "Regex" => {

@@ -113,6 +113,7 @@ pub enum Instruction {
     ElseJump(isize),
     NewList(usize), // num_elements
     NewMap(usize),  // num_pairs (key/value count)
+    NewSet(usize),  // num_elements
     NewRegex,
     DefineClass {
         name: NamespacedName,
