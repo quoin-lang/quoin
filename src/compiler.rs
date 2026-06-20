@@ -652,7 +652,13 @@ impl Compiler {
         for arg in &block.arguments {
             let name = arg.identifier.name.clone();
             param_names.push(name.clone());
-            let type_name = arg.type_hint.as_ref().map(|id| id.name.clone());
+            // An unannotated parameter defaults to `Object` (the universal supertype),
+            // so `|x|` and `|x:Object|` are the same signature everywhere downstream.
+            let type_name = arg
+                .type_hint
+                .as_ref()
+                .map(|id| id.name.clone())
+                .unwrap_or_else(|| "Object".to_string());
             param_types.push(type_name);
             locals.insert(name);
         }
@@ -1205,7 +1211,7 @@ mod tests {
             name: None,
             is_nested_block: true,
             param_names: vec!["x".to_string()],
-            param_types: vec![None],
+            param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode(Rc::new(vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
@@ -1345,7 +1351,7 @@ mod tests {
             name: None,
             is_nested_block: true,
             param_names: vec!["a".to_string(), "b".to_string()],
-            param_types: vec![None, None],
+            param_types: vec!["Object".to_string(), "Object".to_string()],
             bytecode: SharedBytecode(Rc::new(vec![
                 Instruction::Push(Constant::Nil),
                 Instruction::Return,

@@ -26,6 +26,12 @@ pub enum BBError {
         selector: String,
         args: Vec<String>,
     },
+    /// Raised when two or more equally-specific method variants tie for a send,
+    /// so dispatch can't pick one (see scored multimethod dispatch).
+    AmbiguousMethod {
+        selector: String,
+        msg: String,
+    },
     /// Raised when trying to execute a value that does not implement call/send dispatch
     NotCallable(String),
     /// Raised when attempting to pop or peek from an empty VM stack
@@ -113,6 +119,7 @@ impl fmt::Display for BBError {
                     args.join(", ")
                 )
             }
+            BBError::AmbiguousMethod { msg, .. } => write!(f, "{}", msg),
             BBError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
             BBError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             BBError::Other(msg) => write!(f, "{}", msg),

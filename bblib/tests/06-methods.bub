@@ -26,16 +26,50 @@
 
     .test:
     dispatchByBlock -> {
+        "* A guard refines specificity within a type level, so the catch-all is a
+        "* plain unguarded |x| (it loses to any guarded variant at the same type
+        "* distance) rather than a {.class==Object} guard. No reliance on definition
+        "* order — dispatch is purely by (type distance, then guarded-beats-unguarded).
         .is:{
             TSMTC3 <- {
                 x: -> { |x {.class==Integer}| 'Integer: %' % (x) }
                 x: --> { |x {.class==String}| 'String: %' % x }
-                x: --> { |x {.class==Object}| 'Other: %' % x }
+                x: --> { |x| 'Other: %' % x }
                 x: --> { |x:Integer {x > 100}| 'Big Integer: %' % x }
                 x: --> { |x:Integer {|n| n < 0}| 'Negative Integer: %' % x }
             };
             #( TSMTC3.new.x:55 TSMTC3.new.x:'str' TSMTC3.new.x:true TSMTC3.new.x:150 TSMTC3.new.x:-10 )
         } equalTo:#( 'Integer: 55' 'String: str' 'Other: true' 'Big Integer: 150' 'Negative Integer: -10' );
+    };
+
+    "* Two equally-specific UNGUARDED variants (a value that is-a both mixins at the
+    "* same hierarchy distance) have no tiebreaker -> AmbiguousMethodError.
+    .test:
+    dispatchAmbiguityType -> {
+        Mixin <- TSMA <- {};
+        Mixin <- TSMB <- {};
+        TSThing <- { .mix:TSMA; .mix:TSMB; };
+        TSPick <- {
+            pick: -> { |x:TSMA| 'A' }
+            pick: --> { |x:TSMB| 'B' }
+        };
+        .does:{ TSPick.new.pick:TSThing.new } throw:AmbiguousMethodError;
+        "* A non-ambiguous arg (is-a only one mixin) still dispatches cleanly.
+        TSThingA <- { .mix:TSMA; };
+        .is:{ TSPick.new.pick:TSThingA.new } equalTo:'A';
+    };
+
+    "* Two GUARDED variants at the same type level that both pass also tie -> throw.
+    "* (A guarded variant beating an unguarded catch-all is fine; two passing guards
+    "* with no specificity difference is the ambiguous case.)
+    .test:
+    dispatchAmbiguityGuard -> {
+        TSGuard <- {
+            g: -> { |x:Integer {x > 0}| 'pos' }
+            g: --> { |x:Integer {x > 5}| 'big' }
+        };
+        .does:{ TSGuard.new.g:10 } throw:AmbiguousMethodError;   "* 10 passes both
+        .is:{ TSGuard.new.g:3 } equalTo:'pos';                   "* only x>0 passes
     };
 
     .test:

@@ -530,7 +530,7 @@ pub struct Block<'gc> {
     pub name: Option<String>,
     pub is_nested_block: bool,
     pub param_names: Vec<String>,
-    pub param_types: Vec<Option<String>>,
+    pub param_types: Vec<String>,
     pub bytecode: SharedBytecode,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     pub enclosing_method_id: Option<usize>,
@@ -619,7 +619,7 @@ impl<'gc> Object<'gc> {
 pub struct NativeMethodDef {
     pub selector: String,
     pub func: NativeFunc,
-    pub param_types: Option<Vec<Option<String>>>,
+    pub param_types: Option<Vec<String>>,
 }
 
 pub trait NativeClass {
@@ -639,8 +639,8 @@ pub struct NativeClassBuilder {
 type NativeFn =
     for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, BBError>;
 
-fn type_hints(param_types: &[&str]) -> Option<Vec<Option<String>>> {
-    Some(param_types.iter().map(|t| Some(t.to_string())).collect())
+fn type_hints(param_types: &[&str]) -> Option<Vec<String>> {
+    Some(param_types.iter().map(|t| t.to_string()).collect())
 }
 
 impl NativeClassBuilder {

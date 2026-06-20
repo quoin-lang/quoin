@@ -696,7 +696,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         selector: String,
         func: NativeFunc,
-        param_types: Option<Vec<Option<String>>>,
+        param_types: Option<Vec<String>>,
     ) -> Value<'gc> {
         let class = self.get_or_create_builtin_class(mc, "Method");
         let state = NativeMethodState::new_native(selector, func, param_types);
@@ -1705,21 +1705,30 @@ impl<'gc> VmState<'gc> {
                 curr = self.get_next_method_in_chain(method_val);
             }
 
-            // Score each applicable candidate and pick the lowest score. We only
-            // replace `best` on a *strictly* lower score, so ties go to the
-            // first-defined — this preserves ordered-guard dispatch (define the
-            // specific guards before a catch-all). The hierarchy walk below still
-            // lets a derived class override a base class regardless of score.
-            let mut best: Option<(Value<'gc>, i64)> = None;
+            // Score every applicable candidate; the lowest `(Σ type_distance,
+            // guarded?)` wins. Two distinct candidates sharing the lowest score are
+            // equally specific with no tiebreaker -> `AmbiguousMethodError`. A guarded
+            // and an unguarded variant never share a score (the guard rank separates
+            // them), so the specific-guards-then-unguarded-catch-all idiom stays
+            // unambiguous. A signatureless native scores i64::MAX and is a pure
+            // fallback, exempt from ambiguity. The hierarchy walk below still lets a
+            // derived class override a base regardless of score.
+            let mut applicable: Vec<(Value<'gc>, (i64, u8))> = Vec::new();
             for &method_val in &candidates {
-                if let Some(score) = self.match_score(mc, method_val, args)?
-                    && best.map_or(true, |(_, bs)| score < bs)
-                {
-                    best = Some((method_val, score));
+                if let Some(score) = self.match_score(mc, method_val, args)? {
+                    applicable.push((method_val, score));
                 }
             }
-            if let Some((method_val, _)) = best {
-                return Ok(Some(method_val));
+            if let Some(min_score) = applicable.iter().map(|(_, s)| *s).min() {
+                let at_min: Vec<Value<'gc>> = applicable
+                    .iter()
+                    .filter(|(_, s)| *s == min_score)
+                    .map(|(mv, _)| *mv)
+                    .collect();
+                if at_min.len() >= 2 && min_score.0 != i64::MAX {
+                    return Err(self.ambiguous_method_error(selector, class_ref, &at_min, args));
+                }
+                return Ok(Some(at_min[0]));
             }
         }
 
@@ -1758,58 +1767,131 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         method_val: Value<'gc>,
         args: &[Value<'gc>],
-    ) -> Result<Option<i64>, BBError> {
+    ) -> Result<Option<(i64, u8)>, BBError> {
         let block = match self.get_block_from_method(method_val) {
             Some(b) => b,
             None => {
-                // No user block: a native method. Score by its declared signature
-                // if it has one; an untyped (legacy) native method ranks last.
+                // No user block: a native method (always unguarded — rank 1). Score
+                // by its declared signature if it has one; a signatureless legacy
+                // native makes no specificity claim and ranks last as a pure fallback.
                 return Ok(match self.native_method_param_types(method_val) {
-                    Some(param_types) => self.score_param_types(&param_types, args),
-                    None => Some(i64::MAX),
+                    Some(param_types) => {
+                        self.score_param_types(&param_types, args).map(|s| (s, 1))
+                    }
+                    None => Some((i64::MAX, 1)),
                 });
             }
         };
-        let score = match self.score_param_types(&block.param_types, args) {
+        let param_score = match self.score_param_types(&block.param_types, args) {
             Some(s) => s,
             None => return Ok(None),
         };
-        if let Some(decl_block) = block.decl_block {
+        // A guard *refines* specificity within a parameter-type level: a guarded
+        // variant whose guard passes (rank 0) outranks an otherwise-equal unguarded
+        // variant (rank 1). A failing guard makes the variant inapplicable.
+        let guard_rank = if let Some(decl_block) = block.decl_block {
             let res = self.execute_validation_block(mc, decl_block, &block.param_names, args)?;
             if !res.is_true() {
                 return Ok(None);
             }
-        }
-        Ok(Some(score))
+            0
+        } else {
+            1
+        };
+        Ok(Some((param_score, guard_rank)))
     }
 
+    /// Build an `AmbiguousMethod` error naming the equally-specific candidates that
+    /// tied for `selector` on `class_ref` given `args`.
+    fn ambiguous_method_error(
+        &self,
+        selector: &str,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        candidates: &[Value<'gc>],
+        args: &[Value<'gc>],
+    ) -> BBError {
+        let class_name = class_ref.borrow().name.to_string();
+        let sigs: Vec<String> = candidates
+            .iter()
+            .map(|&mv| self.describe_candidate(mv))
+            .collect();
+        let arg_types: Vec<String> = args.iter().map(|a| a.class_name()).collect();
+        let msg = format!(
+            "ambiguous dispatch for '{}' on {} with argument type(s) ({}): {} equally-specific candidates — {}",
+            selector,
+            class_name,
+            arg_types.join(", "),
+            candidates.len(),
+            sigs.join("; "),
+        );
+        BBError::AmbiguousMethod {
+            selector: selector.to_string(),
+            msg,
+        }
+    }
+
+    /// A short signature description of a method variant (e.g. `(x:MA)` or
+    /// `(x:Integer) [guarded]`) for ambiguity diagnostics.
+    fn describe_candidate(&self, method_val: Value<'gc>) -> String {
+        if let Some(block) = self.get_block_from_method(method_val) {
+            let params: Vec<String> = block
+                .param_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| match block.param_types.get(i) {
+                    // Suppress the `Object` default so unannotated params read as `x`.
+                    Some(ty) if ty != "Object" => format!("{}:{}", name, ty),
+                    _ => name.clone(),
+                })
+                .collect();
+            let guard = if block.decl_block.is_some() {
+                " [guarded]"
+            } else {
+                ""
+            };
+            format!("({}){}", params.join(" "), guard)
+        } else {
+            match self.native_method_param_types(method_val) {
+                Some(types) => format!("(native: {})", types.join(" ")),
+                None => "(native)".to_string(),
+            }
+        }
+    }
+
+    /// Distance assigned to `:Object` when a value can't physically walk up to
+    /// Object (metaclasses) — large, so such matches rank last while still matching.
+    const OBJECT_UNIVERSAL_DISTANCE: i64 = 1_000_000;
+
     /// Sum of per-parameter class-hierarchy distances (`type_distance`), or `None`
-    /// if any typed parameter's argument isn't assignable (or there are too few
-    /// arguments). An untyped parameter contributes a large constant so a typed
-    /// parameter always beats an untyped one. Shared by user blocks and typed
-    /// native methods.
+    /// if any parameter's argument isn't assignable to its type (or there are too
+    /// few arguments). Every parameter carries a type: a user block defaults an
+    /// unannotated parameter to `Object` (the universal supertype) at compile time,
+    /// so a more-specific type always beats it.
+    ///
+    /// Native methods differ *slightly*: their signature is supplied directly by the
+    /// builder (`typed_instance_method`, …) and may be **shorter** than the argument
+    /// list — only the leading args are typed, and any trailing args are left
+    /// unconstrained (not defaulted to `Object`). E.g. `List#at:put:` declares
+    /// `["Integer"]`, constraining the index but leaving the value free. (A native
+    /// method with no signature at all is handled by `match_score` as a fallback.)
     fn score_param_types(
         &self,
-        param_types: &[Option<String>],
+        param_types: &[String],
         args: &[Value<'gc>],
     ) -> Option<i64> {
-        const UNTYPED_PARAM_SCORE: i64 = 1_000_000;
         if args.len() < param_types.len() {
             return None;
         }
         let mut score: i64 = 0;
-        for (i, param_type) in param_types.iter().enumerate() {
-            match param_type {
-                Some(hint) => score += self.type_distance(args[i], hint)?,
-                None => score += UNTYPED_PARAM_SCORE,
-            }
+        for (i, hint) in param_types.iter().enumerate() {
+            score += self.type_distance(args[i], hint)?;
         }
         Some(score)
     }
 
     /// Declared parameter types of a native method variant, or `None` for a user
     /// block, an untyped (legacy) native method, or a non-method.
-    fn native_method_param_types(&self, method_val: Value<'gc>) -> Option<Vec<Option<String>>> {
+    fn native_method_param_types(&self, method_val: Value<'gc>) -> Option<Vec<String>> {
         method_val
             .with_native_state::<NativeMethodState, _, _>(|m| m.native_param_types())
             .ok()
@@ -1857,6 +1939,13 @@ impl<'gc> VmState<'gc> {
             }
             curr = parent;
             dist += 1;
+        }
+        // `Object` is the universal supertype: it matches every value. Some values
+        // (notably metaclasses — see BBLIB_TODO about making Class/ClassMeta subclass
+        // Object directly) don't physically reach Object via `parent`, so they fall
+        // here and rank last via this large fallback distance.
+        if hint == "Object" {
+            return Some(Self::OBJECT_UNIVERSAL_DISTANCE);
         }
         None
     }
@@ -2595,6 +2684,9 @@ impl<'gc> VmState<'gc> {
             } => {
                 let msg = format!("no method '{}' for {}", selector, receiver);
                 self.make_error(mc, "MessageNotUnderstood", &msg, None)
+            }
+            BBError::AmbiguousMethod { msg, .. } => {
+                self.make_error(mc, "AmbiguousMethodError", msg, None)
             }
             BBError::WithSourceInfo { error, .. } => self.bberror_to_value(mc, error),
             other => {
@@ -4062,7 +4154,7 @@ mod tests {
             name: Some("test_block".to_string()),
             is_nested_block: false,
             param_names: vec!["x".to_string()],
-            param_types: vec![None],
+            param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode::from(vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
@@ -4216,7 +4308,7 @@ mod tests {
             name: Some("bar".to_string()),
             is_nested_block: false,
             param_names: vec!["blk".to_string()],
-            param_types: vec![None],
+            param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode::from(vec![
                 Instruction::LoadLocal("blk".to_string()),
                 Instruction::Send("value".to_string(), 0),
@@ -4767,7 +4859,7 @@ mod tests {
                     name: Some("test_block".to_string()),
                     is_nested_block: false,
                     param_names: vec!["a".to_string(), "b".to_string()],
-                    param_types: vec![None, None],
+                    param_types: vec!["Object".to_string(), "Object".to_string()],
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal("self".to_string()),
                         Instruction::LoadLocal("a".to_string()),
@@ -4808,7 +4900,7 @@ mod tests {
                     name: Some("test_block_no_self".to_string()),
                     is_nested_block: false,
                     param_names: vec!["a".to_string(), "b".to_string()],
-                    param_types: vec![None, None],
+                    param_types: vec!["Object".to_string(), "Object".to_string()],
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal("a".to_string()),
                         Instruction::LoadLocal("b".to_string()),

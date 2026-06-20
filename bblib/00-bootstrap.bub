@@ -84,6 +84,7 @@ Error <- { |@message @payload|
 Error <- TypeError <- {};
 Error <- ArgumentError <- {};
 Error <- MessageNotUnderstood <- {};
+Error <- AmbiguousMethodError <- {};
 Error <- ArithmeticError <- {};
 Error <- IndexError <- {};
 Error <- FiberError <- {};

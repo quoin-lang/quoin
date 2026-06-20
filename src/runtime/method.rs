@@ -16,7 +16,7 @@ pub enum MethodBody {
         func: NativeFunc,
         /// `None` = untyped/legacy native method (scored as a fallback); `Some` =
         /// scored by these declared parameter types like a user method.
-        param_types: Option<Vec<Option<String>>>,
+        param_types: Option<Vec<String>>,
     },
 }
 
@@ -44,7 +44,7 @@ impl NativeMethodState {
     pub fn new_native(
         selector: String,
         func: NativeFunc,
-        param_types: Option<Vec<Option<String>>>,
+        param_types: Option<Vec<String>>,
     ) -> Self {
         Self {
             selector,
@@ -74,7 +74,7 @@ impl NativeMethodState {
     /// an untyped (legacy) native method — both of which the scorer handles
     /// elsewhere (a user block scores from its `Block`, an untyped native is a
     /// fallback).
-    pub fn native_param_types(&self) -> Option<Vec<Option<String>>> {
+    pub fn native_param_types(&self) -> Option<Vec<String>> {
         match &self.body {
             MethodBody::Native { param_types, .. } => param_types.clone(),
             MethodBody::UserBlock(_) => None,
