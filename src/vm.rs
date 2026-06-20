@@ -713,9 +713,10 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         selector: String,
         func: NativeFunc,
+        param_types: Option<Vec<Option<String>>>,
     ) -> Value<'gc> {
         let class = self.get_or_create_builtin_class(mc, "Method");
-        let state = NativeMethodState::new_native(selector, func);
+        let state = NativeMethodState::new_native(selector, func, param_types);
         let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
             mc,
@@ -866,16 +867,27 @@ impl<'gc> VmState<'gc> {
             None
         };
 
-        let mut inst_methods = HashMap::new();
-        for (name, func) in native_class.instance_methods() {
-            let m = self.new_native_method(mc, name.clone(), func);
-            inst_methods.insert(name, m);
+        // Several defs may share a selector (typed multimethod variants); chain
+        // them in declaration order so the scorer routes by argument type and ties
+        // resolve to the first-declared.
+        let mut inst_methods: HashMap<String, Value<'gc>> = HashMap::new();
+        for def in native_class.instance_methods() {
+            let node = self.new_native_method(mc, def.selector.clone(), def.func, def.param_types);
+            if let Some(head) = inst_methods.get(&def.selector).copied() {
+                let _ = Self::append_method_to_chain(mc, head, node);
+            } else {
+                inst_methods.insert(def.selector, node);
+            }
         }
 
-        let mut cls_methods = HashMap::new();
-        for (name, func) in native_class.class_methods() {
-            let m = self.new_native_method(mc, name.clone(), func);
-            cls_methods.insert(name, m);
+        let mut cls_methods: HashMap<String, Value<'gc>> = HashMap::new();
+        for def in native_class.class_methods() {
+            let node = self.new_native_method(mc, def.selector.clone(), def.func, def.param_types);
+            if let Some(head) = cls_methods.get(&def.selector).copied() {
+                let _ = Self::append_method_to_chain(mc, head, node);
+            } else {
+                cls_methods.insert(def.selector, node);
+            }
         }
 
         let name = native_class.name();
@@ -1765,24 +1777,21 @@ impl<'gc> VmState<'gc> {
         method_val: Value<'gc>,
         args: &[Value<'gc>],
     ) -> Result<Option<i64>, BBError> {
-        const UNTYPED_PARAM_SCORE: i64 = 1_000_000;
         let block = match self.get_block_from_method(method_val) {
             Some(b) => b,
-            None => return Ok(Some(i64::MAX)), // legacy native method: ranked last
-        };
-        if args.len() < block.param_names.len() {
-            return Ok(None);
-        }
-        let mut score: i64 = 0;
-        for (i, param_type) in block.param_types.iter().enumerate() {
-            match param_type {
-                Some(hint) => match self.type_distance(args[i], hint) {
-                    Some(d) => score += d,
-                    None => return Ok(None),
-                },
-                None => score += UNTYPED_PARAM_SCORE,
+            None => {
+                // No user block: a native method. Score by its declared signature
+                // if it has one; an untyped (legacy) native method ranks last.
+                return Ok(match self.native_method_param_types(method_val) {
+                    Some(param_types) => self.score_param_types(&param_types, args),
+                    None => Some(i64::MAX),
+                });
             }
-        }
+        };
+        let score = match self.score_param_types(&block.param_types, args) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
         if let Some(decl_block) = block.decl_block {
             let res = self.execute_validation_block(mc, decl_block, &block.param_names, args)?;
             if !res.is_true() {
@@ -1790,6 +1799,39 @@ impl<'gc> VmState<'gc> {
             }
         }
         Ok(Some(score))
+    }
+
+    /// Sum of per-parameter class-hierarchy distances (`type_distance`), or `None`
+    /// if any typed parameter's argument isn't assignable (or there are too few
+    /// arguments). An untyped parameter contributes a large constant so a typed
+    /// parameter always beats an untyped one. Shared by user blocks and typed
+    /// native methods.
+    fn score_param_types(
+        &self,
+        param_types: &[Option<String>],
+        args: &[Value<'gc>],
+    ) -> Option<i64> {
+        const UNTYPED_PARAM_SCORE: i64 = 1_000_000;
+        if args.len() < param_types.len() {
+            return None;
+        }
+        let mut score: i64 = 0;
+        for (i, param_type) in param_types.iter().enumerate() {
+            match param_type {
+                Some(hint) => score += self.type_distance(args[i], hint)?,
+                None => score += UNTYPED_PARAM_SCORE,
+            }
+        }
+        Some(score)
+    }
+
+    /// Declared parameter types of a native method variant, or `None` for a user
+    /// block, an untyped (legacy) native method, or a non-method.
+    fn native_method_param_types(&self, method_val: Value<'gc>) -> Option<Vec<Option<String>>> {
+        method_val
+            .with_native_state::<NativeMethodState, _, _>(|m| m.native_param_types())
+            .ok()
+            .flatten()
     }
 
     /// Class-hierarchy distance from `val`'s class to the class named `hint` (0 if
@@ -3739,6 +3781,7 @@ mod tests {
                 mc,
                 "can?:".to_string(),
                 NativeFunc(|vm, mc, _args| Ok(vm.new_nil(mc))),
+                None,
             );
             VmState::append_method_to_chain(mc, native_method, appended)
                 .expect("appending onto a native method's chain should succeed");
@@ -3746,6 +3789,49 @@ mod tests {
                 vm.get_next_method_in_chain(native_method).is_some(),
                 "the native method should now chain to the appended variant"
             );
+        });
+    }
+
+    #[test]
+    fn test_typed_native_method_dispatches_by_type() {
+        // Phase 2b: native methods can carry a type signature, so several typed
+        // native variants of one selector are routed by argument type, exactly like
+        // user multimethod variants.
+        use crate::value::NativeClassBuilder;
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, VmOptions::default());
+            vm.register_native_class(mc, build_object_class());
+            vm.register_native_class(mc, build_integer_class());
+            vm.register_native_class(mc, build_string_class());
+            // Two typed class-side `kind:` variants on one selector.
+            let builder = NativeClassBuilder::new("ScoreTest", Some("Object"))
+                .typed_class_method("kind:", &["Integer"], |vm, mc, _args| {
+                    Ok(vm.new_string(mc, "int".to_string()))
+                })
+                .typed_class_method("kind:", &["String"], |vm, mc, _args| {
+                    Ok(vm.new_string(mc, "str".to_string()))
+                });
+            vm.register_native_class(mc, builder);
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            let test_class = vm.get_or_create_builtin_class(mc, "ScoreTest");
+            let recv = Value::Class(test_class);
+
+            let check = |v: Value<'_>, expected: &str| match v {
+                Value::Object(o) => match &o.borrow().payload {
+                    ObjectPayload::String(s) => assert_eq!(s.as_str(), expected),
+                    _ => panic!("expected a String result, got a different payload"),
+                },
+                _ => panic!("expected a String result"),
+            };
+
+            let int_arg = vm.new_int(mc, 5);
+            check(vm.call_method(mc, recv, "kind:", vec![int_arg]).unwrap(), "int");
+
+            let str_arg = vm.new_string(mc, "hi".to_string());
+            check(vm.call_method(mc, recv, "kind:", vec![str_arg]).unwrap(), "str");
         });
     }
 

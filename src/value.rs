@@ -600,18 +600,41 @@ impl<'gc> Object<'gc> {
     }
 }
 
+/// A native method definition: the fn plus its declared parameter types.
+/// `param_types: None` is an untyped/legacy native method (scored as a fallback
+/// ranked below any user or typed variant); `Some(types)` participates in scored
+/// multimethod dispatch by argument type, exactly like a user method. Several
+/// defs may share a selector — `register_native_class` chains them into a
+/// multimethod, so the dispatcher routes by type.
+#[derive(Clone)]
+pub struct NativeMethodDef {
+    pub selector: String,
+    pub func: NativeFunc,
+    pub param_types: Option<Vec<Option<String>>>,
+}
+
 pub trait NativeClass {
     fn parent_name(&self) -> Option<&'static str>;
     fn name(&self) -> &'static str;
-    fn class_methods(&self) -> HashMap<String, NativeFunc>;
-    fn instance_methods(&self) -> HashMap<String, NativeFunc>;
+    fn class_methods(&self) -> Vec<NativeMethodDef>;
+    fn instance_methods(&self) -> Vec<NativeMethodDef>;
 }
 
 pub struct NativeClassBuilder {
     parent_name: Option<&'static str>,
     name: &'static str,
-    class_methods: HashMap<String, NativeFunc>,
-    instance_methods: HashMap<String, NativeFunc>,
+    class_methods: Vec<NativeMethodDef>,
+    instance_methods: Vec<NativeMethodDef>,
+}
+
+type NativeFn = for<'a> fn(
+    &mut VmState<'a>,
+    &Mutation<'a>,
+    Vec<Value<'a>>,
+) -> Result<Value<'a>, BBError>;
+
+fn type_hints(param_types: &[&str]) -> Option<Vec<Option<String>>> {
+    Some(param_types.iter().map(|t| Some(t.to_string())).collect())
 }
 
 impl NativeClassBuilder {
@@ -619,36 +642,51 @@ impl NativeClassBuilder {
         Self {
             parent_name,
             name,
-            class_methods: HashMap::new(),
-            instance_methods: HashMap::new(),
+            class_methods: Vec::new(),
+            instance_methods: Vec::new(),
         }
     }
 
-    pub fn class_method(
-        mut self,
-        selector: &str,
-        f: for<'a> fn(
-            &mut VmState<'a>,
-            &Mutation<'a>,
-            Vec<Value<'a>>,
-        ) -> Result<Value<'a>, BBError>,
-    ) -> Self {
-        self.class_methods
-            .insert(selector.to_string(), NativeFunc(f));
+    pub fn class_method(mut self, selector: &str, f: NativeFn) -> Self {
+        self.class_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func: NativeFunc(f),
+            param_types: None,
+        });
         self
     }
 
-    pub fn instance_method(
+    /// A class-side native method with a declared type signature (scored by type).
+    pub fn typed_class_method(mut self, selector: &str, param_types: &[&str], f: NativeFn) -> Self {
+        self.class_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func: NativeFunc(f),
+            param_types: type_hints(param_types),
+        });
+        self
+    }
+
+    pub fn instance_method(mut self, selector: &str, f: NativeFn) -> Self {
+        self.instance_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func: NativeFunc(f),
+            param_types: None,
+        });
+        self
+    }
+
+    /// An instance native method with a declared type signature (scored by type).
+    pub fn typed_instance_method(
         mut self,
         selector: &str,
-        f: for<'a> fn(
-            &mut VmState<'a>,
-            &Mutation<'a>,
-            Vec<Value<'a>>,
-        ) -> Result<Value<'a>, BBError>,
+        param_types: &[&str],
+        f: NativeFn,
     ) -> Self {
-        self.instance_methods
-            .insert(selector.to_string(), NativeFunc(f));
+        self.instance_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func: NativeFunc(f),
+            param_types: type_hints(param_types),
+        });
         self
     }
 }
@@ -662,11 +700,11 @@ impl NativeClass for NativeClassBuilder {
         self.name
     }
 
-    fn class_methods(&self) -> HashMap<String, NativeFunc> {
+    fn class_methods(&self) -> Vec<NativeMethodDef> {
         self.class_methods.clone()
     }
 
-    fn instance_methods(&self) -> HashMap<String, NativeFunc> {
+    fn instance_methods(&self) -> Vec<NativeMethodDef> {
         self.instance_methods.clone()
     }
 }

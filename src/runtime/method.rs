@@ -12,7 +12,12 @@ use std::mem::transmute;
 #[derive(Debug)]
 pub enum MethodBody {
     UserBlock(Value<'static>),
-    Native(NativeFunc),
+    Native {
+        func: NativeFunc,
+        /// `None` = untyped/legacy native method (scored as a fallback); `Some` =
+        /// scored by these declared parameter types like a user method.
+        param_types: Option<Vec<Option<String>>>,
+    },
 }
 
 #[derive(Debug)]
@@ -36,10 +41,14 @@ impl NativeMethodState {
     }
 
     /// A native method variant. Chainable and dispatchable like a user method.
-    pub fn new_native(selector: String, func: NativeFunc) -> Self {
+    pub fn new_native(
+        selector: String,
+        func: NativeFunc,
+        param_types: Option<Vec<Option<String>>>,
+    ) -> Self {
         Self {
             selector,
-            body: MethodBody::Native(func),
+            body: MethodBody::Native { func, param_types },
             is_extension: false,
             next: None,
         }
@@ -49,14 +58,25 @@ impl NativeMethodState {
     pub fn get_block<'gc>(&self) -> Option<Value<'gc>> {
         match &self.body {
             MethodBody::UserBlock(block) => Some(unsafe { transmute(*block) }),
-            MethodBody::Native(_) => None,
+            MethodBody::Native { .. } => None,
         }
     }
 
     /// The native function, or `None` for a user block body.
     pub fn native_func(&self) -> Option<NativeFunc> {
         match &self.body {
-            MethodBody::Native(func) => Some(*func),
+            MethodBody::Native { func, .. } => Some(*func),
+            MethodBody::UserBlock(_) => None,
+        }
+    }
+
+    /// Declared parameter types for a native method, or `None` for a user block or
+    /// an untyped (legacy) native method — both of which the scorer handles
+    /// elsewhere (a user block scores from its `Block`, an untyped native is a
+    /// fallback).
+    pub fn native_param_types(&self) -> Option<Vec<Option<String>>> {
+        match &self.body {
+            MethodBody::Native { param_types, .. } => param_types.clone(),
             MethodBody::UserBlock(_) => None,
         }
     }
