@@ -61,11 +61,27 @@
     .test:
     runtimeTypeErrorIsStructured -> {
         caught = nil;
-        { #(1 2).at:'x' }.catch:{ |e| caught = e };
+        { 'abc'.contains?:5 }.catch:{ |e| caught = e };
         .isTrue:{ caught.class == TypeError };
         .isTrue:{ TypeError ~ caught };
-        .does:{ #(1 2).at:'x' } throw:TypeError;
-        .does:{ #(1 2).at:'x' } throw:#/integer/;
+        .does:{ 'abc'.contains?:5 } throw:TypeError;
+        .does:{ 'abc'.contains?:5 } throw:#/String/;
+    };
+
+    "* Methods that enforce an argument's type through the dispatcher (a typed
+    "* variant) raise MessageNotUnderstood for a wrong-typed arg - no variant
+    "* matches - rather than a hand-rolled TypeError. Correctly typed args dispatch.
+    .test:
+    typedArgDispatch -> {
+        .is:{ #(10 20 30).at:1 } equalTo:20;
+        .is:{ (#(10 20 30).sliceFrom:1).count } equalTo:2;
+        .is:{ l = #(1 2 3); l.at:1 put:9; l.at:1 } equalTo:9;
+        .is:{ 'abcd'.insert:'X' at:2 } equalTo:'abXcd';
+
+        .does:{ #(1 2).at:'x' } throw:MessageNotUnderstood;
+        .does:{ #(1 2).at:'x' put:9 } throw:MessageNotUnderstood;
+        .does:{ #(1 2).sliceFrom:'x' } throw:MessageNotUnderstood;
+        .does:{ 'abcd'.insert:'e' at:'z' } throw:MessageNotUnderstood;
     };
 
     .test:

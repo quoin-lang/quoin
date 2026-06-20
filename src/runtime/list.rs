@@ -69,26 +69,10 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| BBError::Other(e))?;
             Ok(args[0])
         })
-        .instance_method("at:", |vm, mc, args| {
-            let idx = match args[1] {
-                Value::Object(obj) => match &obj.borrow().payload {
-                    ObjectPayload::Int(i) => *i,
-                    _ => {
-                        return Err(BBError::TypeError {
-                            expected: "Integer".to_string(),
-                            got: args[1].type_name().to_string(),
-                            msg: "at expects integer index".to_string(),
-                        });
-                    }
-                },
-                _ => {
-                    return Err(BBError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: args[1].type_name().to_string(),
-                        msg: "at expects integer index".to_string(),
-                    });
-                }
-            };
+        // The index is typed, so a non-Integer index matches no variant -> MNU
+        // (dispatch enforces the type instead of a hand-rolled TypeError).
+        .typed_instance_method("at:", &["Integer"], |vm, mc, args| {
+            let idx = arg!(args, Int, 1);
             args[0]
                 .with_native_state::<NativeListState, _, _>(|l| {
                     let vec = l.get_vec();
@@ -100,26 +84,9 @@ pub fn build_list_class() -> NativeClassBuilder {
                 })
                 .map_err(|e| BBError::Other(e))?
         })
-        .instance_method("at:put:", |_vm, mc, args| {
-            let idx = match args[1] {
-                Value::Object(obj) => match &obj.borrow().payload {
-                    ObjectPayload::Int(i) => *i,
-                    _ => {
-                        return Err(BBError::TypeError {
-                            expected: "Integer".to_string(),
-                            got: args[1].type_name().to_string(),
-                            msg: "at:put: expects integer index".to_string(),
-                        });
-                    }
-                },
-                _ => {
-                    return Err(BBError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: args[1].type_name().to_string(),
-                        msg: "at:put: expects integer index".to_string(),
-                    });
-                }
-            };
+        // Only the index is typed (`&["Integer"]`); the value (arg 2) is any type.
+        .typed_instance_method("at:put:", &["Integer"], |_vm, mc, args| {
+            let idx = arg!(args, Int, 1);
             let val = args[2];
             args[0]
                 .with_native_state_mut(mc, |l: &mut NativeListState| {
@@ -138,26 +105,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| BBError::Other(e))??;
             Ok(args[0])
         })
-        .instance_method("sliceFrom:", |vm, mc, args| {
-            let idx = match args[1] {
-                Value::Object(obj) => match &obj.borrow().payload {
-                    ObjectPayload::Int(i) => *i,
-                    _ => {
-                        return Err(BBError::TypeError {
-                            expected: "Integer".to_string(),
-                            got: args[1].type_name().to_string(),
-                            msg: "sliceFrom expects integer index".to_string(),
-                        });
-                    }
-                },
-                _ => {
-                    return Err(BBError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: args[1].type_name().to_string(),
-                        msg: "sliceFrom expects integer index".to_string(),
-                    });
-                }
-            };
+        .typed_instance_method("sliceFrom:", &["Integer"], |vm, mc, args| {
+            let idx = arg!(args, Int, 1);
             args[0]
                 .with_native_state::<NativeListState, _, _>(|l| {
                     let vec = l.get_vec();

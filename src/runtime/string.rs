@@ -354,28 +354,12 @@ pub fn build_string_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
-        .instance_method("insert:at:", |vm, mc, args| {
+        // Both args are typed: the substring (String) and the index (Integer); a
+        // wrong-typed arg matches no variant -> MNU (dispatch enforces the types).
+        .typed_instance_method("insert:at:", &["String", "Integer"], |vm, mc, args| {
             let s = arg!(args, String, 0);
             let sub = arg!(args, String, 1);
-            let char_idx = match args[2] {
-                Value::Object(obj) => match &obj.borrow().payload {
-                    ObjectPayload::Int(idx) => *idx as usize,
-                    _ => {
-                        return Err(BBError::TypeError {
-                            expected: "Integer".to_string(),
-                            got: args[2].type_name().to_string(),
-                            msg: "insert:at: expected Integer index".to_string(),
-                        });
-                    }
-                },
-                _ => {
-                    return Err(BBError::TypeError {
-                        expected: "Integer".to_string(),
-                        got: args[2].type_name().to_string(),
-                        msg: "insert:at: expected Integer index".to_string(),
-                    });
-                }
-            };
+            let char_idx = arg!(args, Int, 2) as usize;
 
             let char_count = s.chars().count();
             let safe_idx = char_idx.min(char_count);
