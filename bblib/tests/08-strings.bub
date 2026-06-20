@@ -41,4 +41,16 @@
         .is:{ 'foo   bar  baz '.split:#/\s+/ } equalTo:#( 'foo' 'bar' 'baz' '' );
         .is:{ 'foo   bar  baz '.split } equalTo:#( 'foo' 'bar' 'baz' '' );
     };
+
+    .test:
+    replaceWith -> {
+        "* `replace:with:` dispatches on the pattern argument's type: a String
+        "* pattern is a literal replace-all, a Regex pattern a regex replace-all.
+        .is:{ 'a-b-c'.replace:'-' with:'_' } equalTo:'a_b_c';
+        .is:{ 'hello'.replace:'l' with:'L' } equalTo:'heLLo';
+        .is:{ 'a1b2c3'.replace:#/[0-9]/ with:'#' } equalTo:'a#b#c#';
+        .is:{ 'x   y'.replace:#/\s+/ with:' ' } equalTo:'x y';
+        "* A pattern that is neither String nor Regex matches no variant -> MNU.
+        .does:{ 'x'.replace:5 with:'y' } throw:MessageNotUnderstood;
+    };
 }

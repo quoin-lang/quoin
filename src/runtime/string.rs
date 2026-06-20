@@ -11,34 +11,22 @@ use std::collections::HashSet;
 
 pub fn build_string_class() -> NativeClassBuilder {
     NativeClassBuilder::new("String", Some("Object"))
-        .instance_method("replace:with:", |vm, mc, args| {
-            if args.len() < 3 {
-                return Err(BBError::Other(
-                    "replace:with: expects receiver, pattern, and replacement".to_string(),
-                ));
-            }
-            let s_borrow = arg!(args, String, 0);
-            let from_val = args[1];
-            let to_str = arg!(args, String, 2);
-
-            if let Ok(result) = from_val.with_native_state::<NativeRegexState, _, _>(|r| {
-                r.regex.replace_all(&*s_borrow, &**to_str).to_string()
-            }) {
-                return Ok(vm.new_string(mc, result));
-            }
-
-            if let Value::Object(obj) = from_val
-                && let ObjectPayload::String(s) = &obj.borrow().payload
-            {
-                let result = s_borrow.replace(&**s, &**to_str);
-                return Ok(vm.new_string(mc, result));
-            }
-
-            Err(BBError::TypeError {
-                expected: "Regex or String".to_string(),
-                got: from_val.type_name().to_string(),
-                msg: "replace:with: expected Regex or String pattern".to_string(),
-            })
+        // `replace:with:` is a multimethod: the pattern's type selects the variant
+        // (a non-String/non-Regex pattern matches neither → MessageNotUnderstood).
+        // The replacement is always a String.
+        .typed_instance_method("replace:with:", &["Regex", "String"], |vm, mc, args| {
+            let s = arg!(args, String, 0);
+            let to = arg!(args, String, 2);
+            let result = args[1].with_native_state::<NativeRegexState, _, _>(|r| {
+                r.regex.replace_all(&*s, &**to).to_string()
+            })?;
+            Ok(vm.new_string(mc, result))
+        })
+        .typed_instance_method("replace:with:", &["String", "String"], |vm, mc, args| {
+            let s = arg!(args, String, 0);
+            let from = arg!(args, String, 1);
+            let to = arg!(args, String, 2);
+            Ok(vm.new_string(mc, s.replace(&**from, &**to)))
         })
         .instance_method(
             "==:",
