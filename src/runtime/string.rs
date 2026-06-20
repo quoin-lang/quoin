@@ -198,6 +198,12 @@ pub fn build_string_class() -> NativeClassBuilder {
             let s = arg!(args, String, 0);
             Ok(vm.new_int(mc, s.chars().count() as i64))
         })
+        .instance_method("ansiEscaped", |vm, mc, args| {
+            // Escape '$' so this text is safe to embed in an #ANSI'…' color
+            // template. Reuses the colorizer's own escape so the two can't drift.
+            let s = arg!(args, String, 0);
+            Ok(vm.new_string(mc, crate::ansi_colorizer::escape(&s)))
+        })
         .instance_method("contains?:", |vm, mc, args| {
             let s = arg!(args, String, 0);
             let sub = arg!(args, String, 1);

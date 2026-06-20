@@ -139,7 +139,17 @@ ANSI <- { |@string|
     "* XXX: Need a way to modify scope for this to work.
     "* #'%' -> { .class.newUserString:(%@string) }
 
-    #'%:' -> { |arg| .class.newUserString:(@string % arg) }
+    "* Escape interpolated values so a stray '$' in a value can't inject color
+    "* codes (or corrupt the template). A nested ANSI argument is left alone, so its
+    "* own markup still renders.
+    #'%:' -> { |arg|
+        escaped = (arg.can?:List).if:{
+            arg.collect:{ |e| (e.can?:ANSI).if:{ e } else:{ e.s.ansiEscaped } }
+        } else:{
+            (arg.can?:ANSI).if:{ arg } else:{ arg.s.ansiEscaped }
+        };
+        .class.newUserString:(@string % escaped)
+    }
 
     "* XXX: Rendered length?
     length -> { @string.length }

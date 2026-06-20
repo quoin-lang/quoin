@@ -93,4 +93,17 @@
         .is:{ nil / 42 } equalTo:nil;
         .is:{ nil % 42 } equalTo:nil;
     };
+
+    .test:
+    ansiEscapesInterpolatedValues -> {
+        "* `String#ansiEscaped` doubles '$' so a value can't inject color codes.
+        .is:{ '$foo'.ansiEscaped } equalTo:'$$foo';
+        .is:{ 'plain'.ansiEscaped } equalTo:'plain';
+        "* ANSI's `%` escapes a non-ANSI argument's '$' in the underlying string,
+        "* so an arbitrary value (e.g. a test-failure value) can't corrupt the
+        "* color template or inject markup.
+        .is:{ (#ANSI'v=%' % '$x').string } equalTo:'v=$$x';
+        "* ...but a nested ANSI argument is left alone, so its markup still renders.
+        .is:{ (#ANSI'v=%' % #ANSI'$#bw[hi$]').string.contains?:'$#bw[hi$]' } equalTo:true;
+    };
 }

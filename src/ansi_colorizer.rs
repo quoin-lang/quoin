@@ -8,9 +8,8 @@ const RESET_ALL: &str = "\x1b[0;00;22;39;49m";
 static STRIP_ANSI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[.+?m").unwrap());
 // Match either $$ (escaped dollar) or $attr[text$] (color pattern).
 // Ordered alternation ensures $$ is consumed before it could start a color pattern.
-static COLORIZE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\$\$|\$(?P<attr>[^\[\n]+?)\[(?P<text>(?:\$\$|[^\$])+?)\$\]").unwrap()
-});
+static COLORIZE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\$\$|\$(?P<attr>[^\[\n]+?)\[(?P<text>(?:\$\$|[^$])+?)\$]").unwrap());
 static HEX_COLOR_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"#([A-Fa-f0-9]{2})([A-Fa-f0-9]{2})([A-Fa-f0-9]{2})").unwrap());
 
@@ -46,15 +45,20 @@ fn parse_attribute(s: &str) -> String {
                 "bw" => "1",
                 "lw" => "2",
                 "nw" => "22",
-                "i"  => "3",
-                "_"  => "4",
-                "="  => "21",
-                "-"  => "9",
+                "i" => "3",
+                "_" => "4",
+                "=" => "21",
+                "-" => "9",
                 "b0" => "25",
                 "b1" => "5",
                 "b9" => "6",
-                "!"  => "7",
-                other => panic!("Unknown color attribute '{other}'"),
+                "!" => "7",
+                // Unknown attribute: skip it rather than crash. This colorizer
+                // renders arbitrary text — e.g. test-failure values embedded in
+                // #ANSI'…' templates — so a stray '$' or '[' in a value must never
+                // panic the whole run. At worst the styling for that fragment is
+                // dropped; the text itself still renders.
+                _ => continue,
             };
             result.push(';');
             result.push_str(code);
@@ -116,5 +120,15 @@ mod tests {
     fn dollar_dollar_in_text_becomes_dollar() {
         let result = colorize("$bw[price: $$5$]");
         assert!(result.contains("price: $5"), "got: {result}");
+    }
+
+    #[test]
+    fn colorize_tolerates_unknown_attributes() {
+        // An unescaped '$' in a value can make the regex match a garbage attribute
+        // (this exact input — "] $#bw" — once panicked the whole test reporter).
+        // Hardening: unknown attributes are skipped, never panicked, and the text
+        // still renders.
+        let result = colorize("$] $#bw[oops$]");
+        assert!(result.contains("oops"), "got: {result}");
     }
 }
