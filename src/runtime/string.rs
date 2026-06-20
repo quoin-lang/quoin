@@ -3,11 +3,13 @@ use crate::compiler::Compiler;
 use crate::error::BBError;
 use crate::parser::ast::NodeValue;
 use crate::parser::parse_building_blocks_string;
+use crate::runtime::list::NativeListState;
+use crate::runtime::map::NativeMapState;
 use crate::runtime::regex::NativeRegexState;
 use crate::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 
 use gc_arena::Gc;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub fn build_string_class() -> NativeClassBuilder {
     NativeClassBuilder::new("String", Some("Object"))
@@ -32,17 +34,137 @@ pub fn build_string_class() -> NativeClassBuilder {
             "==:",
             |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
         )
-        // Binary comparison uses the `:` keyword selectors (the compiler lowers
-        // `a < b` to `Send(a, "<:", [b])`).
+        // Concatenation: `a + b` -> `Send(a, "+:", [b])`. Only a String RHS matches;
+        // any other RHS falls through (-> MNU once the `native_add` global is gone).
+        .typed_instance_method("+:", &["String"], |vm, mc, args| {
+            let a = arg!(args, String, 0);
+            let b = arg!(args, String, 1);
+            Ok(vm.new_string(mc, format!("{}{}", *a, *b)))
+        })
+        // `a % b` -> `Send(a, "%:", [b])`: printf-like formatting. A List RHS supplies
+        // positional args (`%1`, `%2`, … and bare `%`); a Map RHS additionally supplies
+        // named substitutions (`%<key>`); any other RHS is a single positional arg.
+        // (Migrated verbatim from `native_mod`'s String branch.) Values stay reachable
+        // through the rooted `active_native_args`, so they survive the `.s` calls below.
+        .instance_method("%:", |vm, mc, args| {
+            let s_str = arg!(args, String, 0).to_string();
+
+            let arg1 = vm.active_native_args.last().unwrap()[1];
+            let mut format_args_raw = Vec::new();
+            if let Value::Object(o) = arg1 {
+                let oref = o.borrow();
+                match &oref.payload {
+                    ObjectPayload::NativeState(state_cell) => {
+                        let state_ref = state_cell.borrow();
+                        if let Some(list_state) =
+                            state_ref.as_any().downcast_ref::<NativeListState>()
+                        {
+                            for val in list_state.get_vec() {
+                                format_args_raw.push(*val);
+                            }
+                        } else {
+                            format_args_raw.push(arg1);
+                        }
+                    }
+                    _ => format_args_raw.push(arg1),
+                }
+            } else {
+                format_args_raw.push(arg1);
+            }
+
+            let mut format_args_strings = Vec::new();
+            for val in format_args_raw {
+                let val_str_val = vm.call_method(mc, val, "s", vec![])?;
+                let val_str = match val_str_val {
+                    Value::Object(o) => match &o.borrow().payload {
+                        ObjectPayload::String(st) => st.to_string(),
+                        _ => format!("{}", val_str_val),
+                    },
+                    _ => format!("{}", val_str_val),
+                };
+                format_args_strings.push(val_str);
+            }
+
+            let mut map_formatted_args = HashMap::new();
+            let arg1 = vm.active_native_args.last().unwrap()[1];
+            if let Value::Object(obj) = arg1
+                && let ObjectPayload::NativeState(state_cell) = &obj.borrow().payload
+                && state_cell.borrow().as_any().is::<NativeMapState>()
+            {
+                let state_ref = state_cell.borrow();
+                if let Some(map_state) = state_ref.as_any().downcast_ref::<NativeMapState>() {
+                    for (k, &v) in map_state.get_map() {
+                        let val_str_val = vm.call_method(mc, v, "s", vec![])?;
+                        let val_str = match val_str_val {
+                            Value::Object(o) => match &o.borrow().payload {
+                                ObjectPayload::String(st) => st.to_string(),
+                                _ => format!("{}", val_str_val),
+                            },
+                            _ => format!("{}", val_str_val),
+                        };
+                        map_formatted_args.insert(k.clone(), val_str);
+                    }
+                }
+            }
+
+            let mut result = String::new();
+            let mut chars = s_str.chars().peekable();
+            let mut arg_idx = 0;
+
+            while let Some(c) = chars.next() {
+                if c == '%' {
+                    if let Some(&next_c) = chars.peek() {
+                        if next_c.is_digit(10) {
+                            let mut num_str = String::new();
+                            while let Some(&digit) = chars.peek() {
+                                if digit.is_digit(10) {
+                                    num_str.push(digit);
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                            let idx: usize = num_str.parse().unwrap();
+                            if idx > 0 && idx <= format_args_strings.len() {
+                                result.push_str(&format_args_strings[idx - 1]);
+                            }
+                        } else if next_c.is_alphabetic() && !map_formatted_args.is_empty() {
+                            let key_char = next_c;
+                            chars.next();
+
+                            let key_str = key_char.to_string();
+                            if let Some(val_str) = map_formatted_args.get(&key_str) {
+                                result.push_str(val_str);
+                            } else {
+                                result.push('%');
+                                result.push(key_char);
+                            }
+                        } else {
+                            if arg_idx < format_args_strings.len() {
+                                result.push_str(&format_args_strings[arg_idx]);
+                                arg_idx += 1;
+                            }
+                        }
+                    } else {
+                        if arg_idx < format_args_strings.len() {
+                            result.push_str(&format_args_strings[arg_idx]);
+                            arg_idx += 1;
+                        } else {
+                            result.push('%');
+                        }
+                    }
+                } else {
+                    result.push(c);
+                }
+            }
+            Ok(vm.new_string(mc, result))
+        })
+        // Only `<:` is native (the compiler lowers `a < b` to `Send(a, "<:", [b])`);
+        // `>:`/`<=:`/`>=:` derive from it as shared BB on Object.
         .instance_method("<:", |vm, mc, args| {
             let lhs = arg!(args, String, 0);
             let rhs = arg!(args, String, 1);
             Ok(vm.new_bool(mc, *lhs < *rhs))
-        })
-        .instance_method(">:", |vm, mc, args| {
-            let lhs = arg!(args, String, 0);
-            let rhs = arg!(args, String, 1);
-            Ok(vm.new_bool(mc, *lhs > *rhs))
         })
         .instance_method("to_integer", |vm, mc, args| {
             let s = arg!(args, String, 0);

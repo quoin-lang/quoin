@@ -10,6 +10,9 @@ true <-- {
     if:else: -> { |ifblock _| ifblock.value };
     not -> { false }
     #'!' -> { false }
+
+    "* Boolean ordering: `true` sorts before `false`, so `true < x` iff x is falsy.
+    #'<:' -> { |x| !x }
 };
 
 false <-- {
@@ -20,6 +23,9 @@ false <-- {
     if:else: -> { |_ elseblock| elseblock.value };
     not -> { true }
     #'!' -> { true }
+
+    "* `false` is the maximum, so `false < x` is never true.
+    #'<:' -> { |_| false }
 };
 
 Object <-- {
@@ -31,6 +37,12 @@ Object <-- {
 
     "* Unary plus (`+self`) is identity for every type.
     #'+' -> { self }
+
+    "* Ordering derived from `<:` (defined natively per primitive type, and on the
+    "* booleans). Any class that defines `<:` gets `>:`/`<=:`/`>=:` for free.
+    #'>:' -> { |x| x < self }
+    #'<=:' -> { |x| !(x < self) }
+    #'>=:' -> { |x| !(self < x) }
 };
 
 Mixin <- {

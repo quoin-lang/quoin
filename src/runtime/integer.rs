@@ -54,9 +54,7 @@ pub fn build_integer_class() -> NativeClassBuilder {
     let b = int_binop!(b, "*:", arith *);
     let b = int_binop!(b, "/:", divop /);
     let b = int_binop!(b, "%:", divop %);
+    // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared BB on Object.
     let b = int_binop!(b, "<:", cmp <);
-    let b = int_binop!(b, ">:", cmp >);
-    let b = int_binop!(b, "<=:", cmp <=);
-    let b = int_binop!(b, ">=:", cmp >=);
     b.instance_method("==:", |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])))
 }
