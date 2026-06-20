@@ -156,3 +156,14 @@ name.case:{
     .when:1..10  do:'Low';
     .when:11..20 do:'High';
 })).print;
+
+"* Test 8: Ambiguous method dispatch. Two variants are equally specific for `pick:10`
+"* — same parameter type (Integer) and both guards pass — so dispatch has no
+"* tiebreaker and raises AmbiguousMethodError. This is UNCAUGHT, so it halts the
+"* script and prints the ambiguity report (each tied candidate, with its guard
+"* source, listed below the error and above the stack trace).
+Ambiguous <- {
+    pick: -> { |n:Integer {n > 0}|  'positive' }
+    pick: --> { |n:Integer {n > 5}| 'big' }
+};
+Ambiguous.new.pick:10;

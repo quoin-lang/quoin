@@ -335,11 +335,21 @@ fn parse_expr(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         .map_postfix(|lhs, op| {
             let call_sig = op.into_inner().next().unwrap();
             let sig_args = parse_call_sig(call_sig, filename, source_text);
+            // Span the call through its last argument (e.g. `recv.pick:10`), falling
+            // back to the last selector identifier for an argument-less call, so the
+            // method-call node — and the `Send` that inherits its span — covers the
+            // whole call rather than stopping at the selector.
             let end_span = sig_args
-                .signature
-                .identifiers
+                .expressions
                 .last()
-                .and_then(|id| id.source_info.as_ref())
+                .and_then(|e| e.source_info.as_ref())
+                .or_else(|| {
+                    sig_args
+                        .signature
+                        .identifiers
+                        .last()
+                        .and_then(|id| id.source_info.as_ref())
+                })
                 .map(|si| si.end)
                 .unwrap_or_else(|| lhs.source_info.as_ref().map(|si| si.end).unwrap_or(0));
             let source_info = combine_source_info(

@@ -20,17 +20,22 @@ pub enum BBError {
     },
     /// Raised during illegal arithmetic operations (e.g. division by zero)
     ArithmeticError(String),
-    /// Raised when method lookup fails
+    /// Raised when method lookup fails. `candidates` holds the formatted signatures
+    /// of any variants that *do* share the selector but were filtered out by
+    /// dispatch (empty when the selector is genuinely absent) — a display-only hint.
     MessageNotUnderstood {
         receiver: String,
         selector: String,
         args: Vec<String>,
+        candidates: Vec<String>,
     },
     /// Raised when two or more equally-specific method variants tie for a send,
-    /// so dispatch can't pick one (see scored multimethod dispatch).
+    /// so dispatch can't pick one (see scored multimethod dispatch). `candidates`
+    /// holds the formatted signatures of the tied variants.
     AmbiguousMethod {
         selector: String,
         msg: String,
+        candidates: Vec<String>,
     },
     /// Raised when trying to execute a value that does not implement call/send dispatch
     NotCallable(String),
@@ -110,6 +115,7 @@ impl fmt::Display for BBError {
                 receiver,
                 selector,
                 args,
+                candidates,
             } => {
                 write!(
                     f,
@@ -117,9 +123,21 @@ impl fmt::Display for BBError {
                     receiver,
                     selector,
                     args.join(", ")
-                )
+                )?;
+                // The variants that share the selector but didn't match — one per
+                // line, below the message and above the stack trace.
+                for candidate in candidates {
+                    write!(f, "\n  {}", candidate)?;
+                }
+                Ok(())
             }
-            BBError::AmbiguousMethod { msg, .. } => write!(f, "{}", msg),
+            BBError::AmbiguousMethod { msg, candidates, .. } => {
+                write!(f, "{}", msg)?;
+                for candidate in candidates {
+                    write!(f, "\n  {}", candidate)?;
+                }
+                Ok(())
+            }
             BBError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
             BBError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             BBError::Other(msg) => write!(f, "{}", msg),
@@ -207,5 +225,53 @@ impl From<String> for BBError {
 impl From<&str> for BBError {
     fn from(s: &str) -> Self {
         BBError::Other(s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mnu_renders_candidates_one_per_line() {
+        let err = BBError::MessageNotUnderstood {
+            receiver: "Foo".to_string(),
+            selector: "bar:".to_string(),
+            args: vec!["Boolean".to_string()],
+            candidates: vec![
+                "bar:Integer".to_string(),
+                "bar:String {x.length > 3}".to_string(),
+            ],
+        };
+        let out = format!("{}", err);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].contains("selector='bar:'"));
+        assert_eq!(lines[1], "  bar:Integer");
+        assert_eq!(lines[2], "  bar:String {x.length > 3}");
+    }
+
+    #[test]
+    fn ambiguous_renders_candidates_one_per_line() {
+        let err = BBError::AmbiguousMethod {
+            selector: "z:".to_string(),
+            msg: "ambiguous dispatch for 'z:'".to_string(),
+            candidates: vec!["z:QA".to_string(), "z:QB".to_string()],
+        };
+        let out = format!("{}", err);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "ambiguous dispatch for 'z:'");
+        assert_eq!(lines[1], "  z:QA");
+        assert_eq!(lines[2], "  z:QB");
+    }
+
+    #[test]
+    fn mnu_without_candidates_is_single_line() {
+        let err = BBError::MessageNotUnderstood {
+            receiver: "Integer".to_string(),
+            selector: "bogus".to_string(),
+            args: vec![],
+            candidates: vec![],
+        };
+        assert_eq!(format!("{}", err).lines().count(), 1);
     }
 }

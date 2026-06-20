@@ -103,14 +103,17 @@
         .is:{ TSMTC_DC.new.kindOf:5 } equalTo:'an object';        "* an instance -> only :Object matches
     };
 
-"*    .test:
-"*    dispatchNoMatch -> {
-"*        .does:{
-"*            TSMTC3 <- {
-"*                z: -> { |z:Integer| 'Integer: %' % z }
-"*                z: --> { |z {z~String}| 'String: %' % z }
-"*            };
-"*            TSMTC3.new.z:true
-"*        } throw:#/Missing method 'TSMTC3#z:' on TSMTC3.*for argument type.Boolean.*Candidates were:.*z:Integer/;
-"*    };
+    "* A selector that exists but whose variants don't match the argument types
+    "* raises MessageNotUnderstood (not a silent mis-dispatch). The displayed error
+    "* additionally lists the filtered-out candidate signatures as a hint.
+    .test:
+    dispatchNoMatchRaisesMNU -> {
+        TSMTC_NM <- {
+            z: -> { |x:Integer| 'int' }
+            z: --> { |x:String {x.length > 3}| 'str' }
+        };
+        .does:{ TSMTC_NM.new.z:true } throw:MessageNotUnderstood;
+        "* a matching arg still dispatches
+        .is:{ TSMTC_NM.new.z:5 } equalTo:'int';
+    };
 }

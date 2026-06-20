@@ -1802,7 +1802,8 @@ impl<'gc> VmState<'gc> {
     }
 
     /// Build an `AmbiguousMethod` error naming the equally-specific candidates that
-    /// tied for `selector` on `class_ref` given `args`.
+    /// tied for `selector` on `class_ref` given `args`. The candidate signatures
+    /// render one-per-line at the error site (see `BBError` Display).
     fn ambiguous_method_error(
         &self,
         selector: &str,
@@ -1811,51 +1812,186 @@ impl<'gc> VmState<'gc> {
         args: &[Value<'gc>],
     ) -> BBError {
         let class_name = class_ref.borrow().name.to_string();
-        let sigs: Vec<String> = candidates
-            .iter()
-            .map(|&mv| self.describe_candidate(mv))
-            .collect();
         let arg_types: Vec<String> = args.iter().map(|a| a.class_name()).collect();
         let msg = format!(
-            "ambiguous dispatch for '{}' on {} with argument type(s) ({}): {} equally-specific candidates — {}",
+            "ambiguous dispatch for '{}' on {} with argument type(s) ({}): {} equally-specific candidates",
             selector,
             class_name,
             arg_types.join(", "),
             candidates.len(),
-            sigs.join("; "),
         );
         BBError::AmbiguousMethod {
             selector: selector.to_string(),
             msg,
+            candidates: candidates
+                .iter()
+                .map(|&mv| self.format_candidate_signature(mv, selector))
+                .collect(),
         }
     }
 
-    /// A short signature description of a method variant (e.g. `(x:MA)` or
-    /// `(x:Integer) [guarded]`) for ambiguity diagnostics.
-    fn describe_candidate(&self, method_val: Value<'gc>) -> String {
-        if let Some(block) = self.get_block_from_method(method_val) {
-            let params: Vec<String> = block
-                .param_names
-                .iter()
-                .enumerate()
-                .map(|(i, name)| match block.param_types.get(i) {
-                    // Suppress the `Object` default so unannotated params read as `x`.
-                    Some(ty) if ty != "Object" => format!("{}:{}", name, ty),
-                    _ => name.clone(),
-                })
-                .collect();
-            let guard = if block.decl_block.is_some() {
-                " [guarded]"
-            } else {
-                ""
-            };
-            format!("({}){}", params.join(" "), guard)
+    /// Every variant sharing `selector` reachable from `receiver`'s class hierarchy
+    /// (instance- or class-side as appropriate), in hierarchy order, regardless of
+    /// whether it applies to the current arguments. Used to enrich a
+    /// `MessageNotUnderstood` with the candidates dispatch filtered out.
+    fn collect_method_candidates(&self, receiver: Value<'gc>, selector: &str) -> Vec<Value<'gc>> {
+        let class_side = matches!(receiver, Value::Class(_) | Value::ClassMeta(_));
+        let mut out = Vec::new();
+        if let Some(class) = self.get_class_for_lookup(receiver) {
+            let mut visited = Vec::new();
+            self.collect_candidates_rec(class, selector, class_side, &mut visited, &mut out);
+        }
+        out
+    }
+
+    fn collect_candidates_rec(
+        &self,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        selector: &str,
+        class_side: bool,
+        visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
+        out: &mut Vec<Value<'gc>>,
+    ) {
+        if visited.iter().any(|c| Gc::ptr_eq(*c, class_ref)) {
+            return;
+        }
+        visited.push(class_ref);
+        let class_borrow = class_ref.borrow();
+        let methods = if class_side {
+            &class_borrow.class_methods
         } else {
-            match self.native_method_param_types(method_val) {
-                Some(types) => format!("(native: {})", types.join(" ")),
-                None => "(native)".to_string(),
+            &class_borrow.instance_methods
+        };
+        let chain_start = methods.get(selector).copied();
+        let mixins = class_borrow.mixin_classes.clone();
+        let parent = class_borrow.parent;
+        drop(class_borrow);
+        let mut curr = chain_start;
+        while let Some(mv) = curr {
+            out.push(mv);
+            curr = self.get_next_method_in_chain(mv);
+        }
+        for mixin in mixins {
+            self.collect_candidates_rec(mixin, selector, class_side, visited, out);
+        }
+        if let Some(p) = parent {
+            self.collect_candidates_rec(p, selector, class_side, visited, out);
+        }
+    }
+
+    /// Format a candidate's signature in the stack-trace style: the selector's
+    /// keywords interleaved with the variant's *declared* parameter types (e.g.
+    /// `foo:Integer bar:Object`), plus the guard appended for a guarded variant —
+    /// its syntax-highlighted source if available, else a `{...}` placeholder.
+    fn format_candidate_signature(&self, method_val: Value<'gc>, selector: &str) -> String {
+        let supports_color = self.options.supports_color;
+        let types = self.candidate_param_types(method_val);
+        let mut sig = Self::format_selector_with_types(selector, &types, supports_color);
+        if let Some(guard) = self.candidate_guard_display(method_val, supports_color) {
+            sig.push(' ');
+            sig.push_str(&guard);
+        }
+        sig
+    }
+
+    /// The declared parameter types of a candidate (a user block carries them
+    /// directly; a native method via its signature, empty if signatureless).
+    fn candidate_param_types(&self, method_val: Value<'gc>) -> Vec<String> {
+        if let Some(block) = self.get_block_from_method(method_val) {
+            block.param_types.clone()
+        } else {
+            self.native_method_param_types(method_val).unwrap_or_default()
+        }
+    }
+
+    /// A guarded variant's guard for display: its syntax-highlighted source (e.g.
+    /// `{x > 5}`), or a colorized `{...}` placeholder when source text is absent.
+    /// `None` for an unguarded variant.
+    fn candidate_guard_display(&self, method_val: Value<'gc>, supports_color: bool) -> Option<String> {
+        let block = self.get_block_from_method(method_val)?;
+        let decl = block.decl_block?;
+        // `source_info.source_text` is the node's own text (the guard span), so it
+        // already holds the guard source — no slicing needed.
+        let src = decl
+            .source_info
+            .as_ref()
+            .and_then(|si| si.source_text.as_ref())
+            .map(|s| s.trim().to_string());
+        let display = match src {
+            Some(s) if !s.is_empty() => {
+                let braced = if s.starts_with('{') {
+                    s
+                } else {
+                    format!("{{{}}}", s)
+                };
+                if supports_color {
+                    crate::highlighter::highlight_to_ansi(&braced)
+                        .trim_end()
+                        .to_string()
+                } else {
+                    braced
+                }
+            }
+            _ => {
+                if supports_color {
+                    crate::ansi_colorizer::colorize("$#808080[{...}$]")
+                } else {
+                    "{...}".to_string()
+                }
+            }
+        };
+        Some(display)
+    }
+
+    /// Interleave a selector's keywords with `types` (e.g. `foo:Integer bar:Object`),
+    /// matching the stack-trace rendering style. A keyword with no corresponding type
+    /// (a no-arg selector, or a native signature shorter than the selector) prints
+    /// bare. Colorized to match traces when `supports_color`.
+    fn format_selector_with_types(selector: &str, types: &[String], supports_color: bool) -> String {
+        // Split into keyword parts, each keeping its trailing ':'.
+        let mut parts: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for c in selector.chars() {
+            current.push(c);
+            if c == ':' {
+                parts.push(std::mem::take(&mut current));
             }
         }
+        if !current.is_empty() {
+            parts.push(current);
+        }
+        let mut out = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let mut keyword = part.clone();
+            let has_colon = keyword.ends_with(':');
+            if has_colon {
+                keyword.pop();
+            }
+            match types.get(i) {
+                Some(ty) if has_colon => {
+                    if supports_color {
+                        out.push(crate::ansi_colorizer::colorize(&format!(
+                            "$#ab82ff[{}$]$#808080[:$]$#5fd7af[{}$]",
+                            keyword, ty
+                        )));
+                    } else {
+                        out.push(format!("{}:{}", keyword, ty));
+                    }
+                }
+                _ => {
+                    let text = part.clone();
+                    if supports_color {
+                        out.push(crate::ansi_colorizer::colorize(&format!(
+                            "$#ab82ff[{}$]",
+                            text
+                        )));
+                    } else {
+                        out.push(text);
+                    }
+                }
+            }
+        }
+        out.join(" ")
     }
 
     /// Distance assigned to `:Object` when a value can't physically walk up to
@@ -3023,10 +3159,18 @@ impl<'gc> VmState<'gc> {
                     all_args.extend(args);
                     callable.call(self, mc, all_args, Some(selector.clone()))?;
                 } else {
+                    // The selector may still exist with non-matching signatures;
+                    // surface those filtered-out variants as a hint.
+                    let candidates = self
+                        .collect_method_candidates(receiver, &selector)
+                        .iter()
+                        .map(|&mv| self.format_candidate_signature(mv, &selector))
+                        .collect();
                     return Err(BBError::MessageNotUnderstood {
                         receiver: receiver.class_name(),
                         selector: selector.clone(),
                         args: args.iter().map(|a| a.class_name()).collect(),
+                        candidates,
                     });
                 }
             }
