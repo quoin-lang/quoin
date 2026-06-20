@@ -1,31 +1,64 @@
 use crate::error::BBError;
-use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
+use crate::value::{AnyCollect, NativeClassBuilder, NativeFunc, ObjectPayload, Value};
 
 use gc_arena::collect::{DynCollect, Trace};
 use std::any::Any;
 use std::mem::transmute;
 
+/// The body of a method variant: a user-defined `Block`, or a native Rust fn.
+/// Unifying these into one chainable node lets native and user methods share the
+/// same multimethod dispatch. (Phase 2b will let the `Native` variant also carry a
+/// type signature; until then a native method scores as an untyped fallback.)
+#[derive(Debug)]
+pub enum MethodBody {
+    UserBlock(Value<'static>),
+    Native(NativeFunc),
+}
+
 #[derive(Debug)]
 pub struct NativeMethodState {
     pub selector: String,
-    pub block: Value<'static>,
+    pub body: MethodBody,
     pub is_extension: bool,
     pub next: Option<Value<'static>>,
 }
 
 impl NativeMethodState {
+    /// A user-defined method variant wrapping `block`.
     pub fn new(selector: String, block: Value<'_>, is_extension: bool) -> Self {
         let block_static: Value<'static> = unsafe { transmute(block) };
         Self {
             selector,
-            block: block_static,
+            body: MethodBody::UserBlock(block_static),
             is_extension,
             next: None,
         }
     }
 
-    pub fn get_block<'gc>(&self) -> Value<'gc> {
-        unsafe { transmute(self.block) }
+    /// A native method variant. Chainable and dispatchable like a user method.
+    pub fn new_native(selector: String, func: NativeFunc) -> Self {
+        Self {
+            selector,
+            body: MethodBody::Native(func),
+            is_extension: false,
+            next: None,
+        }
+    }
+
+    /// The wrapped user `Block` value, or `None` for a native method body.
+    pub fn get_block<'gc>(&self) -> Option<Value<'gc>> {
+        match &self.body {
+            MethodBody::UserBlock(block) => Some(unsafe { transmute(*block) }),
+            MethodBody::Native(_) => None,
+        }
+    }
+
+    /// The native function, or `None` for a user block body.
+    pub fn native_func(&self) -> Option<NativeFunc> {
+        match &self.body {
+            MethodBody::Native(func) => Some(*func),
+            MethodBody::UserBlock(_) => None,
+        }
     }
 }
 
@@ -39,8 +72,11 @@ impl AnyCollect for NativeMethodState {
     }
 
     fn trace_gc<'gc>(&self, cc: &mut dyn Trace<'gc>) {
-        let block_gc: &Value<'gc> = unsafe { transmute(&self.block) };
-        block_gc.dyn_trace(cc);
+        if let MethodBody::UserBlock(block) = &self.body {
+            let block_gc: &Value<'gc> = unsafe { transmute(block) };
+            block_gc.dyn_trace(cc);
+        }
+        // MethodBody::Native holds only a fn pointer — nothing to trace.
         if let Some(next) = &self.next {
             let next_gc: &Value<'gc> = unsafe { transmute(next) };
             next_gc.dyn_trace(cc);
@@ -65,15 +101,16 @@ pub fn build_method_class() -> NativeClassBuilder {
                 args[0].with_native_state::<NativeMethodState, _, _>(|m| m.is_extension)?;
             Ok(vm.new_bool(mc, is_ext))
         })
-        .instance_method("block", |_vm, _mc, args| {
+        .instance_method("block", |vm, mc, args| {
+            // A native method has no user block; report it as nil.
             let block = args[0].with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
-            Ok(block)
+            Ok(block.unwrap_or_else(|| vm.new_nil(mc)))
         })
         .instance_method("callOn:", |vm, mc, args| {
             let block_val =
                 args[0].with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
             let receiver = args[1];
-            if let Value::Object(obj) = block_val
+            if let Some(Value::Object(obj)) = block_val
                 && let ObjectPayload::Block(block) = &obj.borrow().payload
             {
                 vm.execute_block(mc, block.clone(), Vec::new(), Some(receiver))

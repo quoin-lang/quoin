@@ -7,7 +7,7 @@ use crate::runtime::fiber::{FiberStatus, NativeFiberState};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::set::NativeSetState;
-use crate::runtime::method::NativeMethodState;
+use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, GcUlid, NamespacedName, NativeClass, NativeFunc, Object,
@@ -706,6 +706,28 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
+    /// Wrap a native fn as a `Method` chain node, so native methods are chainable,
+    /// scored, and override-able just like user methods.
+    pub fn new_native_method(
+        &self,
+        mc: &Mutation<'gc>,
+        selector: String,
+        func: NativeFunc,
+    ) -> Value<'gc> {
+        let class = self.get_or_create_builtin_class(mc, "Method");
+        let state = NativeMethodState::new_native(selector, func);
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
+        Value::Object(gcl!(
+            mc,
+            Object {
+                id: GcUlid(Ulid::new()),
+                class,
+                fields: HashMap::new(),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
+            }
+        ))
+    }
+
     #[allow(no_gc_across_yield)]
     fn finalize_instantiation(
         &mut self,
@@ -767,7 +789,7 @@ impl<'gc> VmState<'gc> {
                 let state_ref = state_cell.borrow();
                 let any_ref = (**state_ref).as_any();
                 let method_state = any_ref.downcast_ref::<NativeMethodState>()?;
-                if let Value::Object(block_obj) = method_state.get_block()
+                if let Some(Value::Object(block_obj)) = method_state.get_block()
                     && let ObjectPayload::Block(b) = &block_obj.borrow().payload
                 {
                     Some(b.param_names.clone())
@@ -846,12 +868,14 @@ impl<'gc> VmState<'gc> {
 
         let mut inst_methods = HashMap::new();
         for (name, func) in native_class.instance_methods() {
-            inst_methods.insert(name, self.new_native(mc, func));
+            let m = self.new_native_method(mc, name.clone(), func);
+            inst_methods.insert(name, m);
         }
 
         let mut cls_methods = HashMap::new();
         for (name, func) in native_class.class_methods() {
-            cls_methods.insert(name, self.new_native(mc, func));
+            let m = self.new_native_method(mc, name.clone(), func);
+            cls_methods.insert(name, m);
         }
 
         let name = native_class.name();
@@ -993,8 +1017,9 @@ impl<'gc> VmState<'gc> {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
                     if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
-                        let block_val = method_state.get_block();
-                        if let Value::Object(block_obj) = block_val
+                        if let Some(func) = method_state.native_func() {
+                            Some(Box::new(NativeCallable(func)) as Box<dyn Callable<'gc> + 'gc>)
+                        } else if let Some(Value::Object(block_obj)) = method_state.get_block()
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
                             Some(Box::new(BlockCallable { block: *block })
@@ -1613,8 +1638,9 @@ impl<'gc> VmState<'gc> {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
                     if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
-                        let block_val = method_state.get_block();
-                        if let Value::Object(block_obj) = block_val
+                        if let Some(func) = method_state.native_func() {
+                            Ok(Some(Box::new(NativeCallable(func))))
+                        } else if let Some(Value::Object(block_obj)) = method_state.get_block()
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
                             Ok(Some(Box::new(BlockCallable { block: *block })))
@@ -1819,8 +1845,7 @@ impl<'gc> VmState<'gc> {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
                     if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
-                        let block_val = method_state.get_block();
-                        if let Value::Object(block_obj) = block_val
+                        if let Some(Value::Object(block_obj)) = method_state.get_block()
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
                             Some(*block)
@@ -1926,10 +1951,10 @@ impl<'gc> VmState<'gc> {
         let new_block = self.get_block_from_method(new_method);
         if let Some(nb) = new_block
             && nb.decl_block.is_none()
+            && let Some(new_block_val) =
+                new_method.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?
         {
             let new_param_types = nb.param_types.clone();
-            let new_block_val =
-                new_method.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
             let mut curr = Some(chain_start);
             while let Some(node) = curr {
                 let is_match = self
@@ -1944,7 +1969,7 @@ impl<'gc> VmState<'gc> {
                             if let Some(ms) =
                                 state_ref.as_any_mut().downcast_mut::<NativeMethodState>()
                             {
-                                ms.block = unsafe { transmute(new_block_val) };
+                                ms.body = MethodBody::UserBlock(unsafe { transmute(new_block_val) });
                             }
                         }
                     }
@@ -3676,6 +3701,51 @@ mod tests {
                     _ => panic!("deferred value is not an Object — collected?"),
                 }
             }
+        });
+    }
+
+    #[test]
+    fn test_native_methods_are_chainable() {
+        // Phase 2a: native methods are now `Method` chain nodes (`NativeState`
+        // wrapping a native body), not bare `ObjectPayload::Native`. So another
+        // variant can be appended onto a native method's chain — which previously
+        // errored "Invalid method object in chain" (overriding e.g. List#count).
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, VmOptions::default());
+            vm.register_native_class(mc, build_object_class());
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            let obj_class = vm.get_or_create_builtin_class(mc, "Object");
+            let native_method = obj_class
+                .borrow()
+                .instance_methods
+                .get("can?:")
+                .copied()
+                .expect("Object should have a native can?: method");
+
+            // A native method is a chainable node, not a bare ObjectPayload::Native.
+            match native_method {
+                Value::Object(o) => assert!(
+                    matches!(&o.borrow().payload, ObjectPayload::NativeState(_)),
+                    "native method should be a chainable NativeState node"
+                ),
+                _ => panic!("native method should be an object"),
+            }
+
+            // Appending another variant onto it succeeds (previously crashed).
+            let appended = vm.new_native_method(
+                mc,
+                "can?:".to_string(),
+                NativeFunc(|vm, mc, _args| Ok(vm.new_nil(mc))),
+            );
+            VmState::append_method_to_chain(mc, native_method, appended)
+                .expect("appending onto a native method's chain should succeed");
+            assert!(
+                vm.get_next_method_in_chain(native_method).is_some(),
+                "the native method should now chain to the appended variant"
+            );
         });
     }
 
