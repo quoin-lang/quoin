@@ -23,6 +23,16 @@ use std::path::Path;
 use std::{cmp, fs};
 use ulid::Ulid;
 
+/// A method call queued to run when its frame completes normally (a "defer").
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct DeferredCall<'gc> {
+    pub receiver: Value<'gc>,
+    #[collect(require_static)]
+    pub selector: String,
+    pub args: Vec<Value<'gc>>,
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Frame<'gc> {
@@ -38,6 +48,12 @@ pub struct Frame<'gc> {
     pub args: Vec<Value<'gc>>,
     pub stack_base: usize,
     pub return_receiver: bool,
+    /// Calls queued (e.g. by `mix:`) to run when this frame returns normally.
+    pub defers: Vec<DeferredCall<'gc>>,
+    /// If set, and a deferred call throws, remove this global before propagating
+    /// (used so a class whose mixin requirements fail is never left registered).
+    #[collect(require_static)]
+    pub unregister_on_defer_failure: Option<NamespacedName>,
 }
 
 #[derive(Collect)]
@@ -95,6 +111,11 @@ pub struct VmState<'gc> {
     /// Intern pool for symbols: one canonical `Symbol` value per name, so symbols
     /// compare by identity. Rooted here and traced as part of `VmState`.
     pub symbol_table: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
+    /// Name of the class just created by `DefineClass`, consumed by the next
+    /// `ExecuteBlockWithSelf` to mark the class body's frame for unregister-on-
+    /// defer-failure. Only a *new* class definition sets this (not an extension).
+    #[collect(require_static)]
+    pub pending_class_def: Option<NamespacedName>,
     pub next_frame_id: usize,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
@@ -316,6 +337,7 @@ impl<'gc> VmState<'gc> {
             frames: Vec::new(),
             globals: gcl!(mc, HashMap::new()),
             symbol_table: gcl!(mc, HashMap::new()),
+            pending_class_def: None,
             next_frame_id: 1,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_exception: None,
@@ -1057,6 +1079,19 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Run a frame's deferred calls in order. Each is a plain method send; the
+    /// first one that errors aborts and returns the error.
+    fn run_defers(
+        &mut self,
+        mc: &Mutation<'gc>,
+        defers: &[DeferredCall<'gc>],
+    ) -> Result<(), BBError> {
+        for d in defers {
+            self.call_method(mc, d.receiver, &d.selector, d.args.clone())?;
+        }
+        Ok(())
+    }
+
     pub fn run_all_inits(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1430,6 +1465,8 @@ impl<'gc> VmState<'gc> {
             args: args.to_vec(),
             stack_base: self.stack.len(),
             return_receiver: false,
+            defers: Vec::new(),
+            unregister_on_defer_failure: None,
         });
 
         if self.frames.len() > initial_frame_count {
@@ -2110,6 +2147,8 @@ impl<'gc> VmState<'gc> {
             args,
             stack_base: self.stack.len(),
             return_receiver: false,
+            defers: Vec::new(),
+            unregister_on_defer_failure: None,
         });
     }
 
@@ -2156,6 +2195,8 @@ impl<'gc> VmState<'gc> {
             args,
             stack_base: self.stack.len(),
             return_receiver: false,
+            defers: Vec::new(),
+            unregister_on_defer_failure: None,
         });
     }
 
@@ -2198,6 +2239,8 @@ impl<'gc> VmState<'gc> {
             args: Vec::new(),
             stack_base: self.stack.len(),
             return_receiver: false,
+            defers: Vec::new(),
+            unregister_on_defer_failure: None,
         });
     }
 
@@ -2902,6 +2945,25 @@ impl<'gc> VmState<'gc> {
                 }
             }
             Instruction::Return | Instruction::BlockReturn => {
+                // Run calls deferred during this frame (e.g. mixin requirement
+                // checks) *before* popping it, so the defer queue — and any Values
+                // it references — stays GC-rooted via self.frames even if a defer
+                // yields and a collection happens during the suspension. We iterate
+                // a clone to satisfy the borrow checker; the originals stay in the
+                // (still-live) frame to keep their Values reachable. Defers run only
+                // on normal completion; if one throws and this is a new class
+                // definition, unregister the class first.
+                if !self.frames[frame_idx].defers.is_empty() {
+                    let defers = self.frames[frame_idx].defers.clone();
+                    if let Err(e) = self.run_defers(mc, &defers) {
+                        if let Some(name) =
+                            self.frames[frame_idx].unregister_on_defer_failure.clone()
+                        {
+                            self.globals.borrow_mut(mc).remove(&name);
+                        }
+                        return Err(e);
+                    }
+                }
                 let mut ret_val = self.pop()?;
                 let popped_frame = self.frames.pop().unwrap();
                 self.last_popped_env = Some(popped_frame.env);
@@ -3097,6 +3159,10 @@ impl<'gc> VmState<'gc> {
                 self.globals
                     .borrow_mut(mc)
                     .insert(name.clone(), Value::Class(class_obj));
+                // The class is registered now (so it can reference itself), but if
+                // the body's deferred mixin checks fail it must be unregistered.
+                // Hand the name to the upcoming ExecuteBlockWithSelf (the body).
+                self.pending_class_def = Some(name.clone());
                 self.push(Value::Class(class_obj));
                 self.frames[frame_idx].ip += 1;
             }
@@ -3113,7 +3179,13 @@ impl<'gc> VmState<'gc> {
                 {
                     self.frames[frame_idx].ip += 1;
                     self.start_block_as_method(mc, *block, self_val, Vec::new(), None, false);
-                    self.frames.last_mut().unwrap().return_receiver = true;
+                    // A new class definition (DefineClass ran just before) marks its
+                    // body frame so a failed deferred mixin check unregisters the class.
+                    // Extensions don't set pending_class_def, so they get no marker.
+                    let pending = self.pending_class_def.take();
+                    let body_frame = self.frames.last_mut().unwrap();
+                    body_frame.return_receiver = true;
+                    body_frame.unregister_on_defer_failure = pending;
                     Ok(VmStatus::Running)
                 } else {
                     Err(BBError::TypeError {
@@ -3575,6 +3647,91 @@ mod tests {
             // Sanity: BB-level equality agrees with identity.
             assert!(a == b);
             assert!(a != c);
+        });
+    }
+
+    #[test]
+    fn test_deferred_call_values_survive_collection() {
+        // A `DeferredCall` holds GC `Value`s (receiver + args) in `Frame.defers`.
+        // They must be traced so a collection between when a defer is enqueued (e.g.
+        // by `mix:`) and when it runs (the Return handler) does not free them. The
+        // run loop collects between steps, so this really can happen.
+        // (`pending_class_def` / `unregister_on_defer_failure` hold only a 'static
+        // `NamespacedName` — no GC pointers — so they need no such guard.)
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, VmOptions::default());
+            vm.register_native_class(mc, build_object_class());
+            vm.register_native_class(mc, build_string_class());
+
+            // Start a frame the defer can attach to (mirrors run_test_steps).
+            let static_block = StaticBlock {
+                source_info: None,
+                name: Some("defer_gc_test".to_string()),
+                is_nested_block: false,
+                param_names: Vec::new(),
+                param_types: Vec::new(),
+                bytecode: Vec::<Instruction>::new().into(),
+                decl_block: None,
+                source_map: SharedSourceMap::from(Vec::new()),
+            };
+            let block = gc!(
+                mc,
+                Block {
+                    source_info: None,
+                    name: static_block.name.clone(),
+                    is_nested_block: static_block.is_nested_block,
+                    param_names: static_block.param_names.clone(),
+                    param_types: static_block.param_types.clone(),
+                    bytecode: static_block.bytecode.clone(),
+                    parent_env: None,
+                    enclosing_method_id: None,
+                    decl_block: None,
+                    source_map: SharedSourceMap::from(Vec::new()),
+                }
+            );
+            vm.start_block(mc, block, Vec::new(), None, None);
+            vm
+        });
+
+        // Enqueue a deferred call whose receiver and args are freshly-allocated
+        // strings reachable ONLY through the defer.
+        arena.mutate_root(|mc, vm| {
+            let receiver = vm.new_string(mc, "DEFER-RECEIVER".to_string());
+            let arg = vm.new_string(mc, "DEFER-ARG".to_string());
+            let frame = vm.frames.last_mut().expect("a frame to hold the defer");
+            frame.defers.push(DeferredCall {
+                receiver,
+                selector: "check:".to_string(),
+                args: vec![arg],
+            });
+        });
+
+        // Allocate a pile of unreachable garbage so the collector has real work to
+        // sweep, then drive it through full cycles. If `Frame.defers` weren't traced,
+        // the deferred strings would be swept right alongside this garbage.
+        arena.mutate_root(|mc, vm| {
+            for i in 0..512 {
+                let _garbage = vm.new_string(mc, format!("garbage-{i}"));
+            }
+        });
+        arena.finish_cycle();
+        arena.finish_cycle();
+
+        // After collection the deferred Values must still be the exact strings.
+        arena.mutate_root(|_mc, vm| {
+            let frame = vm.frames.last().expect("frame still present");
+            assert_eq!(frame.defers.len(), 1, "the defer must survive collection");
+            let d = &frame.defers[0];
+            assert_eq!(d.selector, "check:");
+            for (val, expected) in [(d.receiver, "DEFER-RECEIVER"), (d.args[0], "DEFER-ARG")] {
+                match val {
+                    Value::Object(obj) => match &obj.borrow().payload {
+                        ObjectPayload::String(s) => assert_eq!(s.as_str(), expected),
+                        _ => panic!("deferred value is no longer a String — collected?"),
+                    },
+                    _ => panic!("deferred value is not an Object — collected?"),
+                }
+            }
         });
     }
 

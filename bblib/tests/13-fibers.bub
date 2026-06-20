@@ -183,4 +183,19 @@
         .is:{ f.resume:10 } equalTo:11;
         .is:{ f.resume:5 } equalTo:105;
     };
+
+    "* A mixin requirement check runs as a deferred call at the end of a class body.
+    "* If it yields, the class definition suspends and resumes correctly — and the
+    "* defer's frame stays GC-rooted across the yield, so it's safe.
+    .test:
+    yieldFromDeferredMixinCheck -> {
+        Mixin <- TFYieldReq <- {
+            .meta <-- { assertMeetsRequirements: -> { |class| ^> 42 } }
+        };
+        f = Fiber.new:{ TFYieldHost <- { .mix:TFYieldReq }; 'done' };
+        .is:{ f.resume } equalTo:42;            "* the deferred check yielded
+        .is:{ f.resume } equalTo:'done';         "* class definition + fiber completed
+        .is:{ f.status } equalTo:'done';
+        .is:{ TFYieldHost.defined? } equalTo:true;
+    };
 }

@@ -127,4 +127,27 @@
             #( newObj.c newObj.m newObj.z newObj.b )
         } equalTo:#( #( 1 11 22 ) 1 22 11 );
     };
+
+    .test:
+    mixinRequirements -> {
+        "* A mixin can declare requirements via a class-side assertMeetsRequirements:.
+        "* It runs at the END of the host's definition block (so required methods may
+        "* be defined after the `.mix:`), and if it throws the host is never registered.
+        Mixin <- TSCNC_Req <- {
+            .meta <-- {
+                assertMeetsRequirements: -> { |class:Class|
+                    (class.can?:#req).else:{ ('% needs #req' % class.name).throw }
+                }
+            }
+        };
+        "* Host provides #req (defined after the mix) -> defines fine.
+        .is:{
+            TSCNC_ReqGood <- { .mix:TSCNC_Req; req -> { 7 } };
+            TSCNC_ReqGood.new.req
+        } equalTo:7;
+        "* Host missing #req -> throws at definition time...
+        .does:{ TSCNC_ReqBad <- { .mix:TSCNC_Req } } throw:'TSCNC_ReqBad needs #req';
+        "* ...and the failed class is not registered.
+        .is:{ TSCNC_ReqBad.defined? } equalTo:false;
+    };
 }

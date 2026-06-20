@@ -109,6 +109,7 @@ class's `init:` receiving the block fields whose names match its parameters.
 > **Rules**
 > - **Method lookup order**: the receiver's own class → its mixins (in the order added) → its parent, recursing upward. The most-derived definition wins.
 > - `.mix:M` mixes class `M` into the current class; its methods and instance vars are included. (There is no `.can:` alias — use `.mix:`.)
+> - A mixin may declare requirements via a class-side `assertMeetsRequirements: -> { |class| … }` (typically using `class.can?:#someMethod`). It runs at the **end of the host's definition block**, so the host may define the required methods *after* the `.mix:`. If it throws, the host class is not registered.
 > - **Initializer order is the dual of lookup**: base → derived (parent, then mixins, then self), so ancestors initialize first (§11).
 > - `.sealed!` is currently a **no-op** (intended to forbid further extension; not yet enforced).
 > - `obj.can?:X` is **overloaded**: a `Symbol`/`String` selector asks *"does it implement that method?"*; a `Class` asks *"is it an instance of / does it mix in that class?"* — e.g. `list.can?:#each:`, `list.can?:'each:'`, `list.can?:Iterate`. Works on instance, class, and metaclass receivers.

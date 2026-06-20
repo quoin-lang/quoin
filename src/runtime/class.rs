@@ -1,5 +1,6 @@
 use crate::arg;
 use crate::value::{NamespacedName, NativeClassBuilder, Value};
+use crate::vm::DeferredCall;
 
 pub fn build_class_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Class", Some("Object"))
@@ -25,10 +26,24 @@ pub fn build_class_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
-        .instance_method("mix:", |_vm, mc, args| {
+        .instance_method("mix:", |vm, mc, args| {
             let clz = arg!(args, Class, 0);
             let mixin = arg!(args, Class, 1);
             clz.borrow_mut(mc).mixin_classes.push(mixin);
+            // Defer the mixin's requirement check to the end of the current block
+            // (the class-definition body), when the host class is fully defined.
+            // Only mixins that define a class-side assertMeetsRequirements: take part.
+            if vm
+                .lookup_in_class_hierarchy(mixin, "assertMeetsRequirements:", true)
+                .is_some()
+                && let Some(frame) = vm.frames.last_mut()
+            {
+                frame.defers.push(DeferredCall {
+                    receiver: Value::Class(mixin),
+                    selector: "assertMeetsRequirements:".to_string(),
+                    args: vec![Value::Class(clz)],
+                });
+            }
             Ok(Value::Class(mixin))
         })
         .instance_method("sealed!", |vm, mc, _args| {

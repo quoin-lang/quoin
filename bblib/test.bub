@@ -1,7 +1,7 @@
 Mixin <- BuiltinAssertions <- {
     .meta <-- {
         assertMeetsRequirements: -> { |class:Class|
-            (class.implements?:#addResult:).else:{
+            (class.can?:#addResult:).else:{
                 ('Class % must implement #addResult: to use BuiltinAssertions' % class.name).throw
             }
         }
