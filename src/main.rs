@@ -2,6 +2,11 @@ use quoin::runner::{VmRunner, VmRunnerOptions};
 
 use std::{env, process};
 
+// Opt-in via `--features mimalloc`. Default build uses the system allocator.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let args = env::args().collect::<Vec<String>>();
     let mut options = VmRunnerOptions::parse(&args);

@@ -21,6 +21,11 @@ libraries = [
 inherits = "release"
 debug = true
 
+[features]
+# Opt-in: build the `qn` binary with mimalloc as the global allocator.
+# Default stays the system allocator. Enable with `--features mimalloc`.
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 gc-arena = "0.6.0"
 regex = "1.10"
@@ -32,4 +37,5 @@ pest = "2.8.6"
 pest_derive = "2.8.6"
 corosensei = "0.1.4"
 console = "0.15"
+mimalloc = { version = "0.1", optional = true }
 
