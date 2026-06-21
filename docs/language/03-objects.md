@@ -134,28 +134,33 @@ Widget.new.hello       "* 'hi from Widget'   (found via the mixin)
 ## 13. Multimethod dispatch
 
 > **Rules**
-> - A selector can have several definitions distinguished by argument **type** or a **guard block**; dispatch picks a matching one at call time.
-> - Candidates are ordered by **specificity** (a more specific type like `Integer` beats `Object`); ties are broken by **definition order — first wins**.
-> - Typed parameter: `|x:Integer|`. Guard block: `|x { x > 5 }|` or `|x:Type { … }|` — the guard must return a truthy value to match.
-> - No matching variant → `MessageNotUnderstood { receiver, selector, args }`.
+> - A selector can have several definitions distinguished by argument **type** and/or a **guard block**; dispatch picks the most specific matching one at call time.
+> - Candidates are ranked by **specificity**: a more specific parameter type wins (`Integer` beats `Object`, and an unannotated parameter counts as `:Object`), and a **guard refines** specificity — a guarded variant outranks an otherwise-equal *unguarded* one.
+> - **Definition order is not a tiebreaker.** Two distinct candidates that are equally specific *and* both match are ambiguous → `AmbiguousMethodError` (which lists the tied candidates). Keep guards mutually exclusive or distinguish by type; for *ordered* "first match wins" semantics use `case`/`~` instead.
+> - Typed parameter: `|x:Integer|`. Guard block: `|x { x > 5 }|` or `|x:Type { … }|` — the guard must return a truthy value to match. Inside a guard the arguments are bound **by name** and `self` is the **receiver**, so a guard can also use the class's instance variables and other methods.
+> - No matching variant → `MessageNotUnderstood` — and if the selector *does* exist with non-matching argument types, the error lists those filtered-out variants as a hint.
 
 ```buildingblocks
 describe: -> { |n:Integer| 'int ' + n.s }
 describe: --> { |s:String|  'str ' + s }
-describe: --> { |n { n > 100 }| 'big number' }   "* guard block
+describe: --> { |n:Integer { n > 100 }| 'big number' }   "* a guard refines :Integer
 
-describe:5         "* 'int 5'
+describe:5         "* 'int 5'        (the guard fails, so plain :Integer matches)
 describe:'hi'      "* 'str hi'
+describe:150       "* 'big number'   (the guarded :Integer beats the unguarded one)
 ```
 
 Type-based variants are the right tool when you want different behavior per
 argument type; the dispatcher chooses the most specific match.
 
-> **⚠ Gotcha — order matters for equal-specificity guarded variants.** Among
-> variants that match the same argument with equal type-specificity, **guarded**
-> variants are tried in *definition order* (first match wins) — so define the
-> specific guards before a catch-all. (Two variants with the **same signature and no
-> guard** don't coexist: the later one *replaces* the earlier — §10.)
+> **⚠ Gotcha — equal-specificity matches are ambiguous, not ordered.** If two
+> variants match the same argument with the **same** type-specificity *and* the same
+> guard status (e.g. two overlapping guards on the same type that both pass), neither
+> is preferred — dispatch raises `AmbiguousMethodError` rather than picking by
+> definition order. A *guarded* variant always beats an equal-typed *unguarded* one,
+> so the usual idiom is specific guarded variants plus one unguarded catch-all
+> (`|x|`), which is unambiguous. (Two variants with the **same signature and no
+> guard** don't coexist at all: the later one *replaces* the earlier — §10.)
 
 ---
 

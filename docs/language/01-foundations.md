@@ -198,7 +198,7 @@ parenthesize an operator expression that you want to pass as a single argument
 ## 6. Operators & precedence
 
 > **Rules**
-> - **Prefix** operators are no-argument sends on the operand: `-x`→`negated`, `!x`→`!`, `%x`→`mod`, `+x`→ no-op.
+> - **Prefix** operators are no-argument sends on the operand: `-x`→`-`, `+x`→`+` (identity), `!x`→`!`, `%x`→`mod`.
 > - **Infix** operators are one-argument sends and are **all left-associative**.
 > - Most infix operators are overridable methods on the receiver's type; `&&`/`||` are special short-circuit forms (not method sends).
 > - **Precedence, loosest → tightest:** `||` · `&&` · `== !=` · `< <= > >=` · `~` · `..` · `+ -` · `* / %` · `<--`. Postfix sends (`.method`) bind tighter than any infix operator.
@@ -207,13 +207,13 @@ parenthesize an operator expression that you want to pass as a single argument
 
 | You write | Compiles to | Notes |
 |---|---|---|
-| `a + b` `a - b` `a * b` `a / b` `a % b` | `Send("+"…)` etc. | routed through a global dispatcher that forwards to the overridable `+:` `-:` `*:` `/:` `%:` method on the receiver |
-| `a == b` `a != b` `a < b` `a <= b` `a > b` `a >= b` | `Send("=="…)` etc. | comparison methods |
-| `a ~ b` | `Send("~"…)` | the match protocol — checks a custom `~:` on the receiver first (Part IV) |
+| `a + b` `a - b` `a * b` `a / b` `a % b` | `Send("+:"…)` etc. | the overridable `+:` `-:` `*:` `/:` `%:` method on the receiver's type (resolved class-first; no global fallback) |
+| `a == b` `a != b` `a < b` `a <= b` `a > b` `a >= b` | `Send("==:"…)` etc. | overridable `==:` `!=:` `<:` `<=:` `>:` `>=:` methods |
+| `a ~ b` | `Send("~:"…)` | the match protocol — dispatches `~:` on the left operand (Part IV) |
 | `a .. b` | `Send("..:"…)` | builds a `NumberRange` |
 | `a && b` `a \|\| b` | short-circuit jumps | **not** method sends; right side is skipped when the left decides the result |
-| `-x` | `Send("negated")` | unary minus is `negated`, **not** `-` |
-| `!x` | `Send("!")` | boolean negation (defined on `true`/`false`) |
+| `-x` | `Send("-")` | unary minus is the no-arg `-` method (binary `-` is `-:`); `+x` is `Send("+")`, the identity `+` method |
+| `!x` | `Send("!")` | boolean negation (`Object#'!'` / `Nil#'!'` / the booleans) |
 
 Operators are therefore per-type customizable: define `+:` on your class and `+`
 works on its instances.

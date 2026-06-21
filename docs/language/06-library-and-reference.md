@@ -45,11 +45,11 @@ exclusive end). Plus `Iterate` combinators.
 
 **Integer / Double** (`src/runtime/{integer,double}.rs`, `bblib/00-bootstrap.bub`)
 — arithmetic operators (§6), comparisons, `sqrt`, `abs`, `next`, `integer` /
-`double` (identity coercions), `negated`, `s`.
+`double` (identity coercions), unary `-`, `s`.
 
 **Regex** (`src/runtime/regex.rs`, `bblib/05-regex.bub`) — literal `#/…/`;
-`match:` (→ a match result supporting `.bind:` over named groups `(?<name>…)`),
-`split:`, `~:` (used by `~` for `regex ~ string`), `==:`.
+`split:` (split a string on the pattern), `~:` (used by `~` to test `regex ~ string`),
+`==:`.
 
 **IO** (`bblib/06-io.bub`, `src/runtime/io.rs`) under the `[IO]` namespace:
 - `[IO]Handle` — `write:`, `writeln:`; class-side `stdout` / `stderr` / `stdin`.

@@ -12,7 +12,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 > **Rules**
 > - `subject.case:{ .when:cond do:result … .default:fallback }` — tests each `cond` against `subject` with the `~` operator; the **first match wins**. With no match and no `default:`, the result is `nil`.
 > - `do:` (and `default:`) accept either a **block** (the block receives the subject as its argument) or a **plain value** (used as the result).
-> - The **`~` match protocol** (`a ~ b`) is tried in this order: a custom `~:` method on `a` → a block predicate on either side → a class/type test (`Class ~ value` ⇒ is-instance-of) → regex (`regex ~ string`, or `string ~ regex`) → range membership (via the range's `~:`) → `==:` equality fallback.
+> - The **`~` match protocol**: `a ~ b` is `a.~:(b)` — the matcher is the **left** operand, so dispatch is class-first on `a`'s `~:` (define `~:` on your own class to customize). Built-in matchers: a **Class** tests is-instance-of (`Integer ~ 5`), a **Regex** tests a match against the string (`#/…/ ~ str`), a **Block** runs as a predicate over `b`, a **range** tests membership, and the default `Object#~:` is `==:` equality. (Because the matcher is on the left, `case` puts the `cond` first: `cond ~ subject`.)
 
 ```buildingblocks
 grade = score.case:{
@@ -29,8 +29,8 @@ name.case:{
 }
 ```
 
-The same `~` operator works standalone: `5 ~ (1..10)`, `'abc' ~ #/b/`,
-`value ~ TypeError`, `x ~ { |n| n > 0 }`.
+The same `~` operator works standalone, with the matcher on the left:
+`(1..10) ~ 5`, `#/b/ ~ 'abc'`, `TypeError ~ value`, `{ |n| n > 0 } ~ x`.
 
 > **⚠ Gotcha — `case:` matches with `~`, not `==`.** A `when:` clause succeeds
 > whenever `cond ~ subject` is truthy, so ranges, regexes, classes, and predicate
@@ -45,7 +45,7 @@ The same `~` operator works standalone: `5 ~ (1..10)`, `'abc' ~ #/b/`,
 > - `value.throw` throws **any value**. The `Error` classes add class-side convenience constructors: `Error.throw:'msg'` and `Error.throw:'msg' payload:p` build an instance and throw it.
 > - `{ … }.catch:{ |e| … }` runs the receiver block; if it throws, the thrown value is passed to the catch block, whose result becomes the value. `{ … }.catch:{ |e| … } finally:{ … }` additionally runs `finally:` **always** (on success or failure).
 > - **Catch by type** with `case`/`~` inside the handler: `e.case:{ .when:TypeError do:… }`.
-> - **Built-in hierarchy** (`00-bootstrap.bub`): `Error` with `@message @payload`, accessors `message`/`payload`, and `s` (→ `'ClassName: message'`); subclasses `TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`, `FiberError`.
+> - **Built-in hierarchy** (`00-bootstrap.bub`): `Error` with `@message @payload`, accessors `message`/`payload`, and `s` (→ `'ClassName: message'`); subclasses `TypeError`, `ArgumentError`, `MessageNotUnderstood`, `AmbiguousMethodError`, `ArithmeticError`, `IndexError`, `FiberError`.
 > - **Runtime errors are structured**: the VM maps its internal errors to these BB `Error` objects at the `catch:` boundary, so you can catch and inspect them.
 
 ```buildingblocks
@@ -68,7 +68,7 @@ an unknown selector becomes a `MessageNotUnderstood` — each with a `message` y
 can read.
 
 > **⚠ Gotcha — `throw` accepts any value, but typed catching expects `Error`s.**
-> You *can* `42.throw`, but catch-by-type (`e ~ TypeError`) only works when the
+> You *can* `42.throw`, but catch-by-type (`TypeError ~ e`) only works when the
 > thrown value is an `Error` instance. Throw `Error` subclasses (or use the
 > `Error.throw:` constructors) if handlers will dispatch on type.
 

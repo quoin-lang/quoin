@@ -42,9 +42,9 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 | `~` | Match (Part IV) |
 | `..` | Range (half-open) |
 | `!` (prefix) | Boolean negation |
-| `-` (prefix) | Negate (→ `negated`) |
+| `-` (prefix) | Negate (→ the no-arg `-` method) |
 | `%` (prefix) | String interpolation (→ `mod`) |
-| `+` (prefix) | No-op |
+| `+` (prefix) | Identity (→ the no-arg `+` method) |
 
 ### Operator precedence
 
@@ -59,12 +59,12 @@ Postfix sends (`.method`) bind tighter than any infix operator; prefix operators
 
 | Surface form | Compiles to |
 |---|---|
-| `a + b` (and `- * / %`) | `Send("+"…)` → overridable `+:` / `-:` / `*:` / `/:` / `%:` method |
-| `a == b` (and `!= < <= > >=`) | `Send("=="…)` etc. |
-| `a ~ b` | `Send("~"…)` → match protocol (custom `~:` first) |
+| `a + b` (and `- * / %`) | `Send("+:"…)` → overridable `+:` / `-:` / `*:` / `/:` / `%:` method (class-first, no global fallback) |
+| `a == b` (and `!= < <= > >=`) | `Send("==:"…)` → overridable `==:` / `!=:` / `<:` / `<=:` / `>:` / `>=:` methods |
+| `a ~ b` | `Send("~:"…)` → match protocol (dispatches `~:` on the left operand) |
 | `a .. b` | `Send("..:"…)` → `NumberRange` |
 | `a && b` / `a \|\| b` | short-circuit jumps (not a method send) |
-| `-x` | `Send("negated")` |
+| `-x` / `+x` | `Send("-")` / `Send("+")` — the no-arg `-` (negate) / `+` (identity) methods |
 | `!x` | `Send("!")` |
 | `%x` (prefix, on a string) | `Send("mod")` — `%{…}` interpolation |
 | `'fmt' % arg` | `Send("%:")` — `printf`-style substitution |
@@ -100,9 +100,11 @@ this first.
 8. **Redefining overrides; type/guard variants coexist.** A later same-signature
    definition (same param types, no guard) *replaces* the earlier — `bar -> {1}`
    then `bar --> {2}` makes `bar` return `2`. Variants that differ by parameter type
-   or carry a guard are kept as distinct multimethods, dispatched by argument;
-   equal-specificity **guarded** variants are tried in definition order, so define
-   specific guards before a catch-all.
+   or carry a guard are kept as distinct multimethods, dispatched by argument by
+   specificity (a guarded variant outranks an equal-typed unguarded one). Definition
+   order is **not** a tiebreaker: two equally-specific variants that both match raise
+   `AmbiguousMethodError` — pair specific guards with one unguarded catch-all (`|x|`),
+   or use `case`/`~` for ordered matching.
 9. **`new:{}` doesn't capture lexical scope, and `super` doesn't exist.** An empty
    `new:{}` leaves fields `nil`; only explicit assignment binds a field (its RHS is
    lexical, but it never mutates the outer variable). A plain-assignment
@@ -112,7 +114,8 @@ this first.
     blocks all match; the first matching `when:` wins. Order clauses
     most-specific-first.
 12. **`throw` takes any value, but catch-by-type needs `Error`s.** To dispatch with
-    `e ~ TypeError`, throw `Error` subclasses (or use `Error.throw:`).
+    `TypeError ~ e` (the matcher class is on the **left** of `~`), throw `Error`
+    subclasses (or use `Error.throw:`).
 13. **`%` has three meanings.** Infix between numbers = modulo; infix on a string =
     `printf`-style `%:`; prefix on a string = `%{…}` interpolation (`mod`).
 14. **`<-` vs `=`.** `<-` defines a once-only constant/class (redefining throws);
@@ -132,7 +135,8 @@ this first.
 - **Selector** — a method name, including its colons: `at:put:` is one selector
   with two argument slots. Operators are selectors too (`+:`, `~:`).
 - **Multimethod** — several definitions of one selector distinguished by argument
-  type or guard; dispatch picks the most specific match (ties → first defined).
+  type or guard; dispatch picks the most specific match (an equally-specific tie that
+  both match → `AmbiguousMethodError`).
 - **Eigenclass / singleton** — a per-object class created by `value <-- { … }`,
   holding methods for just that one object (named `$Type` internally).
 - **Mixin** — a class included into another with `.mix:`; its methods and
