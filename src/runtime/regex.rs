@@ -54,7 +54,7 @@ pub fn build_regex_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_bool(mc, matched))
         })
-        .instance_method("Split:", |vm, mc, receiver, args| {
+        .instance_method("split:", |vm, mc, receiver, args| {
             let s = crate::arg!(args, String, 0);
             let parts: Vec<Value> = receiver.with_native_state(|r: &NativeRegexState| {
                 r.regex
