@@ -1,7 +1,7 @@
 use crate::error::QuoinError;
 use crate::fiber::{run_vm_loop, Fiber};
 use crate::gc;
-use crate::value::{AnyCollect, NativeClassBuilder, Value};
+use crate::value::{AnyCollect, NativeCall, NativeClassBuilder, Value};
 use crate::vm::Frame;
 
 use gc_arena::collect::{DynCollect, Trace};
@@ -46,7 +46,7 @@ pub struct NativeFiberState {
     pub started: bool,
     stack: Vec<Value<'static>>,
     frames: Vec<Frame<'static>>,
-    native_args: Vec<Vec<Value<'static>>>,
+    native_args: Vec<NativeCall<'static>>,
     /// Final return value once the fiber completes normally.
     result: Option<Value<'static>>,
     /// The error value once the fiber fails.
@@ -109,12 +109,12 @@ impl NativeFiberState {
     /// Move the saved context out, leaving the slots empty.
     pub fn take_context<'gc>(
         &mut self,
-    ) -> (Vec<Value<'gc>>, Vec<Frame<'gc>>, Vec<Vec<Value<'gc>>>) {
+    ) -> (Vec<Value<'gc>>, Vec<Frame<'gc>>, Vec<NativeCall<'gc>>) {
         unsafe {
             (
                 transmute::<Vec<Value<'static>>, Vec<Value<'gc>>>(std::mem::take(&mut self.stack)),
                 transmute::<Vec<Frame<'static>>, Vec<Frame<'gc>>>(std::mem::take(&mut self.frames)),
-                transmute::<Vec<Vec<Value<'static>>>, Vec<Vec<Value<'gc>>>>(std::mem::take(
+                transmute::<Vec<NativeCall<'static>>, Vec<NativeCall<'gc>>>(std::mem::take(
                     &mut self.native_args,
                 )),
             )
@@ -126,13 +126,13 @@ impl NativeFiberState {
         &mut self,
         stack: Vec<Value<'gc>>,
         frames: Vec<Frame<'gc>>,
-        native_args: Vec<Vec<Value<'gc>>>,
+        native_args: Vec<NativeCall<'gc>>,
     ) {
         unsafe {
             self.stack = transmute::<Vec<Value<'gc>>, Vec<Value<'static>>>(stack);
             self.frames = transmute::<Vec<Frame<'gc>>, Vec<Frame<'static>>>(frames);
             self.native_args =
-                transmute::<Vec<Vec<Value<'gc>>>, Vec<Vec<Value<'static>>>>(native_args);
+                transmute::<Vec<NativeCall<'gc>>, Vec<NativeCall<'static>>>(native_args);
         }
     }
 }
@@ -169,8 +169,10 @@ impl AnyCollect for NativeFiberState {
             let frame_gc: &Frame<'gc> = unsafe { transmute(frame) };
             frame_gc.dyn_trace(cc);
         }
-        for inner in &self.native_args {
-            for val in inner {
+        for call in &self.native_args {
+            let recv_gc: &Value<'gc> = unsafe { transmute(&call.receiver) };
+            recv_gc.dyn_trace(cc);
+            for val in &call.args {
                 let val_gc: &Value<'gc> = unsafe { transmute(val) };
                 val_gc.dyn_trace(cc);
             }
@@ -195,8 +197,8 @@ fn status_of(fiber: Value<'_>) -> Result<FiberStatus, QuoinError> {
 pub fn build_fiber_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Fiber", Some("Object"))
         // Fiber.new:aBlock -> a fresh, unstarted fiber wrapping the block.
-        .class_method("new:", |vm, mc, args| {
-            let block_val = args[1];
+        .class_method("new:", |vm, mc, _receiver, args| {
+            let block_val = args[0];
             match block_val {
                 Value::Object(obj)
                     if matches!(obj.borrow().payload, crate::value::ObjectPayload::Block(_)) => {}
@@ -215,34 +217,34 @@ pub fn build_fiber_class() -> NativeClassBuilder {
             Ok(vm.new_native_state(mc, class, state))
         })
         // Fiber.yield:value / Fiber.yield -> suspend the running fiber.
-        .class_method("yield:", |vm, mc, args| vm.fiber_yield(mc, args[1]))
-        .class_method("yield", |vm, mc, _args| {
+        .class_method("yield:", |vm, mc, _receiver, args| vm.fiber_yield(mc, args[0]))
+        .class_method("yield", |vm, mc, _receiver, _args| {
             let nil = vm.new_nil(mc);
             vm.fiber_yield(mc, nil)
         })
         // Fiber.current -> the running fiber, or nil from the main program.
-        .class_method("current", |vm, mc, _args| {
+        .class_method("current", |vm, mc, _receiver, _args| {
             Ok(vm.current_fiber.unwrap_or_else(|| vm.new_nil(mc)))
         })
         // f.resume / f.resume:value -> run until the next yield or completion.
-        .instance_method("resume", |vm, mc, args| {
+        .instance_method("resume", |vm, mc, receiver, _args| {
             let nil = vm.new_nil(mc);
-            vm.fiber_resume(mc, args[0], nil)
+            vm.fiber_resume(mc, receiver, nil)
         })
-        .instance_method("resume:", |vm, mc, args| {
-            vm.fiber_resume(mc, args[0], args[1])
+        .instance_method("resume:", |vm, mc, receiver, args| {
+            vm.fiber_resume(mc, receiver, args[0])
         })
-        .instance_method("done?", |vm, mc, args| {
-            Ok(vm.new_bool(mc, status_of(args[0])? == FiberStatus::Done))
+        .instance_method("done?", |vm, mc, receiver, _args| {
+            Ok(vm.new_bool(mc, status_of(receiver)? == FiberStatus::Done))
         })
-        .instance_method("failed?", |vm, mc, args| {
-            Ok(vm.new_bool(mc, status_of(args[0])? == FiberStatus::Failed))
+        .instance_method("failed?", |vm, mc, receiver, _args| {
+            Ok(vm.new_bool(mc, status_of(receiver)? == FiberStatus::Failed))
         })
-        .instance_method("alive?", |vm, mc, args| {
-            Ok(vm.new_bool(mc, !status_of(args[0])?.is_terminated()))
+        .instance_method("alive?", |vm, mc, receiver, _args| {
+            Ok(vm.new_bool(mc, !status_of(receiver)?.is_terminated()))
         })
-        .instance_method("status", |vm, mc, args| {
-            let name = match status_of(args[0])? {
+        .instance_method("status", |vm, mc, receiver, _args| {
+            let name = match status_of(receiver)? {
                 FiberStatus::Created => "created",
                 FiberStatus::Suspended => "suspended",
                 FiberStatus::Running => "running",
@@ -252,15 +254,15 @@ pub fn build_fiber_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, name.to_string()))
         })
         // The fiber's final return value (nil unless it completed normally).
-        .instance_method("result", |vm, mc, args| {
-            let r = args[0]
+        .instance_method("result", |vm, mc, receiver, _args| {
+            let r = receiver
                 .with_native_state::<NativeFiberState, _, _>(|s| s.result())
                 .map_err(QuoinError::Other)?;
             Ok(r.unwrap_or_else(|| vm.new_nil(mc)))
         })
         // The error value if the fiber failed (nil otherwise).
-        .instance_method("error", |vm, mc, args| {
-            let e = args[0]
+        .instance_method("error", |vm, mc, receiver, _args| {
+            let e = receiver
                 .with_native_state::<NativeFiberState, _, _>(|s| s.error())
                 .map_err(QuoinError::Other)?;
             Ok(e.unwrap_or_else(|| vm.new_nil(mc)))

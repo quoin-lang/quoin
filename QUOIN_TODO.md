@@ -11,6 +11,15 @@ This document outlines the language features, compiler updates, and VM modificat
   a runtime check in `get_target_class_for_def`: when the receiver resolves to a value
   type, reject instance-variable declaration/use. See the note on
   `Compiler::is_value_type_target`.
+- [ ] Investigate a latent GC root-coverage gap surfaced by ultra-aggressive collection.
+  Forcing `arena.finish_cycle()` (or even `collect_debt()`) on *every* VM step instead of every
+  10 (`src/runner.rs`) makes the bblib `test` run fail with `Message not understood:
+  receiver=Nil, selector='add:'` — some value the test harness relies on is collected when GC
+  runs that frequently. **Reproduces identically on a pre-`send-receiver-split` HEAD**, so it
+  predates that change (not caused by the receiver/args rooting, which was stress-validated
+  separately). The normal `% 10` debt-paced collection masks it. Worth tracking down: likely a
+  temporary that's reachable only via the Rust stack across a step boundary in the `add:` /
+  collection-builder path. See `profiling/send-receiver-split/notes.md`.
 - [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
 - [ ] Design an installer.
   - [x] Named the language **Quoin** (extension `.qn`); rationale in `~/code/quoin/DECISIONS.md`.

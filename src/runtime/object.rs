@@ -3,11 +3,10 @@ use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
-        .instance_method("s", |vm, mc, args| {
-            Ok(vm.new_string(mc, format!("{}", args[0])))
+        .instance_method("s", |vm, mc, receiver, _args| {
+            Ok(vm.new_string(mc, format!("{}", receiver)))
         })
-        .instance_method("class", |vm, _mc, args| {
-            let receiver = args[0];
+        .instance_method("class", |vm, _mc, receiver, _args| {
             if let Some(c) = vm.get_class_for_lookup(receiver) {
                 Ok(Value::Class(c))
             } else {
@@ -22,9 +21,8 @@ pub fn build_object_class() -> NativeClassBuilder {
         //     (instance methods for an instance or class receiver; class-side
         //     methods for a metaclass receiver)
         //   - a Class -> is the receiver an instance of / does it mix in that class?
-        .instance_method("can?:", |vm, mc, args| {
-            let receiver = args[0];
-            let cap = args[1];
+        .instance_method("can?:", |vm, mc, receiver, args| {
+            let cap = args[0];
             let responds = if let Value::Class(c) = cap {
                 vm.is_instance_of(receiver, c)
             } else {
@@ -52,25 +50,25 @@ pub fn build_object_class() -> NativeClassBuilder {
             };
             Ok(vm.new_bool(mc, responds))
         })
-        .instance_method("~:", |vm, mc, args| {
-            vm.call_method(mc, args[0], "==:", vec![args[1]])
+        .instance_method("~:", |vm, mc, receiver, args| {
+            vm.call_method(mc, receiver, "==:", vec![args[0]])
         })
-        .instance_method("==:", |vm, mc, args| {
-            let lhs = args[0];
-            let rhs = args[1];
+        .instance_method("==:", |vm, mc, receiver, args| {
+            let lhs = receiver;
+            let rhs = args[0];
             Ok(vm.new_bool(mc, lhs == rhs))
         })
-        .instance_method("!=:", |vm, mc, args| {
-            let lhs = args[0];
-            let rhs = args[1];
+        .instance_method("!=:", |vm, mc, receiver, args| {
+            let lhs = receiver;
+            let rhs = args[0];
 
             let eq_result = vm.call_method(mc, lhs, "==:", vec![rhs])?;
             let false_val = vm.new_bool(mc, false);
             Ok(vm.new_bool(mc, eq_result == false_val))
         })
-        .instance_method("init", |_vm, _mc, args| Ok(args[0]))
-        .instance_method("print", |vm, mc, args| {
-            let s_result = vm.call_method(mc, args[0], "s", vec![])?;
+        .instance_method("init", |_vm, _mc, receiver, _args| Ok(receiver))
+        .instance_method("print", |vm, mc, receiver, _args| {
+            let s_result = vm.call_method(mc, receiver, "s", vec![])?;
 
             println!(
                 "{}",
@@ -85,8 +83,8 @@ pub fn build_object_class() -> NativeClassBuilder {
 
             Ok(vm.new_nil(mc))
         })
-        .instance_method("throw", |vm, _mc, args| {
-            vm.active_exception = Some(args[0]);
+        .instance_method("throw", |vm, _mc, receiver, _args| {
+            vm.active_exception = Some(receiver);
             Err(QuoinError::Thrown)
         })
 }

@@ -50,37 +50,37 @@ impl AnyCollect for NativeMapState {
 pub fn build_map_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Map", Some("Object"))
         //
-        .instance_method("containsKey?:", |vm, mc, args| {
-            let key = arg!(args, String, 1).to_string();
-            let b = args[0].with_native_state(|m: &NativeMapState| m.map.contains_key(&key))?;
+        .instance_method("containsKey?:", |vm, mc, receiver, args| {
+            let key = arg!(args, String, 0).to_string();
+            let b = receiver.with_native_state(|m: &NativeMapState| m.map.contains_key(&key))?;
             Ok(vm.new_bool(mc, b))
         })
-        .instance_method("at:", |vm, mc, args| {
-            let key = arg!(args, String, 1).to_string();
+        .instance_method("at:", |vm, mc, receiver, args| {
+            let key = arg!(args, String, 0).to_string();
             let value =
-                args[0].with_native_state(|m: &NativeMapState| m.get_map().get(&key).copied())?;
+                receiver.with_native_state(|m: &NativeMapState| m.get_map().get(&key).copied())?;
             Ok(if let Some(v) = value {
                 v
             } else {
                 vm.new_nil(mc)
             })
         })
-        .instance_method("at:put:", |_vm, mc, args| {
-            let key = arg!(args, String, 1).to_string();
-            let val = args[2];
-            args[0].with_native_state_mut(mc, |m: &mut NativeMapState| {
+        .instance_method("at:put:", |_vm, mc, receiver, args| {
+            let key = arg!(args, String, 0).to_string();
+            let val = args[1];
+            receiver.with_native_state_mut(mc, |m: &mut NativeMapState| {
                 m.get_map_mut().insert(key, val)
             })?;
-            Ok(args[0])
+            Ok(receiver)
         })
-        .instance_method("count", |vm, mc, args| {
+        .instance_method("count", |vm, mc, receiver, _args| {
             Ok(vm.new_int(
                 mc,
-                args[0].with_native_state(|m: &NativeMapState| m.get_map().len())? as i64,
+                receiver.with_native_state(|m: &NativeMapState| m.get_map().len())? as i64,
             ))
         })
-        .instance_method("keys", |vm, mc, args| {
-            let keys_vec = args[0].with_native_state(|m: &NativeMapState| {
+        .instance_method("keys", |vm, mc, receiver, _args| {
+            let keys_vec = receiver.with_native_state(|m: &NativeMapState| {
                 m.get_map()
                     .keys()
                     .map(|v| vm.new_string(mc, v.clone()))
@@ -88,17 +88,17 @@ pub fn build_map_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_list(mc, keys_vec))
         })
-        .instance_method("values", |vm, mc, args| {
-            let values_vec = args[0].with_native_state(|m: &NativeMapState| {
+        .instance_method("values", |vm, mc, receiver, _args| {
+            let values_vec = receiver.with_native_state(|m: &NativeMapState| {
                 m.get_map().values().map(|v| *v).collect::<Vec<_>>()
             })?;
             Ok(vm.new_list(mc, values_vec))
         })
-        .instance_method("==:", |vm, mc, args| {
+        .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_map =
-                args[0].with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone())?;
+                receiver.with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone())?;
             let rhs_map_res =
-                args[1].with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone());
+                args[0].with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone());
             let rhs_map = match rhs_map_res {
                 Ok(m) => m,
                 Err(_) => return Ok(vm.new_bool(mc, false)),
@@ -110,12 +110,12 @@ pub fn build_map_class() -> NativeClassBuilder {
 
             let keys: Vec<String> = lhs_map.keys().cloned().collect();
             for key in keys {
-                let lhs_val = args[0]
+                let lhs_val = receiver
                     .with_native_state::<NativeMapState, _, _>(|m| m.get_map().get(&key).copied())
                     .map_err(|e| QuoinError::Other(e))?
                     .ok_or_else(|| QuoinError::Other("Key missing in lhs".to_string()))?;
 
-                let rhs_val = args[1]
+                let rhs_val = args[0]
                     .with_native_state::<NativeMapState, _, _>(|m| m.get_map().get(&key).copied())
                     .map_err(|e| QuoinError::Other(e))?
                     .ok_or_else(|| QuoinError::Other("Key missing in rhs".to_string()))?;
@@ -184,22 +184,22 @@ impl AnyCollect for NativeKeyValuePairState {
 
 pub fn build_key_value_pair_class() -> NativeClassBuilder {
     NativeClassBuilder::new("KeyValuePair", Some("Object"))
-        .class_method("new:", |vm, mc, args| {
-            if !matches!(args[0], Value::Class(_)) {
+        .class_method("new:", |vm, mc, receiver, args| {
+            if !matches!(receiver, Value::Class(_)) {
                 return Err(QuoinError::TypeError {
                     expected: "Class".to_string(),
-                    got: args[0].type_name().to_string(),
+                    got: receiver.type_name().to_string(),
                     msg: "new: expects Class receiver".to_string(),
                 });
             }
-            let block = if let Value::Object(obj) = args[1]
+            let block = if let Value::Object(obj) = args[0]
                 && let ObjectPayload::Block(b) = &obj.borrow().payload
             {
                 *b
             } else {
                 return Err(QuoinError::TypeError {
                     expected: "Block".to_string(),
-                    got: args[1].type_name().to_string(),
+                    got: args[0].type_name().to_string(),
                     msg: "new: expects a Block".to_string(),
                 });
             };
@@ -251,7 +251,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             let state = NativeKeyValuePairState::new(key, value);
             let boxed_state: Box<dyn AnyCollect> = Box::new(state);
-            let active_class_val = vm.active_native_args.last().unwrap()[0];
+            let active_class_val = vm.active_native_args.last().unwrap().receiver;
             let class_obj = match active_class_val {
                 Value::Class(c) => c,
                 _ => {
@@ -268,27 +268,27 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             Ok(Value::Object(obj))
         })
-        .instance_method("init:", |_vm, mc, args| {
-            let key = args[1];
-            let value = args[2];
-            args[0].with_native_state_mut(mc, |kvp: &mut NativeKeyValuePairState| {
+        .instance_method("init:", |_vm, mc, receiver, args| {
+            let key = args[0];
+            let value = args[1];
+            receiver.with_native_state_mut(mc, |kvp: &mut NativeKeyValuePairState| {
                 kvp.set_key(key);
                 kvp.set_value(value);
             })?;
-            Ok(args[0])
+            Ok(receiver)
         })
-        .instance_method("key", |_vm, _mc, args| {
-            let key = args[0].with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_key())?;
+        .instance_method("key", |_vm, _mc, receiver, _args| {
+            let key = receiver.with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_key())?;
             Ok(key)
         })
-        .instance_method("value", |_vm, _mc, args| {
+        .instance_method("value", |_vm, _mc, receiver, _args| {
             let value =
-                args[0].with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_value())?;
+                receiver.with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_value())?;
             Ok(value)
         })
-        .instance_method("s", |vm, mc, args| {
+        .instance_method("s", |vm, mc, receiver, _args| {
             let key =
-                args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
+                receiver.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
 
             let key_s_val = vm.call_method(mc, key, "s", vec![])?;
             let key_s = if let Value::Object(obj) = key_s_val
@@ -299,7 +299,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
                 format!("{}", key_s_val)
             };
 
-            let active_receiver = vm.active_native_args.last().unwrap()[0];
+            let active_receiver = vm.active_native_args.last().unwrap().receiver;
             let value = active_receiver
                 .with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;
 
@@ -314,11 +314,11 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             Ok(vm.new_string(mc, format!("{}:{}", key_s, val_s)))
         })
-        .instance_method("==:", |vm, mc, args| {
+        .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_key =
-                args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
+                receiver.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
             let rhs_key_res =
-                args[1].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key());
+                args[0].with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key());
             let rhs_key = match rhs_key_res {
                 Ok(k) => k,
                 Err(_) => return Ok(vm.new_bool(mc, false)),
@@ -329,8 +329,8 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
                 return Ok(vm.new_bool(mc, false));
             }
 
-            let active_lhs = vm.active_native_args.last().unwrap()[0];
-            let active_rhs = vm.active_native_args.last().unwrap()[1];
+            let active_lhs = vm.active_native_args.last().unwrap().receiver;
+            let active_rhs = vm.active_native_args.last().unwrap().args[0];
 
             let lhs_val = active_lhs
                 .with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;

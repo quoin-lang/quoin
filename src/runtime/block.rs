@@ -1,15 +1,16 @@
 use crate::arg;
+use crate::recv;
 use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};
 
 pub fn build_block_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Block", Some("Object"))
-        .instance_method("arity", |vm, mc, args| {
-            let block = arg!(args, Block, 0);
+        .instance_method("arity", |vm, mc, receiver, _args| {
+            let block = recv!(receiver, Block);
             Ok(vm.new_int(mc, block.param_names.len() as i64))
         })
-        .instance_method("args", |vm, mc, args| {
-            let block = arg!(args, Block, 0);
+        .instance_method("args", |vm, mc, receiver, _args| {
+            let block = recv!(receiver, Block);
             Ok(vm.new_list(
                 mc,
                 block
@@ -19,16 +20,16 @@ pub fn build_block_class() -> NativeClassBuilder {
                     .collect(),
             ))
         })
-        .instance_method("name", |vm, mc, args| {
-            let block = arg!(args, Block, 0);
+        .instance_method("name", |vm, mc, receiver, _args| {
+            let block = recv!(receiver, Block);
             if let Some(name) = &block.name {
                 Ok(vm.new_symbol(mc, name.clone()))
             } else {
                 Ok(vm.new_nil(mc))
             }
         })
-        .instance_method("code", |vm, mc, args| {
-            let block = arg!(args, Block, 0);
+        .instance_method("code", |vm, mc, receiver, _args| {
+            let block = recv!(receiver, Block);
             if let Some(source_info) = &block.source_info
                 && let Some(text) = &source_info.source_text
             {
@@ -37,30 +38,30 @@ pub fn build_block_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
-        // .instance_method("value", |vm, mc, args| {
-        //     let block = arg!(args, Block, 0);
+        // .instance_method("value", |vm, mc, receiver, args| {
+        //     let block = recv!(receiver, Block);
         //     vm.execute_block(mc, block, Vec::new(), None)
         // })
-        // .instance_method("value:", |vm, mc, args| {
-        //     let block = arg!(args, Block, 0);
-        //     let val = args[1];
+        // .instance_method("value:", |vm, mc, receiver, args| {
+        //     let block = recv!(receiver, Block);
+        //     let val = args[0];
         //     vm.execute_block(mc, block, vec![val], None)
         // })
-        .instance_method("valueWithArgs:", |vm, mc, args| {
-            let block = arg!(args, Block, 0);
+        .instance_method("valueWithArgs:", |vm, mc, receiver, args| {
+            let block = recv!(receiver, Block);
             let block_args =
-                args[1].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())?;
+                args[0].with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())?;
             vm.execute_block(mc, block, block_args, None)
         })
-        .instance_method("valueWithSelf:", |vm, mc, args| {
-            let block = arg!(args, Block, 0);
-            let self_val = args[1];
+        .instance_method("valueWithSelf:", |vm, mc, receiver, args| {
+            let block = recv!(receiver, Block);
+            let self_val = args[0];
             vm.execute_block(mc, block, Vec::new(), Some(self_val))
         })
-        .instance_method("value:withSelf:", |vm, mc, args| {
-            let block = arg!(args, Block, 0);
-            let arg_val = args[1];
-            let self_val = args[2];
+        .instance_method("value:withSelf:", |vm, mc, receiver, args| {
+            let block = recv!(receiver, Block);
+            let arg_val = args[0];
+            let self_val = args[1];
             let block_args = match arg_val
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
             {
@@ -69,25 +70,25 @@ pub fn build_block_class() -> NativeClassBuilder {
             };
             vm.execute_block(mc, block, block_args, Some(self_val))
         })
-        .instance_method("valueWithSelfOrArg:", |vm, mc, args| {
-            let block = arg!(args, Block, 0);
-            let arg_val = args[1];
+        .instance_method("valueWithSelfOrArg:", |vm, mc, receiver, args| {
+            let block = recv!(receiver, Block);
+            let arg_val = args[0];
             vm.execute_block(mc, block, vec![arg_val], Some(arg_val))
         })
         .instance_method(
             "==:",
-            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+            |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])),
         )
-        .instance_method("catch:", |vm, mc, args| {
-            let receiver_block = arg!(args, Block, 0);
+        .instance_method("catch:", |vm, mc, receiver, _args| {
+            let receiver_block = recv!(receiver, Block);
 
             let initial_frame_count = vm.frames.len();
             let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
             match res {
                 Ok(val) => Ok(val),
                 Err(e) => {
-                    let active_args = vm.active_native_args.last().unwrap();
-                    let catch_block = arg!(active_args, Block, 1);
+                    let active_args = &vm.active_native_args.last().unwrap().args;
+                    let catch_block = arg!(active_args, Block, 0);
                     while vm.frames.len() > initial_frame_count {
                         vm.frames.pop();
                     }
@@ -101,16 +102,16 @@ pub fn build_block_class() -> NativeClassBuilder {
                 }
             }
         })
-        .instance_method("catch:finally:", |vm, mc, args| {
-            let receiver_block = arg!(args, Block, 0);
+        .instance_method("catch:finally:", |vm, mc, receiver, _args| {
+            let receiver_block = recv!(receiver, Block);
 
             let initial_frame_count = vm.frames.len();
             let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
             match res {
                 Ok(val) => {
                     vm.push(val);
-                    let active_args = vm.active_native_args.last().unwrap();
-                    let finally_block = arg!(active_args, Block, 2);
+                    let active_args = &vm.active_native_args.last().unwrap().args;
+                    let finally_block = arg!(active_args, Block, 1);
                     let finally_res = vm.execute_block(mc, finally_block, Vec::new(), None);
                     let val = vm.pop()?;
                     finally_res.map(|_| val)
@@ -125,8 +126,8 @@ pub fn build_block_class() -> NativeClassBuilder {
                         vm.quoinerror_to_value(mc, &e)
                     };
 
-                    let active_args = vm.active_native_args.last().unwrap();
-                    let catch_block = arg!(active_args, Block, 1);
+                    let active_args = &vm.active_native_args.last().unwrap().args;
+                    let catch_block = arg!(active_args, Block, 0);
                     let catch_res = vm.execute_block(mc, catch_block, vec![exception_val], None);
                     while vm.frames.len() > initial_frame_count {
                         vm.frames.pop();
@@ -141,8 +142,8 @@ pub fn build_block_class() -> NativeClassBuilder {
                         Err(err) => Err(err),
                     };
 
-                    let active_args = vm.active_native_args.last().unwrap();
-                    let finally_block = arg!(active_args, Block, 2);
+                    let active_args = &vm.active_native_args.last().unwrap().args;
+                    let finally_block = arg!(active_args, Block, 1);
                     let finally_res = vm.execute_block(mc, finally_block, Vec::new(), None);
 
                     let catch_res = match catch_res_err {

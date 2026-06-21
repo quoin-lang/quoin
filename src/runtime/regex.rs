@@ -30,11 +30,11 @@ impl AnyCollect for NativeRegexState {
 }
 pub fn build_regex_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Regex", Some("Object"))
-        .instance_method("==:", |vm, mc, args| {
+        .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_pat =
-                args[0].with_native_state(|r: &NativeRegexState| r.regex.as_str().to_string())?;
+                receiver.with_native_state(|r: &NativeRegexState| r.regex.as_str().to_string())?;
             let rhs_pat =
-                args[1].with_native_state(|r: &NativeRegexState| r.regex.as_str().to_string());
+                args[0].with_native_state(|r: &NativeRegexState| r.regex.as_str().to_string());
             match rhs_pat {
                 Ok(rhs_pat) => Ok(vm.new_bool(mc, lhs_pat == rhs_pat)),
                 Err(_) => Ok(vm.new_bool(mc, false)),
@@ -42,9 +42,9 @@ pub fn build_regex_class() -> NativeClassBuilder {
         })
         // `pattern ~ str` -> `Send(pattern, "~:", [str])`: true if the regex matches.
         // A non-String operand never matches (mirrors the old `native_match`).
-        .instance_method("~:", |vm, mc, args| {
-            let matched = args[0].with_native_state(|r: &NativeRegexState| {
-                if let Value::Object(o) = args[1]
+        .instance_method("~:", |vm, mc, receiver, args| {
+            let matched = receiver.with_native_state(|r: &NativeRegexState| {
+                if let Value::Object(o) = args[0]
                     && let ObjectPayload::String(s) = &o.borrow().payload
                 {
                     r.regex.is_match(&**s)
@@ -54,9 +54,9 @@ pub fn build_regex_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_bool(mc, matched))
         })
-        .instance_method("Split:", |vm, mc, args| {
-            let s = crate::arg!(args, String, 1);
-            let parts: Vec<Value> = args[0].with_native_state(|r: &NativeRegexState| {
+        .instance_method("Split:", |vm, mc, receiver, args| {
+            let s = crate::arg!(args, String, 0);
+            let parts: Vec<Value> = receiver.with_native_state(|r: &NativeRegexState| {
                 r.regex
                     .split(&**s)
                     .map(|part| vm.new_string(mc, part.to_string()))

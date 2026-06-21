@@ -106,30 +106,30 @@ impl AnyCollect for NativeMethodState {
 
 pub fn build_method_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Method", Some("Object"))
-        .instance_method("selector", |vm, mc, args| {
+        .instance_method("selector", |vm, mc, receiver, _args| {
             let selector =
-                args[0].with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
+                receiver.with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
             Ok(vm.new_symbol(mc, selector))
         })
-        .instance_method("name", |vm, mc, args| {
+        .instance_method("name", |vm, mc, receiver, _args| {
             let selector =
-                args[0].with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
+                receiver.with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
             Ok(vm.new_symbol(mc, selector))
         })
-        .instance_method("extension?", |vm, mc, args| {
+        .instance_method("extension?", |vm, mc, receiver, _args| {
             let is_ext =
-                args[0].with_native_state::<NativeMethodState, _, _>(|m| m.is_extension)?;
+                receiver.with_native_state::<NativeMethodState, _, _>(|m| m.is_extension)?;
             Ok(vm.new_bool(mc, is_ext))
         })
-        .instance_method("block", |vm, mc, args| {
+        .instance_method("block", |vm, mc, receiver, _args| {
             // A native method has no user block; report it as nil.
-            let block = args[0].with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
+            let block = receiver.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
             Ok(block.unwrap_or_else(|| vm.new_nil(mc)))
         })
-        .instance_method("callOn:", |vm, mc, args| {
+        .instance_method("callOn:", |vm, mc, receiver, args| {
             let block_val =
-                args[0].with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
-            let receiver = args[1];
+                receiver.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
+            let receiver = args[0];
             if let Some(Value::Object(obj)) = block_val
                 && let ObjectPayload::Block(block) = &obj.borrow().payload
             {
@@ -140,6 +140,6 @@ pub fn build_method_class() -> NativeClassBuilder {
         })
         .instance_method(
             "==:",
-            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+            |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])),
         )
 }

@@ -12,25 +12,25 @@ use std::path::PathBuf;
 
 pub fn build_runtime_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Runtime", Some("Object"))
-        .class_method("eval:", |vm, mc, args| {
-            let code = arg!(args, String, 1);
+        .class_method("eval:", |vm, mc, _receiver, args| {
+            let code = arg!(args, String, 0);
             eval_string(vm, mc, &code, "<string>", None)
         })
-        .class_method("eval:self:", |vm, mc, args| {
-            let code = arg!(args, String, 1);
-            let self_val = args[2];
+        .class_method("eval:self:", |vm, mc, _receiver, args| {
+            let code = arg!(args, String, 0);
+            let self_val = args[1];
             eval_string(vm, mc, &code, "<string>", Some(self_val))
         })
-        .class_method("evalFile:", |vm, mc, args| {
-            let filename = arg!(args, String, 1);
+        .class_method("evalFile:", |vm, mc, _receiver, args| {
+            let filename = arg!(args, String, 0);
             eval_file(vm, mc, &filename, None)
         })
-        .class_method("evalFile:self:", |vm, mc, args| {
-            let filename = arg!(args, String, 1);
-            let self_val = args[2];
+        .class_method("evalFile:self:", |vm, mc, _receiver, args| {
+            let filename = arg!(args, String, 0);
+            let self_val = args[1];
             eval_file(vm, mc, &filename, Some(self_val))
         })
-        .class_method("arguments", |vm, mc, _args| {
+        .class_method("arguments", |vm, mc, _receiver, _args| {
             let args_list = vm
                 .options
                 .arguments
@@ -39,7 +39,7 @@ pub fn build_runtime_class() -> NativeClassBuilder {
                 .collect::<Vec<_>>();
             Ok(vm.new_list(mc, args_list))
         })
-        .class_method("options", |vm, mc, _args| {
+        .class_method("options", |vm, mc, _receiver, _args| {
             let mut map = HashMap::new();
             let args_list = vm
                 .options
@@ -52,7 +52,7 @@ pub fn build_runtime_class() -> NativeClassBuilder {
             map.insert("supports_color".to_string(), supports_color_val);
             Ok(vm.new_map(mc, map))
         })
-        .class_method("supportsColor", |vm, mc, _args| {
+        .class_method("supportsColor", |vm, mc, _receiver, _args| {
             Ok(vm.new_bool(mc, vm.options.supports_color))
         })
 }

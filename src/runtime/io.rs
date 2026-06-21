@@ -16,19 +16,19 @@ pub struct NativeIoFolder {
 
 pub fn build_io_folder_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Folder", Some("Object"))
-        .class_method("open:", |vm, mc, args| {
-            let path = arg!(args, String, 1);
+        .class_method("open:", |vm, mc, _receiver, args| {
+            let path = arg!(args, String, 0);
             Ok(new_native_io_folder(vm, mc, path))
         })
-        .instance_method("path", |vm, mc, args| {
-            args[0]
+        .instance_method("path", |vm, mc, receiver, _args| {
+            receiver
                 .with_native_state(|io: &NativeIoFolder| {
                     vm.new_string(mc, io.path.to_string_lossy().into_owned())
                 })
                 .map_err(|e| QuoinError::Other(e.to_string()))
         })
-        .instance_method("next", |vm, mc, args| {
-            let r = args[0].with_native_state_mut(mc, |io: &mut NativeIoFolder| {
+        .instance_method("next", |vm, mc, receiver, _args| {
+            let r = receiver.with_native_state_mut(mc, |io: &mut NativeIoFolder| {
                 if io.iter.is_none() {
                     io.iter = Some(read_dir(&io.path).unwrap());
                 }
@@ -52,15 +52,15 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                 vm.new_nil(mc)
             });
         })
-        .instance_method("reset", |vm, mc, args| {
-            args[0].with_native_state_mut(mc, |io: &mut NativeIoFolder| {
+        .instance_method("reset", |vm, mc, receiver, _args| {
+            receiver.with_native_state_mut(mc, |io: &mut NativeIoFolder| {
                 io.iter = None;
             })?;
             Ok(vm.new_nil(mc))
         })
-        .instance_method("==:", |vm, mc, args| {
-            let lhs_path = args[0].with_native_state(|io: &NativeIoFolder| io.path.clone())?;
-            let rhs_path = args[1].with_native_state(|io: &NativeIoFolder| io.path.clone());
+        .instance_method("==:", |vm, mc, receiver, args| {
+            let lhs_path = receiver.with_native_state(|io: &NativeIoFolder| io.path.clone())?;
+            let rhs_path = args[0].with_native_state(|io: &NativeIoFolder| io.path.clone());
             match rhs_path {
                 Ok(rhs_path) => Ok(vm.new_bool(mc, lhs_path == rhs_path)),
                 Err(_) => Ok(vm.new_bool(mc, false)),
@@ -104,8 +104,8 @@ fn new_native_io_file<'a>(
 
 pub fn build_io_file_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]File", Some("Object"))
-        .class_method("open:", |vm, mc, args| {
-            let path = arg!(args, String, 1);
+        .class_method("open:", |vm, mc, _receiver, args| {
+            let path = arg!(args, String, 0);
             let os_string = OsString::from(path.as_str());
             Ok(new_native_io_file(
                 vm,
@@ -114,15 +114,15 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 metadata(os_string).map_err(|e| QuoinError::Other(e.to_string()))?,
             ))
         })
-        .instance_method("fullpath", |vm, mc, args| {
-            args[0]
+        .instance_method("fullpath", |vm, mc, receiver, _args| {
+            receiver
                 .with_native_state(|io: &NativeIoFile| {
                     vm.new_string(mc, io.path.to_string_lossy().into_owned())
                 })
                 .map_err(|e| QuoinError::Other(e.to_string()))
         })
-        .instance_method("name", |vm, mc, args| {
-            args[0]
+        .instance_method("name", |vm, mc, receiver, _args| {
+            receiver
                 .with_native_state(|io: &NativeIoFile| {
                     vm.new_string(
                         mc,
@@ -134,8 +134,8 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 })
                 .map_err(|e| QuoinError::Other(e.to_string()))
         })
-        .instance_method("ext", |vm, mc, args| {
-            let ext = args[0].with_native_state(|io: &NativeIoFile| {
+        .instance_method("ext", |vm, mc, receiver, _args| {
+            let ext = receiver.with_native_state(|io: &NativeIoFile| {
                 PathBuf::from(&io.path)
                     .extension()
                     .map(|s| s.to_os_string())
@@ -143,25 +143,25 @@ pub fn build_io_file_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_string(mc, ext.to_string_lossy().to_string()))
         })
-        .instance_method("s", |vm, mc, args| {
+        .instance_method("s", |vm, mc, receiver, _args| {
             Ok(vm.new_string(
                 mc,
-                args[0]
+                receiver
                     .with_native_state(|io: &NativeIoFile| {
                         io.path.to_string_lossy().to_owned().to_string()
                     })
                     .map_err(|e| QuoinError::Other(e.to_string()))?,
             ))
         })
-        .instance_method("is_file?", |vm, mc, args| {
-            args[0]
+        .instance_method("is_file?", |vm, mc, receiver, _args| {
+            receiver
                 .with_native_state(|io: &NativeIoFile| io.metadata.is_file())
                 .map_err(|e| QuoinError::Other(e.to_string()))
                 .map(|v| vm.new_bool(mc, v))
         })
-        .instance_method("==:", |vm, mc, args| {
-            let lhs_path = args[0].with_native_state(|io: &NativeIoFile| io.path.clone())?;
-            let rhs_path = args[1].with_native_state(|io: &NativeIoFile| io.path.clone());
+        .instance_method("==:", |vm, mc, receiver, args| {
+            let lhs_path = receiver.with_native_state(|io: &NativeIoFile| io.path.clone())?;
+            let rhs_path = args[0].with_native_state(|io: &NativeIoFile| io.path.clone());
             match rhs_path {
                 Ok(rhs_path) => Ok(vm.new_bool(mc, lhs_path == rhs_path)),
                 Err(_) => Ok(vm.new_bool(mc, false)),
@@ -229,29 +229,29 @@ fn get_io_string<'gc>(
 
 pub fn build_io_handle_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Handle", Some("Object"))
-        .class_method("stdout", |vm, mc, _args| {
+        .class_method("stdout", |vm, mc, _receiver, _args| {
             Ok(new_native_io_handle_with_wrapper(
                 vm,
                 mc,
                 NativeIoHandleWrapper::Stdout(stdout()),
             ))
         })
-        .class_method("stderr", |vm, mc, _args| {
+        .class_method("stderr", |vm, mc, _receiver, _args| {
             Ok(new_native_io_handle_with_wrapper(
                 vm,
                 mc,
                 NativeIoHandleWrapper::Stderr(stderr()),
             ))
         })
-        .class_method("stdin", |vm, mc, _args| {
+        .class_method("stdin", |vm, mc, _receiver, _args| {
             Ok(new_native_io_handle_with_wrapper(
                 vm,
                 mc,
                 NativeIoHandleWrapper::Stdin(stdin()),
             ))
         })
-        .instance_method("s", |vm, mc, args| {
-            let s = args[0].with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+        .instance_method("s", |vm, mc, receiver, _args| {
+            let s = receiver.with_native_state(|h: &NativeIoHandle| match &h.wrapper {
                 NativeIoHandleWrapper::Stdout(_) => "[IO]Handle.stdout",
                 NativeIoHandleWrapper::Stderr(_) => "[IO]Handle.stderr",
                 NativeIoHandleWrapper::Stdin(_) => "[IO]Handle.stdin",
@@ -259,9 +259,9 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             })?;
             Ok(vm.new_string(mc, s.to_string()))
         })
-        .instance_method("write:", |vm, mc, args| {
-            let mut s = get_io_string(vm, mc, args[1])?;
-            let active_receiver = vm.active_native_args.last().unwrap()[0];
+        .instance_method("write:", |vm, mc, _receiver, args| {
+            let mut s = get_io_string(vm, mc, args[0])?;
+            let active_receiver = vm.active_native_args.last().unwrap().receiver;
 
             let is_stdout_or_stderr = active_receiver
                 .with_native_state(|h: &NativeIoHandle| match &h.wrapper {
@@ -300,9 +300,9 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
 
             Ok(vm.new_nil(mc))
         })
-        .instance_method("writeln:", |vm, mc, args| {
-            let mut s = get_io_string(vm, mc, args[1])?;
-            let active_receiver = vm.active_native_args.last().unwrap()[0];
+        .instance_method("writeln:", |vm, mc, _receiver, args| {
+            let mut s = get_io_string(vm, mc, args[0])?;
+            let active_receiver = vm.active_native_args.last().unwrap().receiver;
 
             let is_stdout_or_stderr = active_receiver
                 .with_native_state(|h: &NativeIoHandle| match &h.wrapper {
@@ -341,14 +341,14 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
 
             Ok(vm.new_nil(mc))
         })
-        .instance_method("==:", |vm, mc, args| {
-            let lhs_val = args[0].with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+        .instance_method("==:", |vm, mc, receiver, args| {
+            let lhs_val = receiver.with_native_state(|h: &NativeIoHandle| match &h.wrapper {
                 NativeIoHandleWrapper::Stdout(_) => Some(0),
                 NativeIoHandleWrapper::Stderr(_) => Some(1),
                 NativeIoHandleWrapper::Stdin(_) => Some(2),
                 NativeIoHandleWrapper::File(_) => None,
             })?;
-            let rhs_val = args[1].with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+            let rhs_val = args[0].with_native_state(|h: &NativeIoHandle| match &h.wrapper {
                 NativeIoHandleWrapper::Stdout(_) => Some(0),
                 NativeIoHandleWrapper::Stderr(_) => Some(1),
                 NativeIoHandleWrapper::Stdin(_) => Some(2),
@@ -380,7 +380,7 @@ mod tests {
 
             // Build and register the ANSI class
             let ansi_builder = NativeClassBuilder::new("ANSI", Some("Object"))
-                .instance_method("string", |vm, mc, _args| {
+                .instance_method("string", |vm, mc, _receiver, _args| {
                     Ok(vm.new_string(mc, "$bw[bold text$]".to_string()))
                 });
             vm.register_native_class(mc, ansi_builder);

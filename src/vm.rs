@@ -10,7 +10,7 @@ use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
 use crate::value::{
-    AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeClass, NativeFunc, Object,
+    AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeCall, NativeClass, NativeFunc, Object,
     ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, gc, gcl};
@@ -119,7 +119,7 @@ pub struct VmState<'gc> {
     pub active_exception: Option<Value<'gc>>,
     pub last_send_receiver: Option<Value<'gc>>,
     pub last_send_args: Vec<Value<'gc>>,
-    pub active_native_args: Vec<Vec<Value<'gc>>>,
+    pub active_native_args: Vec<NativeCall<'gc>>,
 
     /// Yielder of the *currently running* coroutine. Set by the driver from the
     /// running fiber's stored slot before every resume, so it can never dangle.
@@ -145,7 +145,7 @@ pub struct VmState<'gc> {
     /// Saved execution context for the main program while a guest fiber runs.
     pub main_saved_stack: Vec<Value<'gc>>,
     pub main_saved_frames: Vec<Frame<'gc>>,
-    pub main_saved_native_args: Vec<Vec<Value<'gc>>>,
+    pub main_saved_native_args: Vec<NativeCall<'gc>>,
     /// An error raised inside a guest fiber, delivered to its resumer.
     #[collect(require_static)]
     pub fiber_error: Option<QuoinError>,
@@ -161,10 +161,13 @@ pub enum VmStatus<'gc> {
 }
 
 pub trait Callable<'gc> {
+    /// `receiver` is passed separately from `args` (which holds only the real
+    /// arguments) so the hot path never prepends the receiver into a fresh Vec.
     fn call(
         &self,
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
+        receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
         selector: Option<String>,
     ) -> Result<(), QuoinError>;
@@ -179,17 +182,15 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         &self,
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
+        receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
         selector: Option<String>,
     ) -> Result<(), QuoinError> {
-        if args.is_empty() {
-            return Err(QuoinError::Other(
-                "Method call arguments is empty (missing receiver)".to_string(),
-            ));
-        }
-        let receiver = args[0];
-        let method_args = args[1..].to_vec();
-        vm.start_block_as_method(mc, self.block, receiver, method_args, selector, true);
+        let receiver = receiver.ok_or_else(|| {
+            QuoinError::Other("Method call is missing a receiver".to_string())
+        })?;
+        // `args` is already the method args (no receiver) — pass it straight through.
+        vm.start_block_as_method(mc, self.block, receiver, args, selector, true);
         Ok(())
     }
 }
@@ -203,6 +204,7 @@ impl<'gc> Callable<'gc> for MetaCallable<'gc> {
         &self,
         vm: &mut VmState<'gc>,
         _mc: &Mutation<'gc>,
+        _receiver: Option<Value<'gc>>,
         _args: Vec<Value<'gc>>,
         _selector: Option<String>,
     ) -> Result<(), QuoinError> {
@@ -220,22 +222,21 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
         &self,
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
+        _receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
         selector: Option<String>,
     ) -> Result<(), QuoinError> {
-        if args.len() != 2 {
-            return Err(QuoinError::Other(
-                "new: expects receiver and a block".to_string(),
-            ));
+        if args.len() != 1 {
+            return Err(QuoinError::Other("new: expects a block".to_string()));
         }
-        let block = if let Value::Object(obj) = args[1]
+        let block = if let Value::Object(obj) = args[0]
             && let ObjectPayload::Block(b) = &obj.borrow().payload
         {
             *b
         } else {
             return Err(QuoinError::TypeError {
                 expected: "Block".to_string(),
-                got: args[1].type_name().to_string(),
+                got: args[0].type_name().to_string(),
                 msg: "new: expects a Block".to_string(),
             });
         };
@@ -257,11 +258,12 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         &self,
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
+        _receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
         _selector: Option<String>,
     ) -> Result<(), QuoinError> {
-        if args.len() != 1 {
-            return Err(QuoinError::Other("new expects only the receiver".to_string()));
+        if !args.is_empty() {
+            return Err(QuoinError::Other("new expects no arguments".to_string()));
         }
 
         // Create the new object
@@ -283,11 +285,21 @@ impl<'gc> Callable<'gc> for NativeCallable {
         &self,
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
+        receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
         _selector: Option<String>,
     ) -> Result<(), QuoinError> {
-        vm.active_native_args.push(args.clone());
-        let ret = self.0.0(vm, mc, args);
+        let receiver = receiver.ok_or_else(|| {
+            QuoinError::Other("native method called without a receiver".to_string())
+        })?;
+        // Keep (receiver, args) GC-rooted as one unit so a native fn can re-read
+        // them after a nested call that may have collected. One push/pop -> they
+        // can never desync.
+        vm.active_native_args.push(NativeCall {
+            receiver,
+            args: args.clone(),
+        });
+        let ret = self.0.0(vm, mc, receiver, args);
         vm.active_native_args.pop();
         let ret = ret?;
         vm.push(ret);
@@ -875,10 +887,8 @@ impl<'gc> VmState<'gc> {
     ) -> Result<usize, QuoinError> {
         let method = self.lookup_method(mc, receiver, selector, &args)?;
         if let Some(method) = method {
-            let mut all_args = vec![receiver];
-            all_args.extend(args);
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, all_args, Some(selector.to_string()))?;
+            method.call(self, mc, Some(receiver), args, Some(selector.to_string()))?;
             Ok(initial_frame_count)
         } else {
             Err(QuoinError::Other(format!(
@@ -898,10 +908,8 @@ impl<'gc> VmState<'gc> {
     ) -> Result<Value<'gc>, QuoinError> {
         let method = self.lookup_method(mc, receiver, selector, &args)?;
         if let Some(method) = method {
-            let mut all_args = vec![receiver];
-            all_args.extend(args);
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, all_args, Some(selector.to_string()))?;
+            method.call(self, mc, Some(receiver), args, Some(selector.to_string()))?;
 
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
@@ -979,10 +987,8 @@ impl<'gc> VmState<'gc> {
         };
 
         if let Some(method) = method {
-            let mut all_args = vec![receiver];
-            all_args.extend(args);
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, all_args, Some(selector.to_string()))?;
+            method.call(self, mc, Some(receiver), args, Some(selector.to_string()))?;
 
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
@@ -3181,9 +3187,7 @@ impl<'gc> VmState<'gc> {
 
                 let method_opt = self.lookup_method(mc, receiver, &selector, &args)?;
                 if let Some(callable) = method_opt {
-                    let mut all_args = vec![receiver];
-                    all_args.extend(args);
-                    callable.call(self, mc, all_args, Some(selector.clone()))?;
+                    callable.call(self, mc, Some(receiver), args, Some(selector.clone()))?;
                 } else {
                     // The selector may still exist with non-matching signatures;
                     // surface those filtered-out variants as a hint.
@@ -3665,12 +3669,13 @@ mod tests {
     fn native_add<'gc>(
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, QuoinError> {
-        let a = args[0]
+        let a = receiver
             .as_i64()
             .ok_or_else(|| QuoinError::Other("Invalid types".to_string()))?;
-        let b = args[1]
+        let b = args[0]
             .as_i64()
             .ok_or_else(|| QuoinError::Other("Invalid types".to_string()))?;
         Ok(vm.new_int(mc, a + b))
@@ -4044,7 +4049,7 @@ mod tests {
             let appended = vm.new_native_method(
                 mc,
                 "can?:".to_string(),
-                NativeFunc(|vm, mc, _args| Ok(vm.new_nil(mc))),
+                NativeFunc(|vm, mc, _receiver, _args| Ok(vm.new_nil(mc))),
                 None,
             );
             VmState::append_method_to_chain(mc, native_method, appended)
@@ -4069,10 +4074,10 @@ mod tests {
             vm.register_native_class(mc, build_string_class());
             // Two typed class-side `kind:` variants on one selector.
             let builder = NativeClassBuilder::new("ScoreTest", Some("Object"))
-                .typed_class_method("kind:", &["Integer"], |vm, mc, _args| {
+                .typed_class_method("kind:", &["Integer"], |vm, mc, _receiver, _args| {
                     Ok(vm.new_string(mc, "int".to_string()))
                 })
-                .typed_class_method("kind:", &["String"], |vm, mc, _args| {
+                .typed_class_method("kind:", &["String"], |vm, mc, _receiver, _args| {
                     Ok(vm.new_string(mc, "str".to_string()))
                 });
             vm.register_native_class(mc, builder);
@@ -4880,7 +4885,7 @@ mod tests {
 
             // Build a namespaced native class [IO]File
             let file_builder = NativeClassBuilder::new("[IO]File", Some("Object"))
-                .instance_method("path", |vm, mc, _args| {
+                .instance_method("path", |vm, mc, _receiver, _args| {
                     Ok(vm.new_string(mc, "/etc/passwd".to_string()))
                 });
             vm.register_native_class(mc, file_builder);
@@ -4913,25 +4918,25 @@ mod tests {
 
             // Build native class [IO]Resource
             let resource_builder = NativeClassBuilder::new("[IO]Resource", Some("Object"))
-                .class_method("create", |vm, mc, _args| {
+                .class_method("create", |vm, mc, _receiver, _args| {
                     let class_obj = vm.get_builtin_class("[IO]Resource");
                     let state = OpaqueState(MyCustomResource { counter: 10 });
                     Ok(vm.new_native_state(mc, class_obj, state))
                 })
-                .instance_method("get", |vm, mc, args| {
-                    let val = args[0]
+                .instance_method("get", |vm, mc, receiver, _args| {
+                    let val = receiver
                         .with_native_state::<MyCustomResource, _, _>(|res| res.counter)
                         .unwrap();
                     Ok(vm.new_int(mc, val as i64))
                 })
-                .instance_method("inc:", |_vm, mc, args| {
-                    let val = args[1].as_i64().expect("Expected Int") as i32;
-                    args[0]
+                .instance_method("inc:", |_vm, mc, receiver, args| {
+                    let val = args[0].as_i64().expect("Expected Int") as i32;
+                    receiver
                         .with_native_state_mut::<MyCustomResource, _, _>(mc, |res| {
                             res.counter += val;
                         })
                         .unwrap();
-                    Ok(args[0])
+                    Ok(receiver)
                 });
             vm.register_native_class(mc, resource_builder);
             vm
@@ -4980,7 +4985,7 @@ mod tests {
                             vm.new_native_method(
                                 mc,
                                 "name".to_string(),
-                                NativeFunc::new(|vm, mc, _args| {
+                                NativeFunc::new(|vm, mc, _receiver, _args| {
                                     Ok(vm.new_string(mc, "Point".to_string()))
                                 }),
                                 None,

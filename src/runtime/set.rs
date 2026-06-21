@@ -47,46 +47,46 @@ impl AnyCollect for NativeSetState {
 
 pub fn build_set_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Set", Some("Object"))
-        .instance_method("count", |vm, mc, args| {
-            let len = args[0]
+        .instance_method("count", |vm, mc, receiver, _args| {
+            let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
             Ok(vm.new_int(mc, len as i64))
         })
-        .instance_method("add:", |vm, mc, args| {
-            vm.set_add(mc, args[0], args[1])?;
-            Ok(args[0])
+        .instance_method("add:", |vm, mc, receiver, args| {
+            vm.set_add(mc, receiver, args[0])?;
+            Ok(receiver)
         })
-        .instance_method("remove:", |vm, mc, args| {
-            vm.set_remove(mc, args[0], args[1])?;
-            Ok(args[0])
+        .instance_method("remove:", |vm, mc, receiver, args| {
+            vm.set_remove(mc, receiver, args[0])?;
+            Ok(receiver)
         })
-        .instance_method("contains?:", |vm, mc, args| {
-            let found = vm.set_contains(mc, args[0], args[1])?;
+        .instance_method("contains?:", |vm, mc, receiver, args| {
+            let found = vm.set_contains(mc, receiver, args[0])?;
             Ok(vm.new_bool(mc, found))
         })
-        .instance_method("each:", |vm, mc, args| {
-            let len = args[0]
+        .instance_method("each:", |vm, mc, receiver, args| {
+            let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
             for i in 0..len {
-                let elem = args[0]
+                let elem = receiver
                     .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().get(i).copied())
                     .map_err(|e| QuoinError::Other(e))?;
                 if let Some(elem) = elem {
-                    vm.call_method(mc, args[1], "valueWithSelfOrArg:", vec![elem])?;
+                    vm.call_method(mc, args[0], "valueWithSelfOrArg:", vec![elem])?;
                 }
             }
-            Ok(args[0])
+            Ok(receiver)
         })
-        .instance_method("s", |vm, mc, args| {
-            let len = args[0]
+        .instance_method("s", |vm, mc, receiver, _args| {
+            let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
 
             let mut parts = Vec::new();
             for i in 0..len {
-                let val = args[0]
+                let val = receiver
                     .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().get(i).copied())
                     .map_err(|e| QuoinError::Other(e))?
                     .ok_or_else(|| QuoinError::Other("Index out of bounds".to_string()))?;
@@ -106,11 +106,11 @@ pub fn build_set_class() -> NativeClassBuilder {
 
             Ok(vm.new_string(mc, format!("#<{}>", parts.join(" "))))
         })
-        .instance_method("==:", |vm, mc, args| {
-            let lhs_len = args[0]
+        .instance_method("==:", |vm, mc, receiver, args| {
+            let lhs_len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
-            let rhs_len = match args[1].with_native_state::<NativeSetState, _, _>(|s| {
+            let rhs_len = match args[0].with_native_state::<NativeSetState, _, _>(|s| {
                 s.get_vec().len()
             }) {
                 Ok(len) => len,
@@ -122,10 +122,10 @@ pub fn build_set_class() -> NativeClassBuilder {
             }
 
             for i in 0..lhs_len {
-                let elem = args[0]
+                let elem = receiver
                     .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
                     .map_err(|e| QuoinError::Other(e))?;
-                if !vm.set_contains(mc, args[1], elem)? {
+                if !vm.set_contains(mc, args[0], elem)? {
                     return Ok(vm.new_bool(mc, false));
                 }
             }

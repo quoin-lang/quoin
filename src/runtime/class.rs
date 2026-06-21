@@ -1,14 +1,15 @@
 use crate::arg;
+use crate::recv;
 use crate::value::{NamespacedName, NativeClassBuilder, Value};
 use crate::vm::DeferredCall;
 
 pub fn build_class_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Class", Some("Object"))
-        .instance_method("name", |vm, mc, args| {
-            let clz = arg!(args, Class, 0);
+        .instance_method("name", |vm, mc, receiver, _args| {
+            let clz = recv!(receiver, Class);
             Ok(vm.new_string(mc, clz.borrow().name.to_string()))
         })
-        .instance_method("class", |vm, _mc, _args| {
+        .instance_method("class", |vm, _mc, _receiver, _args| {
             let class_key = NamespacedName::new(Vec::new(), "Class".to_string());
             Ok(vm
                 .globals
@@ -17,8 +18,8 @@ pub fn build_class_class() -> NativeClassBuilder {
                 .expect("Class global not found")
                 .clone())
         })
-        .instance_method("parent", |vm, mc, args| {
-            let clz = arg!(args, Class, 0);
+        .instance_method("parent", |vm, mc, receiver, _args| {
+            let clz = recv!(receiver, Class);
             let parent = clz.borrow().parent;
             if let Some(parent) = parent {
                 Ok(Value::Class(parent))
@@ -26,9 +27,9 @@ pub fn build_class_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
-        .instance_method("mix:", |vm, mc, args| {
-            let clz = arg!(args, Class, 0);
-            let mixin = arg!(args, Class, 1);
+        .instance_method("mix:", |vm, mc, receiver, args| {
+            let clz = recv!(receiver, Class);
+            let mixin = arg!(args, Class, 0);
             clz.borrow_mut(mc).mixin_classes.push(mixin);
             // Defer the mixin's requirement check to the end of the current block
             // (the class-definition body), when the host class is fully defined.
@@ -46,17 +47,17 @@ pub fn build_class_class() -> NativeClassBuilder {
             }
             Ok(Value::Class(mixin))
         })
-        .instance_method("sealed!", |vm, mc, _args| {
+        .instance_method("sealed!", |vm, mc, _receiver, _args| {
             // TODO: implement this
             Ok(vm.new_nil(mc))
         })
-        .instance_method("abstract!", |vm, mc, _args| {
+        .instance_method("abstract!", |vm, mc, _receiver, _args| {
             // TODO: implement this
             Ok(vm.new_nil(mc))
         })
-        .instance_method("==:", |vm, mc, args| {
-            let lhs = args[0];
-            let rhs = args[1];
+        .instance_method("==:", |vm, mc, receiver, args| {
+            let lhs = receiver;
+            let rhs = args[0];
             let res = match (lhs, rhs) {
                 (Value::Class(l), Value::Class(r)) => vm.is_subclass_of_clz(l, r),
                 (Value::ClassMeta(l), Value::ClassMeta(r)) => vm.is_subclass_of_clz(l, r),

@@ -1,11 +1,11 @@
-use crate::arg;
+use crate::recv;
 use crate::value::{NativeClassBuilder, Value};
 
 pub fn build_boolean_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Boolean", Some("Object"))
         //
-        .instance_method("s", |vm, mc, args| {
-            let b = arg!(args, Bool, 0);
+        .instance_method("s", |vm, mc, receiver, _args| {
+            let b = recv!(receiver, Bool);
             Ok(vm.new_string(
                 mc,
                 if b {
@@ -17,6 +17,6 @@ pub fn build_boolean_class() -> NativeClassBuilder {
         })
         .instance_method(
             "==:",
-            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+            |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])),
         )
 }

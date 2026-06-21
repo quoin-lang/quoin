@@ -1,4 +1,4 @@
-use crate::arg;
+use crate::recv;
 use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, Value};
 
@@ -10,31 +10,31 @@ use crate::value::{NativeClassBuilder, Value};
 /// `native.rs`. (Receiver and arg are scorer-guaranteed, so the coercions are total.)
 macro_rules! int_binop {
     ($b:expr, $sel:literal, arith $op:tt) => {
-        $b.typed_instance_method($sel, &["Integer"], |vm, mc, args| {
-            Ok(vm.new_int(mc, args[0].as_i64().unwrap() $op args[1].as_i64().unwrap()))
+        $b.typed_instance_method($sel, &["Integer"], |vm, mc, receiver, args| {
+            Ok(vm.new_int(mc, receiver.as_i64().unwrap() $op args[0].as_i64().unwrap()))
         })
-        .typed_instance_method($sel, &["Double"], |vm, mc, args| {
-            Ok(vm.new_double(mc, args[0].as_f64().unwrap() $op args[1].as_f64().unwrap()))
+        .typed_instance_method($sel, &["Double"], |vm, mc, receiver, args| {
+            Ok(vm.new_double(mc, receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
         })
     };
     ($b:expr, $sel:literal, divop $op:tt) => {
-        $b.typed_instance_method($sel, &["Integer"], |vm, mc, args| {
-            let divisor = args[1].as_i64().unwrap();
+        $b.typed_instance_method($sel, &["Integer"], |vm, mc, receiver, args| {
+            let divisor = args[0].as_i64().unwrap();
             if divisor == 0 {
                 return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
             }
-            Ok(vm.new_int(mc, args[0].as_i64().unwrap() $op divisor))
+            Ok(vm.new_int(mc, receiver.as_i64().unwrap() $op divisor))
         })
-        .typed_instance_method($sel, &["Double"], |vm, mc, args| {
-            Ok(vm.new_double(mc, args[0].as_f64().unwrap() $op args[1].as_f64().unwrap()))
+        .typed_instance_method($sel, &["Double"], |vm, mc, receiver, args| {
+            Ok(vm.new_double(mc, receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
         })
     };
     ($b:expr, $sel:literal, cmp $op:tt) => {
-        $b.typed_instance_method($sel, &["Integer"], |vm, mc, args| {
-            Ok(vm.new_bool(mc, args[0].as_i64().unwrap() $op args[1].as_i64().unwrap()))
+        $b.typed_instance_method($sel, &["Integer"], |vm, mc, receiver, args| {
+            Ok(vm.new_bool(mc, receiver.as_i64().unwrap() $op args[0].as_i64().unwrap()))
         })
-        .typed_instance_method($sel, &["Double"], |vm, mc, args| {
-            Ok(vm.new_bool(mc, args[0].as_f64().unwrap() $op args[1].as_f64().unwrap()))
+        .typed_instance_method($sel, &["Double"], |vm, mc, receiver, args| {
+            Ok(vm.new_bool(mc, receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
         })
     };
 }
@@ -44,8 +44,8 @@ pub fn build_integer_class() -> NativeClassBuilder {
     // the bare forms are reserved for unary operators.
     let b = NativeClassBuilder::new("Integer", Some("Object")).instance_method(
         "sqrt",
-        |vm, mc, args| {
-            let val = arg!(args, Int, 0);
+        |vm, mc, receiver, _args| {
+            let val = recv!(receiver, Int);
             Ok(vm.new_double(mc, (val as f64).sqrt()))
         },
     );
@@ -56,5 +56,5 @@ pub fn build_integer_class() -> NativeClassBuilder {
     let b = int_binop!(b, "%:", divop %);
     // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
     let b = int_binop!(b, "<:", cmp <);
-    b.instance_method("==:", |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])))
+    b.instance_method("==:", |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])))
 }

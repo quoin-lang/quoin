@@ -128,7 +128,12 @@ impl fmt::Display for NamespacedName {
 
 #[derive(Clone, Copy, Debug)]
 pub struct NativeFunc(
-    pub for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, QuoinError>,
+    pub  for<'a> fn(
+        &mut VmState<'a>,
+        &Mutation<'a>,
+        Value<'a>,
+        Vec<Value<'a>>,
+    ) -> Result<Value<'a>, QuoinError>,
 );
 
 impl NativeFunc {
@@ -136,11 +141,22 @@ impl NativeFunc {
         f: for<'a> fn(
             &mut VmState<'a>,
             &Mutation<'a>,
+            Value<'a>,
             Vec<Value<'a>>,
         ) -> Result<Value<'a>, QuoinError>,
     ) -> Self {
         Self(f)
     }
+}
+
+/// A native method's GC-rooted call context: the receiver and its arguments kept
+/// together on `VmState::active_native_args`, so a native fn can re-read them after
+/// a nested call that may have collected. One atomic push/pop keeps the pair in sync.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct NativeCall<'gc> {
+    pub receiver: Value<'gc>,
+    pub args: Vec<Value<'gc>>,
 }
 
 unsafe impl<'gc> Collect<'gc> for NativeFunc {
@@ -623,8 +639,12 @@ pub struct NativeClassBuilder {
     instance_methods: Vec<NativeMethodDef>,
 }
 
-type NativeFn =
-    for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, QuoinError>;
+type NativeFn = for<'a> fn(
+    &mut VmState<'a>,
+    &Mutation<'a>,
+    Value<'a>,
+    Vec<Value<'a>>,
+) -> Result<Value<'a>, QuoinError>;
 
 fn type_hints(param_types: &[&str]) -> Option<Vec<String>> {
     Some(param_types.iter().map(|t| t.to_string()).collect())

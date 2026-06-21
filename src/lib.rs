@@ -228,3 +228,79 @@ macro_rules! arg_obj {
         }
     };
 }
+
+/// Extract a typed value from a native method's `receiver` (its `self`), mirroring
+/// `arg!` but for the single receiver value rather than an indexed argument. The
+/// immediate scalar types match `Value` directly; the rest match an `ObjectPayload`.
+#[macro_export]
+macro_rules! recv {
+    ($recv:expr, Int) => {
+        match $recv {
+            Value::Int(val) => val,
+            v => {
+                return Err($crate::error::QuoinError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: v.type_name().to_string(),
+                    msg: "expected an Integer receiver".to_string(),
+                })
+            }
+        }
+    };
+    ($recv:expr, Double) => {
+        match $recv {
+            Value::Double(val) => val,
+            v => {
+                return Err($crate::error::QuoinError::TypeError {
+                    expected: "Double".to_string(),
+                    got: v.type_name().to_string(),
+                    msg: "expected a Double receiver".to_string(),
+                })
+            }
+        }
+    };
+    ($recv:expr, Bool) => {
+        match $recv {
+            Value::Bool(val) => val,
+            v => {
+                return Err($crate::error::QuoinError::TypeError {
+                    expected: "Boolean".to_string(),
+                    got: v.type_name().to_string(),
+                    msg: "expected a Boolean receiver".to_string(),
+                })
+            }
+        }
+    };
+    ($recv:expr, Class) => {
+        match $recv {
+            Value::Class(val) => val,
+            v => {
+                return Err($crate::error::QuoinError::TypeError {
+                    expected: "Class".to_string(),
+                    got: v.type_name().to_string(),
+                    msg: "expected a Class receiver".to_string(),
+                })
+            }
+        }
+    };
+    ($recv:expr, $variant:ident) => {
+        match $recv {
+            Value::Object(obj) => match &obj.borrow().payload {
+                $crate::value::ObjectPayload::$variant(val) => val.clone(),
+                _ => {
+                    return Err($crate::error::QuoinError::TypeError {
+                        expected: stringify!($variant).to_string(),
+                        got: $recv.type_name().to_string(),
+                        msg: format!("expected a {} receiver", stringify!($variant)),
+                    })
+                }
+            },
+            v => {
+                return Err($crate::error::QuoinError::TypeError {
+                    expected: stringify!($variant).to_string(),
+                    got: v.type_name().to_string(),
+                    msg: format!("expected a {} receiver", stringify!($variant)),
+                })
+            }
+        }
+    };
+}

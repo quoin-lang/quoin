@@ -1,4 +1,5 @@
 use crate::arg;
+use crate::recv;
 use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::parser::ast::NodeValue;
@@ -16,35 +17,35 @@ pub fn build_string_class() -> NativeClassBuilder {
         // `replace:with:` is a multimethod: the pattern's type selects the variant
         // (a non-String/non-Regex pattern matches neither → MessageNotUnderstood).
         // The replacement is always a String.
-        .typed_instance_method("replace:with:", &["Regex", "String"], |vm, mc, args| {
-            let s = arg!(args, String, 0);
-            let to = arg!(args, String, 2);
-            let result = args[1].with_native_state::<NativeRegexState, _, _>(|r| {
+        .typed_instance_method("replace:with:", &["Regex", "String"], |vm, mc, receiver, args| {
+            let s = recv!(receiver, String);
+            let to = arg!(args, String, 1);
+            let result = args[0].with_native_state::<NativeRegexState, _, _>(|r| {
                 r.regex.replace_all(&*s, &**to).to_string()
             })?;
             Ok(vm.new_string(mc, result))
         })
-        .typed_instance_method("replace:with:", &["String", "String"], |vm, mc, args| {
-            let s = arg!(args, String, 0);
-            let from = arg!(args, String, 1);
-            let to = arg!(args, String, 2);
+        .typed_instance_method("replace:with:", &["String", "String"], |vm, mc, receiver, args| {
+            let s = recv!(receiver, String);
+            let from = arg!(args, String, 0);
+            let to = arg!(args, String, 1);
             Ok(vm.new_string(mc, s.replace(&**from, &**to)))
         })
         .instance_method(
             "==:",
-            |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])),
+            |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])),
         )
         // Concatenation: `a + b` -> `Send(a, "+:", [b])`. A String RHS concatenates
         // directly (the fast path); any other RHS is coerced via `.s` by the untyped
         // fallback below, so `'n = ' + 5` or `'m = ' + aMap` work.
-        .typed_instance_method("+:", &["String"], |vm, mc, args| {
-            let a = arg!(args, String, 0);
-            let b = arg!(args, String, 1);
+        .typed_instance_method("+:", &["String"], |vm, mc, receiver, args| {
+            let a = recv!(receiver, String);
+            let b = arg!(args, String, 0);
             Ok(vm.new_string(mc, format!("{}{}", *a, *b)))
         })
-        .instance_method("+:", |vm, mc, args| {
-            let a = arg!(args, String, 0).to_string();
-            let b_val = vm.call_method(mc, args[1], "s", vec![])?;
+        .instance_method("+:", |vm, mc, receiver, args| {
+            let a = recv!(receiver, String).to_string();
+            let b_val = vm.call_method(mc, args[0], "s", vec![])?;
             let b = match b_val {
                 Value::Object(o) => match &o.borrow().payload {
                     ObjectPayload::String(st) => st.to_string(),
@@ -59,10 +60,10 @@ pub fn build_string_class() -> NativeClassBuilder {
         // named substitutions (`%<key>`); any other RHS is a single positional arg.
         // (Migrated verbatim from `native_mod`'s String branch.) Values stay reachable
         // through the rooted `active_native_args`, so they survive the `.s` calls below.
-        .instance_method("%:", |vm, mc, args| {
-            let s_str = arg!(args, String, 0).to_string();
+        .instance_method("%:", |vm, mc, receiver, _args| {
+            let s_str = recv!(receiver, String).to_string();
 
-            let arg1 = vm.active_native_args.last().unwrap()[1];
+            let arg1 = vm.active_native_args.last().unwrap().args[0];
             let mut format_args_raw = Vec::new();
             if let Value::Object(o) = arg1 {
                 let oref = o.borrow();
@@ -99,7 +100,7 @@ pub fn build_string_class() -> NativeClassBuilder {
             }
 
             let mut map_formatted_args = HashMap::new();
-            let arg1 = vm.active_native_args.last().unwrap()[1];
+            let arg1 = vm.active_native_args.last().unwrap().args[0];
             if let Value::Object(obj) = arg1
                 && let ObjectPayload::NativeState(state_cell) = &obj.borrow().payload
                 && state_cell.borrow().as_any().is::<NativeMapState>()
@@ -174,21 +175,21 @@ pub fn build_string_class() -> NativeClassBuilder {
         })
         // Only `<:` is native (the compiler lowers `a < b` to `Send(a, "<:", [b])`);
         // `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
-        .instance_method("<:", |vm, mc, args| {
-            let lhs = arg!(args, String, 0);
-            let rhs = arg!(args, String, 1);
+        .instance_method("<:", |vm, mc, receiver, args| {
+            let lhs = recv!(receiver, String);
+            let rhs = arg!(args, String, 0);
             Ok(vm.new_bool(mc, *lhs < *rhs))
         })
-        .instance_method("to_integer", |vm, mc, args| {
-            let s = arg!(args, String, 0);
+        .instance_method("to_integer", |vm, mc, receiver, _args| {
+            let s = recv!(receiver, String);
             Ok(vm.new_int(
                 mc,
                 s.parse::<i64>()
                     .map_err(|e| QuoinError::Other(e.to_string()))?,
             ))
         })
-        .instance_method("mod", |vm, mc, args| {
-            let s_borrow = arg!(args, String, 0);
+        .instance_method("mod", |vm, mc, receiver, _args| {
+            let s_borrow = recv!(receiver, String);
             let s = s_borrow.to_string();
 
             enum InterpolPart {
@@ -319,34 +320,34 @@ pub fn build_string_class() -> NativeClassBuilder {
 
             Ok(vm.new_string(mc, result))
         })
-        .instance_method("length", |vm, mc, args| {
-            let s = arg!(args, String, 0);
+        .instance_method("length", |vm, mc, receiver, _args| {
+            let s = recv!(receiver, String);
             Ok(vm.new_int(mc, s.chars().count() as i64))
         })
-        .instance_method("ansiEscaped", |vm, mc, args| {
+        .instance_method("ansiEscaped", |vm, mc, receiver, _args| {
             // Escape '$' so this text is safe to embed in an #ANSI'…' color
             // template. Reuses the colorizer's own escape so the two can't drift.
-            let s = arg!(args, String, 0);
+            let s = recv!(receiver, String);
             Ok(vm.new_string(mc, crate::ansi_colorizer::escape(&s)))
         })
-        .instance_method("contains?:", |vm, mc, args| {
-            let s = arg!(args, String, 0);
-            let sub = arg!(args, String, 1);
+        .instance_method("contains?:", |vm, mc, receiver, args| {
+            let s = recv!(receiver, String);
+            let sub = arg!(args, String, 0);
             Ok(vm.new_bool(mc, s.contains(&**sub)))
         })
-        .instance_method("ends?:", |vm, mc, args| {
-            let s = arg!(args, String, 0);
-            let sub = arg!(args, String, 1);
+        .instance_method("ends?:", |vm, mc, receiver, args| {
+            let s = recv!(receiver, String);
+            let sub = arg!(args, String, 0);
             Ok(vm.new_bool(mc, s.ends_with(&**sub)))
         })
-        .instance_method("starts?:", |vm, mc, args| {
-            let s = arg!(args, String, 0);
-            let sub = arg!(args, String, 1);
+        .instance_method("starts?:", |vm, mc, receiver, args| {
+            let s = recv!(receiver, String);
+            let sub = arg!(args, String, 0);
             Ok(vm.new_bool(mc, s.starts_with(&**sub)))
         })
-        .instance_method("index:", |vm, mc, args| {
-            let s = arg!(args, String, 0);
-            let sub = arg!(args, String, 1);
+        .instance_method("index:", |vm, mc, receiver, args| {
+            let s = recv!(receiver, String);
+            let sub = arg!(args, String, 0);
             if let Some(byte_idx) = s.find(&**sub) {
                 let char_idx = s[..byte_idx].chars().count() as i64;
                 Ok(vm.new_int(mc, char_idx))
@@ -356,10 +357,10 @@ pub fn build_string_class() -> NativeClassBuilder {
         })
         // Both args are typed: the substring (String) and the index (Integer); a
         // wrong-typed arg matches no variant -> MNU (dispatch enforces the types).
-        .typed_instance_method("insert:at:", &["String", "Integer"], |vm, mc, args| {
-            let s = arg!(args, String, 0);
-            let sub = arg!(args, String, 1);
-            let char_idx = arg!(args, Int, 2) as usize;
+        .typed_instance_method("insert:at:", &["String", "Integer"], |vm, mc, receiver, args| {
+            let s = recv!(receiver, String);
+            let sub = arg!(args, String, 0);
+            let char_idx = arg!(args, Int, 1) as usize;
 
             let char_count = s.chars().count();
             let safe_idx = char_idx.min(char_count);
@@ -376,17 +377,17 @@ pub fn build_string_class() -> NativeClassBuilder {
 
             Ok(vm.new_string(mc, result))
         })
-        .instance_method("lower", |vm, mc, args| {
-            let s = arg!(args, String, 0);
+        .instance_method("lower", |vm, mc, receiver, _args| {
+            let s = recv!(receiver, String);
             Ok(vm.new_string(mc, s.to_lowercase()))
         })
-        .instance_method("upper", |vm, mc, args| {
-            let s = arg!(args, String, 0);
+        .instance_method("upper", |vm, mc, receiver, _args| {
+            let s = recv!(receiver, String);
             Ok(vm.new_string(mc, s.to_uppercase()))
         })
-        .instance_method("splitString:", |vm, mc, args| {
-            let s = arg!(args, String, 0);
-            let pat = arg!(args, String, 1);
+        .instance_method("splitString:", |vm, mc, receiver, args| {
+            let s = recv!(receiver, String);
+            let pat = arg!(args, String, 0);
             let parts: Vec<Value> = s
                 .split(&**pat)
                 .map(|part| vm.new_string(mc, part.to_string()))
