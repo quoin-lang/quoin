@@ -9,6 +9,7 @@ use crate::runtime::map::NativeMapState;
 use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
+use crate::symbol::Symbol;
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeCall, NativeClass, NativeFunc, Object,
     ObjectPayload, Value,
@@ -43,7 +44,7 @@ pub struct Frame<'gc> {
     pub env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
     pub instantiating_obj: Option<Gc<'gc, RefLock<Object<'gc>>>>,
     pub receiver: Option<Value<'gc>>,
-    pub selector: Option<String>,
+    pub selector: Option<Symbol>,
     pub args: Vec<Value<'gc>>,
     pub stack_base: usize,
     pub return_receiver: bool,
@@ -169,7 +170,7 @@ pub trait Callable<'gc> {
         mc: &Mutation<'gc>,
         receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
-        selector: Option<String>,
+        selector: Option<Symbol>,
     ) -> Result<(), QuoinError>;
 }
 
@@ -184,7 +185,7 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         mc: &Mutation<'gc>,
         receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
-        selector: Option<String>,
+        selector: Option<Symbol>,
     ) -> Result<(), QuoinError> {
         let receiver = receiver.ok_or_else(|| {
             QuoinError::Other("Method call is missing a receiver".to_string())
@@ -206,7 +207,7 @@ impl<'gc> Callable<'gc> for MetaCallable<'gc> {
         _mc: &Mutation<'gc>,
         _receiver: Option<Value<'gc>>,
         _args: Vec<Value<'gc>>,
-        _selector: Option<String>,
+        _selector: Option<Symbol>,
     ) -> Result<(), QuoinError> {
         vm.push(Value::ClassMeta(self.class_obj));
         Ok(())
@@ -224,7 +225,7 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
         mc: &Mutation<'gc>,
         _receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
-        selector: Option<String>,
+        selector: Option<Symbol>,
     ) -> Result<(), QuoinError> {
         if args.len() != 1 {
             return Err(QuoinError::Other("new: expects a block".to_string()));
@@ -260,7 +261,7 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         mc: &Mutation<'gc>,
         _receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
-        _selector: Option<String>,
+        _selector: Option<Symbol>,
     ) -> Result<(), QuoinError> {
         if !args.is_empty() {
             return Err(QuoinError::Other("new expects no arguments".to_string()));
@@ -287,7 +288,7 @@ impl<'gc> Callable<'gc> for NativeCallable {
         mc: &Mutation<'gc>,
         receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
-        _selector: Option<String>,
+        _selector: Option<Symbol>,
     ) -> Result<(), QuoinError> {
         let receiver = receiver.ok_or_else(|| {
             QuoinError::Other("native method called without a receiver".to_string())
@@ -885,10 +886,11 @@ impl<'gc> VmState<'gc> {
         selector: &str,
         args: Vec<Value<'gc>>,
     ) -> Result<usize, QuoinError> {
-        let method = self.lookup_method(mc, receiver, selector, &args)?;
+        let sel = Symbol::intern(selector);
+        let method = self.lookup_method(mc, receiver, sel, &args)?;
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(selector.to_string()))?;
+            method.call(self, mc, Some(receiver), args, Some(sel))?;
             Ok(initial_frame_count)
         } else {
             Err(QuoinError::Other(format!(
@@ -906,10 +908,11 @@ impl<'gc> VmState<'gc> {
         selector: &str,
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, QuoinError> {
-        let method = self.lookup_method(mc, receiver, selector, &args)?;
+        let sel = Symbol::intern(selector);
+        let method = self.lookup_method(mc, receiver, sel, &args)?;
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(selector.to_string()))?;
+            method.call(self, mc, Some(receiver), args, Some(sel))?;
 
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
@@ -988,7 +991,7 @@ impl<'gc> VmState<'gc> {
 
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(selector.to_string()))?;
+            method.call(self, mc, Some(receiver), args, Some(Symbol::intern(selector)))?;
 
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
@@ -1487,10 +1490,10 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         receiver: Value<'gc>,
-        selector: &str,
+        selector: Symbol,
         args: &[Value<'gc>],
     ) -> Result<Option<Box<dyn Callable<'gc> + 'gc>>, QuoinError> {
-        if selector == "meta" {
+        if selector.as_str() == "meta" {
             if let Value::Class(c) = receiver {
                 return Ok(Some(Box::new(MetaCallable { class_obj: c })));
             }
@@ -1500,15 +1503,15 @@ impl<'gc> VmState<'gc> {
                 .lookup_method_in_class_hierarchy(mc, c, receiver, selector, true, args)?
                 .is_none()
             {
-                if selector == "new:" {
+                if selector.as_str() == "new:" {
                     return Ok(Some(Box::new(NewCallable { class_obj: c })));
                 }
-                if selector == "new" {
+                if selector.as_str() == "new" {
                     return Ok(Some(Box::new(NewNoBlockCallable { class_obj: c })));
                 }
             }
         }
-        let selector_key = NamespacedName::new(Vec::new(), selector.to_string());
+        let selector_key = NamespacedName::new(Vec::new(), selector.as_str().to_string());
         let method_val = match receiver {
             Value::Class(class_obj) => {
                 if let Some(m) =
@@ -1622,7 +1625,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         receiver: Value<'gc>,
-        selector: &str,
+        selector: Symbol,
         class_side: bool,
         args: &[Value<'gc>],
     ) -> Result<Option<Value<'gc>>, QuoinError> {
@@ -1646,7 +1649,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         receiver: Value<'gc>,
-        selector: &str,
+        selector: Symbol,
         class_side: bool,
         args: &[Value<'gc>],
         visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
@@ -1662,7 +1665,7 @@ impl<'gc> VmState<'gc> {
         } else {
             &class_borrow.instance_methods
         };
-        let method_chain_start = methods.get(selector).copied();
+        let method_chain_start = methods.get(selector.as_str()).copied();
         let mixins = class_borrow.mixin_classes.clone();
         let parent = class_borrow.parent;
         drop(class_borrow);
@@ -1778,7 +1781,7 @@ impl<'gc> VmState<'gc> {
     /// render one-per-line at the error site (see `QuoinError` Display).
     fn ambiguous_method_error(
         &self,
-        selector: &str,
+        selector: Symbol,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         candidates: &[Value<'gc>],
         args: &[Value<'gc>],
@@ -1793,7 +1796,7 @@ impl<'gc> VmState<'gc> {
             candidates.len(),
         );
         QuoinError::AmbiguousMethod {
-            selector: selector.to_string(),
+            selector: selector.as_str().to_string(),
             msg,
             candidates: candidates
                 .iter()
@@ -1806,7 +1809,7 @@ impl<'gc> VmState<'gc> {
     /// (instance- or class-side as appropriate), in hierarchy order, regardless of
     /// whether it applies to the current arguments. Used to enrich a
     /// `MessageNotUnderstood` with the candidates dispatch filtered out.
-    fn collect_method_candidates(&self, receiver: Value<'gc>, selector: &str) -> Vec<Value<'gc>> {
+    fn collect_method_candidates(&self, receiver: Value<'gc>, selector: Symbol) -> Vec<Value<'gc>> {
         let class_side = matches!(receiver, Value::Class(_) | Value::ClassMeta(_));
         let mut out = Vec::new();
         if let Some(class) = self.get_class_for_lookup(receiver) {
@@ -1819,7 +1822,7 @@ impl<'gc> VmState<'gc> {
     fn collect_candidates_rec(
         &self,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
-        selector: &str,
+        selector: Symbol,
         class_side: bool,
         visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
         out: &mut Vec<Value<'gc>>,
@@ -1834,7 +1837,7 @@ impl<'gc> VmState<'gc> {
         } else {
             &class_borrow.instance_methods
         };
-        let chain_start = methods.get(selector).copied();
+        let chain_start = methods.get(selector.as_str()).copied();
         let mixins = class_borrow.mixin_classes.clone();
         let parent = class_borrow.parent;
         drop(class_borrow);
@@ -1855,10 +1858,10 @@ impl<'gc> VmState<'gc> {
     /// keywords interleaved with the variant's *declared* parameter types (e.g.
     /// `foo:Integer bar:Object`), plus the guard appended for a guarded variant —
     /// its syntax-highlighted source if available, else a `{...}` placeholder.
-    fn format_candidate_signature(&self, method_val: Value<'gc>, selector: &str) -> String {
+    fn format_candidate_signature(&self, method_val: Value<'gc>, selector: Symbol) -> String {
         let supports_color = self.options.supports_color;
         let types = self.candidate_param_types(method_val);
-        let mut sig = Self::format_selector_with_types(selector, &types, supports_color);
+        let mut sig = Self::format_selector_with_types(selector.as_str(), &types, supports_color);
         if let Some(guard) = self.candidate_guard_display(method_val, supports_color) {
             sig.push(' ');
             sig.push_str(&guard);
@@ -2306,7 +2309,7 @@ impl<'gc> VmState<'gc> {
         block: Gc<'gc, Block<'gc>>,
         args: Vec<Value<'gc>>,
         receiver: Option<Value<'gc>>,
-        selector: Option<String>,
+        selector: Option<Symbol>,
     ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
@@ -2349,7 +2352,7 @@ impl<'gc> VmState<'gc> {
         block: Gc<'gc, Block<'gc>>,
         receiver: Value<'gc>,
         args: Vec<Value<'gc>>,
-        selector: Option<String>,
+        selector: Option<Symbol>,
         is_method_call: bool,
     ) {
         let frame_id = self.next_frame_id;
@@ -2396,7 +2399,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         block: Gc<'gc, Block<'gc>>,
         obj: Gc<'gc, RefLock<Object<'gc>>>,
-        selector: Option<String>,
+        selector: Option<Symbol>,
     ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
@@ -2612,6 +2615,7 @@ impl<'gc> VmState<'gc> {
                     let formatted_selector = if let Some(Instruction::Send(selector, num_args)) =
                         f.block.bytecode.get(frame_ip)
                     {
+                        let selector = selector.as_str();
                         let args_vec = if *num_args > 0 {
                             if i == n - 1 {
                                 self.last_send_args.clone()
@@ -2655,7 +2659,10 @@ impl<'gc> VmState<'gc> {
                     } else if i == 0 {
                         colorize_simple("(top)")
                     } else {
-                        let sel_str = f.selector.clone().unwrap_or_else(|| "value".to_string());
+                        let sel_str = f
+                            .selector
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_else(|| "value".to_string());
                         colorize_simple(&sel_str)
                     };
 
@@ -3179,26 +3186,26 @@ impl<'gc> VmState<'gc> {
                 if let Value::Object(obj) = receiver
                     && let ObjectPayload::Block(block) = &obj.borrow().payload
                 {
-                    if selector == "value" || selector == "value:" {
-                        self.start_block(mc, *block, args, Some(receiver), Some(selector.clone()));
+                    if selector.as_str() == "value" || selector.as_str() == "value:" {
+                        self.start_block(mc, *block, args, Some(receiver), Some(selector));
                         return Ok(VmStatus::Running);
                     }
                 }
 
-                let method_opt = self.lookup_method(mc, receiver, &selector, &args)?;
+                let method_opt = self.lookup_method(mc, receiver, selector, &args)?;
                 if let Some(callable) = method_opt {
-                    callable.call(self, mc, Some(receiver), args, Some(selector.clone()))?;
+                    callable.call(self, mc, Some(receiver), args, Some(selector))?;
                 } else {
                     // The selector may still exist with non-matching signatures;
                     // surface those filtered-out variants as a hint.
                     let candidates = self
-                        .collect_method_candidates(receiver, &selector)
+                        .collect_method_candidates(receiver, selector)
                         .iter()
-                        .map(|&mv| self.format_candidate_signature(mv, &selector))
+                        .map(|&mv| self.format_candidate_signature(mv, selector))
                         .collect();
                     return Err(QuoinError::MessageNotUnderstood {
                         receiver: receiver.class_name(),
-                        selector: selector.clone(),
+                        selector: selector.as_str().to_string(),
                         args: args.iter().map(|a| a.class_name()).collect(),
                         candidates,
                     });
@@ -4329,7 +4336,7 @@ mod tests {
                 Instruction::Push(Constant::Int(5)),
                 Instruction::Push(Constant::Int(10)),
                 // Send "+" with 1 argument (selector: "+", receiver: Int(5), arg: Int(10))
-                Instruction::Send("+".to_string(), 1),
+                Instruction::Send(Symbol::intern("+"), 1),
             ],
             |vm, mc| {
                 vm.step(mc).unwrap();
@@ -4354,7 +4361,7 @@ mod tests {
             bytecode: SharedBytecode::from(vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
-                Instruction::Send("+".to_string(), 1),
+                Instruction::Send(Symbol::intern("+"), 1),
                 Instruction::Return,
             ]),
             decl_block: None,
@@ -4366,7 +4373,7 @@ mod tests {
                 Instruction::Push(Constant::Block(block_static)),
                 Instruction::Push(Constant::Int(41)),
                 // Send "value:" with 1 arg
-                Instruction::Send("value:".to_string(), 1),
+                Instruction::Send(Symbol::intern("value:"), 1),
             ],
             |vm, mc| {
                 vm.step(mc).unwrap(); // Push block -> [Block]
@@ -4446,7 +4453,7 @@ mod tests {
             param_types: Vec::new(),
             bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Block(block_nested)),
-                Instruction::Send("value".to_string(), 0),
+                Instruction::Send(Symbol::intern("value"), 0),
                 Instruction::Push(Constant::Int(100)), // this should be skipped due to MethodReturn
                 Instruction::Return,
             ]),
@@ -4457,7 +4464,7 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::Push(Constant::Block(block_method)),
-                Instruction::Send("value".to_string(), 0),
+                Instruction::Send(Symbol::intern("value"), 0),
             ],
             |vm, mc| {
                 vm.step(mc).unwrap(); // Push block_method
@@ -4507,7 +4514,7 @@ mod tests {
             param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode::from(vec![
                 Instruction::LoadLocal("blk".to_string()),
-                Instruction::Send("value".to_string(), 0),
+                Instruction::Send(Symbol::intern("value"), 0),
                 Instruction::Push(Constant::Int(111)),
                 Instruction::Return,
             ]),
@@ -4525,7 +4532,7 @@ mod tests {
             bytecode: SharedBytecode::from(vec![
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "bar_func".to_string())),
                 Instruction::Push(Constant::Block(block_nested)),
-                Instruction::Send("value:".to_string(), 1),
+                Instruction::Send(Symbol::intern("value:"), 1),
                 Instruction::Push(Constant::Int(222)),
                 Instruction::Return,
             ]),
@@ -4658,7 +4665,7 @@ mod tests {
                 Instruction::ExecuteBlockWithSelf,
                 // Send "meta" to Point
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "Point".to_string())),
-                Instruction::Send("meta".to_string(), 0),
+                Instruction::Send(Symbol::intern("meta"), 0),
             ],
             |vm, mc| {
                 // Step DefineClass
@@ -4721,7 +4728,7 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "Point".to_string())),
-                Instruction::Send("name".to_string(), 0),
+                Instruction::Send(Symbol::intern("name"), 0),
             ],
             |vm, mc| {
                 let point_class = gcl!(
@@ -4787,16 +4794,16 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::Push(Constant::Bool(true)),
-                Instruction::Send("class".to_string(), 0),
+                Instruction::Send(Symbol::intern("class"), 0),
                 Instruction::Push(Constant::Bool(true)),
                 Instruction::Push(Constant::Block(class_extension_block)),
                 Instruction::ExecuteBlockWithSelf,
                 Instruction::Push(Constant::Bool(true)),
-                Instruction::Send("class".to_string(), 0),
+                Instruction::Send(Symbol::intern("class"), 0),
                 Instruction::Push(Constant::Bool(true)),
-                Instruction::Send("custom_true".to_string(), 0),
+                Instruction::Send(Symbol::intern("custom_true"), 0),
                 Instruction::Push(Constant::Bool(false)),
-                Instruction::Send("class".to_string(), 0),
+                Instruction::Send(Symbol::intern("class"), 0),
             ],
             |vm, mc| {
                 vm.step(mc).unwrap();
@@ -4859,7 +4866,7 @@ mod tests {
                     instance_vars: vec!["x".to_string(), "y".to_string()],
                 },
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "Point".to_string())),
-                Instruction::Send("new".to_string(), 0),
+                Instruction::Send(Symbol::intern("new"), 0),
             ],
             |vm, mc| {
                 vm.step(mc).unwrap(); // DefineClass
@@ -5024,7 +5031,7 @@ mod tests {
 
             // Look up "name" on PType instance -> should find Point's name method
             let _method = vm
-                .lookup_method(mc, Value::Object(obj), "name", &[])
+                .lookup_method(mc, Value::Object(obj), Symbol::intern("name"), &[])
                 .unwrap()
                 .unwrap();
 
@@ -5056,9 +5063,9 @@ mod tests {
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal("self".to_string()),
                         Instruction::LoadLocal("a".to_string()),
-                        Instruction::Send("+".to_string(), 1),
+                        Instruction::Send(Symbol::intern("+"), 1),
                         Instruction::LoadLocal("b".to_string()),
-                        Instruction::Send("+".to_string(), 1),
+                        Instruction::Send(Symbol::intern("+"), 1),
                         Instruction::Return,
                     ]),
                     parent_env: None,
@@ -5097,7 +5104,7 @@ mod tests {
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal("a".to_string()),
                         Instruction::LoadLocal("b".to_string()),
-                        Instruction::Send("+".to_string(), 1),
+                        Instruction::Send(Symbol::intern("+"), 1),
                         Instruction::Return,
                     ]),
                     parent_env: None,

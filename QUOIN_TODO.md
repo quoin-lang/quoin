@@ -185,6 +185,35 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] **Alternative Parser Architecture Evaluation**:
   - Evaluate replacing ANTLR with Tree-sitter for faster full-file compiles using its compiled C engine.
   - Assess native Rust parser generators (e.g., LALRPOP or Pest) or hand-writing a recursive-descent parser for optimal compiler performance.
+- [ ] **Method-dispatch optimization** (baseline + plan in `profiling/dispatch-cache/notes.md`). The Send
+  path is malloc-dominated (37.8% self) and `lookup_method` is 21.5% inclusive (13.6% walk + 2.7% scoring).
+  - [ ] **Selector interning** (in progress). Replace `Instruction::Send(String, …)` with an interned
+    `Symbol(&'static str)` (Eq/Hash by pointer, lock-free `as_str()`; global leak-forever interner in
+    `src/symbol.rs`). Kills the per-Send `selector.clone()` (~8.8% `String::clone`) and gives the dispatch
+    cache a `Copy`, collision-free, pointer-stable key. Scoped to selectors in the dispatch path; method
+    tables / globals stay `String`-keyed for now (the walk resolves via `as_str()`).
+  - [ ] **Method-resolution cache** (the headline). Global `HashMap<(recv_class_ptr, selector,
+    class_side, arg_class_ptrs) → Option<Value>>`; guard-free resolutions only; arg classes in the key for
+    multi-dispatch; pointer keys safe because named classes are globals-rooted (eigenclasses flagged via
+    `Class.is_eigenclass` and skipped); invalidate by `clear()` on method-table mutations. Skips the
+    walk+scoring on a hit.
+  - [ ] **Follow-up: migrate method tables to `Symbol` keys.** After the cache lands, rekey
+    `Class.instance_methods`/`class_methods` (and ideally `globals`/`NamespacedName`) from `String` to
+    `Symbol`, turning the per-class `methods.get(selector)` SipHash into an integer hash. Ripples through
+    the ~150 native `instance_method("name", …)` builder sites and `register_native_class`; do it as its
+    own pass once dispatch caching is in.
+  - [ ] **Follow-up: unify the symbol caches.** Reconcile the new compile-time selector interner
+    (`Symbol(&'static str)`) with the existing runtime `symbol_table` (`VmState`, interned `#foo` Quoin
+    symbol *values*) so there's a single canonical interning mechanism rather than two parallel ones.
+  - [ ] **Per-step whole-instruction clone (likely the fattest malloc lever).** `vm.rs:3022` does
+    `frame.block.bytecode.get(frame.ip).cloned()` — it clones the *entire* `Instruction` on every VM
+    step. Any String-bearing variant (`LoadLocal`/`StoreLocal`/`DefineLocal`/`LoadGlobal`/`Send`/…) then
+    allocates per step; this is a large share of the 37.8%-of-self malloc (selector interning only
+    removed the `Send` selector's slice, hence its ~noise isolated effect — see
+    `profiling/selector-interning/notes.md`). Fix by borrowing the instruction instead of cloning
+    (non-trivial: it borrows `frame.block.bytecode` behind `Gc` while the step handler needs
+    `&mut self`), or by interning all instruction operands so the clone is alloc-free. Plausibly a
+    bigger win than the dispatch cache; do after the cache.
 
 ## 10. Test Coverage
 - [ ] **Increase Code Coverage**:

@@ -1,4 +1,5 @@
 use crate::instruction::{Constant, Instruction, SharedBytecode, SharedSourceMap, StaticBlock};
+use crate::symbol::Symbol;
 use crate::parser::ast::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, IdentifierType,
     MethodCallNode, MethodSelectorNode, Node, NodeValue, ProgramNode, UnaryOperatorNode,
@@ -255,7 +256,7 @@ impl Compiler {
                     "Fiber".to_string(),
                 )));
                 self.compile_node(&ret.value, bytecode)?;
-                bytecode.push(Instruction::Send("yield:".to_string(), 1));
+                bytecode.push(Instruction::Send(Symbol::intern("yield:"), 1));
             }
             NodeValue::List(list) => {
                 for item in &list.values {
@@ -364,7 +365,7 @@ impl Compiler {
                 let ns_name = NamespacedName::from_ast(&user_str.identifier);
                 bytecode.push(Instruction::LoadGlobal(ns_name));
                 bytecode.push(Instruction::Push(Constant::String(user_str.value.clone())));
-                bytecode.push(Instruction::Send("newUserString:".to_string(), 1));
+                bytecode.push(Instruction::Send(Symbol::intern("newUserString:"), 1));
             }
             NodeValue::UserList(user_list) => {
                 let ns_name = NamespacedName::from_ast(&user_list.identifier);
@@ -373,22 +374,22 @@ impl Compiler {
                     self.compile_node(val, bytecode)?;
                 }
                 bytecode.push(Instruction::NewList(user_list.values.len()));
-                bytecode.push(Instruction::Send("newUserList:".to_string(), 1));
+                bytecode.push(Instruction::Send(Symbol::intern("newUserList:"), 1));
             }
             NodeValue::Dot3 => {
                 // TODO: For now, just throw the string.
                 bytecode.push(Instruction::Push(Constant::String("...".to_string())));
-                bytecode.push(Instruction::Send("throw".to_string(), 0));
+                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
             }
             NodeValue::Huh3 => {
                 // TODO: For now, just throw the string.
                 bytecode.push(Instruction::Push(Constant::String("???".to_string())));
-                bytecode.push(Instruction::Send("throw".to_string(), 0));
+                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
             }
             NodeValue::Bang3 => {
                 // TODO: For now, just throw the string.
                 bytecode.push(Instruction::Push(Constant::String("!!!".to_string())));
-                bytecode.push(Instruction::Send("throw".to_string(), 0));
+                bytecode.push(Instruction::Send(Symbol::intern("throw"), 0));
             }
             NodeValue::Unknown => {
                 return Err("Encountered Unknown NodeValue (ast_visitor bug)".to_string());
@@ -541,7 +542,7 @@ impl Compiler {
                     let name = &ident_lval.identifier.name;
                     bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
-                    bytecode.push(Instruction::Send("at:".to_string(), 1));
+                    bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
 
                     self.compile_ident_store(
                         &ident_lval.identifier.identifier_type,
@@ -553,7 +554,7 @@ impl Compiler {
                     let name = &splat_lval.identifier.name;
                     bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
-                    bytecode.push(Instruction::Send("sliceFrom:".to_string(), 1));
+                    bytecode.push(Instruction::Send(Symbol::intern("sliceFrom:"), 1));
 
                     self.compile_ident_store(
                         &splat_lval.identifier.identifier_type,
@@ -573,7 +574,7 @@ impl Compiler {
 
                     bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
-                    bytecode.push(Instruction::Send("at:".to_string(), 1));
+                    bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
                     bytecode.push(Instruction::DefineLocal(nested_temp.clone()));
 
                     self.compile_destruct(&sub_lval.lvalues, &nested_temp, bytecode)?;
@@ -625,7 +626,7 @@ impl Compiler {
         };
 
         let num_args = args.expressions.len();
-        bytecode.push(Instruction::Send(selector, num_args));
+        bytecode.push(Instruction::Send(Symbol::intern(&selector), num_args));
         Ok(())
     }
 
@@ -689,7 +690,7 @@ impl Compiler {
             }
         };
 
-        bytecode.push(Instruction::Send(selector.to_string(), 1));
+        bytecode.push(Instruction::Send(Symbol::intern(selector), 1));
         Ok(())
     }
 
@@ -703,16 +704,16 @@ impl Compiler {
 
         match op.operator {
             UnaryOperatorType::Bang => {
-                bytecode.push(Instruction::Send("!".to_string(), 0));
+                bytecode.push(Instruction::Send(Symbol::intern("!"), 0));
             }
             UnaryOperatorType::Sub => {
-                bytecode.push(Instruction::Send("-".to_string(), 0));
+                bytecode.push(Instruction::Send(Symbol::intern("-"), 0));
             }
             UnaryOperatorType::Add => {
-                bytecode.push(Instruction::Send("+".to_string(), 0));
+                bytecode.push(Instruction::Send(Symbol::intern("+"), 0));
             }
             UnaryOperatorType::Mod => {
-                bytecode.push(Instruction::Send("mod".to_string(), 0));
+                bytecode.push(Instruction::Send(Symbol::intern("mod"), 0));
             }
             _ => {
                 return Err(format!(
@@ -1055,11 +1056,11 @@ mod tests {
         expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
-        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("at:"), 1));
         expected.push(Instruction::DefineLocal("a".to_string()));
         expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
-        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("at:"), 1));
         expected.push(Instruction::DefineLocal("b".to_string()));
         assert_eq!(res.bytecode, expected);
 
@@ -1090,7 +1091,7 @@ mod tests {
         expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
-        expected.push(Instruction::Send("sliceFrom:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("sliceFrom:"), 1));
         expected.push(Instruction::DefineLocal("rest".to_string()));
         assert_eq!(res.bytecode, expected);
 
@@ -1161,19 +1162,19 @@ mod tests {
         expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
-        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("at:"), 1));
         expected.push(Instruction::DefineLocal("a".to_string()));
         expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
-        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("at:"), 1));
         expected.push(Instruction::DefineLocal("__qn_temp_2".to_string()));
         expected.push(Instruction::LoadLocal("__qn_temp_2".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
-        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("at:"), 1));
         expected.push(Instruction::DefineLocal("b".to_string()));
         expected.push(Instruction::LoadLocal("__qn_temp_2".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
-        expected.push(Instruction::Send("at:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("at:"), 1));
         expected.push(Instruction::DefineLocal("c".to_string()));
         assert_eq!(res.bytecode, expected);
     }
@@ -1185,14 +1186,14 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Push(Constant::Int(1)));
-        expected.push(Instruction::Send("foo:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("foo:"), 1));
         assert_eq!(res.bytecode, expected);
 
         // Implicit subject (self): .foo
         let res = compile(vec![call(None, "foo", vec![])]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadLocal("self".to_string()));
-        expected.push(Instruction::Send("foo".to_string(), 0));
+        expected.push(Instruction::Send(Symbol::intern("foo"), 0));
         assert_eq!(res.bytecode, expected);
     }
 
@@ -1203,28 +1204,28 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Push(Constant::Int(2)));
-        expected.push(Instruction::Send("+:".to_string(), 1));
+        expected.push(Instruction::Send(Symbol::intern("+:"), 1));
         assert_eq!(res.bytecode, expected);
 
         // -x
         let res = compile(vec![unary(UnaryOperatorType::Sub, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
-        expected.push(Instruction::Send("-".to_string(), 0));
+        expected.push(Instruction::Send(Symbol::intern("-"), 0));
         assert_eq!(res.bytecode, expected);
 
         // !x
         let res = compile(vec![unary(UnaryOperatorType::Bang, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
-        expected.push(Instruction::Send("!".to_string(), 0));
+        expected.push(Instruction::Send(Symbol::intern("!"), 0));
         assert_eq!(res.bytecode, expected);
 
         // +x
         let res = compile(vec![unary(UnaryOperatorType::Add, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
-        expected.push(Instruction::Send("+".to_string(), 0));
+        expected.push(Instruction::Send(Symbol::intern("+"), 0));
         assert_eq!(res.bytecode, expected);
 
         // x && y
@@ -1295,7 +1296,7 @@ mod tests {
             bytecode: SharedBytecode(Rc::new(vec![
                 Instruction::LoadLocal("x".to_string()),
                 Instruction::Push(Constant::Int(1)),
-                Instruction::Send("+:".to_string(), 1),
+                Instruction::Send(Symbol::intern("+:"), 1),
                 Instruction::Return,
             ])),
             source_info: None,

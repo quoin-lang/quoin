@@ -1,3 +1,4 @@
+use crate::symbol::Symbol;
 use crate::value::{NamespacedName, SourceInfo};
 
 use gc_arena::Collect;
@@ -104,7 +105,7 @@ pub enum Instruction {
     Push(Constant),
     Pop,
     Dup,
-    Send(String, usize), // selector, num_args
+    Send(Symbol, usize), // selector, num_args
     Return,
     Yeet,
     BlockReturn,
