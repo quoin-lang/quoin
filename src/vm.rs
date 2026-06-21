@@ -3101,12 +3101,15 @@ impl<'gc> VmState<'gc> {
         }
 
         let frame_idx = self.frames.len() - 1;
-        let inst = {
-            let frame = &self.frames[frame_idx];
-            frame.block.bytecode.get(frame.ip).cloned()
-        };
-
-        let inst = match inst {
+        // Borrow the current instruction instead of deep-cloning it every step: clone
+        // only the `Rc` to the bytecode (a refcount bump, no allocation) into a local,
+        // then take a `&Instruction` into it. `inst` borrows this local `Rc`, not
+        // `self`, so handlers keep full `&mut self` access; the `Rc` keeps the bytecode
+        // alive even if a handler pushes/pops frames. (`Instruction` is `'static` — no
+        // `Gc` pointers — so there's no GC-across-step concern.)
+        let bytecode = self.frames[frame_idx].block.bytecode.clone();
+        let ip = self.frames[frame_idx].ip;
+        let inst = match bytecode.0.get(ip) {
             Some(i) => i,
             None => {
                 // Implicit return Nil
@@ -3120,12 +3123,14 @@ impl<'gc> VmState<'gc> {
 
         match inst {
             Instruction::LoadLocal(name) => {
+                let name = *name;
                 let frame = &self.frames[frame_idx];
                 let val = EnvFrame::get(frame.env, name).unwrap_or_else(|| self.new_nil(mc));
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::DefineLocal(name) => {
+                let name = *name;
                 if matches!(name.as_str(), "true" | "false" | "nil") {
                     let err_msg = format!("Can't modify keyword {}", name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
@@ -3137,6 +3142,7 @@ impl<'gc> VmState<'gc> {
                 frame.ip += 1;
             }
             Instruction::StoreLocal(name) => {
+                let name = *name;
                 if matches!(name.as_str(), "true" | "false" | "nil") {
                     let err_msg = format!("Can't modify keyword {}", name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
@@ -3160,7 +3166,7 @@ impl<'gc> VmState<'gc> {
                 let val = self
                     .globals
                     .borrow()
-                    .get(&name)
+                    .get(name)
                     .copied()
                     .unwrap_or_else(|| self.new_nil(mc));
                 self.push(val);
@@ -3175,8 +3181,8 @@ impl<'gc> VmState<'gc> {
                 }
                 let first_char = name.name.chars().next().unwrap_or('\0');
                 if first_char.is_ascii_uppercase() {
-                    let exists = self.globals.borrow().contains_key(&name);
-                    if is_define {
+                    let exists = self.globals.borrow().contains_key(name);
+                    if *is_define {
                         if exists {
                             let err_msg = format!(
                                 "Global {} is already defined in this scope",
@@ -3196,15 +3202,15 @@ impl<'gc> VmState<'gc> {
                         }
                     }
                 }
-                self.globals.borrow_mut(mc).insert(name, val);
+                self.globals.borrow_mut(mc).insert(name.clone(), val);
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::Push(constant) => {
                 let val = match constant {
                     Constant::Nil => self.new_nil(mc),
-                    Constant::Bool(b) => self.new_bool(mc, b),
-                    Constant::Int(i) => self.new_int(mc, i),
-                    Constant::Double(f) => self.new_double(mc, f),
+                    Constant::Bool(b) => self.new_bool(mc, *b),
+                    Constant::Int(i) => self.new_int(mc, *i),
+                    Constant::Double(f) => self.new_double(mc, *f),
                     Constant::String(s) => self.new_string(mc, s.clone()),
                     Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
                     Constant::Block(sb) => {
@@ -3256,6 +3262,7 @@ impl<'gc> VmState<'gc> {
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::Send(selector, num_args) => {
+                let (selector, num_args) = (*selector, *num_args);
                 let mut args = Vec::new();
                 for _ in 0..num_args {
                     args.push(self.pop()?);
@@ -3373,10 +3380,12 @@ impl<'gc> VmState<'gc> {
                 return Ok(VmStatus::Yeeted(yeeted_val));
             }
             Instruction::Jump(offset) => {
+                let offset = *offset;
                 let frame = &mut self.frames[frame_idx];
                 frame.ip = (frame.ip as isize + offset) as usize;
             }
             Instruction::IfJump(offset) => {
+                let offset = *offset;
                 let cond = self.pop()?;
                 let frame = &mut self.frames[frame_idx];
                 if cond.is_truthy() {
@@ -3386,6 +3395,7 @@ impl<'gc> VmState<'gc> {
                 }
             }
             Instruction::ElseJump(offset) => {
+                let offset = *offset;
                 let cond = self.pop()?;
                 let frame = &mut self.frames[frame_idx];
                 if !cond.is_truthy() {
@@ -3395,6 +3405,7 @@ impl<'gc> VmState<'gc> {
                 }
             }
             Instruction::NewList(n) => {
+                let n = *n;
                 let mut elements = Vec::new();
                 for _ in 0..n {
                     elements.push(self.pop()?);
@@ -3405,6 +3416,7 @@ impl<'gc> VmState<'gc> {
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::NewMap(n) => {
+                let n = *n;
                 let mut map = HashMap::new();
                 for _ in 0..n {
                     let val = self.pop()?;
@@ -3426,6 +3438,7 @@ impl<'gc> VmState<'gc> {
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::NewSet(n) => {
+                let n = *n;
                 let mut raw = Vec::new();
                 for _ in 0..n {
                     raw.push(self.pop()?);
@@ -3462,7 +3475,7 @@ impl<'gc> VmState<'gc> {
                 parent_name,
                 instance_vars,
             } => {
-                let parent = if let Some(p_name) = &parent_name {
+                let parent = if let Some(p_name) = parent_name {
                     let val = self
                         .globals
                         .borrow()
@@ -3489,7 +3502,7 @@ impl<'gc> VmState<'gc> {
                     }
                 };
 
-                if let Some(existing_val) = self.globals.borrow().get(&name).copied() {
+                if let Some(existing_val) = self.globals.borrow().get(name).copied() {
                     if let Value::Class(_) = existing_val {
                         return Err(format!(
                             "Cannot redefine class {} because it already exists",
@@ -3565,11 +3578,11 @@ impl<'gc> VmState<'gc> {
                     let method_obj = self.new_method(mc, selector.clone(), block_val, false);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
                     if is_class_side {
-                        if target_class.borrow().class_methods.contains_key(&selector) {
+                        if target_class.borrow().class_methods.contains_key(selector) {
                             let existing_val = target_class
                                 .borrow()
                                 .class_methods
-                                .get(&selector)
+                                .get(selector)
                                 .copied()
                                 .unwrap();
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
@@ -3577,18 +3590,18 @@ impl<'gc> VmState<'gc> {
                             target_class
                                 .borrow_mut(mc)
                                 .class_methods
-                                .insert(selector, method_obj);
+                                .insert(selector.clone(), method_obj);
                         }
                     } else {
                         if target_class
                             .borrow()
                             .instance_methods
-                            .contains_key(&selector)
+                            .contains_key(selector)
                         {
                             let existing_val = target_class
                                 .borrow()
                                 .instance_methods
-                                .get(&selector)
+                                .get(selector)
                                 .copied()
                                 .unwrap();
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
@@ -3596,7 +3609,7 @@ impl<'gc> VmState<'gc> {
                             target_class
                                 .borrow_mut(mc)
                                 .instance_methods
-                                .insert(selector, method_obj);
+                                .insert(selector.clone(), method_obj);
                         }
                     }
                     // The class's method table just changed — drop memoized resolutions.
@@ -3625,7 +3638,7 @@ impl<'gc> VmState<'gc> {
                     let method_obj = self.new_method(mc, selector.clone(), block_val, true);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
                     let exists = self
-                        .lookup_in_class_hierarchy(target_class, &selector, is_class_side)
+                        .lookup_in_class_hierarchy(target_class, selector, is_class_side)
                         .is_some();
                     if !exists {
                         return Err(QuoinError::Other(format!(
@@ -3636,11 +3649,11 @@ impl<'gc> VmState<'gc> {
                     }
 
                     if is_class_side {
-                        if target_class.borrow().class_methods.contains_key(&selector) {
+                        if target_class.borrow().class_methods.contains_key(selector) {
                             let existing_val = target_class
                                 .borrow()
                                 .class_methods
-                                .get(&selector)
+                                .get(selector)
                                 .copied()
                                 .unwrap();
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
@@ -3648,18 +3661,18 @@ impl<'gc> VmState<'gc> {
                             target_class
                                 .borrow_mut(mc)
                                 .class_methods
-                                .insert(selector, method_obj);
+                                .insert(selector.clone(), method_obj);
                         }
                     } else {
                         if target_class
                             .borrow()
                             .instance_methods
-                            .contains_key(&selector)
+                            .contains_key(selector)
                         {
                             let existing_val = target_class
                                 .borrow()
                                 .instance_methods
-                                .get(&selector)
+                                .get(selector)
                                 .copied()
                                 .unwrap();
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
@@ -3667,7 +3680,7 @@ impl<'gc> VmState<'gc> {
                             target_class
                                 .borrow_mut(mc)
                                 .instance_methods
-                                .insert(selector, method_obj);
+                                .insert(selector.clone(), method_obj);
                         }
                     }
                     // The class's method table just changed — drop memoized resolutions.
@@ -3690,7 +3703,7 @@ impl<'gc> VmState<'gc> {
                     let class = obj.borrow().class;
                     // No slot (undeclared) or a slot past this instance's array
                     // (declared on the class after this object was created) => nil.
-                    self.field_slot(class, &name)
+                    self.field_slot(class, name)
                         .and_then(|slot| obj.borrow().fields.get(slot).copied())
                         .unwrap_or_else(|| self.new_nil(mc))
                 } else {

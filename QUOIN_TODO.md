@@ -256,15 +256,14 @@ This document outlines the language features, compiler updates, and VM modificat
   - [ ] **Follow-up: unify the symbol caches.** Reconcile the new compile-time selector interner
     (`Symbol(&'static str)`) with the existing runtime `symbol_table` (`VmState`, interned `#foo` Quoin
     symbol *values*) so there's a single canonical interning mechanism rather than two parallel ones.
-  - [ ] **Per-step whole-instruction clone (likely the fattest malloc lever).** `vm.rs:3022` does
-    `frame.block.bytecode.get(frame.ip).cloned()` — it clones the *entire* `Instruction` on every VM
-    step. Any String-bearing variant (`LoadLocal`/`StoreLocal`/`DefineLocal`/`LoadGlobal`/`Send`/…) then
-    allocates per step; this is a large share of the 37.8%-of-self malloc (selector interning only
-    removed the `Send` selector's slice, hence its ~noise isolated effect — see
-    `profiling/selector-interning/notes.md`). Fix by borrowing the instruction instead of cloning
-    (non-trivial: it borrows `frame.block.bytecode` behind `Gc` while the step handler needs
-    `&mut self`), or by interning all instruction operands so the clone is alloc-free. Plausibly a
-    bigger win than the dispatch cache; do after the cache.
+  - [x] **Per-step whole-instruction clone.** `step_internal` used to deep-clone the whole `Instruction`
+    every step (`frame.block.bytecode.get(ip).cloned()`), allocating for every heap-carrying variant.
+    Fixed by cloning only the bytecode `Rc` (refcount bump, no alloc) into a local and taking a
+    `&Instruction` into it — `inst` borrows the local `Rc`, not `self`, so handlers keep `&mut self`.
+    GC-safe (`Instruction` is `'static`/no `Gc`, bytecode immutable). Match arms use reference patterns
+    (Copy operands get a `let x = *x;` deref-shadow; the few class-def-time owned sites `.clone()`).
+    **Result: malloc 30.6% → 27.3%, `String::clone` 4.3% → 1.9%; Fib −11% / Sieve −8% / Binary Trees
+    −13%.** All green incl. `QN_GC_STRESS=1`. See `profiling/instr-borrow/notes.md`.
 
 ## 10. Test Coverage
 - [ ] **Increase Code Coverage**:
