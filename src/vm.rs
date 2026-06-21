@@ -1449,6 +1449,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         block: Gc<'gc, Block<'gc>>,
+        receiver: Value<'gc>,
         outer_param_names: &[String],
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, BBError> {
@@ -1459,12 +1460,12 @@ impl<'gc> VmState<'gc> {
 
         let mut env_frame = EnvFrame::new(block.parent_env);
 
-        let receiver = args.get(0).copied().unwrap_or_else(|| self.new_nil(mc));
+        // A guard is a predicate over the method's arguments: every argument is bound
+        // by its (method) parameter name, so the guard references them directly
+        // (`|x:Integer { x > 5 }|`) without re-declaring them. `self` is the method's
+        // receiver (the subject of the call), so a guard can also use the rest of the
+        // class's functionality — other methods, instance variables, etc.
         env_frame.vars.insert("self".to_string(), receiver);
-
-        for name in &block.param_names {
-            env_frame.vars.insert(name.clone(), receiver);
-        }
 
         for (name, val) in outer_param_names.iter().zip(args.iter().copied()) {
             env_frame.vars.insert(name.clone(), val);
@@ -1538,7 +1539,7 @@ impl<'gc> VmState<'gc> {
         }
         if let Value::Class(c) = receiver {
             if self
-                .lookup_method_in_class_hierarchy(mc, c, selector, true, args)?
+                .lookup_method_in_class_hierarchy(mc, c, receiver, selector, true, args)?
                 .is_none()
             {
                 if selector == "new:" {
@@ -1553,7 +1554,7 @@ impl<'gc> VmState<'gc> {
         let method_val = match receiver {
             Value::Class(class_obj) => {
                 if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(mc, class_obj, selector, true, args)?
+                    self.lookup_method_in_class_hierarchy(mc, class_obj, receiver, selector, true, args)?
                 {
                     Some(m)
                 } else {
@@ -1564,6 +1565,7 @@ impl<'gc> VmState<'gc> {
                         if let Some(m) = self.lookup_method_in_class_hierarchy(
                             mc,
                             class_class,
+                            receiver,
                             selector,
                             false,
                             args,
@@ -1579,7 +1581,7 @@ impl<'gc> VmState<'gc> {
             }
             Value::ClassMeta(class_obj) => {
                 if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(mc, class_obj, selector, true, args)?
+                    self.lookup_method_in_class_hierarchy(mc, class_obj, receiver, selector, true, args)?
                 {
                     Some(m)
                 } else {
@@ -1595,6 +1597,7 @@ impl<'gc> VmState<'gc> {
                         if let Some(m) = self.lookup_method_in_class_hierarchy(
                             mc,
                             object_class,
+                            receiver,
                             selector,
                             false,
                             args,
@@ -1611,7 +1614,7 @@ impl<'gc> VmState<'gc> {
             Value::Object(obj) => {
                 let class_obj = obj.borrow().class;
                 if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(mc, class_obj, selector, false, args)?
+                    self.lookup_method_in_class_hierarchy(mc, class_obj, receiver, selector, false, args)?
                 {
                     Some(m)
                 } else {
@@ -1656,6 +1659,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        receiver: Value<'gc>,
         selector: &str,
         class_side: bool,
         args: &[Value<'gc>],
@@ -1664,6 +1668,7 @@ impl<'gc> VmState<'gc> {
         self.lookup_method_in_class_hierarchy_rec(
             mc,
             class_ref,
+            receiver,
             selector,
             class_side,
             args,
@@ -1671,11 +1676,14 @@ impl<'gc> VmState<'gc> {
         )
     }
 
+    // `receiver` is the subject of the send (the value `self` resolves to inside a
+    // guard block); it's threaded down to `match_score`/`execute_validation_block`.
     #[allow(no_gc_across_yield)]
     fn lookup_method_in_class_hierarchy_rec(
         &mut self,
         mc: &Mutation<'gc>,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        receiver: Value<'gc>,
         selector: &str,
         class_side: bool,
         args: &[Value<'gc>],
@@ -1715,7 +1723,7 @@ impl<'gc> VmState<'gc> {
             // derived class override a base regardless of score.
             let mut applicable: Vec<(Value<'gc>, (i64, u8))> = Vec::new();
             for &method_val in &candidates {
-                if let Some(score) = self.match_score(mc, method_val, args)? {
+                if let Some(score) = self.match_score(mc, receiver, method_val, args)? {
                     applicable.push((method_val, score));
                 }
             }
@@ -1734,15 +1742,15 @@ impl<'gc> VmState<'gc> {
 
         for mixin in mixins {
             if let Some(method) = self.lookup_method_in_class_hierarchy_rec(
-                mc, mixin, selector, class_side, args, visited,
+                mc, mixin, receiver, selector, class_side, args, visited,
             )? {
                 return Ok(Some(method));
             }
         }
         if let Some(p) = parent {
-            if let Some(method) = self
-                .lookup_method_in_class_hierarchy_rec(mc, p, selector, class_side, args, visited)?
-            {
+            if let Some(method) = self.lookup_method_in_class_hierarchy_rec(
+                mc, p, receiver, selector, class_side, args, visited,
+            )? {
                 return Ok(Some(method));
             }
         }
@@ -1765,6 +1773,7 @@ impl<'gc> VmState<'gc> {
     fn match_score(
         &mut self,
         mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
         method_val: Value<'gc>,
         args: &[Value<'gc>],
     ) -> Result<Option<(i64, u8)>, BBError> {
@@ -1790,7 +1799,8 @@ impl<'gc> VmState<'gc> {
         // variant whose guard passes (rank 0) outranks an otherwise-equal unguarded
         // variant (rank 1). A failing guard makes the variant inapplicable.
         let guard_rank = if let Some(decl_block) = block.decl_block {
-            let res = self.execute_validation_block(mc, decl_block, &block.param_names, args)?;
+            let res =
+                self.execute_validation_block(mc, decl_block, receiver, &block.param_names, args)?;
             if !res.is_true() {
                 return Ok(None);
             }

@@ -32,14 +32,29 @@
         "* order — dispatch is purely by (type distance, then guarded-beats-unguarded).
         .is:{
             TSMTC3 <- {
-                x: -> { |x {.class==Integer}| 'Integer: %' % (x) }
-                x: --> { |x {.class==String}| 'String: %' % x }
+                x: -> { |x { x.class==Integer }| 'Integer: %' % (x) }
+                x: --> { |x { x.class==String }| 'String: %' % x }
                 x: --> { |x| 'Other: %' % x }
-                x: --> { |x:Integer {x > 100}| 'Big Integer: %' % x }
-                x: --> { |x:Integer {|n| n < 0}| 'Negative Integer: %' % x }
+                x: --> { |x:Integer { x > 100 }| 'Big Integer: %' % x }
+                x: --> { |x:Integer { x < 0 }| 'Negative Integer: %' % x }
             };
             #( TSMTC3.new.x:55 TSMTC3.new.x:'str' TSMTC3.new.x:true TSMTC3.new.x:150 TSMTC3.new.x:-10 )
         } equalTo:#( 'Integer: 55' 'String: str' 'Other: true' 'Big Integer: 150' 'Negative Integer: -10' );
+    };
+
+    "* A guard's `self` is the method's receiver (the subject of the call), so a guard
+    "* can use the rest of the class — instance variables and other methods — not just
+    "* the arguments (which are bound by name).
+    .test:
+    dispatchGuardUsesSelf -> {
+        Bound <- { |@min|
+            .meta <-- { min: -> { |m| ^.new:{ min = m } } }
+            within?: -> { |n:Integer| n >= @min }
+            ok?: -> { |n:Integer { .within?:n }| 'yes' }   "* guard calls a method (which reads @min) via self
+            ok?: --> { |n:Integer| 'no' }
+        };
+        .is:{ (Bound.min:10).ok?:15 } equalTo:'yes';
+        .is:{ (Bound.min:10).ok?:5 } equalTo:'no';
     };
 
     "* Two equally-specific UNGUARDED variants (a value that is-a both mixins at the
