@@ -19,6 +19,7 @@ use crate::{ansi_colorizer, gc, gcl};
 
 use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
 use regex::Regex;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::path::Path;
@@ -163,7 +164,9 @@ pub struct VmState<'gc> {
     /// (`invalidate_method_cache`). Traced as part of `VmState` so cached method
     /// `Value`s stay live; the key's class *pointers* are sound because named
     /// classes are globals-rooted (stable address) — eigenclasses are excluded.
-    pub method_cache: HashMap<MethodCacheKey, Option<Value<'gc>>>,
+    /// Keyed by an all-integer `MethodCacheKey`, so it uses `FxHashMap` (FxHash) —
+    /// SipHash's worst case, FxHash's best — for a faster per-send probe.
+    pub method_cache: FxHashMap<MethodCacheKey, Option<Value<'gc>>>,
     /// Scratch flag marking the in-progress lookup's result as un-memoizable. Set
     /// by `match_score` when a guarded candidate is examined — a guard's outcome
     /// depends on argument *values*, not just types, so the resolution can't be keyed
@@ -239,7 +242,7 @@ impl<'gc> VmState<'gc> {
             main_saved_frames: Vec::new(),
             main_saved_native_args: Vec::new(),
             fiber_error: None,
-            method_cache: HashMap::new(),
+            method_cache: FxHashMap::default(),
             dispatch_uncacheable: false,
             options,
         }

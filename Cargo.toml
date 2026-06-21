@@ -41,4 +41,5 @@ pest_derive = "2.8.6"
 corosensei = "0.1.4"
 console = "0.15"
 mimalloc = { version = "0.1", optional = true }
+rustc-hash = "2"
 
