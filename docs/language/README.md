@@ -1,17 +1,17 @@
-# BuildingBlocks Language Reference
+# Quoin Language Reference
 
-A semantics reference for the BuildingBlocks (BB) language, grounded in how the
-VM actually behaves. Near-term purpose: a record of how to write BB correctly so
+A semantics reference for the Quoin (Quoin) language, grounded in how the
+VM actually behaves. Near-term purpose: a record of how to write Quoin correctly so
 that a reader (human or a fresh tooling session) doesn't have to reverse-engineer
 the interpreter. Longer-term, this is intended to grow into end-user documentation.
 
 **Format.** Pedagogical order — read top to bottom to learn the language — but
 every section opens with a terse **Rules** box so it also works for lookup. Method
-reference is kept brief and points at the stdlib (`bblib/*.bub`) as the source of
+reference is kept brief and points at the stdlib (`qnlib/*.qn`) as the source of
 truth rather than duplicating it.
 
 > Status: full draft (Parts I–VI + appendices) pending review. Claims are verified
-> against the parser grammar, `src/vm.rs`, `bblib/`, and the test suite — the
+> against the parser grammar, `src/vm.rs`, `qnlib/`, and the test suite — the
 > surprising ones were confirmed by running the VM directly.
 
 ## Contents
@@ -47,10 +47,10 @@ truth rather than duplicating it.
 18. Collections & core types — brief tables, pointers to stdlib
 19. String formatting & ANSI — `%` interpolation, `%'…%{expr}'`
 20. Namespaces — `[IO]`, `[/]`, `[Y]`
-21. Stdlib map — what each `bblib/*.bub` provides; native vs BB
+21. Stdlib map — what each `qnlib/*.qn` provides; native vs Quoin
 
 ### Appendices · [`07-appendices.md`](07-appendices.md)
 - A. Sigil & operator cheat-sheet
 - B. Selector / desugaring quick-reference
-- C. **Gotchas for writing & generating BB** — all corner cases consolidated
+- C. **Gotchas for writing & generating Quoin** — all corner cases consolidated
 - D. Glossary

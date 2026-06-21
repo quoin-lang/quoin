@@ -1,8 +1,8 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMYielder, YieldReason};
 use crate::highlighter::{format_ansi, HighlightParser, HighlightSpan};
 use crate::instruction::{Constant, Instruction};
-use crate::parser::parse_building_blocks_string;
+use crate::parser::parse_quoin_string;
 use crate::runtime::fiber::{FiberStatus, NativeFiberState};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
@@ -149,7 +149,7 @@ pub struct VmState<'gc> {
     pub main_saved_native_args: Vec<Vec<Value<'gc>>>,
     /// An error raised inside a guest fiber, delivered to its resumer.
     #[collect(require_static)]
-    pub fiber_error: Option<BBError>,
+    pub fiber_error: Option<QuoinError>,
 
     #[collect(require_static)]
     pub options: VmOptions,
@@ -168,7 +168,7 @@ pub trait Callable<'gc> {
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
         selector: Option<String>,
-    ) -> Result<(), BBError>;
+    ) -> Result<(), QuoinError>;
 }
 
 pub struct BlockCallable<'gc> {
@@ -182,9 +182,9 @@ impl<'gc> Callable<'gc> for BlockCallable<'gc> {
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
         selector: Option<String>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         if args.is_empty() {
-            return Err(BBError::Other(
+            return Err(QuoinError::Other(
                 "Method call arguments is empty (missing receiver)".to_string(),
             ));
         }
@@ -206,7 +206,7 @@ impl<'gc> Callable<'gc> for MetaCallable<'gc> {
         _mc: &Mutation<'gc>,
         _args: Vec<Value<'gc>>,
         _selector: Option<String>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         vm.push(Value::ClassMeta(self.class_obj));
         Ok(())
     }
@@ -223,9 +223,9 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
         selector: Option<String>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         if args.len() != 2 {
-            return Err(BBError::Other(
+            return Err(QuoinError::Other(
                 "new: expects receiver and a block".to_string(),
             ));
         }
@@ -234,7 +234,7 @@ impl<'gc> Callable<'gc> for NewCallable<'gc> {
         {
             *b
         } else {
-            return Err(BBError::TypeError {
+            return Err(QuoinError::TypeError {
                 expected: "Block".to_string(),
                 got: args[1].type_name().to_string(),
                 msg: "new: expects a Block".to_string(),
@@ -260,9 +260,9 @@ impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
         _selector: Option<String>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         if args.len() != 1 {
-            return Err(BBError::Other("new expects only the receiver".to_string()));
+            return Err(QuoinError::Other("new expects only the receiver".to_string()));
         }
 
         // Create the new object
@@ -286,7 +286,7 @@ impl<'gc> Callable<'gc> for NativeCallable {
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
         _selector: Option<String>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         vm.active_native_args.push(args.clone());
         let ret = self.0.0(vm, mc, args);
         vm.active_native_args.pop();
@@ -512,7 +512,7 @@ impl<'gc> VmState<'gc> {
 
     #[allow(clippy::wrong_self_convention)]
     #[allow(no_gc_across_yield)]
-    pub fn to_s(&mut self, mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Value<'gc>, BBError> {
+    pub fn to_s(&mut self, mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Value<'gc>, QuoinError> {
         match value {
             Value::Object(_) => self.call_method(mc, value, "s", vec![]),
             Value::Class(_) | Value::ClassMeta(_) => {
@@ -567,20 +567,20 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
-    /// True if `set_val` already contains a value equal (by BB `==:`) to `value`.
+    /// True if `set_val` already contains a value equal (by Quoin `==:`) to `value`.
     pub fn set_contains(
         &mut self,
         mc: &Mutation<'gc>,
         set_val: Value<'gc>,
         value: Value<'gc>,
-    ) -> Result<bool, BBError> {
+    ) -> Result<bool, QuoinError> {
         let len = set_val
             .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-            .map_err(|e| BBError::Other(e))?;
+            .map_err(|e| QuoinError::Other(e))?;
         for i in 0..len {
             let elem = set_val
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
             if self.call_method(mc, elem, "==:", vec![value])?.is_true() {
                 return Ok(true);
             }
@@ -595,13 +595,13 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         set_val: Value<'gc>,
         value: Value<'gc>,
-    ) -> Result<bool, BBError> {
+    ) -> Result<bool, QuoinError> {
         if self.set_contains(mc, set_val, value)? {
             Ok(false)
         } else {
             set_val
                 .with_native_state_mut::<NativeSetState, _, _>(mc, |s| s.get_vec_mut().push(value))
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
             Ok(true)
         }
     }
@@ -613,20 +613,20 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         set_val: Value<'gc>,
         value: Value<'gc>,
-    ) -> Result<bool, BBError> {
+    ) -> Result<bool, QuoinError> {
         let len = set_val
             .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-            .map_err(|e| BBError::Other(e))?;
+            .map_err(|e| QuoinError::Other(e))?;
         for i in 0..len {
             let elem = set_val
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
             if self.call_method(mc, elem, "==:", vec![value])?.is_true() {
                 set_val
                     .with_native_state_mut::<NativeSetState, _, _>(mc, |s| {
                         s.get_vec_mut().remove(i);
                     })
-                    .map_err(|e| BBError::Other(e))?;
+                    .map_err(|e| QuoinError::Other(e))?;
                 return Ok(true);
             }
         }
@@ -718,7 +718,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         obj: Gc<'gc, RefLock<Object<'gc>>>,
         env_borrow: &EnvFrame<'gc>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         let vars = self.get_all_instance_vars(obj.borrow().class);
         for var in &vars {
             if let Some(val) = env_borrow.vars.get(var) {
@@ -920,7 +920,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         selector: &str,
         args: Vec<Value<'gc>>,
-    ) -> Result<usize, BBError> {
+    ) -> Result<usize, QuoinError> {
         let method = self.lookup_method(mc, receiver, selector, &args)?;
         if let Some(method) = method {
             let mut all_args = vec![receiver];
@@ -929,7 +929,7 @@ impl<'gc> VmState<'gc> {
             method.call(self, mc, all_args, Some(selector.to_string()))?;
             Ok(initial_frame_count)
         } else {
-            Err(BBError::Other(format!(
+            Err(QuoinError::Other(format!(
                 "Method {} not found on receiver",
                 selector
             )))
@@ -943,7 +943,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         selector: &str,
         args: Vec<Value<'gc>>,
-    ) -> Result<Value<'gc>, BBError> {
+    ) -> Result<Value<'gc>, QuoinError> {
         let method = self.lookup_method(mc, receiver, selector, &args)?;
         if let Some(method) = method {
             let mut all_args = vec![receiver];
@@ -964,18 +964,18 @@ impl<'gc> VmState<'gc> {
                             break;
                         }
                         Ok(VmStatus::Yeeted(val)) => {
-                            return Err(BBError::Other(format!(
+                            return Err(QuoinError::Other(format!(
                                 "Uncaught exception during method call: {}",
                                 val
                             )));
                         }
-                        Err(BBError::NonLocalReturn) => {
+                        Err(QuoinError::NonLocalReturn) => {
                             if self.frames.len() > initial_frame_count {
                                 continue;
                             } else if self.frames.len() == initial_frame_count {
                                 break;
                             } else {
-                                return Err(BBError::NonLocalReturn);
+                                return Err(QuoinError::NonLocalReturn);
                             }
                         }
                         Err(e) => return Err(e),
@@ -997,7 +997,7 @@ impl<'gc> VmState<'gc> {
         method_val: Value<'gc>,
         selector: &str,
         args: Vec<Value<'gc>>,
-    ) -> Result<Value<'gc>, BBError> {
+    ) -> Result<Value<'gc>, QuoinError> {
         let method: Option<Box<dyn Callable<'gc> + 'gc>> = match method_val {
             Value::Object(obj) => match &obj.borrow().payload {
                 ObjectPayload::Block(block) => {
@@ -1045,18 +1045,18 @@ impl<'gc> VmState<'gc> {
                             break;
                         }
                         Ok(VmStatus::Yeeted(val)) => {
-                            return Err(BBError::Other(format!(
+                            return Err(QuoinError::Other(format!(
                                 "Uncaught exception during method call: {}",
                                 val
                             )));
                         }
-                        Err(BBError::NonLocalReturn) => {
+                        Err(QuoinError::NonLocalReturn) => {
                             if self.frames.len() > initial_frame_count {
                                 continue;
                             } else if self.frames.len() == initial_frame_count {
                                 break;
                             } else {
-                                return Err(BBError::NonLocalReturn);
+                                return Err(QuoinError::NonLocalReturn);
                             }
                         }
                         Err(e) => return Err(e),
@@ -1100,7 +1100,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         defers: &[DeferredCall<'gc>],
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         for d in defers {
             self.call_method(mc, d.receiver, &d.selector, d.args.clone())?;
         }
@@ -1111,7 +1111,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         obj: Gc<'gc, RefLock<Object<'gc>>>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         let mut classes = Vec::new();
         let mut visited = Vec::new();
         self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
@@ -1132,7 +1132,7 @@ impl<'gc> VmState<'gc> {
         block: Gc<'gc, Block<'gc>>,
         args: Vec<Value<'gc>>,
         self_val: Option<Value<'gc>>,
-    ) -> Result<Value<'gc>, BBError> {
+    ) -> Result<Value<'gc>, QuoinError> {
         let initial_frame_count = self.frames.len();
         if let Some(receiver) = self_val {
             self.start_block_as_method(mc, block, receiver, args, None, false);
@@ -1152,18 +1152,18 @@ impl<'gc> VmState<'gc> {
                         break;
                     }
                     Ok(VmStatus::Yeeted(val)) => {
-                        return Err(BBError::Other(format!(
+                        return Err(QuoinError::Other(format!(
                             "Uncaught exception during block execution: {}",
                             val
                         )));
                     }
-                    Err(BBError::NonLocalReturn) => {
+                    Err(QuoinError::NonLocalReturn) => {
                         if self.frames.len() > initial_frame_count {
                             continue;
                         } else if self.frames.len() == initial_frame_count {
                             break;
                         } else {
-                            return Err(BBError::NonLocalReturn);
+                            return Err(QuoinError::NonLocalReturn);
                         }
                     }
                     Err(e) => return Err(e),
@@ -1193,7 +1193,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         fiber_val: Value<'gc>,
         arg: Value<'gc>,
-    ) -> Result<Value<'gc>, BBError> {
+    ) -> Result<Value<'gc>, QuoinError> {
         match self.fiber_status(fiber_val)? {
             FiberStatus::Done => {
                 return Err(self.raise_fiber_error(mc, "cannot resume a finished Fiber"));
@@ -1220,7 +1220,7 @@ impl<'gc> VmState<'gc> {
                 arg,
             });
         } else {
-            return Err(BBError::Other(
+            return Err(QuoinError::Other(
                 "Fiber.resume called outside the VM scheduler".to_string(),
             ));
         }
@@ -1242,7 +1242,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         value: Value<'gc>,
-    ) -> Result<Value<'gc>, BBError> {
+    ) -> Result<Value<'gc>, QuoinError> {
         if self.current_fiber.is_none() {
             return Err(self.raise_fiber_error(mc, "Fiber.yield: called outside of a Fiber"));
         }
@@ -1250,7 +1250,7 @@ impl<'gc> VmState<'gc> {
         if let Some(yielder) = unsafe { self.get_yielder() } {
             yielder.suspend(YieldReason::YieldFiber { value });
         } else {
-            return Err(BBError::Other(
+            return Err(QuoinError::Other(
                 "Fiber.yield: called outside the VM scheduler".to_string(),
             ));
         }
@@ -1265,18 +1265,18 @@ impl<'gc> VmState<'gc> {
             .unwrap_or_else(|| self.new_nil(mc)))
     }
 
-    fn fiber_status(&self, fiber_val: Value<'gc>) -> Result<FiberStatus, BBError> {
+    fn fiber_status(&self, fiber_val: Value<'gc>) -> Result<FiberStatus, QuoinError> {
         fiber_val
             .with_native_state::<NativeFiberState, _, _>(|s| s.status)
-            .map_err(BBError::Other)
+            .map_err(QuoinError::Other)
     }
 
     /// Park a structured `FiberError` in `active_exception` and return the
-    /// `Thrown` signal, so fiber misuse is catchable by type in BB code.
-    fn raise_fiber_error(&mut self, mc: &Mutation<'gc>, msg: &str) -> BBError {
+    /// `Thrown` signal, so fiber misuse is catchable by type in Quoin code.
+    fn raise_fiber_error(&mut self, mc: &Mutation<'gc>, msg: &str) -> QuoinError {
         let err = self.make_error(mc, "FiberError", msg, None);
         self.active_exception = Some(err);
-        BBError::Thrown
+        QuoinError::Thrown
     }
 
     fn set_fiber_status(&self, mc: &Mutation<'gc>, fiber_val: Value<'gc>, status: FiberStatus) {
@@ -1289,7 +1289,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         who: Option<Value<'gc>>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         let stack = std::mem::take(&mut self.stack);
         let frames = std::mem::take(&mut self.frames);
         let native_args = std::mem::take(&mut self.active_native_args);
@@ -1303,7 +1303,7 @@ impl<'gc> VmState<'gc> {
                 f.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
                     s.set_context(stack, frames, native_args)
                 })
-                .map_err(BBError::Other)?;
+                .map_err(QuoinError::Other)?;
             }
         }
         Ok(())
@@ -1314,7 +1314,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         who: Option<Value<'gc>>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         let (stack, frames, native_args) = match who {
             None => (
                 std::mem::take(&mut self.main_saved_stack),
@@ -1323,7 +1323,7 @@ impl<'gc> VmState<'gc> {
             ),
             Some(f) => f
                 .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.take_context())
-                .map_err(BBError::Other)?,
+                .map_err(QuoinError::Other)?,
         };
         self.stack = stack;
         self.frames = frames;
@@ -1338,7 +1338,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         fiber_val: Value<'gc>,
         arg: Value<'gc>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         let outgoing = self.current_fiber;
         self.save_fiber_context(mc, outgoing)?;
         if let Some(of) = outgoing {
@@ -1349,7 +1349,7 @@ impl<'gc> VmState<'gc> {
 
         let started = fiber_val
             .with_native_state::<NativeFiberState, _, _>(|s| s.started)
-            .map_err(BBError::Other)?;
+            .map_err(QuoinError::Other)?;
 
         self.load_fiber_context(mc, Some(fiber_val))?;
 
@@ -1359,18 +1359,18 @@ impl<'gc> VmState<'gc> {
             // First activation: bind `arg` to the block's parameters.
             let block_val = fiber_val
                 .with_native_state::<NativeFiberState, _, _>(|s| s.block())
-                .map_err(BBError::Other)?;
+                .map_err(QuoinError::Other)?;
             let block_gc = match block_val {
                 Value::Object(obj) => match &obj.borrow().payload {
                     ObjectPayload::Block(b) => *b,
-                    _ => return Err(BBError::Other("Fiber target is not a Block".to_string())),
+                    _ => return Err(QuoinError::Other("Fiber target is not a Block".to_string())),
                 },
-                _ => return Err(BBError::Other("Fiber target is not a Block".to_string())),
+                _ => return Err(QuoinError::Other("Fiber target is not a Block".to_string())),
             };
             self.start_block(mc, block_gc, vec![arg], None, None);
             fiber_val
                 .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.started = true)
-                .map_err(BBError::Other)?;
+                .map_err(QuoinError::Other)?;
         }
         self.set_fiber_status(mc, fiber_val, FiberStatus::Running);
         Ok(())
@@ -1381,7 +1381,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         value: Value<'gc>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         let outgoing = self.current_fiber;
         self.save_fiber_context(mc, outgoing)?;
         if let Some(of) = outgoing {
@@ -1402,8 +1402,8 @@ impl<'gc> VmState<'gc> {
     pub fn do_fiber_done(
         &mut self,
         mc: &Mutation<'gc>,
-        result: Result<Value<'gc>, BBError>,
-    ) -> Result<(), BBError> {
+        result: Result<Value<'gc>, QuoinError>,
+    ) -> Result<(), QuoinError> {
         // Record the outcome on the finished fiber for `result`/`error`/`status`.
         if let Some(finished) = self.current_fiber {
             match &result {
@@ -1414,11 +1414,11 @@ impl<'gc> VmState<'gc> {
                         .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.set_result(v));
                 }
                 Err(e) => {
-                    // The error value is the parked BB exception, or a converted
+                    // The error value is the parked Quoin exception, or a converted
                     // internal error. Peek (don't take) so the resumer still sees it.
                     let err_val = match self.active_exception {
                         Some(v) => v,
-                        None => self.bberror_to_value(mc, e),
+                        None => self.quoinerror_to_value(mc, e),
                     };
                     self.set_fiber_status(mc, finished, FiberStatus::Failed);
                     let _ = finished.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
@@ -1452,7 +1452,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         outer_param_names: &[String],
         args: &[Value<'gc>],
-    ) -> Result<Value<'gc>, BBError> {
+    ) -> Result<Value<'gc>, QuoinError> {
         let initial_frame_count = self.frames.len();
 
         let frame_id = self.next_frame_id;
@@ -1502,18 +1502,18 @@ impl<'gc> VmState<'gc> {
                         break;
                     }
                     Ok(VmStatus::Yeeted(val)) => {
-                        return Err(BBError::Other(format!(
+                        return Err(QuoinError::Other(format!(
                             "Uncaught exception during validation block execution: {}",
                             val
                         )));
                     }
-                    Err(BBError::NonLocalReturn) => {
+                    Err(QuoinError::NonLocalReturn) => {
                         if self.frames.len() > initial_frame_count {
                             continue;
                         } else if self.frames.len() == initial_frame_count {
                             break;
                         } else {
-                            return Err(BBError::NonLocalReturn);
+                            return Err(QuoinError::NonLocalReturn);
                         }
                     }
                     Err(e) => return Err(e),
@@ -1531,7 +1531,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         selector: &str,
         args: &[Value<'gc>],
-    ) -> Result<Option<Box<dyn Callable<'gc> + 'gc>>, BBError> {
+    ) -> Result<Option<Box<dyn Callable<'gc> + 'gc>>, QuoinError> {
         if selector == "meta" {
             if let Value::Class(c) = receiver {
                 return Ok(Some(Box::new(MetaCallable { class_obj: c })));
@@ -1663,7 +1663,7 @@ impl<'gc> VmState<'gc> {
         selector: &str,
         class_side: bool,
         args: &[Value<'gc>],
-    ) -> Result<Option<Value<'gc>>, BBError> {
+    ) -> Result<Option<Value<'gc>>, QuoinError> {
         let mut visited = Vec::new();
         self.lookup_method_in_class_hierarchy_rec(
             mc,
@@ -1688,7 +1688,7 @@ impl<'gc> VmState<'gc> {
         class_side: bool,
         args: &[Value<'gc>],
         visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
-    ) -> Result<Option<Value<'gc>>, BBError> {
+    ) -> Result<Option<Value<'gc>>, QuoinError> {
         if visited.iter().any(|c| Gc::ptr_eq(*c, class_ref)) {
             return Ok(None);
         }
@@ -1776,7 +1776,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         method_val: Value<'gc>,
         args: &[Value<'gc>],
-    ) -> Result<Option<(i64, u8)>, BBError> {
+    ) -> Result<Option<(i64, u8)>, QuoinError> {
         let block = match self.get_block_from_method(method_val) {
             Some(b) => b,
             None => {
@@ -1813,14 +1813,14 @@ impl<'gc> VmState<'gc> {
 
     /// Build an `AmbiguousMethod` error naming the equally-specific candidates that
     /// tied for `selector` on `class_ref` given `args`. The candidate signatures
-    /// render one-per-line at the error site (see `BBError` Display).
+    /// render one-per-line at the error site (see `QuoinError` Display).
     fn ambiguous_method_error(
         &self,
         selector: &str,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         candidates: &[Value<'gc>],
         args: &[Value<'gc>],
-    ) -> BBError {
+    ) -> QuoinError {
         let class_name = class_ref.borrow().name.to_string();
         let arg_types: Vec<String> = args.iter().map(|a| a.class_name()).collect();
         let msg = format!(
@@ -1830,7 +1830,7 @@ impl<'gc> VmState<'gc> {
             arg_types.join(", "),
             candidates.len(),
         );
-        BBError::AmbiguousMethod {
+        QuoinError::AmbiguousMethod {
             selector: selector.to_string(),
             msg,
             candidates: candidates
@@ -2087,7 +2087,7 @@ impl<'gc> VmState<'gc> {
             dist += 1;
         }
         // `Object` is the universal supertype: it matches every value. Some values
-        // (notably metaclasses — see BBLIB_TODO about making Class/ClassMeta subclass
+        // (notably metaclasses — see QUOIN_TODO about making Class/ClassMeta subclass
         // Object directly) don't physically reach Object via `parent`, so they fall
         // here and rank last via this large fallback distance.
         if hint == "Object" {
@@ -2168,7 +2168,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         chain_start: Value<'gc>,
         new_method: Value<'gc>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         let mut curr = chain_start;
         loop {
             if let Value::Object(obj) = curr {
@@ -2191,7 +2191,7 @@ impl<'gc> VmState<'gc> {
                     }
                 }
             }
-            return Err(BBError::Other("Invalid method object in chain".to_string()));
+            return Err(QuoinError::Other("Invalid method object in chain".to_string()));
         }
     }
 
@@ -2206,7 +2206,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         chain_start: Value<'gc>,
         new_method: Value<'gc>,
-    ) -> Result<(), BBError> {
+    ) -> Result<(), QuoinError> {
         let new_block = self.get_block_from_method(new_method);
         if let Some(nb) = new_block
             && nb.decl_block.is_none()
@@ -2531,19 +2531,19 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    pub fn annotate_error(&self, error: BBError) -> BBError {
-        // An uncaught BB throw reaches here as `Thrown`; surface the actual
+    pub fn annotate_error(&self, error: QuoinError) -> QuoinError {
+        // An uncaught Quoin throw reaches here as `Thrown`; surface the actual
         // thrown value (which lives in `active_exception`) for display.
-        let error = if matches!(error, BBError::Thrown) {
+        let error = if matches!(error, QuoinError::Thrown) {
             let msg = match self.active_exception {
                 Some(v) => format!("{}", v),
                 None => "uncaught exception".to_string(),
             };
-            BBError::Other(msg)
+            QuoinError::Other(msg)
         } else {
             error
         };
-        if matches!(error, BBError::WithSourceInfo { .. }) {
+        if matches!(error, QuoinError::WithSourceInfo { .. }) {
             return error;
         }
         if let Some(frame) = self.frames.last() {
@@ -2777,7 +2777,7 @@ impl<'gc> VmState<'gc> {
                     trace.push(line);
                 }
 
-                return BBError::WithSourceInfo {
+                return QuoinError::WithSourceInfo {
                     error: Box::new(error),
                     source_info: source_info.clone(),
                     trace,
@@ -2788,7 +2788,7 @@ impl<'gc> VmState<'gc> {
         error
     }
 
-    /// Build a BB `Error` instance of the named class with `message`/`payload`.
+    /// Build a Quoin `Error` instance of the named class with `message`/`payload`.
     /// Falls back to a plain string if the class isn't registered yet (e.g. an
     /// error fired during bootstrap before the Error hierarchy is defined).
     pub fn make_error(
@@ -2815,26 +2815,26 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    /// Convert an internal `BBError` into the BB value a `catch:` handler should
+    /// Convert an internal `QuoinError` into the Quoin value a `catch:` handler should
     /// receive. Structured variants become typed `Error` objects so guest code
     /// can dispatch on them; everything else stays a descriptive string.
-    pub fn bberror_to_value(&self, mc: &Mutation<'gc>, error: &BBError) -> Value<'gc> {
+    pub fn quoinerror_to_value(&self, mc: &Mutation<'gc>, error: &QuoinError) -> Value<'gc> {
         match error {
-            BBError::TypeError { msg, .. } => self.make_error(mc, "TypeError", msg, None),
-            BBError::ArgumentCountMismatch { msg, .. } => {
+            QuoinError::TypeError { msg, .. } => self.make_error(mc, "TypeError", msg, None),
+            QuoinError::ArgumentCountMismatch { msg, .. } => {
                 self.make_error(mc, "ArgumentError", msg, None)
             }
-            BBError::ArithmeticError(msg) => self.make_error(mc, "ArithmeticError", msg, None),
-            BBError::MessageNotUnderstood {
+            QuoinError::ArithmeticError(msg) => self.make_error(mc, "ArithmeticError", msg, None),
+            QuoinError::MessageNotUnderstood {
                 receiver, selector, ..
             } => {
                 let msg = format!("no method '{}' for {}", selector, receiver);
                 self.make_error(mc, "MessageNotUnderstood", &msg, None)
             }
-            BBError::AmbiguousMethod { msg, .. } => {
+            QuoinError::AmbiguousMethod { msg, .. } => {
                 self.make_error(mc, "AmbiguousMethodError", msg, None)
             }
-            BBError::WithSourceInfo { error, .. } => self.bberror_to_value(mc, error),
+            QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             other => {
                 let s = format!("{}", other);
                 self.new_string(mc, s)
@@ -2865,7 +2865,7 @@ impl<'gc> VmState<'gc> {
                     };
                     if supports_color {
                         let parse_and_highlight = || -> Option<String> {
-                            let program = parse_building_blocks_string(&snippet_text);
+                            let program = parse_quoin_string(&snippet_text);
                             let mut parser = HighlightParser::new(&snippet_text);
                             let spans = parser.highlight_program(&program);
                             Some(format_ansi(&snippet_text, spans))
@@ -2940,7 +2940,7 @@ impl<'gc> VmState<'gc> {
 
         if supports_color {
             let parse_and_highlight = || -> Option<String> {
-                let program = parse_building_blocks_string(&content);
+                let program = parse_quoin_string(&content);
                 let mut parser = HighlightParser::new(&content);
                 let spans = parser.highlight_program(&program);
 
@@ -2968,9 +2968,9 @@ impl<'gc> VmState<'gc> {
         Some(snippet_text.to_string())
     }
 
-    pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
+    pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, QuoinError> {
         let res = self.step_internal(mc);
-        if let Err(BBError::NonLocalReturn) = res {
+        if let Err(QuoinError::NonLocalReturn) = res {
             return Ok(VmStatus::Running);
         }
         if let Err(e) = res {
@@ -2980,7 +2980,7 @@ impl<'gc> VmState<'gc> {
     }
 
     #[allow(no_gc_across_yield)]
-    pub(crate) fn step_internal(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, BBError> {
+    pub(crate) fn step_internal(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, QuoinError> {
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
             // assert_eq!(self.stack.len(), 0, "Stack is not empty! {:?}", self.stack);
@@ -3016,7 +3016,7 @@ impl<'gc> VmState<'gc> {
                 if name == "true" || name == "false" || name == "nil" {
                     let err_msg = format!("Can't modify keyword {}", name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                    return Err(BBError::Other(err_msg));
+                    return Err(QuoinError::Other(err_msg));
                 }
                 let val = self.pop()?;
                 let frame = &mut self.frames[frame_idx];
@@ -3027,7 +3027,7 @@ impl<'gc> VmState<'gc> {
                 if name == "true" || name == "false" || name == "nil" {
                     let err_msg = format!("Can't modify keyword {}", name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                    return Err(BBError::Other(err_msg));
+                    return Err(QuoinError::Other(err_msg));
                 }
                 let val = self.pop()?;
                 let frame = &mut self.frames[frame_idx];
@@ -3058,7 +3058,7 @@ impl<'gc> VmState<'gc> {
                 if name.name == "true" || name.name == "false" || name.name == "nil" {
                     let err_msg = format!("Can't modify keyword {}", name.name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                    return Err(BBError::Other(err_msg));
+                    return Err(QuoinError::Other(err_msg));
                 }
                 let first_char = name.name.chars().next().unwrap_or('\0');
                 if first_char.is_ascii_uppercase() {
@@ -3070,7 +3070,7 @@ impl<'gc> VmState<'gc> {
                                 name.to_explicit_string()
                             );
                             self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                            return Err(BBError::Other(err_msg));
+                            return Err(QuoinError::Other(err_msg));
                         }
                     } else {
                         if exists {
@@ -3079,7 +3079,7 @@ impl<'gc> VmState<'gc> {
                                 name.to_explicit_string()
                             );
                             self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                            return Err(BBError::Other(err_msg));
+                            return Err(QuoinError::Other(err_msg));
                         }
                     }
                 }
@@ -3176,7 +3176,7 @@ impl<'gc> VmState<'gc> {
                         .iter()
                         .map(|&mv| self.format_candidate_signature(mv, &selector))
                         .collect();
-                    return Err(BBError::MessageNotUnderstood {
+                    return Err(QuoinError::MessageNotUnderstood {
                         receiver: receiver.class_name(),
                         selector: selector.clone(),
                         args: args.iter().map(|a| a.class_name()).collect(),
@@ -3248,7 +3248,7 @@ impl<'gc> VmState<'gc> {
                         self.stack.truncate(base);
                     }
                     self.push(ret_val);
-                    Err(BBError::NonLocalReturn)
+                    Err(QuoinError::NonLocalReturn)
                 } else {
                     Err("MethodReturn executed outside of a method context".into())
                 };
@@ -3300,7 +3300,7 @@ impl<'gc> VmState<'gc> {
                     {
                         map.insert((**s).clone(), val);
                     } else {
-                        return Err(BBError::TypeError {
+                        return Err(QuoinError::TypeError {
                             expected: "String".to_string(),
                             got: key_val.type_name().to_string(),
                             msg: format!("Map keys must be Strings, got: {:?}", key_val),
@@ -3335,7 +3335,7 @@ impl<'gc> VmState<'gc> {
                     let regex_val = self.new_regex(mc, re);
                     self.push(regex_val);
                 } else {
-                    return Err(BBError::TypeError {
+                    return Err(QuoinError::TypeError {
                         expected: "String".to_string(),
                         got: pattern_val.type_name().to_string(),
                         msg: format!("Regex pattern must be a String, got: {:?}", pattern_val),
@@ -3410,7 +3410,7 @@ impl<'gc> VmState<'gc> {
                 let block_val = self.pop()?;
                 let self_val = self.pop()?;
                 if self_val.is_nil() {
-                    return Err(BBError::Other(
+                    return Err(QuoinError::Other(
                         "Cannot extend nil or non-existent class/object".to_string(),
                     ));
                 }
@@ -3428,7 +3428,7 @@ impl<'gc> VmState<'gc> {
                     body_frame.unregister_on_defer_failure = pending;
                     Ok(VmStatus::Running)
                 } else {
-                    Err(BBError::TypeError {
+                    Err(QuoinError::TypeError {
                         expected: "Block".to_string(),
                         got: block_val.type_name().to_string(),
                         msg: format!("ExecuteBlockWithSelf expects a Block, got {:?}", block_val),
@@ -3444,7 +3444,7 @@ impl<'gc> VmState<'gc> {
                         .unwrap_or_else(|| self.new_nil(mc));
                     let target_class = self
                         .get_target_class_for_def(mc, self_val)
-                        .map_err(|e| BBError::Other(e))?;
+                        .map_err(|e| QuoinError::Other(e))?;
 
                     let method_obj = self.new_method(mc, selector.clone(), block_val, false);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
@@ -3486,7 +3486,7 @@ impl<'gc> VmState<'gc> {
                     self.push(method_obj);
                     self.frames[frame_idx].ip += 1;
                 } else {
-                    return Err(BBError::TypeError {
+                    return Err(QuoinError::TypeError {
                         expected: "Block".to_string(),
                         got: block_val.type_name().to_string(),
                         msg: format!("DefineMethod expects a Block, got {:?}", block_val),
@@ -3502,7 +3502,7 @@ impl<'gc> VmState<'gc> {
                         .unwrap_or_else(|| self.new_nil(mc));
                     let target_class = self
                         .get_target_class_for_def(mc, self_val)
-                        .map_err(|e| BBError::Other(e))?;
+                        .map_err(|e| QuoinError::Other(e))?;
 
                     let method_obj = self.new_method(mc, selector.clone(), block_val, true);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
@@ -3510,7 +3510,7 @@ impl<'gc> VmState<'gc> {
                         .lookup_in_class_hierarchy(target_class, &selector, is_class_side)
                         .is_some();
                     if !exists {
-                        return Err(BBError::Other(format!(
+                        return Err(QuoinError::Other(format!(
                             "Method {} does not exist in hierarchy of Class {} to override",
                             selector,
                             target_class.borrow().name
@@ -3555,7 +3555,7 @@ impl<'gc> VmState<'gc> {
                     self.push(method_obj);
                     self.frames[frame_idx].ip += 1;
                 } else {
-                    return Err(BBError::TypeError {
+                    return Err(QuoinError::TypeError {
                         expected: "Block".to_string(),
                         got: block_val.type_name().to_string(),
                         msg: format!("OverrideMethod expects a Block, got {:?}", block_val),
@@ -3585,7 +3585,7 @@ impl<'gc> VmState<'gc> {
                 if let Value::Object(obj) = self_val {
                     obj.borrow_mut(mc).fields.insert(name, val);
                 } else {
-                    return Err(BBError::Other(format!(
+                    return Err(QuoinError::Other(format!(
                         "Cannot set field '{}' on non-object {:?}",
                         name, self_val
                     )));
@@ -3621,20 +3621,20 @@ mod tests {
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
-    ) -> Result<Value<'gc>, BBError> {
+    ) -> Result<Value<'gc>, QuoinError> {
         let a = match args[0] {
             Value::Object(obj) => match obj.borrow().payload {
                 ObjectPayload::Int(i) => i,
-                _ => return Err(BBError::Other("Invalid types".to_string())),
+                _ => return Err(QuoinError::Other("Invalid types".to_string())),
             },
-            _ => return Err(BBError::Other("Invalid types".to_string())),
+            _ => return Err(QuoinError::Other("Invalid types".to_string())),
         };
         let b = match args[1] {
             Value::Object(obj) => match obj.borrow().payload {
                 ObjectPayload::Int(i) => i,
-                _ => return Err(BBError::Other("Invalid types".to_string())),
+                _ => return Err(QuoinError::Other("Invalid types".to_string())),
             },
-            _ => return Err(BBError::Other("Invalid types".to_string())),
+            _ => return Err(QuoinError::Other("Invalid types".to_string())),
         };
         Ok(vm.new_int(mc, a + b))
     }
@@ -3882,7 +3882,7 @@ mod tests {
                 "symbols of different names must not share a pointer"
             );
 
-            // Sanity: BB-level equality agrees with identity.
+            // Sanity: Quoin-level equality agrees with identity.
             assert_eq!(a, b);
             assert_ne!(a, c);
         });
@@ -5214,10 +5214,10 @@ mod tests {
     #[test]
     fn test_error_annotation_and_display() {
         use crate::compiler::Compiler;
-        use crate::parser::parse_building_blocks_string;
+        use crate::parser::parse_quoin_string;
 
         let code = "1.foo;";
-        let ast = parse_building_blocks_string(code);
+        let ast = parse_quoin_string(code);
         let mut compiler = Compiler::new();
         let compiled = compiler
             .compile_program(match &ast.value {
@@ -5289,10 +5289,10 @@ mod tests {
     #[test]
     fn test_error_annotation_with_color() {
         use crate::compiler::Compiler;
-        use crate::parser::parse_building_blocks_string;
+        use crate::parser::parse_quoin_string;
 
         let code = "1.foo;";
-        let ast = parse_building_blocks_string(code);
+        let ast = parse_quoin_string(code);
         let mut compiler = Compiler::new();
         let compiled = compiler
             .compile_program(match &ast.value {
@@ -5369,10 +5369,10 @@ mod tests {
     #[test]
     fn test_error_annotation_with_console_width() {
         use crate::compiler::Compiler;
-        use crate::parser::parse_building_blocks_string;
+        use crate::parser::parse_quoin_string;
 
         let code = "1.foo;";
-        let ast = parse_building_blocks_string(code);
+        let ast = parse_quoin_string(code);
         let mut compiler = Compiler::new();
         let compiled = compiler
             .compile_program(match &ast.value {
@@ -5418,7 +5418,7 @@ mod tests {
             }
 
             let err = err.expect("Expected execution error");
-            assert!(matches!(err, BBError::WithSourceInfo { .. }));
+            assert!(matches!(err, QuoinError::WithSourceInfo { .. }));
         });
     }
 

@@ -1,7 +1,12 @@
 [package]
-name = "building_blocks_vm"
+name = "quoin"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "qn"
+path = "src/main.rs"
+
 [workspace]
 members = [
     ".",
@@ -18,7 +23,6 @@ debug = true
 
 [dependencies]
 gc-arena = "0.6.0"
-antlr-rust = "0.3.0-beta"
 regex = "1.10"
 once_cell = "1.21.4"
 substring = "1.4.5"

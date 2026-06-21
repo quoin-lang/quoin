@@ -1,5 +1,5 @@
 use crate::arg;
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmStatus;
 
@@ -112,13 +112,13 @@ pub fn build_map_class() -> NativeClassBuilder {
             for key in keys {
                 let lhs_val = args[0]
                     .with_native_state::<NativeMapState, _, _>(|m| m.get_map().get(&key).copied())
-                    .map_err(|e| BBError::Other(e))?
-                    .ok_or_else(|| BBError::Other("Key missing in lhs".to_string()))?;
+                    .map_err(|e| QuoinError::Other(e))?
+                    .ok_or_else(|| QuoinError::Other("Key missing in lhs".to_string()))?;
 
                 let rhs_val = args[1]
                     .with_native_state::<NativeMapState, _, _>(|m| m.get_map().get(&key).copied())
-                    .map_err(|e| BBError::Other(e))?
-                    .ok_or_else(|| BBError::Other("Key missing in rhs".to_string()))?;
+                    .map_err(|e| QuoinError::Other(e))?
+                    .ok_or_else(|| QuoinError::Other("Key missing in rhs".to_string()))?;
 
                 let eq_res = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
                 if !eq_res {
@@ -186,7 +186,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
     NativeClassBuilder::new("KeyValuePair", Some("Object"))
         .class_method("new:", |vm, mc, args| {
             if !matches!(args[0], Value::Class(_)) {
-                return Err(BBError::TypeError {
+                return Err(QuoinError::TypeError {
                     expected: "Class".to_string(),
                     got: args[0].type_name().to_string(),
                     msg: "new: expects Class receiver".to_string(),
@@ -197,7 +197,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             {
                 *b
             } else {
-                return Err(BBError::TypeError {
+                return Err(QuoinError::TypeError {
                     expected: "Block".to_string(),
                     got: args[1].type_name().to_string(),
                     msg: "new: expects a Block".to_string(),
@@ -212,18 +212,18 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
                     Ok(VmStatus::Running) => {}
                     Ok(VmStatus::Finished(_)) => break,
                     Ok(VmStatus::Yeeted(val)) => {
-                        return Err(BBError::Other(format!(
+                        return Err(QuoinError::Other(format!(
                             "Uncaught exception during block execution: {}",
                             val
                         )));
                     }
-                    Err(BBError::NonLocalReturn) => {
+                    Err(QuoinError::NonLocalReturn) => {
                         if vm.frames.len() > initial_frame_count {
                             continue;
                         } else if vm.frames.len() == initial_frame_count {
                             break;
                         } else {
-                            return Err(BBError::NonLocalReturn);
+                            return Err(QuoinError::NonLocalReturn);
                         }
                     }
                     Err(e) => return Err(e),
@@ -231,11 +231,11 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             }
 
             // Pop the block's return value to clean up the stack
-            let _block_ret = vm.pop().map_err(|e| BBError::Other(e))?;
+            let _block_ret = vm.pop().map_err(|e| QuoinError::Other(e))?;
 
             // Retrieve environment from the last popped frame recorded in VmState
             let env_ref = vm.last_popped_env.ok_or_else(|| {
-                BBError::Other("Missing environment from block execution".to_string())
+                QuoinError::Other("Missing environment from block execution".to_string())
             })?;
             let env_borrow = env_ref.borrow();
             let key = env_borrow
@@ -255,7 +255,7 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             let class_obj = match active_class_val {
                 Value::Class(c) => c,
                 _ => {
-                    return Err(BBError::TypeError {
+                    return Err(QuoinError::TypeError {
                         expected: "Class".to_string(),
                         got: active_class_val.type_name().to_string(),
                         msg: "new: expects Class receiver".to_string(),

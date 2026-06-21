@@ -139,7 +139,7 @@ file = [IO]File.open: '/etc/zshrc';
 ('[/]Object = ' + [/]Object).print;
 ('Object == [/]Object = ' + (Object == [/]Object)).print;
 
-folder = [IO]Folder.open: 'bblib/tests/';
+folder = [IO]Folder.open: 'qnlib/tests/';
 ('Test files = ' + folder.list).print;
 
 name = 'Damon';

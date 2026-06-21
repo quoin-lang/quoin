@@ -1,8 +1,8 @@
 use crate::arg;
 use crate::compiler::Compiler;
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::parser::ast::NodeValue;
-use crate::parser::parse_building_blocks_string;
+use crate::parser::parse_quoin_string;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::regex::NativeRegexState;
@@ -173,7 +173,7 @@ pub fn build_string_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, result))
         })
         // Only `<:` is native (the compiler lowers `a < b` to `Send(a, "<:", [b])`);
-        // `>:`/`<=:`/`>=:` derive from it as shared BB on Object.
+        // `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
         .instance_method("<:", |vm, mc, args| {
             let lhs = arg!(args, String, 0);
             let rhs = arg!(args, String, 1);
@@ -184,7 +184,7 @@ pub fn build_string_class() -> NativeClassBuilder {
             Ok(vm.new_int(
                 mc,
                 s.parse::<i64>()
-                    .map_err(|e| BBError::Other(e.to_string()))?,
+                    .map_err(|e| QuoinError::Other(e.to_string()))?,
             ))
         })
         .instance_method("mod", |vm, mc, args| {
@@ -228,7 +228,7 @@ pub fn build_string_class() -> NativeClassBuilder {
             // Get the caller's frame context
             let (caller_env, caller_receiver, enclosing_method_id) = {
                 let caller_frame = vm.frames.last().ok_or_else(|| {
-                    BBError::Other("No caller frame found for string interpolation".to_string())
+                    QuoinError::Other("No caller frame found for string interpolation".to_string())
                 })?;
                 (
                     caller_frame.env,
@@ -244,11 +244,11 @@ pub fn build_string_class() -> NativeClassBuilder {
                         result.push_str(&lit);
                     }
                     InterpolPart::Expr(expr_str) => {
-                        let node = parse_building_blocks_string(&expr_str);
+                        let node = parse_quoin_string(&expr_str);
                         let program_node = match &node.value {
                             NodeValue::Program(p) => p,
                             _ => {
-                                return Err(BBError::Other(
+                                return Err(QuoinError::Other(
                                     "Parsed node is not a ProgramNode".to_string(),
                                 ));
                             }
@@ -266,7 +266,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                         let mut compiler = Compiler::new_with_locals(local_names);
                         let compiled = compiler
                             .compile_program(program_node)
-                            .map_err(|e| BBError::Other(e))?;
+                            .map_err(|e| QuoinError::Other(e))?;
 
                         let decl_block = compiled.decl_block.as_ref().map(|db| {
                             crate::gc!(

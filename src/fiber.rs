@@ -1,4 +1,4 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{Block, Value};
 use crate::vm::{VmState, VmStatus};
 
@@ -10,7 +10,7 @@ pub type VMCoroutine<'gc> = corosensei::ScopedCoroutine<
     'gc,
     VMContext<'gc>,
     YieldReason<'gc>,
-    Result<Value<'gc>, BBError>,
+    Result<Value<'gc>, QuoinError>,
     DefaultStack,
 >;
 pub type VMYielder<'gc> = corosensei::Yielder<VMContext<'gc>, YieldReason<'gc>>;
@@ -46,7 +46,7 @@ pub enum YieldReason<'gc> {
 pub fn run_vm_loop<'gc>(
     yielder: &VMYielder<'gc>,
     mut ctx: VMContext<'gc>,
-) -> Result<Value<'gc>, BBError> {
+) -> Result<Value<'gc>, QuoinError> {
     // Record this coroutine's yielder in its fiber's slot (and make it live).
     // From here on the driver restores `vm.yielder` from that slot before every
     // resume, so it can never be left pointing at a different/freed coroutine.
@@ -64,7 +64,7 @@ pub fn run_vm_loop<'gc>(
             }
             Ok(VmStatus::Finished(val)) => return Ok(val),
             Ok(VmStatus::Yeeted(val)) => {
-                return Err(BBError::Other(format!("Uncaught exception: {}", val)));
+                return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
             }
             Err(err) => return Err(err),
         }
@@ -99,7 +99,7 @@ unsafe impl<'gc> Collect<'gc> for Fiber<'gc> {
 impl<'gc> Fiber<'gc> {
     pub fn new<F>(f: F) -> Self
     where
-        F: FnOnce(&VMYielder<'gc>, VMContext<'gc>) -> Result<Value<'gc>, BBError> + 'gc,
+        F: FnOnce(&VMYielder<'gc>, VMContext<'gc>) -> Result<Value<'gc>, QuoinError> + 'gc,
     {
         let coroutine = VMCoroutine::new(move |yielder, ctx| f(yielder, ctx));
         Self {

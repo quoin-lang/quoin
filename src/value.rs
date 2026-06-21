@@ -1,4 +1,4 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::instruction::{SharedBytecode, SharedSourceMap};
 use crate::parser::ast::IdentifierNode;
 use crate::runtime::list::NativeListState;
@@ -136,7 +136,7 @@ impl fmt::Display for NamespacedName {
 
 #[derive(Clone, Copy, Debug)]
 pub struct NativeFunc(
-    pub for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, BBError>,
+    pub for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, QuoinError>,
 );
 
 impl NativeFunc {
@@ -145,7 +145,7 @@ impl NativeFunc {
             &mut VmState<'a>,
             &Mutation<'a>,
             Vec<Value<'a>>,
-        ) -> Result<Value<'a>, BBError>,
+        ) -> Result<Value<'a>, QuoinError>,
     ) -> Self {
         Self(f)
     }
@@ -637,7 +637,7 @@ pub struct NativeClassBuilder {
 }
 
 type NativeFn =
-    for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, BBError>;
+    for<'a> fn(&mut VmState<'a>, &Mutation<'a>, Vec<Value<'a>>) -> Result<Value<'a>, QuoinError>;
 
 fn type_hints(param_types: &[&str]) -> Option<Vec<String>> {
     Some(param_types.iter().map(|t| t.to_string()).collect())
@@ -726,7 +726,7 @@ mod tests {
         let debug_str = format!("{:?}", state);
         assert_eq!(
             debug_str,
-            "OpaqueState<building_blocks_vm::value::tests::test_opaque_state_debug::Dummy>"
+            "OpaqueState<quoin::value::tests::test_opaque_state_debug::Dummy>"
         );
     }
 }

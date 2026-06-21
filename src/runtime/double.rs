@@ -1,5 +1,5 @@
 use crate::arg;
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, Value};
 
 /// Generate `[Integer]` and `[Double]` typed variants for a binary operator on a
@@ -29,10 +29,10 @@ macro_rules! double_binop {
 
 pub fn build_double_class() -> NativeClassBuilder {
     // Binary operators are the `:` keyword selectors (`a + b` -> `Send(a, "+:", [b])`).
-    // Only `<:` is provided natively; `>:`/`<=:`/`>=:` derive from it as shared BB.
+    // Only `<:` is provided natively; `>:`/`<=:`/`>=:` derive from it as shared Quoin.
     let b = NativeClassBuilder::new("Double", Some("Object")).instance_method("sqrt", |vm, mc, args| {
         if args.is_empty() {
-            return Err(BBError::Other("sqrt expects a receiver".to_string()));
+            return Err(QuoinError::Other("sqrt expects a receiver".to_string()));
         }
         let val = arg!(args, Double, 0);
         Ok(vm.new_double(mc, val.sqrt()))

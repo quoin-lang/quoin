@@ -1,5 +1,5 @@
 use crate::arg;
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, Value};
 
 /// Generate `[Integer]` and `[Double]` typed variants for a binary numeric
@@ -21,7 +21,7 @@ macro_rules! int_binop {
         $b.typed_instance_method($sel, &["Integer"], |vm, mc, args| {
             let divisor = args[1].as_i64().unwrap();
             if divisor == 0 {
-                return Err(BBError::ArithmeticError("Division by zero".to_string()));
+                return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
             }
             Ok(vm.new_int(mc, args[0].as_i64().unwrap() $op divisor))
         })
@@ -54,7 +54,7 @@ pub fn build_integer_class() -> NativeClassBuilder {
     let b = int_binop!(b, "*:", arith *);
     let b = int_binop!(b, "/:", divop /);
     let b = int_binop!(b, "%:", divop %);
-    // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared BB on Object.
+    // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
     let b = int_binop!(b, "<:", cmp <);
     b.instance_method("==:", |vm, mc, args| Ok(vm.new_bool(mc, args[0] == args[1])))
 }

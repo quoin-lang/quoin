@@ -17,7 +17,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 > - `Class <-- { … }` — reopen a class to add instance methods. `value <-- { … }` — add singleton (eigenclass) methods to *one specific object*.
 > - `.meta <-- { … }` — define class-side (static) methods. `obj.class` — an object's class; inside a method, `self` / leading `.` is the receiver.
 
-```buildingblocks
+```quoin
 Point <- { |@x @y|
     .meta <-- {
         newX:y: -> { |x y| .new:{ x = x; y = y } }   "* a class-side factory
@@ -50,7 +50,7 @@ Reopen a class with `<--` to add methods later; extend a single value with `<--`
 to give just that object new behavior (a singleton/eigenclass, named `$Type`
 internally):
 
-```buildingblocks
+```quoin
 Integer <-- { doubled -> { self + self } }    "* every Integer gains doubled
 21.doubled                                     "* 42
 
@@ -78,7 +78,7 @@ n.greet                                        "* 'hi from this 42'
 > - The chain runs **base → derived** (parents, then mixins, then the class itself). Each class contributes its `init:` (fed the block fields it names) if it has one, else its zero-arg `init`.
 > - An **empty `new:{}` does not capture lexical scope** — fields stay at their `nil` default. Inside the block, an assignment's right-hand side resolves up the lexical chain, but the assignment binds the field in the block's own frame and never mutates the enclosing variable.
 
-```buildingblocks
+```quoin
 Person <- { |@name @greeting|
     init: -> { |name| @name = name; @greeting = 'Hello, ' + name }
     greeting -> { @greeting }
@@ -95,7 +95,7 @@ class's `init:` receiving the block fields whose names match its parameters.
 > `new:{…}` block are copied into the object *before* any `init:` runs, so
 > `init: -> { |a| @a = a }` just re-does work already done — it behaves identically
 > to having no `init:` at all. Use `init:` for *derived* or *validated* state, not
-> plain copies. See `BBLIB_TODO.md` → *Bugs/Odd Behavior* for the full write-up of
+> plain copies. See `QUOIN_TODO.md` → *Bugs/Odd Behavior* for the full write-up of
 > the `new:{}` scoping rules and the (intentionally absent) lexical capture.
 
 > **Note — there is no `super`.** A subclass `init:` cannot call its parent's
@@ -115,7 +115,7 @@ class's `init:` receiving the block fields whose names match its parameters.
 > - `obj.can?:X` is **overloaded**: a `Symbol`/`String` selector asks *"does it implement that method?"*; a `Class` asks *"is it an instance of / does it mix in that class?"* — e.g. `list.can?:#each:`, `list.can?:'each:'`, `list.can?:Iterate`. Works on instance, class, and metaclass receivers.
 > - The built-in `ActAsUserList` / `ActAsUserString` mixins are what enable the `#Name( … )` and `#Name'…'` custom-literal forms.
 
-```buildingblocks
+```quoin
 Greeter <- { hello -> { 'hi from ' + .class.name.s } }
 
 Widget <- {
@@ -140,7 +140,7 @@ Widget.new.hello       "* 'hi from Widget'   (found via the mixin)
 > - Typed parameter: `|x:Integer|`. Guard block: `|x { x > 5 }|` or `|x:Type { … }|` — the guard must return a truthy value to match. Inside a guard the arguments are bound **by name** and `self` is the **receiver**, so a guard can also use the class's instance variables and other methods.
 > - No matching variant → `MessageNotUnderstood` — and if the selector *does* exist with non-matching argument types, the error lists those filtered-out variants as a hint.
 
-```buildingblocks
+```quoin
 describe: -> { |n:Integer| 'int ' + n.s }
 describe: --> { |s:String|  'str ' + s }
 describe: --> { |n:Integer { n > 100 }| 'big number' }   "* a guard refines :Integer

@@ -1,4 +1,4 @@
-//! Syntax highlighter, ported from the C# BuildingBlocks
+//! Syntax highlighter, ported from the C# Quoin
 //! `Parser/Highlighter` (HighlightParser / AnsiColorPicker / AnsiSyntaxFormatter).
 //!
 //! It walks the parsed AST and produces a list of [`HighlightSpan`]s — byte
@@ -20,7 +20,7 @@ use crate::ansi_colorizer;
 use crate::parser::ast::{
     BlockNode, IdentifierNode, IdentifierType, MethodCallNode, Node, NodeValue,
 };
-use crate::parser::parse_building_blocks_string;
+use crate::parser::parse_quoin_string;
 use crate::value::SourceInfo;
 
 use once_cell::sync::Lazy;
@@ -708,7 +708,7 @@ pub fn format_ansi(source: &str, mut spans: Vec<HighlightSpan>) -> String {
 
 /// Convenience: parse, highlight, and ANSI-format a source string.
 pub fn highlight_to_ansi(source: &str) -> String {
-    let program = parse_building_blocks_string(source);
+    let program = parse_quoin_string(source);
     let mut parser = HighlightParser::new(source);
     let spans = parser.highlight_program(&program);
     format_ansi(source, spans)
@@ -723,7 +723,7 @@ mod tests {
     }
 
     fn highlight(source: &str) -> Vec<HighlightSpan> {
-        let program = parse_building_blocks_string(source);
+        let program = parse_quoin_string(source);
         let mut parser = HighlightParser::new(source);
         parser.highlight_program(&program)
     }

@@ -16,8 +16,8 @@ use std::sync::Arc;
 use substring::Substring;
 
 #[derive(Parser)]
-#[grammar = "parser/pest/BuildingBlocks.pest"]
-pub struct BuildingBlocksParser;
+#[grammar = "parser/pest/Quoin.pest"]
+pub struct QuoinParser;
 
 static PRATT_PARSER: Lazy<PrattParser<Rule>> = Lazy::new(|| {
     use Rule::*;
@@ -79,7 +79,7 @@ thread_local! {
     static LINE_OFFSET_TABLE: RefCell<Option<LineOffsetTable>> = RefCell::new(None);
 }
 
-pub fn parse_building_blocks_string(code: &str) -> Node {
+pub fn parse_quoin_string(code: &str) -> Node {
     let code = code.strip_prefix('\u{FEFF}').unwrap_or(code);
 
     let table = LineOffsetTable::new(code);
@@ -87,7 +87,7 @@ pub fn parse_building_blocks_string(code: &str) -> Node {
         *cell.borrow_mut() = Some(table);
     });
 
-    let mut pairs = match BuildingBlocksParser::parse(Rule::program, code) {
+    let mut pairs = match QuoinParser::parse(Rule::program, code) {
         Ok(p) => p,
         Err(e) => {
             LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
@@ -102,7 +102,7 @@ pub fn parse_building_blocks_string(code: &str) -> Node {
     res
 }
 
-pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
+pub fn parse_quoin_file(path: &PathBuf) -> Node {
     let filename = path.display().to_string();
 
     let mut file = match File::open(path) {
@@ -125,7 +125,7 @@ pub fn parse_building_blocks_file(path: &PathBuf) -> Node {
         *cell.borrow_mut() = Some(table);
     });
 
-    let mut pairs = match BuildingBlocksParser::parse(Rule::program, &contents) {
+    let mut pairs = match QuoinParser::parse(Rule::program, &contents) {
         Ok(p) => p,
         Err(e) => {
             LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
@@ -1110,12 +1110,12 @@ fn unicode_from_hex(s: String) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_building_blocks_string;
+    use super::parse_quoin_string;
     use crate::parser::ast::*;
     use std::sync::Arc;
 
     fn parse(code: &str) -> Node {
-        let mut node = parse_building_blocks_string(code);
+        let mut node = parse_quoin_string(code);
         node.clear_source_info();
         node
     }

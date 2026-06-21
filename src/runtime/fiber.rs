@@ -1,4 +1,4 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::fiber::{run_vm_loop, Fiber};
 use crate::gc;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
@@ -186,10 +186,10 @@ impl AnyCollect for NativeFiberState {
     }
 }
 
-fn status_of(fiber: Value<'_>) -> Result<FiberStatus, BBError> {
+fn status_of(fiber: Value<'_>) -> Result<FiberStatus, QuoinError> {
     fiber
         .with_native_state::<NativeFiberState, _, _>(|s| s.status)
-        .map_err(BBError::Other)
+        .map_err(QuoinError::Other)
 }
 
 pub fn build_fiber_class() -> NativeClassBuilder {
@@ -201,7 +201,7 @@ pub fn build_fiber_class() -> NativeClassBuilder {
                 Value::Object(obj)
                     if matches!(obj.borrow().payload, crate::value::ObjectPayload::Block(_)) => {}
                 _ => {
-                    return Err(BBError::TypeError {
+                    return Err(QuoinError::TypeError {
                         expected: "Block".to_string(),
                         got: block_val.type_name().to_string(),
                         msg: "Fiber.new: expects a Block".to_string(),
@@ -255,14 +255,14 @@ pub fn build_fiber_class() -> NativeClassBuilder {
         .instance_method("result", |vm, mc, args| {
             let r = args[0]
                 .with_native_state::<NativeFiberState, _, _>(|s| s.result())
-                .map_err(BBError::Other)?;
+                .map_err(QuoinError::Other)?;
             Ok(r.unwrap_or_else(|| vm.new_nil(mc)))
         })
         // The error value if the fiber failed (nil otherwise).
         .instance_method("error", |vm, mc, args| {
             let e = args[0]
                 .with_native_state::<NativeFiberState, _, _>(|s| s.error())
-                .map_err(BBError::Other)?;
+                .map_err(QuoinError::Other)?;
             Ok(e.unwrap_or_else(|| vm.new_nil(mc)))
         })
 }

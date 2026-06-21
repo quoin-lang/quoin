@@ -14,7 +14,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 > - `do:` (and `default:`) accept either a **block** (the block receives the subject as its argument) or a **plain value** (used as the result).
 > - The **`~` match protocol**: `a ~ b` is `a.~:(b)` — the matcher is the **left** operand, so dispatch is class-first on `a`'s `~:` (define `~:` on your own class to customize). Built-in matchers: a **Class** tests is-instance-of (`Integer ~ 5`), a **Regex** tests a match against the string (`#/…/ ~ str`), a **Block** runs as a predicate over `b`, a **range** tests membership, and the default `Object#~:` is `==:` equality. (Because the matcher is on the left, `case` puts the `cond` first: `cond ~ subject`.)
 
-```buildingblocks
+```quoin
 grade = score.case:{
     .when:(90..101) do:'A'                 "* range membership
     .when:(80..90)  do:'B'
@@ -45,10 +45,10 @@ The same `~` operator works standalone, with the matcher on the left:
 > - `value.throw` throws **any value**. The `Error` classes add class-side convenience constructors: `Error.throw:'msg'` and `Error.throw:'msg' payload:p` build an instance and throw it.
 > - `{ … }.catch:{ |e| … }` runs the receiver block; if it throws, the thrown value is passed to the catch block, whose result becomes the value. `{ … }.catch:{ |e| … } finally:{ … }` additionally runs `finally:` **always** (on success or failure).
 > - **Catch by type** with `case`/`~` inside the handler: `e.case:{ .when:TypeError do:… }`.
-> - **Built-in hierarchy** (`00-bootstrap.bub`): `Error` with `@message @payload`, accessors `message`/`payload`, and `s` (→ `'ClassName: message'`); subclasses `TypeError`, `ArgumentError`, `MessageNotUnderstood`, `AmbiguousMethodError`, `ArithmeticError`, `IndexError`, `FiberError`.
-> - **Runtime errors are structured**: the VM maps its internal errors to these BB `Error` objects at the `catch:` boundary, so you can catch and inspect them.
+> - **Built-in hierarchy** (`00-bootstrap.qn`): `Error` with `@message @payload`, accessors `message`/`payload`, and `s` (→ `'ClassName: message'`); subclasses `TypeError`, `ArgumentError`, `MessageNotUnderstood`, `AmbiguousMethodError`, `ArithmeticError`, `IndexError`, `FiberError`.
+> - **Runtime errors are structured**: the VM maps its internal errors to these Quoin `Error` objects at the `catch:` boundary, so you can catch and inspect them.
 
-```buildingblocks
+```quoin
 result = {
     (amount < 0).if:{ ArgumentError.throw:'amount must be >= 0' }
     process:amount
@@ -62,7 +62,7 @@ result = {
 }
 ```
 
-Internal failures surface as the matching BB error type — e.g. an out-of-range
+Internal failures surface as the matching Quoin error type — e.g. an out-of-range
 index or a type mismatch becomes a catchable `TypeError`/`IndexError`, and sending
 an unknown selector becomes a `MessageNotUnderstood` — each with a `message` you
 can read.

@@ -1,6 +1,6 @@
-# Custom Linter Design: Enforcing "Flush before Yield" in BuildingBlocks
+# Custom Linter Design: Enforcing "Flush before Yield" in Quoin
 
-This document designs a custom static analysis tool (linter) to automatically verify that native methods in the BuildingBlocks VM follow the safety rules for stackful fibers. Specifically, it ensures that no garbage-collected references (`Value<'gc>` or `Gc<'gc, T>`) are held in local variables across a fiber yield point (`yielder.suspend(...)`).
+This document designs a custom static analysis tool (linter) to automatically verify that native methods in the Quoin VM follow the safety rules for stackful fibers. Specifically, it ensures that no garbage-collected references (`Value<'gc>` or `Gc<'gc, T>`) are held in local variables across a fiber yield point (`yielder.suspend(...)`).
 
 ---
 

@@ -1,11 +1,11 @@
 use crate::highlighter::{HighlightParser, HighlightSpan};
-use crate::parser::parse_building_blocks_string;
+use crate::parser::parse_quoin_string;
 use crate::value::SourceInfo;
 use std::error::Error;
 use std::{cmp, fmt, fs};
 
 #[derive(Debug, Clone)]
-pub enum BBError {
+pub enum QuoinError {
     /// Raised when a function or method receives the wrong number of arguments
     ArgumentCountMismatch {
         expected: usize,
@@ -43,7 +43,7 @@ pub enum BBError {
     StackUnderflow(String),
     /// Generic other error
     Other(String),
-    /// Marker that a BB-level exception value has been parked in
+    /// Marker that a Quoin-level exception value has been parked in
     /// `VmState.active_exception` (set by `throw`). Carries no payload — the
     /// thrown value travels in the GC-rooted `active_exception` slot, not here.
     Thrown,
@@ -51,7 +51,7 @@ pub enum BBError {
     NonLocalReturn,
     /// Wrapper containing source location for execution errors
     WithSourceInfo {
-        error: Box<BBError>,
+        error: Box<QuoinError>,
         source_info: SourceInfo,
         trace: Vec<String>,
         supports_color: bool,
@@ -70,7 +70,7 @@ fn get_highlighted_range(
     }
     if let Ok(content) = fs::read_to_string(filename) {
         let parse_and_highlight = || -> Option<String> {
-            let program = parse_building_blocks_string(&content);
+            let program = parse_quoin_string(&content);
             let mut parser = HighlightParser::new(&content);
             let spans = parser.highlight_program(&program);
 
@@ -95,7 +95,7 @@ fn get_highlighted_range(
         }
     }
     let parse_and_highlight_fallback = || -> Option<String> {
-        let program = parse_building_blocks_string(fallback_text);
+        let program = parse_quoin_string(fallback_text);
         let mut parser = HighlightParser::new(fallback_text);
         let spans = parser.highlight_program(&program);
         Some(crate::highlighter::format_ansi(fallback_text, spans))
@@ -103,15 +103,15 @@ fn get_highlighted_range(
     parse_and_highlight_fallback().unwrap_or_else(|| fallback_text.to_string())
 }
 
-impl fmt::Display for BBError {
+impl fmt::Display for QuoinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BBError::ArgumentCountMismatch { msg, .. } => {
+            QuoinError::ArgumentCountMismatch { msg, .. } => {
                 write!(f, "Argument count mismatch: {}", msg)
             }
-            BBError::TypeError { msg, .. } => write!(f, "Type error: {}", msg),
-            BBError::ArithmeticError(msg) => write!(f, "Arithmetic error: {}", msg),
-            BBError::MessageNotUnderstood {
+            QuoinError::TypeError { msg, .. } => write!(f, "Type error: {}", msg),
+            QuoinError::ArithmeticError(msg) => write!(f, "Arithmetic error: {}", msg),
+            QuoinError::MessageNotUnderstood {
                 receiver,
                 selector,
                 args,
@@ -131,19 +131,19 @@ impl fmt::Display for BBError {
                 }
                 Ok(())
             }
-            BBError::AmbiguousMethod { msg, candidates, .. } => {
+            QuoinError::AmbiguousMethod { msg, candidates, .. } => {
                 write!(f, "{}", msg)?;
                 for candidate in candidates {
                     write!(f, "\n  {}", candidate)?;
                 }
                 Ok(())
             }
-            BBError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
-            BBError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
-            BBError::Other(msg) => write!(f, "{}", msg),
-            BBError::Thrown => write!(f, "thrown exception"),
-            BBError::NonLocalReturn => write!(f, "Non-local return"),
-            BBError::WithSourceInfo {
+            QuoinError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
+            QuoinError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
+            QuoinError::Other(msg) => write!(f, "{}", msg),
+            QuoinError::Thrown => write!(f, "thrown exception"),
+            QuoinError::NonLocalReturn => write!(f, "Non-local return"),
+            QuoinError::WithSourceInfo {
                 error,
                 source_info,
                 trace,
@@ -214,17 +214,17 @@ impl fmt::Display for BBError {
     }
 }
 
-impl Error for BBError {}
+impl Error for QuoinError {}
 
-impl From<String> for BBError {
+impl From<String> for QuoinError {
     fn from(s: String) -> Self {
-        BBError::Other(s)
+        QuoinError::Other(s)
     }
 }
 
-impl From<&str> for BBError {
+impl From<&str> for QuoinError {
     fn from(s: &str) -> Self {
-        BBError::Other(s.to_string())
+        QuoinError::Other(s.to_string())
     }
 }
 
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn mnu_renders_candidates_one_per_line() {
-        let err = BBError::MessageNotUnderstood {
+        let err = QuoinError::MessageNotUnderstood {
             receiver: "Foo".to_string(),
             selector: "bar:".to_string(),
             args: vec!["Boolean".to_string()],
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn ambiguous_renders_candidates_one_per_line() {
-        let err = BBError::AmbiguousMethod {
+        let err = QuoinError::AmbiguousMethod {
             selector: "z:".to_string(),
             msg: "ambiguous dispatch for 'z:'".to_string(),
             candidates: vec!["z:QA".to_string(), "z:QB".to_string()],
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn mnu_without_candidates_is_single_line() {
-        let err = BBError::MessageNotUnderstood {
+        let err = QuoinError::MessageNotUnderstood {
             receiver: "Integer".to_string(),
             selector: "bogus".to_string(),
             args: vec![],

@@ -1,18 +1,18 @@
 runner = TestRunner.new;
 
-testFolder = ([IO]Folder.open:'bblib/tests');
+testFolder = ([IO]Folder.open:'qnlib/tests');
 (testFolder
     .list
     .sort:{|sf| (sf.name.split:'-').first.to_integer})
     .each:{|ef|
-    (ef.is_file? && (ef.ext == 'bub')).if:{
+    (ef.is_file? && (ef.ext == 'qn')).if:{
         [IO]Stdout.writeln:'Loading ' + ef.name + '...';
         suite = Runtime.evalFile:ef.fullpath;
         runner.add:suite;
     }
 };
 
-runner.add:Runtime.evalFile:'bblib/tests/01-iterate.bub';
+runner.add:Runtime.evalFile:'qnlib/tests/01-iterate.qn';
 
 results = runner.run:AnsiTestReporter.new:{ out = [IO]Stdout }
 

@@ -1,12 +1,12 @@
-# BuildingBlocks VM: Benchmark Diagnosis, Design Explorations, and Stackful Fiber Redesign Plan
+# Quoin VM: Benchmark Diagnosis, Design Explorations, and Stackful Fiber Redesign Plan
 
-This document serves as the master design reference and implementation blueprint for the BuildingBlocks VM. It details the resolution of performance bottlenecks and compile/runtime issues, evaluates alternative VM architectures (including Continuation-Passing Style), compares low-level fiber crates, defines safety rules for integrating a tracing GC with native stackful fibers, and presents a step-by-step rearchitecture plan.
+This document serves as the master design reference and implementation blueprint for the Quoin VM. It details the resolution of performance bottlenecks and compile/runtime issues, evaluates alternative VM architectures (including Continuation-Passing Style), compares low-level fiber crates, defines safety rules for integrating a tracing GC with native stackful fibers, and presents a step-by-step rearchitecture plan.
 
 ---
 
 ## 1. Executive Summary
 
-During execution of the BuildingBlocks (BB) VM, two major architectural issues were identified:
+During execution of the Quoin (Quoin) VM, two major architectural issues were identified:
 1. **Garbage Collector Starvation**: Long-running native methods (such as iteration, sorting, and recursion) nested Rust's execution loop synchronously, keeping the GC heap borrowed (`mutate_root`) and preventing memory collection, causing Out-Of-Memory (OOM) crashes on large inputs.
 2. **Interpreter Heap Churn**: High CPU overhead due to vector/string duplication when instantiating guest blocks.
 
@@ -18,13 +18,13 @@ To solve these, we have already implemented bytecode sharing optimizations (resu
 
 ### Fixed Issues in the Benchmark Suite
 To make the benchmarks runnable and stable, several bugs in the benchmark suite and the VM native library were addressed:
-* **Operator Precedence in `benchmark.bub`**: Keywords (e.g. `.value:`) have lower precedence than binary operators. The expression `.value:(n - 1) + .value:(n - 2)` was incorrectly parsed as a single nested call. We added parentheses to enforce correct evaluation: `(.value:(n - 1)) + (.value:(n - 2))`.
+* **Operator Precedence in `benchmark.qn`**: Keywords (e.g. `.value:`) have lower precedence than binary operators. The expression `.value:(n - 1) + .value:(n - 2)` was incorrectly parsed as a single nested call. We added parentheses to enforce correct evaluation: `(.value:(n - 1)) + (.value:(n - 2))`.
 * **String Concatenation Type Mismatch**: Smalltalk-style string concatenation raised type errors when mixed with integers/doubles. We updated the scripts to convert primitive values using `.s` (string conversion) before concatenating.
 * **Missing `at:put:` in `List`**: The `Sieve` benchmark failed when attempting to update element values in lists because the native Rust `List` implementation lacked the `at:put:` instance method. We implemented this method safely using `with_native_state_mut`.
 
 ### GC-Enabled Benchmark Timing Harness
 To allow the garbage collector to run actively during benchmark execution (preventing starvation):
-1. We modified `benchmark.bub` to act solely as a definition file instead of auto-executing.
+1. We modified `benchmark.qn` to act solely as a definition file instead of auto-executing.
 2. We introduced `VmState::start_method_call` to push a method activation frame onto the stack without executing it.
 3. We implemented a driving loop in `main.rs` that calls `arena.mutate_root(|mc, vm| vm.step(mc))` step-by-step and periodically triggers `arena.collect_debt()`. This separates execution steps from the borrow lifetime, enabling garbage collection during runtimes.
 
@@ -217,7 +217,7 @@ Before calling `yielder.suspend`, we "flush" the sorting vector back into the re
 
 ## 7. Exposing Concurrency to Guest Code (Fibers & Generators)
 
-Exposing stackful coroutines to guest code allows us to implement cooperative green threads and generator classes natively in BuildingBlocks.
+Exposing stackful coroutines to guest code allows us to implement cooperative green threads and generator classes natively in Quoin.
 
 ### Cooperative Green Threads
 We can introduce a `Task` class to guest code:
@@ -273,12 +273,12 @@ impl VmRunner {
     }
 
     /// Entry point for running parsed CLI commands
-    pub fn run(&self) -> Result<(), BBError> {
+    pub fn run(&self) -> Result<(), QuoinError> {
         // ...
     }
 
     /// Triggers the VM trampoline loop using gc_arena
-    fn run_trampoline(&self, ast_nodes: Vec<Node>) -> Result<Value<'gc>, BBError> {
+    fn run_trampoline(&self, ast_nodes: Vec<Node>) -> Result<Value<'gc>, QuoinError> {
         // ...
     }
 }
@@ -286,7 +286,7 @@ impl VmRunner {
 
 ### Refactored `src/main.rs`
 ```rust
-use building_blocks_vm::runner::{VmRunner, VmOptions};
+use quoin::runner::{VmRunner, VmOptions};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

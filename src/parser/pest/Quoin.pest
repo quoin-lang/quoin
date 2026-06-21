@@ -1,4 +1,4 @@
-// Pest Grammar for BuildingBlocks
+// Pest Grammar for Quoin
 
 // Skipped rules (whitespace and comments)
 WHITESPACE = _{ " " | "\r" | "\n" | "\t" }

@@ -1,6 +1,6 @@
 # Part I — Foundations
 
-How BB code is spelled and how the most basic pieces fit together: comments,
+How Quoin code is spelled and how the most basic pieces fit together: comments,
 literals, names, message sends, and operators. Read this first; everything else
 builds on it.
 
@@ -23,12 +23,12 @@ Nav: **Foundations** · [Blocks & control](02-blocks-and-control.md) · [Objects
 > - Comments start with `"`. Strings are single-quoted `'…'`. There are **no** double-quoted strings.
 > - A newline ends a statement when unambiguous; use `;` when the next line would otherwise continue the expression (i.e. it starts with `.` or an operator).
 
-BB is a small, uniformly object-oriented language in the Smalltalk lineage. If you
+Quoin is a small, uniformly object-oriented language in the Smalltalk lineage. If you
 can read "send the message `m` to the object `x`" for every `x.m`, you can read
 almost all of it. A method with no explicit receiver is sent to `self`, written
 with a bare leading dot:
 
-```buildingblocks
+```quoin
 .print: 'hello'        "* sends print: to self
 person.greet           "* sends greet to person
 (1..5).collect:{ |n| n * 10 }
@@ -54,7 +54,7 @@ about statements.
 
 ### Comments
 
-```buildingblocks
+```quoin
 "* A line comment — everything to the end of this line is ignored.
 
 "
@@ -77,7 +77,7 @@ A newline ends a statement **when the result is unambiguous**. A `;` is needed
 when the next line would otherwise continue the previous expression —
 specifically when it begins with `.` (a message send) or an infix operator:
 
-```buildingblocks
+```quoin
 A <- {
     method -> {};          "* the ; ends the statement
     .mix:Mixin
@@ -150,7 +150,7 @@ statement.
 > - `@name` is an **instance variable** (only meaningful inside class/method bodies — Part III). `[Ns]name` / `[/]name` are namespaced globals (§20).
 > - `Name <- expr` defines a **constant** (redefining one throws).
 
-```buildingblocks
+```quoin
 x = 10
 greeting = 'hi'
 
@@ -181,7 +181,7 @@ trail. `_` (and `*_`) ignore the corresponding element(s).
 > - **Suffix selectors**: `name!` (e.g. `.sealed!`) and `name?` (e.g. `fiber.done?`) are ordinary method names.
 > - Method (postfix) sends bind **tighter** than infix operators: `a.b + c.d` is `(a.b) + (c.d)`.
 
-```buildingblocks
+```quoin
 42.abs                         "* unary
 'a,b,c'.split:','              "* one keyword arg
 scores.at:'amy' put:95         "* selector is at:put:, two args

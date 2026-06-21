@@ -1,7 +1,7 @@
 # Part VI — Library & reference
 
 Brief reference for the core types, string formatting, namespaces, and a map of
-the standard library. For method-level detail, the stdlib `.bub` files and the
+the standard library. For method-level detail, the stdlib `.qn` files and the
 Rust `src/runtime/*.rs` modules are the source of truth — this part points you at
 them rather than duplicating them.
 
@@ -15,7 +15,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 > - These are brief, indicative lists — see the cited files for the full, current set and exact semantics.
 > - Anything in the `Iterate` mixin (Part V) is also available on every iterable type below.
 
-**String** (`src/runtime/string.rs`, `bblib/04-string.bub`) — `length`, `s`,
+**String** (`src/runtime/string.rs`, `qnlib/04-string.qn`) — `length`, `s`,
 `contains?:`, `starts?:`, `ends?:`, `index:`, `insert:at:`, `lower`, `upper`,
 `replace:with:`, `split:` (String or Regex), `to_integer`, `==:`, `<`, `>`,
 `%:` (formatting, §19), `mod` (interpolation, §19).
@@ -33,25 +33,25 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 (→ the name, no `#`), `asString`, `asSymbol`, `==:`. `Block#name` and
 `Method#selector`/`name` return symbols.
 
-**Set** (`src/runtime/set.rs`, algebra in `bblib/02-iterate.bub`) — literal
+**Set** (`src/runtime/set.rs`, algebra in `qnlib/02-iterate.qn`) — literal
 `#< … >`, unique by `==:`, insertion-ordered; `count`, `add:`, `remove:`,
 `contains?:`, `each:`, `s`, `==:` (order-independent), plus `union:`,
 `intersection:`, `difference:`, `subset?:`, `superset?:` and all `Iterate`
 combinators. Membership is O(n) — a simple reference set, not hashed.
 
-**Range / NumberRange** (`bblib/03-number_range.bub`) — built by `a..b`; `each:`
+**Range / NumberRange** (`qnlib/03-number_range.qn`) — built by `a..b`; `each:`
 (forward or backward), `~:` (membership), `s`. **Half-open** (inclusive start,
 exclusive end). Plus `Iterate` combinators.
 
-**Integer / Double** (`src/runtime/{integer,double}.rs`, `bblib/00-bootstrap.bub`)
+**Integer / Double** (`src/runtime/{integer,double}.rs`, `qnlib/00-bootstrap.qn`)
 — arithmetic operators (§6), comparisons, `sqrt`, `abs`, `next`, `integer` /
 `double` (identity coercions), unary `-`, `s`.
 
-**Regex** (`src/runtime/regex.rs`, `bblib/05-regex.bub`) — literal `#/…/`;
+**Regex** (`src/runtime/regex.rs`, `qnlib/05-regex.qn`) — literal `#/…/`;
 `split:` (split a string on the pattern), `~:` (used by `~` to test `regex ~ string`),
 `==:`.
 
-**IO** (`bblib/06-io.bub`, `src/runtime/io.rs`) under the `[IO]` namespace:
+**IO** (`qnlib/06-io.qn`, `src/runtime/io.rs`) under the `[IO]` namespace:
 - `[IO]Handle` — `write:`, `writeln:`; class-side `stdout` / `stderr` / `stdin`.
 - `[IO]Stdout`, `[IO]Stderr` — constant handles.
 - `[IO]File` — class-side `open:`; `fullpath`, `name`, `ext`, `is_file?`.
@@ -70,7 +70,7 @@ exclusive end). Plus `Iterate` combinators.
 > - Values are converted with `.s` before insertion.
 > - ANSI strings are the `#ANSI'…'` literal (a user string mixing in `ActAsUserString`); `%`-formatting works on them too.
 
-```buildingblocks
+```quoin
 'hello %' % 'world'                  "* 'hello world'
 '%1 then %2' % #('a' 'b')            "* 'a then b'        (positional, 1-based)
 '%h-%w' % #{ 'h':'hi' 'w':'world' }  "* 'hi-world'        (named, 1-char keys)
@@ -94,7 +94,7 @@ a = 'foo'; b = 'bar'
 > - Namespaced names: `[NS]Name` (e.g. `[IO]File`), multi-segment `[A/B]Name`, and root `[/]Name`. A bare `Name` and `[/]Name` both refer to the **root** namespace.
 > - Globals are stored by full namespace + name; namespaces are a lookup/organization mechanism, not modules with their own scope.
 
-```buildingblocks
+```quoin
 Pi <- 3.14159           "* constant; a second `Pi <- …` throws
 radius = 2              "* local; reassignable
 
@@ -111,18 +111,18 @@ root = [/]Object        "* explicit root; same as bare `Object`
 ## 21. Stdlib map
 
 > **Rules** — what each file provides, and whether behavior is implemented natively
-> (Rust, `src/runtime/*.rs`) or in BB (`bblib/*.bub`). Native code supplies the
-> primitive payloads and operations; BB code supplies the abstractions on top.
+> (Rust, `src/runtime/*.rs`) or in Quoin (`qnlib/*.qn`). Native code supplies the
+> primitive payloads and operations; Quoin code supplies the abstractions on top.
 
 | File | Provides |
 |---|---|
-| `00-bootstrap.bub` | `true`/`false`/`nil` behavior, `Object`, `Mixin`, the `Error` hierarchy, `Block` loops (`whileDo:`, `whileDefinedDo:`), numeric helpers, the `ANSI` class. (Primitive payloads/dispatch are native.) |
-| `01-case.bub` | `Case` and `Object#case:` pattern matching (built on the native `~` operator). |
-| `02-iterate.bub` | The `Iterate` mixin and every combinator, plus `Generator`, the external `Iterator`, and `Set` algebra (`union:`/`intersection:`/…). (List/Map/Set storage is native.) |
-| `03-number_range.bub` | `NumberRange` (`a..b`), its `each:` and `~:` membership. |
-| `04-string.bub` | String conveniences over the native string methods (e.g. `split:`). |
-| `05-regex.bub` | Regex conveniences over the native regex methods (e.g. `split:`). |
-| `06-io.bub` | `[IO]Stdout`/`[IO]Stderr` constants and the `[IO]Folder` iterable, over native `[IO]` handles/files. |
+| `00-bootstrap.qn` | `true`/`false`/`nil` behavior, `Object`, `Mixin`, the `Error` hierarchy, `Block` loops (`whileDo:`, `whileDefinedDo:`), numeric helpers, the `ANSI` class. (Primitive payloads/dispatch are native.) |
+| `01-case.qn` | `Case` and `Object#case:` pattern matching (built on the native `~` operator). |
+| `02-iterate.qn` | The `Iterate` mixin and every combinator, plus `Generator`, the external `Iterator`, and `Set` algebra (`union:`/`intersection:`/…). (List/Map/Set storage is native.) |
+| `03-number_range.qn` | `NumberRange` (`a..b`), its `each:` and `~:` membership. |
+| `04-string.qn` | String conveniences over the native string methods (e.g. `split:`). |
+| `05-regex.qn` | Regex conveniences over the native regex methods (e.g. `split:`). |
+| `06-io.qn` | `[IO]Stdout`/`[IO]Stderr` constants and the `[IO]Folder` iterable, over native `[IO]` handles/files. |
 
 ---
 

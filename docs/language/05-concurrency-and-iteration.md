@@ -16,7 +16,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 > - Fibers are **stackful** (you can yield from deep inside a native method such as `each:`) and **nestable/re-entrant**.
 > - `Generator.from:{ ^> … }` wraps a yielding block as a **lazy, re-runnable** iterable (it mixes in `Iterate`). `collection.iterator` returns an external pull iterator with `hasNext?` / `next`.
 
-```buildingblocks
+```quoin
 f = Fiber.new:{ Fiber.yield:1; Fiber.yield:2; 'done' }
 f.resume        "* 1     (runs to first yield)
 f.resume        "* 2
@@ -39,7 +39,7 @@ evens.take:4    "* #(0 2 4 6)   (infinite source, consumed lazily)
 > **Rules**
 > - The `Iterate` mixin provides the entire collection API on top of **one required primitive: `each:`**. Implement `each:` and mix in `Iterate`, and every combinator below works.
 > - Custom iterable recipe:
->   ```buildingblocks
+>   ```quoin
 >   MyThing <- { …
 >       .mix:Iterate
 >       each: -> { |b| … b.valueWithSelfOrArg:element … }   "* call b once per element
@@ -59,9 +59,9 @@ Access: `first`…`fifth`, `last`, `nth:`, `take:`, `drop:`, `list`, `join:`,
 `iterator`.
 Lazy: `lazyCollect:`, `lazySelect:`.
 
-(See `bblib/02-iterate.bub` for the authoritative list and exact semantics.)
+(See `qnlib/02-iterate.qn` for the authoritative list and exact semantics.)
 
-```buildingblocks
+```quoin
 MyRange <- { |@start @end|
     .mix:Iterate
     each: -> { |b| i = @start; { i < @end }.whileDo:{ b.valueWithSelfOrArg:i; i = i + 1 } }

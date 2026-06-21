@@ -1,4 +1,4 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 /// The interned name of a symbol value, or `None` if `val` isn't a symbol.
@@ -17,12 +17,12 @@ pub fn build_symbol_class() -> NativeClassBuilder {
         // The plain name, without the leading `#` (e.g. `#foo.s` -> 'foo').
         .instance_method("s", |vm, mc, args| {
             let name = symbol_name(args[0])
-                .ok_or_else(|| BBError::Other("Symbol#s on a non-symbol".to_string()))?;
+                .ok_or_else(|| QuoinError::Other("Symbol#s on a non-symbol".to_string()))?;
             Ok(vm.new_string(mc, name))
         })
         .instance_method("asString", |vm, mc, args| {
             let name = symbol_name(args[0])
-                .ok_or_else(|| BBError::Other("Symbol#asString on a non-symbol".to_string()))?;
+                .ok_or_else(|| QuoinError::Other("Symbol#asString on a non-symbol".to_string()))?;
             Ok(vm.new_string(mc, name))
         })
         .instance_method("asSymbol", |_vm, _mc, args| Ok(args[0]))

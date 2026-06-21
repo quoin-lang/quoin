@@ -32,7 +32,7 @@ macro_rules! arg {
         match $args.get($idx) {
             Some(&Value::Class(val)) => val,
             _ => {
-                return Err($crate::error::BBError::TypeError {
+                return Err($crate::error::QuoinError::TypeError {
                     expected: "Class".to_string(),
                     got: match $args.get($idx) {
                         Some(v) => v.type_name().to_string(),
@@ -47,7 +47,7 @@ macro_rules! arg {
         match $args.get($idx) {
             Some(&Value::ClassMeta(val)) => val,
             _ => {
-                return Err($crate::error::BBError::TypeError {
+                return Err($crate::error::QuoinError::TypeError {
                     expected: "ClassMeta".to_string(),
                     got: match $args.get($idx) {
                         Some(v) => v.type_name().to_string(),
@@ -62,7 +62,7 @@ macro_rules! arg {
         match $args.get($idx) {
             Some(&Value::Object(obj)) => obj,
             _ => {
-                return Err($crate::error::BBError::TypeError {
+                return Err($crate::error::QuoinError::TypeError {
                     expected: "Instance".to_string(),
                     got: match $args.get($idx) {
                         Some(v) => v.type_name().to_string(),
@@ -81,7 +81,7 @@ macro_rules! arg {
             Some(&Value::Object(obj)) => match &obj.borrow().payload {
                 $crate::value::ObjectPayload::$variant(val) => val.clone(),
                 _ => {
-                    return Err($crate::error::BBError::TypeError {
+                    return Err($crate::error::QuoinError::TypeError {
                         expected: stringify!($variant).to_string(),
                         got: match $args.get($idx) {
                             Some(v) => v.type_name().to_string(),
@@ -97,7 +97,7 @@ macro_rules! arg {
                 }
             },
             _ => {
-                return Err($crate::error::BBError::TypeError {
+                return Err($crate::error::QuoinError::TypeError {
                     expected: stringify!($variant).to_string(),
                     got: match $args.get($idx) {
                         Some(v) => v.type_name().to_string(),
@@ -149,7 +149,7 @@ macro_rules! arg_obj {
             Some(&Value::Object(val)) => match val.borrow().class_name().as_str() {
                 $class_name => val,
                 x => {
-                    return Err($crate::error::BBError::TypeError {
+                    return Err($crate::error::QuoinError::TypeError {
                         expected: $class_name.to_string(),
                         got: x.to_string(),
                         msg: format!(
@@ -160,7 +160,7 @@ macro_rules! arg_obj {
                 }
             },
             _ => {
-                return Err($crate::error::BBError::TypeError {
+                return Err($crate::error::QuoinError::TypeError {
                     expected: "Object".to_string(),
                     got: match $args.get($idx) {
                         Some(v) => v.type_name().to_string(),

@@ -1,6 +1,6 @@
 # Part II — Blocks & control flow
 
-Blocks are BB's closures, and they're also how all control flow works — there are
+Blocks are Quoin's closures, and they're also how all control flow works — there are
 no `if`/`while` statements, only messages sent to booleans and blocks.
 
 Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](06-library-and-reference.md) · [Appendices](07-appendices.md)
@@ -17,7 +17,7 @@ Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-ob
 > - Blocks are **closures** capturing a *live reference* to the enclosing scope — later mutations of an outer local are visible inside the block.
 > - Calling with the **wrong number of args is not an error**: extra args are ignored; missing params read as `nil`.
 
-```buildingblocks
+```quoin
 double = { |n| n * 2 }
 double.value:21                  "* 42
 
@@ -31,7 +31,7 @@ adder.valueWithArgs:#(3 4)       "* 7
 Closures capture the live environment, so a block can see — and call — names that
 change after it was created (this is how recursive named blocks work):
 
-```buildingblocks
+```quoin
 count = 0
 bump = { count = count + 1 }
 bump.value
@@ -54,14 +54,14 @@ block argument.
 ## 8. Control flow is a library, not syntax
 
 > **Rules**
-> - `if:`, `else:`, `if:else:`, and `not` are methods defined **only on `true` and `false`** (see `00-bootstrap.bub`). `nil` has none of them.
+> - `if:`, `else:`, `if:else:`, and `not` are methods defined **only on `true` and `false`** (see `00-bootstrap.qn`). `nil` has none of them.
 > - There is **no truthiness coercion**. A condition must be an actual boolean. Sending `if:` to a non-boolean — including `nil` — is a `MessageNotUnderstood`.
 > - The `if:`/`else:` blocks are zero-arg; they run via `.value`.
 > - **Loops** are methods on a *block* used as the condition:
 >   - `{ cond }.whileDo:{ body }` — re-evaluates `cond` (must yield `true`/`false`) before each iteration.
 >   - `{ cond }.whileDefinedDo:{ |v| body }` — loops while `cond`'s value is `defined?` (non-`nil`), passing that value into the body.
 
-```buildingblocks
+```quoin
 (score > 90).if:{ 'A'.print } else:{ 'not yet'.print }
 
 (x == nil).if:{ 'missing'.print }     "* compare to produce a boolean first
@@ -75,7 +75,7 @@ boolean. Comparison operators (`==`, `<`, …) and predicate methods (`defined?`
 `contains?:`, …) are how you produce one.
 
 > **⚠ Gotcha — `nil.if:` is an error, not "false".** Many languages treat `nil` as
-> falsy; BB does not. `maybe.if:{ … }` throws `MessageNotUnderstood` when `maybe`
+> falsy; Quoin does not. `maybe.if:{ … }` throws `MessageNotUnderstood` when `maybe`
 > is `nil` (or any non-boolean). Guard with an explicit test:
 > `maybe.defined?.if:{ … }` or `(maybe == x).if:{ … }`.
 
@@ -89,7 +89,7 @@ boolean. Comparison operators (`==`, `<`, …) and predicate methods (`defined?`
 > - `^^ expr` — **method return** (non-local): unwinds through any intervening blocks and returns from the enclosing method. This is how you break out of an iterator's body.
 > - `^> expr` — **yield**: sugar for `Fiber.yield:expr` (Part V).
 
-```buildingblocks
+```quoin
 firstBig -> { |list|
     list.each:{ |n|
         (n > 100).if:{ ^^ n }      "* ^^ returns from firstBig, ending the loop

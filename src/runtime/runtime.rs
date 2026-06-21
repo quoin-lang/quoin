@@ -1,8 +1,8 @@
 use crate::arg;
 use crate::compiler::Compiler;
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::parser::ast::NodeValue;
-use crate::parser::{parse_building_blocks_file, parse_building_blocks_string};
+use crate::parser::{parse_quoin_file, parse_quoin_string};
 use crate::value::{Block, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -63,14 +63,14 @@ fn eval_string<'gc>(
     code: &str,
     _filename: &str,
     self_val: Option<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
-    let ast = parse_building_blocks_string(code);
+) -> Result<Value<'gc>, QuoinError> {
+    let ast = parse_quoin_string(code);
 
     let mut compiler = Compiler::new();
     let program_node = match &ast.value {
         NodeValue::Program(p) => p,
         _ => {
-            return Err(BBError::Other(
+            return Err(QuoinError::Other(
                 "Expected Program node from parser".to_string(),
             ));
         }
@@ -78,7 +78,7 @@ fn eval_string<'gc>(
 
     let static_block = compiler
         .compile_program(program_node)
-        .map_err(|e| BBError::Other(format!("Compilation error: {}", e)))?;
+        .map_err(|e| QuoinError::Other(format!("Compilation error: {}", e)))?;
 
     let decl_block = static_block.decl_block.as_ref().map(|db| {
         crate::gc!(
@@ -122,19 +122,19 @@ fn eval_file<'gc>(
     mc: &Mutation<'gc>,
     filename: &str,
     self_val: Option<Value<'gc>>,
-) -> Result<Value<'gc>, BBError> {
+) -> Result<Value<'gc>, QuoinError> {
     let path = PathBuf::from(filename);
     if !path.exists() {
-        return Err(BBError::Other(format!("File not found: {}", filename)));
+        return Err(QuoinError::Other(format!("File not found: {}", filename)));
     }
 
-    let ast = parse_building_blocks_file(&path);
+    let ast = parse_quoin_file(&path);
 
     let mut compiler = Compiler::new();
     let program_node = match &ast.value {
         NodeValue::Program(p) => p,
         _ => {
-            return Err(BBError::Other(
+            return Err(QuoinError::Other(
                 "Expected Program node from parser".to_string(),
             ));
         }
@@ -142,7 +142,7 @@ fn eval_file<'gc>(
 
     let static_block = compiler
         .compile_program(program_node)
-        .map_err(|e| BBError::Other(format!("Compilation error: {}", e)))?;
+        .map_err(|e| QuoinError::Other(format!("Compilation error: {}", e)))?;
 
     let decl_block = static_block.decl_block.as_ref().map(|db| {
         crate::gc!(

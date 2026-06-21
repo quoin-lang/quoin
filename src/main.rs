@@ -1,4 +1,4 @@
-use building_blocks_vm::runner::{VmRunner, VmRunnerOptions};
+use quoin::runner::{VmRunner, VmRunnerOptions};
 
 use std::{env, process};
 

@@ -1,4 +1,4 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{AnyCollect, NativeClassBuilder, NativeFunc, ObjectPayload, Value};
 
 use gc_arena::collect::{DynCollect, Trace};
@@ -135,7 +135,7 @@ pub fn build_method_class() -> NativeClassBuilder {
             {
                 vm.execute_block(mc, block.clone(), Vec::new(), Some(receiver))
             } else {
-                Err(BBError::Other("Method block is not a Block".to_string()))
+                Err(QuoinError::Other("Method block is not a Block".to_string()))
             }
         })
         .instance_method(

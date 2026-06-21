@@ -1,4 +1,4 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {
@@ -19,7 +19,7 @@ pub fn build_object_class() -> NativeClassBuilder {
             if let Some(c) = vm.get_class_for_lookup(receiver) {
                 Ok(Value::Class(c))
             } else {
-                Err(BBError::Other(format!(
+                Err(QuoinError::Other(format!(
                     "Class not found for type {}",
                     receiver.type_name()
                 )))
@@ -43,7 +43,7 @@ pub fn build_object_class() -> NativeClassBuilder {
                     },
                     _ => None,
                 };
-                let name = name.ok_or_else(|| BBError::TypeError {
+                let name = name.ok_or_else(|| QuoinError::TypeError {
                     expected: "Symbol, String, or Class".to_string(),
                     got: cap.type_name().to_string(),
                     msg: "can?: expects a selector (symbol or string) or a class".to_string(),
@@ -94,6 +94,6 @@ pub fn build_object_class() -> NativeClassBuilder {
         })
         .instance_method("throw", |vm, _mc, args| {
             vm.active_exception = Some(args[0]);
-            Err(BBError::Thrown)
+            Err(QuoinError::Thrown)
         })
 }

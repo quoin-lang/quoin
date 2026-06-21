@@ -1,10 +1,10 @@
 use crate::compiler::Compiler;
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
 use crate::highlighter::highlight_to_ansi;
 use crate::parser::ast::Node;
-use crate::parser::{NodeValue, parse_building_blocks_file};
+use crate::parser::{NodeValue, parse_quoin_file};
 use crate::runtime::{
     block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method,
     nil, object, regex, runtime, set, string, symbol, timer,
@@ -95,7 +95,7 @@ impl VmRunner {
         Self { options }
     }
 
-    pub fn run(&self) -> Result<(), BBError> {
+    pub fn run(&self) -> Result<(), QuoinError> {
         match self.options.mode {
             VmRunnerMode::Highlight => {
                 let Some(ref path) = self.options.target_path else {
@@ -113,71 +113,71 @@ impl VmRunner {
                 Ok(())
             }
             VmRunnerMode::Test => {
-                println!("Loading bblib/*.bub...");
-                let ast_iter = glob("bblib/*.bub")
+                println!("Loading qnlib/*.qn...");
+                let ast_iter = glob("qnlib/*.qn")
                     .unwrap()
                     .filter_map(|p| {
                         let path_buf = p.unwrap();
                         let path_s = path_buf.display().to_string();
-                        if path_s == "bblib/test.bub"
-                            || (!path_s.starts_with("bblib/test")
-                                && !path_s.ends_with("main.bub")
-                                && !path_s.ends_with("benchmark.bub"))
+                        if path_s == "qnlib/test.qn"
+                            || (!path_s.starts_with("qnlib/test")
+                                && !path_s.ends_with("main.qn")
+                                && !path_s.ends_with("benchmark.qn"))
                         {
                             println!("Loading file: {}", path_s);
-                            let node = parse_building_blocks_file(&path_buf);
+                            let node = parse_quoin_file(&path_buf);
                             Some(node)
                         } else {
                             None
                         }
                     })
                     .chain(once_with(|| {
-                        println!("Loading file: bblib/main.bub");
-                        parse_building_blocks_file(&PathBuf::from("bblib/main.bub"))
+                        println!("Loading file: qnlib/main.qn");
+                        parse_quoin_file(&PathBuf::from("qnlib/main.qn"))
                     }));
 
                 self.compile_and_run_asts(ast_iter);
                 Ok(())
             }
             VmRunnerMode::Benchmark => {
-                println!("Loading bblib/*.bub...");
-                let ast_iter = glob("bblib/*.bub")
+                println!("Loading qnlib/*.qn...");
+                let ast_iter = glob("qnlib/*.qn")
                     .unwrap()
                     .filter_map(|p| {
                         let path_buf = p.unwrap();
                         let path_s = path_buf.display().to_string();
-                        if !path_s.starts_with("bblib/test")
-                            && !path_s.ends_with("main.bub")
-                            && !path_s.ends_with("benchmark.bub")
+                        if !path_s.starts_with("qnlib/test")
+                            && !path_s.ends_with("main.qn")
+                            && !path_s.ends_with("benchmark.qn")
                         {
                             println!("Loading file: {}", path_s);
-                            let node = parse_building_blocks_file(&path_buf);
+                            let node = parse_quoin_file(&path_buf);
                             Some(node)
                         } else {
                             None
                         }
                     })
                     .chain(once_with(|| {
-                        println!("Loading file: bblib/benchmark.bub");
-                        parse_building_blocks_file(&PathBuf::from("bblib/benchmark.bub"))
+                        println!("Loading file: qnlib/benchmark.qn");
+                        parse_quoin_file(&PathBuf::from("qnlib/benchmark.qn"))
                     }));
 
                 self.compile_and_benchmark(ast_iter);
                 Ok(())
             }
             VmRunnerMode::Run => {
-                println!("Loading bblib/*.bub...");
-                let ast_iter = glob("bblib/*.bub")
+                println!("Loading qnlib/*.qn...");
+                let ast_iter = glob("qnlib/*.qn")
                     .unwrap()
                     .filter_map(|p| {
                         let path_buf = p.unwrap();
                         let path_s = path_buf.display().to_string();
-                        if !path_s.starts_with("bblib/test")
-                            && !path_s.ends_with("main.bub")
-                            && !path_s.ends_with("benchmark.bub")
+                        if !path_s.starts_with("qnlib/test")
+                            && !path_s.ends_with("main.qn")
+                            && !path_s.ends_with("benchmark.qn")
                         {
                             println!("Loading file: {}", path_s);
-                            let node = parse_building_blocks_file(&path_buf);
+                            let node = parse_quoin_file(&path_buf);
                             Some(node)
                         } else {
                             None
@@ -188,9 +188,9 @@ impl VmRunner {
                             .options
                             .target_path
                             .as_deref()
-                            .unwrap_or("bblib/testscript.bub");
+                            .unwrap_or("qnlib/testscript.qn");
                         println!("Loading file: {}", script_path);
-                        parse_building_blocks_file(&PathBuf::from(script_path))
+                        parse_quoin_file(&PathBuf::from(script_path))
                     }));
 
                 self.compile_and_run_asts(ast_iter);
@@ -300,7 +300,7 @@ impl VmRunner {
                         },
                         Some(fv) => fv
                             .with_native_state::<fiber_class::NativeFiberState, _, _>(|s| s.coro())
-                            .map_err(BBError::Other)?,
+                            .map_err(QuoinError::Other)?,
                     };
 
                     // Point `vm.yielder` at the coroutine we're about to run,
@@ -422,7 +422,7 @@ impl VmRunner {
                         }
                         Ok(VmStatus::Yeeted(val)) => {
                             vm.yielder = None;
-                            return Err(BBError::Other(format!("Uncaught exception: {}", val)));
+                            return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
                         }
                         Err(err) => {
                             vm.yielder = None;

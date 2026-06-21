@@ -73,9 +73,9 @@ Postfix sends (`.method`) bind tighter than any infix operator; prefix operators
 
 ---
 
-## C. Gotchas for writing & generating BB
+## C. Gotchas for writing & generating Quoin
 
-The consolidated list of surprising behaviors. If you're producing BB code, read
+The consolidated list of surprising behaviors. If you're producing Quoin code, read
 this first.
 
 1. **Operator precedence is conventional** (`* / %` tighter than `+ -` tighter than

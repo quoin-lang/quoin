@@ -1,5 +1,5 @@
 "
-Basic stuff that needs to be loaded first. Everything else should try to be self-contained within its .bub file.
+Basic stuff that needs to be loaded first. Everything else should try to be self-contained within its .qn file.
 "
 
 true <-- {
@@ -80,7 +80,7 @@ Error <- { |@message @payload|
 };
 
 "* Core error types. These mirror the VM's internal error kinds so the runtime
-"* can later raise them directly (see BBLIB_TODO). User code subclasses `Error`.
+"* can later raise them directly (see QUOIN_TODO). User code subclasses `Error`.
 Error <- TypeError <- {};
 Error <- ArgumentError <- {};
 Error <- MessageNotUnderstood <- {};

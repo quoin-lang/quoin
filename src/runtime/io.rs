@@ -1,4 +1,4 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::VmState;
 use crate::{ansi_colorizer, arg};
@@ -25,7 +25,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                 .with_native_state(|io: &NativeIoFolder| {
                     vm.new_string(mc, io.path.to_string_lossy().into_owned())
                 })
-                .map_err(|e| BBError::Other(e.to_string()))
+                .map_err(|e| QuoinError::Other(e.to_string()))
         })
         .instance_method("next", |vm, mc, args| {
             let r = args[0].with_native_state_mut(mc, |io: &mut NativeIoFolder| {
@@ -36,7 +36,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                     .as_mut()
                     .unwrap()
                     .next()
-                    .map(|r| r.map_err(|e| BBError::Other(e.to_string())))
+                    .map(|r| r.map_err(|e| QuoinError::Other(e.to_string())))
             })?;
 
             return Ok(if let Some(entry) = r {
@@ -46,7 +46,7 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                     vm,
                     mc,
                     os_string,
-                    ent.metadata().map_err(|e| BBError::Other(e.to_string()))?,
+                    ent.metadata().map_err(|e| QuoinError::Other(e.to_string()))?,
                 )
             } else {
                 vm.new_nil(mc)
@@ -111,7 +111,7 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 vm,
                 mc,
                 os_string.clone(),
-                metadata(os_string).map_err(|e| BBError::Other(e.to_string()))?,
+                metadata(os_string).map_err(|e| QuoinError::Other(e.to_string()))?,
             ))
         })
         .instance_method("fullpath", |vm, mc, args| {
@@ -119,7 +119,7 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 .with_native_state(|io: &NativeIoFile| {
                     vm.new_string(mc, io.path.to_string_lossy().into_owned())
                 })
-                .map_err(|e| BBError::Other(e.to_string()))
+                .map_err(|e| QuoinError::Other(e.to_string()))
         })
         .instance_method("name", |vm, mc, args| {
             args[0]
@@ -132,7 +132,7 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                             .unwrap_or("".to_string()),
                     )
                 })
-                .map_err(|e| BBError::Other(e.to_string()))
+                .map_err(|e| QuoinError::Other(e.to_string()))
         })
         .instance_method("ext", |vm, mc, args| {
             let ext = args[0].with_native_state(|io: &NativeIoFile| {
@@ -150,13 +150,13 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                     .with_native_state(|io: &NativeIoFile| {
                         io.path.to_string_lossy().to_owned().to_string()
                     })
-                    .map_err(|e| BBError::Other(e.to_string()))?,
+                    .map_err(|e| QuoinError::Other(e.to_string()))?,
             ))
         })
         .instance_method("is_file?", |vm, mc, args| {
             args[0]
                 .with_native_state(|io: &NativeIoFile| io.metadata.is_file())
-                .map_err(|e| BBError::Other(e.to_string()))
+                .map_err(|e| QuoinError::Other(e.to_string()))
                 .map(|v| vm.new_bool(mc, v))
         })
         .instance_method("==:", |vm, mc, args| {
@@ -196,7 +196,7 @@ fn get_io_string<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     val: Value<'gc>,
-) -> Result<String, BBError> {
+) -> Result<String, QuoinError> {
     let val_type_name = val.type_name().to_string();
     let val_debug = format!("{:?}", val);
 
@@ -213,14 +213,14 @@ fn get_io_string<'gc>(
                     return Ok(ansi_colorizer::colorize(st));
                 }
             }
-            return Err(BBError::TypeError {
+            return Err(QuoinError::TypeError {
                 expected: "String".to_string(),
                 got: string_val.type_name().to_string(),
                 msg: "Expected string return from ANSI#string".to_string(),
             });
         }
     }
-    Err(BBError::TypeError {
+    Err(QuoinError::TypeError {
         expected: "String or ANSI".to_string(),
         got: val_type_name,
         msg: format!("Expected String or ANSI (got {})", val_debug),
@@ -268,7 +268,7 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
                     NativeIoHandleWrapper::Stdout(_) | NativeIoHandleWrapper::Stderr(_) => true,
                     _ => false,
                 })
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
 
             if is_stdout_or_stderr && !vm.options.supports_color {
                 s = ansi_colorizer::decolorize(&s);
@@ -281,19 +281,19 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             {
                 NativeIoHandleWrapper::Stdout(out) => {
                     out.write(&bytes)
-                        .map_err(|e| BBError::Other(e.to_string()))?;
+                        .map_err(|e| QuoinError::Other(e.to_string()))?;
                     Ok(())
                 }
                 NativeIoHandleWrapper::Stderr(err) => {
                     err.write(&bytes)
-                        .map_err(|e| BBError::Other(e.to_string()))?;
+                        .map_err(|e| QuoinError::Other(e.to_string()))?;
                     Ok(())
                 }
                 NativeIoHandleWrapper::Stdin(_) => {
-                    Err(BBError::Other("can't write to stdin!".to_string()))
+                    Err(QuoinError::Other("can't write to stdin!".to_string()))
                 }
                 NativeIoHandleWrapper::File(f) => {
-                    f.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
+                    f.write(&bytes).map_err(|e| QuoinError::Other(e.to_string()))?;
                     Ok(())
                 }
             })??;
@@ -309,7 +309,7 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
                     NativeIoHandleWrapper::Stdout(_) | NativeIoHandleWrapper::Stderr(_) => true,
                     _ => false,
                 })
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
 
             if is_stdout_or_stderr && !vm.options.supports_color {
                 s = ansi_colorizer::decolorize(&s);
@@ -322,19 +322,19 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             {
                 NativeIoHandleWrapper::Stdout(out) => {
                     out.write(&bytes)
-                        .map_err(|e| BBError::Other(e.to_string()))?;
+                        .map_err(|e| QuoinError::Other(e.to_string()))?;
                     Ok(())
                 }
                 NativeIoHandleWrapper::Stderr(err) => {
                     err.write(&bytes)
-                        .map_err(|e| BBError::Other(e.to_string()))?;
+                        .map_err(|e| QuoinError::Other(e.to_string()))?;
                     Ok(())
                 }
                 NativeIoHandleWrapper::Stdin(_) => {
-                    Err(BBError::Other("can't write to stdin!".to_string()))
+                    Err(QuoinError::Other("can't write to stdin!".to_string()))
                 }
                 NativeIoHandleWrapper::File(f) => {
-                    f.write(&bytes).map_err(|e| BBError::Other(e.to_string()))?;
+                    f.write(&bytes).map_err(|e| QuoinError::Other(e.to_string()))?;
                     Ok(())
                 }
             })??;
@@ -388,7 +388,7 @@ mod tests {
         });
 
         arena.mutate_root(|mc, vm| {
-            // Test 1: BB String
+            // Test 1: Quoin String
             let string_val = vm.new_string(mc, "hello".to_string());
             let s = get_io_string(vm, mc, string_val).unwrap();
             assert_eq!(s, "hello");

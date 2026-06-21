@@ -2,9 +2,9 @@ runner = TestRunner.new
 
 [IO]Stdout.write:'Loading tests';
 
-lib = [IO]Folder.open:'bblib/tests';
+lib = [IO]Folder.open:'qnlib/tests';
 lib.entries.each:{|f|
-    (f.is_file? && f.ext == 'bub').if:{
+    (f.is_file? && f.ext == 'qn').if:{
         suite = Runtime.evalFile:f.fullpath;
         runner.add:suite;
         [IO]Stdout.write:'.';

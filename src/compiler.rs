@@ -77,7 +77,7 @@ impl Compiler {
 
     fn new_temp_var(&mut self) -> String {
         self.temp_counter += 1;
-        format!("__bb_temp_{}", self.temp_counter)
+        format!("__qn_temp_{}", self.temp_counter)
     }
 
     fn is_local(&self, name: &str) -> bool {
@@ -744,7 +744,7 @@ impl Compiler {
 mod tests {
     use super::*;
     use crate::parser::ast::*;
-    use crate::parser::parse_building_blocks_string;
+    use crate::parser::parse_quoin_string;
     use crate::value::NamespacedName;
 
     use std::sync::Arc;
@@ -972,12 +972,12 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
-        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send("at:".to_string(), 1));
         expected.push(Instruction::DefineLocal("a".to_string()));
-        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("at:".to_string(), 1));
         expected.push(Instruction::DefineLocal("b".to_string()));
@@ -1007,8 +1007,8 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
-        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("sliceFrom:".to_string(), 1));
         expected.push(Instruction::DefineLocal("rest".to_string()));
@@ -1031,7 +1031,7 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
         assert_eq!(res.bytecode, expected);
 
         // SubLValue: a (b c) = x;
@@ -1078,20 +1078,20 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("__bb_temp_1".to_string()));
-        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send("at:".to_string(), 1));
         expected.push(Instruction::DefineLocal("a".to_string()));
-        expected.push(Instruction::LoadLocal("__bb_temp_1".to_string()));
+        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("at:".to_string(), 1));
-        expected.push(Instruction::DefineLocal("__bb_temp_2".to_string()));
-        expected.push(Instruction::LoadLocal("__bb_temp_2".to_string()));
+        expected.push(Instruction::DefineLocal("__qn_temp_2".to_string()));
+        expected.push(Instruction::LoadLocal("__qn_temp_2".to_string()));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send("at:".to_string(), 1));
         expected.push(Instruction::DefineLocal("b".to_string()));
-        expected.push(Instruction::LoadLocal("__bb_temp_2".to_string()));
+        expected.push(Instruction::LoadLocal("__qn_temp_2".to_string()));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send("at:".to_string(), 1));
         expected.push(Instruction::DefineLocal("c".to_string()));
@@ -1374,7 +1374,7 @@ mod tests {
     #[test]
     fn test_source_info_propagation() {
         let code = "{ 1 + 2 };";
-        let ast = parse_building_blocks_string(code);
+        let ast = parse_quoin_string(code);
         let mut compiler = Compiler::new();
 
         // The root program node itself should have the source info

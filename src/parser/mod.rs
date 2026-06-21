@@ -1,12 +1,11 @@
 pub mod ast;
 pub use ast::*;
 
-pub mod antlr;
 pub mod pest;
 
 // Public entry points for parsing, maintaining same interface
-pub use pest::parser::parse_building_blocks_file;
-pub use pest::parser::parse_building_blocks_string;
+pub use pest::parser::parse_quoin_file;
+pub use pest::parser::parse_quoin_string;
 
 #[macro_export]
 macro_rules! cast_node {

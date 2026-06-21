@@ -1,7 +1,7 @@
-# BuildingBlocks VM: Guest-Level Fibers (Continuations with Yield)
+# Quoin VM: Guest-Level Fibers (Continuations with Yield)
 
 This document is the design reference and implementation record for exposing the
-VM's stackful fibers to the BuildingBlocks (BB) language as a first-class
+VM's stackful fibers to the Quoin (Quoin) language as a first-class
 `Fiber` type. It builds directly on the runtime described in
 [`FIBER_REDESIGN.md`](FIBER_REDESIGN.md), which migrated the interpreter onto
 `corosensei` stackful coroutines so the GC could run during long native calls.
@@ -9,7 +9,7 @@ That work gave the *host* a single fiber; this feature gives the *guest* many.
 
 Status: **Phases 1–3 implemented and shipped** (core fibers, the `^>` operator,
 the iteration redesign + Generator/Iterator bridge, and the Phase 2
-introspection/diagnostics layer). All BB test suites and Rust unit tests pass;
+introspection/diagnostics layer). All Quoin test suites and Rust unit tests pass;
 see [Testing](#9-testing).
 
 ---
@@ -18,7 +18,7 @@ see [Testing](#9-testing).
 
 The VM already runs guest code inside a `corosensei` coroutine that suspends
 cooperatively so the host can collect garbage. We expose that same capability to
-BB programs as asymmetric, resumable coroutines — Ruby `Fiber` / Lua coroutine
+Quoin programs as asymmetric, resumable coroutines — Ruby `Fiber` / Lua coroutine
 style:
 
 ```
@@ -127,7 +127,7 @@ f.resume:10   "=> 10"   f.resume   "=> 11"
   already running"` (prevents cycles).
 - **Errors propagate to the resumer.** An uncaught throw inside the block
   surfaces as a throw out of the resumer's `resume` call; the fiber becomes
-  `done`. These errors are ordinary catchable BB exceptions.
+  `done`. These errors are ordinary catchable Quoin exceptions.
 - **Nesting.** Fibers may resume other fibers to arbitrary depth; `yield` always
   returns control to the *immediate* resumer.
 
@@ -250,11 +250,11 @@ current_fiber: Option<Value<'gc>>,        // running guest fiber, or None = main
 resume_stack: Vec<Option<Value<'gc>>>,    // resumer chain (None == main)
 fiber_transfer: Option<Value<'gc>>,       // one-slot value mailbox across a switch
 main_saved_stack / main_saved_frames / main_saved_native_args, // main's saved context
-fiber_error: Option<BBError>,             // (require_static) error delivered to a resumer
+fiber_error: Option<QuoinError>,             // (require_static) error delivered to a resumer
 ```
 
 All `Value`-bearing fields are GC-traced; `fiber_error` is `require_static`
-(`BBError` contains no `Gc`).
+(`QuoinError` contains no `Gc`).
 
 ---
 
@@ -368,7 +368,7 @@ outer.resume  "=> 'a'"   outer.resume  "=> 'b'"   outer.resume  "=> 'inner-done'
 
 ## 9. Testing
 
-`bblib/tests/13-fibers.bub` — 8 tests / 25 assertions:
+`qnlib/tests/13-fibers.qn` — 8 tests / 25 assertions:
 - `yieldsValuesInOrder` — first-resume parameter binding + ordered yields.
 - `returnsFinalValueThenIsDone` — final return value + `done?` transition.
 - `twoWayCommunication` — values passed both directions.
@@ -380,7 +380,7 @@ outer.resume  "=> 'a'"   outer.resume  "=> 'b'"   outer.resume  "=> 'inner-done'
 Additional validation performed during development:
 - **GC stress**: a fiber kept suspended across ~20k allocations returned the
   correct result, exercising `trace_gc` on suspended contexts.
-- **No regressions**: all BB suites pass (0 failures); all Rust unit tests pass;
+- **No regressions**: all Quoin suites pass (0 failures); all Rust unit tests pass;
   warning-free build.
 
 ---
@@ -395,7 +395,7 @@ Additional validation performed during development:
   `Iterate` protocol was simplified to a single required method, `each:`
   (dropping the `next`/`reset` mutable cursor), which made iteration re-entrant
   and `nil`-safe. The fiber bridges iteration in both directions, in
-  `bblib/02-iterate.bub`:
+  `qnlib/02-iterate.qn`:
   - **`Generator`** — a `^>`-yielding block as an iterable (`Generator.from:`);
     its `each:` runs the block in a fiber and forwards each yield to the
     consumer. Consumed lazily through an `Iterator` (e.g. `.take:`), so even
@@ -407,13 +407,13 @@ Additional validation performed during development:
   Plus lazy combinators `lazyCollect:` / `lazySelect:` that return `Generator`s,
   so pipelines stay lazy and compose over infinite sources.
 
-  Covered by `bblib/tests/14-generators.bub` (custom `each:`-only collection,
+  Covered by `qnlib/tests/14-generators.qn` (custom `each:`-only collection,
   `nil` elements, re-entrancy, `Generator`, infinite generator + `take:`,
   external `Iterator`, `zip:`/`drop:`, lazy combinators).
 - **Phase 2 (done):** `Fiber.current`; richer status/result surface
   (`failed?`/`result`/`error`, `status` gains `'failed'`); typed `FiberError`
   with distinct double-resume / yield-outside diagnostics. Tests in
-  `bblib/tests/13-fibers.bub`.
+  `qnlib/tests/13-fibers.qn`.
 
 ### Known limitations
 - Guest fibers are unavailable in benchmark mode (that driver bypasses the

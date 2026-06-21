@@ -1,11 +1,11 @@
-use crate::error::BBError;
+use crate::error::QuoinError;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 
 use gc_arena::collect::{DynCollect, Trace};
 use std::any::Any;
 use std::mem::transmute;
 
-/// An insertion-ordered set of unique values. Uniqueness is determined by the BB
+/// An insertion-ordered set of unique values. Uniqueness is determined by the Quoin
 /// `==:` method (so it matches `List#uniq` semantics), which means membership is
 /// O(n); this is a simple reference implementation rather than a hashed set.
 #[derive(Debug)]
@@ -50,7 +50,7 @@ pub fn build_set_class() -> NativeClassBuilder {
         .instance_method("count", |vm, mc, args| {
             let len = args[0]
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
             Ok(vm.new_int(mc, len as i64))
         })
         .instance_method("add:", |vm, mc, args| {
@@ -68,11 +68,11 @@ pub fn build_set_class() -> NativeClassBuilder {
         .instance_method("each:", |vm, mc, args| {
             let len = args[0]
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
             for i in 0..len {
                 let elem = args[0]
                     .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().get(i).copied())
-                    .map_err(|e| BBError::Other(e))?;
+                    .map_err(|e| QuoinError::Other(e))?;
                 if let Some(elem) = elem {
                     vm.call_method(mc, args[1], "valueWithSelfOrArg:", vec![elem])?;
                 }
@@ -82,14 +82,14 @@ pub fn build_set_class() -> NativeClassBuilder {
         .instance_method("s", |vm, mc, args| {
             let len = args[0]
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
 
             let mut parts = Vec::new();
             for i in 0..len {
                 let val = args[0]
                     .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().get(i).copied())
-                    .map_err(|e| BBError::Other(e))?
-                    .ok_or_else(|| BBError::Other("Index out of bounds".to_string()))?;
+                    .map_err(|e| QuoinError::Other(e))?
+                    .ok_or_else(|| QuoinError::Other("Index out of bounds".to_string()))?;
 
                 let result = vm.call_method(mc, val, "s", vec![])?;
                 let part = if let Value::Object(obj) = result {
@@ -109,7 +109,7 @@ pub fn build_set_class() -> NativeClassBuilder {
         .instance_method("==:", |vm, mc, args| {
             let lhs_len = args[0]
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-                .map_err(|e| BBError::Other(e))?;
+                .map_err(|e| QuoinError::Other(e))?;
             let rhs_len = match args[1].with_native_state::<NativeSetState, _, _>(|s| {
                 s.get_vec().len()
             }) {
@@ -124,7 +124,7 @@ pub fn build_set_class() -> NativeClassBuilder {
             for i in 0..lhs_len {
                 let elem = args[0]
                     .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
-                    .map_err(|e| BBError::Other(e))?;
+                    .map_err(|e| QuoinError::Other(e))?;
                 if !vm.set_contains(mc, args[1], elem)? {
                     return Ok(vm.new_bool(mc, false));
                 }
