@@ -22,8 +22,11 @@ inherits = "release"
 debug = true
 
 [features]
-# Opt-in: build the `qn` binary with mimalloc as the global allocator.
-# Default stays the system allocator. Enable with `--features mimalloc`.
+# mimalloc is the global allocator for optimized builds (release/profiling);
+# debug builds fall back to the system allocator via a `debug_assertions` gate
+# in main.rs, so malloc-debug tooling keeps working. Disable everywhere with
+# `--no-default-features`.
+default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]

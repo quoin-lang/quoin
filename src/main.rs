@@ -2,8 +2,10 @@ use quoin::runner::{VmRunner, VmRunnerOptions};
 
 use std::{env, process};
 
-// Opt-in via `--features mimalloc`. Default build uses the system allocator.
-#[cfg(feature = "mimalloc")]
+// Default-on for optimized builds (release/profiling); debug builds use the
+// system allocator so malloc-debug tooling (leaks, ASan, MallocScribble) works.
+// Turn off entirely with `--no-default-features`.
+#[cfg(all(feature = "mimalloc", not(debug_assertions)))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
