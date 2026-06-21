@@ -136,7 +136,9 @@ impl VmRunner {
                         parse_quoin_file(&PathBuf::from("qnlib/main.qn"))
                     }));
 
-                self.compile_and_run_asts(ast_iter);
+                if !self.compile_and_run_asts(ast_iter) {
+                    exit(1);
+                }
                 Ok(())
             }
             VmRunnerMode::Benchmark => {
@@ -199,7 +201,11 @@ impl VmRunner {
         }
     }
 
-    fn compile_and_run_asts(&self, ast_iter: impl Iterator<Item = Node>) {
+    /// Runs each program AST in turn. Returns `true` if the run completed without a
+    /// VM error and the last program's result value was truthy. For `qn test` that
+    /// last value is main.qn's `results.none?:{…}` boolean (true iff every suite
+    /// passed), so the Test driver can gate the process exit code on it.
+    fn compile_and_run_asts(&self, ast_iter: impl Iterator<Item = Node>) -> bool {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
 
@@ -377,7 +383,13 @@ impl VmRunner {
             }
         }
 
+        // The last program run leaves its result on top of the stack. Treat a VM
+        // error (abort) as failure too, so callers can gate purely on the return.
+        let passed = !aborted
+            && arena.mutate_root(|_mc, vm| vm.stack.last().map(|v| v.is_truthy()).unwrap_or(false));
+
         arena.finish_cycle();
+        passed
     }
 
     fn run_benchmark_iteration(

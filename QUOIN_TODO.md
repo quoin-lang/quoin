@@ -21,6 +21,12 @@ This document outlines the language features, compiler updates, and VM modificat
   temporary that's reachable only via the Rust stack across a step boundary in the `add:` /
   collection-builder path. See `profiling/send-receiver-split/notes.md`.
 - [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
+- [ ] Add a Quoin builtin for exiting the process with a status code (like C's `exit(status)`) —
+  e.g. `Runtime.exit:0` / `Runtime.exit:1` — threading a requested exit code out of the VM to
+  `std::process::exit`. Once it exists, the `qn test` harness (`qnlib/main.qn`) can call it
+  directly instead of the Rust driver inferring pass/fail from the program's final value (today
+  `compile_and_run_asts` in `src/runner.rs` exits non-zero when a `qn test` run aborts on a VM
+  error or its final result is falsy).
 - [ ] Design an installer.
   - [x] Named the language **Quoin** (extension `.qn`); rationale in `~/code/quoin/DECISIONS.md`.
   - [x] Binary name is `qn` (set via `[[bin]]` in `Cargo.toml`).
