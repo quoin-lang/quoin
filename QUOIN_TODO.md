@@ -264,6 +264,21 @@ This document outlines the language features, compiler updates, and VM modificat
     (Copy operands get a `let x = *x;` deref-shadow; the few class-def-time owned sites `.clone()`).
     **Result: malloc 30.6% → 27.3%, `String::clone` 4.3% → 1.9%; Fib −11% / Sieve −8% / Binary Trees
     −13%.** All green incl. `QN_GC_STRESS=1`. See `profiling/instr-borrow/notes.md`.
+  - [x] **Phase 3 — per-Send allocation cleanups.** (A) `lookup_method`'s `selector_key`
+    (`NamespacedName::new(.., selector)`, a `String` alloc every send) made lazy via
+    `lookup_selector_in_globals` — only the globals-fallback path (method not found) allocates it now.
+    (B) the per-send `last_send_args = args.clone()` removed; args are captured only on the in-place-error
+    branches (lookup-`Err`/MNU in the Send handler, `New`/`NewNoBlock`/`Native` in `Callable::call` — the
+    native case reuses the existing `active_native_args` rooting snapshot, so the hot path adds nothing).
+    Removed the dead write-only `last_send_receiver`. Stack traces diffed byte-identical before/after.
+    **Result: malloc 30.4% → 22.9% (−7.4pts, the largest single drop); Fib −6% / Sieve −5% / Binary
+    Trees −4%.** All green incl. `QN_GC_STRESS=1`. See `profiling/phase3-send-allocs/notes.md`.
+  - [ ] **Make stack-trace/error formatting unit-testable (data, not direct print).** `annotate_error`
+    (`vm.rs`) builds the stack trace by formatting strings inline (selector + arg types + source location
+    per frame). Extract the *structured data* — a `Vec` of per-frame records (selector, arg class names,
+    location) — from the string rendering, so the data can be asserted in Rust unit tests. This gives
+    Phase 3 (B) a real regression test: that an error raised from a 1+-arg send still reports its args
+    correctly (today only the `.qn` `07-errors` suite covers this indirectly, by matching printed output).
 
 ## 10. Test Coverage
 - [ ] **Increase Code Coverage**:

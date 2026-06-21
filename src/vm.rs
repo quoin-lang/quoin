@@ -146,7 +146,10 @@ pub struct VmState<'gc> {
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_exception: Option<Value<'gc>>,
-    pub last_send_receiver: Option<Value<'gc>>,
+    /// Arguments of the most recent send that failed *in place* (no callee frame of
+    /// its own) — read only by the stack-trace formatter (`annotate_error`). Set on
+    /// the in-place-error branches of the `Send` handler / `Callable::call`, not on
+    /// every send.
     pub last_send_args: Vec<Value<'gc>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
 
@@ -251,7 +254,10 @@ impl<'gc> Callable<'gc> {
                 Ok(())
             }
             Callable::New(class_obj) => {
+                // `new:` consumes `args` and can error in place — keep them for the
+                // stack trace before returning (cold paths; a plain move, no clone).
                 if args.len() != 1 {
+                    vm.last_send_args = args;
                     return Err(QuoinError::Other("new: expects a block".to_string()));
                 }
                 let block = if let Value::Object(obj) = args[0]
@@ -259,9 +265,11 @@ impl<'gc> Callable<'gc> {
                 {
                     *b
                 } else {
+                    let got = args[0].type_name().to_string();
+                    vm.last_send_args = args;
                     return Err(QuoinError::TypeError {
                         expected: "Block".to_string(),
-                        got: args[0].type_name().to_string(),
+                        got,
                         msg: "new: expects a Block".to_string(),
                     });
                 };
@@ -274,6 +282,7 @@ impl<'gc> Callable<'gc> {
             }
             Callable::NewNoBlock(class_obj) => {
                 if !args.is_empty() {
+                    vm.last_send_args = args;
                     return Err(QuoinError::Other("new expects no arguments".to_string()));
                 }
 
@@ -299,6 +308,14 @@ impl<'gc> Callable<'gc> {
                     args: args.clone(),
                 });
                 let ret = func.0(vm, mc, receiver, args);
+                if ret.is_err() {
+                    // Native error: the send failed in place (no callee frame), so the
+                    // stack-trace formatter wants its args. Reuse the rooting snapshot
+                    // (cloned only here, on the cold error path — not on every send).
+                    if let Some(call) = vm.active_native_args.last() {
+                        vm.last_send_args = call.args.clone();
+                    }
+                }
                 vm.active_native_args.pop();
                 let ret = ret?;
                 vm.push(ret);
@@ -350,7 +367,6 @@ impl<'gc> VmState<'gc> {
             next_frame_id: 1,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_exception: None,
-            last_send_receiver: None,
             last_send_args: Vec::new(),
             active_native_args: Vec::new(),
             yielder: None,
@@ -1486,6 +1502,14 @@ impl<'gc> VmState<'gc> {
         Ok(self.pop()?)
     }
 
+    /// Resolve a bare selector as a global (the legacy global-function fallback,
+    /// reached only when no method matched in the class hierarchy). Builds the key
+    /// lazily so the hot, method-found path never allocates it.
+    fn lookup_selector_in_globals(&self, selector: Symbol) -> Option<Value<'gc>> {
+        let key = NamespacedName::new(Vec::new(), selector.as_str().to_string());
+        self.globals.borrow().get(&key).copied()
+    }
+
     #[allow(no_gc_across_yield)]
     pub fn lookup_method(
         &mut self,
@@ -1512,7 +1536,6 @@ impl<'gc> VmState<'gc> {
                 }
             }
         }
-        let selector_key = NamespacedName::new(Vec::new(), selector.as_str().to_string());
         let method_val = match receiver {
             Value::Class(class_obj) => {
                 if let Some(m) =
@@ -1534,10 +1557,10 @@ impl<'gc> VmState<'gc> {
                         )? {
                             Some(m)
                         } else {
-                            self.globals.borrow().get(&selector_key).copied()
+                            self.lookup_selector_in_globals(selector)
                         }
                     } else {
-                        self.globals.borrow().get(&selector_key).copied()
+                        self.lookup_selector_in_globals(selector)
                     }
                 }
             }
@@ -1566,10 +1589,10 @@ impl<'gc> VmState<'gc> {
                         )? {
                             Some(m)
                         } else {
-                            self.globals.borrow().get(&selector_key).copied()
+                            self.lookup_selector_in_globals(selector)
                         }
                     } else {
-                        self.globals.borrow().get(&selector_key).copied()
+                        self.lookup_selector_in_globals(selector)
                     }
                 }
             }
@@ -1581,10 +1604,10 @@ impl<'gc> VmState<'gc> {
                     )? {
                         Some(m)
                     } else {
-                        self.globals.borrow().get(&selector_key).copied()
+                        self.lookup_selector_in_globals(selector)
                     }
                 } else {
-                    self.globals.borrow().get(&selector_key).copied()
+                    self.lookup_selector_in_globals(selector)
                 }
             }
         };
@@ -3270,8 +3293,6 @@ impl<'gc> VmState<'gc> {
                 args.reverse();
 
                 let receiver = self.pop()?;
-                self.last_send_receiver = Some(receiver);
-                self.last_send_args = args.clone();
                 self.frames[frame_idx].ip += 1; // Advance caller frame IP
 
                 if let Value::Object(obj) = receiver
@@ -3283,7 +3304,19 @@ impl<'gc> VmState<'gc> {
                     }
                 }
 
-                let method_opt = self.lookup_method(mc, receiver, selector, &args)?;
+                // `last_send_args` is read only by the stack-trace formatter, and only
+                // for an innermost send that fails *in place* (no callee frame of its
+                // own): a failed lookup, a `MessageNotUnderstood`, or a native-method
+                // error (the last captured inside `Callable::call`). On success the args
+                // move into the callee frame (`Frame.args`), which the formatter reads
+                // instead — so we snapshot only on these error branches, not every send.
+                let method_opt = match self.lookup_method(mc, receiver, selector, &args) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        self.last_send_args = args;
+                        return Err(e);
+                    }
+                };
                 if let Some(callable) = method_opt {
                     callable.call(self, mc, Some(receiver), args, Some(selector))?;
                 } else {
@@ -3294,10 +3327,13 @@ impl<'gc> VmState<'gc> {
                         .iter()
                         .map(|&mv| self.format_candidate_signature(mv, selector))
                         .collect();
+                    let receiver_name = receiver.class_name();
+                    let arg_names = args.iter().map(|a| a.class_name()).collect();
+                    self.last_send_args = args;
                     return Err(QuoinError::MessageNotUnderstood {
-                        receiver: receiver.class_name(),
+                        receiver: receiver_name,
                         selector: selector.as_str().to_string(),
-                        args: args.iter().map(|a| a.class_name()).collect(),
+                        args: arg_names,
                         candidates,
                     });
                 }
