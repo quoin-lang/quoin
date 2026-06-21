@@ -74,7 +74,8 @@ impl PartialEq<SharedSourceMap> for Vec<Option<SourceInfo>> {
 pub struct StaticBlock {
     pub name: Option<String>,
     pub is_nested_block: bool,
-    pub param_names: Vec<String>,
+    /// Parameter names interned at compile time; copied into the runtime `Block`.
+    pub param_syms: Vec<Symbol>,
     pub param_types: Vec<String>,
     pub bytecode: SharedBytecode,
     pub source_info: Option<SourceInfo>,

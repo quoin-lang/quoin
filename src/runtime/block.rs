@@ -7,16 +7,16 @@ pub fn build_block_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Block", Some("Object"))
         .instance_method("arity", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
-            Ok(vm.new_int(mc, block.param_names.len() as i64))
+            Ok(vm.new_int(mc, block.param_syms.len() as i64))
         })
         .instance_method("args", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
             Ok(vm.new_list(
                 mc,
                 block
-                    .param_names
+                    .param_syms
                     .iter()
-                    .map(|s| vm.new_string(mc, s.clone()))
+                    .map(|s| vm.new_string(mc, s.as_str().to_string()))
                     .collect(),
             ))
         })

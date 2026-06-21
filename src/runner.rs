@@ -262,7 +262,7 @@ impl VmRunner {
                         Block {
                             name: db.name.clone(),
                             is_nested_block: db.is_nested_block,
-                            param_names: db.param_names.clone(),
+                            param_syms: db.param_syms.clone(),
                             param_types: db.param_types.clone(),
                             bytecode: db.bytecode.clone(),
                             parent_env: None,
@@ -278,7 +278,7 @@ impl VmRunner {
                     Block {
                         name: program.name.clone(),
                         is_nested_block: program.is_nested_block,
-                        param_names: program.param_names.clone(),
+                        param_syms: program.param_syms.clone(),
                         param_types: program.param_types.clone(),
                         bytecode: program.bytecode.clone(),
                         parent_env: None,
@@ -572,7 +572,7 @@ impl VmRunner {
                         Block {
                             name: db.name.clone(),
                             is_nested_block: db.is_nested_block,
-                            param_names: db.param_names.clone(),
+                            param_syms: db.param_syms.clone(),
                             param_types: db.param_types.clone(),
                             bytecode: db.bytecode.clone(),
                             parent_env: None,
@@ -588,7 +588,7 @@ impl VmRunner {
                     Block {
                         name: program.name.clone(),
                         is_nested_block: program.is_nested_block,
-                        param_names: program.param_names.clone(),
+                        param_syms: program.param_syms.clone(),
                         param_types: program.param_types.clone(),
                         bytecode: program.bytecode.clone(),
                         parent_env: None,

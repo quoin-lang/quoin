@@ -162,7 +162,7 @@ impl Compiler {
         Ok(StaticBlock {
             name: None,
             is_nested_block: false,
-            param_names: Vec::new(),
+            param_syms: Vec::new(),
             param_types: Vec::new(),
             bytecode: SharedBytecode(Rc::new(cb.bytecode)),
             source_info: program.source_info.clone(),
@@ -797,7 +797,7 @@ impl Compiler {
         let static_block = StaticBlock {
             name: block_name,
             is_nested_block: true,
-            param_names,
+            param_syms: crate::value::intern_param_syms(&param_names),
             param_types,
             bytecode: SharedBytecode(Rc::new(block_bytecode.bytecode)),
             source_info: block.source_info.clone(),
@@ -1291,7 +1291,7 @@ mod tests {
         let inner_static = StaticBlock {
             name: None,
             is_nested_block: true,
-            param_names: vec!["x".to_string()],
+            param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
             param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode(Rc::new(vec![
                 Instruction::LoadLocal(Symbol::intern("x")),
@@ -1431,7 +1431,7 @@ mod tests {
         let expected_block = StaticBlock {
             name: None,
             is_nested_block: true,
-            param_names: vec!["a".to_string(), "b".to_string()],
+            param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),
             param_types: vec!["Object".to_string(), "Object".to_string()],
             bytecode: SharedBytecode(Rc::new(vec![
                 Instruction::Push(Constant::Nil),

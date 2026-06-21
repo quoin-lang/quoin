@@ -731,7 +731,7 @@ impl<'gc> VmState<'gc> {
         };
         let io_ref = io.borrow();
         match &io_ref.payload {
-            ObjectPayload::Block(b) => Some(b.param_names.clone()),
+            ObjectPayload::Block(b) => Some(b.param_syms.iter().map(|s| s.as_str().to_string()).collect()),
             ObjectPayload::NativeState(state_cell) => {
                 let state_ref = state_cell.borrow();
                 let any_ref = (**state_ref).as_any();
@@ -739,7 +739,7 @@ impl<'gc> VmState<'gc> {
                 if let Some(Value::Object(block_obj)) = method_state.get_block()
                     && let ObjectPayload::Block(b) = &block_obj.borrow().payload
                 {
-                    Some(b.param_names.clone())
+                    Some(b.param_syms.iter().map(|s| s.as_str().to_string()).collect())
                 } else {
                     None
                 }
@@ -1412,7 +1412,7 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         block: Gc<'gc, Block<'gc>>,
         receiver: Value<'gc>,
-        outer_param_names: &[String],
+        outer_param_syms: &[Symbol],
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, QuoinError> {
         let initial_frame_count = self.frames.len();
@@ -1429,8 +1429,8 @@ impl<'gc> VmState<'gc> {
         // class's functionality — other methods, instance variables, etc.
         env_frame.bind(self_symbol(), receiver);
 
-        for (name, val) in outer_param_names.iter().zip(args.iter().copied()) {
-            env_frame.bind(Symbol::intern(name), val);
+        for (sym, val) in outer_param_syms.iter().zip(args.iter().copied()) {
+            env_frame.bind(*sym, val);
         }
 
         let env_ref = gcl!(mc, env_frame);
@@ -1847,7 +1847,7 @@ impl<'gc> VmState<'gc> {
             // holds regardless of which candidate ultimately wins.
             self.dispatch_uncacheable = true;
             let res =
-                self.execute_validation_block(mc, decl_block, receiver, &block.param_names, args)?;
+                self.execute_validation_block(mc, decl_block, receiver, &block.param_syms, args)?;
             if !res.is_true() {
                 return Ok(None);
             }
@@ -2398,8 +2398,8 @@ impl<'gc> VmState<'gc> {
 
         let mut env_frame = EnvFrame::new(block.parent_env);
         // Bind parameters
-        for (name, val) in block.param_names.iter().zip(args.iter().copied()) {
-            env_frame.bind(Symbol::intern(name), val);
+        for (sym, val) in block.param_syms.iter().zip(args.iter().copied()) {
+            env_frame.bind(*sym, val);
         }
         let env_ref = gcl!(mc, env_frame);
 
@@ -2444,8 +2444,8 @@ impl<'gc> VmState<'gc> {
         // Bind self
         env_frame.bind(self_symbol(), receiver);
         // Bind parameters
-        for (name, val) in block.param_names.iter().zip(args.iter().copied()) {
-            env_frame.bind(Symbol::intern(name), val);
+        for (sym, val) in block.param_syms.iter().zip(args.iter().copied()) {
+            env_frame.bind(*sym, val);
         }
         let env_ref = gcl!(mc, env_frame);
 
@@ -3217,7 +3217,7 @@ impl<'gc> VmState<'gc> {
                                 Block {
                                     name: db.name.clone(),
                                     is_nested_block: db.is_nested_block,
-                                    param_names: db.param_names.clone(),
+                                    param_syms: db.param_syms.clone(),
                                     param_types: db.param_types.clone(),
                                     bytecode: db.bytecode.clone(),
                                     parent_env,
@@ -3231,7 +3231,7 @@ impl<'gc> VmState<'gc> {
                         let block = Block {
                             name: sb.name.clone(),
                             is_nested_block: sb.is_nested_block,
-                            param_names: sb.param_names.clone(),
+                            param_syms: sb.param_syms.clone(),
                             param_types: sb.param_types.clone(),
                             bytecode: sb.bytecode.clone(),
                             parent_env,
@@ -3897,7 +3897,7 @@ mod tests {
                 source_info: None,
                 name: Some("test_main".to_string()),
                 is_nested_block: false,
-                param_names: Vec::new(),
+                param_syms: Vec::new(),
                 param_types: Vec::new(),
                 bytecode: instructions.into(),
                 decl_block: None,
@@ -3909,7 +3909,7 @@ mod tests {
                     source_info: None,
                     name: static_block.name.clone(),
                     is_nested_block: static_block.is_nested_block,
-                    param_names: static_block.param_names.clone(),
+                    param_syms: static_block.param_syms.clone(),
                     param_types: static_block.param_types.clone(),
                     bytecode: static_block.bytecode.clone(),
                     parent_env: None,
@@ -4047,7 +4047,7 @@ mod tests {
                 source_info: None,
                 name: Some("defer_gc_test".to_string()),
                 is_nested_block: false,
-                param_names: Vec::new(),
+                param_syms: Vec::new(),
                 param_types: Vec::new(),
                 bytecode: Vec::<Instruction>::new().into(),
                 decl_block: None,
@@ -4059,7 +4059,7 @@ mod tests {
                     source_info: None,
                     name: static_block.name.clone(),
                     is_nested_block: static_block.is_nested_block,
-                    param_names: static_block.param_names.clone(),
+                    param_syms: static_block.param_syms.clone(),
                     param_types: static_block.param_types.clone(),
                     bytecode: static_block.bytecode.clone(),
                     parent_env: None,
@@ -4448,7 +4448,7 @@ mod tests {
             source_info: None,
             name: Some("test_block".to_string()),
             is_nested_block: false,
-            param_names: vec!["x".to_string()],
+            param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
             param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode::from(vec![
                 Instruction::LoadLocal(Symbol::intern("x")),
@@ -4525,7 +4525,7 @@ mod tests {
             source_info: None,
             name: Some("nested".to_string()),
             is_nested_block: true,
-            param_names: Vec::new(),
+            param_syms: Vec::new(),
             param_types: Vec::new(),
             bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Int(999)),
@@ -4541,7 +4541,7 @@ mod tests {
             source_info: None,
             name: Some("method".to_string()),
             is_nested_block: false, // enclosing_method_id will be this frame's ID
-            param_names: Vec::new(),
+            param_syms: Vec::new(),
             param_types: Vec::new(),
             bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Block(block_nested)),
@@ -4587,7 +4587,7 @@ mod tests {
             source_info: None,
             name: Some("nested".to_string()),
             is_nested_block: true,
-            param_names: Vec::new(),
+            param_syms: Vec::new(),
             param_types: Vec::new(),
             bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Int(777)),
@@ -4602,7 +4602,7 @@ mod tests {
             source_info: None,
             name: Some("bar".to_string()),
             is_nested_block: false,
-            param_names: vec!["blk".to_string()],
+            param_syms: crate::value::intern_param_syms(&vec!["blk".to_string()]),
             param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode::from(vec![
                 Instruction::LoadLocal(Symbol::intern("blk")),
@@ -4619,7 +4619,7 @@ mod tests {
             source_info: None,
             name: Some("foo".to_string()),
             is_nested_block: false,
-            param_names: Vec::new(),
+            param_syms: Vec::new(),
             param_types: Vec::new(),
             bytecode: SharedBytecode::from(vec![
                 Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "bar_func".to_string())),
@@ -4638,7 +4638,7 @@ mod tests {
                 source_info: None,
                 name: block_bar.name.clone(),
                 is_nested_block: block_bar.is_nested_block,
-                param_names: block_bar.param_names.clone(),
+                param_syms: block_bar.param_syms.clone(),
                 param_types: block_bar.param_types.clone(),
                 bytecode: block_bar.bytecode.clone(),
                 parent_env: None,
@@ -4658,7 +4658,7 @@ mod tests {
                     source_info: None,
                     name: block_foo.name.clone(),
                     is_nested_block: block_foo.is_nested_block,
-                    param_names: block_foo.param_names.clone(),
+                    param_syms: block_foo.param_syms.clone(),
                     param_types: block_foo.param_types.clone(),
                     bytecode: block_foo.bytecode.clone(),
                     parent_env: None,
@@ -4705,7 +4705,7 @@ mod tests {
             source_info: None,
             name: Some("class_block".to_string()),
             is_nested_block: false,
-            param_names: Vec::new(),
+            param_syms: Vec::new(),
             param_types: Vec::new(),
             bytecode: SharedBytecode::from(vec![
                 // 1. Define inst method x
@@ -4713,7 +4713,7 @@ mod tests {
                     source_info: None,
                     name: Some("x".to_string()),
                     is_nested_block: false,
-                    param_names: Vec::new(),
+                    param_syms: Vec::new(),
                     param_types: Vec::new(),
                     bytecode: vec![
                         Instruction::LoadLocal(Symbol::intern("self")),
@@ -4729,7 +4729,7 @@ mod tests {
                     source_info: None,
                     name: Some("x".to_string()),
                     is_nested_block: false,
-                    param_names: Vec::new(),
+                    param_syms: Vec::new(),
                     param_types: Vec::new(),
                     bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return]
                         .into(),
@@ -4858,7 +4858,7 @@ mod tests {
             source_info: None,
             name: Some("custom_true_method".to_string()),
             is_nested_block: false,
-            param_names: Vec::new(),
+            param_syms: Vec::new(),
             param_types: Vec::new(),
             bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Int(42)),
@@ -4872,7 +4872,7 @@ mod tests {
             source_info: None,
             name: Some("class_extension_block".to_string()),
             is_nested_block: false,
-            param_names: Vec::new(),
+            param_syms: Vec::new(),
             param_types: Vec::new(),
             bytecode: SharedBytecode::from(vec![
                 Instruction::Push(Constant::Block(custom_true_method)),
@@ -5153,7 +5153,7 @@ mod tests {
                     source_info: None,
                     name: Some("test_block".to_string()),
                     is_nested_block: false,
-                    param_names: vec!["a".to_string(), "b".to_string()],
+                    param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),
                     param_types: vec!["Object".to_string(), "Object".to_string()],
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal(Symbol::intern("self")),
@@ -5194,7 +5194,7 @@ mod tests {
                     source_info: None,
                     name: Some("test_block_no_self".to_string()),
                     is_nested_block: false,
-                    param_names: vec!["a".to_string(), "b".to_string()],
+                    param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),
                     param_types: vec!["Object".to_string(), "Object".to_string()],
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal(Symbol::intern("a")),
@@ -5245,7 +5245,7 @@ mod tests {
                     source_info: None,
                     name: Some("ext_block".to_string()),
                     is_nested_block: false,
-                    param_names: Vec::new(),
+                    param_syms: Vec::new(),
                     param_types: Vec::new(),
                     bytecode: SharedBytecode::from(vec![
                         Instruction::Push(Constant::Nil),
@@ -5378,7 +5378,7 @@ mod tests {
                         source_info: db.source_info.clone(),
                         name: db.name.clone(),
                         is_nested_block: db.is_nested_block,
-                        param_names: db.param_names.clone(),
+                        param_syms: db.param_syms.clone(),
                         param_types: db.param_types.clone(),
                         bytecode: db.bytecode.clone(),
                         parent_env: None,
@@ -5394,7 +5394,7 @@ mod tests {
                     source_info: compiled.source_info.clone(),
                     name: compiled.name.clone(),
                     is_nested_block: compiled.is_nested_block,
-                    param_names: compiled.param_names.clone(),
+                    param_syms: compiled.param_syms.clone(),
                     param_types: compiled.param_types.clone(),
                     bytecode: compiled.bytecode.clone(),
                     parent_env: None,
@@ -5455,7 +5455,7 @@ mod tests {
                         source_info: db.source_info.clone(),
                         name: db.name.clone(),
                         is_nested_block: db.is_nested_block,
-                        param_names: db.param_names.clone(),
+                        param_syms: db.param_syms.clone(),
                         param_types: db.param_types.clone(),
                         bytecode: db.bytecode.clone(),
                         parent_env: None,
@@ -5471,7 +5471,7 @@ mod tests {
                     source_info: compiled.source_info.clone(),
                     name: compiled.name.clone(),
                     is_nested_block: compiled.is_nested_block,
-                    param_names: compiled.param_names.clone(),
+                    param_syms: compiled.param_syms.clone(),
                     param_types: compiled.param_types.clone(),
                     bytecode: compiled.bytecode.clone(),
                     parent_env: None,
@@ -5534,7 +5534,7 @@ mod tests {
                     source_info: compiled.source_info.clone(),
                     name: compiled.name.clone(),
                     is_nested_block: compiled.is_nested_block,
-                    param_names: compiled.param_names.clone(),
+                    param_syms: compiled.param_syms.clone(),
                     param_types: compiled.param_types.clone(),
                     bytecode: compiled.bytecode.clone(),
                     parent_env: None,

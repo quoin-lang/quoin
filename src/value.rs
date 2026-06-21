@@ -526,7 +526,9 @@ impl<'gc> fmt::Display for Value<'gc> {
 pub struct Block<'gc> {
     pub name: Option<String>,
     pub is_nested_block: bool,
-    pub param_names: Vec<String>,
+    /// Parameter names, interned. `Symbol` is the single representation everywhere;
+    /// stringify via `as_str()` only for display (`Block#args`, signature output).
+    pub param_syms: Vec<Symbol>,
     pub param_types: Vec<String>,
     pub bytecode: SharedBytecode,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
@@ -608,6 +610,12 @@ impl<'gc> EnvFrame<'gc> {
             None => self.vars.push((name, val)),
         }
     }
+}
+
+/// Intern a block's parameter names to `Symbol`s. Called once per block value when
+/// it's created (see `Block::param_syms`), so per-call binding never re-interns.
+pub fn intern_param_syms(names: &[String]) -> Vec<Symbol> {
+    names.iter().map(|n| Symbol::intern(n)).collect()
 }
 
 #[derive(Collect, Debug)]

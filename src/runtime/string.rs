@@ -275,7 +275,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                                 Block {
                                     name: db.name.clone(),
                                     is_nested_block: db.is_nested_block,
-                                    param_names: db.param_names.clone(),
+                                    param_syms: db.param_syms.clone(),
                                     param_types: db.param_types.clone(),
                                     bytecode: db.bytecode.clone(),
                                     parent_env: Some(caller_env),
@@ -292,7 +292,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                             Block {
                                 name: compiled.name.clone(),
                                 is_nested_block: compiled.is_nested_block,
-                                param_names: compiled.param_names.clone(),
+                                param_syms: compiled.param_syms.clone(),
                                 param_types: compiled.param_types.clone(),
                                 bytecode: compiled.bytecode.clone(),
                                 parent_env: Some(caller_env),

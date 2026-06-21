@@ -185,7 +185,7 @@ pub fn build_list_class() -> NativeClassBuilder {
             let block_args = receiver.with_native_state(|l: &NativeListState| {
                 l.get_vec()
                     .iter()
-                    .take(block.param_names.len())
+                    .take(block.param_syms.len())
                     .map(|v| unsafe { transmute(*v) })
                     .collect::<Vec<_>>()
             })?;
@@ -238,7 +238,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
 
-            let arity = block_gc.param_names.len();
+            let arity = block_gc.param_syms.len();
             if arity == 1 {
                 for i in 1..len {
                     let mut j = i;
