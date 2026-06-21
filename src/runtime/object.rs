@@ -1,5 +1,6 @@
 use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
+use gc_arena::Gc;
 
 pub fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
@@ -8,7 +9,7 @@ pub fn build_object_class() -> NativeClassBuilder {
         })
         .instance_method("id", |vm, mc, args| {
             let id_str = match args[0] {
-                Value::Object(obj) => obj.borrow().id.0.to_string(),
+                Value::Object(obj) => format!("{:x}", Gc::as_ptr(obj) as usize),
                 Value::Class(c) => format!("Class({})", c.borrow().name),
                 Value::ClassMeta(c) => format!("ClassMeta({})", c.borrow().name),
             };

@@ -10,7 +10,7 @@ use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
 use crate::value::{
-    AnyCollect, Block, Class, EnvFrame, GcUlid, NamespacedName, NativeClass, NativeFunc, Object,
+    AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeClass, NativeFunc, Object,
     ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, gc, gcl};
@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::mem::transmute;
 use std::path::Path;
 use std::{cmp, fs};
-use ulid::Ulid;
 
 /// A method call queued to run when its frame completes normally (a "defer").
 #[derive(Clone, Collect)]
@@ -369,7 +368,6 @@ impl<'gc> VmState<'gc> {
         gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class: class_obj,
                 fields,
                 payload: ObjectPayload::Instance,
@@ -387,7 +385,6 @@ impl<'gc> VmState<'gc> {
         let obj = gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class: class_obj,
                 fields: HashMap::new(),
                 payload,
@@ -406,7 +403,6 @@ impl<'gc> VmState<'gc> {
             let v = Value::Object(gcl!(
                 mc,
                 Object {
-                    id: GcUlid(Ulid::new()),
                     class,
                     fields: HashMap::new(),
                     payload: ObjectPayload::Nil,
@@ -431,7 +427,6 @@ impl<'gc> VmState<'gc> {
             let v = Value::Object(gcl!(
                 mc,
                 Object {
-                    id: GcUlid(Ulid::new()),
                     class,
                     fields: HashMap::new(),
                     payload: ObjectPayload::Bool(b),
@@ -452,7 +447,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::Int(i),
@@ -466,7 +460,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::Double(f),
@@ -480,7 +473,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::String(gc!(mc, s)),
@@ -500,7 +492,6 @@ impl<'gc> VmState<'gc> {
         let sym = Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::Symbol(gc!(mc, name.clone())),
@@ -530,7 +521,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
@@ -545,7 +535,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
@@ -559,7 +548,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
@@ -640,7 +628,6 @@ impl<'gc> VmState<'gc> {
         let regex_val = Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
@@ -660,7 +647,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::Block(gc!(mc, block)),
@@ -681,7 +667,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
@@ -704,7 +689,6 @@ impl<'gc> VmState<'gc> {
         Value::Object(gcl!(
             mc,
             Object {
-                id: GcUlid(Ulid::new()),
                 class,
                 fields: HashMap::new(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),

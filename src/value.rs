@@ -14,14 +14,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use ulid::Ulid;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct GcUlid(pub Ulid);
-
-unsafe impl<'gc> Collect<'gc> for GcUlid {
-    const NEEDS_TRACE: bool = false;
-}
 
 pub trait AnyCollect: Debug {
     fn as_any(&self) -> &dyn Any;
@@ -329,7 +321,7 @@ impl<'gc> PartialEq for Value<'gc> {
                     (ObjectPayload::String(x), ObjectPayload::String(y)) => **x == **y,
                     (ObjectPayload::Symbol(x), ObjectPayload::Symbol(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Block(x), ObjectPayload::Block(y)) => Gc::ptr_eq(*x, *y),
-                    _ => a_borrow.id == b_borrow.id,
+                    _ => Gc::ptr_eq(*a, *b),
                 }
             }
             _ => false,
@@ -386,11 +378,11 @@ impl<'gc> fmt::Debug for Value<'gc> {
 }
 
 thread_local! {
-    static FORMATTING_OBJECTS: RefCell<HashSet<GcUlid>> = RefCell::new(HashSet::new());
+    static FORMATTING_OBJECTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
 
 struct FormattingGuard {
-    id: GcUlid,
+    id: usize,
 }
 
 impl Drop for FormattingGuard {
@@ -407,7 +399,7 @@ impl<'gc> fmt::Display for Value<'gc> {
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "class {} meta", c.borrow().name),
             Value::Object(o) => {
-                let id = o.borrow().id;
+                let id = Gc::as_ptr(*o) as usize;
                 let already_formatting =
                     FORMATTING_OBJECTS.with(|set| !set.borrow_mut().insert(id));
                 if already_formatting {
@@ -597,7 +589,6 @@ pub struct Class<'gc> {
 #[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Object<'gc> {
-    pub id: GcUlid,
     pub class: Gc<'gc, RefLock<Class<'gc>>>,
     pub fields: HashMap<String, Value<'gc>>,
     pub payload: ObjectPayload<'gc>,
