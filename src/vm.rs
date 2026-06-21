@@ -100,6 +100,34 @@ pub struct VmOptions {
     pub console_width: Option<u16>,
 }
 
+/// Number of leading arguments whose classes are encoded into a method-cache
+/// key. Sends with more arguments than this skip the cache (rare).
+const METHOD_CACHE_MAX_ARGS: usize = 4;
+
+/// Key for the method-resolution cache (`VmState::method_cache`). Every field is
+/// `Copy`/`'static`, so a lookup builds and probes a key with no allocation.
+/// Class identities are raw pointers — sound only because cached lookups never
+/// involve an eigenclass (the one class kind with a transient, reusable address);
+/// see `Class::is_eigenclass` and `VmState::method_cache_key`. `class_ptr` is the
+/// *searched* class (not necessarily the receiver's), since that is what the walk
+/// is parameterized by; the receiver only matters for guards, which are uncached.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Collect)]
+#[collect(require_static)]
+pub struct MethodCacheKey {
+    class_ptr: usize,
+    selector: Symbol,
+    class_side: bool,
+    n_args: u8,
+    /// Per-argument dispatch class pointers (`get_class_for_lookup`).
+    arg_ptrs: [usize; METHOD_CACHE_MAX_ARGS],
+    /// Per-argument `Value`-variant discriminant. Necessary because scoring matches
+    /// an argument by `type_name()` *and* its class: a `Class` *value* (type
+    /// `"Class"`) and an *instance* of that class share one `get_class_for_lookup`
+    /// pointer but dispatch differently (`kindOf:Integer` vs `kindOf:5`). The kind
+    /// keeps them in distinct cache entries.
+    arg_kinds: [u8; METHOD_CACHE_MAX_ARGS],
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct VmState<'gc> {
@@ -150,6 +178,23 @@ pub struct VmState<'gc> {
     /// An error raised inside a guest fiber, delivered to its resumer.
     #[collect(require_static)]
     pub fiber_error: Option<QuoinError>,
+
+    /// Memoized method resolution: `(searched-class ptr, selector, class-side,
+    /// arg-class ptrs)` → resolved method (or `None` when the hierarchy has no
+    /// match). Populated by `lookup_method_in_class_hierarchy` for guard-free,
+    /// non-eigenclass lookups; cleared whenever a class's method table changes
+    /// (`invalidate_method_cache`). Traced as part of `VmState` so cached method
+    /// `Value`s stay live; the key's class *pointers* are sound because named
+    /// classes are globals-rooted (stable address) — eigenclasses are excluded.
+    pub method_cache: HashMap<MethodCacheKey, Option<Value<'gc>>>,
+    /// Scratch flag marking the in-progress lookup's result as un-memoizable. Set
+    /// by `match_score` when a guarded candidate is examined — a guard's outcome
+    /// depends on argument *values*, not just types, so the resolution can't be keyed
+    /// on classes alone. Saved/restored around each `lookup_method_in_class_hierarchy`
+    /// call for re-entrancy safety (a guard's nested sends run their own lookups
+    /// without corrupting this one).
+    #[collect(require_static)]
+    pub dispatch_uncacheable: bool,
 
     #[collect(require_static)]
     pub options: VmOptions,
@@ -364,6 +409,8 @@ impl<'gc> VmState<'gc> {
             main_saved_frames: Vec::new(),
             main_saved_native_args: Vec::new(),
             fiber_error: None,
+            method_cache: HashMap::new(),
+            dispatch_uncacheable: false,
             options,
         }
     }
@@ -773,6 +820,7 @@ impl<'gc> VmState<'gc> {
                     class_methods: HashMap::new(),
                     mixin_classes: Vec::new(),
                     field_slots: HashMap::new(),
+                    is_eigenclass: false,
                 }
             );
             self.globals
@@ -856,6 +904,7 @@ impl<'gc> VmState<'gc> {
                     class_methods: cls_methods,
                     mixin_classes: Vec::new(),
                     field_slots: HashMap::new(),
+                    is_eigenclass: false,
                 }
             );
 
@@ -877,6 +926,8 @@ impl<'gc> VmState<'gc> {
                 _ => {}
             }
         }
+        // A class's method tables just changed — drop any memoized resolutions.
+        self.invalidate_method_cache();
     }
     #[allow(no_gc_across_yield)]
     pub fn start_method_call(
@@ -1620,6 +1671,57 @@ impl<'gc> VmState<'gc> {
     }
 
     #[allow(no_gc_across_yield)]
+    /// Drop every memoized method resolution. Called whenever a class's method
+    /// table changes (method def/override, native registration, class unregister),
+    /// which only happens at class-definition time — never inside a hot loop — so
+    /// the cache stays warm during execution. Clearing wholesale (rather than
+    /// per-class) is correct because a new/overridden method can shadow cached
+    /// resolutions in *derived* classes too.
+    pub fn invalidate_method_cache(&mut self) {
+        self.method_cache.clear();
+    }
+
+    /// Build the cache key for a lookup, or `None` if the lookup must not be cached:
+    /// an eigenclass is involved (transient pointer → unsafe to key on), an argument
+    /// has no dispatch class, or there are more arguments than the key encodes.
+    fn method_cache_key(
+        &self,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        selector: Symbol,
+        class_side: bool,
+        args: &[Value<'gc>],
+    ) -> Option<MethodCacheKey> {
+        if args.len() > METHOD_CACHE_MAX_ARGS || class_ref.borrow().is_eigenclass {
+            return None;
+        }
+        let mut arg_ptrs = [0usize; METHOD_CACHE_MAX_ARGS];
+        let mut arg_kinds = [0u8; METHOD_CACHE_MAX_ARGS];
+        for (i, a) in args.iter().enumerate() {
+            let ac = self.get_class_for_lookup(*a)?;
+            if ac.borrow().is_eigenclass {
+                return None;
+            }
+            arg_ptrs[i] = Gc::as_ptr(ac) as usize;
+            arg_kinds[i] = match a {
+                Value::Int(_) => 0,
+                Value::Double(_) => 1,
+                Value::Bool(_) => 2,
+                Value::Nil => 3,
+                Value::Object(_) => 4,
+                Value::Class(_) => 5,
+                Value::ClassMeta(_) => 6,
+            };
+        }
+        Some(MethodCacheKey {
+            class_ptr: Gc::as_ptr(class_ref) as usize,
+            selector,
+            class_side,
+            n_args: args.len() as u8,
+            arg_ptrs,
+            arg_kinds,
+        })
+    }
+
     pub fn lookup_method_in_class_hierarchy(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1629,8 +1731,21 @@ impl<'gc> VmState<'gc> {
         class_side: bool,
         args: &[Value<'gc>],
     ) -> Result<Option<Value<'gc>>, QuoinError> {
+        // Fast path: a memoized, guard-free resolution skips the whole walk + scoring.
+        let key = self.method_cache_key(class_ref, selector, class_side, args);
+        if let Some(k) = key {
+            if let Some(cached) = self.method_cache.get(&k) {
+                return Ok(*cached);
+            }
+        }
+
+        // Miss: walk, tracking whether any guarded candidate was examined. Save and
+        // restore `dispatch_uncacheable` so nested sends fired *by* a guard (which run
+        // their own lookups) can't corrupt this lookup's cacheability accounting.
+        let saved_uncacheable = self.dispatch_uncacheable;
+        self.dispatch_uncacheable = false;
         let mut visited = Vec::new();
-        self.lookup_method_in_class_hierarchy_rec(
+        let result = self.lookup_method_in_class_hierarchy_rec(
             mc,
             class_ref,
             receiver,
@@ -1638,7 +1753,18 @@ impl<'gc> VmState<'gc> {
             class_side,
             args,
             &mut visited,
-        )
+        );
+        let uncacheable = self.dispatch_uncacheable;
+        self.dispatch_uncacheable = saved_uncacheable;
+
+        // Cache only a successful, guard-free resolution (errors and guarded
+        // dispatches stay uncached — the latter can depend on argument values).
+        if !uncacheable {
+            if let (Some(k), Ok(resolved)) = (key, &result) {
+                self.method_cache.insert(k, *resolved);
+            }
+        }
+        result
     }
 
     // `receiver` is the subject of the send (the value `self` resolves to inside a
@@ -1764,6 +1890,12 @@ impl<'gc> VmState<'gc> {
         // variant whose guard passes (rank 0) outranks an otherwise-equal unguarded
         // variant (rank 1). A failing guard makes the variant inapplicable.
         let guard_rank = if let Some(decl_block) = block.decl_block {
+            // This selector has a guarded variant on the class being examined, so the
+            // resolution can depend on argument *values*, not just types — mark the
+            // in-progress lookup uncacheable. Set before running the guard so a throw
+            // (or a failing-guard early return) still disables caching, and so it
+            // holds regardless of which candidate ultimately wins.
+            self.dispatch_uncacheable = true;
             let res =
                 self.execute_validation_block(mc, decl_block, receiver, &block.param_names, args)?;
             if !res.is_true() {
@@ -2513,6 +2645,7 @@ impl<'gc> VmState<'gc> {
                         class_methods: HashMap::new(),
                         mixin_classes: Vec::new(),
                         field_slots: HashMap::new(),
+                        is_eigenclass: false,
                     }
                 );
                 self.globals.borrow_mut(mc).insert(ns, Value::Class(s));
@@ -2545,6 +2678,7 @@ impl<'gc> VmState<'gc> {
                             class_methods: HashMap::new(),
                             mixin_classes: Vec::new(),
                             field_slots,
+                            is_eigenclass: true,
                         }
                     );
                     obj.borrow_mut(mc).class = s;
@@ -3227,6 +3361,9 @@ impl<'gc> VmState<'gc> {
                             self.frames[frame_idx].unregister_on_defer_failure.clone()
                         {
                             self.globals.borrow_mut(mc).remove(&name);
+                            // The class is gone; its pointer could be reused, so drop
+                            // any memoized resolutions that might reference it.
+                            self.invalidate_method_cache();
                         }
                         return Err(e);
                     }
@@ -3422,6 +3559,7 @@ impl<'gc> VmState<'gc> {
                         class_methods: HashMap::new(),
                         mixin_classes: Vec::new(),
                         field_slots: HashMap::new(),
+                        is_eigenclass: false,
                     }
                 );
                 self.globals
@@ -3511,6 +3649,8 @@ impl<'gc> VmState<'gc> {
                                 .insert(selector, method_obj);
                         }
                     }
+                    // The class's method table just changed — drop memoized resolutions.
+                    self.invalidate_method_cache();
                     self.push(method_obj);
                     self.frames[frame_idx].ip += 1;
                 } else {
@@ -3580,6 +3720,8 @@ impl<'gc> VmState<'gc> {
                                 .insert(selector, method_obj);
                         }
                     }
+                    // The class's method table just changed — drop memoized resolutions.
+                    self.invalidate_method_cache();
                     self.push(method_obj);
                     self.frames[frame_idx].ip += 1;
                 } else {
@@ -4741,6 +4883,7 @@ mod tests {
                         class_methods: HashMap::new(),
                         mixin_classes: Vec::new(),
                         field_slots: HashMap::new(),
+                        is_eigenclass: false,
                     }
                 );
                 vm.globals.borrow_mut(mc).insert(
@@ -5003,6 +5146,7 @@ mod tests {
                     class_methods: HashMap::new(),
                     mixin_classes: Vec::new(),
                     field_slots: HashMap::new(),
+                    is_eigenclass: false,
                 }
             );
 
@@ -5017,6 +5161,7 @@ mod tests {
                     class_methods: HashMap::new(),
                     mixin_classes: vec![point_class],
                     field_slots: HashMap::new(),
+                    is_eigenclass: false,
                 }
             );
 

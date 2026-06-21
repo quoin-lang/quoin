@@ -593,6 +593,15 @@ pub struct Class<'gc> {
     /// mixins + parent) at first instantiation; new ivars only ever append, so
     /// existing slots stay stable across runtime mixins. `len()` is the field count.
     pub field_slots: HashMap<String, usize>,
+    /// True only for per-instance *eigenclasses* (singletons synthesized by
+    /// `get_target_class_for_def` for a `Value::Object` receiver). Named classes —
+    /// including the `$TrueClass`/`$FalseClass` boolean singletons, which are
+    /// rooted in `globals`/`builtin_cache` — are `false`. The method-dispatch cache
+    /// keys on class *pointers*, which is only sound for classes with stable
+    /// addresses; eigenclasses are transient (collected when their instance dies →
+    /// pointer reuse), so the cache skips any lookup whose receiver or argument
+    /// class is an eigenclass.
+    pub is_eigenclass: bool,
 }
 
 #[derive(Collect, Debug)]

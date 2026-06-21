@@ -192,11 +192,19 @@ This document outlines the language features, compiler updates, and VM modificat
     `src/symbol.rs`). Kills the per-Send `selector.clone()` (~8.8% `String::clone`) and gives the dispatch
     cache a `Copy`, collision-free, pointer-stable key. Scoped to selectors in the dispatch path; method
     tables / globals stay `String`-keyed for now (the walk resolves via `as_str()`).
-  - [ ] **Method-resolution cache** (the headline). Global `HashMap<(recv_class_ptr, selector,
-    class_side, arg_class_ptrs) → Option<Value>>`; guard-free resolutions only; arg classes in the key for
-    multi-dispatch; pointer keys safe because named classes are globals-rooted (eigenclasses flagged via
-    `Class.is_eigenclass` and skipped); invalidate by `clear()` on method-table mutations. Skips the
-    walk+scoring on a hit.
+  - [x] **Method-resolution cache** (the headline). Global `HashMap<MethodCacheKey → Option<Value>>`
+    where the key is `(searched-class ptr, selector: Symbol, class_side, n_args, arg_class_ptrs,
+    arg_kinds)`. Guard-free resolutions only — `match_score` sets `VmState.dispatch_saw_guard` when a
+    guarded candidate is examined; saved/restored around each lookup for re-entrancy (a guard's nested
+    sends run their own lookups). Pointer keys are safe because named classes are globals-rooted;
+    eigenclasses carry `Class.is_eigenclass` and are excluded (receiver or any arg). The per-arg
+    `Value`-variant **kind** byte is required so a `Class` value and an instance of that class (same
+    `get_class_for_lookup` pointer, different `type_name`-based dispatch) don't collide. Invalidated by
+    `invalidate_method_cache()` (`clear()`) at the method-table mutation sites: both method-def handlers,
+    `register_native_class`, and the class-unregister path. Cache is traced (holds `Gc` method `Value`s).
+    **Result: Fib −28% / Sieve −22% / Binary Trees −17%; walk+scoring collapse into hits.** Validated
+    incl. `QN_GC_STRESS=1`; invalidation pinned by `dispatchCacheInvalidatesOnNewMethod`. See
+    `profiling/dispatch-cache/notes.md`.
   - [ ] **Follow-up: migrate method tables to `Symbol` keys.** After the cache lands, rekey
     `Class.instance_methods`/`class_methods` (and ideally `globals`/`NamespacedName`) from `String` to
     `Symbol`, turning the per-class `methods.get(selector)` SipHash into an integer hash. Ripples through

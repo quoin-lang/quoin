@@ -131,4 +131,20 @@
         "* a matching arg still dispatches
         .is:{ TSMTC_NM.new.z:5 } equalTo:'int';
     };
+
+    "* Resolving a send memoizes the result in the dispatch cache — including a
+    "* *miss* (selector not found). Defining that method afterwards must invalidate
+    "* the cache so the new definition is seen, rather than the stale cached miss
+    "* keeping the selector 'not understood'. (A same-signature `-->` override is a
+    "* weaker test: it mutates the method object in place, so the cached pointer sees
+    "* the new body even without invalidation — a fresh definition does not.)
+    .test:
+    dispatchCacheInvalidatesOnNewMethod -> {
+        TSMTC_CN <- { existing -> { 1 } };
+        "* `late` is undefined -> resolves to a miss, which gets cached
+        .does:{ TSMTC_CN.new.late } throw:MessageNotUnderstood;
+        "* now define it; the cached miss must be invalidated
+        TSMTC_CN <-- { late -> { 9 } };
+        .is:{ TSMTC_CN.new.late } equalTo:9;
+    };
 }
