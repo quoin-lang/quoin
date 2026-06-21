@@ -477,13 +477,24 @@ impl<'gc> fmt::Display for Value<'gc> {
                         }
                     }
                     _ => {
-                        let name = o_borrow.class.borrow().name.clone();
-                        write!(f, "{}{{", name)?;
-                        for (i, (k, v)) in o_borrow.fields.iter().enumerate() {
-                            if i > 0 {
-                                write!(f, " ")?;
+                        let class = o_borrow.class.borrow();
+                        write!(f, "{}{{", class.name)?;
+                        // Fields in slot order: `name: value`.
+                        let mut by_slot: Vec<(&str, usize)> = class
+                            .field_slots
+                            .iter()
+                            .map(|(n, &s)| (n.as_str(), s))
+                            .collect();
+                        by_slot.sort_by_key(|&(_, s)| s);
+                        let mut first = true;
+                        for (n, s) in by_slot {
+                            if let Some(v) = o_borrow.fields.get(s) {
+                                if !first {
+                                    write!(f, " ")?;
+                                }
+                                first = false;
+                                write!(f, "{}: {}", n, v)?;
                             }
-                            write!(f, "{}: {}", k, v)?;
                         }
                         write!(f, "}}")
                     }
@@ -561,13 +572,21 @@ pub struct Class<'gc> {
     pub instance_methods: HashMap<String, Value<'gc>>,
     pub class_methods: HashMap<String, Value<'gc>>,
     pub mixin_classes: Vec<Gc<'gc, RefLock<Class<'gc>>>>,
+    /// Memoized, append-only instance-variable layout: name -> absolute slot in an
+    /// instance's `fields` array. Built lazily from the full hierarchy (own +
+    /// mixins + parent) at first instantiation; new ivars only ever append, so
+    /// existing slots stay stable across runtime mixins. `len()` is the field count.
+    pub field_slots: HashMap<String, usize>,
 }
 
 #[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Object<'gc> {
     pub class: Gc<'gc, RefLock<Class<'gc>>>,
-    pub fields: HashMap<String, Value<'gc>>,
+    /// Instance-variable storage, indexed by the class's slot layout
+    /// (`Class::field_slots`). Sized at construction to the class's field count;
+    /// immediate value types have no fields and never allocate an `Object`.
+    pub fields: Box<[Value<'gc>]>,
     pub payload: ObjectPayload<'gc>,
 }
 

@@ -360,11 +360,9 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         class_obj: Gc<'gc, RefLock<Class<'gc>>>,
     ) -> Gc<'gc, RefLock<Object<'gc>>> {
-        let mut fields = HashMap::new();
+        let count = self.ensure_field_layout(mc, class_obj);
         let nil_val = self.new_nil(mc);
-        for var in self.get_all_instance_vars(class_obj) {
-            fields.insert(var.clone(), nil_val);
-        }
+        let fields = vec![nil_val; count].into_boxed_slice();
         gcl!(
             mc,
             Object {
@@ -373,6 +371,32 @@ impl<'gc> VmState<'gc> {
                 payload: ObjectPayload::Instance,
             }
         )
+    }
+
+    /// Ensure `class.field_slots` covers the full current hierarchy (own + mixins +
+    /// parent) and return the field count. Append-only: a newly-seen ivar gets a
+    /// fresh trailing slot, so existing slots stay stable across runtime mixins.
+    fn ensure_field_layout(
+        &self,
+        mc: &Mutation<'gc>,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+    ) -> usize {
+        let all = self.get_all_instance_vars(class);
+        let mut c = class.borrow_mut(mc);
+        for name in all {
+            if !c.field_slots.contains_key(&name) {
+                let slot = c.field_slots.len();
+                c.field_slots.insert(name, slot);
+            }
+        }
+        c.field_slots.len()
+    }
+
+    /// The absolute slot of instance variable `name` for instances of `class`
+    /// (the layout is populated at instantiation), or `None` if it's not a declared
+    /// ivar of the class.
+    fn field_slot(&self, class: Gc<'gc, RefLock<Class<'gc>>>, name: &str) -> Option<usize> {
+        class.borrow().field_slots.get(name).copied()
     }
 
     pub fn new_native_state<T: AnyCollect + 'static>(
@@ -386,7 +410,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class: class_obj,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload,
             }
         );
@@ -418,7 +442,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::String(gc!(mc, s)),
             }
         ))
@@ -437,7 +461,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::Symbol(gc!(mc, name.clone())),
             }
         ));
@@ -467,7 +491,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -481,7 +505,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -494,7 +518,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -570,20 +594,14 @@ impl<'gc> VmState<'gc> {
         let class = self.builtin_cache.borrow().regex_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Regex"));
         let boxed_state: Box<dyn AnyCollect> = Box::new(NativeRegexState::new(regex));
-        let regex_val = Value::Object(gcl!(
+        Value::Object(gcl!(
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
-        ));
-        if let Value::Object(obj) = regex_val {
-            obj.borrow_mut(mc)
-                .fields
-                .insert("impl".to_string(), regex_val);
-        }
-        regex_val
+        ))
     }
 
     pub fn new_block(&self, mc: &Mutation<'gc>, block: Block<'gc>) -> Value<'gc> {
@@ -593,7 +611,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::Block(gc!(mc, block)),
             }
         ))
@@ -613,7 +631,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -635,7 +653,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: HashMap::new(),
+                fields: Box::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -648,10 +666,13 @@ impl<'gc> VmState<'gc> {
         obj: Gc<'gc, RefLock<Object<'gc>>>,
         env_borrow: &EnvFrame<'gc>,
     ) -> Result<(), QuoinError> {
-        let vars = self.get_all_instance_vars(obj.borrow().class);
+        let class = obj.borrow().class;
+        let vars = self.get_all_instance_vars(class);
         for var in &vars {
-            if let Some(val) = env_borrow.vars.get(var) {
-                obj.borrow_mut(mc).fields.insert(var.clone(), *val);
+            if let Some(val) = env_borrow.vars.get(var)
+                && let Some(slot) = self.field_slot(class, var)
+            {
+                obj.borrow_mut(mc).fields[slot] = *val;
             }
         }
 
@@ -738,6 +759,7 @@ impl<'gc> VmState<'gc> {
                     instance_methods: HashMap::new(),
                     class_methods: HashMap::new(),
                     mixin_classes: Vec::new(),
+                    field_slots: HashMap::new(),
                 }
             );
             self.globals
@@ -820,6 +842,7 @@ impl<'gc> VmState<'gc> {
                     instance_methods: inst_methods,
                     class_methods: cls_methods,
                     mixin_classes: Vec::new(),
+                    field_slots: HashMap::new(),
                 }
             );
 
@@ -2480,6 +2503,7 @@ impl<'gc> VmState<'gc> {
                         instance_methods: HashMap::new(),
                         class_methods: HashMap::new(),
                         mixin_classes: Vec::new(),
+                        field_slots: HashMap::new(),
                     }
                 );
                 self.globals.borrow_mut(mc).insert(ns, Value::Class(s));
@@ -2497,6 +2521,11 @@ impl<'gc> VmState<'gc> {
                 } else {
                     let mut singleton_name = class_ref.borrow().name.clone();
                     singleton_name.name = format!("${}", singleton_name.name);
+                    // The eigenclass declares no new ivars, so it shares its base
+                    // class's instance layout: it must carry the same field-slot map,
+                    // or `@ivar` access on the instance (now of the eigenclass) can't
+                    // resolve the inherited slots and reads them as nil.
+                    let field_slots = class_ref.borrow().field_slots.clone();
                     let s = gcl!(
                         mc,
                         Class {
@@ -2506,6 +2535,7 @@ impl<'gc> VmState<'gc> {
                             instance_methods: HashMap::new(),
                             class_methods: HashMap::new(),
                             mixin_classes: Vec::new(),
+                            field_slots,
                         }
                     );
                     obj.borrow_mut(mc).class = s;
@@ -2787,11 +2817,13 @@ impl<'gc> VmState<'gc> {
         if let Some(Value::Class(cls)) = class_opt {
             let obj = self.new_object(mc, cls);
             let msg_val = self.new_string(mc, message.to_string());
-            obj.borrow_mut(mc)
-                .fields
-                .insert("message".to_string(), msg_val);
-            if let Some(p) = payload {
-                obj.borrow_mut(mc).fields.insert("payload".to_string(), p);
+            if let Some(slot) = self.field_slot(cls, "message") {
+                obj.borrow_mut(mc).fields[slot] = msg_val;
+            }
+            if let Some(p) = payload
+                && let Some(slot) = self.field_slot(cls, "payload")
+            {
+                obj.borrow_mut(mc).fields[slot] = p;
             }
             Value::Object(obj)
         } else {
@@ -3378,6 +3410,7 @@ impl<'gc> VmState<'gc> {
                         instance_methods: HashMap::new(),
                         class_methods: HashMap::new(),
                         mixin_classes: Vec::new(),
+                        field_slots: HashMap::new(),
                     }
                 );
                 self.globals
@@ -3551,10 +3584,11 @@ impl<'gc> VmState<'gc> {
                 let frame = &self.frames[frame_idx];
                 let self_val = EnvFrame::get(frame.env, "self").unwrap_or_else(|| self.new_nil(mc));
                 let val = if let Value::Object(obj) = self_val {
-                    obj.borrow()
-                        .fields
-                        .get(&name)
-                        .copied()
+                    let class = obj.borrow().class;
+                    // No slot (undeclared) or a slot past this instance's array
+                    // (declared on the class after this object was created) => nil.
+                    self.field_slot(class, &name)
+                        .and_then(|slot| obj.borrow().fields.get(slot).copied())
                         .unwrap_or_else(|| self.new_nil(mc))
                 } else {
                     self.new_nil(mc)
@@ -3567,7 +3601,31 @@ impl<'gc> VmState<'gc> {
                 let frame = &self.frames[frame_idx];
                 let self_val = EnvFrame::get(frame.env, "self").unwrap_or_else(|| self.new_nil(mc));
                 if let Value::Object(obj) = self_val {
-                    obj.borrow_mut(mc).fields.insert(name, val);
+                    let class = obj.borrow().class;
+                    match self.field_slot(class, &name) {
+                        Some(slot) if slot < obj.borrow().fields.len() => {
+                            obj.borrow_mut(mc).fields[slot] = val;
+                        }
+                        Some(_) => {
+                            // Declared on the class, but this instance predates it
+                            // (a mixin added the ivar after the object was created);
+                            // an object's shape is fixed at construction.
+                            return Err(QuoinError::Other(format!(
+                                "Instance of '{}' has no '@{}' (it was added after this instance was created)",
+                                class.borrow().name,
+                                name
+                            )));
+                        }
+                        None => {
+                            // You cannot create an instance variable by assigning to
+                            // it — it must be declared in the class.
+                            return Err(QuoinError::Other(format!(
+                                "No instance variable '@{}' declared on '{}'",
+                                name,
+                                class.borrow().name
+                            )));
+                        }
+                    }
                 } else {
                     // Immediate value types (Integer/Double/Boolean/Nil) have no
                     // per-instance fields — setting `@x` on one is an error.
@@ -4670,6 +4728,7 @@ mod tests {
                         instance_methods: HashMap::new(),
                         class_methods: HashMap::new(),
                         mixin_classes: Vec::new(),
+                        field_slots: HashMap::new(),
                     }
                 );
                 vm.globals.borrow_mut(mc).insert(
@@ -4804,9 +4863,9 @@ mod tests {
                 let obj_val = vm.pop().unwrap();
                 if let Value::Object(obj) = obj_val {
                     assert_eq!(obj.borrow().class.borrow().name.to_string(), "Point");
-                    let fields = &obj.borrow().fields;
-                    assert_eq!(to_spec(*fields.get("x").unwrap()), ValueSpec::Nil);
-                    assert_eq!(to_spec(*fields.get("y").unwrap()), ValueSpec::Nil);
+                    let ob = obj.borrow();
+                    assert_eq!(ob.fields.len(), 2); // @x, @y
+                    assert!(ob.fields.iter().all(|v| matches!(to_spec(*v), ValueSpec::Nil)));
                 } else {
                     panic!("Expected Object, got {:?}", obj_val);
                 }
@@ -4931,6 +4990,7 @@ mod tests {
                     },
                     class_methods: HashMap::new(),
                     mixin_classes: Vec::new(),
+                    field_slots: HashMap::new(),
                 }
             );
 
@@ -4944,6 +5004,7 @@ mod tests {
                     instance_methods: HashMap::new(),
                     class_methods: HashMap::new(),
                     mixin_classes: vec![point_class],
+                    field_slots: HashMap::new(),
                 }
             );
 
