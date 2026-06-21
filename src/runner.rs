@@ -357,7 +357,7 @@ impl VmRunner {
                 match status {
                     Ok(ExecutionStatus::Running) => {
                         step_count += 1;
-                        if step_count % 10 == 0 {
+                        if crate::tuning::gc_stress() || step_count % 10 == 0 {
                             arena.collect_debt();
                         }
                     }
@@ -482,7 +482,7 @@ impl VmRunner {
                 Ok(true) => break,
                 Ok(false) => {
                     step_count += 1;
-                    if step_count % 10 == 0 {
+                    if crate::tuning::gc_stress() || step_count % 10 == 0 {
                         arena.collect_debt();
                     }
                 }
@@ -603,7 +603,7 @@ impl VmRunner {
                 match status {
                     Ok(ExecutionStatus::Running) => {
                         step_count += 1;
-                        if step_count % 10 == 0 {
+                        if crate::tuning::gc_stress() || step_count % 10 == 0 {
                             arena.collect_debt();
                         }
                     }
