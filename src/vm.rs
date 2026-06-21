@@ -206,150 +206,105 @@ pub enum VmStatus<'gc> {
     Yeeted(Value<'gc>), // Uncaught exception
 }
 
-pub trait Callable<'gc> {
+/// A resolved, ready-to-invoke method. A `Copy` enum rather than a boxed trait
+/// object, so dispatch resolves and invokes a method without a per-Send heap
+/// allocation — each variant carries only `Copy` data (`Gc` handles / a native fn
+/// pointer). The callable is transient — built by `lookup_method` and consumed by
+/// `call` within a single `Send` step — so it is never stored in a traced struct
+/// and needs no `Collect` impl (matching the `Box<dyn Callable>` it replaced).
+#[derive(Copy, Clone)]
+pub enum Callable<'gc> {
+    /// A user method (a block run as a method on the receiver).
+    Block(Gc<'gc, Block<'gc>>),
+    /// `Class.meta` — push the class's metaclass.
+    Meta(Gc<'gc, RefLock<Class<'gc>>>),
+    /// `Class.new:` with no user-defined `new:` — instantiate from the block argument.
+    New(Gc<'gc, RefLock<Class<'gc>>>),
+    /// `Class.new` with no user-defined `new` — instantiate with no block.
+    NewNoBlock(Gc<'gc, RefLock<Class<'gc>>>),
+    /// A native (Rust) method.
+    Native(NativeFunc),
+}
+
+impl<'gc> Callable<'gc> {
     /// `receiver` is passed separately from `args` (which holds only the real
     /// arguments) so the hot path never prepends the receiver into a fresh Vec.
-    fn call(
-        &self,
-        vm: &mut VmState<'gc>,
-        mc: &Mutation<'gc>,
-        receiver: Option<Value<'gc>>,
-        args: Vec<Value<'gc>>,
-        selector: Option<Symbol>,
-    ) -> Result<(), QuoinError>;
-}
-
-pub struct BlockCallable<'gc> {
-    pub block: Gc<'gc, Block<'gc>>,
-}
-
-impl<'gc> Callable<'gc> for BlockCallable<'gc> {
-    fn call(
-        &self,
+    pub fn call(
+        self,
         vm: &mut VmState<'gc>,
         mc: &Mutation<'gc>,
         receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
         selector: Option<Symbol>,
     ) -> Result<(), QuoinError> {
-        let receiver = receiver.ok_or_else(|| {
-            QuoinError::Other("Method call is missing a receiver".to_string())
-        })?;
-        // `args` is already the method args (no receiver) — pass it straight through.
-        vm.start_block_as_method(mc, self.block, receiver, args, selector, true);
-        Ok(())
-    }
-}
+        match self {
+            Callable::Block(block) => {
+                let receiver = receiver.ok_or_else(|| {
+                    QuoinError::Other("Method call is missing a receiver".to_string())
+                })?;
+                // `args` is already the method args (no receiver) — pass it straight through.
+                vm.start_block_as_method(mc, block, receiver, args, selector, true);
+                Ok(())
+            }
+            Callable::Meta(class_obj) => {
+                vm.push(Value::ClassMeta(class_obj));
+                Ok(())
+            }
+            Callable::New(class_obj) => {
+                if args.len() != 1 {
+                    return Err(QuoinError::Other("new: expects a block".to_string()));
+                }
+                let block = if let Value::Object(obj) = args[0]
+                    && let ObjectPayload::Block(b) = &obj.borrow().payload
+                {
+                    *b
+                } else {
+                    return Err(QuoinError::TypeError {
+                        expected: "Block".to_string(),
+                        got: args[0].type_name().to_string(),
+                        msg: "new: expects a Block".to_string(),
+                    });
+                };
 
-pub struct MetaCallable<'gc> {
-    pub class_obj: Gc<'gc, RefLock<Class<'gc>>>,
-}
+                // Create the new object
+                let obj = vm.new_object(mc, class_obj);
 
-impl<'gc> Callable<'gc> for MetaCallable<'gc> {
-    fn call(
-        &self,
-        vm: &mut VmState<'gc>,
-        _mc: &Mutation<'gc>,
-        _receiver: Option<Value<'gc>>,
-        _args: Vec<Value<'gc>>,
-        _selector: Option<Symbol>,
-    ) -> Result<(), QuoinError> {
-        vm.push(Value::ClassMeta(self.class_obj));
-        Ok(())
-    }
-}
+                vm.start_block_for_instantiation(mc, block, obj, selector);
+                Ok(())
+            }
+            Callable::NewNoBlock(class_obj) => {
+                if !args.is_empty() {
+                    return Err(QuoinError::Other("new expects no arguments".to_string()));
+                }
 
-pub struct NewCallable<'gc> {
-    pub class_obj: Gc<'gc, RefLock<Class<'gc>>>,
-}
+                // Create the new object
+                let obj = vm.new_object(mc, class_obj);
 
-impl<'gc> Callable<'gc> for NewCallable<'gc> {
-    fn call(
-        &self,
-        vm: &mut VmState<'gc>,
-        mc: &Mutation<'gc>,
-        _receiver: Option<Value<'gc>>,
-        args: Vec<Value<'gc>>,
-        selector: Option<Symbol>,
-    ) -> Result<(), QuoinError> {
-        if args.len() != 1 {
-            return Err(QuoinError::Other("new: expects a block".to_string()));
+                vm.push(Value::Object(obj));
+                if let Err(e) = vm.run_all_inits(mc, obj) {
+                    vm.pop().ok();
+                    return Err(e);
+                }
+                Ok(())
+            }
+            Callable::Native(func) => {
+                let receiver = receiver.ok_or_else(|| {
+                    QuoinError::Other("native method called without a receiver".to_string())
+                })?;
+                // Keep (receiver, args) GC-rooted as one unit so a native fn can re-read
+                // them after a nested call that may have collected. One push/pop -> they
+                // can never desync.
+                vm.active_native_args.push(NativeCall {
+                    receiver,
+                    args: args.clone(),
+                });
+                let ret = func.0(vm, mc, receiver, args);
+                vm.active_native_args.pop();
+                let ret = ret?;
+                vm.push(ret);
+                Ok(())
+            }
         }
-        let block = if let Value::Object(obj) = args[0]
-            && let ObjectPayload::Block(b) = &obj.borrow().payload
-        {
-            *b
-        } else {
-            return Err(QuoinError::TypeError {
-                expected: "Block".to_string(),
-                got: args[0].type_name().to_string(),
-                msg: "new: expects a Block".to_string(),
-            });
-        };
-
-        // Create the new object
-        let obj = vm.new_object(mc, self.class_obj);
-
-        vm.start_block_for_instantiation(mc, block, obj, selector);
-        Ok(())
-    }
-}
-
-pub struct NewNoBlockCallable<'gc> {
-    pub class_obj: Gc<'gc, RefLock<Class<'gc>>>,
-}
-
-impl<'gc> Callable<'gc> for NewNoBlockCallable<'gc> {
-    fn call(
-        &self,
-        vm: &mut VmState<'gc>,
-        mc: &Mutation<'gc>,
-        _receiver: Option<Value<'gc>>,
-        args: Vec<Value<'gc>>,
-        _selector: Option<Symbol>,
-    ) -> Result<(), QuoinError> {
-        if !args.is_empty() {
-            return Err(QuoinError::Other("new expects no arguments".to_string()));
-        }
-
-        // Create the new object
-        let obj = vm.new_object(mc, self.class_obj);
-
-        vm.push(Value::Object(obj));
-        if let Err(e) = vm.run_all_inits(mc, obj) {
-            vm.pop().ok();
-            return Err(e);
-        }
-        Ok(())
-    }
-}
-
-pub struct NativeCallable(pub NativeFunc);
-
-impl<'gc> Callable<'gc> for NativeCallable {
-    fn call(
-        &self,
-        vm: &mut VmState<'gc>,
-        mc: &Mutation<'gc>,
-        receiver: Option<Value<'gc>>,
-        args: Vec<Value<'gc>>,
-        _selector: Option<Symbol>,
-    ) -> Result<(), QuoinError> {
-        let receiver = receiver.ok_or_else(|| {
-            QuoinError::Other("native method called without a receiver".to_string())
-        })?;
-        // Keep (receiver, args) GC-rooted as one unit so a native fn can re-read
-        // them after a nested call that may have collected. One push/pop -> they
-        // can never desync.
-        vm.active_native_args.push(NativeCall {
-            receiver,
-            args: args.clone(),
-        });
-        let ret = self.0.0(vm, mc, receiver, args);
-        vm.active_native_args.pop();
-        let ret = ret?;
-        vm.push(ret);
-        Ok(())
     }
 }
 
@@ -1012,22 +967,19 @@ impl<'gc> VmState<'gc> {
         selector: &str,
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, QuoinError> {
-        let method: Option<Box<dyn Callable<'gc> + 'gc>> = match method_val {
+        let method: Option<Callable<'gc>> = match method_val {
             Value::Object(obj) => match &obj.borrow().payload {
-                ObjectPayload::Block(block) => {
-                    Some(Box::new(BlockCallable { block: *block }) as Box<dyn Callable<'gc> + 'gc>)
-                }
+                ObjectPayload::Block(block) => Some(Callable::Block(*block)),
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
                     if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
                         if let Some(func) = method_state.native_func() {
-                            Some(Box::new(NativeCallable(func)) as Box<dyn Callable<'gc> + 'gc>)
+                            Some(Callable::Native(func))
                         } else if let Some(Value::Object(block_obj)) = method_state.get_block()
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
-                            Some(Box::new(BlockCallable { block: *block })
-                                as Box<dyn Callable<'gc> + 'gc>)
+                            Some(Callable::Block(*block))
                         } else {
                             None
                         }
@@ -1543,10 +1495,10 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         selector: Symbol,
         args: &[Value<'gc>],
-    ) -> Result<Option<Box<dyn Callable<'gc> + 'gc>>, QuoinError> {
+    ) -> Result<Option<Callable<'gc>>, QuoinError> {
         if selector.as_str() == "meta" {
             if let Value::Class(c) = receiver {
-                return Ok(Some(Box::new(MetaCallable { class_obj: c })));
+                return Ok(Some(Callable::Meta(c)));
             }
         }
         if let Value::Class(c) = receiver {
@@ -1555,10 +1507,10 @@ impl<'gc> VmState<'gc> {
                 .is_none()
             {
                 if selector.as_str() == "new:" {
-                    return Ok(Some(Box::new(NewCallable { class_obj: c })));
+                    return Ok(Some(Callable::New(c)));
                 }
                 if selector.as_str() == "new" {
-                    return Ok(Some(Box::new(NewNoBlockCallable { class_obj: c })));
+                    return Ok(Some(Callable::NewNoBlock(c)));
                 }
             }
         }
@@ -1646,17 +1598,17 @@ impl<'gc> VmState<'gc> {
 
         match method_val {
             Value::Object(obj) => match &obj.borrow().payload {
-                ObjectPayload::Block(block) => Ok(Some(Box::new(BlockCallable { block: *block }))),
+                ObjectPayload::Block(block) => Ok(Some(Callable::Block(*block))),
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
                     if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
                         if let Some(func) = method_state.native_func() {
-                            Ok(Some(Box::new(NativeCallable(func))))
+                            Ok(Some(Callable::Native(func)))
                         } else if let Some(Value::Object(block_obj)) = method_state.get_block()
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
-                            Ok(Some(Box::new(BlockCallable { block: *block })))
+                            Ok(Some(Callable::Block(*block)))
                         } else {
                             Ok(None)
                         }

@@ -194,7 +194,7 @@ This document outlines the language features, compiler updates, and VM modificat
     tables / globals stay `String`-keyed for now (the walk resolves via `as_str()`).
   - [x] **Method-resolution cache** (the headline). Global `HashMap<MethodCacheKey → Option<Value>>`
     where the key is `(searched-class ptr, selector: Symbol, class_side, n_args, arg_class_ptrs,
-    arg_kinds)`. Guard-free resolutions only — `match_score` sets `VmState.dispatch_saw_guard` when a
+    arg_kinds)`. Guard-free resolutions only — `match_score` sets `VmState.dispatch_uncacheable` when a
     guarded candidate is examined; saved/restored around each lookup for re-entrancy (a guard's nested
     sends run their own lookups). Pointer keys are safe because named classes are globals-rooted;
     eigenclasses carry `Class.is_eigenclass` and are excluded (receiver or any arg). The per-arg
@@ -205,6 +205,22 @@ This document outlines the language features, compiler updates, and VM modificat
     **Result: Fib −28% / Sieve −22% / Binary Trees −17%; walk+scoring collapse into hits.** Validated
     incl. `QN_GC_STRESS=1`; invalidation pinned by `dispatchCacheInvalidatesOnNewMethod`. See
     `profiling/dispatch-cache/notes.md`.
+  - [x] **`Callable` enum (kill the per-Send `Box<dyn Callable>`).** Replaced the `Callable` trait + 5
+    structs + 5 impls with one `#[derive(Copy, Clone)] enum Callable<'gc>` (5 variants of `Gc`/`NativeFunc`)
+    and an inherent `call(self, …)` that `match`es; `lookup_method`/`call_method_value` return/build
+    `Option<Callable>` instead of `Option<Box<dyn Callable>>`. Dispatch now resolves+invokes with no heap
+    alloc. No `Collect` (transient, like the `Box`); `no_gc_across_yield` did not fire. Measured: malloc
+    self-time 34.3% → 32.6%, locks 7.3% → 6.2%; wall-clock within noise (the `Box` was a cheap short-lived
+    alloc — the real allocation volume is the per-call `EnvFrame` HashMap + per-step instruction clone).
+    Net code simplification; unblocks caching a `Copy` `Callable` (vs the method `Value`) later. See
+    `profiling/callable-enum/notes.md`.
+  - [ ] **Local-variable slots (now the fattest malloc target).** `EnvFrame.vars: HashMap<String,Value>`
+    is allocated+dropped every call, populated with cloned var-name `String`s (`"self"` + each param), and
+    `LoadLocal/StoreLocal/DefineLocal(String)` hash a `String` per access. Resolve locals to integer slot
+    indices at compile time and back the frame with a `Vec`/`Box<[Value]>` — kills the per-call HashMap
+    alloc/drop (~3.6% hashbrown teardown + allocs), the name clones (a big slice of `String::clone` ~9%),
+    the per-access SipHash, and shrinks the per-step instruction clone. Mirrors the object field-slots
+    work already done for ivars. Reduces GC pressure too. Profiled post-cache as the top remaining lever.
   - [ ] **Follow-up: migrate method tables to `Symbol` keys.** After the cache lands, rekey
     `Class.instance_methods`/`class_methods` (and ideally `globals`/`NamespacedName`) from `String` to
     `Symbol`, turning the per-class `methods.get(selector)` SipHash into an integer hash. Ripples through
