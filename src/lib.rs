@@ -2,6 +2,7 @@
 
 pub mod ansi_colorizer;
 pub mod compiler;
+pub mod dispatch;
 pub mod error;
 pub mod fiber;
 pub mod highlighter;
