@@ -33,10 +33,6 @@ p2 = Point.newX: 0 y: 0;
 d = p1.dist: p2;
 ('distance = ' + d).print;
 p1.print;
-('p1.id = ' + p1.id).print;
-('p2.id = ' + p2.id).print;
-('p1.id = ' + p1.id).print;
-('p2.id = ' + p2.id).print;
 
 p3 = Point3D.new: { |x y z| x = 10; y = 20; z = 30 };
 p3.print;
@@ -49,8 +45,6 @@ p3.class.parent.print;
 p3.class.parent.name.print;
 p3.class.parent.parent.print;
 p3.class.parent.parent.name.print;
-(p3.id == p3.id).print;
-(p3.id != p1.id).print;
 (p3.class == p3.class).print;
 (p3.class != p1.class).print;
 ('p3.x = ' + p3.x).print;
@@ -156,6 +150,9 @@ name.case:{
     .when:1..10  do:'Low';
     .when:11..20 do:'High';
 })).print;
+
+
+(1+2) <-- {|@x|};
 
 "* Test 8: Ambiguous method dispatch. Two variants are equally specific for `pick:10`
 "* — same parameter type (Integer) and both guards pass — so dispatch has no
