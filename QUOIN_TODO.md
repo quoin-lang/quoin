@@ -69,6 +69,14 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Find duplicate bits of code and refactor.
   - Spinning the VM while executing in a native method.
   - Object initialization/new:{} logic
+- [ ] **Extract the dispatch subsystem out of `vm.rs`** (which is ~5.5k lines). Move the method-dispatch
+  machinery into its own module (e.g. `src/dispatch.rs` or `src/vm/dispatch.rs`): the `Callable` enum +
+  `call`, `lookup_method`, `lookup_method_in_class_hierarchy[_rec]`, `match_score`/`score_param_types`/
+  `type_distance`, `MethodCacheKey` + `method_cache_key` + `invalidate_method_cache`, and the
+  candidate/ambiguity helpers (`collect_method_candidates`, `ambiguous_method_error`,
+  `format_candidate_signature`, …). Behavior-neutral move (methods stay on `VmState` via an `impl` block in
+  the new module, or become free fns taking `&mut VmState`). Do it as its own commit, separate from any
+  perf change, so the diff is a pure relocation. ~600 lines out of `vm.rs`.
 - [x] Bring over AnsiColorizer.cs from the old repo.
   - [x] Switch to the colorized test suite runner.
 - [x] Bring over Highlighter from the old repo.
@@ -87,7 +95,12 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Think about a better destructuring protocol than assuming `#at:` exists.
   - use an Iterator?
 - [x] Confirm `%'string%{eval}' is working.
-  - [ ] Optimize it into string concatenation by the compiler.
+  - [ ] Optimize it into string concatenation by the compiler. (Today it recompiles the interpolated
+    expression at runtime with the caller's local *names* in scope — implicit local capture via the env
+    chain, see `string.rs`.) Lowering `%{expr}` directly to `String` concatenation at compile time removes
+    that runtime recapture — which also clears a blocker for the slot-based local plan (§9 "local-variable
+    slots", Plan B): with no implicit local capture left in interpolation, `(depth, slot)` resolution has
+    no cross-compilation-unit holes. If we go to B, insert this between steps A and B.
 - [x] Make sure case statements are tested and working.
 - [x] Make the `^>` yield operator usable in expression position.
   - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.
@@ -178,6 +191,13 @@ This document outlines the language features, compiler updates, and VM modificat
   - `Timer.time: { ... }`: Computes elapsed time in milliseconds.
   - `Runtime.evalFile: filename`: Loads, compiles, and evaluates a file.
   - `Object.s` overrides: Overriding `s` string representation when converting objects to strings for printing.
+  - [ ] **`eval:bindings:` (eval with an explicit environment).** Today `eval:`/`eval:self:` run the
+    string as a self-contained compilation unit (`parent_env: None`) — globals + an optional `self`, but no
+    access to the caller's locals. To let eval reference the local environment, add a variant taking a
+    `Map` of name→value bindings that are injected as pre-populated locals in the eval'd frame.
+    Deliberately *explicit* (not implicit lexical capture): the eval'd code still compiles its own
+    independent layout, so this stays compatible with the compile-time `(depth, slot)` local-variable
+    resolution — the bindings just arrive as seeded slot values, no cross-compilation-unit capture.
 - [x] **Native State Support**:
   - Implement native classes holding arbitrary Rust state inside VM objects.
 
@@ -214,13 +234,20 @@ This document outlines the language features, compiler updates, and VM modificat
     alloc — the real allocation volume is the per-call `EnvFrame` HashMap + per-step instruction clone).
     Net code simplification; unblocks caching a `Copy` `Callable` (vs the method `Value`) later. See
     `profiling/callable-enum/notes.md`.
-  - [ ] **Local-variable slots (now the fattest malloc target).** `EnvFrame.vars: HashMap<String,Value>`
-    is allocated+dropped every call, populated with cloned var-name `String`s (`"self"` + each param), and
-    `LoadLocal/StoreLocal/DefineLocal(String)` hash a `String` per access. Resolve locals to integer slot
-    indices at compile time and back the frame with a `Vec`/`Box<[Value]>` — kills the per-call HashMap
-    alloc/drop (~3.6% hashbrown teardown + allocs), the name clones (a big slice of `String::clone` ~9%),
-    the per-access SipHash, and shrinks the per-step instruction clone. Mirrors the object field-slots
-    work already done for ivars. Reduces GC pressure too. Profiled post-cache as the top remaining lever.
+  - [x] **Local variables — Step A: Symbol-keyed env.** `EnvFrame.vars: HashMap<String,Value>` →
+    `Vec<(Symbol, Value)>` (linear scan, pointer-compared `Symbol`s); `LoadLocal/StoreLocal/DefineLocal`
+    carry `Symbol`. Killed the per-frame HashMap alloc/drop (the ~3.6% hashbrown teardown is gone), the
+    var-name `String` clones, and the per-access local SipHash (~2.6% → 1.1%). Capture model unchanged
+    (closures still capture via `EnvFrame.parent`). **Result: malloc 32.6% → 27.7%; Fib −13% / Sieve
+    −22% / Binary Trees −18%.** All green incl. `QN_GC_STRESS=1`. See `profiling/local-var-symbols/notes.md`.
+  - [ ] **Local variables — Step B (optional): full `(depth, slot)` resolution.** Replace the per-frame
+    `Vec<(Symbol,Value)>` with a `Box<[Value]>` sized to the slot count; compiler resolves every reference
+    to `(depth, slot)` (incl. a reserved `self` slot + capture depth + frame sizing). Buys: smaller env
+    allocs (no `Symbol` storage) + O(1) index access + the shared `Slots` primitive with instance vars.
+    Step A already captured the big win, so B's remaining upside is modest (same per-frame alloc *count*,
+    Vec→Box). **Only pursue if a later profile shows `EnvFrame::get`/the env alloc still hot.** Blocker for
+    B: the `%{}` string interpolation captures caller locals by name (`string.rs`) — see the "lower it to
+    String concat" item in §8; do that between A and B if we proceed.
   - [ ] **Follow-up: migrate method tables to `Symbol` keys.** After the cache lands, rekey
     `Class.instance_methods`/`class_methods` (and ideally `globals`/`NamespacedName`) from `String` to
     `Symbol`, turning the per-class `methods.get(selector)` SipHash into an integer hash. Ripples through

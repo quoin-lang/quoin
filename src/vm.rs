@@ -9,7 +9,7 @@ use crate::runtime::map::NativeMapState;
 use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
-use crate::symbol::Symbol;
+use crate::symbol::{self_symbol, Symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeCall, NativeClass, NativeFunc, Object,
     ObjectPayload, Value,
@@ -684,10 +684,10 @@ impl<'gc> VmState<'gc> {
         let class = obj.borrow().class;
         let vars = self.get_all_instance_vars(class);
         for var in &vars {
-            if let Some(val) = env_borrow.vars.get(var)
+            if let Some(val) = env_borrow.lookup_str(var)
                 && let Some(slot) = self.field_slot(class, var)
             {
-                obj.borrow_mut(mc).fields[slot] = *val;
+                obj.borrow_mut(mc).fields[slot] = val;
             }
         }
 
@@ -709,9 +709,7 @@ impl<'gc> VmState<'gc> {
                 let mut init_args = Vec::new();
                 for param in &param_names {
                     let val = env_borrow
-                        .vars
-                        .get(param)
-                        .copied()
+                        .lookup_str(param)
                         .unwrap_or_else(|| self.new_nil(mc));
                     init_args.push(val);
                 }
@@ -1429,10 +1427,10 @@ impl<'gc> VmState<'gc> {
         // (`|x:Integer { x > 5 }|`) without re-declaring them. `self` is the method's
         // receiver (the subject of the call), so a guard can also use the rest of the
         // class's functionality — other methods, instance variables, etc.
-        env_frame.vars.insert("self".to_string(), receiver);
+        env_frame.bind(self_symbol(), receiver);
 
         for (name, val) in outer_param_names.iter().zip(args.iter().copied()) {
-            env_frame.vars.insert(name.clone(), val);
+            env_frame.bind(Symbol::intern(name), val);
         }
 
         let env_ref = gcl!(mc, env_frame);
@@ -2401,7 +2399,7 @@ impl<'gc> VmState<'gc> {
         let mut env_frame = EnvFrame::new(block.parent_env);
         // Bind parameters
         for (name, val) in block.param_names.iter().zip(args.iter().copied()) {
-            env_frame.vars.insert(name.clone(), val);
+            env_frame.bind(Symbol::intern(name), val);
         }
         let env_ref = gcl!(mc, env_frame);
 
@@ -2444,10 +2442,10 @@ impl<'gc> VmState<'gc> {
 
         let mut env_frame = EnvFrame::new(block.parent_env);
         // Bind self
-        env_frame.vars.insert("self".to_string(), receiver);
+        env_frame.bind(self_symbol(), receiver);
         // Bind parameters
         for (name, val) in block.param_names.iter().zip(args.iter().copied()) {
-            env_frame.vars.insert(name.clone(), val);
+            env_frame.bind(Symbol::intern(name), val);
         }
         let env_ref = gcl!(mc, env_frame);
 
@@ -3123,23 +3121,23 @@ impl<'gc> VmState<'gc> {
         match inst {
             Instruction::LoadLocal(name) => {
                 let frame = &self.frames[frame_idx];
-                let val = EnvFrame::get(frame.env, &name).unwrap_or_else(|| self.new_nil(mc));
+                let val = EnvFrame::get(frame.env, name).unwrap_or_else(|| self.new_nil(mc));
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::DefineLocal(name) => {
-                if name == "true" || name == "false" || name == "nil" {
+                if matches!(name.as_str(), "true" | "false" | "nil") {
                     let err_msg = format!("Can't modify keyword {}", name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
                     return Err(QuoinError::Other(err_msg));
                 }
                 let val = self.pop()?;
                 let frame = &mut self.frames[frame_idx];
-                frame.env.borrow_mut(mc).vars.insert(name, val);
+                frame.env.borrow_mut(mc).bind(name, val);
                 frame.ip += 1;
             }
             Instruction::StoreLocal(name) => {
-                if name == "true" || name == "false" || name == "nil" {
+                if matches!(name.as_str(), "true" | "false" | "nil") {
                     let err_msg = format!("Can't modify keyword {}", name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
                     return Err(QuoinError::Other(err_msg));
@@ -3152,9 +3150,9 @@ impl<'gc> VmState<'gc> {
                 // variable that happens to share the name. RHS reads still resolve
                 // lexically (LoadLocal), so `{ x = x }` copies the outer `x`.
                 if frame.instantiating_obj.is_some() {
-                    frame.env.borrow_mut(mc).vars.insert(name, val);
-                } else if !EnvFrame::set(frame.env, mc, &name, val) {
-                    frame.env.borrow_mut(mc).vars.insert(name, val);
+                    frame.env.borrow_mut(mc).bind(name, val);
+                } else if !EnvFrame::set(frame.env, mc, name, val) {
+                    frame.env.borrow_mut(mc).bind(name, val);
                 }
                 frame.ip += 1;
             }
@@ -3558,7 +3556,7 @@ impl<'gc> VmState<'gc> {
                 if let Value::Object(obj) = block_val
                     && let ObjectPayload::Block(_) = &obj.borrow().payload
                 {
-                    let self_val = EnvFrame::get(self.frames[frame_idx].env, "self")
+                    let self_val = EnvFrame::get(self.frames[frame_idx].env, self_symbol())
                         .unwrap_or_else(|| self.new_nil(mc));
                     let target_class = self
                         .get_target_class_for_def(mc, self_val)
@@ -3618,7 +3616,7 @@ impl<'gc> VmState<'gc> {
                 if let Value::Object(obj) = block_val
                     && let ObjectPayload::Block(_) = &obj.borrow().payload
                 {
-                    let self_val = EnvFrame::get(self.frames[frame_idx].env, "self")
+                    let self_val = EnvFrame::get(self.frames[frame_idx].env, self_symbol())
                         .unwrap_or_else(|| self.new_nil(mc));
                     let target_class = self
                         .get_target_class_for_def(mc, self_val)
@@ -3687,7 +3685,7 @@ impl<'gc> VmState<'gc> {
 
             Instruction::LoadField(name) => {
                 let frame = &self.frames[frame_idx];
-                let self_val = EnvFrame::get(frame.env, "self").unwrap_or_else(|| self.new_nil(mc));
+                let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
                 let val = if let Value::Object(obj) = self_val {
                     let class = obj.borrow().class;
                     // No slot (undeclared) or a slot past this instance's array
@@ -3704,7 +3702,7 @@ impl<'gc> VmState<'gc> {
             Instruction::StoreField(name) => {
                 let val = self.pop()?;
                 let frame = &self.frames[frame_idx];
-                let self_val = EnvFrame::get(frame.env, "self").unwrap_or_else(|| self.new_nil(mc));
+                let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
                 if let Value::Object(obj) = self_val {
                     let class = obj.borrow().class;
                     match self.field_slot(class, &name) {
@@ -4216,11 +4214,11 @@ mod tests {
         run_test_steps(
             vec![
                 Instruction::Push(Constant::Int(42)),
-                Instruction::DefineLocal("a".to_string()),
-                Instruction::LoadLocal("a".to_string()),
+                Instruction::DefineLocal(Symbol::intern("a")),
+                Instruction::LoadLocal(Symbol::intern("a")),
                 Instruction::Push(Constant::Int(100)),
-                Instruction::StoreLocal("a".to_string()),
-                Instruction::LoadLocal("a".to_string()),
+                Instruction::StoreLocal(Symbol::intern("a")),
+                Instruction::LoadLocal(Symbol::intern("a")),
             ],
             |vm, mc| {
                 // Step 1: Push(42) -> [Int(42)]
@@ -4453,7 +4451,7 @@ mod tests {
             param_names: vec!["x".to_string()],
             param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode::from(vec![
-                Instruction::LoadLocal("x".to_string()),
+                Instruction::LoadLocal(Symbol::intern("x")),
                 Instruction::Push(Constant::Int(1)),
                 Instruction::Send(Symbol::intern("+"), 1),
                 Instruction::Return,
@@ -4607,7 +4605,7 @@ mod tests {
             param_names: vec!["blk".to_string()],
             param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode::from(vec![
-                Instruction::LoadLocal("blk".to_string()),
+                Instruction::LoadLocal(Symbol::intern("blk")),
                 Instruction::Send(Symbol::intern("value"), 0),
                 Instruction::Push(Constant::Int(111)),
                 Instruction::Return,
@@ -4718,7 +4716,7 @@ mod tests {
                     param_names: Vec::new(),
                     param_types: Vec::new(),
                     bytecode: vec![
-                        Instruction::LoadLocal("self".to_string()),
+                        Instruction::LoadLocal(Symbol::intern("self")),
                         Instruction::Return,
                     ]
                     .into(),
@@ -4780,7 +4778,7 @@ mod tests {
                 // Step ExecuteBlockWithSelf -> frame for class_block starts
                 vm.step(mc).unwrap();
                 assert_eq!(vm.frames.len(), 2);
-                assert_eq!(EnvFrame::get(vm.frames[1].env, "self").unwrap(), class_val);
+                assert_eq!(EnvFrame::get(vm.frames[1].env, self_symbol()).unwrap(), class_val);
 
                 // Inside class_block: Push(x_block)
                 vm.step(mc).unwrap();
@@ -5158,10 +5156,10 @@ mod tests {
                     param_names: vec!["a".to_string(), "b".to_string()],
                     param_types: vec!["Object".to_string(), "Object".to_string()],
                     bytecode: SharedBytecode::from(vec![
-                        Instruction::LoadLocal("self".to_string()),
-                        Instruction::LoadLocal("a".to_string()),
+                        Instruction::LoadLocal(Symbol::intern("self")),
+                        Instruction::LoadLocal(Symbol::intern("a")),
                         Instruction::Send(Symbol::intern("+"), 1),
-                        Instruction::LoadLocal("b".to_string()),
+                        Instruction::LoadLocal(Symbol::intern("b")),
                         Instruction::Send(Symbol::intern("+"), 1),
                         Instruction::Return,
                     ]),
@@ -5199,8 +5197,8 @@ mod tests {
                     param_names: vec!["a".to_string(), "b".to_string()],
                     param_types: vec!["Object".to_string(), "Object".to_string()],
                     bytecode: SharedBytecode::from(vec![
-                        Instruction::LoadLocal("a".to_string()),
-                        Instruction::LoadLocal("b".to_string()),
+                        Instruction::LoadLocal(Symbol::intern("a")),
+                        Instruction::LoadLocal(Symbol::intern("b")),
                         Instruction::Send(Symbol::intern("+"), 1),
                         Instruction::Return,
                     ]),

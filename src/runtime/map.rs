@@ -239,14 +239,10 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             })?;
             let env_borrow = env_ref.borrow();
             let key = env_borrow
-                .vars
-                .get("key")
-                .copied()
+                .lookup_str("key")
                 .unwrap_or_else(|| vm.new_nil(mc));
             let value = env_borrow
-                .vars
-                .get("value")
-                .copied()
+                .lookup_str("value")
                 .unwrap_or_else(|| vm.new_nil(mc));
 
             let state = NativeKeyValuePairState::new(key, value);

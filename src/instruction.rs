@@ -97,9 +97,9 @@ pub enum Constant {
 #[derive(Clone, Debug, Collect, PartialEq)]
 #[collect(require_static)]
 pub enum Instruction {
-    LoadLocal(String),
-    DefineLocal(String),
-    StoreLocal(String),
+    LoadLocal(Symbol),
+    DefineLocal(Symbol),
+    StoreLocal(Symbol),
     LoadGlobal(NamespacedName),
     StoreGlobal(NamespacedName, bool),
     Push(Constant),

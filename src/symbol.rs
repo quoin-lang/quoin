@@ -55,6 +55,13 @@ impl Symbol {
     }
 }
 
+/// The interned `self` local — bound in every method frame and read on every
+/// `self`/`@ivar` access, so it's worth caching past the interner lock.
+pub fn self_symbol() -> Symbol {
+    static SELF: OnceLock<Symbol> = OnceLock::new();
+    *SELF.get_or_init(|| Symbol::intern("self"))
+}
+
 impl PartialEq for Symbol {
     #[inline]
     fn eq(&self, other: &Self) -> bool {

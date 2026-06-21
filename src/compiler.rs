@@ -140,7 +140,7 @@ impl Compiler {
         // Define default top-level self = nil
         cb.current_source = program.source_info.clone();
         cb.push(Instruction::Push(Constant::Nil));
-        cb.push(Instruction::DefineLocal("self".to_string()));
+        cb.push(Instruction::DefineLocal(Symbol::intern("self")));
         self.scopes[0].locals.insert("self".to_string());
 
         let len = program.expressions.len();
@@ -218,7 +218,7 @@ impl Compiler {
                     let ns_name = NamespacedName::from_ast(id);
                     bytecode.push(Instruction::LoadGlobal(ns_name));
                 } else if self.is_local(&id.name) {
-                    bytecode.push(Instruction::LoadLocal(id.name.clone()));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(&(id.name.clone()))));
                 } else {
                     let ns_name = NamespacedName::new(Vec::new(), id.name.clone());
                     bytecode.push(Instruction::LoadGlobal(ns_name));
@@ -468,7 +468,7 @@ impl Compiler {
                 .locals
                 .insert(temp_var.clone());
             bytecode.push(Instruction::Dup);
-            bytecode.push(Instruction::DefineLocal(temp_var.clone()));
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(&(temp_var.clone()))));
 
             self.compile_destruct(&assign.lvalues, &temp_var, bytecode)?;
         }
@@ -522,10 +522,10 @@ impl Compiler {
             }
             bytecode.push(Instruction::StoreField(name.clone()));
         } else if self.is_local(name) {
-            bytecode.push(Instruction::StoreLocal(name.clone()));
+            bytecode.push(Instruction::StoreLocal(Symbol::intern(&(name.clone()))));
         } else {
             self.scopes.last_mut().unwrap().locals.insert(name.clone());
-            bytecode.push(Instruction::DefineLocal(name.clone()));
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
         }
         Ok(())
     }
@@ -540,7 +540,7 @@ impl Compiler {
             match &lval.value {
                 NodeValue::IdentLValue(ident_lval) => {
                     let name = &ident_lval.identifier.name;
-                    bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(&(temp_var.to_string()))));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
 
@@ -552,7 +552,7 @@ impl Compiler {
                 }
                 NodeValue::SplatLValue(splat_lval) => {
                     let name = &splat_lval.identifier.name;
-                    bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(&(temp_var.to_string()))));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send(Symbol::intern("sliceFrom:"), 1));
 
@@ -572,10 +572,10 @@ impl Compiler {
                         .locals
                         .insert(nested_temp.clone());
 
-                    bytecode.push(Instruction::LoadLocal(temp_var.to_string()));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(&(temp_var.to_string()))));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
-                    bytecode.push(Instruction::DefineLocal(nested_temp.clone()));
+                    bytecode.push(Instruction::DefineLocal(Symbol::intern(&(nested_temp.clone()))));
 
                     self.compile_destruct(&sub_lval.lvalues, &nested_temp, bytecode)?;
                 }
@@ -601,7 +601,7 @@ impl Compiler {
         if let Some(ref subject) = call.subject {
             self.compile_node(subject, bytecode)?;
         } else {
-            bytecode.push(Instruction::LoadLocal("self".to_string()));
+            bytecode.push(Instruction::LoadLocal(Symbol::intern("self")));
         }
 
         // Evaluate args
@@ -758,7 +758,7 @@ impl Compiler {
 
         for name in &decls_names {
             block_bytecode.push(Instruction::Push(Constant::Nil));
-            block_bytecode.push(Instruction::DefineLocal(name.clone()));
+            block_bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
         }
 
         let len = block.statements.len();
@@ -948,7 +948,7 @@ mod tests {
     fn prefix_ops() -> Vec<Instruction> {
         vec![
             Instruction::Push(Constant::Nil),
-            Instruction::DefineLocal("self".to_string()),
+            Instruction::DefineLocal(Symbol::intern("self")),
         ]
     }
 
@@ -995,7 +995,7 @@ mod tests {
         // self is always local
         let res = compile(vec![local_id("self")]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadLocal("self".to_string()));
+        expected.push(Instruction::LoadLocal(Symbol::intern("self")));
         assert_eq!(res.bytecode, expected);
 
         // unknown name defaults to LoadGlobal
@@ -1023,7 +1023,7 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Int(42)));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("x".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("x")));
         assert_eq!(res.bytecode, expected);
 
         // Destructuring assignment (e.g. a b = x)
@@ -1053,15 +1053,15 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
-        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("__qn_temp_1")));
+        expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send(Symbol::intern("at:"), 1));
-        expected.push(Instruction::DefineLocal("a".to_string()));
-        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("a")));
+        expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send(Symbol::intern("at:"), 1));
-        expected.push(Instruction::DefineLocal("b".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("b")));
         assert_eq!(res.bytecode, expected);
 
         // Splat: *rest = x; (under destruct)
@@ -1088,11 +1088,11 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
-        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("__qn_temp_1")));
+        expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send(Symbol::intern("sliceFrom:"), 1));
-        expected.push(Instruction::DefineLocal("rest".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("rest")));
         assert_eq!(res.bytecode, expected);
 
         // IgnoredSplatLValue: _ *_ = x;
@@ -1112,7 +1112,7 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("__qn_temp_1")));
         assert_eq!(res.bytecode, expected);
 
         // SubLValue: a (b c) = x;
@@ -1159,23 +1159,23 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
-        expected.push(Instruction::DefineLocal("__qn_temp_1".to_string()));
-        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("__qn_temp_1")));
+        expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send(Symbol::intern("at:"), 1));
-        expected.push(Instruction::DefineLocal("a".to_string()));
-        expected.push(Instruction::LoadLocal("__qn_temp_1".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("a")));
+        expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send(Symbol::intern("at:"), 1));
-        expected.push(Instruction::DefineLocal("__qn_temp_2".to_string()));
-        expected.push(Instruction::LoadLocal("__qn_temp_2".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("__qn_temp_2")));
+        expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_2")));
         expected.push(Instruction::Push(Constant::Int(0)));
         expected.push(Instruction::Send(Symbol::intern("at:"), 1));
-        expected.push(Instruction::DefineLocal("b".to_string()));
-        expected.push(Instruction::LoadLocal("__qn_temp_2".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("b")));
+        expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_2")));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send(Symbol::intern("at:"), 1));
-        expected.push(Instruction::DefineLocal("c".to_string()));
+        expected.push(Instruction::DefineLocal(Symbol::intern("c")));
         assert_eq!(res.bytecode, expected);
     }
 
@@ -1192,7 +1192,7 @@ mod tests {
         // Implicit subject (self): .foo
         let res = compile(vec![call(None, "foo", vec![])]).unwrap();
         let mut expected = prefix_ops();
-        expected.push(Instruction::LoadLocal("self".to_string()));
+        expected.push(Instruction::LoadLocal(Symbol::intern("self")));
         expected.push(Instruction::Send(Symbol::intern("foo"), 0));
         assert_eq!(res.bytecode, expected);
     }
@@ -1294,7 +1294,7 @@ mod tests {
             param_names: vec!["x".to_string()],
             param_types: vec!["Object".to_string()],
             bytecode: SharedBytecode(Rc::new(vec![
-                Instruction::LoadLocal("x".to_string()),
+                Instruction::LoadLocal(Symbol::intern("x")),
                 Instruction::Push(Constant::Int(1)),
                 Instruction::Send(Symbol::intern("+:"), 1),
                 Instruction::Return,

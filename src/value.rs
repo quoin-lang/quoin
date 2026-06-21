@@ -5,6 +5,7 @@ use crate::runtime::list::NativeListState;
 use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
+use crate::symbol::Symbol;
 use crate::vm::VmState;
 
 use gc_arena::collect::Trace;
@@ -539,21 +540,26 @@ pub struct Block<'gc> {
 #[collect(no_drop)]
 pub struct EnvFrame<'gc> {
     pub parent: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
-    pub vars: HashMap<String, Value<'gc>>,
+    /// Local bindings as a small association list keyed by interned [`Symbol`]. A
+    /// frame holds only a handful of locals, so a linear scan (comparing `Symbol`s
+    /// by pointer) beats a `HashMap`: no per-frame table allocation, no name-string
+    /// clone on bind, no SipHash on access. Closures still capture via `parent`.
+    pub vars: Vec<(Symbol, Value<'gc>)>,
 }
 
 impl<'gc> EnvFrame<'gc> {
     pub fn new(parent: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>) -> Self {
         Self {
             parent,
-            vars: HashMap::new(),
+            vars: Vec::new(),
         }
     }
 
-    pub fn get(frame: Gc<'gc, RefLock<Self>>, name: &str) -> Option<Value<'gc>> {
+    /// Read a local by interned name, walking up the lexical (parent) chain.
+    pub fn get(frame: Gc<'gc, RefLock<Self>>, name: Symbol) -> Option<Value<'gc>> {
         let borrowed = frame.borrow();
-        if let Some(val) = borrowed.vars.get(name) {
-            Some(*val)
+        if let Some(val) = borrowed.lookup(name) {
+            Some(val)
         } else if let Some(parent) = borrowed.parent {
             Self::get(parent, name)
         } else {
@@ -561,21 +567,46 @@ impl<'gc> EnvFrame<'gc> {
         }
     }
 
+    /// Assign to the nearest existing binding up the chain; returns whether one was
+    /// found (callers bind in the current frame when it wasn't).
     pub fn set(
         frame: Gc<'gc, RefLock<Self>>,
         mc: &Mutation<'gc>,
-        name: &str,
+        name: Symbol,
         val: Value<'gc>,
     ) -> bool {
         let mut current = Some(frame);
         while let Some(curr) = current {
-            if curr.borrow().vars.contains_key(name) {
-                curr.borrow_mut(mc).vars.insert(name.to_string(), val);
+            let pos = curr.borrow().vars.iter().position(|(n, _)| *n == name);
+            if let Some(i) = pos {
+                curr.borrow_mut(mc).vars[i].1 = val;
                 return true;
             }
             current = curr.borrow().parent;
         }
         false
+    }
+
+    /// Read a local in *this* frame only, by interned name.
+    pub fn lookup(&self, name: Symbol) -> Option<Value<'gc>> {
+        self.vars.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+    }
+
+    /// Read a local in *this* frame only, by string name — for callers that hold a
+    /// `&str` (instance-var/`init:`-arg population, `bind:` destructuring).
+    pub fn lookup_str(&self, name: &str) -> Option<Value<'gc>> {
+        self.vars
+            .iter()
+            .find(|(n, _)| n.as_str() == name)
+            .map(|(_, v)| *v)
+    }
+
+    /// Bind `name` in this frame: update in place if already present, else append.
+    pub fn bind(&mut self, name: Symbol, val: Value<'gc>) {
+        match self.vars.iter().position(|(n, _)| *n == name) {
+            Some(i) => self.vars[i].1 = val,
+            None => self.vars.push((name, val)),
+        }
     }
 }
 

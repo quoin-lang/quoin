@@ -258,8 +258,8 @@ pub fn build_string_class() -> NativeClassBuilder {
                         let mut local_names = HashSet::new();
                         let mut current_env = Some(caller_env);
                         while let Some(env) = current_env {
-                            for name in env.borrow().vars.keys() {
-                                local_names.insert(name.clone());
+                            for (sym, _) in &env.borrow().vars {
+                                local_names.insert(sym.as_str().to_string());
                             }
                             current_env = env.borrow().parent;
                         }
