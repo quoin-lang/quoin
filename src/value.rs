@@ -150,6 +150,14 @@ unsafe impl<'gc> Collect<'gc> for NativeFunc {
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
 pub enum Value<'gc> {
+    /// Immediate value types — no GC allocation. Their class is *derived* from
+    /// the variant (see `get_class_for_lookup`), so "numbers are objects" still
+    /// holds: they dispatch via `Integer` / `Double` / `Boolean` / `Nil` and
+    /// have methods, but no per-instance fields or true eigenclass.
+    Int(i64),
+    Double(f64),
+    Bool(bool),
+    Nil,
     Object(Gc<'gc, RefLock<Object<'gc>>>),
     Class(Gc<'gc, RefLock<Class<'gc>>>),
     ClassMeta(Gc<'gc, RefLock<Class<'gc>>>),
@@ -158,10 +166,6 @@ pub enum Value<'gc> {
 #[derive(Clone, Copy, Collect, Debug)]
 #[collect(no_drop)]
 pub enum ObjectPayload<'gc> {
-    Nil,
-    Bool(bool),
-    Int(i64),
-    Double(f64),
     String(Gc<'gc, String>),
     /// An interned symbol (`#foo`). The inner string is shared across all
     /// occurrences of the same name, so symbols compare by pointer identity.
@@ -175,10 +179,7 @@ impl<'gc> Value<'gc> {
     /// The integer value if this is an `Integer`, else `None`.
     pub fn as_i64(&self) -> Option<i64> {
         match self {
-            Value::Object(o) => match &o.borrow().payload {
-                ObjectPayload::Int(i) => Some(*i),
-                _ => None,
-            },
+            Value::Int(i) => Some(*i),
             _ => None,
         }
     }
@@ -187,58 +188,34 @@ impl<'gc> Value<'gc> {
     /// numeric. The shared coercion helper for arithmetic operator variants.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
-            Value::Object(o) => match &o.borrow().payload {
-                ObjectPayload::Int(i) => Some(*i as f64),
-                ObjectPayload::Double(d) => Some(*d),
-                _ => None,
-            },
+            Value::Int(i) => Some(*i as f64),
+            Value::Double(d) => Some(*d),
             _ => None,
         }
     }
 
     pub fn is_nil(&self) -> bool {
-        if let Value::Object(obj) = self
-            && let ObjectPayload::Nil = &obj.borrow().payload
-        {
-            true
-        } else {
-            false
-        }
+        matches!(self, Value::Nil)
     }
 
     pub fn is_true(&self) -> bool {
-        if let Value::Object(obj) = self
-            && let ObjectPayload::Bool(b) = &obj.borrow().payload
-        {
-            *b
-        } else {
-            false
-        }
+        matches!(self, Value::Bool(true))
     }
 
     pub fn is_false(&self) -> bool {
-        if let Value::Object(obj) = self
-            && let ObjectPayload::Bool(b) = &obj.borrow().payload
-        {
-            !*b
-        } else {
-            false
-        }
+        matches!(self, Value::Bool(false))
     }
 
     pub fn is_truthy(&self) -> bool {
-        match self {
-            Value::Object(obj) => match &obj.borrow().payload {
-                ObjectPayload::Nil => false,
-                ObjectPayload::Bool(b) => *b,
-                _ => true,
-            },
-            _ => true,
-        }
+        !matches!(self, Value::Nil | Value::Bool(false))
     }
 
     pub fn class_name(&self) -> String {
         match self {
+            Value::Int(_) => "Integer".to_string(),
+            Value::Double(_) => "Double".to_string(),
+            Value::Bool(_) => "Boolean".to_string(),
+            Value::Nil => "Nil".to_string(),
             Value::Class(_) => "Class".to_string(),
             Value::ClassMeta(_) => "ClassMeta".to_string(),
             Value::Object(obj) => obj.borrow().class_name(),
@@ -247,15 +224,15 @@ impl<'gc> Value<'gc> {
 
     pub fn type_name(&self) -> &'static str {
         match self {
+            Value::Int(_) => "Integer",
+            Value::Double(_) => "Double",
+            Value::Bool(_) => "Boolean",
+            Value::Nil => "Nil",
             Value::Class(_) => "Class",
             Value::ClassMeta(_) => "ClassMeta",
             Value::Object(obj) => {
                 let borrowed = obj.borrow();
                 match &borrowed.payload {
-                    ObjectPayload::Nil => "Nil",
-                    ObjectPayload::Bool(_) => "Boolean",
-                    ObjectPayload::Int(_) => "Integer",
-                    ObjectPayload::Double(_) => "Double",
                     ObjectPayload::String(_) => "String",
                     ObjectPayload::Symbol(_) => "Symbol",
                     ObjectPayload::Block(_) => "Block",
@@ -306,18 +283,18 @@ impl<'gc> Value<'gc> {
 impl<'gc> PartialEq for Value<'gc> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Value::Int(x), Value::Int(y)) => x == y,
+            (Value::Double(x), Value::Double(y)) => x == y,
+            (Value::Int(x), Value::Double(y)) => (*x as f64) == *y,
+            (Value::Double(x), Value::Int(y)) => *x == (*y as f64),
+            (Value::Bool(x), Value::Bool(y)) => x == y,
+            (Value::Nil, Value::Nil) => true,
             (Value::Class(a), Value::Class(b)) => Gc::ptr_eq(*a, *b),
             (Value::ClassMeta(a), Value::ClassMeta(b)) => Gc::ptr_eq(*a, *b),
             (Value::Object(a), Value::Object(b)) => {
                 let a_borrow = a.borrow();
                 let b_borrow = b.borrow();
                 match (&a_borrow.payload, &b_borrow.payload) {
-                    (ObjectPayload::Nil, ObjectPayload::Nil) => true,
-                    (ObjectPayload::Bool(x), ObjectPayload::Bool(y)) => x == y,
-                    (ObjectPayload::Int(x), ObjectPayload::Int(y)) => x == y,
-                    (ObjectPayload::Double(x), ObjectPayload::Double(y)) => x == y,
-                    (ObjectPayload::Int(x), ObjectPayload::Double(y)) => (*x as f64) == *y,
-                    (ObjectPayload::Double(x), ObjectPayload::Int(y)) => *x == (*y as f64),
                     (ObjectPayload::String(x), ObjectPayload::String(y)) => **x == **y,
                     (ObjectPayload::Symbol(x), ObjectPayload::Symbol(y)) => Gc::ptr_eq(*x, *y),
                     (ObjectPayload::Block(x), ObjectPayload::Block(y)) => Gc::ptr_eq(*x, *y),
@@ -332,15 +309,15 @@ impl<'gc> PartialEq for Value<'gc> {
 impl<'gc> fmt::Debug for Value<'gc> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Int(i) => write!(f, "Int({})", i),
+            Value::Double(fl) => write!(f, "Float({})", fl),
+            Value::Bool(b) => write!(f, "Bool({})", b),
+            Value::Nil => write!(f, "Nil"),
             Value::Class(c) => write!(f, "Class({})", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "ClassMeta({})", c.borrow().name),
             Value::Object(o) => {
                 let o_borrow = o.borrow();
                 match &o_borrow.payload {
-                    ObjectPayload::Nil => write!(f, "Nil"),
-                    ObjectPayload::Bool(b) => write!(f, "Bool({})", b),
-                    ObjectPayload::Int(i) => write!(f, "Int({})", i),
-                    ObjectPayload::Double(fl) => write!(f, "Float({})", fl),
                     ObjectPayload::String(s) => write!(f, "String({:?})", *s),
                     ObjectPayload::Symbol(s) => write!(f, "#{}", **s),
                     _ if o_borrow.class_name() == "List" => write!(f, "List(...)"),
@@ -396,6 +373,10 @@ impl Drop for FormattingGuard {
 impl<'gc> fmt::Display for Value<'gc> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Int(i) => write!(f, "{}", i),
+            Value::Double(fl) => write!(f, "{}", fl),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Nil => write!(f, "nil"),
             Value::Class(c) => write!(f, "class {}", c.borrow().name),
             Value::ClassMeta(c) => write!(f, "class {} meta", c.borrow().name),
             Value::Object(o) => {
@@ -409,10 +390,6 @@ impl<'gc> fmt::Display for Value<'gc> {
 
                 let o_borrow = o.borrow();
                 match &o_borrow.payload {
-                    ObjectPayload::Nil => write!(f, "nil"),
-                    ObjectPayload::Bool(b) => write!(f, "{}", b),
-                    ObjectPayload::Int(i) => write!(f, "{}", i),
-                    ObjectPayload::Double(fl) => write!(f, "{}", fl),
                     ObjectPayload::String(s) => write!(f, "{}", **s),
                     ObjectPayload::Symbol(s) => write!(f, "#{}", **s),
                     _ if o_borrow.class_name() == "List" => {

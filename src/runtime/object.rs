@@ -41,12 +41,13 @@ pub fn build_object_class() -> NativeClassBuilder {
                     msg: "can?: expects a selector (symbol or string) or a class".to_string(),
                 })?;
                 match receiver {
-                    Value::Object(obj) => {
-                        let class = obj.borrow().class;
-                        vm.lookup_in_class_hierarchy(class, &name, false).is_some()
-                    }
                     Value::Class(c) => vm.lookup_in_class_hierarchy(c, &name, false).is_some(),
                     Value::ClassMeta(c) => vm.lookup_in_class_hierarchy(c, &name, true).is_some(),
+                    // Object + immediate value types: dispatch via the derived class.
+                    _ => match vm.get_class_for_lookup(receiver) {
+                        Some(class) => vm.lookup_in_class_hierarchy(class, &name, false).is_some(),
+                        None => false,
+                    },
                 }
             };
             Ok(vm.new_bool(mc, responds))

@@ -76,6 +76,53 @@ macro_rules! arg {
             }
         }
     };
+    // Immediate scalar types live directly in `Value` (not in an `Object`
+    // payload), so they need their own arms ahead of the generic one below.
+    ($args:ident, Int, $idx:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Int(val)) => val,
+            _ => {
+                return Err($crate::error::QuoinError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: match $args.get($idx) {
+                        Some(v) => v.type_name().to_string(),
+                        None => "None".to_string(),
+                    },
+                    msg: format!("Expected Integer at argument index {}", $idx),
+                })
+            }
+        }
+    };
+    ($args:ident, Double, $idx:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Double(val)) => val,
+            _ => {
+                return Err($crate::error::QuoinError::TypeError {
+                    expected: "Double".to_string(),
+                    got: match $args.get($idx) {
+                        Some(v) => v.type_name().to_string(),
+                        None => "None".to_string(),
+                    },
+                    msg: format!("Expected Double at argument index {}", $idx),
+                })
+            }
+        }
+    };
+    ($args:ident, Bool, $idx:expr) => {
+        match $args.get($idx) {
+            Some(&Value::Bool(val)) => val,
+            _ => {
+                return Err($crate::error::QuoinError::TypeError {
+                    expected: "Boolean".to_string(),
+                    got: match $args.get($idx) {
+                        Some(v) => v.type_name().to_string(),
+                        None => "None".to_string(),
+                    },
+                    msg: format!("Expected Boolean at argument index {}", $idx),
+                })
+            }
+        }
+    };
     ($args:ident, $variant:ident, $idx:expr) => {
         match $args.get($idx) {
             Some(&Value::Object(obj)) => match &obj.borrow().payload {

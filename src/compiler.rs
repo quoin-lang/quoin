@@ -56,6 +56,11 @@ struct Scope {
 pub struct Compiler {
     scopes: Vec<Scope>,
     temp_counter: usize,
+    /// >0 while compiling the body of a `<-`/`<--` block whose target is an
+    /// immediate value type (Integer/Double/Boolean/Nil). Instance variables are
+    /// rejected there so the "value types have no fields" rule surfaces at compile
+    /// time rather than only when a method runs.
+    value_type_def_depth: usize,
 }
 
 impl Compiler {
@@ -65,6 +70,7 @@ impl Compiler {
                 locals: HashSet::new(),
             }],
             temp_counter: 0,
+            value_type_def_depth: 0,
         }
     }
 
@@ -72,6 +78,33 @@ impl Compiler {
         Self {
             scopes: vec![Scope { locals }],
             temp_counter: 0,
+            value_type_def_depth: 0,
+        }
+    }
+
+    /// Is this `<-`/`<--` target an immediate value type? `true`/`false`/`nil` are
+    /// `Identifier` nodes by name, alongside the `Integer`/`Double`/`Boolean`/`Nil`
+    /// class names.
+    ///
+    /// NOTE: this is a *static* check, so it only catches syntactically-literal
+    /// targets. A *computed* target that resolves to a value type — e.g.
+    /// `(1 + 2) <-- { |@x| test -> { @x } }` — is not recognized here, so the
+    /// compiler accepts it. It's harmless rather than wrong (the `@x` reads `nil`
+    /// and any `@x =` throws at runtime), but it's also useless. Catching it
+    /// requires a *runtime* check at `get_target_class_for_def` time: reject
+    /// instance-variable declaration/use when the receiver resolves to a value
+    /// type. See QUOIN_TODO.md.
+    fn is_value_type_target(node: &Node) -> bool {
+        match &node.value {
+            // Literal value-type instances: `5 <-- …`, `3.14 <-- …`.
+            NodeValue::Integer(_) | NodeValue::Double(_) => true,
+            // Class names, plus `true` / `false` / `nil` (which are identifiers by
+            // name): `Integer <-- …`, `true <-- …`, etc.
+            NodeValue::Identifier(id) => matches!(
+                id.name.as_str(),
+                "Integer" | "Double" | "Boolean" | "Nil" | "true" | "false" | "nil"
+            ),
+            _ => false,
         }
     }
 
@@ -165,6 +198,12 @@ impl Compiler {
             }
             NodeValue::Identifier(id) => {
                 if id.identifier_type == IdentifierType::Instance {
+                    if self.value_type_def_depth > 0 {
+                        return Err(format!(
+                            "value types cannot have instance variables (found '@{}')",
+                            id.name
+                        ));
+                    }
                     bytecode.push(Instruction::LoadField(id.name.clone()));
                 } else if id.name == "nil" || id.name == "true" || id.name == "false" {
                     match id.name.as_str() {
@@ -258,17 +297,51 @@ impl Compiler {
                 for arg in &class_def.block.arguments {
                     instance_vars.push(arg.identifier.name.clone());
                 }
+                let is_value_type =
+                    matches!(name.name.as_str(), "Integer" | "Double" | "Boolean" | "Nil");
+                if is_value_type && !instance_vars.is_empty() {
+                    return Err(format!(
+                        "value type '{}' cannot declare instance variables (@{})",
+                        name.name, instance_vars[0]
+                    ));
+                }
                 bytecode.push(Instruction::DefineClass {
                     name,
                     parent_name,
                     instance_vars,
                 });
-                self.compile_block(&class_def.block, bytecode)?;
+                if is_value_type {
+                    self.value_type_def_depth += 1;
+                }
+                let r = self.compile_block(&class_def.block, bytecode);
+                if is_value_type {
+                    self.value_type_def_depth -= 1;
+                }
+                r?;
                 bytecode.push(Instruction::ExecuteBlockWithSelf);
             }
             NodeValue::ClassExtension(class_ext) => {
                 self.compile_node(&class_ext.expression, bytecode)?;
-                self.compile_block(&class_ext.block, bytecode)?;
+                let is_value_type = Self::is_value_type_target(&class_ext.expression);
+                if is_value_type {
+                    if let Some(arg) = class_ext
+                        .block
+                        .arguments
+                        .iter()
+                        .find(|a| a.identifier.identifier_type == IdentifierType::Instance)
+                    {
+                        return Err(format!(
+                            "value type cannot declare instance variables (@{})",
+                            arg.identifier.name
+                        ));
+                    }
+                    self.value_type_def_depth += 1;
+                }
+                let r = self.compile_block(&class_ext.block, bytecode);
+                if is_value_type {
+                    self.value_type_def_depth -= 1;
+                }
+                r?;
                 bytecode.push(Instruction::ExecuteBlockWithSelf);
             }
             NodeValue::MethodDefinition(method_def) => {
@@ -415,7 +488,7 @@ impl Compiler {
                     bytecode.push(Instruction::StoreGlobal(ns_name, false));
                 } else {
                     let name = &id.name;
-                    self.compile_ident_store(&id.identifier_type, name, bytecode);
+                    self.compile_ident_store(&id.identifier_type, name, bytecode)?;
                 }
             }
             NodeValue::IgnoredLValue => {
@@ -434,12 +507,18 @@ impl Compiler {
         ident_type: &IdentifierType,
         name: &String,
         bytecode: &mut CodeBlock,
-    ) {
+    ) -> Result<(), String> {
         let first_char = name.chars().next().unwrap_or('\0');
         if first_char.is_ascii_uppercase() {
             let ns_name = NamespacedName::new(Vec::new(), name.clone());
             bytecode.push(Instruction::StoreGlobal(ns_name, false));
         } else if ident_type == &IdentifierType::Instance {
+            if self.value_type_def_depth > 0 {
+                return Err(format!(
+                    "value types cannot have instance variables (found '@{}')",
+                    name
+                ));
+            }
             bytecode.push(Instruction::StoreField(name.clone()));
         } else if self.is_local(name) {
             bytecode.push(Instruction::StoreLocal(name.clone()));
@@ -447,6 +526,7 @@ impl Compiler {
             self.scopes.last_mut().unwrap().locals.insert(name.clone());
             bytecode.push(Instruction::DefineLocal(name.clone()));
         }
+        Ok(())
     }
 
     fn compile_destruct(
@@ -467,7 +547,7 @@ impl Compiler {
                         &ident_lval.identifier.identifier_type,
                         name,
                         bytecode,
-                    );
+                    )?;
                 }
                 NodeValue::SplatLValue(splat_lval) => {
                     let name = &splat_lval.identifier.name;
@@ -479,7 +559,7 @@ impl Compiler {
                         &splat_lval.identifier.identifier_type,
                         name,
                         bytecode,
-                    );
+                    )?;
                 }
                 NodeValue::IgnoredLValue => {}
                 NodeValue::IgnoredSplatLValue => {}

@@ -3,6 +3,14 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the Quoin standard library (`qnlib`) files and test suites.
 
 ## Misc
+- [ ] Harden the "value types have no instance variables" check. Today the compiler
+  rejects `@x` in a value-type extension whose target is *statically* a value type
+  (`Integer <-- …`, `5 <-- …`, `true <-- …`). A **computed** target slips through —
+  e.g. `(1 + 2) <-- { |@x| test -> { @x } }` compiles (harmlessly: `@x` reads `nil`,
+  `@x =` throws at runtime, so it's useless rather than wrong). Closing the gap needs
+  a runtime check in `get_target_class_for_def`: when the receiver resolves to a value
+  type, reject instance-variable declaration/use. See the note on
+  `Compiler::is_value_type_target`.
 - [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
 - [ ] Design an installer.
   - [x] Named the language **Quoin** (extension `.qn`); rationale in `~/code/quoin/DECISIONS.md`.

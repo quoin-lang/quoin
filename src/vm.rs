@@ -67,9 +67,10 @@ pub struct BuiltinCache<'gc> {
     pub map_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub regex_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub block_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
-    pub nil_val: Option<Value<'gc>>,
-    pub true_val: Option<Value<'gc>>,
-    pub false_val: Option<Value<'gc>>,
+    // `true <-- {…}` / `false <-- {…}` need separate method tables; an immediate
+    // carries no per-instance class, so the synthesized singletons live here.
+    pub true_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
+    pub false_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
 }
 
 impl<'gc> BuiltinCache<'gc> {
@@ -84,9 +85,8 @@ impl<'gc> BuiltinCache<'gc> {
             map_class: None,
             regex_class: None,
             block_class: None,
-            nil_val: None,
-            true_val: None,
-            false_val: None,
+            true_class: None,
+            false_class: None,
         }
     }
 }
@@ -393,78 +393,22 @@ impl<'gc> VmState<'gc> {
         Value::Object(obj)
     }
 
-    pub fn new_nil(&self, mc: &Mutation<'gc>) -> Value<'gc> {
-        let cached = self.builtin_cache.borrow().nil_val;
-        if let Some(v) = cached {
-            v
-        } else {
-            let class = self.builtin_cache.borrow().nil_class;
-            let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Nil"));
-            let v = Value::Object(gcl!(
-                mc,
-                Object {
-                    class,
-                    fields: HashMap::new(),
-                    payload: ObjectPayload::Nil,
-                }
-            ));
-            self.builtin_cache.borrow_mut(mc).nil_val = Some(v);
-            v
-        }
+    // Scalar value types are immediate `Value` variants — no GC allocation. `mc`
+    // is kept in the signatures so the many call sites stay unchanged.
+    pub fn new_nil(&self, _mc: &Mutation<'gc>) -> Value<'gc> {
+        Value::Nil
     }
 
-    pub fn new_bool(&self, mc: &Mutation<'gc>, b: bool) -> Value<'gc> {
-        let cached = if b {
-            self.builtin_cache.borrow().true_val
-        } else {
-            self.builtin_cache.borrow().false_val
-        };
-        if let Some(v) = cached {
-            v
-        } else {
-            let class = self.builtin_cache.borrow().boolean_class;
-            let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Boolean"));
-            let v = Value::Object(gcl!(
-                mc,
-                Object {
-                    class,
-                    fields: HashMap::new(),
-                    payload: ObjectPayload::Bool(b),
-                }
-            ));
-            if b {
-                self.builtin_cache.borrow_mut(mc).true_val = Some(v);
-            } else {
-                self.builtin_cache.borrow_mut(mc).false_val = Some(v);
-            }
-            v
-        }
+    pub fn new_bool(&self, _mc: &Mutation<'gc>, b: bool) -> Value<'gc> {
+        Value::Bool(b)
     }
 
-    pub fn new_int(&self, mc: &Mutation<'gc>, i: i64) -> Value<'gc> {
-        let class = self.builtin_cache.borrow().integer_class;
-        let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Integer"));
-        Value::Object(gcl!(
-            mc,
-            Object {
-                class,
-                fields: HashMap::new(),
-                payload: ObjectPayload::Int(i),
-            }
-        ))
+    pub fn new_int(&self, _mc: &Mutation<'gc>, i: i64) -> Value<'gc> {
+        Value::Int(i)
     }
 
-    pub fn new_double(&self, mc: &Mutation<'gc>, f: f64) -> Value<'gc> {
-        let class = self.builtin_cache.borrow().double_class;
-        let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Double"));
-        Value::Object(gcl!(
-            mc,
-            Object {
-                class,
-                fields: HashMap::new(),
-                payload: ObjectPayload::Double(f),
-            }
-        ))
+    pub fn new_double(&self, _mc: &Mutation<'gc>, f: f64) -> Value<'gc> {
+        Value::Double(f)
     }
 
     pub fn new_string(&self, mc: &Mutation<'gc>, s: String) -> Value<'gc> {
@@ -505,11 +449,12 @@ impl<'gc> VmState<'gc> {
     #[allow(no_gc_across_yield)]
     pub fn to_s(&mut self, mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Value<'gc>, QuoinError> {
         match value {
-            Value::Object(_) => self.call_method(mc, value, "s", vec![]),
             Value::Class(_) | Value::ClassMeta(_) => {
                 let display = value.to_string();
                 Ok(self.new_string(mc, display))
             }
+            // Object + immediate value types dispatch their `s` method.
+            _ => self.call_method(mc, value, "s", vec![]),
         }
     }
 
@@ -1595,12 +1540,16 @@ impl<'gc> VmState<'gc> {
                     }
                 }
             }
-            Value::Object(obj) => {
-                let class_obj = obj.borrow().class;
-                if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(mc, class_obj, receiver, selector, false, args)?
-                {
-                    Some(m)
+            // Object + immediate value types: look up via the receiver's class.
+            _ => {
+                if let Some(class_obj) = self.get_class_for_lookup(receiver) {
+                    if let Some(m) = self.lookup_method_in_class_hierarchy(
+                        mc, class_obj, receiver, selector, false, args,
+                    )? {
+                        Some(m)
+                    } else {
+                        self.globals.borrow().get(&selector_key).copied()
+                    }
                 } else {
                     self.globals.borrow().get(&selector_key).copied()
                 }
@@ -2462,10 +2411,37 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
     ) -> Option<Gc<'gc, RefLock<Class<'gc>>>> {
         match receiver {
+            Value::Int(_) | Value::Double(_) | Value::Bool(_) | Value::Nil => {
+                self.immediate_class(receiver)
+            }
             Value::Object(obj) => Some(obj.borrow().class),
             Value::Class(c) => Some(c),
             Value::ClassMeta(c) => Some(c),
         }
+    }
+
+    /// The dispatch class for an immediate value type, read from `builtin_cache`
+    /// (populated at native-class registration) with a globals fallback. The
+    /// booleans use their per-value singleton class once `true`/`false` have been
+    /// extended, otherwise the shared `Boolean` class.
+    fn immediate_class(&self, receiver: Value<'gc>) -> Option<Gc<'gc, RefLock<Class<'gc>>>> {
+        let (cached, name) = {
+            let c = self.builtin_cache.borrow();
+            match receiver {
+                Value::Int(_) => (c.integer_class, "Integer"),
+                Value::Double(_) => (c.double_class, "Double"),
+                Value::Bool(true) => (c.true_class.or(c.boolean_class), "Boolean"),
+                Value::Bool(false) => (c.false_class.or(c.boolean_class), "Boolean"),
+                Value::Nil => (c.nil_class, "Nil"),
+                _ => return None,
+            }
+        };
+        cached.or_else(|| {
+            match self.globals.borrow().get(&NamespacedName::parse(name)).copied() {
+                Some(Value::Class(c)) => Some(c),
+                _ => None,
+            }
+        })
     }
 
     pub fn get_target_class_for_def(
@@ -2476,27 +2452,51 @@ impl<'gc> VmState<'gc> {
         match receiver {
             Value::Class(c) => Ok(c),
             Value::ClassMeta(c) => Ok(c),
+            // Extending a value type (`5 <-- {…}`, `Integer <-- {…}`) extends the
+            // type itself — value types have no per-instance eigenclass.
+            Value::Int(_) => Ok(self.get_or_create_builtin_class(mc, "Integer")),
+            Value::Double(_) => Ok(self.get_or_create_builtin_class(mc, "Double")),
+            Value::Nil => Ok(self.get_or_create_builtin_class(mc, "Nil")),
+            // `true` and `false` carry distinct methods, so each gets its own
+            // singleton class (parent `Boolean`), synthesized once and cached.
+            Value::Bool(b) => {
+                let existing = if b {
+                    self.builtin_cache.borrow().true_class
+                } else {
+                    self.builtin_cache.borrow().false_class
+                };
+                if let Some(c) = existing {
+                    return Ok(c);
+                }
+                let boolean = self.get_or_create_builtin_class(mc, "Boolean");
+                let name = if b { "$TrueClass" } else { "$FalseClass" };
+                let ns = NamespacedName::new(Vec::new(), name.to_string());
+                let s = gcl!(
+                    mc,
+                    Class {
+                        name: ns.clone(),
+                        parent: Some(boolean),
+                        instance_vars: Vec::new(),
+                        instance_methods: HashMap::new(),
+                        class_methods: HashMap::new(),
+                        mixin_classes: Vec::new(),
+                    }
+                );
+                self.globals.borrow_mut(mc).insert(ns, Value::Class(s));
+                if b {
+                    self.builtin_cache.borrow_mut(mc).true_class = Some(s);
+                } else {
+                    self.builtin_cache.borrow_mut(mc).false_class = Some(s);
+                }
+                Ok(s)
+            }
             Value::Object(obj) => {
                 let class_ref = obj.borrow().class;
                 if class_ref.borrow().name.name.starts_with('$') {
                     Ok(class_ref)
                 } else {
-                    let singleton_name = match &obj.borrow().payload {
-                        ObjectPayload::Nil => {
-                            NamespacedName::new(Vec::new(), "$NilClass".to_string())
-                        }
-                        ObjectPayload::Bool(true) => {
-                            NamespacedName::new(Vec::new(), "$TrueClass".to_string())
-                        }
-                        ObjectPayload::Bool(false) => {
-                            NamespacedName::new(Vec::new(), "$FalseClass".to_string())
-                        }
-                        _ => {
-                            let mut ns_name = class_ref.borrow().name.clone();
-                            ns_name.name = format!("${}", ns_name.name);
-                            ns_name
-                        }
-                    };
+                    let mut singleton_name = class_ref.borrow().name.clone();
+                    singleton_name.name = format!("${}", singleton_name.name);
                     let s = gcl!(
                         mc,
                         Class {
@@ -3569,9 +3569,12 @@ impl<'gc> VmState<'gc> {
                 if let Value::Object(obj) = self_val {
                     obj.borrow_mut(mc).fields.insert(name, val);
                 } else {
+                    // Immediate value types (Integer/Double/Boolean/Nil) have no
+                    // per-instance fields — setting `@x` on one is an error.
                     return Err(QuoinError::Other(format!(
-                        "Cannot set field '{}' on non-object {:?}",
-                        name, self_val
+                        "Cannot set instance variable '@{}' on a value type ({})",
+                        name,
+                        self_val.type_name()
                     )));
                 }
                 self.frames[frame_idx].ip += 1;
@@ -3606,20 +3609,12 @@ mod tests {
         mc: &Mutation<'gc>,
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, QuoinError> {
-        let a = match args[0] {
-            Value::Object(obj) => match obj.borrow().payload {
-                ObjectPayload::Int(i) => i,
-                _ => return Err(QuoinError::Other("Invalid types".to_string())),
-            },
-            _ => return Err(QuoinError::Other("Invalid types".to_string())),
-        };
-        let b = match args[1] {
-            Value::Object(obj) => match obj.borrow().payload {
-                ObjectPayload::Int(i) => i,
-                _ => return Err(QuoinError::Other("Invalid types".to_string())),
-            },
-            _ => return Err(QuoinError::Other("Invalid types".to_string())),
-        };
+        let a = args[0]
+            .as_i64()
+            .ok_or_else(|| QuoinError::Other("Invalid types".to_string()))?;
+        let b = args[1]
+            .as_i64()
+            .ok_or_else(|| QuoinError::Other("Invalid types".to_string()))?;
         Ok(vm.new_int(mc, a + b))
     }
 
@@ -3642,15 +3637,15 @@ mod tests {
 
     fn to_spec(val: Value<'_>) -> ValueSpec {
         match val {
+            Value::Int(i) => ValueSpec::Int(i),
+            Value::Double(d) => ValueSpec::Double(d),
+            Value::Bool(b) => ValueSpec::Bool(b),
+            Value::Nil => ValueSpec::Nil,
             Value::Class(c) => ValueSpec::Class(c.borrow().name.to_string()),
             Value::ClassMeta(c) => ValueSpec::ClassMeta(c.borrow().name.to_string()),
             Value::Object(obj) => {
                 let borrowed = obj.borrow();
                 match &borrowed.payload {
-                    ObjectPayload::Nil => ValueSpec::Nil,
-                    ObjectPayload::Bool(b) => ValueSpec::Bool(*b),
-                    ObjectPayload::Int(i) => ValueSpec::Int(*i),
-                    ObjectPayload::Double(d) => ValueSpec::Double(*d),
                     ObjectPayload::String(s) => ValueSpec::String((**s).clone()),
                     ObjectPayload::Symbol(s) => ValueSpec::Symbol((**s).clone()),
                     _ if borrowed.class_name() == "List" => {
@@ -4871,13 +4866,7 @@ mod tests {
                     Ok(vm.new_int(mc, val as i64))
                 })
                 .instance_method("inc:", |_vm, mc, args| {
-                    let val = match args[1] {
-                        Value::Object(obj) => match obj.borrow().payload {
-                            ObjectPayload::Int(i) => i as i32,
-                            _ => panic!("Expected Int"),
-                        },
-                        _ => panic!("Expected Int"),
-                    };
+                    let val = args[1].as_i64().expect("Expected Int") as i32;
                     args[0]
                         .with_native_state_mut::<MyCustomResource, _, _>(mc, |res| {
                             res.counter += val;
