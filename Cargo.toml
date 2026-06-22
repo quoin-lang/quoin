@@ -39,6 +39,8 @@ substring = "1.4.5"
 cargo-llvm-cov = "0.8.7"
 glob = "0.3.3"
 corosensei = "0.1.4"
+async-io = "2"
+futures-lite = "2"
 console = "0.15"
 mimalloc = { version = "0.1", optional = true }
 rustc-hash = "2"

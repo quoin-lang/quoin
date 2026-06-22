@@ -1,0 +1,285 @@
+# Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
+
+Status: **design**, not yet implemented. Companion to `USE_ARCH.md`.
+
+## Decision
+
+Build Quoin's networking on top of the existing **stackful Fiber** machinery
+(`corosensei`). Add **one** new fiber suspension reason, `AwaitIo`, that carries a
+plain-data I/O request up to the scheduler. The scheduler — the *only* async code
+in the VM — fulfills the request through an **`IoBackend` trait** and resumes the
+fiber with the result.
+
+- **Backend (chosen): `async-io` / smol.** Small, modular, single-threaded
+  executor (`!Send`-friendly, which fits gc_arena). TLS via `rustls`
+  (`futures-rustls`); async DNS via the `blocking` thread pool under `async-net`
+  or `async-io`.
+- **HTTP: built in the Quoin stdlib**, not pulled from a crate. HTTP/1.1 over
+  sockets+TLS, with `httparse` (the same parser hyper uses, runtime-independent)
+  for robust header parsing. The smol-adjacent HTTP crates (`async-h1`, `surf`,
+  `http-types`, async-std) are abandoned — we deliberately do not depend on them.
+- **`IoBackend` is a seam, not just an abstraction.** tokio stays a deletable,
+  swappable option for the future (heavy HTTP/2, QUIC, websockets), and WASM gets
+  a host-import backend, all without touching anything above the trait.
+
+## The core insight: async is contained to one function
+
+Rust's function-coloring only propagates *up the call stack* through `.await`. We
+stop it by **reifying "what I'm blocked on" as a value** instead of awaiting in
+place. Quoin already does this for every other suspension: a fiber suspends by
+bubbling a `YieldReason` up to the scheduler (`src/fiber.rs`, `src/runner.rs`).
+
+So the async surface area of the entire VM is:
+
+```
+one async fn  (the scheduler loop)
+   └─ calls  backend.perform(req).await    ← the single .await in the codebase
+```
+
+Everything below it — the interpreter (`vm.step`), every native method, the GC,
+all of qnlib — stays synchronous and never names a `Future`. A native
+`socket.read:` does **not** await; it suspends with a request *value*:
+
+```rust
+YieldReason::AwaitIo(IoRequest::Read { id, max })   // plain data, no Gc/Value
+```
+
+The backend turns request values into awaits. This gives us, almost for free:
+
+1. **Swapping runtimes is one file** — smol → tokio → a `mio` loop → a WASM host
+   backend changes only the `IoBackend` impl. The scheduler glue and every socket
+   method stay put.
+2. **Tests need no network** — a `MockBackend` returning canned bytes exercises
+   the whole networking stdlib deterministically.
+3. **The dangerous boundary is already policed** — `AwaitIo` is just a (long)
+   yield, and the `no_gc_across_yield` lint already guarantees no `Gc`/`Value`
+   survives a yield, which *forces* the request/result payloads to be plain data.
+
+## Hard constraints (all already in force for fibers)
+
+These are not new burdens — they are the rules the fiber system already lives by.
+
+1. **gc_arena is single-threaded and `'gc`-bound; futures must be non-`Send`/
+   non-`'gc`.** Use single-threaded `block_on` (from `futures-lite`/`async-io`),
+   never a multi-thread executor. The scheduler future and its `FuturesUnordered`
+   never need `Send`.
+2. **Never hold the arena borrow across `.await`.** Every VM step runs inside a
+   synchronous `arena.mutate_root(|mc, vm| …)` call; the `.await` happens
+   *between* those calls, outside any arena borrow. The existing loop already
+   yields cooperatively "so the scheduler can run the GC" — the await slots into
+   that same gap.
+3. **OS resources are never GC objects.** A `TcpStream` has a real `Drop` (closes
+   the fd). The backend owns a side registry (`HashMap<StreamId, Box<dyn AsyncStream>>`,
+   where `AsyncStream = dyn AsyncRead + AsyncWrite + Unpin`) outside the arena; QN
+   sees an integer handle (`StreamId`) wrapped in a small GC object. The arena never
+   owns a socket. See *Resource model & lifecycle* for why the registry is keyed on
+   a generic stream rather than a concrete type, and how collected handles are
+   reaped.
+4. **I/O request/result payloads hold zero `Gc`/`Value`.** Enforced by
+   `no_gc_across_yield`. On resume, the native method re-acquires `mc` and copies
+   the plain `Vec<u8>` result into a GC string/bytes object (one copy — fine).
+5. **Single-threaded cooperative scheduling.** CPU-bound QN in one fiber blocks
+   all fibers — same model as asyncio/Lua/Node, and it keeps the GC race-free.
+   True CPU parallelism (worker pool / multiple arenas) is explicitly out of scope.
+
+## Data types (illustrative sketch)
+
+```rust
+// Plain data — no 'gc, no Value, no Gc. Crosses the yield boundary safely.
+#[derive(Clone, Copy)]
+pub struct StreamId(u64);
+
+pub enum IoRequest {
+    Sleep   { ms: u64 },
+    Resolve { host: String, port: u16 },
+    Connect { addr: SocketAddr },
+    Read    { id: StreamId, max: usize },
+    Write   { id: StreamId, bytes: Vec<u8> },
+    Close   { id: StreamId },
+    // Stage 4+: TlsConnect / TlsWrap, Stage 6: Listen / Accept
+}
+
+pub enum IoResult {
+    Slept,
+    Resolved(Vec<SocketAddr>),
+    Connected(StreamId),
+    Read(Vec<u8>),          // empty = EOF
+    Wrote(usize),
+    Closed,
+    Err(IoError),           // plain error, mapped to a QuoinError on resume
+}
+
+/// Object-safe so the VM holds it as `Box<dyn IoBackend>`. Returns a boxed,
+/// non-Send future the single-threaded scheduler owns and polls. Backends are
+/// stateful: they own the resource registry.
+pub trait IoBackend {
+    fn perform(&self, req: IoRequest) -> LocalBoxFuture<'_, IoResult>;
+}
+```
+
+Backends: `SmolBackend` (native, owns the `Async<_>` registry), `MockBackend`
+(tests), later `TokioBackend` and `WasmHostBackend`.
+
+## Resource model & lifecycle
+
+**The request waist is per-operation, not per-resource.** Most resources are byte
+streams — TCP, TLS-over-TCP, Unix sockets, pipes — and share `Read`/`Write`/`Close`.
+So the registry is keyed on a generic `Box<dyn AsyncStream>` (`= dyn AsyncRead +
+AsyncWrite + Unpin`), and only *creation* ops are resource-specific (`Connect`,
+`TlsWrap`, `Listen`/`Accept`, `UdpBind`, …). Adding TLS, for instance, adds one
+creation variant (`TlsWrap { id } -> StreamId`, producing a
+`futures_rustls::TlsStream<…>` that drops into the *same* registry) and **zero**
+changes to the byte ops or the scheduler.
+
+`IoRequest`/`IoResult` stay a **closed, plain-data enum** rather than an open
+`Box<dyn IoOp>`: that buys an exhaustive `MockBackend`, a single audit point for all
+I/O, and — for the WASM goal — requests that marshal cleanly across a host boundary
+(a `dyn IoOp` can't be serialized to JS). The cost is editing the enum + each
+backend's match when a genuinely new *primitive* appears; backends are few and those
+arms are mechanical. The **scheduler never changes** for any new resource — it only
+ever sees `IoRequest`/`IoResult`/`IoBackend`.
+
+**Lifecycle — explicit close is primary; a finalizer reap-queue is the backstop.**
+fds are scarce *non-memory* resources, and GC timing keys off memory pressure, so
+relying on collection to close sockets can exhaust the fd table long before a cycle
+runs. The primary path is therefore explicit `socket.close`, ideally via a scope
+combinator (`Socket connect:addr do:{ … }`) that closes on exit, exception-safe
+(API settled at Stage 3).
+
+The backstop catches forgotten sockets. The QN handle is a GC object holding only a
+plain `StreamId`; the real stream lives in the backend registry *outside* the arena
+(forced — we `.await` on it, and no arena borrow may be held across `.await`). When
+the handle is collected, gc-arena runs its `Drop` — the codebase already relies on
+this: `Gc<Fiber>` owns a `corosensei` stack freed on collection. That `Drop` must
+not touch other `Gc` pointers and can't reach the async backend, so it does the one
+safe thing: push the `StreamId` onto a non-GC reap queue (`Rc<RefCell<Vec<StreamId>>>`).
+The scheduler drains the queue each turn and has the backend close the fd and remove
+it from the registry. **The integer id is the only link** between the collected
+handle and the live resource.
+
+## Integration points (exact)
+
+- **`src/fiber.rs`** — add `AwaitIo(IoRequest)` to `enum YieldReason`. It carries
+  plain data, so `#[collect]` is trivial (no GC fields to trace).
+- **`src/vm.rs`** — add `VmState::await_io(&mut self, req) -> IoResult`: suspends
+  via `yielder.suspend(YieldReason::AwaitIo(req))`, and on resume re-derives
+  `(vm, mc)` from the returned `VMContext` (exactly like `run_vm_loop`) and reads
+  the result the scheduler stashed in a plain `VmState.pending_io_result` slot.
+  Native I/O methods call this and convert the plain result into GC values.
+- **`src/runner.rs`** — the scheduler in `compile_and_run_asts`. Two changes:
+  (a) wrap the outer loop in single-threaded `block_on`; (b) add an arm to the
+  `match res` block (currently `src/runner.rs:278`) for
+  `CoroutineResult::Yield(YieldReason::AwaitIo(req))`. In its simplest form
+  (**Level 1**, below) it — outside `mutate_root` — awaits `backend.perform(req)`,
+  stashes the result, and resumes; **Level 2** replaces that single await with a
+  `select` over the `FuturesUnordered` of *all* parked fibers' ops. The backend is
+  owned by the runner (outside the arena) and passed into the driver.
+- **`src/runtime/`** — new `net.rs` (Socket class over `StreamId` handles) and the
+  HTTP layer; `timer.rs` / a `Runtime sleep:` gains a non-blocking path via
+  `IoRequest::Sleep`.
+- **`qnlib/`** — `std:net/*`, later `std:http/*`, exposed through the `use` system.
+
+## Concurrency model — two levels
+
+The payoff (N fibers' I/O overlapping) needs a real scheduler on top of the
+fiber primitive. Split into two levels so the seam can land before the scheduler:
+
+- **Level 1 — the primitive (single in-flight op).** `AwaitIo` suspends the one
+  running fiber; the scheduler awaits its single op, then resumes. This proves the
+  round-trip (a value comes back into QN) but gives no inter-fiber overlap yet.
+- **Level 2 — concurrent scheduler.** Maintain a **ready queue** and a
+  **parked set**. Run ready fibers until each parks on `AwaitIo`; move a parked
+  fiber's `backend.perform(req)` future into a `FuturesUnordered` keyed by fiber
+  id. When the ready queue drains, `select` the `FuturesUnordered`; as each future
+  completes, stash its result, mark that fiber ready, and resume it. Now I/O
+  overlaps across all fibers — total wall-clock ≈ slowest op, not the sum.
+
+Futures live in the scheduler's side table (non-GC, non-`'gc`), constructed from
+plain `IoRequest`s over resources in the backend registry — completely decoupled
+from the arena, which is touched only in the synchronous steps between awaits.
+
+**The wait is readiness-driven, not a timed poll.** Awaiting an op parks the VM
+thread in the reactor's `epoll`/`kqueue` (indefinitely, or until the nearest timer
+for `Sleep`) and wakes it the instant the fd is ready — no interval, no spin. At
+Level 1 the whole VM parks (only one fiber exists to wait on). At Level 2 the runner
+parks *only when every fiber is blocked*; otherwise it keeps running other fibers'
+synchronous steps, and the park is on the whole set of in-flight ops at once. So
+`block_on` sleeps exactly when there is no CPU work left — the deliberate opposite
+of the current CPU-bound step loop, which always has a next instruction.
+
+## Cross-cutting concerns
+
+- **Cancellation.** If a parked fiber is killed/collected, the scheduler drops its
+  in-flight future and issues `Close` on any owned resource (it owns both the
+  future and, via the backend, the fd).
+- **DNS.** `getaddrinfo` blocks; `IoRequest::Resolve` is fulfilled via the
+  `blocking` thread pool (what `async-net` uses) so it never stalls the reactor.
+- **Timers.** `IoRequest::Sleep` → `async_io::Timer`. This is the simplest possible
+  `AwaitIo` (no sockets), making it the ideal Stage 1 proof.
+- **WASM / embedding.** The browser has no sockets; a `WasmHostBackend` bridges
+  `AwaitIo` to host imports (`fetch`, host-provided sockets). Same `IoRequest`
+  values, different backend — the filesystem-agnostic goal from `USE_ARCH.md`
+  carries straight over (this is the I/O analogue of `PackageResolver`).
+
+## Dependencies to add
+
+- `async-io` (reactor) + `futures-lite` (`block_on`, `LocalBoxFuture`, combinators)
+- `async-net` (or `blocking` directly) for async DNS
+- `futures-rustls` + `rustls` (+ `webpki-roots` / `rustls-native-certs`) for TLS
+- `httparse` for HTTP/1.1 header parsing
+- Edition is already 2024, so `async fn` in traits is available; we still return
+  `LocalBoxFuture` from `IoBackend::perform` for `dyn` object-safety.
+
+## Staged plan
+
+Each stage is independently committable, builds clean, and ships a test.
+
+**Stage 0 — backend scaffolding (no VM wiring).**
+Add deps. Define `IoRequest`/`IoResult`/`StreamId`/`IoBackend`. Implement
+`SmolBackend` (resource registry, `Sleep`/`Resolve`/`Connect`/`Read`/`Write`/
+`Close`) and `MockBackend`. *Test:* pure-Rust unit tests — `block_on` a connect to
+a local `TcpListener`, echo bytes, assert; mock returns canned data.
+
+**Stage 1 — the seam (`AwaitIo` + async driver, single op).**
+Add `YieldReason::AwaitIo`, `VmState::await_io`, the runner's `block_on` wrapper
+and `AwaitIo` arm. Wire `Runtime sleep:` (or `Fiber sleep:`) to `IoRequest::Sleep`.
+*Test:* a `.qn` program that sleeps and observes elapsed time — proves a value
+round-trips out to the backend and back into QN. (No inter-fiber overlap yet.)
+
+**Stage 2 — concurrent scheduler.**
+Introduce the ready-queue + parked-set + `FuturesUnordered` (Level 2). *Test:*
+spawn many fibers each sleeping N ms concurrently; assert total ≈ N, not N×count.
+
+**Stage 3 — TCP sockets stdlib.**
+`src/runtime/net.rs`: a `Socket` class over `StreamId` with `connect:`/`read:`/
+`writeAll:`/`close`, backed by `AwaitIo`. `qnlib/std/net/*` exposing a clean QN
+API. *Test:* QN client against a local echo server (Rust-side harness), multiple
+concurrent connections.
+
+**Stage 4 — TLS.**
+Wrap streams with `futures-rustls` (cert roots via `webpki-roots`). Either new
+`IoRequest` variants (`TlsConnect`) or a "wrap handle" op. *Test:* QN connects to a
+known TLS host (or a local rustls server) and completes a handshake + round-trip.
+
+**Stage 5 — HTTP/1.1 in the stdlib (the payoff).**
+`qnlib/std/http/*` in Quoin: build request line + headers + body; read status +
+headers to `\r\n\r\n`; body by `Content-Length` or chunked transfer-encoding. Use
+`httparse` via a tiny native helper for parsing robustness. *Test:* `Http get:` a
+local server; assert status/headers/body; chunked + Content-Length cases.
+
+**Stage 6 — listeners/servers (optional/future).**
+`Listen`/`Accept` as `AwaitIo`, enabling QN servers. *Test:* a QN echo/HTTP server
+hit by a QN client, both on the same scheduler.
+
+## Deferred / open
+
+- **HTTP/2, QUIC, websockets, connection pooling, proxies** — where tokio's
+  ecosystem (h2, quinn, tungstenite, hyper-util) runs far ahead. If/when needed,
+  add a `TokioBackend` behind the same trait rather than rewriting upward.
+- **`hyper` 1.x core via a smol shim** — a maintained HTTP engine + HTTP/2 path
+  while staying on smol, if hand-rolled HTTP/1.1 outgrows itself (its `hyper::rt`
+  traits are runtime-agnostic; the adapter from `async-io` streams is small).
+- **Structured concurrency / cancellation API in QN** (e.g. nurseries, deadlines)
+  — worth designing once Stage 2 lands, but out of scope here.
+- **Exact QN-facing API shapes** (`Socket` vs `TcpStream` naming, blocking-looking
+  `read:` semantics, error model) — settle during Stage 3.
