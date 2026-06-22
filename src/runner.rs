@@ -25,6 +25,7 @@ use std::iter::once_with;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::exit;
+use std::sync::Once;
 use std::time::Instant;
 
 /// The prelude AST: a single `qnlib/prelude.qn` whose `use core/*` loads the core
@@ -48,10 +49,41 @@ enum ExecutionStatus {
 /// task the instant its op completes — that `.next().await` is the one reactor wait.
 type IoTaskFuture = Pin<Box<dyn Future<Output = (TaskId, IoResult)>>>;
 
+/// A tiny deterministic PRNG (SplitMix64) for `QN_SCHED_STRESS`. Seeded so a
+/// randomized scheduling failure can be replayed exactly. Not used outside stress.
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A uniform index in `0..n` (caller ensures `n > 0`).
+    fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+}
+
 /// What the current task did when the run/test scheduler resumed it once.
 enum RunStep {
-    /// Made progress (a step, a block call, or a guest-fiber switch) and is still
-    /// the current task.
+    /// Suspended at a cooperative-yield boundary (between VM steps). Mailboxes are
+    /// empty here, so this is the one point it is safe to *preempt* the task — the
+    /// scheduler stress mode does exactly that. Without stress, it just keeps running.
+    Yielded,
+    /// Made progress mid-work — a block call or a guest-fiber switch — and is still
+    /// the current task. Not a safe preemption point (a fiber switch leaves a value
+    /// in the `fiber_transfer` mailbox the target has not consumed yet), so the
+    /// driver always keeps running it.
     Running,
     /// Parked on async I/O. Its context is already saved; the driver fulfills `req`
     /// and resumes it later with the result.
@@ -105,8 +137,8 @@ fn resume_current_task<'gc>(
     };
 
     match res {
-        CoroutineResult::Yield(YieldReason::CooperativeYield)
-        | CoroutineResult::Yield(YieldReason::CallBlock { .. }) => Ok(RunStep::Running),
+        CoroutineResult::Yield(YieldReason::CooperativeYield) => Ok(RunStep::Yielded),
+        CoroutineResult::Yield(YieldReason::CallBlock { .. }) => Ok(RunStep::Running),
         CoroutineResult::Yield(YieldReason::ResumeFiber { fiber, arg }) => {
             vm.do_resume_switch(mc, fiber, arg)?;
             Ok(RunStep::Running)
@@ -401,9 +433,19 @@ impl VmRunner {
             // The scheduler: run tasks until each parks on I/O or finishes, overlapping
             // their I/O via a `FuturesUnordered`. The backend lives outside the arena and
             // is the only async code; the await on `futures` is the single reactor wait.
+            // `QN_SCHED_STRESS` turns on a seeded PRNG that preempts at every cooperative
+            // yield and picks ready tasks at random — exercising the per-task state swap
+            // and a wide range of interleavings. Without it the scheduler is run-to-block.
             let backend = SmolBackend::new();
             let mut ready: VecDeque<TaskId> = VecDeque::new();
             let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
+            let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
+            // Announce the seed once per process so a failing run is reproducible with
+            // the same `QN_SCHED_STRESS=<seed>` (this driver runs once per program AST).
+            if let Some(seed) = crate::tuning::sched_stress() {
+                static ANNOUNCED: Once = Once::new();
+                ANNOUNCED.call_once(|| eprintln!("scheduler stress enabled (seed={seed})"));
+            }
             // Task #0 starts current and already live; nothing to load on first resume.
             let mut current: Option<TaskId> = Some(TaskId(0));
             let mut needs_load = false;
@@ -411,13 +453,15 @@ impl VmRunner {
             block_on(async {
                 let mut step_count = 0;
                 loop {
-                    // Pick the next task to run when the previous one parked or finished:
-                    // a ready task, else (if any I/O is in flight) wait for a completion.
+                    // Acquire a task to run after the previous one parked, spawned, or
+                    // finished. Completed I/O feeds `ready`, so one selection path covers
+                    // both freshly-ready tasks and I/O wakeups.
                     if current.is_none() {
-                        if let Some(tid) = ready.pop_front() {
-                            current = Some(tid);
-                            needs_load = true;
-                        } else if !futures.is_empty() {
+                        if ready.is_empty() {
+                            if futures.is_empty() {
+                                break; // nothing ready and nothing in flight
+                            }
+                            // The single reactor wait: park until some task's I/O lands.
                             let (tid, result) = futures.next().await.expect("futures is non-empty");
                             arena.mutate_root(|_mc, vm| {
                                 vm.sched.tasks[tid.0]
@@ -425,11 +469,15 @@ impl VmRunner {
                                     .expect("woken task slot is empty")
                                     .wake = Some(Wake::Io { result });
                             });
-                            current = Some(tid);
-                            needs_load = true;
-                        } else {
-                            break; // nothing ready and nothing in flight
+                            ready.push_back(tid);
                         }
+                        // Pick a ready task — at random under scheduler stress, else FIFO.
+                        let idx = match rng.as_mut() {
+                            Some(r) => r.below(ready.len()),
+                            None => 0,
+                        };
+                        current = Some(ready.remove(idx).expect("idx within ready"));
+                        needs_load = true;
                     }
                     let cur = current.expect("current task set above");
                     if needs_load {
@@ -439,6 +487,17 @@ impl VmRunner {
 
                     let step = arena.mutate_root(|mc, vm| resume_current_task(vm, mc));
                     match step {
+                        Ok(RunStep::Yielded) => {
+                            // A clean cooperative-yield boundary. Under scheduler stress,
+                            // preempt: stash this task and requeue it, so the save/load
+                            // round-trip runs every step and task ordering varies. Without
+                            // stress, keep running it (run-to-block).
+                            if rng.is_some() {
+                                arena.mutate_root(|_mc, vm| vm.save_task_context(cur));
+                                ready.push_back(cur);
+                                current = None;
+                            }
+                        }
                         Ok(RunStep::Running) => {}
                         Ok(RunStep::ParkedIo(req)) => {
                             // Hand the op to the backend; the future is tagged with the
