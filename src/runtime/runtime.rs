@@ -1,8 +1,10 @@
 use crate::arg;
 use crate::compiler::Compiler;
 use crate::error::QuoinError;
+use crate::instruction::StaticBlock;
+use crate::packages::{LoadStatus, LoadedUnit};
 use crate::parser::ast::NodeValue;
-use crate::parser::{parse_quoin_file, parse_quoin_string};
+use crate::parser::parse_quoin_string_named;
 use crate::value::{Block, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -57,29 +59,11 @@ pub fn build_runtime_class() -> NativeClassBuilder {
         })
 }
 
-fn eval_string<'gc>(
-    vm: &mut VmState<'gc>,
+/// Build a runnable top-level `Block` from a freshly compiled `StaticBlock`.
+fn build_block<'gc>(
     mc: &Mutation<'gc>,
-    code: &str,
-    _filename: &str,
-    self_val: Option<Value<'gc>>,
-) -> Result<Value<'gc>, QuoinError> {
-    let ast = parse_quoin_string(code);
-
-    let mut compiler = Compiler::new();
-    let program_node = match &ast.value {
-        NodeValue::Program(p) => p,
-        _ => {
-            return Err(QuoinError::Other(
-                "Expected Program node from parser".to_string(),
-            ));
-        }
-    };
-
-    let static_block = compiler
-        .compile_program(program_node)
-        .map_err(|e| QuoinError::Other(format!("Compilation error: {}", e)))?;
-
+    static_block: &StaticBlock,
+) -> Gc<'gc, Block<'gc>> {
     let decl_block = static_block.decl_block.as_ref().map(|db| {
         crate::gc!(
             mc,
@@ -98,7 +82,7 @@ fn eval_string<'gc>(
         )
     });
 
-    let block = crate::gc!(
+    crate::gc!(
         mc,
         Block {
             source_info: static_block.source_info.clone(),
@@ -112,9 +96,43 @@ fn eval_string<'gc>(
             decl_block,
             source_map: static_block.source_map.clone(),
         }
-    );
+    )
+}
 
+/// Compile `source` (named `display` for source-info / errors) into a top-level block
+/// and run it to completion, returning its final value. The shared core behind
+/// `eval:` / `evalFile:` / `use`.
+fn compile_and_execute_source<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    source: &str,
+    display: &str,
+    self_val: Option<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let ast = parse_quoin_string_named(source, display);
+    let program_node = match &ast.value {
+        NodeValue::Program(p) => p,
+        _ => {
+            return Err(QuoinError::Other(
+                "Expected Program node from parser".to_string(),
+            ));
+        }
+    };
+    let static_block = Compiler::new()
+        .compile_program(program_node)
+        .map_err(|e| QuoinError::Other(format!("Compilation error: {}", e)))?;
+    let block = build_block(mc, &static_block);
     vm.execute_block(mc, block, Vec::new(), self_val)
+}
+
+fn eval_string<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    code: &str,
+    filename: &str,
+    self_val: Option<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    compile_and_execute_source(vm, mc, code, filename, self_val)
 }
 
 fn eval_file<'gc>(
@@ -127,56 +145,49 @@ fn eval_file<'gc>(
     if !path.exists() {
         return Err(QuoinError::Other(format!("File not found: {}", filename)));
     }
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| QuoinError::Other(format!("couldn't read {}: {}", filename, e)))?;
+    compile_and_execute_source(vm, mc, &source, filename, self_val)
+}
 
-    let ast = parse_quoin_file(&path);
-
-    let mut compiler = Compiler::new();
-    let program_node = match &ast.value {
-        NodeValue::Program(p) => p,
-        _ => {
-            return Err(QuoinError::Other(
-                "Expected Program node from parser".to_string(),
-            ));
+/// Load a unit once. Resolves `(package, path)` to source via the VM's resolver, runs
+/// it in a nested top-level frame (frame-balanced), and records it in the run-once
+/// registry in load order. A repeat `use` — or a cyclic one (an in-progress entry) —
+/// is a no-op, so the cycle sees whatever was defined so far rather than recursing.
+pub fn load_unit<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    package: Option<&str>,
+    path: &str,
+) -> Result<(), QuoinError> {
+    if vm
+        .loaded
+        .iter()
+        .any(|u| u.package.as_deref() == package && u.path == path)
+    {
+        return Ok(());
+    }
+    let source = match vm.resolver.resolve(package, path) {
+        Some(s) => s,
+        None => {
+            let q = package.map(|p| format!("{p}:")).unwrap_or_default();
+            return Err(QuoinError::Other(format!("use: cannot resolve `{q}{path}`")));
         }
     };
-
-    let static_block = compiler
-        .compile_program(program_node)
-        .map_err(|e| QuoinError::Other(format!("Compilation error: {}", e)))?;
-
-    let decl_block = static_block.decl_block.as_ref().map(|db| {
-        crate::gc!(
-            mc,
-            Block {
-                source_info: db.source_info.clone(),
-                name: db.name.clone(),
-                is_nested_block: db.is_nested_block,
-                param_syms: db.param_syms.clone(),
-                param_types: db.param_types.clone(),
-                bytecode: db.bytecode.clone(),
-                parent_env: None,
-                enclosing_method_id: None,
-                decl_block: None,
-                source_map: db.source_map.clone(),
-            }
-        )
+    vm.loaded.push(LoadedUnit {
+        package: package.map(|s| s.to_string()),
+        path: path.to_string(),
+        status: LoadStatus::InProgress,
     });
-
-    let block = crate::gc!(
-        mc,
-        Block {
-            source_info: static_block.source_info.clone(),
-            name: static_block.name.clone(),
-            is_nested_block: static_block.is_nested_block,
-            param_syms: static_block.param_syms.clone(),
-            param_types: static_block.param_types.clone(),
-            bytecode: static_block.bytecode.clone(),
-            parent_env: None,
-            enclosing_method_id: None,
-            decl_block,
-            source_map: static_block.source_map.clone(),
-        }
-    );
-
-    vm.execute_block(mc, block, Vec::new(), self_val)
+    let q = package.map(|p| format!("{p}:")).unwrap_or_default();
+    let display = format!("{q}{path}.qn");
+    compile_and_execute_source(vm, mc, &source, &display, None)?;
+    if let Some(u) = vm
+        .loaded
+        .iter_mut()
+        .find(|u| u.package.as_deref() == package && u.path == path)
+    {
+        u.status = LoadStatus::Loaded;
+    }
+    Ok(())
 }

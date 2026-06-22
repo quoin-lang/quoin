@@ -80,6 +80,12 @@ thread_local! {
 }
 
 pub fn parse_quoin_string(code: &str) -> Node {
+    parse_quoin_string_named(code, "<string>")
+}
+
+/// Like `parse_quoin_string`, but with an explicit display name for source-info /
+/// error messages (e.g. a `use`d unit's `pkg:path.qn`).
+pub fn parse_quoin_string_named(code: &str, filename: &str) -> Node {
     let code = code.strip_prefix('\u{FEFF}').unwrap_or(code);
 
     let table = LineOffsetTable::new(code);
@@ -91,12 +97,12 @@ pub fn parse_quoin_string(code: &str) -> Node {
         Ok(p) => p,
         Err(e) => {
             LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
-            panic!("Pest parsing error: {}", e);
+            panic!("Pest parsing error in {}: {}", filename, e);
         }
     };
 
     let program_pair = pairs.next().unwrap();
-    let res = parse_program(program_pair, "<string>", code);
+    let res = parse_program(program_pair, filename, code);
 
     LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
     res
@@ -228,6 +234,33 @@ fn parse_stmt(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
             }
         }
         Rule::assignment => parse_assignment(inner, filename, source_text),
+        Rule::use_stmt => {
+            // use_stmt → use_kw use_target; the atomic `use_kw` token is skipped.
+            // `.qn` and the trailing `/*` glob are stripped into structured fields here.
+            let target = inner
+                .into_inner()
+                .find(|p| p.as_rule() == Rule::use_target)
+                .unwrap();
+            let mut package = None;
+            let mut path_str = "";
+            for p in target.into_inner() {
+                match p.as_rule() {
+                    Rule::use_pkg => package = Some(p.as_str().to_string()),
+                    Rule::use_path => path_str = p.as_str(),
+                    _ => {}
+                }
+            }
+            let glob = path_str.ends_with("/*");
+            let path = path_str.strip_suffix("/*").unwrap_or(path_str).to_string();
+            Node {
+                source_info,
+                value: Use(UseNode {
+                    package,
+                    path,
+                    glob,
+                }),
+            }
+        }
         Rule::bang3 => Node {
             source_info,
             value: Bang3,

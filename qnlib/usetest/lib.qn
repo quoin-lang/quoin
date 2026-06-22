@@ -1,0 +1,5 @@
+"* `use` regression fixture: a stdlib file in a subdir, so the startup `qnlib/*.qn`
+"* glob does NOT auto-load it — `use usetest/lib` must load it on demand.
+[UseTest]Greeter <- {
+    greeting -> { 'hello from usetest/lib' }
+};

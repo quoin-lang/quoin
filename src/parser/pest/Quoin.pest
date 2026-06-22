@@ -42,7 +42,8 @@ op_meth = _{ "-" ~ ">" ~ !"-" }
 program = { SOI ~ (stmt ~ ";"?)+ ~ EOI }
 
 stmt = {
-    method_return
+    use_stmt
+  | method_return
   | block_return
   | assignment
   | bang3
@@ -50,6 +51,16 @@ stmt = {
   | huh3
   | expr
 }
+
+// `use` is a soft keyword: `"use" ~ !IDENT_REST` matches only `use ` followed by a
+// path, so `use` stays an ordinary identifier everywhere else. `use_target` is
+// compound-atomic ($) so the path is contiguous (`io/file`, not `io / file`) while its
+// package/path parts are still captured. `.qn` is implied; trailing `/*` globs a dir.
+use_stmt   = { use_kw ~ use_target }
+use_kw     = @{ "use" ~ !IDENT_REST }
+use_target = ${ (use_pkg ~ ":")? ~ use_path }
+use_pkg    = @{ IDENT }
+use_path   = @{ IDENT ~ ("/" ~ IDENT)* ~ ("/" ~ "*")? }
 
 method_return = { "^" ~ "^" ~ expr }
 yield_return  = { "^" ~ ">" ~ expr }

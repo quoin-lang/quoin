@@ -128,4 +128,11 @@ pub enum Instruction {
     OverrideMethod(String),
     LoadField(String),
     StoreField(String),
+    /// `use (pkg:)? path;` — load a file once. `package` is `None` for stdlib; `path`
+    /// has `.qn` implied; `glob` loads every `.qn` in the directory (Stage 2).
+    Use {
+        package: Option<String>,
+        path: String,
+        glob: bool,
+    },
 }

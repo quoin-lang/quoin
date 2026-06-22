@@ -1,0 +1,17 @@
+"* Explicit file loading via `use`. Loads qnlib/usetest/lib.qn on demand — a stdlib
+"* file in a subdir, so it is NOT auto-loaded by the startup `qnlib/*.qn` glob.
+use usetest/lib;
+
+(TestSuite.new:{ name = 'Use' }).add:{
+    .test:
+    loadsAndRegistersClass -> {
+        .is:{ [UseTest]Greeter.new.greeting } equalTo:'hello from usetest/lib';
+    };
+
+    .test:
+    runOnceIsIdempotent -> {
+        "* a second use of the same unit is a no-op — no "cannot redefine class" error.
+        use usetest/lib;
+        .is:{ [UseTest]Greeter.new.greeting } equalTo:'hello from usetest/lib';
+    };
+};

@@ -7,6 +7,7 @@ pub mod error;
 pub mod fiber;
 pub mod highlighter;
 pub mod instruction;
+pub mod packages;
 pub mod parser;
 pub mod runner;
 pub mod runtime;

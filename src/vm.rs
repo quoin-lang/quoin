@@ -3,12 +3,14 @@ use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMYielder, YieldReason};
 use crate::highlighter::{format_ansi, HighlightParser, HighlightSpan};
 use crate::instruction::{Constant, Instruction};
+use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
 use crate::parser::parse_quoin_string;
 use crate::runtime::fiber::{FiberStatus, NativeFiberState};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
+use crate::runtime::runtime::load_unit;
 use crate::runtime::set::NativeSetState;
 use crate::symbol::{self_symbol, Symbol};
 use crate::value::{
@@ -176,6 +178,15 @@ pub struct VmState<'gc> {
     #[collect(require_static)]
     pub dispatch_uncacheable: bool,
 
+    /// Resolves `use (pkg:)? path` to source — the filesystem-agnostic seam, swappable
+    /// per host (FS on the CLI, in-memory on WASM/embedded). See `src/packages.rs`.
+    #[collect(require_static)]
+    pub resolver: Box<dyn PackageResolver>,
+    /// Run-once registry for `use`, in load order (a `Vec`, not a set: run order *is*
+    /// load order). A per-entry status breaks cycles. See `USE_ARCH.md`.
+    #[collect(require_static)]
+    pub loaded: Vec<LoadedUnit>,
+
     #[collect(require_static)]
     pub options: VmOptions,
 }
@@ -244,6 +255,8 @@ impl<'gc> VmState<'gc> {
             fiber_error: None,
             method_cache: FxHashMap::default(),
             dispatch_uncacheable: false,
+            resolver: Box::new(FsResolver::new()),
+            loaded: Vec::new(),
             options,
         }
     }
@@ -2948,6 +2961,25 @@ impl<'gc> VmState<'gc> {
                     )));
                 }
                 self.frames[frame_idx].ip += 1;
+            }
+            Instruction::Use { package, path, glob } => {
+                // Clone out so the `inst` borrow is released before `load_unit` takes
+                // `&mut self`. Advance ip first: `load_unit` runs the loaded unit in a
+                // nested frame (frame-balanced), so this frame resumes at the next ip.
+                let package = package.clone();
+                let path = path.clone();
+                let glob = *glob;
+                self.frames[frame_idx].ip += 1;
+                if glob {
+                    return Err(QuoinError::Other(
+                        "glob `use` (path/*) is not yet supported".to_string(),
+                    ));
+                }
+                load_unit(self, mc, package.as_deref(), &path)?;
+                // A `use` evaluates to nil — push one value so the statement nets +1 on
+                // the stack (`compile_program` pops between statements).
+                let nil = self.new_nil(mc);
+                self.push(nil);
             }
         }
 

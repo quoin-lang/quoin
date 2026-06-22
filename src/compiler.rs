@@ -361,6 +361,13 @@ impl Compiler {
                 bytecode.push(Instruction::Dup);
                 bytecode.push(Instruction::StoreGlobal(ns_name, true));
             }
+            NodeValue::Use(use_node) => {
+                bytecode.push(Instruction::Use {
+                    package: use_node.package.clone(),
+                    path: use_node.path.clone(),
+                    glob: use_node.glob,
+                });
+            }
             NodeValue::UserString(user_str) => {
                 let ns_name = NamespacedName::from_ast(&user_str.identifier);
                 bytecode.push(Instruction::LoadGlobal(ns_name));

@@ -248,6 +248,16 @@ pub struct UserStringNode {
     pub value: String,
 }
 
+/// `use (pkg:)? path;` — explicit file loading. `package` is `None` for the stdlib
+/// default; `path` is the slash path with `.qn` implied (e.g. `"io/file"`); `glob` is
+/// set when the target ended in `/*` (load every `.qn` in that directory).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseNode {
+    pub package: Option<String>,
+    pub path: String,
+    pub glob: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct YieldReturnNode {
     pub value: Arc<Node>,
@@ -295,6 +305,7 @@ pub enum NodeValue {
     UnaryOperator(UnaryOperatorNode),
     UserList(UserListNode),
     UserString(UserStringNode),
+    Use(UseNode),
     YieldReturn(YieldReturnNode),
 }
 
