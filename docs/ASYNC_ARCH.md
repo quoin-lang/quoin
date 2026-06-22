@@ -299,10 +299,92 @@ preemptive + randomized scheduling) to harden the state swap. *Test:* `Async.gat
 of eight 30 ms sleeps finishes in ≈ 30 ms not 240 ms; results in spawn order; plus a
 seed sweep over the existing suites. See *As implemented* above.
 
-**Stage 2b — detached tasks + structured concurrency (deferred).**
-`Task.spawn:` returning a handle, `join`/`await`, and cancellation (drop the in-flight
-future + `Close` owned resources). Introduces a second park flavor (parked-on-task).
-Design once the surfaced API needs more than `gather`.
+**Stage 2b — detached tasks (designed; not yet implemented).**
+`Task.spawn:{block} -> handle`, `handle.join`, and `handle.cancel` — the unstructured
+counterpart to 2a's structured `gather`. Introduces a third park flavor
+(parked-on-task). The four design decisions below are settled; the staged plan follows.
+
+Design notes:
+
+- **Liveness model — fire-and-forget.** The scheduler owns a spawned task's liveness
+  (it is rooted by `Scheduler.tasks`), *not* the handle. Dropping/collecting the
+  handle never cancels a running task — it only governs whether a *finished* task's
+  result-slot is retained (reaped via the handle's `Drop`, the socket-style reap
+  queue). This keeps task execution independent of collector timing, which is
+  mandatory given `QN_GC_STRESS` (Model B — GC'ing the handle cancels — would make
+  task lifetime nondeterministic and stress-dependent; cf. asyncio's "Task was
+  destroyed but it is pending"). Structured "no task outlives its scope" guarantees,
+  if wanted, come later from an explicit scope/nursery (the `gather` lineage), never
+  from handle reachability.
+  - **TODO:** expose `Task.running` — the list of currently-live task handles — as a
+    `Task` class method. Fire-and-forget gives no built-in join-all; surfacing the
+    running set lets a user write the structured fallback *in Quoin* (e.g. a scope
+    helper that joins every running handle before returning) without baking nurseries
+    into the core.
+- **Program exit — abandon (not drain).** When `main` finishes, the program exits;
+  still-running detached tasks are dropped (their coros and in-flight futures drop on
+  teardown — zero new code, it is today's `break`-on-`Finished`). Matches Go / tokio /
+  asyncio (program runtimes abandon; only server runtimes like Node drain). Drain is
+  recoverable *on top of* abandon via `Task.running` + `join`; the reverse is not —
+  making drain the default would force the opt-out to be *cancel-all*, saddling users
+  with cancellation **ordering** hazards (logical deadlocks when A is mid-handoff to B
+  and they cancel in the wrong order) that order-insensitive join-all is immune to.
+  Optional: warn when exiting with N live detached tasks (à la asyncio's "task
+  destroyed but pending").
+- **Cancellation — cooperative unwind, honoring `finally`.** `cancel` sets a per-task
+  flag; at the task's next yield point (a `CooperativeYield` step boundary, or a park
+  resume) the scheduler injects a `Cancelled` throw that runs the existing exception
+  machinery, so `finally`/ensure runs and resources close deterministically. In-flight
+  futures are wrapped with `futures::abortable` so `cancel` interrupts a `sleep`/read
+  promptly instead of waiting it out. Quoin's per-step `CooperativeYield` means even a
+  tight CPU loop is cancellable (no uncancellable tasks — cooperative cancel's usual
+  weakness doesn't apply here). `Cancelled` is **not swallowable**: `finally` runs but
+  `catch` cannot suppress it (a task can't ignore its own cancellation). Abrupt-drop
+  was rejected — it skips `finally`, which Quoin guarantees, and pushes cleanup onto
+  the GC-timed reap backstop. Lands in 2b-ii (after spawn+join in 2b-i).
+- **Join — multiple joiners, re-readable result (Promise/Future semantics).** A handle
+  can be `join`ed any number of times by any number of tasks: parked-on-task is already
+  a waiter *list*, and a finished task's result is already retained (liveness model
+  above), so N joiners and re-reads cost nothing extra. `join` yields `Ok(value)`,
+  re-throws the task's own exception (catchable, like `gather`'s first error), or
+  signals a **catchable** joinee-cancelled error. The nuance: a task's *own*
+  cancellation is the unswallowable `Cancelled`, but *observing another task's*
+  cancellation through `join` is an ordinary catchable outcome — otherwise one `cancel`
+  would virally, uncatchably cancel every joiner. One-shot (tokio `JoinHandle`) was
+  rejected: it buys nothing here and fights the retention model `spawn` already needs.
+
+Sharp edges (documented, accepted as user-error in v1 rather than engineered against):
+
+- **Join an already-finished task** returns the retained result immediately, no park.
+- **Self-join** (`h.join` from the very task `h` denotes) is a cheap guarded error, like
+  2a's "a Fiber cannot resume itself".
+- **Broader join cycles** (A joins B, B joins A) are *not* detected: both park forever
+  and are abandoned on program exit (the abandon policy) — an actual hang only if `main`
+  is in the cycle. Documented, not prevented.
+- **`Task.running` is a snapshot, not a live view.** A handle can finish (or be reaped)
+  between the snapshot and a later `join`, so the join-all idiom relies on `join` of a
+  finished/reaped handle behaving — returning the retained result, or a clear
+  already-collected error, never a crash.
+- **Self-cancel / cancelling an already-finished or cancelled task** is a no-op (the
+  latter two) or self-`Cancelled` at the next step (the former); never an error.
+- Optional non-blocking `handle.status` (running / done / failed / cancelled) — nearly
+  free since the state already exists, and lets code poll without parking.
+
+Plan:
+
+- **2b-i — spawn + join.** The `Task` handle (a GC object over a plain `TaskId`, like
+  `StreamId`); `spawn_detached(mc, block) -> handle` (allocate a task, enqueue, return
+  the handle — no park, so the runner's `ready` queue likely moves into `Scheduler` so a
+  native method can enqueue, which also subsumes `gather`'s `Spawned` hand-off); the
+  parked-on-task waiter list with `Wake::Joined` / re-thrown failure; result retention +
+  the handle-`Drop` reap queue; `Task.running`; `handle.status`. *Test:* extend
+  `async_soak.qn` with a spawn/join round (spawn N, join all, check results against the
+  serial reference) under the stress knobs. No cancellation yet.
+- **2b-ii — cancel.** Per-task cancel flag; `futures::abortable` on in-flight ops;
+  `Cancelled` injection at the next `CooperativeYield`/park, unwinding `finally`;
+  `Cancelled` unswallowable by `catch`; `Wake::Cancelled` delivered to joiners. *Test:*
+  soak round that spawns, cancels mid-flight, and asserts `finally` ran and the joiner
+  observes a catchable cancellation.
 
 **Stage 3 — TCP sockets stdlib.**
 `src/runtime/net.rs`: a `Socket` class over `StreamId` with `connect:`/`read:`/
