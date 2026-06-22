@@ -73,7 +73,10 @@ impl HighlightSpan {
     }
 }
 
-const KEYWORD_CONSTANTS: [&str; 3] = ["true", "false", "nil"];
+/// The **reserved identifiers** — `true`/`false`/`nil`. These are distinct from
+/// *keywords* (e.g. `use`, `HighlightType::Keyword`); reserved identifiers are colored
+/// as globals, keywords get their own type.
+const RESERVED_IDENTIFIERS: [&str; 3] = ["true", "false", "nil"];
 
 /// Color attribute spec per highlight type, mirroring `AnsiColorPicker`.
 /// The chosen variant is `colors[counter % colors.len()]`.
@@ -559,7 +562,7 @@ impl<'a> HighlightParser<'a> {
             None => return Vec::new(),
         };
 
-        let is_keyword = KEYWORD_CONSTANTS.contains(&ident.name.as_str());
+        let is_reserved = RESERVED_IDENTIFIERS.contains(&ident.name.as_str());
         let starts_upper = ident
             .name
             .chars()
@@ -567,7 +570,7 @@ impl<'a> HighlightParser<'a> {
             .map(|c| c.is_uppercase())
             .unwrap_or(false);
 
-        if is_keyword || starts_upper {
+        if is_reserved || starts_upper {
             if ident.identifier_type == IdentifierType::Namespaced {
                 return self.namespaced_spans(
                     ident,
@@ -819,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn global_for_uppercase_and_keyword() {
+    fn global_for_uppercase_and_reserved_ident() {
         let spans = highlight("Foo;");
         assert!(types(&spans).contains(&HighlightType::Global), "{spans:?}");
 

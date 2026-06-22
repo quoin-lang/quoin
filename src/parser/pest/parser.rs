@@ -831,7 +831,7 @@ fn parse_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> Identifie
     let inner = pair.into_inner().next().unwrap();
     let name = inner.as_str().to_string();
     let identifier_type = match inner.as_rule() {
-        Rule::keyword => IdentifierType::Keyword,
+        Rule::reserved_ident => IdentifierType::ReservedIdentifier,
         _ => IdentifierType::Local,
     };
     IdentifierNode {
@@ -1832,7 +1832,7 @@ mod tests {
         }));
         assert_eq!(ast, expected);
 
-        // SelectorNoArgs with keyword
+        // SelectorNoArgs with a reserved identifier
         let ast = parse("nil -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
@@ -1843,7 +1843,7 @@ mod tests {
                             source_info: None,
                             namespace: None,
                             name: "nil".to_string(),
-                            identifier_type: IdentifierType::Keyword,
+                            identifier_type: IdentifierType::ReservedIdentifier,
                         })],
                     }),
                     block: Arc::new(BlockNode {
@@ -1956,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_namespaces_and_keywords() {
+    fn test_parse_namespaces_and_reserved_idents() {
         // Namespaced Ident: [foo/bar]baz;
         let ast = parse("[foo/bar]baz;");
         let ns = Arc::new(NamespaceNode {
@@ -2004,7 +2004,7 @@ mod tests {
         }));
         assert_eq!(ast, expected);
 
-        // Keywords as identifiers: nil; true; false;
+        // Reserved identifiers used as names: nil; true; false;
         let ast = parse("nil;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,

@@ -9,7 +9,9 @@ pub enum IdentifierType {
     Local,
     Instance,
     Namespaced,
-    Keyword,
+    /// A reserved identifier — `true` / `false` / `nil`. (Distinct from a *keyword*
+    /// like `use`.)
+    ReservedIdentifier,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]

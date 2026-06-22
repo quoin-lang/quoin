@@ -31,7 +31,7 @@ USER_STRING           = @{ "#" ~ IDENT ~ STRING }
 INT    = _{ "0" | '1'..'9' ~ ASCII_DIGIT* }
 NUMBER = @{ INT ~ ("." ~ ASCII_DIGIT+)? | ("." ~ ASCII_DIGIT+) }
 
-keyword = @{ ("nil" | "true" | "false") ~ !IDENT_REST }
+reserved_ident = @{ ("nil" | "true" | "false") ~ !IDENT_REST }
 
 // Definition operators with negative lookahead to prevent greedy prefix matching
 op_def  = _{ "<" ~ "-" ~ !"-" }
@@ -216,7 +216,7 @@ namespace = {
 root_ns = { "[" ~ "/" ~ "]" }
 full_ns = { "[" ~ ident ~ ("/" ~ ident)* ~ "/"? ~ "]" }
 
-ident = { keyword | IDENT }
+ident = { reserved_ident | IDENT }
 
 symbol = @{ "#" ~ (STRING | XIDENT) }
 

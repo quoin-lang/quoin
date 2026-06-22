@@ -50,7 +50,7 @@ about statements.
 > - **No double-quoted strings exist** — a `"` always begins a comment.
 > - **Separators**: a newline ends a statement *when unambiguous*. A `;` is required when the next line would otherwise continue the expression — i.e. it begins with `.` (a message send) or an infix operator.
 > - **Identifiers**: start with a letter or `_`, then letters/digits/`_`/`?`. So `done?` and `my_var` are valid names. `!` is *not* part of a name (it's a selector suffix — see §5).
-> - **Keywords**: only `nil`, `true`, `false`. Identifiers are case-sensitive.
+> - **Reserved identifiers**: only `nil`, `true`, `false` (can't be reassigned). The only *keyword* is the soft keyword `use` (statement prefix; §21). Identifiers are case-sensitive.
 
 ### Comments
 
@@ -113,7 +113,7 @@ statement.
 > | User string | `#Name'…'` | `#ANSI'…'` |
 > | User list | `#Name( … )` | (mixes in `ActAsUserList`) |
 > | Block | `{ … }` | `{ |n| n * 2 }` (Part II) |
-> | Booleans / nil | keywords | `true`, `false`, `nil` |
+> | Booleans / nil | reserved identifiers | `true`, `false`, `nil` |
 
 - **Numbers.** Integers have no fractional part; a number is a double only if it
   has a `.` followed by digits. There is no negative *literal* — `-3` is the

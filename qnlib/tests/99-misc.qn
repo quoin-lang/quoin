@@ -56,10 +56,10 @@
     };
 
     .test:
-    immutableKeywords -> {
-        .does:{ true = false } throw:'Can\'t modify keyword true';
-        .does:{ false = true } throw:'Can\'t modify keyword false';
-        .does:{ nil = 1 } throw:'Can\'t modify keyword nil';
+    immutableReservedIdentifiers -> {
+        .does:{ true = false } throw:'Can\'t modify reserved identifier true';
+        .does:{ false = true } throw:'Can\'t modify reserved identifier false';
+        .does:{ nil = 1 } throw:'Can\'t modify reserved identifier nil';
     };
 
     .test:

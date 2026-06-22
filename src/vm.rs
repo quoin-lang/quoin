@@ -2328,7 +2328,7 @@ impl<'gc> VmState<'gc> {
             Instruction::DefineLocal(name) => {
                 let name = *name;
                 if matches!(name.as_str(), "true" | "false" | "nil") {
-                    let err_msg = format!("Can't modify keyword {}", name);
+                    let err_msg = format!("Can't modify reserved identifier {}", name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
                     return Err(QuoinError::Other(err_msg));
                 }
@@ -2340,7 +2340,7 @@ impl<'gc> VmState<'gc> {
             Instruction::StoreLocal(name) => {
                 let name = *name;
                 if matches!(name.as_str(), "true" | "false" | "nil") {
-                    let err_msg = format!("Can't modify keyword {}", name);
+                    let err_msg = format!("Can't modify reserved identifier {}", name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
                     return Err(QuoinError::Other(err_msg));
                 }
@@ -2371,7 +2371,7 @@ impl<'gc> VmState<'gc> {
             Instruction::StoreGlobal(name, is_define) => {
                 let val = self.pop()?;
                 if name.name == "true" || name.name == "false" || name.name == "nil" {
-                    let err_msg = format!("Can't modify keyword {}", name.name);
+                    let err_msg = format!("Can't modify reserved identifier {}", name.name);
                     self.active_exception = Some(self.new_string(mc, err_msg.clone()));
                     return Err(QuoinError::Other(err_msg));
                 }
