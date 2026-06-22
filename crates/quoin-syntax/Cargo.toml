@@ -1,0 +1,20 @@
+[package]
+name = "quoin-syntax"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone Quoin parser, AST, and syntax-highlighting span producer (no VM/runtime)."
+
+[features]
+# Derives `gc_arena::Collect` on `SourceInfo` so the type can be embedded in the
+# VM's GC-traced structures. The `quoin` crate enables this; tooling that only
+# needs the parser/AST (e.g. the language server) leaves it off and never links
+# gc-arena.
+gc = ["dep:gc-arena"]
+
+[dependencies]
+pest = "2.8.6"
+pest_derive = "2.8.6"
+regex = "1.10"
+once_cell = "1.21.4"
+substring = "1.4.5"
+gc-arena = { version = "0.6.0", optional = true }

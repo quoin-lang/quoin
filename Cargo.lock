@@ -1102,10 +1102,21 @@ dependencies = [
  "glob",
  "mimalloc",
  "once_cell",
+ "quoin-syntax",
+ "regex",
+ "rustc-hash",
+ "substring",
+]
+
+[[package]]
+name = "quoin-syntax"
+version = "0.1.0"
+dependencies = [
+ "gc-arena",
+ "once_cell",
  "pest",
  "pest_derive",
  "regex",
- "rustc-hash",
  "substring",
 ]
 

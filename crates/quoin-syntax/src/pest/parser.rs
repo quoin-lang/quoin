@@ -1,6 +1,6 @@
-use crate::parser::ast::NodeValue::*;
-use crate::parser::ast::*;
-use crate::value::SourceInfo;
+use crate::ast::NodeValue::*;
+use crate::ast::*;
+use crate::source_info::{ParseError, SourceInfo};
 
 use once_cell::sync::Lazy;
 use pest::Parser;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use substring::Substring;
 
 #[derive(Parser)]
-#[grammar = "parser/pest/Quoin.pest"]
+#[grammar = "pest/Quoin.pest"]
 pub struct QuoinParser;
 
 static PRATT_PARSER: Lazy<PrattParser<Rule>> = Lazy::new(|| {
@@ -86,6 +86,16 @@ pub fn parse_quoin_string(code: &str) -> Node {
 /// Like `parse_quoin_string`, but with an explicit display name for source-info /
 /// error messages (e.g. a `use`d unit's `pkg:path.qn`).
 pub fn parse_quoin_string_named(code: &str, filename: &str) -> Node {
+    match try_parse_quoin_string_named(code, filename) {
+        Ok(node) => node,
+        Err(e) => panic!("Pest parsing error in {}: {}", filename, e),
+    }
+}
+
+/// Fallible variant of [`parse_quoin_string_named`]: returns a structured
+/// [`ParseError`] instead of panicking, for callers (e.g. the language server)
+/// that need to report diagnostics rather than abort on a syntax error.
+pub fn try_parse_quoin_string_named(code: &str, filename: &str) -> Result<Node, ParseError> {
     let code = code.strip_prefix('\u{FEFF}').unwrap_or(code);
 
     let table = LineOffsetTable::new(code);
@@ -93,19 +103,38 @@ pub fn parse_quoin_string_named(code: &str, filename: &str) -> Node {
         *cell.borrow_mut() = Some(table);
     });
 
-    let mut pairs = match QuoinParser::parse(Rule::program, code) {
-        Ok(p) => p,
-        Err(e) => {
-            LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
-            panic!("Pest parsing error in {}: {}", filename, e);
-        }
-    };
-
-    let program_pair = pairs.next().unwrap();
-    let res = parse_program(program_pair, filename, code);
+    let result = QuoinParser::parse(Rule::program, code)
+        .map_err(parse_error_from_pest)
+        .map(|mut pairs| {
+            let program_pair = pairs.next().unwrap();
+            parse_program(program_pair, filename, code)
+        });
 
     LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
-    res
+    result
+}
+
+/// Translate a `pest` parse error into a [`ParseError`] with byte-offset and
+/// line/column position for diagnostics.
+fn parse_error_from_pest(e: pest::error::Error<Rule>) -> ParseError {
+    use pest::error::{InputLocation, LineColLocation};
+
+    let (start, end) = match e.location {
+        InputLocation::Pos(p) => (p, p),
+        InputLocation::Span((s, end)) => (s, end),
+    };
+    let (line, col) = match e.line_col {
+        LineColLocation::Pos((l, c)) => (l, c),
+        LineColLocation::Span((l, c), _) => (l, c),
+    };
+
+    ParseError {
+        message: e.variant.message().to_string(),
+        line,
+        column: col.saturating_sub(1), // 0-indexed to match `SourceInfo`
+        start,
+        end,
+    }
 }
 
 pub fn parse_quoin_file(path: &PathBuf) -> Node {
@@ -126,24 +155,10 @@ pub fn parse_quoin_file(path: &PathBuf) -> Node {
         .unwrap_or(&contents)
         .to_string();
 
-    let table = LineOffsetTable::new(&contents);
-    LINE_OFFSET_TABLE.with(|cell| {
-        *cell.borrow_mut() = Some(table);
-    });
-
-    let mut pairs = match QuoinParser::parse(Rule::program, &contents) {
-        Ok(p) => p,
-        Err(e) => {
-            LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
-            panic!("Pest parsing error in file {}: {}", filename, e);
-        }
-    };
-
-    let program_pair = pairs.next().unwrap();
-    let res = parse_program(program_pair, &filename, &contents);
-
-    LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
-    res
+    match try_parse_quoin_string_named(&contents, &filename) {
+        Ok(node) => node,
+        Err(e) => panic!("Pest parsing error in file {}: {}", filename, e),
+    }
 }
 
 fn extract_source_info(span: pest::Span, filename: &str, source_text: &str) -> Option<SourceInfo> {
@@ -1144,7 +1159,7 @@ fn unicode_from_hex(s: String) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::parse_quoin_string;
-    use crate::parser::ast::*;
+    use crate::ast::*;
     use std::sync::Arc;
 
     fn parse(code: &str) -> Node {

@@ -49,18 +49,10 @@ impl<T: 'static> AnyCollect for OpaqueState<T> {
     fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
 }
 
-#[derive(Clone, Debug, Collect, PartialEq, Eq)]
-#[collect(require_static)]
-pub struct SourceInfo {
-    pub filename: String,
-    pub line: usize,
-    pub column: usize,
-    /// Byte offset of the first character of this node in the source text.
-    pub start: usize,
-    /// Byte offset one past the last character of this node (exclusive).
-    pub end: usize,
-    pub source_text: Option<String>,
-}
+// `SourceInfo` now lives in the standalone `quoin-syntax` crate (its `Collect`
+// impl is gated behind that crate's `gc` feature, which the `quoin` crate
+// enables). Re-exported here so existing `crate::value::SourceInfo` paths work.
+pub use quoin_syntax::SourceInfo;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Collect)]
 #[collect(require_static)]
