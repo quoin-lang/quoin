@@ -54,7 +54,7 @@ block argument.
 ## 8. Control flow is a library, not syntax
 
 > **Rules**
-> - `if:`, `else:`, `if:else:`, and `not` are methods defined **only on `true` and `false`** (see `00-bootstrap.qn`). `nil` has none of them.
+> - `if:`, `else:`, `if:else:`, and `not` are methods defined **only on `true` and `false`** (see `core/00-bootstrap.qn`). `nil` has none of them.
 > - There is **no truthiness coercion**. A condition must be an actual boolean. Sending `if:` to a non-boolean — including `nil` — is a `MessageNotUnderstood`.
 > - The `if:`/`else:` blocks are zero-arg; they run via `.value`.
 > - **Loops** are methods on a *block* used as the condition:

@@ -45,7 +45,7 @@ The same `~` operator works standalone, with the matcher on the left:
 > - `value.throw` throws **any value**. The `Error` classes add class-side convenience constructors: `Error.throw:'msg'` and `Error.throw:'msg' payload:p` build an instance and throw it.
 > - `{ … }.catch:{ |e| … }` runs the receiver block; if it throws, the thrown value is passed to the catch block, whose result becomes the value. `{ … }.catch:{ |e| … } finally:{ … }` additionally runs `finally:` **always** (on success or failure).
 > - **Catch by type** with `case`/`~` inside the handler: `e.case:{ .when:TypeError do:… }`.
-> - **Built-in hierarchy** (`00-bootstrap.qn`): `Error` with `@message @payload`, accessors `message`/`payload`, and `s` (→ `'ClassName: message'`); subclasses `TypeError`, `ArgumentError`, `MessageNotUnderstood`, `AmbiguousMethodError`, `ArithmeticError`, `IndexError`, `FiberError`.
+> - **Built-in hierarchy** (`core/00-bootstrap.qn`): `Error` with `@message @payload`, accessors `message`/`payload`, and `s` (→ `'ClassName: message'`); subclasses `TypeError`, `ArgumentError`, `MessageNotUnderstood`, `AmbiguousMethodError`, `ArithmeticError`, `IndexError`, `FiberError`.
 > - **Runtime errors are structured**: the VM maps its internal errors to these Quoin `Error` objects at the `catch:` boundary, so you can catch and inspect them.
 
 ```quoin

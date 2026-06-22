@@ -1,3 +1,8 @@
+"* Global registry of test suites. Each TestSuite registers itself on construction
+"* (TestSuite#init:); the harness (main.qn) runs everything collected here, so test
+"* files just build their suite — no return-value plumbing or explicit registration.
+[Test]Suites <- #();
+
 Mixin <- BuiltinAssertions <- {
     .meta <-- {
         assertMeetsRequirements: -> { |class:Class|
@@ -178,6 +183,7 @@ TestSuite <- { |@name @tests|
         @name = name
 
         @tests = #()
+        [Test]Suites.add:self
     }
 
     name -> { @name }

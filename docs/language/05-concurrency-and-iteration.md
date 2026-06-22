@@ -59,7 +59,7 @@ Access: `first`…`fifth`, `last`, `nth:`, `take:`, `drop:`, `list`, `join:`,
 `iterator`.
 Lazy: `lazyCollect:`, `lazySelect:`.
 
-(See `qnlib/02-iterate.qn` for the authoritative list and exact semantics.)
+(See `qnlib/core/02-iterate.qn` for the authoritative list and exact semantics.)
 
 ```quoin
 MyRange <- { |@start @end|

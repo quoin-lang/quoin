@@ -31,9 +31,18 @@ This document outlines the language features, compiler updates, and VM modificat
   - [x] Named the language **Quoin** (extension `.qn`); rationale in `~/code/quoin/DECISIONS.md`.
   - [x] Binary name is `qn` (set via `[[bin]]` in `Cargo.toml`).
   - [ ] Support installing the binary and support files to `/usr/local/bin` or something.
-  - [ ] Create a more general purpose way of determining what to load by default on start.
-- [ ] Support importing files explicitly.
-  - [ ] When the installer work is done, search for files in standard locations + wherever the binary is installed.
+  - [x] Create a more general purpose way of determining what to load by default on start.
+    - The prelude is now `qnlib/prelude.qn` (`use core/*`), loaded by the runner alongside one
+      mode-entry file — instead of a hardcoded `glob("qnlib/*.qn")`.
+- [x] Support importing files explicitly. `use (pkg:)? path;` — a soft keyword that loads a `.qn`
+  file once (run-once, cycle-safe) through a host-swappable `PackageResolver` seam, so the VM never
+  touches `std::fs` (works on WASM / embedded). Packages: bare or `std:` = stdlib (`$CWD/qnlib`),
+  `self:` = the project (`$CWD`), other names are a reserved stub ("cannot resolve"). `dir/*` globs a
+  directory in UTF-8-sorted order. The load *path* is decoupled from the `[Ns]` *namespace* a file
+  registers under. Reference: `docs/language/` §21.
+  - [ ] When the installer work is done, search for files in standard locations + wherever the binary
+    is installed. (Today both roots are `$CWD`-relative; `self_root` can later anchor to the entry-point
+    directory, and the stdlib can be embedded via `include_dir!`.)
 - [x] Change the file extension to `.qn` everywhere.
   - [x] Don't forget to update the plugin.
 - [x] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
@@ -86,7 +95,11 @@ This document outlines the language features, compiler updates, and VM modificat
   - Iterate now requires only `each:`; `next`/`reset` cursor removed. Re-entrant, nil-safe.
   - [x] Use generators now that the VM supports them.
     - Added `Generator` (yield-block as iterable) and a fiber-backed external `Iterator` (`hasNext?`/`next`) in `qnlib/02-iterate.qn`.
-- [ ] Rewrite the TestSuite so it doesn't mix the tests into itself, too many conflicts.
+- [x] Rewrite the TestSuite so it doesn't mix the tests into itself, too many conflicts. Test suites
+  now **self-register** into a global `[Test]Suites` list on construction (`TestSuite#init:`), so a test
+  file just builds its suite — no return-value plumbing or explicit registration. `main.qn` loads the
+  suites with `use std:tests/*` and runs the registry; the per-file loader `Runtime.evalFile:` was
+  removed (its only caller). A deeper rewrite of the assertion/Test/Suite class graph wasn't needed.
 - [ ] List, Regex and Map #bind:{}
   - [x] List#bind:{}
   - [ ] Regex#bind:{}

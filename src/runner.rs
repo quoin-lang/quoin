@@ -119,9 +119,8 @@ impl VmRunner {
                 Ok(())
             }
             VmRunnerMode::Test => {
-                // prelude, then the test framework, then the suite runner.
+                // prelude, then the test entry — main.qn `use`s the framework + suites.
                 let ast_iter = prelude_asts()
-                    .chain(once_with(|| parse_quoin_file(&PathBuf::from("qnlib/test.qn"))))
                     .chain(once_with(|| parse_quoin_file(&PathBuf::from("qnlib/main.qn"))));
 
                 if !self.compile_and_run_asts(ast_iter) {

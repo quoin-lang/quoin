@@ -47,7 +47,8 @@ truth rather than duplicating it.
 18. Collections & core types — brief tables, pointers to stdlib
 19. String formatting & ANSI — `%` interpolation, `%'…%{expr}'`
 20. Namespaces — `[IO]`, `[/]`, `[Y]`
-21. Stdlib map — what each `qnlib/*.qn` provides; native vs Quoin
+21. File loading & packages — `use (pkg:)? path`, the resolver seam, directory globs
+22. Stdlib map — the prelude (`core/*`) and what each file provides; native vs Quoin
 
 ### Appendices · [`07-appendices.md`](07-appendices.md)
 - A. Sigil & operator cheat-sheet

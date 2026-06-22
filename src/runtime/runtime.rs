@@ -10,7 +10,6 @@ use crate::vm::VmState;
 
 use gc_arena::{Gc, Mutation};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 pub fn build_runtime_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Runtime", Some("Object"))
@@ -22,15 +21,6 @@ pub fn build_runtime_class() -> NativeClassBuilder {
             let code = arg!(args, String, 0);
             let self_val = args[1];
             eval_string(vm, mc, &code, "<string>", Some(self_val))
-        })
-        .class_method("evalFile:", |vm, mc, _receiver, args| {
-            let filename = arg!(args, String, 0);
-            eval_file(vm, mc, &filename, None)
-        })
-        .class_method("evalFile:self:", |vm, mc, _receiver, args| {
-            let filename = arg!(args, String, 0);
-            let self_val = args[1];
-            eval_file(vm, mc, &filename, Some(self_val))
         })
         .class_method("arguments", |vm, mc, _receiver, _args| {
             let args_list = vm
@@ -100,8 +90,8 @@ fn build_block<'gc>(
 }
 
 /// Compile `source` (named `display` for source-info / errors) into a top-level block
-/// and run it to completion, returning its final value. The shared core behind
-/// `eval:` / `evalFile:` / `use`.
+/// and run it to completion, returning its final value. The shared core behind `eval:`
+/// and `use`.
 fn compile_and_execute_source<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
@@ -133,21 +123,6 @@ fn eval_string<'gc>(
     self_val: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
     compile_and_execute_source(vm, mc, code, filename, self_val)
-}
-
-fn eval_file<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    filename: &str,
-    self_val: Option<Value<'gc>>,
-) -> Result<Value<'gc>, QuoinError> {
-    let path = PathBuf::from(filename);
-    if !path.exists() {
-        return Err(QuoinError::Other(format!("File not found: {}", filename)));
-    }
-    let source = std::fs::read_to_string(&path)
-        .map_err(|e| QuoinError::Other(format!("couldn't read {}: {}", filename, e)))?;
-    compile_and_execute_source(vm, mc, &source, filename, self_val)
 }
 
 /// Load a unit once. Resolves `(package, path)` to source via the VM's resolver, runs

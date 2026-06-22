@@ -1,18 +1,11 @@
+"* Test entry point. Pulls in the framework and every test file via `use`; each suite
+"* self-registers into [Test]Suites (see test.qn), which we then run. `use std:tests/*`
+"* loads qnlib/tests/*.qn in UTF-8 sorted order (== numeric, since prefixes are padded).
+use test;
+use std:tests/*;
+
 runner = TestRunner.new;
-
-testFolder = ([IO]Folder.open:'qnlib/tests');
-(testFolder
-    .list
-    .sort:{|sf| (sf.name.split:'-').first.to_integer})
-    .each:{|ef|
-    (ef.is_file? && (ef.ext == 'qn')).if:{
-        [IO]Stdout.writeln:'Loading ' + ef.name + '...';
-        suite = Runtime.evalFile:ef.fullpath;
-        runner.add:suite;
-    }
-};
-
-runner.add:Runtime.evalFile:'qnlib/tests/01-iterate.qn';
+[Test]Suites.each:{|s| runner.add:s };
 
 results = runner.run:AnsiTestReporter.new:{ out = [IO]Stdout }
 
