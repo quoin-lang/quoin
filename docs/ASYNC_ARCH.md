@@ -1,7 +1,7 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **Stages 0–2a and 2b-i implemented**; 2b-ii (cancel) and Stages 3–6 are
-design. Companion to `USE_ARCH.md`. See the *Staged plan* below for what has landed.
+Status: **Phase 2 complete (Stages 0–2b implemented)**; Stages 3–6 are design.
+Companion to `USE_ARCH.md`. See the *Staged plan* below for what has landed.
 
 ## Decision
 
@@ -299,7 +299,7 @@ preemptive + randomized scheduling) to harden the state swap. *Test:* `Async.gat
 of eight 30 ms sleeps finishes in ≈ 30 ms not 240 ms; results in spawn order; plus a
 seed sweep over the existing suites. See *As implemented* above.
 
-**Stage 2b — detached tasks (2b-i done; 2b-ii pending).**
+**Stage 2b — detached tasks (done).**
 `Task.spawn:{block} -> handle`, `handle.join`, and `handle.cancel` — the unstructured
 counterpart to 2a's structured `gather`. Introduces a third park flavor
 (parked-on-task). The four design decisions below are settled; the staged plan follows.
@@ -389,11 +389,20 @@ Plan:
   `Task.running`; `handle.status`/`done?`; a self-join guard. *Test:* a spawn/join round
   in `async_soak.qn` (spawn N, join all, check against the serial reference) plus Async
   suite tests — checksum-identical across plain / `QN_GC_STRESS` / `QN_SCHED_STRESS`.
-- **2b-ii — cancel.** Per-task cancel flag; `futures::abortable` on in-flight ops;
-  `Cancelled` injection at the next `CooperativeYield`/park, unwinding `finally`;
-  `Cancelled` unswallowable by `catch`; `Wake::Cancelled` delivered to joiners. *Test:*
-  soak round that spawns, cancels mid-flight, and asserts `finally` ran and the joiner
-  observes a catchable cancellation.
+- **2b-ii — cancel. ✅ done.** A new `QuoinError::Cancelled` (propagates like a throw,
+  runs `finally`, but `catch:` re-propagates it). Per-task `cancel_requested` flag,
+  mirrored to a live `Scheduler::cancel_current`; a checkpoint at `step_internal` and on
+  each park-resume (`await_io`/`await_gather`/`await_join`) raises it. **One-shot:**
+  `take_cancellation` clears *both* flags when consumed, so a preempt-reload during the
+  ensuing `finally` doesn't re-raise (the bug found under `QN_SCHED_STRESS`). In-flight
+  I/O is `futures::abortable`, so `cancel` interrupts a `sleep` promptly. `request_cancel`
+  aborts the future / dequeues a join-parked task. `complete_detached` sets status
+  `Cancelled` and delivers `Wake::JoinedCancelled`; `join` on a cancelled task is a
+  *catchable* error. **v1 scope:** an infinite CPU loop with no yield-to-reactor
+  monopolizes the single thread (the documented cooperative model — the canceller never
+  runs), and cancelling a task parked on its *own* gather waits for the children. *Test:*
+  a cancel-all round in `async_soak.qn` (checksum-stable across the stress knobs) + Async
+  suite tests (cancel runs `finally`, `catch:` can't swallow it, `join` observes it).
 
 **Stage 3 — TCP sockets stdlib.**
 `src/runtime/net.rs`: a `Socket` class over `StreamId` with `connect:`/`read:`/

@@ -49,6 +49,10 @@ pub enum QuoinError {
     Thrown,
     /// Raised to propagate non-local returns out of native call stacks
     NonLocalReturn,
+    /// A task was cancelled (`handle.cancel`). Propagates like `Thrown` so `finally`
+    /// blocks run during the unwind, but is deliberately *not* catchable by `catch:`
+    /// (a task cannot swallow its own cancellation). Carries no payload.
+    Cancelled,
     /// Wrapper containing source location for execution errors
     WithSourceInfo {
         error: Box<QuoinError>,
@@ -145,6 +149,7 @@ impl fmt::Display for QuoinError {
             QuoinError::Other(msg) => write!(f, "{}", msg),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
+            QuoinError::Cancelled => write!(f, "task cancelled"),
             QuoinError::WithSourceInfo {
                 error,
                 source_info,

@@ -16,6 +16,7 @@ use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
 use corosensei::CoroutineResult;
 use futures_lite::StreamExt;
 use futures_lite::future::block_on;
+use futures_util::future::{Aborted, abortable};
 use futures_util::stream::FuturesUnordered;
 use gc_arena::{Arena, Gc, Mutation, Rootable};
 use std::fs::read_to_string;
@@ -46,7 +47,8 @@ enum ExecutionStatus {
 /// A boxed, single-threaded I/O completion future tagged with the task that is
 /// waiting on it. The scheduler keeps these in a `FuturesUnordered` and resumes a
 /// task the instant its op completes — that `.next().await` is the one reactor wait.
-type IoTaskFuture = Pin<Box<dyn Future<Output = (TaskId, IoResult)>>>;
+/// `abortable`, so `handle.cancel` interrupts the op promptly (`Err(Aborted)`).
+type IoTaskFuture = Pin<Box<dyn Future<Output = (TaskId, Result<IoResult, Aborted>)>>>;
 
 /// A tiny deterministic PRNG (SplitMix64) for `QN_SCHED_STRESS`. Seeded so a
 /// randomized scheduling failure can be replayed exactly. Not used outside stress.
@@ -437,6 +439,9 @@ impl VmRunner {
                     gather: None,
                     handle: None,
                     waiters: Vec::new(),
+                    cancel_requested: false,
+                    abort_handle: None,
+                    joining: None,
                 })];
                 vm.sched.current_task = TaskId(0);
             });
@@ -491,10 +496,18 @@ impl VmRunner {
                                 let (tid, result) =
                                     futures.next().await.expect("futures is non-empty");
                                 arena.mutate_root(|_mc, vm| {
-                                    vm.sched.tasks[tid.0]
-                                        .as_mut()
-                                        .expect("woken task slot is empty")
-                                        .wake = Some(Wake::Io { result });
+                                    {
+                                        let t = vm.sched.tasks[tid.0]
+                                            .as_mut()
+                                            .expect("woken task slot is empty");
+                                        t.abort_handle = None; // the future is done
+                                        // On `Err(Aborted)` the task was cancelled: leave
+                                        // `wake` unset — `await_io` raises `Cancelled` from
+                                        // the live `cancel_current` flag instead.
+                                        if let Ok(io_result) = result {
+                                            t.wake = Some(Wake::Io { result: io_result });
+                                        }
+                                    }
                                     vm.sched.ready.push_back(tid);
                                 });
                                 continue;
@@ -525,8 +538,16 @@ impl VmRunner {
                         Ok(RunStep::Running) => {}
                         Ok(RunStep::ParkedIo(req)) => {
                             // Hand the op to the backend; the future is tagged with the
-                            // parked task so its result routes back on completion.
-                            let fut = backend.perform(req);
+                            // parked task so its result routes back on completion, and
+                            // wrapped in `abortable` so `cancel` can interrupt it. Stash
+                            // the abort handle on the task for `request_cancel`.
+                            let (fut, abort_handle) = abortable(backend.perform(req));
+                            arena.mutate_root(|_mc, vm| {
+                                vm.sched.tasks[cur.0]
+                                    .as_mut()
+                                    .expect("parked task slot is empty")
+                                    .abort_handle = Some(abort_handle);
+                            });
                             futures.push(Box::pin(async move { (cur, fut.await) }));
                             current = None;
                         }

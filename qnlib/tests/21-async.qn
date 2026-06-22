@@ -74,4 +74,24 @@
     joinReRaisesTaskFailure -> {
         .is:{ { (Task.spawn:{ 'boom'.throw }).join }.catch:{ |ex| ex } } equalTo:'boom';
     };
+
+    "* Stage 2b-ii: `cancel` raises an uncatchable Cancelled at the task's next
+    "* checkpoint, so its `finally` runs but its own `catch:` cannot swallow it; the
+    "* joiner observes a catchable cancellation and the status becomes 'cancelled'.
+    .test:
+    cancelRunsFinallyAndIsObservable -> {
+        trace = #();
+        entered = #();
+        h = Task.spawn:{
+            { entered.add:1; Runtime.sleep: 1000 }
+                .catch:{ |e| trace.add:'caught' } finally:{ trace.add:'finally' }
+        };
+        "* Wait until the task is *inside* the protected block (non-flaky under stress),
+        "* so cancel hits its sleep and `finally` is guaranteed to run.
+        { entered.count == 0 }.whileDo:{ Runtime.sleep: 1 };
+        h.cancel;
+        .is:{ { h.join }.catch:{ |ex| 'observed' } } equalTo:'observed';
+        .is:{ h.status } equalTo:'cancelled';
+        .is:{ trace } equalTo:#('finally');
+    };
 }

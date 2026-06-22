@@ -21,6 +21,7 @@ use crate::value::{
 };
 use crate::{ansi_colorizer, gc, gcl};
 
+use futures_util::future::AbortHandle;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use regex::Regex;
 use rustc_hash::FxHashMap;
@@ -164,6 +165,20 @@ pub struct Task<'gc> {
     /// Tasks parked in `join` on this one, woken with the outcome on completion.
     #[collect(require_static)]
     pub waiters: Vec<TaskId>,
+    /// Set by `handle.cancel`: at the task's next checkpoint (a VM step, or a park
+    /// resume) it raises `QuoinError::Cancelled`, unwinding through `finally`. Copied
+    /// to the live `Scheduler::cancel_current` by `load_task_context`.
+    #[collect(require_static)]
+    pub cancel_requested: bool,
+    /// While parked on I/O: the handle that aborts the in-flight future, so `cancel`
+    /// interrupts a `sleep`/read promptly. Set by the driver on park, cleared on the
+    /// op's completion and on becoming current.
+    #[collect(require_static)]
+    pub abort_handle: Option<AbortHandle>,
+    /// While parked in `join`: the task being joined, so `cancel` can dequeue this
+    /// joiner from that target's waiter list and wake it. Cleared on becoming current.
+    #[collect(require_static)]
+    pub joining: Option<TaskId>,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -204,6 +219,18 @@ pub enum Wake<'gc> {
     Failed {
         error: Value<'gc>,
     },
+    /// A joined task was cancelled. The joiner observes this as a *catchable* error
+    /// (distinct from its own uncatchable `Cancelled`).
+    JoinedCancelled,
+}
+
+/// Classification of a finished detached task's outcome, used by `complete_detached`
+/// to write the handle and wake joiners. A plain transient local (not arena state).
+#[derive(Clone, Copy)]
+enum DetachedOutcome<'gc> {
+    Done(Value<'gc>),
+    Failed(Value<'gc>),
+    Cancelled,
 }
 
 /// Coroutine / guest-fiber scheduler state, grouped out of [`VmState`] for
@@ -260,6 +287,12 @@ pub struct Scheduler<'gc> {
     /// outgoing I/O request no longer needs a slot — the driver receives it
     /// directly from the `AwaitIo` suspension.
     pub wake: Option<Wake<'gc>>,
+    /// Live mirror of the current task's `cancel_requested`, checked on the hot path
+    /// (a bool, not a table index — and always `false` in benchmark mode, which has
+    /// no task table). Set by `load_task_context`; cleared when a checkpoint raises
+    /// `Cancelled`, so the ensuing `finally` unwind is not itself re-cancelled.
+    #[collect(require_static)]
+    pub cancel_current: bool,
 }
 
 #[derive(Collect)]
@@ -405,6 +438,7 @@ impl<'gc> VmState<'gc> {
                 main_saved_native_args: Vec::new(),
                 fiber_error: None,
                 wake: None,
+                cancel_current: false,
             },
             method_cache: FxHashMap::default(),
             dispatch_uncacheable: false,
@@ -1302,6 +1336,23 @@ impl<'gc> VmState<'gc> {
             .unwrap_or_else(|| self.new_nil(mc)))
     }
 
+    /// Consume a pending cancellation at a checkpoint: clear the live flag *and* the
+    /// current task's durable `cancel_requested`, so cancellation is one-shot — the
+    /// ensuing `finally` unwind (and any preempt-reload during it) is not re-cancelled.
+    /// Returns the `Cancelled` error to raise.
+    fn take_cancellation(&mut self) -> QuoinError {
+        self.sched.cancel_current = false;
+        if let Some(t) = self
+            .sched
+            .tasks
+            .get_mut(self.sched.current_task.0)
+            .and_then(|t| t.as_mut())
+        {
+            t.cancel_requested = false;
+        }
+        QuoinError::Cancelled
+    }
+
     /// Suspend the running coroutine to perform async I/O, returning the result the
     /// scheduler delivers on resume. Mirrors `fiber_yield`: the request bubbles up as
     /// `YieldReason::AwaitIo`, and on resume the driver has stashed the answer in
@@ -1316,7 +1367,11 @@ impl<'gc> VmState<'gc> {
                 "I/O attempted outside the VM scheduler".to_string(),
             ));
         }
-        // On resume the driver has stashed the result for us.
+        // On resume: a pending cancel raises before consuming any result.
+        if self.sched.cancel_current {
+            return Err(self.take_cancellation());
+        }
+        // The driver has stashed the result for us.
         match self.sched.wake.take() {
             Some(Wake::Io { result }) => Ok(result),
             _ => Err(QuoinError::Other(
@@ -1341,7 +1396,12 @@ impl<'gc> VmState<'gc> {
                 "gather attempted outside the VM scheduler".to_string(),
             ));
         }
-        // On resume the driver has stashed the assembled result list (or an error).
+        // On resume: a pending cancel raises (the gather's children have finished by
+        // now — see the v1 scope note in docs/ASYNC_ARCH.md).
+        if self.sched.cancel_current {
+            return Err(self.take_cancellation());
+        }
+        // The driver has stashed the assembled result list (or an error).
         match self.sched.wake.take() {
             Some(Wake::Gather { list }) => Ok(list),
             Some(Wake::GatherErr { error }) => Err(error),
@@ -1358,7 +1418,8 @@ impl<'gc> VmState<'gc> {
     #[allow(no_gc_across_yield)]
     pub fn await_join(&mut self, target: TaskId) -> Result<Value<'gc>, QuoinError> {
         // Register as a waiter on the target before suspending (same step, so the
-        // target cannot complete in between).
+        // target cannot complete in between); record the target so `cancel` can dequeue
+        // and wake this joiner.
         let me = self.sched.current_task;
         match self.sched.tasks.get_mut(target.0).and_then(|t| t.as_mut()) {
             Some(t) => t.waiters.push(me),
@@ -1368,6 +1429,9 @@ impl<'gc> VmState<'gc> {
                 ));
             }
         }
+        if let Some(t) = self.sched.tasks[me.0].as_mut() {
+            t.joining = Some(target);
+        }
         if let Some(yielder) = unsafe { self.get_yielder() } {
             yielder.suspend(YieldReason::Join { task: target });
         } else {
@@ -1375,12 +1439,21 @@ impl<'gc> VmState<'gc> {
                 "join attempted outside the VM scheduler".to_string(),
             ));
         }
-        // On resume the driver has stashed the outcome.
+        // On resume: a pending cancel on *this* joiner raises first.
+        if self.sched.cancel_current {
+            return Err(self.take_cancellation());
+        }
+        // The driver has stashed the outcome.
         match self.sched.wake.take() {
             Some(Wake::Joined { value }) => Ok(value),
             Some(Wake::Failed { error }) => {
                 self.active_exception = Some(error);
                 Err(QuoinError::Thrown)
+            }
+            // The joined task was cancelled — a *catchable* observation, not the
+            // joiner's own cancellation.
+            Some(Wake::JoinedCancelled) => {
+                Err(QuoinError::Other("joined task was cancelled".to_string()))
             }
             _ => Err(QuoinError::Other(
                 "join resumed without a result".to_string(),
@@ -1603,10 +1676,16 @@ impl<'gc> VmState<'gc> {
     /// On a child's first activation, installs an empty context and starts its block.
     pub fn load_task_context(&mut self, mc: &Mutation<'gc>, tid: TaskId) {
         self.sched.current_task = tid;
-        let started = self.sched.tasks[tid.0]
-            .as_ref()
-            .expect("load_task_context: task slot is empty")
-            .started;
+        {
+            // Becoming current: surface any pending cancel, and drop the join park-state
+            // (it is no longer waiting on anything).
+            let t = self.sched.tasks[tid.0]
+                .as_mut()
+                .expect("load_task_context: task slot is empty");
+            self.sched.cancel_current = t.cancel_requested;
+            t.joining = None;
+        }
+        let started = self.sched.tasks[tid.0].as_ref().unwrap().started;
         if started {
             let t = self.sched.tasks[tid.0].as_mut().unwrap();
             self.stack = std::mem::take(&mut t.stack);
@@ -1692,6 +1771,9 @@ impl<'gc> VmState<'gc> {
             gather: None,
             handle,
             waiters: Vec::new(),
+            cancel_requested: false,
+            abort_handle: None,
+            joining: None,
         }
     }
 
@@ -1771,9 +1853,10 @@ impl<'gc> VmState<'gc> {
         self.sched.ready.push_back(parent);
     }
 
-    /// A detached task `cur` finished with `result`. Write the outcome into its handle,
-    /// wake every joiner with that outcome, and free the slot. After this the handle
-    /// lives by normal QN reachability and carries the result for any later `join`.
+    /// A detached task `cur` finished with `result` (a value, an uncaught exception,
+    /// or cancellation). Write the outcome into its handle, wake every joiner with it,
+    /// and free the slot. After this the handle lives by normal QN reachability and
+    /// carries the outcome for any later `join`.
     pub fn complete_detached(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1785,18 +1868,22 @@ impl<'gc> VmState<'gc> {
             .expect("complete_detached: slot is empty")
             .handle
             .expect("complete_detached: task has no handle");
-        // The outcome value: the result, or the task's exception value (the parked
-        // Quoin exception, or a converted internal error) so `join` can re-raise it.
-        let outcome: Result<Value<'gc>, Value<'gc>> = match result {
-            Ok(val) => Ok(val),
-            Err(ref e) => Err(match self.active_exception {
+        // Classify the outcome. Cancellation is distinct from a normal failure: it sets
+        // status `Cancelled` and joiners observe it as a *catchable* `JoinedCancelled`.
+        // A failure carries the task's exception value (the parked Quoin exception, or a
+        // converted internal error) so `join` can re-raise it.
+        let outcome = match result {
+            Ok(val) => DetachedOutcome::Done(val),
+            Err(QuoinError::Cancelled) => DetachedOutcome::Cancelled,
+            Err(ref e) => DetachedOutcome::Failed(match self.active_exception {
                 Some(v) => v,
                 None => self.quoinerror_to_value(mc, e),
             }),
         };
         let _ = handle.with_native_state_mut::<NativeTaskHandle, _, _>(mc, |h| match outcome {
-            Ok(val) => h.set_done(val),
-            Err(err) => h.set_failed(err),
+            DetachedOutcome::Done(val) => h.set_done(val),
+            DetachedOutcome::Failed(err) => h.set_failed(err),
+            DetachedOutcome::Cancelled => h.set_cancelled(),
         });
         let waiters = std::mem::take(
             &mut self.sched.tasks[cur.0]
@@ -1807,14 +1894,41 @@ impl<'gc> VmState<'gc> {
         self.sched.tasks[cur.0] = None; // free the slot; the handle keeps the outcome
         for w in waiters {
             let wake = match outcome {
-                Ok(value) => Wake::Joined { value },
-                Err(error) => Wake::Failed { error },
+                DetachedOutcome::Done(value) => Wake::Joined { value },
+                DetachedOutcome::Failed(error) => Wake::Failed { error },
+                DetachedOutcome::Cancelled => Wake::JoinedCancelled,
             };
             if let Some(t) = self.sched.tasks.get_mut(w.0).and_then(|t| t.as_mut()) {
                 t.wake = Some(wake);
                 self.sched.ready.push_back(w);
             }
         }
+    }
+
+    /// `handle.cancel`: request cancellation of detached task `target`. No-op if it is
+    /// no longer running. Otherwise flag it (raised at its next checkpoint, unwinding
+    /// `finally`) and nudge it toward that checkpoint promptly: abort its in-flight I/O
+    /// future, or dequeue-and-wake it if it is parked in `join`.
+    pub fn request_cancel(&mut self, target: TaskId) {
+        let Some(t) = self.sched.tasks.get_mut(target.0).and_then(|t| t.as_mut()) else {
+            return; // already finished
+        };
+        t.cancel_requested = true;
+        if target == self.sched.current_task {
+            self.sched.cancel_current = true;
+            return;
+        }
+        if let Some(ah) = t.abort_handle.take() {
+            ah.abort(); // parked on I/O: the aborted future wakes it
+        } else if let Some(joined) = t.joining.take() {
+            // parked on join: dequeue from the target's waiters and make it runnable.
+            if let Some(jt) = self.sched.tasks.get_mut(joined.0).and_then(|t| t.as_mut()) {
+                jt.waiters.retain(|w| *w != target);
+            }
+            self.sched.ready.push_back(target);
+        }
+        // Otherwise it is already ready (or parked on its own gather — see the v1 scope
+        // note); it will see the flag when it next runs.
     }
 
     pub fn execute_validation_block(
@@ -2843,6 +2957,11 @@ impl<'gc> VmState<'gc> {
         if let Err(QuoinError::NonLocalReturn) = res {
             return Ok(VmStatus::Running);
         }
+        // Cancellation bypasses source annotation (like NonLocalReturn) so it reaches
+        // the scheduler as a bare `Cancelled` rather than wrapped in `WithSourceInfo`.
+        if let Err(QuoinError::Cancelled) = res {
+            return Err(QuoinError::Cancelled);
+        }
         if let Err(e) = res {
             return Err(self.annotate_error(e));
         }
@@ -2854,6 +2973,12 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
     ) -> Result<VmStatus<'gc>, QuoinError> {
+        // Cancellation checkpoint: a pending `cancel` raises here, then clears the live
+        // flag so the ensuing `finally` unwind runs to completion uninterrupted. Always
+        // `false` in benchmark mode (no task table), so this is a single cheap bool load.
+        if self.sched.cancel_current {
+            return Err(self.take_cancellation());
+        }
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
             // assert_eq!(self.stack.len(), 0, "Stack is not empty! {:?}", self.stack);

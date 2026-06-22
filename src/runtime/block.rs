@@ -1,4 +1,5 @@
 use crate::arg;
+use crate::error::QuoinError;
 use crate::recv;
 use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};
@@ -85,6 +86,14 @@ pub fn build_block_class() -> NativeClassBuilder {
             let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
             match res {
                 Ok(val) => Ok(val),
+                // Cancellation is not catchable: unwind frames and re-propagate so the
+                // task still cancels (a `catch:` cannot swallow it).
+                Err(QuoinError::Cancelled) => {
+                    while vm.frames.len() > initial_frame_count {
+                        vm.frames.pop();
+                    }
+                    Err(QuoinError::Cancelled)
+                }
                 Err(e) => {
                     let active_args = &vm.active_native_args.last().unwrap().args;
                     let catch_block = arg!(active_args, Block, 0);
@@ -114,6 +123,21 @@ pub fn build_block_class() -> NativeClassBuilder {
                     let finally_res = vm.execute_block(mc, finally_block, Vec::new(), None);
                     let val = vm.pop()?;
                     finally_res.map(|_| val)
+                }
+                // Cancellation runs `finally` (its always-runs guarantee holds) but is
+                // not caught — re-propagate so the task still cancels. Cancellation wins
+                // over any error the `finally` block itself raises.
+                Err(QuoinError::Cancelled) => {
+                    while vm.frames.len() > initial_frame_count {
+                        vm.frames.pop();
+                    }
+                    let active_args = &vm.active_native_args.last().unwrap().args;
+                    let finally_block = arg!(active_args, Block, 1);
+                    let _ = vm.execute_block(mc, finally_block, Vec::new(), None);
+                    while vm.frames.len() > initial_frame_count {
+                        vm.frames.pop();
+                    }
+                    Err(QuoinError::Cancelled)
                 }
                 Err(e) => {
                     while vm.frames.len() > initial_frame_count {

@@ -102,6 +102,17 @@ spawnJoin = { |r|
     handles.collect:{ |h| h.join }
 };
 
+"* Detached spawn + cancel (Stage 2b-ii): spawn one sleeper per index, cancel them
+"* all, and join. Each sleeps far longer than a round so cancel always wins (whether
+"* the task is still ready or already parked on the sleep) — deterministic under the
+"* stress knobs. Every join must observe a (catchable) cancellation, mapped to -1.
+spawnCancel = { |r|
+    handles = (0..width).collect:{ |k| Task.spawn:{ Runtime.sleep: 100000; r + k } };
+    handles.each:{ |h| h.cancel };
+    handles.collect:{ |h| { h.join }.catch:{ |ex| 0 - 1 } }
+};
+expectedCancel = (0..width).collect:{ |k| 0 - 1 };
+
 "* Compare, or fail loudly: print a greppable SOAK FAILED line to stdout (Run mode
 "* exits 0 even on an uncaught throw) and then throw to abort the loop and dump the
 "* detail to stderr.
@@ -139,7 +150,10 @@ checksum = 0;
         'spawnjoin' round (spawnJoin.value:round) (expectedCompute.value:round)
     );
 
-    "* 5. allocation pressure (give the GC debt) folded into a running checksum
+    "* 5. detached spawn + cancel-all
+    check.valueWithArgs:#( 'spawncancel' round (spawnCancel.value:round) expectedCancel );
+
+    "* 6. allocation pressure (give the GC debt) folded into a running checksum
     pressure = (0..width).collect:{ |k| (round + k) * (k + 1) };
     rsum = actual.sum + (pressure.select:{ |x| (x % 2) == 0 }).sum;
     checksum = (checksum + rsum) % 1000000007;

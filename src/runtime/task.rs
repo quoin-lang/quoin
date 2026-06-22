@@ -63,6 +63,10 @@ impl NativeTaskHandle {
         self.error = Some(unsafe { transmute::<Value<'gc>, Value<'static>>(error) });
     }
 
+    pub fn set_cancelled(&mut self) {
+        self.status = TaskStatus::Cancelled;
+    }
+
     pub fn result<'gc>(&self) -> Option<Value<'gc>> {
         self.result
             .map(|v| unsafe { transmute::<Value<'static>, Value<'gc>>(v) })
@@ -161,10 +165,20 @@ pub fn build_task_class() -> NativeClassBuilder {
                     vm.active_exception = e;
                     Err(QuoinError::Thrown)
                 }
-                TaskStatus::Cancelled => Err(QuoinError::Other(
-                    "join of a cancelled task is not yet supported".to_string(),
-                )),
+                TaskStatus::Cancelled => {
+                    Err(QuoinError::Other("joined task was cancelled".to_string()))
+                }
             }
+        })
+        // handle.cancel -> request cooperative cancellation (no-op if already done).
+        // The task raises an uncatchable Cancelled at its next checkpoint, running its
+        // `finally` blocks; joiners observe a catchable cancellation. See ASYNC_ARCH.md.
+        .instance_method("cancel", |vm, mc, receiver, _args| {
+            let (status, id) = handle_state(receiver)?;
+            if status == TaskStatus::Running {
+                vm.request_cancel(id);
+            }
+            Ok(vm.new_nil(mc))
         })
         // handle.status -> running | done | failed | cancelled
         .instance_method("status", |vm, mc, receiver, _args| {
