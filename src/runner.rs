@@ -14,12 +14,18 @@ use crate::vm::{VmOptions, VmState, VmStatus};
 
 use corosensei::CoroutineResult;
 use gc_arena::{Arena, Gc, Rootable};
-use glob::glob;
 use std::fs::read_to_string;
 use std::iter::once_with;
 use std::path::PathBuf;
 use std::process::exit;
 use std::time::Instant;
+
+/// The prelude AST: a single `qnlib/prelude.qn` whose `use core/*` loads the core
+/// stdlib (00-bootstrap … 06-io) in sorted order. Every runner mode loads this first,
+/// so the prelude composition lives in Quoin rather than a hardcoded glob here.
+fn prelude_asts() -> impl Iterator<Item = Node> {
+    once_with(|| parse_quoin_file(&PathBuf::from("qnlib/prelude.qn")))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionStatus {
@@ -113,28 +119,10 @@ impl VmRunner {
                 Ok(())
             }
             VmRunnerMode::Test => {
-                println!("Loading qnlib/*.qn...");
-                let ast_iter = glob("qnlib/*.qn")
-                    .unwrap()
-                    .filter_map(|p| {
-                        let path_buf = p.unwrap();
-                        let path_s = path_buf.display().to_string();
-                        if path_s == "qnlib/test.qn"
-                            || (!path_s.starts_with("qnlib/test")
-                                && !path_s.ends_with("main.qn")
-                                && !path_s.ends_with("benchmark.qn"))
-                        {
-                            println!("Loading file: {}", path_s);
-                            let node = parse_quoin_file(&path_buf);
-                            Some(node)
-                        } else {
-                            None
-                        }
-                    })
-                    .chain(once_with(|| {
-                        println!("Loading file: qnlib/main.qn");
-                        parse_quoin_file(&PathBuf::from("qnlib/main.qn"))
-                    }));
+                // prelude, then the test framework, then the suite runner.
+                let ast_iter = prelude_asts()
+                    .chain(once_with(|| parse_quoin_file(&PathBuf::from("qnlib/test.qn"))))
+                    .chain(once_with(|| parse_quoin_file(&PathBuf::from("qnlib/main.qn"))));
 
                 if !self.compile_and_run_asts(ast_iter) {
                     exit(1);
@@ -142,58 +130,20 @@ impl VmRunner {
                 Ok(())
             }
             VmRunnerMode::Benchmark => {
-                println!("Loading qnlib/*.qn...");
-                let ast_iter = glob("qnlib/*.qn")
-                    .unwrap()
-                    .filter_map(|p| {
-                        let path_buf = p.unwrap();
-                        let path_s = path_buf.display().to_string();
-                        if !path_s.starts_with("qnlib/test")
-                            && !path_s.ends_with("main.qn")
-                            && !path_s.ends_with("benchmark.qn")
-                        {
-                            println!("Loading file: {}", path_s);
-                            let node = parse_quoin_file(&path_buf);
-                            Some(node)
-                        } else {
-                            None
-                        }
-                    })
-                    .chain(once_with(|| {
-                        println!("Loading file: qnlib/benchmark.qn");
-                        parse_quoin_file(&PathBuf::from("qnlib/benchmark.qn"))
-                    }));
+                let ast_iter = prelude_asts()
+                    .chain(once_with(|| parse_quoin_file(&PathBuf::from("qnlib/benchmark.qn"))));
 
                 self.compile_and_benchmark(ast_iter);
                 Ok(())
             }
             VmRunnerMode::Run => {
-                println!("Loading qnlib/*.qn...");
-                let ast_iter = glob("qnlib/*.qn")
-                    .unwrap()
-                    .filter_map(|p| {
-                        let path_buf = p.unwrap();
-                        let path_s = path_buf.display().to_string();
-                        if !path_s.starts_with("qnlib/test")
-                            && !path_s.ends_with("main.qn")
-                            && !path_s.ends_with("benchmark.qn")
-                        {
-                            println!("Loading file: {}", path_s);
-                            let node = parse_quoin_file(&path_buf);
-                            Some(node)
-                        } else {
-                            None
-                        }
-                    })
-                    .chain(once_with(|| {
-                        let script_path = self
-                            .options
-                            .target_path
-                            .as_deref()
-                            .unwrap_or("qnlib/testscript.qn");
-                        println!("Loading file: {}", script_path);
-                        parse_quoin_file(&PathBuf::from(script_path))
-                    }));
+                let script_path = self
+                    .options
+                    .target_path
+                    .clone()
+                    .unwrap_or_else(|| "qnlib/testscript.qn".to_string());
+                let ast_iter = prelude_asts()
+                    .chain(once_with(move || parse_quoin_file(&PathBuf::from(&script_path))));
 
                 self.compile_and_run_asts(ast_iter);
                 Ok(())

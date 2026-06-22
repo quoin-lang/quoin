@@ -1,0 +1,4 @@
+"* The core standard library. `use core/*` loads qnlib/core/*.qn in UTF-8 sorted
+"* order (00-bootstrap … 06-io — zero-padded, so lexicographic == numeric). Every
+"* runner mode loads this first; user scripts get it automatically.
+use core/*;
