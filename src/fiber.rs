@@ -38,10 +38,17 @@ pub enum YieldReason<'gc> {
     },
     /// A fiber is suspending to perform async I/O. The plain-data request bubbles to
     /// the scheduler, which fulfills it via the `IoBackend` and resumes the fiber with
-    /// the result in `Scheduler::pending_io_result`. See `docs/ASYNC_ARCH.md`.
+    /// the result in `Scheduler::wake`. See `docs/ASYNC_ARCH.md`.
     AwaitIo {
         #[collect(require_static)]
         req: IoRequest,
+    },
+    /// The running task is spawning one child task per block and parking until all
+    /// of them complete (`Async.gather:`). The blocks carry `Gc` just like
+    /// `CallBlock`; the scheduler spawns the children and resumes the parent with the
+    /// list of results in `Scheduler::wake`. See `docs/ASYNC_ARCH.md` (Stage 2a).
+    Gather {
+        blocks: Vec<Gc<'gc, Block<'gc>>>,
     },
 }
 

@@ -128,6 +128,62 @@ pub struct Task<'gc> {
     /// resuming this task's root, so it never dangles.
     #[collect(require_static)]
     pub root_yielder: Option<*const ()>,
+    /// The block this task runs. `None` for the main task (#0), whose block is
+    /// already started into the live context before the task is created. A spawned
+    /// child carries its block here and starts it on first activation (`started`).
+    pub block: Option<Gc<'gc, Block<'gc>>>,
+    /// Whether the root coroutine has begun. The first activation of a child
+    /// installs an empty live context and starts `block` (mirrors guest fibers).
+    pub started: bool,
+    /// Stashed per-task slice of `VmState`, valid only while this task is *not* the
+    /// current one (the live task keeps these in `VmState` directly). Saved/restored
+    /// across a task switch by `save_task_context`/`load_task_context`.
+    pub stack: Vec<Value<'gc>>,
+    pub frames: Vec<Frame<'gc>>,
+    pub native_args: Vec<NativeCall<'gc>>,
+    pub current_fiber: Option<Value<'gc>>,
+    pub resume_stack: Vec<Option<Value<'gc>>>,
+    /// Result to deliver when this task is next resumed (an I/O result, or a gather
+    /// outcome). Stashed here while parked; moved into `Scheduler::wake` by
+    /// `load_task_context`, then taken by `await_io`/`await_gather`.
+    pub wake: Option<Wake<'gc>>,
+    /// For a gather *child*: which parent task awaits it, and the result slot index
+    /// to report into. `None` for the main task and any future detached task.
+    #[collect(require_static)]
+    pub parent: Option<(TaskId, usize)>,
+    /// For a task parked in `gather`: the children it is waiting on and their
+    /// results so far.
+    pub gather: Option<GatherState<'gc>>,
+}
+
+/// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
+/// reaches zero, with `results` (in spawn order) or the `first_error` a child hit.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct GatherState<'gc> {
+    pub pending: usize,
+    pub results: Vec<Option<Value<'gc>>>,
+    #[collect(require_static)]
+    pub first_error: Option<QuoinError>,
+}
+
+/// The value the scheduler delivers to a parked task on resume. Plain I/O results
+/// and gather errors carry no `Gc`; a gather's result list does. Unifies what were
+/// two separate Stage-1 slots so a growing scheduler has one delivery channel.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub enum Wake<'gc> {
+    Io {
+        #[collect(require_static)]
+        result: IoResult,
+    },
+    Gather {
+        list: Value<'gc>,
+    },
+    GatherErr {
+        #[collect(require_static)]
+        error: QuoinError,
+    },
 }
 
 /// Coroutine / guest-fiber scheduler state, grouped out of [`VmState`] for
@@ -174,13 +230,11 @@ pub struct Scheduler<'gc> {
     /// An error raised inside a guest fiber, delivered to its resumer.
     #[collect(require_static)]
     pub fiber_error: Option<QuoinError>,
-    /// I/O round-trip slots (Stage 1). `await_io` suspends with the request in
-    /// `pending_io_request`; the driver fulfills it and stashes the answer in
-    /// `pending_io_result` before resuming. Both plain data — they cross the yield.
-    #[collect(require_static)]
-    pub pending_io_request: Option<IoRequest>,
-    #[collect(require_static)]
-    pub pending_io_result: Option<IoResult>,
+    /// Delivery slot for the *current* task, loaded from its `Task::wake` just
+    /// before resuming and taken by `await_io`/`await_gather` (Stage 2a). The
+    /// outgoing I/O request no longer needs a slot — the driver receives it
+    /// directly from the `AwaitIo` suspension.
+    pub wake: Option<Wake<'gc>>,
 }
 
 #[derive(Collect)]
@@ -324,8 +378,7 @@ impl<'gc> VmState<'gc> {
                 main_saved_frames: Vec::new(),
                 main_saved_native_args: Vec::new(),
                 fiber_error: None,
-                pending_io_request: None,
-                pending_io_result: None,
+                wake: None,
             },
             method_cache: FxHashMap::default(),
             dispatch_uncacheable: false,
@@ -1226,9 +1279,8 @@ impl<'gc> VmState<'gc> {
     /// Suspend the running coroutine to perform async I/O, returning the result the
     /// scheduler delivers on resume. Mirrors `fiber_yield`: the request bubbles up as
     /// `YieldReason::AwaitIo`, and on resume the driver has stashed the answer in
-    /// `self.sched.pending_io_result`. Only plain data crosses the yield. Works from
-    /// the main program too (it runs as a task whose root coroutine has its own
-    /// `root_yielder`).
+    /// `self.sched.wake`. Only plain data crosses the yield. Works from the main
+    /// program too (it runs as a task whose root coroutine has its own `root_yielder`).
     #[allow(no_gc_across_yield)]
     pub fn await_io(&mut self, req: IoRequest) -> Result<IoResult, QuoinError> {
         if let Some(yielder) = unsafe { self.get_yielder() } {
@@ -1239,10 +1291,38 @@ impl<'gc> VmState<'gc> {
             ));
         }
         // On resume the driver has stashed the result for us.
-        self.sched
-            .pending_io_result
-            .take()
-            .ok_or_else(|| QuoinError::Other("I/O resumed without a result".to_string()))
+        match self.sched.wake.take() {
+            Some(Wake::Io { result }) => Ok(result),
+            _ => Err(QuoinError::Other(
+                "I/O resumed without a result".to_string(),
+            )),
+        }
+    }
+
+    /// Suspend the running task to spawn one child task per block and wait for all of
+    /// them (`Async.gather:`). The blocks bubble up as `YieldReason::Gather`; the
+    /// scheduler runs the children concurrently and resumes this task with the list of
+    /// results in `self.sched.wake` (or the first child error). See `docs/ASYNC_ARCH.md`.
+    #[allow(no_gc_across_yield)]
+    pub fn await_gather(
+        &mut self,
+        blocks: Vec<Gc<'gc, Block<'gc>>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        if let Some(yielder) = unsafe { self.get_yielder() } {
+            yielder.suspend(YieldReason::Gather { blocks });
+        } else {
+            return Err(QuoinError::Other(
+                "gather attempted outside the VM scheduler".to_string(),
+            ));
+        }
+        // On resume the driver has stashed the assembled result list (or an error).
+        match self.sched.wake.take() {
+            Some(Wake::Gather { list }) => Ok(list),
+            Some(Wake::GatherErr { error }) => Err(error),
+            _ => Err(QuoinError::Other(
+                "gather resumed without a result".to_string(),
+            )),
+        }
     }
 
     fn fiber_status(&self, fiber_val: Value<'gc>) -> Result<FiberStatus, QuoinError> {
@@ -1423,6 +1503,185 @@ impl<'gc> VmState<'gc> {
             Err(err) => self.sched.fiber_error = Some(err),
         }
         Ok(())
+    }
+
+    // =====================================================================
+    // Task scheduling support (Stage 2a)
+    //
+    // A top-level task owns a private slice of `VmState` (the data stack, frame
+    // stack, native-call stack, and its guest-fiber chain). The *current* task
+    // keeps that slice live in `VmState`; every other task stashes it in its
+    // `Task`. `save_task_context`/`load_task_context` swap the slice in and out at
+    // a task switch — the I/O-parking analogue of `save_/load_fiber_context`. The
+    // driver in `runner.rs` decides *when* to switch; these just move the state.
+    // =====================================================================
+
+    /// Stash the live per-task context into `tasks[tid]` (the task is parking or
+    /// being preempted). Mailboxes (`fiber_transfer`/`fiber_error`) are empty at
+    /// every switch boundary, so they are not saved.
+    pub fn save_task_context(&mut self, tid: TaskId) {
+        let stack = std::mem::take(&mut self.stack);
+        let frames = std::mem::take(&mut self.frames);
+        let native_args = std::mem::take(&mut self.active_native_args);
+        let current_fiber = self.sched.current_fiber.take();
+        let resume_stack = std::mem::take(&mut self.sched.resume_stack);
+        let t = self.sched.tasks[tid.0]
+            .as_mut()
+            .expect("save_task_context: task slot is empty");
+        t.stack = stack;
+        t.frames = frames;
+        t.native_args = native_args;
+        t.current_fiber = current_fiber;
+        t.resume_stack = resume_stack;
+    }
+
+    /// Make `tid` the current task and restore its context into `VmState`. The
+    /// caller must already have saved (or discarded) the outgoing task's context.
+    /// On a child's first activation, installs an empty context and starts its block.
+    pub fn load_task_context(&mut self, mc: &Mutation<'gc>, tid: TaskId) {
+        self.sched.current_task = tid;
+        let started = self.sched.tasks[tid.0]
+            .as_ref()
+            .expect("load_task_context: task slot is empty")
+            .started;
+        if started {
+            let t = self.sched.tasks[tid.0].as_mut().unwrap();
+            self.stack = std::mem::take(&mut t.stack);
+            self.frames = std::mem::take(&mut t.frames);
+            self.active_native_args = std::mem::take(&mut t.native_args);
+            self.sched.current_fiber = t.current_fiber.take();
+            self.sched.resume_stack = std::mem::take(&mut t.resume_stack);
+            self.sched.wake = t.wake.take();
+        } else {
+            // First activation: a fresh, empty live context, then start the block.
+            self.stack = Vec::new();
+            self.frames = Vec::new();
+            self.active_native_args = Vec::new();
+            self.sched.current_fiber = None;
+            self.sched.resume_stack = Vec::new();
+            self.sched.wake = None;
+            let block = self.sched.tasks[tid.0]
+                .as_ref()
+                .unwrap()
+                .block
+                .expect("a spawned task must carry a block");
+            self.start_block(mc, block, Vec::new(), None, None);
+            self.sched.tasks[tid.0].as_mut().unwrap().started = true;
+        }
+    }
+
+    /// Spawn one child task per block, parking the current task on a fresh
+    /// `GatherState`. Returns the new child ids (in spawn order) for the driver to
+    /// enqueue as ready. The current task's context is saved here.
+    pub fn spawn_gather(
+        &mut self,
+        mc: &Mutation<'gc>,
+        blocks: Vec<Gc<'gc, Block<'gc>>>,
+    ) -> Vec<TaskId> {
+        let parent = self.sched.current_task;
+        self.save_task_context(parent);
+        let n = blocks.len();
+        self.sched.tasks[parent.0].as_mut().unwrap().gather = Some(GatherState {
+            pending: n,
+            results: vec![None; n],
+            first_error: None,
+        });
+        let mut ids = Vec::with_capacity(n);
+        for (slot, block) in blocks.into_iter().enumerate() {
+            let coro = Fiber::new(|yielder, ctx| crate::fiber::run_vm_loop(yielder, ctx));
+            let task = Task {
+                coro: gc!(mc, coro),
+                root_yielder: None,
+                block: Some(block),
+                started: false,
+                stack: Vec::new(),
+                frames: Vec::new(),
+                native_args: Vec::new(),
+                current_fiber: None,
+                resume_stack: Vec::new(),
+                wake: None,
+                parent: Some((parent, slot)),
+                gather: None,
+            };
+            ids.push(self.alloc_task(task));
+        }
+        ids
+    }
+
+    /// Install `task` in the first free slot (reusing a finished task's slot to keep
+    /// the table from growing without bound), returning its id.
+    fn alloc_task(&mut self, task: Task<'gc>) -> TaskId {
+        if let Some(i) = self.sched.tasks.iter().position(|t| t.is_none()) {
+            self.sched.tasks[i] = Some(task);
+            TaskId(i)
+        } else {
+            self.sched.tasks.push(Some(task));
+            TaskId(self.sched.tasks.len() - 1)
+        }
+    }
+
+    /// A gather child `cur` finished with `result`. Record it into its parent's
+    /// `GatherState`, free the child slot, and — once every sibling has finished —
+    /// deliver the assembled result list (or the first error) to the parent and
+    /// return the parent's id (now runnable). Returns `None` while siblings remain.
+    pub fn complete_child(
+        &mut self,
+        mc: &Mutation<'gc>,
+        cur: TaskId,
+        result: Result<Value<'gc>, QuoinError>,
+    ) -> Option<TaskId> {
+        let (parent, slot) = self.sched.tasks[cur.0]
+            .as_ref()
+            .expect("complete_child: child slot is empty")
+            .parent
+            .expect("complete_child: child has no parent");
+        self.sched.tasks[cur.0] = None; // free the child
+
+        let done = {
+            let pt = self.sched.tasks[parent.0]
+                .as_mut()
+                .expect("complete_child: parent slot is empty");
+            let g = pt
+                .gather
+                .as_mut()
+                .expect("complete_child: parent is not gathering");
+            match result {
+                Ok(val) => g.results[slot] = Some(val),
+                Err(e) => {
+                    if g.first_error.is_none() {
+                        g.first_error = Some(e);
+                    }
+                }
+            }
+            g.pending -= 1;
+            g.pending == 0
+        };
+        if !done {
+            return None;
+        }
+
+        // All children finished: assemble the wake (no borrow held across `new_list`).
+        let gather = self.sched.tasks[parent.0]
+            .as_mut()
+            .unwrap()
+            .gather
+            .take()
+            .unwrap();
+        let wake = match gather.first_error {
+            Some(error) => Wake::GatherErr { error },
+            None => {
+                let vals = gather
+                    .results
+                    .into_iter()
+                    .map(|o| o.expect("a finished gather has every result"))
+                    .collect();
+                Wake::Gather {
+                    list: self.new_list(mc, vals),
+                }
+            }
+        };
+        self.sched.tasks[parent.0].as_mut().unwrap().wake = Some(wake);
+        Some(parent)
     }
 
     pub fn execute_validation_block(

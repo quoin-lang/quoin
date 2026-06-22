@@ -3,22 +3,27 @@ use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
 use crate::highlighter::highlight_to_ansi;
-use crate::io_backend::{IoBackend, SmolBackend};
+use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend};
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file};
 use crate::runtime::{
-    block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method, nil,
-    object, regex, runtime, set, string, symbol, timer,
+    async_rt, block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method,
+    nil, object, regex, runtime, set, string, symbol, timer,
 };
-use crate::value::{Block, NamespacedName};
-use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus};
+use crate::value::{Block, NamespacedName, Value};
+use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
 
 use corosensei::CoroutineResult;
+use futures_lite::StreamExt;
 use futures_lite::future::block_on;
-use gc_arena::{Arena, Gc, Rootable};
+use futures_util::stream::FuturesUnordered;
+use gc_arena::{Arena, Gc, Mutation, Rootable};
+use std::collections::VecDeque;
 use std::fs::read_to_string;
+use std::future::Future;
 use std::iter::once_with;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::exit;
 use std::time::Instant;
 
@@ -29,14 +34,137 @@ fn prelude_asts() -> impl Iterator<Item = Node> {
     once_with(|| parse_quoin_file(&PathBuf::from("qnlib/prelude.qn")))
 }
 
+/// Step status for the benchmark driver, which runs a single fiber to completion
+/// with no async I/O (the run/test driver uses `RunStep` and the task scheduler).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionStatus {
     Running,
-    /// The running coroutine suspended on `AwaitIo`; the request is parked in
-    /// `vm.sched.pending_io_request` for the driver to fulfill.
-    AwaitIo,
     Finished,
     Yeeted,
+}
+
+/// A boxed, single-threaded I/O completion future tagged with the task that is
+/// waiting on it. The scheduler keeps these in a `FuturesUnordered` and resumes a
+/// task the instant its op completes — that `.next().await` is the one reactor wait.
+type IoTaskFuture = Pin<Box<dyn Future<Output = (TaskId, IoResult)>>>;
+
+/// What the current task did when the run/test scheduler resumed it once.
+enum RunStep {
+    /// Made progress (a step, a block call, or a guest-fiber switch) and is still
+    /// the current task.
+    Running,
+    /// Parked on async I/O. Its context is already saved; the driver fulfills `req`
+    /// and resumes it later with the result.
+    ParkedIo(IoRequest),
+    /// Spawned these children (created and enqueued elsewhere) and parked on a
+    /// gather; the driver runs the children, then resumes this task.
+    Spawned(Vec<TaskId>),
+    /// A non-main task finished. `woke` is a parent whose gather just completed and
+    /// is now runnable, if any.
+    Done { woke: Option<TaskId> },
+    /// The main task (#0) finished — the program is done; its result is on the stack.
+    Finished,
+}
+
+/// Resume the current task's coroutine once and classify what happened. The guest
+/// `Fiber` switches (`ResumeFiber`/`YieldFiber`) and the GC-cooperative yield stay
+/// internal to the task; only I/O, gather, and completion surface to the driver.
+fn resume_current_task<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+) -> Result<RunStep, QuoinError> {
+    // Resume the coroutine of the currently-running fiber: a guest `Fiber` if one is
+    // active in this task, otherwise the task's own root coroutine.
+    let coro_holder = match vm.sched.current_fiber {
+        None => match vm
+            .sched
+            .tasks
+            .get(vm.sched.current_task.0)
+            .and_then(|t| t.as_ref())
+        {
+            Some(task) => task.coro,
+            None => return Ok(RunStep::Finished),
+        },
+        Some(fv) => fv
+            .with_native_state::<fiber_class::NativeFiberState, _, _>(|s| s.coro())
+            .map_err(QuoinError::Other)?,
+    };
+
+    // Point `vm.sched.yielder` at the coroutine we're about to run, sourced from its
+    // own GC-rooted slot, so it never dangles.
+    vm.sched.yielder = vm.current_fiber_yielder();
+
+    let ctx = VMContext {
+        vm: vm as *mut _,
+        mc: mc as *const _,
+    };
+    let res = {
+        let mut opt = coro_holder.coroutine.borrow_mut();
+        let coro = opt.as_mut().expect("Coroutine already finished");
+        coro.resume(ctx)
+    };
+
+    match res {
+        CoroutineResult::Yield(YieldReason::CooperativeYield)
+        | CoroutineResult::Yield(YieldReason::CallBlock { .. }) => Ok(RunStep::Running),
+        CoroutineResult::Yield(YieldReason::ResumeFiber { fiber, arg }) => {
+            vm.do_resume_switch(mc, fiber, arg)?;
+            Ok(RunStep::Running)
+        }
+        CoroutineResult::Yield(YieldReason::YieldFiber { value }) => {
+            vm.do_yield_switch(mc, value)?;
+            Ok(RunStep::Running)
+        }
+        CoroutineResult::Yield(YieldReason::AwaitIo { req }) => {
+            // Park: stash this task's context so another can run while I/O is in flight.
+            vm.save_task_context(vm.sched.current_task);
+            Ok(RunStep::ParkedIo(req))
+        }
+        CoroutineResult::Yield(YieldReason::Gather { blocks }) => {
+            let children = vm.spawn_gather(mc, blocks);
+            Ok(RunStep::Spawned(children))
+        }
+        CoroutineResult::Yield(YieldReason::Return(val)) => complete_current_task(vm, mc, Ok(val)),
+        CoroutineResult::Return(res) => {
+            if vm.sched.current_fiber.is_some() {
+                // A guest fiber's block returned; hand the result back to its resumer
+                // and keep running this same task.
+                vm.do_fiber_done(mc, res)?;
+                Ok(RunStep::Running)
+            } else {
+                complete_current_task(vm, mc, res)
+            }
+        }
+    }
+}
+
+/// The current task's root coroutine completed with `result`. A gather child reports
+/// to its parent (which may become runnable); the main task ends the program, leaving
+/// its result on the stack.
+fn complete_current_task<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    result: Result<Value<'gc>, QuoinError>,
+) -> Result<RunStep, QuoinError> {
+    let cur = vm.sched.current_task;
+    let has_parent = vm.sched.tasks[cur.0]
+        .as_ref()
+        .map(|t| t.parent.is_some())
+        .unwrap_or(false);
+    if has_parent {
+        Ok(RunStep::Done {
+            woke: vm.complete_child(mc, cur, result),
+        })
+    } else {
+        vm.sched.tasks[cur.0] = None;
+        match result {
+            Ok(val) => {
+                vm.push(val);
+                Ok(RunStep::Finished)
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 pub struct VmRunnerOptions {
@@ -176,6 +304,7 @@ impl VmRunner {
             vm.register_native_class(mc, list::build_list_class());
             vm.register_native_class(mc, set::build_set_class());
             vm.register_native_class(mc, runtime::build_runtime_class());
+            vm.register_native_class(mc, async_rt::build_async_class());
             vm.register_native_class(mc, method::build_method_class());
             vm.register_native_class(mc, timer::build_timer_class());
             vm.register_native_class(mc, double::build_double_class());
@@ -249,135 +378,97 @@ impl VmRunner {
 
                 // The main program runs as task #0; the run/test driver schedules
                 // over the task table (benchmark mode uses `active_fiber` instead).
+                // Its block is already started into the live context above, so this
+                // task is pre-started and its context lives in `VmState` until it parks.
                 let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
                 vm.sched.tasks = vec![Some(Task {
                     coro: gc!(mc, fiber),
                     root_yielder: None,
+                    block: None,
+                    started: true,
+                    stack: Vec::new(),
+                    frames: Vec::new(),
+                    native_args: Vec::new(),
+                    current_fiber: None,
+                    resume_stack: Vec::new(),
+                    wake: None,
+                    parent: None,
+                    gather: None,
                 })];
                 vm.sched.current_task = TaskId(0);
             });
 
-            // The backend lives outside the arena and is the only async code; the VM
-            // suspends with a plain `AwaitIo` request and the driver fulfills it here.
+            // The scheduler: run tasks until each parks on I/O or finishes, overlapping
+            // their I/O via a `FuturesUnordered`. The backend lives outside the arena and
+            // is the only async code; the await on `futures` is the single reactor wait.
             let backend = SmolBackend::new();
+            let mut ready: VecDeque<TaskId> = VecDeque::new();
+            let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
+            // Task #0 starts current and already live; nothing to load on first resume.
+            let mut current: Option<TaskId> = Some(TaskId(0));
+            let mut needs_load = false;
+
             block_on(async {
                 let mut step_count = 0;
                 loop {
-                    let status = arena.mutate_root(|mc, vm| {
-                        // Resume the coroutine of the currently-running fiber: a guest
-                        // `Fiber` if one is active, otherwise the main program (#0).
-                        let coro_holder = match vm.sched.current_fiber {
-                            None => match vm
-                                .sched
-                                .tasks
-                                .get(vm.sched.current_task.0)
-                                .and_then(|t| t.as_ref())
-                            {
-                                Some(task) => task.coro,
-                                None => return Ok(ExecutionStatus::Finished),
-                            },
-                            Some(fv) => fv
-                                .with_native_state::<fiber_class::NativeFiberState, _, _>(|s| {
-                                    s.coro()
-                                })
-                                .map_err(QuoinError::Other)?,
-                        };
-
-                        // Point `vm.sched.yielder` at the coroutine we're about to run,
-                        // sourced from its own GC-rooted slot, so it never dangles.
-                        vm.sched.yielder = vm.current_fiber_yielder();
-
-                        let ctx = VMContext {
-                            vm: vm as *mut _,
-                            mc: mc as *const _,
-                        };
-                        let res = {
-                            let mut opt = coro_holder.coroutine.borrow_mut();
-                            let coro = opt.as_mut().expect("Coroutine already finished");
-                            coro.resume(ctx)
-                        };
-
-                        match res {
-                            CoroutineResult::Yield(YieldReason::CooperativeYield)
-                            | CoroutineResult::Yield(YieldReason::CallBlock { .. }) => {
-                                Ok(ExecutionStatus::Running)
-                            }
-                            CoroutineResult::Yield(YieldReason::ResumeFiber { fiber, arg }) => {
-                                vm.do_resume_switch(mc, fiber, arg)?;
-                                Ok(ExecutionStatus::Running)
-                            }
-                            CoroutineResult::Yield(YieldReason::YieldFiber { value }) => {
-                                vm.do_yield_switch(mc, value)?;
-                                Ok(ExecutionStatus::Running)
-                            }
-                            CoroutineResult::Yield(YieldReason::AwaitIo { req }) => {
-                                // Park the request; the driver fulfills it outside the
-                                // arena borrow and resumes with the result.
-                                vm.sched.pending_io_request = Some(req);
-                                Ok(ExecutionStatus::AwaitIo)
-                            }
-                            CoroutineResult::Yield(YieldReason::Return(val)) => {
-                                let cur = vm.sched.current_task.0;
-                                vm.sched.tasks[cur] = None;
-                                vm.push(val);
-                                Ok(ExecutionStatus::Finished)
-                            }
-                            CoroutineResult::Return(res) => {
-                                if vm.sched.current_fiber.is_some() {
-                                    // A guest fiber's block returned; hand the result
-                                    // back to its resumer and keep scheduling.
-                                    vm.do_fiber_done(mc, res)?;
-                                    Ok(ExecutionStatus::Running)
-                                } else {
-                                    let cur = vm.sched.current_task.0;
-                                    vm.sched.tasks[cur] = None;
-                                    match res {
-                                        Ok(val) => {
-                                            vm.push(val);
-                                            Ok(ExecutionStatus::Finished)
-                                        }
-                                        Err(err) => Err(err),
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    match status {
-                        Ok(ExecutionStatus::Running) => {
-                            step_count += 1;
-                            if crate::tuning::gc_stress() || step_count % 10 == 0 {
-                                arena.collect_debt();
-                            }
-                        }
-                        Ok(ExecutionStatus::AwaitIo) => {
-                            // Outside the arena borrow: the single `.await` in the VM.
-                            let req = arena.mutate_root(|_mc, vm| {
-                                vm.sched
-                                    .pending_io_request
-                                    .take()
-                                    .expect("AwaitIo yielded without a pending request")
-                            });
-                            let result = backend.perform(req).await;
+                    // Pick the next task to run when the previous one parked or finished:
+                    // a ready task, else (if any I/O is in flight) wait for a completion.
+                    if current.is_none() {
+                        if let Some(tid) = ready.pop_front() {
+                            current = Some(tid);
+                            needs_load = true;
+                        } else if !futures.is_empty() {
+                            let (tid, result) = futures.next().await.expect("futures is non-empty");
                             arena.mutate_root(|_mc, vm| {
-                                vm.sched.pending_io_result = Some(result);
+                                vm.sched.tasks[tid.0]
+                                    .as_mut()
+                                    .expect("woken task slot is empty")
+                                    .wake = Some(Wake::Io { result });
                             });
-                            step_count += 1;
-                            if crate::tuning::gc_stress() || step_count % 10 == 0 {
-                                arena.collect_debt();
+                            current = Some(tid);
+                            needs_load = true;
+                        } else {
+                            break; // nothing ready and nothing in flight
+                        }
+                    }
+                    let cur = current.expect("current task set above");
+                    if needs_load {
+                        arena.mutate_root(|mc, vm| vm.load_task_context(mc, cur));
+                        needs_load = false;
+                    }
+
+                    let step = arena.mutate_root(|mc, vm| resume_current_task(vm, mc));
+                    match step {
+                        Ok(RunStep::Running) => {}
+                        Ok(RunStep::ParkedIo(req)) => {
+                            // Hand the op to the backend; the future is tagged with the
+                            // parked task so its result routes back on completion.
+                            let fut = backend.perform(req);
+                            futures.push(Box::pin(async move { (cur, fut.await) }));
+                            current = None;
+                        }
+                        Ok(RunStep::Spawned(children)) => {
+                            for child in children {
+                                ready.push_back(child);
                             }
+                            current = None;
                         }
-                        Ok(ExecutionStatus::Finished) => {
-                            break;
+                        Ok(RunStep::Done { woke }) => {
+                            if let Some(parent) = woke {
+                                ready.push_back(parent);
+                            }
+                            current = None;
                         }
-                        Ok(ExecutionStatus::Yeeted) => {
-                            aborted = true;
-                            break;
-                        }
+                        Ok(RunStep::Finished) => break,
                         Err(e) => {
                             eprintln!("VM execution error: {}", e);
                             aborted = true;
                             break;
                         }
+                    }
+                    step_count += 1;
+                    if crate::tuning::gc_stress() || step_count % 10 == 0 {
+                        arena.collect_debt();
                     }
                 }
             });
@@ -472,7 +563,8 @@ impl VmRunner {
                     | CoroutineResult::Yield(YieldReason::YieldFiber { .. }) => {
                         panic!("guest fibers are not supported in benchmark mode")
                     }
-                    CoroutineResult::Yield(YieldReason::AwaitIo { .. }) => {
+                    CoroutineResult::Yield(YieldReason::AwaitIo { .. })
+                    | CoroutineResult::Yield(YieldReason::Gather { .. }) => {
                         panic!("async I/O is not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
@@ -532,6 +624,7 @@ impl VmRunner {
             vm.register_native_class(mc, list::build_list_class());
             vm.register_native_class(mc, set::build_set_class());
             vm.register_native_class(mc, runtime::build_runtime_class());
+            vm.register_native_class(mc, async_rt::build_async_class());
             vm.register_native_class(mc, method::build_method_class());
             vm.register_native_class(mc, timer::build_timer_class());
             vm.register_native_class(mc, double::build_double_class());
@@ -621,9 +714,6 @@ impl VmRunner {
                         if crate::tuning::gc_stress() || step_count % 10 == 0 {
                             arena.collect_debt();
                         }
-                    }
-                    Ok(ExecutionStatus::AwaitIo) => {
-                        unreachable!("benchmark initialization does not perform async I/O")
                     }
                     Ok(ExecutionStatus::Finished) => {
                         break;
