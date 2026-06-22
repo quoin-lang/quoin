@@ -1,6 +1,7 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **design**, not yet implemented. Companion to `USE_ARCH.md`.
+Status: **Stages 0–2a implemented**; Stages 2b–6 are design. Companion to
+`USE_ARCH.md`. See the *Staged plan* below for what has landed.
 
 ## Decision
 
@@ -207,6 +208,40 @@ synchronous steps, and the park is on the whole set of in-flight ops at once. So
 `block_on` sleeps exactly when there is no CPU work left — the deliberate opposite
 of the current CPU-bound step loop, which always has a next instruction.
 
+### As implemented (Stages 1–2a)
+
+The schedulable unit is a top-level **task** (`vm::Task`), kept distinct from a
+guest `Fiber` (an asymmetric `resume`/`yield` coroutine): a task is scheduled by
+the runner; a fiber is a generator driven from QN. Both ride the same `corosensei`
+primitive. A task owns a private slice of `VmState` (the data/frame/native stacks
+plus its guest-fiber chain, `current_fiber`/`resume_stack`); the *current* task
+keeps that slice live in `VmState`, every other task stashes it in its `Task`.
+`save_task_context`/`load_task_context` swap the slice at a task switch — the
+I/O-parking analogue of `save_/load_fiber_context`, and it runs entirely inside one
+`mutate_root`, so the swap is atomic with respect to collection and the task table
+roots every parked task's stashed `Gc` context.
+
+- **Stage 1 = Level 1.** `Runtime.sleep:` proves the round-trip; the whole VM parks.
+- **Stage 2a = Level 2.** The run/test driver is a real scheduler: a ready queue
+  plus a `FuturesUnordered<(TaskId, IoResult)>` (from `futures-util`), whose
+  `.next().await` is the one reactor wait. The Stage-1 `pending_io_*` slots are
+  unified into a single `Wake` delivery channel (`Io` / `Gather` / `GatherErr`).
+- **The concurrency primitive is `Async.gather:[blocks] -> list`** (the only one in
+  2a): spawn one child task per block, overlap their I/O, return results in spawn
+  order (or propagate the first child error). Gather is structured — every task has
+  exactly one parent awaiting it, so there are no orphans and teardown stays small.
+  Detached `Task.spawn:`/join and cancellation are **Stage 2b** (deferred).
+
+**Scheduling policy: run-to-block.** A task runs until it parks on I/O or finishes,
+then the next ready task runs (a CPU-bound task blocking its siblings is the
+documented single-threaded model). `QN_SCHED_STRESS` flips this to a randomized,
+preemptive scheduler for testing: it preempts at every cooperative-yield boundary —
+forcing the `save_/load_task_context` round-trip on *every* step — and picks ready
+tasks at random instead of FIFO, which also randomizes gather-child and I/O-wakeup
+ordering. Seeded (SplitMix64) for reproducible replay; the seed is announced once on
+stderr. The existing suites are expected to stay green across a seed sweep, including
+combined with `QN_GC_STRESS`. See `src/tuning.rs`.
+
 ## Cross-cutting concerns
 
 - **Cancellation.** If a parked fiber is killed/collected, the scheduler drops its
@@ -221,34 +256,53 @@ of the current CPU-bound step loop, which always has a next instruction.
   values, different backend — the filesystem-agnostic goal from `USE_ARCH.md`
   carries straight over (this is the I/O analogue of `PackageResolver`).
 
-## Dependencies to add
+## Dependencies
 
-- `async-io` (reactor) + `futures-lite` (`block_on`, `LocalBoxFuture`, combinators)
-- `async-net` (or `blocking` directly) for async DNS
+Added through Stage 2a:
+
+- `async-io` (reactor) + `futures-lite` (`block_on`, `StreamExt`, combinators)
+- `futures-util` (`alloc` only) for `FuturesUnordered` — the scheduler's set of
+  in-flight ops
+
+Still to add for later stages:
+
+- `async-net` (or `blocking` directly) for async DNS (Stage 3)
 - `futures-rustls` + `rustls` (+ `webpki-roots` / `rustls-native-certs`) for TLS
-- `httparse` for HTTP/1.1 header parsing
-- Edition is already 2024, so `async fn` in traits is available; we still return
-  `LocalBoxFuture` from `IoBackend::perform` for `dyn` object-safety.
+  (Stage 4)
+- `httparse` for HTTP/1.1 header parsing (Stage 5)
+- `IoBackend::perform` returns a plain `Pin<Box<dyn Future<Output = IoResult>>>`
+  (`'static` — each future owns the `Rc` clones it needs and borrows nothing from
+  `&self`), which keeps the `FuturesUnordered` free of lifetime entanglement.
 
 ## Staged plan
 
 Each stage is independently committable, builds clean, and ships a test.
 
-**Stage 0 — backend scaffolding (no VM wiring).**
+**Stage 0 — backend scaffolding (no VM wiring). ✅ done.**
 Add deps. Define `IoRequest`/`IoResult`/`StreamId`/`IoBackend`. Implement
-`SmolBackend` (resource registry, `Sleep`/`Resolve`/`Connect`/`Read`/`Write`/
-`Close`) and `MockBackend`. *Test:* pure-Rust unit tests — `block_on` a connect to
-a local `TcpListener`, echo bytes, assert; mock returns canned data.
+`SmolBackend` (resource registry, `Sleep`/`Connect`/`Read`/`Write`/`Close`) and
+`MockBackend`. *Test:* pure-Rust unit tests — `block_on` a connect to a local
+`TcpListener`, echo bytes, assert; mock returns canned data. (`Resolve`/DNS deferred
+to Stage 3.)
 
-**Stage 1 — the seam (`AwaitIo` + async driver, single op).**
-Add `YieldReason::AwaitIo`, `VmState::await_io`, the runner's `block_on` wrapper
-and `AwaitIo` arm. Wire `Runtime sleep:` (or `Fiber sleep:`) to `IoRequest::Sleep`.
-*Test:* a `.qn` program that sleeps and observes elapsed time — proves a value
-round-trips out to the backend and back into QN. (No inter-fiber overlap yet.)
+**Stage 1 — the seam (`AwaitIo` + async driver, single op). ✅ done.**
+Added `YieldReason::AwaitIo`, `VmState::await_io`, the runner's `block_on` wrapper
+and `AwaitIo` arm. Wired `Runtime.sleep:` to `IoRequest::Sleep`. (Also extracted the
+fiber/coroutine fields into a `Scheduler` sub-struct.) *Test:* a `.qn` program that
+sleeps and observes elapsed time — a value round-trips out to the backend and back.
 
-**Stage 2 — concurrent scheduler.**
-Introduce the ready-queue + parked-set + `FuturesUnordered` (Level 2). *Test:*
-spawn many fibers each sleeping N ms concurrently; assert total ≈ N, not N×count.
+**Stage 2a — concurrent scheduler. ✅ done.**
+Promoted the run/test driver to a real scheduler over a top-level task table:
+ready-queue + `FuturesUnordered` (Level 2), per-task context swap, the unified `Wake`
+channel, and the `Async.gather:` primitive. Added `QN_SCHED_STRESS` (seeded
+preemptive + randomized scheduling) to harden the state swap. *Test:* `Async.gather:`
+of eight 30 ms sleeps finishes in ≈ 30 ms not 240 ms; results in spawn order; plus a
+seed sweep over the existing suites. See *As implemented* above.
+
+**Stage 2b — detached tasks + structured concurrency (deferred).**
+`Task.spawn:` returning a handle, `join`/`await`, and cancellation (drop the in-flight
+future + `Close` owned resources). Introduces a second park flavor (parked-on-task).
+Design once the surfaced API needs more than `gather`.
 
 **Stage 3 — TCP sockets stdlib.**
 `src/runtime/net.rs`: a `Socket` class over `StreamId` with `connect:`/`read:`/
@@ -279,7 +333,8 @@ hit by a QN client, both on the same scheduler.
 - **`hyper` 1.x core via a smol shim** — a maintained HTTP engine + HTTP/2 path
   while staying on smol, if hand-rolled HTTP/1.1 outgrows itself (its `hyper::rt`
   traits are runtime-agnostic; the adapter from `async-io` streams is small).
-- **Structured concurrency / cancellation API in QN** (e.g. nurseries, deadlines)
-  — worth designing once Stage 2 lands, but out of scope here.
+- **Structured concurrency / cancellation API in QN** (e.g. nurseries, deadlines,
+  detached `Task.spawn:` + join) — this is **Stage 2b**, to design now that 2a's
+  scheduler is in place; `Async.gather:` is the only 2a surface.
 - **Exact QN-facing API shapes** (`Socket` vs `TcpStream` naming, blocking-looking
   `read:` semantics, error model) — settle during Stage 3.
