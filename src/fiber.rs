@@ -1,7 +1,7 @@
 use crate::error::QuoinError;
 use crate::io_backend::IoRequest;
 use crate::value::{Block, Value};
-use crate::vm::{VmState, VmStatus};
+use crate::vm::{TaskId, VmState, VmStatus};
 
 use corosensei::stack::DefaultStack;
 use gc_arena::{Collect, Gc, Mutation};
@@ -49,6 +49,14 @@ pub enum YieldReason<'gc> {
     /// list of results in `Scheduler::wake`. See `docs/ASYNC_ARCH.md` (Stage 2a).
     Gather {
         blocks: Vec<Gc<'gc, Block<'gc>>>,
+    },
+    /// The running task is parking in `join` on another (detached) task. The plain
+    /// `TaskId` bubbles to the scheduler; the joiner was already added to the target's
+    /// waiter list, and is resumed with the outcome in `Scheduler::wake` when the
+    /// target completes. See `docs/ASYNC_ARCH.md` (Stage 2b).
+    Join {
+        #[collect(require_static)]
+        task: TaskId,
     },
 }
 

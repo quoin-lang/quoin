@@ -13,6 +13,7 @@ use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
+use crate::runtime::task::NativeTaskHandle;
 use crate::symbol::{Symbol, self_symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeCall, NativeClass, NativeFunc,
@@ -23,7 +24,7 @@ use crate::{ansi_colorizer, gc, gcl};
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use regex::Regex;
 use rustc_hash::FxHashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::mem::transmute;
 use std::path::Path;
 use std::{cmp, fs};
@@ -148,12 +149,21 @@ pub struct Task<'gc> {
     /// `load_task_context`, then taken by `await_io`/`await_gather`.
     pub wake: Option<Wake<'gc>>,
     /// For a gather *child*: which parent task awaits it, and the result slot index
-    /// to report into. `None` for the main task and any future detached task.
+    /// to report into. `None` for the main task and any detached task.
     #[collect(require_static)]
     pub parent: Option<(TaskId, usize)>,
     /// For a task parked in `gather`: the children it is waiting on and their
     /// results so far.
     pub gather: Option<GatherState<'gc>>,
+    /// For a *detached* (`Task.spawn:`) task: its QN handle object. A running task
+    /// roots its handle here, so the handle cannot vanish while the task runs; on
+    /// completion `complete_detached` writes the outcome into the handle and frees
+    /// this slot, after which the handle lives by normal QN reachability. `None` for
+    /// gather children and the main task.
+    pub handle: Option<Value<'gc>>,
+    /// Tasks parked in `join` on this one, woken with the outcome on completion.
+    #[collect(require_static)]
+    pub waiters: Vec<TaskId>,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -184,6 +194,16 @@ pub enum Wake<'gc> {
         #[collect(require_static)]
         error: QuoinError,
     },
+    /// A joined task finished normally; `value` is its result.
+    Joined {
+        value: Value<'gc>,
+    },
+    /// A joined task finished with an uncaught exception; `error` is the exception
+    /// value, re-raised in the joiner (a *catchable* throw — distinct from the
+    /// joiner's own cancellation).
+    Failed {
+        error: Value<'gc>,
+    },
 }
 
 /// Coroutine / guest-fiber scheduler state, grouped out of [`VmState`] for
@@ -207,6 +227,11 @@ pub struct Scheduler<'gc> {
     /// task. The run/test driver schedules over this. (Benchmark mode uses the
     /// simpler single-root `active_fiber` path below and leaves this empty.)
     pub tasks: Vec<Option<Task<'gc>>>,
+    /// Runnable task ids. `spawn`/`gather`/completion/I/O-wakeup all enqueue here;
+    /// the driver pops the next task to run (FIFO, or random under `QN_SCHED_STRESS`).
+    /// Lives here (not in the runner) so a native `spawn` can enqueue without parking.
+    #[collect(require_static)]
+    pub ready: VecDeque<TaskId>,
     /// The task whose per-task state is currently live in `VmState`.
     #[collect(require_static)]
     pub current_task: TaskId,
@@ -369,6 +394,7 @@ impl<'gc> VmState<'gc> {
             sched: Scheduler {
                 yielder: None,
                 tasks: Vec::new(),
+                ready: VecDeque::new(),
                 current_task: TaskId(0),
                 active_fiber: None,
                 current_fiber: None,
@@ -1325,6 +1351,43 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Park the running task until `target` (a still-running detached task) finishes,
+    /// returning its result — or re-raising its exception (a catchable throw). Called
+    /// from `handle.join` only when the handle's status is `Running`; the join of an
+    /// already-finished task reads the outcome straight off the handle without parking.
+    #[allow(no_gc_across_yield)]
+    pub fn await_join(&mut self, target: TaskId) -> Result<Value<'gc>, QuoinError> {
+        // Register as a waiter on the target before suspending (same step, so the
+        // target cannot complete in between).
+        let me = self.sched.current_task;
+        match self.sched.tasks.get_mut(target.0).and_then(|t| t.as_mut()) {
+            Some(t) => t.waiters.push(me),
+            None => {
+                return Err(QuoinError::Other(
+                    "join target is no longer running".to_string(),
+                ));
+            }
+        }
+        if let Some(yielder) = unsafe { self.get_yielder() } {
+            yielder.suspend(YieldReason::Join { task: target });
+        } else {
+            return Err(QuoinError::Other(
+                "join attempted outside the VM scheduler".to_string(),
+            ));
+        }
+        // On resume the driver has stashed the outcome.
+        match self.sched.wake.take() {
+            Some(Wake::Joined { value }) => Ok(value),
+            Some(Wake::Failed { error }) => {
+                self.active_exception = Some(error);
+                Err(QuoinError::Thrown)
+            }
+            _ => Err(QuoinError::Other(
+                "join resumed without a result".to_string(),
+            )),
+        }
+    }
+
     fn fiber_status(&self, fiber_val: Value<'gc>) -> Result<FiberStatus, QuoinError> {
         fiber_val
             .with_native_state::<NativeFiberState, _, _>(|s| s.status)
@@ -1571,13 +1634,9 @@ impl<'gc> VmState<'gc> {
     }
 
     /// Spawn one child task per block, parking the current task on a fresh
-    /// `GatherState`. Returns the new child ids (in spawn order) for the driver to
-    /// enqueue as ready. The current task's context is saved here.
-    pub fn spawn_gather(
-        &mut self,
-        mc: &Mutation<'gc>,
-        blocks: Vec<Gc<'gc, Block<'gc>>>,
-    ) -> Vec<TaskId> {
+    /// `GatherState` and enqueueing the children as ready (in spawn order). The
+    /// current task's context is saved here.
+    pub fn spawn_gather(&mut self, mc: &Mutation<'gc>, blocks: Vec<Gc<'gc, Block<'gc>>>) {
         let parent = self.sched.current_task;
         self.save_task_context(parent);
         let n = blocks.len();
@@ -1586,26 +1645,54 @@ impl<'gc> VmState<'gc> {
             results: vec![None; n],
             first_error: None,
         });
-        let mut ids = Vec::with_capacity(n);
         for (slot, block) in blocks.into_iter().enumerate() {
-            let coro = Fiber::new(|yielder, ctx| crate::fiber::run_vm_loop(yielder, ctx));
-            let task = Task {
-                coro: gc!(mc, coro),
-                root_yielder: None,
-                block: Some(block),
-                started: false,
-                stack: Vec::new(),
-                frames: Vec::new(),
-                native_args: Vec::new(),
-                current_fiber: None,
-                resume_stack: Vec::new(),
-                wake: None,
-                parent: Some((parent, slot)),
-                gather: None,
-            };
-            ids.push(self.alloc_task(task));
+            let task = self.new_child_task(mc, block, Some((parent, slot)), None);
+            let id = self.alloc_task(task);
+            self.sched.ready.push_back(id);
         }
-        ids
+    }
+
+    /// Spawn a detached task running `block` and return its QN handle. The spawner is
+    /// not parked — the new task is enqueued as ready and runs when scheduled; the
+    /// handle (a `Task`-class object over the new id) is rooted by the task while it
+    /// runs and receives the outcome on completion (see `complete_detached`).
+    pub fn spawn_detached(&mut self, mc: &Mutation<'gc>, block: Gc<'gc, Block<'gc>>) -> Value<'gc> {
+        // Reserve the slot first so the handle can carry the real id, then root the
+        // handle back on the task.
+        let task = self.new_child_task(mc, block, None, None);
+        let id = self.alloc_task(task);
+        let class = self.get_or_create_builtin_class(mc, "Task");
+        let handle = self.new_native_state(mc, class, NativeTaskHandle::new(id));
+        self.sched.tasks[id.0].as_mut().unwrap().handle = Some(handle);
+        self.sched.ready.push_back(id);
+        handle
+    }
+
+    /// Build a fresh, unstarted child/detached task wrapping `block`.
+    fn new_child_task(
+        &self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        parent: Option<(TaskId, usize)>,
+        handle: Option<Value<'gc>>,
+    ) -> Task<'gc> {
+        let coro = Fiber::new(|yielder, ctx| crate::fiber::run_vm_loop(yielder, ctx));
+        Task {
+            coro: gc!(mc, coro),
+            root_yielder: None,
+            block: Some(block),
+            started: false,
+            stack: Vec::new(),
+            frames: Vec::new(),
+            native_args: Vec::new(),
+            current_fiber: None,
+            resume_stack: Vec::new(),
+            wake: None,
+            parent,
+            gather: None,
+            handle,
+            waiters: Vec::new(),
+        }
     }
 
     /// Install `task` in the first free slot (reusing a finished task's slot to keep
@@ -1621,15 +1708,15 @@ impl<'gc> VmState<'gc> {
     }
 
     /// A gather child `cur` finished with `result`. Record it into its parent's
-    /// `GatherState`, free the child slot, and — once every sibling has finished —
-    /// deliver the assembled result list (or the first error) to the parent and
-    /// return the parent's id (now runnable). Returns `None` while siblings remain.
+    /// `GatherState` and free the child slot; once every sibling has finished, deliver
+    /// the assembled result list (or the first error) to the parent and enqueue it as
+    /// ready.
     pub fn complete_child(
         &mut self,
         mc: &Mutation<'gc>,
         cur: TaskId,
         result: Result<Value<'gc>, QuoinError>,
-    ) -> Option<TaskId> {
+    ) {
         let (parent, slot) = self.sched.tasks[cur.0]
             .as_ref()
             .expect("complete_child: child slot is empty")
@@ -1657,7 +1744,7 @@ impl<'gc> VmState<'gc> {
             g.pending == 0
         };
         if !done {
-            return None;
+            return;
         }
 
         // All children finished: assemble the wake (no borrow held across `new_list`).
@@ -1681,7 +1768,53 @@ impl<'gc> VmState<'gc> {
             }
         };
         self.sched.tasks[parent.0].as_mut().unwrap().wake = Some(wake);
-        Some(parent)
+        self.sched.ready.push_back(parent);
+    }
+
+    /// A detached task `cur` finished with `result`. Write the outcome into its handle,
+    /// wake every joiner with that outcome, and free the slot. After this the handle
+    /// lives by normal QN reachability and carries the result for any later `join`.
+    pub fn complete_detached(
+        &mut self,
+        mc: &Mutation<'gc>,
+        cur: TaskId,
+        result: Result<Value<'gc>, QuoinError>,
+    ) {
+        let handle = self.sched.tasks[cur.0]
+            .as_ref()
+            .expect("complete_detached: slot is empty")
+            .handle
+            .expect("complete_detached: task has no handle");
+        // The outcome value: the result, or the task's exception value (the parked
+        // Quoin exception, or a converted internal error) so `join` can re-raise it.
+        let outcome: Result<Value<'gc>, Value<'gc>> = match result {
+            Ok(val) => Ok(val),
+            Err(ref e) => Err(match self.active_exception {
+                Some(v) => v,
+                None => self.quoinerror_to_value(mc, e),
+            }),
+        };
+        let _ = handle.with_native_state_mut::<NativeTaskHandle, _, _>(mc, |h| match outcome {
+            Ok(val) => h.set_done(val),
+            Err(err) => h.set_failed(err),
+        });
+        let waiters = std::mem::take(
+            &mut self.sched.tasks[cur.0]
+                .as_mut()
+                .expect("complete_detached: slot is empty")
+                .waiters,
+        );
+        self.sched.tasks[cur.0] = None; // free the slot; the handle keeps the outcome
+        for w in waiters {
+            let wake = match outcome {
+                Ok(value) => Wake::Joined { value },
+                Err(error) => Wake::Failed { error },
+            };
+            if let Some(t) = self.sched.tasks.get_mut(w.0).and_then(|t| t.as_mut()) {
+                t.wake = Some(wake);
+                self.sched.ready.push_back(w);
+            }
+        }
     }
 
     pub fn execute_validation_block(

@@ -16,4 +16,5 @@ pub mod runtime;
 pub mod set;
 pub mod string;
 pub mod symbol;
+pub mod task;
 pub mod timer;

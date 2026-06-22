@@ -8,7 +8,7 @@ use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file};
 use crate::runtime::{
     async_rt, block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method,
-    nil, object, regex, runtime, set, string, symbol, timer,
+    nil, object, regex, runtime, set, string, symbol, task, timer,
 };
 use crate::value::{Block, NamespacedName, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -18,7 +18,6 @@ use futures_lite::StreamExt;
 use futures_lite::future::block_on;
 use futures_util::stream::FuturesUnordered;
 use gc_arena::{Arena, Gc, Mutation, Rootable};
-use std::collections::VecDeque;
 use std::fs::read_to_string;
 use std::future::Future;
 use std::iter::once_with;
@@ -88,12 +87,12 @@ enum RunStep {
     /// Parked on async I/O. Its context is already saved; the driver fulfills `req`
     /// and resumes it later with the result.
     ParkedIo(IoRequest),
-    /// Spawned these children (created and enqueued elsewhere) and parked on a
-    /// gather; the driver runs the children, then resumes this task.
-    Spawned(Vec<TaskId>),
-    /// A non-main task finished. `woke` is a parent whose gather just completed and
-    /// is now runnable, if any.
-    Done { woke: Option<TaskId> },
+    /// Parked waiting on other tasks — a `gather` batch, or a `join` — which were
+    /// already wired up (children/waiters enqueued, context saved) inside the resume.
+    /// The driver just picks the next ready task; the wakeup comes from a completion.
+    Parked,
+    /// A non-main task finished; its waker(s) were already enqueued to `ready`.
+    Done,
     /// The main task (#0) finished — the program is done; its result is on the stack.
     Finished,
 }
@@ -153,8 +152,15 @@ fn resume_current_task<'gc>(
             Ok(RunStep::ParkedIo(req))
         }
         CoroutineResult::Yield(YieldReason::Gather { blocks }) => {
-            let children = vm.spawn_gather(mc, blocks);
-            Ok(RunStep::Spawned(children))
+            // Park the parent on its gather; children are enqueued inside spawn_gather.
+            vm.spawn_gather(mc, blocks);
+            Ok(RunStep::Parked)
+        }
+        CoroutineResult::Yield(YieldReason::Join { .. }) => {
+            // The joiner already added itself to the target's waiter list in await_join;
+            // park its context until the target completes and wakes it.
+            vm.save_task_context(vm.sched.current_task);
+            Ok(RunStep::Parked)
         }
         CoroutineResult::Yield(YieldReason::Return(val)) => complete_current_task(vm, mc, Ok(val)),
         CoroutineResult::Return(res) => {
@@ -170,23 +176,25 @@ fn resume_current_task<'gc>(
     }
 }
 
-/// The current task's root coroutine completed with `result`. A gather child reports
-/// to its parent (which may become runnable); the main task ends the program, leaving
-/// its result on the stack.
+/// The current task's root coroutine completed with `result`. Dispatch by kind: a
+/// gather child reports into its parent's batch; a detached task writes its outcome to
+/// its handle and wakes joiners; the main task ends the program, leaving its result on
+/// the stack. The first two enqueue any woken task to `ready` themselves.
 fn complete_current_task<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     result: Result<Value<'gc>, QuoinError>,
 ) -> Result<RunStep, QuoinError> {
     let cur = vm.sched.current_task;
-    let has_parent = vm.sched.tasks[cur.0]
+    let task = vm.sched.tasks[cur.0]
         .as_ref()
-        .map(|t| t.parent.is_some())
-        .unwrap_or(false);
-    if has_parent {
-        Ok(RunStep::Done {
-            woke: vm.complete_child(mc, cur, result),
-        })
+        .expect("completing task slot is empty");
+    if task.parent.is_some() {
+        vm.complete_child(mc, cur, result);
+        Ok(RunStep::Done)
+    } else if task.handle.is_some() {
+        vm.complete_detached(mc, cur, result);
+        Ok(RunStep::Done)
     } else {
         vm.sched.tasks[cur.0] = None;
         match result {
@@ -337,6 +345,7 @@ impl VmRunner {
             vm.register_native_class(mc, set::build_set_class());
             vm.register_native_class(mc, runtime::build_runtime_class());
             vm.register_native_class(mc, async_rt::build_async_class());
+            vm.register_native_class(mc, task::build_task_class());
             vm.register_native_class(mc, method::build_method_class());
             vm.register_native_class(mc, timer::build_timer_class());
             vm.register_native_class(mc, double::build_double_class());
@@ -426,18 +435,21 @@ impl VmRunner {
                     wake: None,
                     parent: None,
                     gather: None,
+                    handle: None,
+                    waiters: Vec::new(),
                 })];
                 vm.sched.current_task = TaskId(0);
             });
 
             // The scheduler: run tasks until each parks on I/O or finishes, overlapping
-            // their I/O via a `FuturesUnordered`. The backend lives outside the arena and
-            // is the only async code; the await on `futures` is the single reactor wait.
-            // `QN_SCHED_STRESS` turns on a seeded PRNG that preempts at every cooperative
-            // yield and picks ready tasks at random — exercising the per-task state swap
-            // and a wide range of interleavings. Without it the scheduler is run-to-block.
+            // their I/O via a `FuturesUnordered`. The runnable set is `vm.sched.ready`
+            // (so a native `spawn` can enqueue directly); the backend lives outside the
+            // arena and is the only async code; the await on `futures` is the single
+            // reactor wait. `QN_SCHED_STRESS` turns on a seeded PRNG that preempts at
+            // every cooperative yield and picks ready tasks at random — exercising the
+            // per-task state swap and a wide range of interleavings. Without it the
+            // scheduler is run-to-block.
             let backend = SmolBackend::new();
-            let mut ready: VecDeque<TaskId> = VecDeque::new();
             let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
             let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
             // Announce the seed once per process so a failing run is reproducible with
@@ -453,31 +465,41 @@ impl VmRunner {
             block_on(async {
                 let mut step_count = 0;
                 loop {
-                    // Acquire a task to run after the previous one parked, spawned, or
-                    // finished. Completed I/O feeds `ready`, so one selection path covers
-                    // both freshly-ready tasks and I/O wakeups.
+                    // Acquire a task to run after the previous one parked or finished:
+                    // pick from `ready` (random under stress); if none are ready but I/O
+                    // is in flight, await a completion, which feeds `ready`, and retry.
                     if current.is_none() {
-                        if ready.is_empty() {
-                            if futures.is_empty() {
-                                break; // nothing ready and nothing in flight
+                        let picked = arena.mutate_root(|_mc, vm| {
+                            let n = vm.sched.ready.len();
+                            if n == 0 {
+                                None
+                            } else {
+                                let idx = rng.as_mut().map(|r| r.below(n)).unwrap_or(0);
+                                Some(vm.sched.ready.remove(idx).expect("idx within ready"))
                             }
-                            // The single reactor wait: park until some task's I/O lands.
-                            let (tid, result) = futures.next().await.expect("futures is non-empty");
-                            arena.mutate_root(|_mc, vm| {
-                                vm.sched.tasks[tid.0]
-                                    .as_mut()
-                                    .expect("woken task slot is empty")
-                                    .wake = Some(Wake::Io { result });
-                            });
-                            ready.push_back(tid);
+                        });
+                        match picked {
+                            Some(tid) => {
+                                current = Some(tid);
+                                needs_load = true;
+                            }
+                            None => {
+                                if futures.is_empty() {
+                                    break; // nothing ready and nothing in flight
+                                }
+                                // The single reactor wait: park until some I/O lands.
+                                let (tid, result) =
+                                    futures.next().await.expect("futures is non-empty");
+                                arena.mutate_root(|_mc, vm| {
+                                    vm.sched.tasks[tid.0]
+                                        .as_mut()
+                                        .expect("woken task slot is empty")
+                                        .wake = Some(Wake::Io { result });
+                                    vm.sched.ready.push_back(tid);
+                                });
+                                continue;
+                            }
                         }
-                        // Pick a ready task — at random under scheduler stress, else FIFO.
-                        let idx = match rng.as_mut() {
-                            Some(r) => r.below(ready.len()),
-                            None => 0,
-                        };
-                        current = Some(ready.remove(idx).expect("idx within ready"));
-                        needs_load = true;
                     }
                     let cur = current.expect("current task set above");
                     if needs_load {
@@ -493,8 +515,10 @@ impl VmRunner {
                             // round-trip runs every step and task ordering varies. Without
                             // stress, keep running it (run-to-block).
                             if rng.is_some() {
-                                arena.mutate_root(|_mc, vm| vm.save_task_context(cur));
-                                ready.push_back(cur);
+                                arena.mutate_root(|_mc, vm| {
+                                    vm.save_task_context(cur);
+                                    vm.sched.ready.push_back(cur);
+                                });
                                 current = None;
                             }
                         }
@@ -506,16 +530,9 @@ impl VmRunner {
                             futures.push(Box::pin(async move { (cur, fut.await) }));
                             current = None;
                         }
-                        Ok(RunStep::Spawned(children)) => {
-                            for child in children {
-                                ready.push_back(child);
-                            }
-                            current = None;
-                        }
-                        Ok(RunStep::Done { woke }) => {
-                            if let Some(parent) = woke {
-                                ready.push_back(parent);
-                            }
+                        // Parked on a gather batch or a join, or finished: any task that
+                        // became runnable was already enqueued to `ready` in the resume.
+                        Ok(RunStep::Parked) | Ok(RunStep::Done) => {
                             current = None;
                         }
                         Ok(RunStep::Finished) => break,
@@ -623,7 +640,8 @@ impl VmRunner {
                         panic!("guest fibers are not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::AwaitIo { .. })
-                    | CoroutineResult::Yield(YieldReason::Gather { .. }) => {
+                    | CoroutineResult::Yield(YieldReason::Gather { .. })
+                    | CoroutineResult::Yield(YieldReason::Join { .. }) => {
                         panic!("async I/O is not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
@@ -684,6 +702,7 @@ impl VmRunner {
             vm.register_native_class(mc, set::build_set_class());
             vm.register_native_class(mc, runtime::build_runtime_class());
             vm.register_native_class(mc, async_rt::build_async_class());
+            vm.register_native_class(mc, task::build_task_class());
             vm.register_native_class(mc, method::build_method_class());
             vm.register_native_class(mc, timer::build_timer_class());
             vm.register_native_class(mc, double::build_double_class());

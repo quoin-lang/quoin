@@ -42,4 +42,36 @@
             { 3 }
         ) } equalTo:#(1 2 3);
     };
+
+    "* Stage 2b: a detached `Task.spawn:` runs concurrently with the spawner; `join`
+    "* parks until it finishes and returns its result.
+    .test:
+    spawnAndJoinReturnsResult -> {
+        .is:{ (Task.spawn:{ Runtime.sleep: 10; 42 }).join } equalTo:42;
+    };
+
+    "* The result is re-readable: joining twice yields the same value (Promise-style).
+    .test:
+    joinIsReadableMoreThanOnce -> {
+        h = Task.spawn:{ 7 };
+        .is:{ h.join } equalTo:7;
+        .is:{ h.join } equalTo:7;
+    };
+
+    "* Detached tasks overlap: eight 30ms tasks joined together finish well under the
+    "* 240ms a serial run would take.
+    .test:
+    spawnedTasksRunConcurrently -> {
+        .is:{ Timer.time:{
+            hs = (0..8).collect:{ |k| Task.spawn:{ Runtime.sleep: 30; k } };
+            hs.each:{ |h| h.join }
+        } } lessThan:150;
+    };
+
+    "* A failed task re-raises its exception out of `join` — catchable, not the
+    "* joiner's own (uncatchable) cancellation.
+    .test:
+    joinReRaisesTaskFailure -> {
+        .is:{ { (Task.spawn:{ 'boom'.throw }).join }.catch:{ |ex| ex } } equalTo:'boom';
+    };
 }

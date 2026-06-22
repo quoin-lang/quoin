@@ -1,7 +1,7 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **Stages 0–2a implemented**; Stages 2b–6 are design. Companion to
-`USE_ARCH.md`. See the *Staged plan* below for what has landed.
+Status: **Stages 0–2a and 2b-i implemented**; 2b-ii (cancel) and Stages 3–6 are
+design. Companion to `USE_ARCH.md`. See the *Staged plan* below for what has landed.
 
 ## Decision
 
@@ -299,7 +299,7 @@ preemptive + randomized scheduling) to harden the state swap. *Test:* `Async.gat
 of eight 30 ms sleeps finishes in ≈ 30 ms not 240 ms; results in spawn order; plus a
 seed sweep over the existing suites. See *As implemented* above.
 
-**Stage 2b — detached tasks (designed; not yet implemented).**
+**Stage 2b — detached tasks (2b-i done; 2b-ii pending).**
 `Task.spawn:{block} -> handle`, `handle.join`, and `handle.cancel` — the unstructured
 counterpart to 2a's structured `gather`. Introduces a third park flavor
 (parked-on-task). The four design decisions below are settled; the staged plan follows.
@@ -308,14 +308,22 @@ Design notes:
 
 - **Liveness model — fire-and-forget.** The scheduler owns a spawned task's liveness
   (it is rooted by `Scheduler.tasks`), *not* the handle. Dropping/collecting the
-  handle never cancels a running task — it only governs whether a *finished* task's
-  result-slot is retained (reaped via the handle's `Drop`, the socket-style reap
-  queue). This keeps task execution independent of collector timing, which is
-  mandatory given `QN_GC_STRESS` (Model B — GC'ing the handle cancels — would make
-  task lifetime nondeterministic and stress-dependent; cf. asyncio's "Task was
-  destroyed but it is pending"). Structured "no task outlives its scope" guarantees,
-  if wanted, come later from an explicit scope/nursery (the `gather` lineage), never
-  from handle reachability.
+  handle never cancels a running task. This keeps task execution independent of
+  collector timing, which is mandatory given `QN_GC_STRESS` (Model B — GC'ing the
+  handle cancels — would make task lifetime nondeterministic and stress-dependent;
+  cf. asyncio's "Task was destroyed but it is pending"). Structured "no task outlives
+  its scope" guarantees, if wanted, come later from an explicit scope/nursery (the
+  `gather` lineage), never from handle reachability.
+  - **Outcome lives in the handle, not a retained slot.** *(Refined during 2b-i,
+    replacing the reap-queue sketch.)* A running task roots its handle via `Gc`; on
+    completion the scheduler writes the outcome (`status` + result/error) **into the
+    handle** and frees the task slot immediately. The handle then lives by normal QN
+    reachability and GC's with its result — no `Rc<RefCell>` reap queue, no GC-timed
+    slot reclamation. The reap queue is the right tool for fds (a resource *outside*
+    the arena; it stays in Stage 3), but a task result is a `Gc` *inside* the arena,
+    so there is no boundary to bridge. The handle's `TaskId` is only dereferenced
+    while `status == Running`, so a freed/reused slot is never touched through a
+    finished handle.
   - **TODO:** expose `Task.running` — the list of currently-live task handles — as a
     `Task` class method. Fire-and-forget gives no built-in join-all; surfacing the
     running set lets a user write the structured fallback *in Quoin* (e.g. a scope
@@ -372,14 +380,15 @@ Sharp edges (documented, accepted as user-error in v1 rather than engineered aga
 
 Plan:
 
-- **2b-i — spawn + join.** The `Task` handle (a GC object over a plain `TaskId`, like
-  `StreamId`); `spawn_detached(mc, block) -> handle` (allocate a task, enqueue, return
-  the handle — no park, so the runner's `ready` queue likely moves into `Scheduler` so a
-  native method can enqueue, which also subsumes `gather`'s `Spawned` hand-off); the
-  parked-on-task waiter list with `Wake::Joined` / re-thrown failure; result retention +
-  the handle-`Drop` reap queue; `Task.running`; `handle.status`. *Test:* extend
-  `async_soak.qn` with a spawn/join round (spawn N, join all, check results against the
-  serial reference) under the stress knobs. No cancellation yet.
+- **2b-i — spawn + join. ✅ done.** The `Task` handle (a GC object over a plain
+  `TaskId`, like `StreamId`); `spawn_detached(mc, block) -> handle` (allocate a task,
+  enqueue, return the handle — no park; `ready` moved into `Scheduler` so a native
+  method can enqueue, which also retired `gather`'s `Spawned` hand-off and `Done{woke}`);
+  the parked-on-task waiter list with `Wake::Joined` / `Wake::Failed` (re-raised,
+  catchable); the **outcome-in-handle** model (no reap queue — see liveness note above);
+  `Task.running`; `handle.status`/`done?`; a self-join guard. *Test:* a spawn/join round
+  in `async_soak.qn` (spawn N, join all, check against the serial reference) plus Async
+  suite tests — checksum-identical across plain / `QN_GC_STRESS` / `QN_SCHED_STRESS`.
 - **2b-ii — cancel.** Per-task cancel flag; `futures::abortable` on in-flight ops;
   `Cancelled` injection at the next `CooperativeYield`/park, unwinding `finally`;
   `Cancelled` unswallowable by `catch`; `Wake::Cancelled` delivered to joiners. *Test:*
