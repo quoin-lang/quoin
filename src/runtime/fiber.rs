@@ -226,7 +226,7 @@ pub fn build_fiber_class() -> NativeClassBuilder {
         })
         // Fiber.current -> the running fiber, or nil from the main program.
         .class_method("current", |vm, mc, _receiver, _args| {
-            Ok(vm.current_fiber.unwrap_or_else(|| vm.new_nil(mc)))
+            Ok(vm.sched.current_fiber.unwrap_or_else(|| vm.new_nil(mc)))
         })
         // f.resume / f.resume:value -> run until the next yield or completion.
         .instance_method("resume", |vm, mc, receiver, _args| {

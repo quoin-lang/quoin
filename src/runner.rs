@@ -243,7 +243,7 @@ impl VmRunner {
                 vm.start_block(mc, main_block, Vec::new(), None, None);
 
                 let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
-                vm.active_fiber = Some(gc!(mc, fiber));
+                vm.sched.active_fiber = Some(gc!(mc, fiber));
             });
 
             let mut step_count = 0;
@@ -251,8 +251,8 @@ impl VmRunner {
                 let status = arena.mutate_root(|mc, vm| {
                     // Resume the coroutine of the currently-running fiber: a guest
                     // `Fiber` if one is active, otherwise the main program (#0).
-                    let coro_holder = match vm.current_fiber {
-                        None => match vm.active_fiber {
+                    let coro_holder = match vm.sched.current_fiber {
+                        None => match vm.sched.active_fiber {
                             Some(f) => f,
                             None => return Ok(ExecutionStatus::Finished),
                         },
@@ -261,9 +261,9 @@ impl VmRunner {
                             .map_err(QuoinError::Other)?,
                     };
 
-                    // Point `vm.yielder` at the coroutine we're about to run,
+                    // Point `vm.sched.yielder` at the coroutine we're about to run,
                     // sourced from its own GC-rooted slot, so it never dangles.
-                    vm.yielder = vm.current_fiber_yielder();
+                    vm.sched.yielder = vm.current_fiber_yielder();
 
                     let ctx = VMContext {
                         vm: vm as *mut _,
@@ -289,18 +289,18 @@ impl VmRunner {
                             Ok(ExecutionStatus::Running)
                         }
                         CoroutineResult::Yield(YieldReason::Return(val)) => {
-                            vm.active_fiber = None;
+                            vm.sched.active_fiber = None;
                             vm.push(val);
                             Ok(ExecutionStatus::Finished)
                         }
                         CoroutineResult::Return(res) => {
-                            if vm.current_fiber.is_some() {
+                            if vm.sched.current_fiber.is_some() {
                                 // A guest fiber's block returned; hand the result
                                 // back to its resumer and keep scheduling.
                                 vm.do_fiber_done(mc, res)?;
                                 Ok(ExecutionStatus::Running)
                             } else {
-                                vm.active_fiber = None;
+                                vm.sched.active_fiber = None;
                                 match res {
                                     Ok(val) => {
                                         vm.push(val);
@@ -369,33 +369,33 @@ impl VmRunner {
         arena.mutate_root(|mc, vm| {
             let fiber = Fiber::new(move |yielder, mut ctx| {
                 let (vm, _mc) = unsafe { ctx.get() };
-                vm.yielder = Some(yielder as *const _ as *const ());
+                vm.sched.yielder = Some(yielder as *const _ as *const ());
 
                 loop {
                     let (vm, _mc) = unsafe { ctx.get() };
                     match vm.step(_mc) {
                         Ok(VmStatus::Running) => {
-                            vm.yielder = None;
+                            vm.sched.yielder = None;
                             ctx = yielder.suspend(YieldReason::CooperativeYield);
                             let (vm, _mc) = unsafe { ctx.get() };
-                            vm.yielder = Some(yielder as *const _ as *const ());
+                            vm.sched.yielder = Some(yielder as *const _ as *const ());
                         }
                         Ok(VmStatus::Finished(val)) => {
-                            vm.yielder = None;
+                            vm.sched.yielder = None;
                             return Ok(val);
                         }
                         Ok(VmStatus::Yeeted(val)) => {
-                            vm.yielder = None;
+                            vm.sched.yielder = None;
                             return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
                         }
                         Err(err) => {
-                            vm.yielder = None;
+                            vm.sched.yielder = None;
                             return Err(err);
                         }
                     }
                 }
             });
-            vm.active_fiber = Some(gc!(mc, fiber));
+            vm.sched.active_fiber = Some(gc!(mc, fiber));
         });
 
         let alloc_before = arena.mutate_root(|mc, _| mc.metrics().total_gc_allocation());
@@ -404,7 +404,7 @@ impl VmRunner {
         let mut step_count = 0;
         loop {
             let is_done = arena.mutate_root(|mc, vm| {
-                let Some(fiber) = vm.active_fiber else {
+                let Some(fiber) = vm.sched.active_fiber else {
                     return Ok(true);
                 };
 
@@ -425,12 +425,12 @@ impl VmRunner {
                         panic!("guest fibers are not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
-                        vm.active_fiber = None;
+                        vm.sched.active_fiber = None;
                         vm.push(val);
                         Ok(true)
                     }
                     CoroutineResult::Return(res) => {
-                        vm.active_fiber = None;
+                        vm.sched.active_fiber = None;
                         match res {
                             Ok(val) => {
                                 vm.push(val);
