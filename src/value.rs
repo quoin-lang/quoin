@@ -641,6 +641,14 @@ pub struct Class<'gc> {
     /// pointer reuse), so the cache skips any lookup whose receiver or argument
     /// class is an eigenclass.
     pub is_eigenclass: bool,
+    /// Set by `sealed!`: the class (or an instance's eigenclass) is frozen — no further
+    /// extension (`<--` / `->` / `-->` / `.mix:`) and no subclassing. (The intended
+    /// future trigger for devirtualization — a sealed class is a leaf with a fixed
+    /// method table.)
+    pub is_sealed: bool,
+    /// Set by `abstract!`: the class itself can't be instantiated (`new` / `new:`),
+    /// though concrete subclasses still can.
+    pub is_abstract: bool,
 }
 
 #[derive(Collect, Debug)]

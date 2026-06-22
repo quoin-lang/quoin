@@ -29,6 +29,7 @@ pub fn build_class_class() -> NativeClassBuilder {
         })
         .instance_method("mix:", |vm, mc, receiver, args| {
             let clz = recv!(receiver, Class);
+            vm.ensure_not_sealed(clz)?;
             let mixin = arg!(args, Class, 0);
             clz.borrow_mut(mc).mixin_classes.push(mixin);
             // Defer the mixin's requirement check to the end of the current block
@@ -47,13 +48,17 @@ pub fn build_class_class() -> NativeClassBuilder {
             }
             Ok(Value::Class(mixin))
         })
-        .instance_method("sealed!", |vm, mc, _receiver, _args| {
-            // TODO: implement this
-            Ok(vm.new_nil(mc))
+        .instance_method("sealed!", |_vm, mc, receiver, _args| {
+            // Freeze the class: no further extension or subclassing.
+            let clz = recv!(receiver, Class);
+            clz.borrow_mut(mc).is_sealed = true;
+            Ok(Value::Class(clz))
         })
-        .instance_method("abstract!", |vm, mc, _receiver, _args| {
-            // TODO: implement this
-            Ok(vm.new_nil(mc))
+        .instance_method("abstract!", |_vm, mc, receiver, _args| {
+            // Forbid instantiating this class itself (subclasses may still be).
+            let clz = recv!(receiver, Class);
+            clz.borrow_mut(mc).is_abstract = true;
+            Ok(Value::Class(clz))
         })
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs = receiver;

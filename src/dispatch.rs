@@ -83,6 +83,7 @@ impl<'gc> Callable<'gc> {
                 Ok(())
             }
             Callable::New(class_obj) => {
+                vm.ensure_instantiable(class_obj)?;
                 // `new:` consumes `args` and can error in place — keep them for the
                 // stack trace before returning (cold paths; a plain move, no clone).
                 if args.len() != 1 {
@@ -110,6 +111,7 @@ impl<'gc> Callable<'gc> {
                 Ok(())
             }
             Callable::NewNoBlock(class_obj) => {
+                vm.ensure_instantiable(class_obj)?;
                 if !args.is_empty() {
                     vm.last_send_args = args;
                     return Err(QuoinError::Other("new expects no arguments".to_string()));

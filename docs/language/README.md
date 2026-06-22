@@ -32,7 +32,7 @@ truth rather than duplicating it.
 ### Part III — Objects · [`03-objects.md`](03-objects.md)
 10. Classes, methods & extension — `<-`, `<--`, `->`, `-->`, `@var`, `.meta`
 11. Construction & initialization — `new`/`new:{}`, the `init`/`init:` chain, **block scoping corner cases**
-12. Inheritance & mixins — subclassing, method-resolution order, `.mix:`/`.can:`, `.sealed!`
+12. Inheritance & mixins — subclassing, method-resolution order, `.mix:`/`.can:`, `.sealed!`/`.abstract!`
 13. Multimethod dispatch — typed params, guard blocks, resolution
 
 ### Part IV — Patterns & errors · [`04-patterns-and-errors.md`](04-patterns-and-errors.md)

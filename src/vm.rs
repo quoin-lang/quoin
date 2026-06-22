@@ -665,6 +665,8 @@ impl<'gc> VmState<'gc> {
                     mixin_classes: Vec::new(),
                     field_slots: HashMap::new(),
                     is_eigenclass: false,
+                    is_sealed: false,
+                    is_abstract: false,
                 }
             );
             self.globals
@@ -749,6 +751,8 @@ impl<'gc> VmState<'gc> {
                     mixin_classes: Vec::new(),
                     field_slots: HashMap::new(),
                     is_eigenclass: false,
+                    is_sealed: false,
+                    is_abstract: false,
                 }
             );
 
@@ -1754,6 +1758,39 @@ impl<'gc> VmState<'gc> {
         })
     }
 
+    /// Error if `class` is `sealed!` — refuses extension (`<--` / `->` / `-->` /
+    /// `.mix:`) and subclassing of a sealed class (or an instance's sealed eigenclass).
+    pub(crate) fn ensure_not_sealed(
+        &self,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+    ) -> Result<(), QuoinError> {
+        let c = class.borrow();
+        if c.is_sealed {
+            return Err(QuoinError::Other(if c.is_eigenclass {
+                "Cannot extend a sealed instance".to_string()
+            } else {
+                format!("Cannot extend sealed class {}", c.name.to_explicit_string())
+            }));
+        }
+        Ok(())
+    }
+
+    /// Error if `class` is `abstract!` — refuses `new` / `new:` on the class itself
+    /// (concrete subclasses are unaffected, since the flag isn't inherited).
+    pub(crate) fn ensure_instantiable(
+        &self,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+    ) -> Result<(), QuoinError> {
+        let c = class.borrow();
+        if c.is_abstract {
+            return Err(QuoinError::Other(format!(
+                "Cannot instantiate abstract class {}",
+                c.name.to_explicit_string()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn get_target_class_for_def(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1792,6 +1829,8 @@ impl<'gc> VmState<'gc> {
                         mixin_classes: Vec::new(),
                         field_slots: HashMap::new(),
                         is_eigenclass: false,
+                        is_sealed: false,
+                        is_abstract: false,
                     }
                 );
                 self.globals.borrow_mut(mc).insert(ns, Value::Class(s));
@@ -1825,6 +1864,8 @@ impl<'gc> VmState<'gc> {
                             mixin_classes: Vec::new(),
                             field_slots,
                             is_eigenclass: true,
+                            is_sealed: false,
+                            is_abstract: false,
                         }
                     );
                     obj.borrow_mut(mc).class = s;
@@ -2692,6 +2733,13 @@ impl<'gc> VmState<'gc> {
                         .copied()
                         .ok_or_else(|| format!("Parent class {} not found", p_name))?;
                     if let Value::Class(parent_class) = val {
+                        if parent_class.borrow().is_sealed {
+                            return Err(format!(
+                                "Cannot subclass sealed class {}",
+                                parent_class.borrow().name.to_explicit_string()
+                            )
+                            .into());
+                        }
                         Some(parent_class)
                     } else {
                         return Err(format!("Parent {} is not a Class", p_name).into());
@@ -2732,6 +2780,8 @@ impl<'gc> VmState<'gc> {
                         mixin_classes: Vec::new(),
                         field_slots: HashMap::new(),
                         is_eigenclass: false,
+                        is_sealed: false,
+                        is_abstract: false,
                     }
                 );
                 self.globals
@@ -2783,6 +2833,7 @@ impl<'gc> VmState<'gc> {
                     let target_class = self
                         .get_target_class_for_def(mc, self_val)
                         .map_err(|e| QuoinError::Other(e))?;
+                    self.ensure_not_sealed(target_class)?;
 
                     let method_obj = self.new_method(mc, selector.clone(), block_val, false);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
@@ -2843,6 +2894,7 @@ impl<'gc> VmState<'gc> {
                     let target_class = self
                         .get_target_class_for_def(mc, self_val)
                         .map_err(|e| QuoinError::Other(e))?;
+                    self.ensure_not_sealed(target_class)?;
 
                     let method_obj = self.new_method(mc, selector.clone(), block_val, true);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
@@ -4074,6 +4126,8 @@ mod tests {
                         mixin_classes: Vec::new(),
                         field_slots: HashMap::new(),
                         is_eigenclass: false,
+                        is_sealed: false,
+                        is_abstract: false,
                     }
                 );
                 vm.globals.borrow_mut(mc).insert(
@@ -4337,6 +4391,8 @@ mod tests {
                     mixin_classes: Vec::new(),
                     field_slots: HashMap::new(),
                     is_eigenclass: false,
+                    is_sealed: false,
+                    is_abstract: false,
                 }
             );
 
@@ -4352,6 +4408,8 @@ mod tests {
                     mixin_classes: vec![point_class],
                     field_slots: HashMap::new(),
                     is_eigenclass: false,
+                    is_sealed: false,
+                    is_abstract: false,
                 }
             );
 

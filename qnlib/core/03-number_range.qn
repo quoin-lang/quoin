@@ -1,6 +1,4 @@
 NumberRange <- { | @start @end @n |
-    .sealed!;
-
     .mix:Iterate;
 
     init: -> {|start end|
@@ -24,7 +22,9 @@ NumberRange <- { | @start @end @n |
             b.valueWithSelfOrArg:i;
             i = i + @n;
         }
-    }
+    };
+
+    .sealed!;
 };
 
 Integer <-- {

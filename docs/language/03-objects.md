@@ -111,7 +111,7 @@ class's `init:` receiving the block fields whose names match its parameters.
 > - `.mix:M` mixes class `M` into the current class; its methods and instance vars are included. (There is no `.can:` alias — use `.mix:`.)
 > - A mixin may declare requirements via a class-side `assertMeetsRequirements: -> { |class| … }` (typically using `class.can?:#someMethod`). It runs at the **end of the host's definition block**, so the host may define the required methods *after* the `.mix:`. If it throws, the host class is not registered.
 > - **Initializer order is the dual of lookup**: base → derived (parent, then mixins, then self), so ancestors initialize first (§11).
-> - `.sealed!` is currently a **no-op** (intended to forbid further extension; not yet enforced).
+> - **`.sealed!`** freezes a class (or, on an instance, its eigenclass): no further `<--` / `->` / `-->` / `.mix:` and no subclassing — any attempt throws *"Cannot extend sealed …"* / *"Cannot subclass sealed class …"*. **`.abstract!`** forbids instantiating the class itself (`new` / `new:` throw *"Cannot instantiate abstract class …"*), though concrete subclasses still instantiate. The two are independent. Call `.sealed!` **last** in a body — defs *after* it are rejected.
 > - `obj.can?:X` is **overloaded**: a `Symbol`/`String` selector asks *"does it implement that method?"*; a `Class` asks *"is it an instance of / does it mix in that class?"* — e.g. `list.can?:#each:`, `list.can?:'each:'`, `list.can?:Iterate`. Works on instance, class, and metaclass receivers.
 > - The built-in `ActAsUserList` / `ActAsUserString` mixins are what enable the `#Name( … )` and `#Name'…'` custom-literal forms.
 
@@ -126,8 +126,10 @@ Widget <- {
 Widget.new.hello       "* 'hi from Widget'   (found via the mixin)
 ```
 
-> **⚠ Gotcha — `.sealed!` doesn't do anything yet.** `.sealed!` parses and runs but
-> does not actually seal the class; don't rely on it for correctness.
+> **⚠ Gotcha — seal last.** `.sealed!` takes effect immediately, so any `->` / `-->`
+> / `.mix:` *after* it in the same class body is rejected. Put `.sealed!` at the end of
+> the body (or call `Foo.sealed!` after the definition). `.abstract!` doesn't have this
+> issue — it only blocks instantiation, not extension.
 
 ---
 

@@ -110,7 +110,10 @@ this first.
    `new:{}` leaves fields `nil`; only explicit assignment binds a field (its RHS is
    lexical, but it never mutates the outer variable). A plain-assignment
    `init: { |a| @a = a }` is redundant. A child sets a parent's field via `@field`.
-10. **`.sealed!` is a stub.** It parses and runs but doesn't actually seal the class.
+10. **`.sealed!` / `.abstract!` are enforced.** `.sealed!` freezes a class (or instance
+    eigenclass) — no `<--`/`->`/`-->`/`.mix:`/subclassing — and `.abstract!` forbids
+    instantiating the class itself (subclasses still instantiate). Call `.sealed!` *last*
+    in a body, since defs after it are rejected.
 11. **`case:` matches with `~`, not `==`.** Ranges, regexes, classes, and predicate
     blocks all match; the first matching `when:` wins. Order clauses
     most-specific-first.

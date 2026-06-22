@@ -6,6 +6,17 @@ pub fn build_object_class() -> NativeClassBuilder {
         .instance_method("s", |vm, mc, receiver, _args| {
             Ok(vm.new_string(mc, format!("{}", receiver)))
         })
+        .instance_method("sealed!", |vm, mc, receiver, _args| {
+            // Seal an instance: get-or-create its eigenclass and freeze it, so further
+            // `<--` on this instance is refused. (`Class#sealed!` handles class
+            // receivers; for a value type this targets the type's shared class, matching
+            // how `value <-- {…}` extends it.)
+            let tc = vm
+                .get_target_class_for_def(mc, receiver)
+                .map_err(QuoinError::Other)?;
+            tc.borrow_mut(mc).is_sealed = true;
+            Ok(receiver)
+        })
         .instance_method("class", |vm, _mc, receiver, _args| {
             if let Some(c) = vm.get_class_for_lookup(receiver) {
                 Ok(Value::Class(c))
