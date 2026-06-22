@@ -11,7 +11,7 @@ use crate::runtime::{
     object, regex, runtime, set, string, symbol, timer,
 };
 use crate::value::{Block, NamespacedName};
-use crate::vm::{VmOptions, VmState, VmStatus};
+use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus};
 
 use corosensei::CoroutineResult;
 use futures_lite::future::block_on;
@@ -247,8 +247,14 @@ impl VmRunner {
                 );
                 vm.start_block(mc, main_block, Vec::new(), None, None);
 
+                // The main program runs as task #0; the run/test driver schedules
+                // over the task table (benchmark mode uses `active_fiber` instead).
                 let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
-                vm.sched.active_fiber = Some(gc!(mc, fiber));
+                vm.sched.tasks = vec![Some(Task {
+                    coro: gc!(mc, fiber),
+                    root_yielder: None,
+                })];
+                vm.sched.current_task = TaskId(0);
             });
 
             // The backend lives outside the arena and is the only async code; the VM
@@ -261,8 +267,13 @@ impl VmRunner {
                         // Resume the coroutine of the currently-running fiber: a guest
                         // `Fiber` if one is active, otherwise the main program (#0).
                         let coro_holder = match vm.sched.current_fiber {
-                            None => match vm.sched.active_fiber {
-                                Some(f) => f,
+                            None => match vm
+                                .sched
+                                .tasks
+                                .get(vm.sched.current_task.0)
+                                .and_then(|t| t.as_ref())
+                            {
+                                Some(task) => task.coro,
                                 None => return Ok(ExecutionStatus::Finished),
                             },
                             Some(fv) => fv
@@ -306,7 +317,8 @@ impl VmRunner {
                                 Ok(ExecutionStatus::AwaitIo)
                             }
                             CoroutineResult::Yield(YieldReason::Return(val)) => {
-                                vm.sched.active_fiber = None;
+                                let cur = vm.sched.current_task.0;
+                                vm.sched.tasks[cur] = None;
                                 vm.push(val);
                                 Ok(ExecutionStatus::Finished)
                             }
@@ -317,7 +329,8 @@ impl VmRunner {
                                     vm.do_fiber_done(mc, res)?;
                                     Ok(ExecutionStatus::Running)
                                 } else {
-                                    vm.sched.active_fiber = None;
+                                    let cur = vm.sched.current_task.0;
+                                    vm.sched.tasks[cur] = None;
                                     match res {
                                         Ok(val) => {
                                             vm.push(val);

@@ -105,15 +105,41 @@ pub struct VmOptions {
     pub console_width: Option<u16>,
 }
 
+/// Index of a top-level scheduler task in [`Scheduler::tasks`]. Plain data, so it
+/// crosses the yield boundary and the arena/runner boundary freely.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct TaskId(pub usize);
+
+/// A top-level **task**: an independently schedulable line of execution the runner
+/// owns. Distinct from a guest `Fiber` (an asymmetric coroutine driven by explicit
+/// `resume`/`yield`) — a task is scheduled by the runner, and Stage 2 overlaps the
+/// I/O of several at once. Built on the same `corosensei` coroutine primitive: each
+/// task has its own root coroutine and, while parked, its own stash of the
+/// per-task slice of `VmState` (the live task keeps that slice in `VmState`
+/// directly; see `save_task_context`/`load_task_context`, added in Stage 2a-ii).
+/// See `docs/ASYNC_ARCH.md`.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct Task<'gc> {
+    /// This task's root coroutine (the analogue of the old single `active_fiber`).
+    pub coro: Gc<'gc, Fiber<'gc>>,
+    /// The root coroutine's yielder slot (per-task replacement for the old global
+    /// `main_yielder`). The driver restores it into `Scheduler::yielder` before
+    /// resuming this task's root, so it never dangles.
+    #[collect(require_static)]
+    pub root_yielder: Option<*const ()>,
+}
+
 /// Coroutine / guest-fiber scheduler state, grouped out of [`VmState`] for
 /// legibility.
 ///
 /// All of this is execution-scheduling bookkeeping: the running coroutine's
-/// yielder (and the main program's slot), the active/current fiber, the resume
-/// chain, the value mailbox handed across a switch, the saved main-program
-/// context while a guest fiber runs, and a slot for an error raised inside a
-/// fiber. Stored inline by value in `VmState` (no indirection); split purely so
-/// the growing struct stays readable. Stage 1's I/O round-trip slots join here.
+/// yielder, the top-level task table and which one is current, the active/current
+/// fiber, the resume chain, the value mailbox handed across a switch, the saved
+/// main-program context while a guest fiber runs, and a slot for an error raised
+/// inside a fiber. Stored inline by value in `VmState` (no indirection); split
+/// purely so the growing struct stays readable. Stage 1's I/O round-trip slots
+/// join here.
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Scheduler<'gc> {
@@ -121,9 +147,15 @@ pub struct Scheduler<'gc> {
     /// running fiber's stored slot before every resume, so it can never dangle.
     #[collect(require_static)]
     pub yielder: Option<*const ()>,
-    /// The main program coroutine's yielder (the per-fiber slot for fiber #0).
+    /// Top-level task table, indexed by [`TaskId`]; a `None` slot is a finished
+    /// task. The run/test driver schedules over this. (Benchmark mode uses the
+    /// simpler single-root `active_fiber` path below and leaves this empty.)
+    pub tasks: Vec<Option<Task<'gc>>>,
+    /// The task whose per-task state is currently live in `VmState`.
     #[collect(require_static)]
-    pub main_yielder: Option<*const ()>,
+    pub current_task: TaskId,
+    /// Single root coroutine for the benchmark driver, which does not use the task
+    /// table. `None` once it finishes. The run/test driver leaves this unused.
     pub active_fiber: Option<Gc<'gc, Fiber<'gc>>>,
     /// The guest `Fiber` currently executing, or `None` when the main program
     /// (fiber #0) is running. The scheduler in the driver keeps this in sync.
@@ -231,7 +263,16 @@ impl<'gc> VmState<'gc> {
     /// the main slot) and make it live. Called once at the top of `run_vm_loop`.
     pub fn register_yielder(&mut self, mc: &Mutation<'gc>, ptr: *const ()) {
         match self.sched.current_fiber {
-            None => self.sched.main_yielder = Some(ptr),
+            None => {
+                if let Some(task) = self
+                    .sched
+                    .tasks
+                    .get_mut(self.sched.current_task.0)
+                    .and_then(|t| t.as_mut())
+                {
+                    task.root_yielder = Some(ptr);
+                }
+            }
             Some(f) => {
                 let _ =
                     f.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.set_yielder(ptr));
@@ -245,7 +286,12 @@ impl<'gc> VmState<'gc> {
     /// always points at the live, GC-rooted coroutine being run.
     pub fn current_fiber_yielder(&self) -> Option<*const ()> {
         match self.sched.current_fiber {
-            None => self.sched.main_yielder,
+            None => self
+                .sched
+                .tasks
+                .get(self.sched.current_task.0)
+                .and_then(|t| t.as_ref())
+                .and_then(|t| t.root_yielder),
             Some(f) => f
                 .with_native_state::<NativeFiberState, _, _>(|s| s.yielder())
                 .ok()
@@ -268,7 +314,8 @@ impl<'gc> VmState<'gc> {
             last_popped_env: None,
             sched: Scheduler {
                 yielder: None,
-                main_yielder: None,
+                tasks: Vec::new(),
+                current_task: TaskId(0),
                 active_fiber: None,
                 current_fiber: None,
                 resume_stack: Vec::new(),
@@ -1180,7 +1227,8 @@ impl<'gc> VmState<'gc> {
     /// scheduler delivers on resume. Mirrors `fiber_yield`: the request bubbles up as
     /// `YieldReason::AwaitIo`, and on resume the driver has stashed the answer in
     /// `self.sched.pending_io_result`. Only plain data crosses the yield. Works from
-    /// the main program too (it runs as a coroutine with `main_yielder`).
+    /// the main program too (it runs as a task whose root coroutine has its own
+    /// `root_yielder`).
     #[allow(no_gc_across_yield)]
     pub fn await_io(&mut self, req: IoRequest) -> Result<IoResult, QuoinError> {
         if let Some(yielder) = unsafe { self.get_yielder() } {
