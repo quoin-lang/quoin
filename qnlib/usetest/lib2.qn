@@ -1,0 +1,4 @@
+"* second unit in usetest/ — used to exercise the `use usetest/*` glob.
+[UseTest]Greeter2 <- {
+    greeting -> { 'hello from usetest/lib2' }
+};

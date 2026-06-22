@@ -1,0 +1,33 @@
+"* `use` packages: directory globs, the self: package, bare==std normalization,
+"* and cyclic loads. Fixtures live in non-globbed subdirs of qnlib/ (so the startup
+"* qnlib/*.qn glob doesn't auto-load them) and are pulled in only via `use`.
+use usetest/*;                  "* glob: loads usetest/lib + usetest/lib2 (UTF-8 sorted)
+use self:qnlib/useself/marker;  "* the self: package (self_root = CWD in dev mode)
+use cyc/a;                      "* a<->b cycle, terminated by the in-progress marker
+
+(TestSuite.new:{ name = 'UsePackages' }).add:{
+    .test:
+    globLoadsAllUnitsInDir -> {
+        .is:{ [UseTest]Greeter.new.greeting } equalTo:'hello from usetest/lib';
+        .is:{ [UseTest]Greeter2.new.greeting } equalTo:'hello from usetest/lib2';
+    };
+
+    .test:
+    selfPackageResolves -> {
+        .is:{ [UseSelf]Marker.new.tag } equalTo:'self marker';
+    };
+
+    .test:
+    bareAndStdAreSamePackage -> {
+        "* both name the same unit — the second is a no-op, not a redefine error.
+        use usetest/lib;
+        use std:usetest/lib;
+        .is:{ [UseTest]Greeter.new.greeting } equalTo:'hello from usetest/lib';
+    };
+
+    .test:
+    cyclicUseTerminates -> {
+        .is:{ [Cyc]A.new.name } equalTo:'A';
+        .is:{ [Cyc]B.new.name } equalTo:'B';
+    };
+};

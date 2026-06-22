@@ -10,7 +10,7 @@ use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
-use crate::runtime::runtime::load_unit;
+use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
 use crate::symbol::{self_symbol, Symbol};
 use crate::value::{
@@ -2971,11 +2971,10 @@ impl<'gc> VmState<'gc> {
                 let glob = *glob;
                 self.frames[frame_idx].ip += 1;
                 if glob {
-                    return Err(QuoinError::Other(
-                        "glob `use` (path/*) is not yet supported".to_string(),
-                    ));
+                    load_glob(self, mc, package.as_deref(), &path)?;
+                } else {
+                    load_unit(self, mc, package.as_deref(), &path)?;
                 }
-                load_unit(self, mc, package.as_deref(), &path)?;
                 // A `use` evaluates to nil — push one value so the statement nets +1 on
                 // the stack (`compile_program` pops between statements).
                 let nil = self.new_nil(mc);

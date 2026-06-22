@@ -2,7 +2,7 @@ use crate::arg;
 use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::instruction::StaticBlock;
-use crate::packages::{LoadStatus, LoadedUnit};
+use crate::packages::{canonical_package, LoadStatus, LoadedUnit};
 use crate::parser::ast::NodeValue;
 use crate::parser::parse_quoin_string_named;
 use crate::value::{Block, NativeClassBuilder, Value};
@@ -160,6 +160,9 @@ pub fn load_unit<'gc>(
     package: Option<&str>,
     path: &str,
 ) -> Result<(), QuoinError> {
+    // Bare and `std:` name the same package — canonicalize so they share one run-once
+    // key instead of double-loading the same file.
+    let package = canonical_package(package);
     if vm
         .loaded
         .iter()
@@ -188,6 +191,30 @@ pub fn load_unit<'gc>(
         .find(|u| u.package.as_deref() == package && u.path == path)
     {
         u.status = LoadStatus::Loaded;
+    }
+    Ok(())
+}
+
+/// Load every `.qn` unit directly in `dir` of `package` — a `use pkg:dir/*` glob — in
+/// UTF-8-sorted order. Each unit still goes through `load_unit`, so run-once applies.
+pub fn load_glob<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    package: Option<&str>,
+    dir: &str,
+) -> Result<(), QuoinError> {
+    let package = canonical_package(package);
+    let units = match vm.resolver.list(package, dir) {
+        Some(u) => u,
+        None => {
+            let q = package.map(|p| format!("{p}:")).unwrap_or_default();
+            return Err(QuoinError::Other(format!(
+                "use: cannot resolve glob `{q}{dir}/*`"
+            )));
+        }
+    };
+    for unit in &units {
+        load_unit(vm, mc, package, unit)?;
     }
     Ok(())
 }

@@ -1,0 +1,2 @@
+use cyc/a;
+[Cyc]B <- { name -> { 'B' } };
