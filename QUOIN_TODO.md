@@ -86,7 +86,7 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Find duplicate bits of code and refactor.
   - Spinning the VM while executing in a native method.
   - Object initialization/new:{} logic
-- [ ] **Extract the dispatch subsystem out of `vm.rs`** (which is ~5.5k lines). Move the method-dispatch
+- [x] **Extract the dispatch subsystem out of `vm.rs`** (which is ~5.5k lines). Move the method-dispatch
   machinery into its own module (e.g. `src/dispatch.rs` or `src/vm/dispatch.rs`): the `Callable` enum +
   `call`, `lookup_method`, `lookup_method_in_class_hierarchy[_rec]`, `match_score`/`score_param_types`/
   `type_distance`, `MethodCacheKey` + `method_cache_key` + `invalidate_method_cache`, and the
