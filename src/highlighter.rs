@@ -18,7 +18,7 @@
 
 use crate::ansi_colorizer;
 use crate::parser::ast::{
-    BlockNode, IdentifierNode, IdentifierType, MethodCallNode, Node, NodeValue,
+    BlockNode, IdentifierNode, IdentifierType, MethodCallNode, Node, NodeValue, UseNode,
 };
 use crate::parser::parse_quoin_string;
 use crate::value::SourceInfo;
@@ -48,6 +48,10 @@ pub enum HighlightType {
     MethodSignature,
     Global,
     Namespace,
+    /// The `use` keyword (and a slot for future keywords).
+    Keyword,
+    /// A `use` target path (and its trailing `/*` glob).
+    Path,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +96,8 @@ fn colors_for(htype: HighlightType) -> &'static [&'static str] {
         HighlightType::MethodSignature => &["#ab82ff"],
         HighlightType::Global => &["#ef65a5"],
         HighlightType::Namespace => &["#d53b82"],
+        HighlightType::Keyword => &["#e0a45a;bw"], // amber, bold
+        HighlightType::Path => &["#6aa9e0"],       // steel-blue
     }
 }
 
@@ -180,6 +186,10 @@ impl<'a> HighlightParser<'a> {
                 s.extend(self.highlight_expression(&c.rvalue, depth));
                 s
             }
+            NodeValue::Use(u) => match si_range(&stmt.source_info) {
+                Some((start, end)) => self.highlight_use(u, start, end, depth),
+                None => Vec::new(),
+            },
             _ => self.highlight_expression(stmt, depth),
         };
 
@@ -187,6 +197,51 @@ impl<'a> HighlightParser<'a> {
             Some((start, end)) => fill_in_gaps(self.source, start, end, spans, depth),
             None => spans,
         }
+    }
+
+    /// `use (pkg:)? path (/*)?` — three spans: the `use` keyword, the optional `pkg:`
+    /// qualifier (namespace hue), and the path. Offsets are derived from the statement
+    /// span: the keyword is always the first three bytes, and the target is contiguous
+    /// (no internal whitespace), so the package length locates the path. `[start, end)`
+    /// excludes the trailing `;`. The caller's `fill_in_gaps` covers the whitespace.
+    fn highlight_use(
+        &self,
+        u: &UseNode,
+        start: usize,
+        end: usize,
+        depth: usize,
+    ) -> Vec<HighlightSpan> {
+        let bytes = self.source.as_bytes();
+        let mut spans = Vec::new();
+
+        // `use` keyword.
+        let kw_end = (start + 3).min(end);
+        spans.push(HighlightSpan::new(start, kw_end, HighlightType::Keyword, depth));
+
+        // The target follows the whitespace after `use`.
+        let mut target_start = kw_end;
+        while target_start < end && bytes[target_start].is_ascii_whitespace() {
+            target_start += 1;
+        }
+
+        // Optional `pkg:` qualifier (name + colon), colored as a namespace.
+        let mut path_start = target_start;
+        if let Some(pkg) = &u.package {
+            let pkg_end = (target_start + pkg.len() + 1).min(end);
+            spans.push(HighlightSpan::new(
+                target_start,
+                pkg_end,
+                HighlightType::Namespace,
+                depth,
+            ));
+            path_start = pkg_end;
+        }
+
+        // The path itself (including any trailing `/*`).
+        if path_start < end {
+            spans.push(HighlightSpan::new(path_start, end, HighlightType::Path, depth));
+        }
+        spans
     }
 
     fn highlight_expression(&mut self, expr: &Node, depth: usize) -> Vec<HighlightSpan> {
@@ -826,6 +881,48 @@ mod tests {
             types(&spans).contains(&HighlightType::Namespace),
             "{spans:?}"
         );
+    }
+
+    #[test]
+    fn use_with_package_tags_keyword_package_path() {
+        let src = "use std:io/file;";
+        let spans = highlight(src);
+        let kw = spans
+            .iter()
+            .find(|s| s.htype == HighlightType::Keyword)
+            .unwrap();
+        assert_eq!(&src[kw.start..kw.end], "use");
+        let pkg = spans
+            .iter()
+            .find(|s| s.htype == HighlightType::Namespace)
+            .unwrap();
+        assert_eq!(&src[pkg.start..pkg.end], "std:");
+        let path = spans
+            .iter()
+            .find(|s| s.htype == HighlightType::Path)
+            .unwrap();
+        assert_eq!(&src[path.start..path.end], "io/file");
+    }
+
+    #[test]
+    fn use_without_package_globs_path_and_roundtrips() {
+        let src = "use core/*;";
+        let spans = highlight(src);
+        assert!(!types(&spans).contains(&HighlightType::Namespace), "{spans:?}");
+        let path = spans
+            .iter()
+            .find(|s| s.htype == HighlightType::Path)
+            .unwrap();
+        assert_eq!(&src[path.start..path.end], "core/*");
+        // colors strip back to the original source
+        assert_eq!(ansi_colorizer::decolorize(&highlight_to_ansi(src)), src);
+    }
+
+    #[test]
+    fn use_as_identifier_is_not_a_keyword() {
+        // `use` is a soft keyword — as a plain variable it must not be tagged Keyword.
+        let spans = highlight("use = 5;");
+        assert!(!types(&spans).contains(&HighlightType::Keyword), "{spans:?}");
     }
 
     #[test]
