@@ -135,8 +135,8 @@ This document outlines the language features, compiler updates, and VM modificat
 - [ ] Implement Decimal.
   - rust_decimal crate
 - [x] Make sure #symbol types are working.
-- [ ] Language server
-  - [ ] VSCode plugin
+- [x] Language server (~/code/quoin-language-server/)
+  - [x] VSCode plugin (~/code/quoin-language-server/editors/vscode/)
 - [ ] Integrate fff into claude for non-Rust searches
   - https://github.com/dmtrKovalenko/fff#mcp-server
 - [x] Write a document fully explaining the language semantics, including all corner cases.
