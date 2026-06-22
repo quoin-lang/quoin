@@ -201,7 +201,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                 let mut j = i;
                 while j > 0 {
                     let active_args = vm.active_native_args.last().unwrap();
-                    let (val_prev, val_curr) = active_args.receiver
+                    let (val_prev, val_curr) = active_args
+                        .receiver
                         .with_native_state::<NativeListState, _, _>(|l| {
                             (l.get_vec()[j - 1], l.get_vec()[j])
                         })
@@ -212,12 +213,14 @@ pub fn build_list_class() -> NativeClassBuilder {
                     } else if val_curr.is_nil() {
                         false
                     } else {
-                        vm.call_method(mc, val_prev, ">:", vec![val_curr])?.is_true()
+                        vm.call_method(mc, val_prev, ">:", vec![val_curr])?
+                            .is_true()
                     };
 
                     if gt_res {
                         let active_args = vm.active_native_args.last().unwrap();
-                        active_args.receiver
+                        active_args
+                            .receiver
                             .with_native_state_mut(mc, |l: &mut NativeListState| {
                                 l.get_vec_mut().swap(j - 1, j);
                             })
@@ -244,7 +247,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                     let mut j = i;
                     while j > 0 {
                         let active_args = vm.active_native_args.last().unwrap();
-                        let val_prev = active_args.receiver
+                        let val_prev = active_args
+                            .receiver
                             .with_native_state::<NativeListState, _, _>(|l| l.get_vec()[j - 1])
                             .map_err(|e| QuoinError::Other(e))?;
 
@@ -257,7 +261,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                         vm.push(key_lhs);
 
                         let active_args = vm.active_native_args.last().unwrap();
-                        let val_curr = active_args.receiver
+                        let val_curr = active_args
+                            .receiver
                             .with_native_state::<NativeListState, _, _>(|l| l.get_vec()[j])
                             .map_err(|e| QuoinError::Other(e))?;
 
@@ -279,7 +284,8 @@ pub fn build_list_class() -> NativeClassBuilder {
 
                         if gt_res {
                             let active_args = vm.active_native_args.last().unwrap();
-                            active_args.receiver
+                            active_args
+                                .receiver
                                 .with_native_state_mut(mc, |l: &mut NativeListState| {
                                     l.get_vec_mut().swap(j - 1, j);
                                 })
@@ -295,7 +301,8 @@ pub fn build_list_class() -> NativeClassBuilder {
                     let mut j = i;
                     while j > 0 {
                         let active_args = vm.active_native_args.last().unwrap();
-                        let (val_prev, val_curr) = active_args.receiver
+                        let (val_prev, val_curr) = active_args
+                            .receiver
                             .with_native_state::<NativeListState, _, _>(|l| {
                                 (l.get_vec()[j - 1], l.get_vec()[j])
                             })
@@ -310,7 +317,8 @@ pub fn build_list_class() -> NativeClassBuilder {
 
                         if !res.is_true() {
                             let active_args = vm.active_native_args.last().unwrap();
-                            active_args.receiver
+                            active_args
+                                .receiver
                                 .with_native_state_mut(mc, |l: &mut NativeListState| {
                                     l.get_vec_mut().swap(j - 1, j);
                                 })

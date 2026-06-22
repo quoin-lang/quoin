@@ -63,7 +63,11 @@ struct GcYieldVisitor<'tcx, 'sym> {
 }
 
 impl<'tcx, 'sym> GcYieldVisitor<'tcx, 'sym> {
-    fn register_pat_bindings(&mut self, pat: &'tcx rustc_hir::Pat<'tcx>, init_span: Option<rustc_span::Span>) {
+    fn register_pat_bindings(
+        &mut self,
+        pat: &'tcx rustc_hir::Pat<'tcx>,
+        init_span: Option<rustc_span::Span>,
+    ) {
         struct BindingFinder<'a, 'tcx, 'sym> {
             visitor: &'a mut GcYieldVisitor<'tcx, 'sym>,
             init_span: Option<rustc_span::Span>,
@@ -74,7 +78,9 @@ impl<'tcx, 'sym> GcYieldVisitor<'tcx, 'sym> {
                     if !self.visitor.registered_locals.contains(&hir_id) {
                         let ty = self.visitor.cx.typeck_results().node_type(hir_id);
                         if contains_gc_lifetime(ty) {
-                            self.visitor.locals.push((hir_id, pat.span, ty, self.init_span));
+                            self.visitor
+                                .locals
+                                .push((hir_id, pat.span, ty, self.init_span));
                             self.visitor.registered_locals.insert(hir_id);
                         }
                     }
@@ -82,7 +88,10 @@ impl<'tcx, 'sym> GcYieldVisitor<'tcx, 'sym> {
                 rustc_hir::intravisit::walk_pat(self, pat);
             }
         }
-        let mut finder = BindingFinder { visitor: self, init_span };
+        let mut finder = BindingFinder {
+            visitor: self,
+            init_span,
+        };
         rustc_hir::intravisit::Visitor::visit_pat(&mut finder, pat);
     }
 }

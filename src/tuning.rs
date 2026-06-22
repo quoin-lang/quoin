@@ -9,7 +9,10 @@ use std::sync::OnceLock;
 /// `QN_FOO=0` reads as off rather than surprise-enabling the knob.
 fn env_flag(name: &str) -> bool {
     match std::env::var(name) {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no"
+        ),
         Err(_) => false,
     }
 }

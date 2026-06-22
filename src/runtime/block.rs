@@ -75,10 +75,9 @@ pub fn build_block_class() -> NativeClassBuilder {
             let arg_val = args[0];
             vm.execute_block(mc, block, vec![arg_val], Some(arg_val))
         })
-        .instance_method(
-            "==:",
-            |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])),
-        )
+        .instance_method("==:", |vm, mc, receiver, args| {
+            Ok(vm.new_bool(mc, receiver == args[0]))
+        })
         .instance_method("catch:", |vm, mc, receiver, _args| {
             let receiver_block = recv!(receiver, Block);
 

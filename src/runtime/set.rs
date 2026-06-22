@@ -110,12 +110,11 @@ pub fn build_set_class() -> NativeClassBuilder {
             let lhs_len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
-            let rhs_len = match args[0].with_native_state::<NativeSetState, _, _>(|s| {
-                s.get_vec().len()
-            }) {
-                Ok(len) => len,
-                Err(_) => return Ok(vm.new_bool(mc, false)),
-            };
+            let rhs_len =
+                match args[0].with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len()) {
+                    Ok(len) => len,
+                    Err(_) => return Ok(vm.new_bool(mc, false)),
+                };
 
             if lhs_len != rhs_len {
                 return Ok(vm.new_bool(mc, false));

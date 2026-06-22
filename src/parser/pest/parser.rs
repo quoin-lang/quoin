@@ -3,9 +3,9 @@ use crate::parser::ast::*;
 use crate::value::SourceInfo;
 
 use once_cell::sync::Lazy;
+use pest::Parser;
 use pest::iterators::Pair;
 use pest::pratt_parser::PrattParser;
-use pest::Parser;
 use pest_derive::Parser;
 use regex::Captures;
 use std::cell::RefCell;

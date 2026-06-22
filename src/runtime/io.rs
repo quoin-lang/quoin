@@ -46,7 +46,8 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                     vm,
                     mc,
                     os_string,
-                    ent.metadata().map_err(|e| QuoinError::Other(e.to_string()))?,
+                    ent.metadata()
+                        .map_err(|e| QuoinError::Other(e.to_string()))?,
                 )
             } else {
                 vm.new_nil(mc)
@@ -293,7 +294,8 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
                     Err(QuoinError::Other("can't write to stdin!".to_string()))
                 }
                 NativeIoHandleWrapper::File(f) => {
-                    f.write(&bytes).map_err(|e| QuoinError::Other(e.to_string()))?;
+                    f.write(&bytes)
+                        .map_err(|e| QuoinError::Other(e.to_string()))?;
                     Ok(())
                 }
             })??;
@@ -334,7 +336,8 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
                     Err(QuoinError::Other("can't write to stdin!".to_string()))
                 }
                 NativeIoHandleWrapper::File(f) => {
-                    f.write(&bytes).map_err(|e| QuoinError::Other(e.to_string()))?;
+                    f.write(&bytes)
+                        .map_err(|e| QuoinError::Other(e.to_string()))?;
                     Ok(())
                 }
             })??;

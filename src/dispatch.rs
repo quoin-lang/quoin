@@ -7,7 +7,7 @@ use crate::symbol::Symbol;
 use crate::value::{Block, Class, NamespacedName, NativeCall, NativeFunc, ObjectPayload, Value};
 use crate::vm::VmState;
 
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use std::mem::transmute;
 
 /// Number of leading arguments whose classes are encoded into a method-cache
@@ -193,9 +193,9 @@ impl<'gc> VmState<'gc> {
         }
         let method_val = match receiver {
             Value::Class(class_obj) => {
-                if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(mc, class_obj, receiver, selector, true, args)?
-                {
+                if let Some(m) = self.lookup_method_in_class_hierarchy(
+                    mc, class_obj, receiver, selector, true, args,
+                )? {
                     Some(m)
                 } else {
                     let class_key = NamespacedName::new(Vec::new(), "Class".to_string());
@@ -220,9 +220,9 @@ impl<'gc> VmState<'gc> {
                 }
             }
             Value::ClassMeta(class_obj) => {
-                if let Some(m) =
-                    self.lookup_method_in_class_hierarchy(mc, class_obj, receiver, selector, true, args)?
-                {
+                if let Some(m) = self.lookup_method_in_class_hierarchy(
+                    mc, class_obj, receiver, selector, true, args,
+                )? {
                     Some(m)
                 } else {
                     // A metaclass acts as if it subclasses Object: fall through to
@@ -503,9 +503,7 @@ impl<'gc> VmState<'gc> {
                 // by its declared signature if it has one; a signatureless legacy
                 // native makes no specificity claim and ranks last as a pure fallback.
                 return Ok(match self.native_method_param_types(method_val) {
-                    Some(param_types) => {
-                        self.score_param_types(&param_types, args).map(|s| (s, 1))
-                    }
+                    Some(param_types) => self.score_param_types(&param_types, args).map(|s| (s, 1)),
                     None => Some((i64::MAX, 1)),
                 });
             }
@@ -569,7 +567,11 @@ impl<'gc> VmState<'gc> {
     /// (instance- or class-side as appropriate), in hierarchy order, regardless of
     /// whether it applies to the current arguments. Used to enrich a
     /// `MessageNotUnderstood` with the candidates dispatch filtered out.
-    pub(crate) fn collect_method_candidates(&self, receiver: Value<'gc>, selector: Symbol) -> Vec<Value<'gc>> {
+    pub(crate) fn collect_method_candidates(
+        &self,
+        receiver: Value<'gc>,
+        selector: Symbol,
+    ) -> Vec<Value<'gc>> {
         let class_side = matches!(receiver, Value::Class(_) | Value::ClassMeta(_));
         let mut out = Vec::new();
         if let Some(class) = self.get_class_for_lookup(receiver) {
@@ -618,7 +620,11 @@ impl<'gc> VmState<'gc> {
     /// keywords interleaved with the variant's *declared* parameter types (e.g.
     /// `foo:Integer bar:Object`), plus the guard appended for a guarded variant —
     /// its syntax-highlighted source if available, else a `{...}` placeholder.
-    pub(crate) fn format_candidate_signature(&self, method_val: Value<'gc>, selector: Symbol) -> String {
+    pub(crate) fn format_candidate_signature(
+        &self,
+        method_val: Value<'gc>,
+        selector: Symbol,
+    ) -> String {
         let supports_color = self.options.supports_color;
         let types = self.candidate_param_types(method_val);
         let mut sig = Self::format_selector_with_types(selector.as_str(), &types, supports_color);
@@ -635,14 +641,19 @@ impl<'gc> VmState<'gc> {
         if let Some(block) = self.get_block_from_method(method_val) {
             block.param_types.clone()
         } else {
-            self.native_method_param_types(method_val).unwrap_or_default()
+            self.native_method_param_types(method_val)
+                .unwrap_or_default()
         }
     }
 
     /// A guarded variant's guard for display: its syntax-highlighted source (e.g.
     /// `{x > 5}`), or a colorized `{...}` placeholder when source text is absent.
     /// `None` for an unguarded variant.
-    fn candidate_guard_display(&self, method_val: Value<'gc>, supports_color: bool) -> Option<String> {
+    fn candidate_guard_display(
+        &self,
+        method_val: Value<'gc>,
+        supports_color: bool,
+    ) -> Option<String> {
         let block = self.get_block_from_method(method_val)?;
         let decl = block.decl_block?;
         // `source_info.source_text` is the node's own text (the guard span), so it
@@ -682,7 +693,11 @@ impl<'gc> VmState<'gc> {
     /// matching the stack-trace rendering style. A keyword with no corresponding type
     /// (a no-arg selector, or a native signature shorter than the selector) prints
     /// bare. Colorized to match traces when `supports_color`.
-    fn format_selector_with_types(selector: &str, types: &[String], supports_color: bool) -> String {
+    fn format_selector_with_types(
+        selector: &str,
+        types: &[String],
+        supports_color: bool,
+    ) -> String {
         // Split into keyword parts, each keeping its trailing ':'.
         let mut parts: Vec<String> = Vec::new();
         let mut current = String::new();
@@ -745,11 +760,7 @@ impl<'gc> VmState<'gc> {
     /// unconstrained (not defaulted to `Object`). E.g. `List#at:put:` declares
     /// `["Integer"]`, constraining the index but leaving the value free. (A native
     /// method with no signature at all is handled by `match_score` as a fallback.)
-    fn score_param_types(
-        &self,
-        param_types: &[String],
-        args: &[Value<'gc>],
-    ) -> Option<i64> {
+    fn score_param_types(&self, param_types: &[String], args: &[Value<'gc>]) -> Option<i64> {
         if args.len() < param_types.len() {
             return None;
         }
@@ -821,7 +832,10 @@ impl<'gc> VmState<'gc> {
         None
     }
 
-    pub(crate) fn get_block_from_method(&self, method_val: Value<'gc>) -> Option<Gc<'gc, Block<'gc>>> {
+    pub(crate) fn get_block_from_method(
+        &self,
+        method_val: Value<'gc>,
+    ) -> Option<Gc<'gc, Block<'gc>>> {
         if let Value::Object(obj) = method_val {
             match &obj.borrow().payload {
                 ObjectPayload::Block(block) => Some(*block),

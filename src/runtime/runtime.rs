@@ -2,7 +2,7 @@ use crate::arg;
 use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::instruction::StaticBlock;
-use crate::packages::{canonical_package, LoadStatus, LoadedUnit};
+use crate::packages::{LoadStatus, LoadedUnit, canonical_package};
 use crate::parser::ast::NodeValue;
 use crate::parser::parse_quoin_string_named;
 use crate::value::{Block, NativeClassBuilder, Value};
@@ -50,10 +50,7 @@ pub fn build_runtime_class() -> NativeClassBuilder {
 }
 
 /// Build a runnable top-level `Block` from a freshly compiled `StaticBlock`.
-fn build_block<'gc>(
-    mc: &Mutation<'gc>,
-    static_block: &StaticBlock,
-) -> Gc<'gc, Block<'gc>> {
+fn build_block<'gc>(mc: &Mutation<'gc>, static_block: &StaticBlock) -> Gc<'gc, Block<'gc>> {
     let decl_block = static_block.decl_block.as_ref().map(|db| {
         crate::gc!(
             mc,
@@ -149,7 +146,9 @@ pub fn load_unit<'gc>(
         Some(s) => s,
         None => {
             let q = package.map(|p| format!("{p}:")).unwrap_or_default();
-            return Err(QuoinError::Other(format!("use: cannot resolve `{q}{path}`")));
+            return Err(QuoinError::Other(format!(
+                "use: cannot resolve `{q}{path}`"
+            )));
         }
     };
     vm.loaded.push(LoadedUnit {

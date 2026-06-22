@@ -27,5 +27,7 @@ pub fn build_symbol_class() -> NativeClassBuilder {
         })
         .instance_method("asSymbol", |_vm, _mc, receiver, _args| Ok(receiver))
         // Symbols are interned, so equality is identity (handled by Value::eq).
-        .instance_method("==:", |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])))
+        .instance_method("==:", |vm, mc, receiver, args| {
+            Ok(vm.new_bool(mc, receiver == args[0]))
+        })
 }

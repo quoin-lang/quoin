@@ -1,11 +1,11 @@
 use crate::error::QuoinError;
-use crate::fiber::{run_vm_loop, Fiber};
+use crate::fiber::{Fiber, run_vm_loop};
 use crate::gc;
 use crate::value::{AnyCollect, NativeCall, NativeClassBuilder, Value};
 use crate::vm::Frame;
 
-use gc_arena::collect::{DynCollect, Trace};
 use gc_arena::Gc;
+use gc_arena::collect::{DynCollect, Trace};
 use std::any::Any;
 use std::fmt;
 use std::mem::transmute;
@@ -217,7 +217,9 @@ pub fn build_fiber_class() -> NativeClassBuilder {
             Ok(vm.new_native_state(mc, class, state))
         })
         // Fiber.yield:value / Fiber.yield -> suspend the running fiber.
-        .class_method("yield:", |vm, mc, _receiver, args| vm.fiber_yield(mc, args[0]))
+        .class_method("yield:", |vm, mc, _receiver, args| {
+            vm.fiber_yield(mc, args[0])
+        })
         .class_method("yield", |vm, mc, _receiver, _args| {
             let nil = vm.new_nil(mc);
             vm.fiber_yield(mc, nil)

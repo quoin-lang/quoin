@@ -1,6 +1,6 @@
 use crate::value::SourceInfo;
-use std::sync::Arc;
 use std::string::String;
+use std::sync::Arc;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub enum IdentifierType {

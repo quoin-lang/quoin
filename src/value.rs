@@ -9,7 +9,7 @@ use crate::symbol::Symbol;
 use crate::vm::VmState;
 
 use gc_arena::collect::Trace;
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

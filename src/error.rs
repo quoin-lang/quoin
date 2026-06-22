@@ -131,7 +131,9 @@ impl fmt::Display for QuoinError {
                 }
                 Ok(())
             }
-            QuoinError::AmbiguousMethod { msg, candidates, .. } => {
+            QuoinError::AmbiguousMethod {
+                msg, candidates, ..
+            } => {
                 write!(f, "{}", msg)?;
                 for candidate in candidates {
                     write!(f, "\n  {}", candidate)?;

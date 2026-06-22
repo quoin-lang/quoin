@@ -1,7 +1,7 @@
 use crate::dispatch::{Callable, MethodCacheKey};
 use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMYielder, YieldReason};
-use crate::highlighter::{format_ansi, HighlightParser, HighlightSpan};
+use crate::highlighter::{HighlightParser, HighlightSpan, format_ansi};
 use crate::instruction::{Constant, Instruction};
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
 use crate::parser::parse_quoin_string;
@@ -12,14 +12,14 @@ use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
-use crate::symbol::{self_symbol, Symbol};
+use crate::symbol::{Symbol, self_symbol};
 use crate::value::{
-    AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeCall, NativeClass, NativeFunc, Object,
-    ObjectPayload, Value,
+    AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeCall, NativeClass, NativeFunc,
+    Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, gc, gcl};
 
-use gc_arena::{lock::RefLock, Collect, Gc, Mutation};
+use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
@@ -103,7 +103,6 @@ pub struct VmOptions {
     pub supports_color: bool,
     pub console_width: Option<u16>,
 }
-
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -196,7 +195,6 @@ pub enum VmStatus<'gc> {
     Finished(Value<'gc>),
     Yeeted(Value<'gc>), // Uncaught exception
 }
-
 
 impl<'gc> VmState<'gc> {
     pub unsafe fn get_yielder(&self) -> Option<&VMYielder<'gc>> {
@@ -377,7 +375,11 @@ impl<'gc> VmState<'gc> {
 
     #[allow(clippy::wrong_self_convention)]
     #[allow(no_gc_across_yield)]
-    pub fn to_s(&mut self, mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Value<'gc>, QuoinError> {
+    pub fn to_s(
+        &mut self,
+        mc: &Mutation<'gc>,
+        value: Value<'gc>,
+    ) -> Result<Value<'gc>, QuoinError> {
         match value {
             Value::Class(_) | Value::ClassMeta(_) => {
                 let display = value.to_string();
@@ -622,7 +624,12 @@ impl<'gc> VmState<'gc> {
         };
         let io_ref = io.borrow();
         match &io_ref.payload {
-            ObjectPayload::Block(b) => Some(b.param_syms.iter().map(|s| s.as_str().to_string()).collect()),
+            ObjectPayload::Block(b) => Some(
+                b.param_syms
+                    .iter()
+                    .map(|s| s.as_str().to_string())
+                    .collect(),
+            ),
             ObjectPayload::NativeState(state_cell) => {
                 let state_ref = state_cell.borrow();
                 let any_ref = (**state_ref).as_any();
@@ -630,7 +637,12 @@ impl<'gc> VmState<'gc> {
                 if let Some(Value::Object(block_obj)) = method_state.get_block()
                     && let ObjectPayload::Block(b) = &block_obj.borrow().payload
                 {
-                    Some(b.param_syms.iter().map(|s| s.as_str().to_string()).collect())
+                    Some(
+                        b.param_syms
+                            .iter()
+                            .map(|s| s.as_str().to_string())
+                            .collect(),
+                    )
                 } else {
                     None
                 }
@@ -887,7 +899,13 @@ impl<'gc> VmState<'gc> {
 
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(Symbol::intern(selector)))?;
+            method.call(
+                self,
+                mc,
+                Some(receiver),
+                args,
+                Some(Symbol::intern(selector)),
+            )?;
 
             // let the VM catch up
             if self.frames.len() > initial_frame_count {
@@ -1381,7 +1399,6 @@ impl<'gc> VmState<'gc> {
         Ok(self.pop()?)
     }
 
-
     pub fn is_subclass_of_clz(
         &self,
         sub: Gc<'gc, RefLock<Class<'gc>>>,
@@ -1410,7 +1427,6 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-
     pub fn append_method_to_chain(
         mc: &Mutation<'gc>,
         chain_start: Value<'gc>,
@@ -1438,7 +1454,9 @@ impl<'gc> VmState<'gc> {
                     }
                 }
             }
-            return Err(QuoinError::Other("Invalid method object in chain".to_string()));
+            return Err(QuoinError::Other(
+                "Invalid method object in chain".to_string(),
+            ));
         }
     }
 
@@ -1751,7 +1769,12 @@ impl<'gc> VmState<'gc> {
             }
         };
         cached.or_else(|| {
-            match self.globals.borrow().get(&NamespacedName::parse(name)).copied() {
+            match self
+                .globals
+                .borrow()
+                .get(&NamespacedName::parse(name))
+                .copied()
+            {
                 Some(Value::Class(c)) => Some(c),
                 _ => None,
             }
@@ -2330,7 +2353,10 @@ impl<'gc> VmState<'gc> {
     }
 
     #[allow(no_gc_across_yield)]
-    pub(crate) fn step_internal(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, QuoinError> {
+    pub(crate) fn step_internal(
+        &mut self,
+        mc: &Mutation<'gc>,
+    ) -> Result<VmStatus<'gc>, QuoinError> {
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
             // assert_eq!(self.stack.len(), 0, "Stack is not empty! {:?}", self.stack);
@@ -2959,7 +2985,8 @@ impl<'gc> VmState<'gc> {
 
             Instruction::LoadField(name) => {
                 let frame = &self.frames[frame_idx];
-                let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
+                let self_val =
+                    EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
                 let val = if let Value::Object(obj) = self_val {
                     let class = obj.borrow().class;
                     // No slot (undeclared) or a slot past this instance's array
@@ -2976,7 +3003,8 @@ impl<'gc> VmState<'gc> {
             Instruction::StoreField(name) => {
                 let val = self.pop()?;
                 let frame = &self.frames[frame_idx];
-                let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
+                let self_val =
+                    EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
                 if let Value::Object(obj) = self_val {
                     let class = obj.borrow().class;
                     match self.field_slot(class, &name) {
@@ -3014,7 +3042,11 @@ impl<'gc> VmState<'gc> {
                 }
                 self.frames[frame_idx].ip += 1;
             }
-            Instruction::Use { package, path, glob } => {
+            Instruction::Use {
+                package,
+                path,
+                glob,
+            } => {
                 // Clone out so the `inst` borrow is released before `load_unit` takes
                 // `&mut self`. Advance ip first: `load_unit` runs the loaded unit in a
                 // nested frame (frame-balanced), so this frame resumes at the next ip.
@@ -3180,7 +3212,8 @@ mod tests {
             }
 
             // Register standard native functions we might need
-            let native_val = vm.new_native_method(mc, "+".to_string(), NativeFunc(native_add), None);
+            let native_val =
+                vm.new_native_method(mc, "+".to_string(), NativeFunc(native_add), None);
             vm.globals
                 .borrow_mut(mc)
                 .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
@@ -4070,7 +4103,10 @@ mod tests {
                 // Step ExecuteBlockWithSelf -> frame for class_block starts
                 vm.step(mc).unwrap();
                 assert_eq!(vm.frames.len(), 2);
-                assert_eq!(EnvFrame::get(vm.frames[1].env, self_symbol()).unwrap(), class_val);
+                assert_eq!(
+                    EnvFrame::get(vm.frames[1].env, self_symbol()).unwrap(),
+                    class_val
+                );
 
                 // Inside class_block: Push(x_block)
                 vm.step(mc).unwrap();
@@ -4264,7 +4300,11 @@ mod tests {
                     assert_eq!(obj.borrow().class.borrow().name.to_string(), "Point");
                     let ob = obj.borrow();
                     assert_eq!(ob.fields.len(), 2); // @x, @y
-                    assert!(ob.fields.iter().all(|v| matches!(to_spec(*v), ValueSpec::Nil)));
+                    assert!(
+                        ob.fields
+                            .iter()
+                            .all(|v| matches!(to_spec(*v), ValueSpec::Nil))
+                    );
                 } else {
                     panic!("Expected Object, got {:?}", obj_val);
                 }
@@ -4451,7 +4491,10 @@ mod tests {
                     source_info: None,
                     name: Some("test_block".to_string()),
                     is_nested_block: false,
-                    param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),
+                    param_syms: crate::value::intern_param_syms(&vec![
+                        "a".to_string(),
+                        "b".to_string()
+                    ]),
                     param_types: vec!["Object".to_string(), "Object".to_string()],
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal(Symbol::intern("self")),
@@ -4469,7 +4512,8 @@ mod tests {
             );
 
             // Register standard native functions we need (+ operator)
-            let native_val = vm.new_native_method(mc, "+".to_string(), NativeFunc(native_add), None);
+            let native_val =
+                vm.new_native_method(mc, "+".to_string(), NativeFunc(native_add), None);
             vm.globals
                 .borrow_mut(mc)
                 .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
@@ -4492,7 +4536,10 @@ mod tests {
                     source_info: None,
                     name: Some("test_block_no_self".to_string()),
                     is_nested_block: false,
-                    param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),
+                    param_syms: crate::value::intern_param_syms(&vec![
+                        "a".to_string(),
+                        "b".to_string()
+                    ]),
                     param_types: vec!["Object".to_string(), "Object".to_string()],
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal(Symbol::intern("a")),

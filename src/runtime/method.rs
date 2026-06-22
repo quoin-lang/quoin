@@ -138,8 +138,7 @@ pub fn build_method_class() -> NativeClassBuilder {
                 Err(QuoinError::Other("Method block is not a Block".to_string()))
             }
         })
-        .instance_method(
-            "==:",
-            |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])),
-        )
+        .instance_method("==:", |vm, mc, receiver, args| {
+            Ok(vm.new_bool(mc, receiver == args[0]))
+        })
 }

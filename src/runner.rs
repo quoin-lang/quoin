@@ -6,8 +6,8 @@ use crate::highlighter::highlight_to_ansi;
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file};
 use crate::runtime::{
-    block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method,
-    nil, object, regex, runtime, set, string, symbol, timer,
+    block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method, nil,
+    object, regex, runtime, set, string, symbol, timer,
 };
 use crate::value::{Block, NamespacedName};
 use crate::vm::{VmOptions, VmState, VmStatus};
@@ -120,8 +120,9 @@ impl VmRunner {
             }
             VmRunnerMode::Test => {
                 // prelude, then the test entry — main.qn `use`s the framework + suites.
-                let ast_iter = prelude_asts()
-                    .chain(once_with(|| parse_quoin_file(&PathBuf::from("qnlib/main.qn"))));
+                let ast_iter = prelude_asts().chain(once_with(|| {
+                    parse_quoin_file(&PathBuf::from("qnlib/main.qn"))
+                }));
 
                 if !self.compile_and_run_asts(ast_iter) {
                     exit(1);
@@ -129,8 +130,9 @@ impl VmRunner {
                 Ok(())
             }
             VmRunnerMode::Benchmark => {
-                let ast_iter = prelude_asts()
-                    .chain(once_with(|| parse_quoin_file(&PathBuf::from("qnlib/benchmark.qn"))));
+                let ast_iter = prelude_asts().chain(once_with(|| {
+                    parse_quoin_file(&PathBuf::from("qnlib/benchmark.qn"))
+                }));
 
                 self.compile_and_benchmark(ast_iter);
                 Ok(())
@@ -141,8 +143,9 @@ impl VmRunner {
                     .target_path
                     .clone()
                     .unwrap_or_else(|| "qnlib/testscript.qn".to_string());
-                let ast_iter = prelude_asts()
-                    .chain(once_with(move || parse_quoin_file(&PathBuf::from(&script_path))));
+                let ast_iter = prelude_asts().chain(once_with(move || {
+                    parse_quoin_file(&PathBuf::from(&script_path))
+                }));
 
                 self.compile_and_run_asts(ast_iter);
                 Ok(())

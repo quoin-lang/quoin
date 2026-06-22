@@ -1,5 +1,5 @@
-use crate::recv;
 use crate::error::QuoinError;
+use crate::recv;
 use crate::value::{NativeClassBuilder, Value};
 
 /// Generate `[Integer]` and `[Double]` typed variants for a binary numeric
@@ -49,12 +49,14 @@ pub fn build_integer_class() -> NativeClassBuilder {
             Ok(vm.new_double(mc, (val as f64).sqrt()))
         },
     );
-    let b = int_binop!(b, "+:", arith +);
+    let b = int_binop!(b, "+:", arith+);
     let b = int_binop!(b, "-:", arith -);
     let b = int_binop!(b, "*:", arith *);
     let b = int_binop!(b, "/:", divop /);
     let b = int_binop!(b, "%:", divop %);
     // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
     let b = int_binop!(b, "<:", cmp <);
-    b.instance_method("==:", |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])))
+    b.instance_method("==:", |vm, mc, receiver, args| {
+        Ok(vm.new_bool(mc, receiver == args[0]))
+    })
 }

@@ -1,10 +1,10 @@
 use crate::instruction::{Constant, Instruction, SharedBytecode, SharedSourceMap, StaticBlock};
-use crate::symbol::Symbol;
 use crate::parser::ast::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, IdentifierType,
     MethodCallNode, MethodSelectorNode, Node, NodeValue, ProgramNode, UnaryOperatorNode,
     UnaryOperatorType,
 };
+use crate::symbol::Symbol;
 use crate::value::{NamespacedName, SourceInfo};
 
 use std::collections::HashSet;
@@ -475,7 +475,9 @@ impl Compiler {
                 .locals
                 .insert(temp_var.clone());
             bytecode.push(Instruction::Dup);
-            bytecode.push(Instruction::DefineLocal(Symbol::intern(&(temp_var.clone()))));
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(
+                &(temp_var.clone()),
+            )));
 
             self.compile_destruct(&assign.lvalues, &temp_var, bytecode)?;
         }
@@ -547,7 +549,9 @@ impl Compiler {
             match &lval.value {
                 NodeValue::IdentLValue(ident_lval) => {
                     let name = &ident_lval.identifier.name;
-                    bytecode.push(Instruction::LoadLocal(Symbol::intern(&(temp_var.to_string()))));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(
+                        &(temp_var.to_string()),
+                    )));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
 
@@ -559,7 +563,9 @@ impl Compiler {
                 }
                 NodeValue::SplatLValue(splat_lval) => {
                     let name = &splat_lval.identifier.name;
-                    bytecode.push(Instruction::LoadLocal(Symbol::intern(&(temp_var.to_string()))));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(
+                        &(temp_var.to_string()),
+                    )));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send(Symbol::intern("sliceFrom:"), 1));
 
@@ -579,10 +585,14 @@ impl Compiler {
                         .locals
                         .insert(nested_temp.clone());
 
-                    bytecode.push(Instruction::LoadLocal(Symbol::intern(&(temp_var.to_string()))));
+                    bytecode.push(Instruction::LoadLocal(Symbol::intern(
+                        &(temp_var.to_string()),
+                    )));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
                     bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
-                    bytecode.push(Instruction::DefineLocal(Symbol::intern(&(nested_temp.clone()))));
+                    bytecode.push(Instruction::DefineLocal(Symbol::intern(
+                        &(nested_temp.clone()),
+                    )));
 
                     self.compile_destruct(&sub_lval.lvalues, &nested_temp, bytecode)?;
                 }

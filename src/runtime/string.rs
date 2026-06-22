@@ -1,9 +1,9 @@
 use crate::arg;
-use crate::recv;
 use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::parser::ast::NodeValue;
 use crate::parser::parse_quoin_string;
+use crate::recv;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::regex::NativeRegexState;
@@ -17,24 +17,31 @@ pub fn build_string_class() -> NativeClassBuilder {
         // `replace:with:` is a multimethod: the pattern's type selects the variant
         // (a non-String/non-Regex pattern matches neither → MessageNotUnderstood).
         // The replacement is always a String.
-        .typed_instance_method("replace:with:", &["Regex", "String"], |vm, mc, receiver, args| {
-            let s = recv!(receiver, String);
-            let to = arg!(args, String, 1);
-            let result = args[0].with_native_state::<NativeRegexState, _, _>(|r| {
-                r.regex.replace_all(&*s, &**to).to_string()
-            })?;
-            Ok(vm.new_string(mc, result))
-        })
-        .typed_instance_method("replace:with:", &["String", "String"], |vm, mc, receiver, args| {
-            let s = recv!(receiver, String);
-            let from = arg!(args, String, 0);
-            let to = arg!(args, String, 1);
-            Ok(vm.new_string(mc, s.replace(&**from, &**to)))
-        })
-        .instance_method(
-            "==:",
-            |vm, mc, receiver, args| Ok(vm.new_bool(mc, receiver == args[0])),
+        .typed_instance_method(
+            "replace:with:",
+            &["Regex", "String"],
+            |vm, mc, receiver, args| {
+                let s = recv!(receiver, String);
+                let to = arg!(args, String, 1);
+                let result = args[0].with_native_state::<NativeRegexState, _, _>(|r| {
+                    r.regex.replace_all(&*s, &**to).to_string()
+                })?;
+                Ok(vm.new_string(mc, result))
+            },
         )
+        .typed_instance_method(
+            "replace:with:",
+            &["String", "String"],
+            |vm, mc, receiver, args| {
+                let s = recv!(receiver, String);
+                let from = arg!(args, String, 0);
+                let to = arg!(args, String, 1);
+                Ok(vm.new_string(mc, s.replace(&**from, &**to)))
+            },
+        )
+        .instance_method("==:", |vm, mc, receiver, args| {
+            Ok(vm.new_bool(mc, receiver == args[0]))
+        })
         // Concatenation: `a + b` -> `Send(a, "+:", [b])`. A String RHS concatenates
         // directly (the fast path); any other RHS is coerced via `.s` by the untyped
         // fallback below, so `'n = ' + 5` or `'m = ' + aMap` work.
@@ -357,26 +364,30 @@ pub fn build_string_class() -> NativeClassBuilder {
         })
         // Both args are typed: the substring (String) and the index (Integer); a
         // wrong-typed arg matches no variant -> MNU (dispatch enforces the types).
-        .typed_instance_method("insert:at:", &["String", "Integer"], |vm, mc, receiver, args| {
-            let s = recv!(receiver, String);
-            let sub = arg!(args, String, 0);
-            let char_idx = arg!(args, Int, 1) as usize;
+        .typed_instance_method(
+            "insert:at:",
+            &["String", "Integer"],
+            |vm, mc, receiver, args| {
+                let s = recv!(receiver, String);
+                let sub = arg!(args, String, 0);
+                let char_idx = arg!(args, Int, 1) as usize;
 
-            let char_count = s.chars().count();
-            let safe_idx = char_idx.min(char_count);
+                let char_count = s.chars().count();
+                let safe_idx = char_idx.min(char_count);
 
-            let byte_offset: usize = s
-                .char_indices()
-                .map(|(idx, _)| idx)
-                .nth(safe_idx)
-                .unwrap_or(s.len());
+                let byte_offset: usize = s
+                    .char_indices()
+                    .map(|(idx, _)| idx)
+                    .nth(safe_idx)
+                    .unwrap_or(s.len());
 
-            let mut result = s[..byte_offset].to_string();
-            result.push_str(&**sub);
-            result.push_str(&s[byte_offset..]);
+                let mut result = s[..byte_offset].to_string();
+                result.push_str(&**sub);
+                result.push_str(&s[byte_offset..]);
 
-            Ok(vm.new_string(mc, result))
-        })
+                Ok(vm.new_string(mc, result))
+            },
+        )
         .instance_method("lower", |vm, mc, receiver, _args| {
             let s = recv!(receiver, String);
             Ok(vm.new_string(mc, s.to_lowercase()))

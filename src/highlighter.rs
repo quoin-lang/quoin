@@ -219,7 +219,12 @@ impl<'a> HighlightParser<'a> {
 
         // `use` keyword.
         let kw_end = (start + 3).min(end);
-        spans.push(HighlightSpan::new(start, kw_end, HighlightType::Keyword, depth));
+        spans.push(HighlightSpan::new(
+            start,
+            kw_end,
+            HighlightType::Keyword,
+            depth,
+        ));
 
         // The target follows the whitespace after `use`.
         let mut target_start = kw_end;
@@ -242,7 +247,12 @@ impl<'a> HighlightParser<'a> {
 
         // The path itself (including any trailing `/*`).
         if path_start < end {
-            spans.push(HighlightSpan::new(path_start, end, HighlightType::Path, depth));
+            spans.push(HighlightSpan::new(
+                path_start,
+                end,
+                HighlightType::Path,
+                depth,
+            ));
         }
         spans
     }
@@ -911,7 +921,10 @@ mod tests {
     fn use_without_package_globs_path_and_roundtrips() {
         let src = "use core/*;";
         let spans = highlight(src);
-        assert!(!types(&spans).contains(&HighlightType::Namespace), "{spans:?}");
+        assert!(
+            !types(&spans).contains(&HighlightType::Namespace),
+            "{spans:?}"
+        );
         let path = spans
             .iter()
             .find(|s| s.htype == HighlightType::Path)
@@ -925,7 +938,10 @@ mod tests {
     fn use_as_identifier_is_not_a_keyword() {
         // `use` is a soft keyword — as a plain variable it must not be tagged Keyword.
         let spans = highlight("use = 5;");
-        assert!(!types(&spans).contains(&HighlightType::Keyword), "{spans:?}");
+        assert!(
+            !types(&spans).contains(&HighlightType::Keyword),
+            "{spans:?}"
+        );
     }
 
     #[test]
