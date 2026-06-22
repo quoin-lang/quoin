@@ -3,6 +3,7 @@ use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
 use crate::highlighter::highlight_to_ansi;
+use crate::io_backend::{IoBackend, SmolBackend};
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file};
 use crate::runtime::{
@@ -13,6 +14,7 @@ use crate::value::{Block, NamespacedName};
 use crate::vm::{VmOptions, VmState, VmStatus};
 
 use corosensei::CoroutineResult;
+use futures_lite::future::block_on;
 use gc_arena::{Arena, Gc, Rootable};
 use std::fs::read_to_string;
 use std::iter::once_with;
@@ -30,6 +32,9 @@ fn prelude_asts() -> impl Iterator<Item = Node> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionStatus {
     Running,
+    /// The running coroutine suspended on `AwaitIo`; the request is parked in
+    /// `vm.sched.pending_io_request` for the driver to fulfill.
+    AwaitIo,
     Finished,
     Yeeted,
 }
@@ -246,93 +251,123 @@ impl VmRunner {
                 vm.sched.active_fiber = Some(gc!(mc, fiber));
             });
 
-            let mut step_count = 0;
-            loop {
-                let status = arena.mutate_root(|mc, vm| {
-                    // Resume the coroutine of the currently-running fiber: a guest
-                    // `Fiber` if one is active, otherwise the main program (#0).
-                    let coro_holder = match vm.sched.current_fiber {
-                        None => match vm.sched.active_fiber {
-                            Some(f) => f,
-                            None => return Ok(ExecutionStatus::Finished),
-                        },
-                        Some(fv) => fv
-                            .with_native_state::<fiber_class::NativeFiberState, _, _>(|s| s.coro())
-                            .map_err(QuoinError::Other)?,
-                    };
+            // The backend lives outside the arena and is the only async code; the VM
+            // suspends with a plain `AwaitIo` request and the driver fulfills it here.
+            let backend = SmolBackend::new();
+            block_on(async {
+                let mut step_count = 0;
+                loop {
+                    let status = arena.mutate_root(|mc, vm| {
+                        // Resume the coroutine of the currently-running fiber: a guest
+                        // `Fiber` if one is active, otherwise the main program (#0).
+                        let coro_holder = match vm.sched.current_fiber {
+                            None => match vm.sched.active_fiber {
+                                Some(f) => f,
+                                None => return Ok(ExecutionStatus::Finished),
+                            },
+                            Some(fv) => fv
+                                .with_native_state::<fiber_class::NativeFiberState, _, _>(|s| {
+                                    s.coro()
+                                })
+                                .map_err(QuoinError::Other)?,
+                        };
 
-                    // Point `vm.sched.yielder` at the coroutine we're about to run,
-                    // sourced from its own GC-rooted slot, so it never dangles.
-                    vm.sched.yielder = vm.current_fiber_yielder();
+                        // Point `vm.sched.yielder` at the coroutine we're about to run,
+                        // sourced from its own GC-rooted slot, so it never dangles.
+                        vm.sched.yielder = vm.current_fiber_yielder();
 
-                    let ctx = VMContext {
-                        vm: vm as *mut _,
-                        mc: mc as *const _,
-                    };
-                    let res = {
-                        let mut opt = coro_holder.coroutine.borrow_mut();
-                        let coro = opt.as_mut().expect("Coroutine already finished");
-                        coro.resume(ctx)
-                    };
+                        let ctx = VMContext {
+                            vm: vm as *mut _,
+                            mc: mc as *const _,
+                        };
+                        let res = {
+                            let mut opt = coro_holder.coroutine.borrow_mut();
+                            let coro = opt.as_mut().expect("Coroutine already finished");
+                            coro.resume(ctx)
+                        };
 
-                    match res {
-                        CoroutineResult::Yield(YieldReason::CooperativeYield)
-                        | CoroutineResult::Yield(YieldReason::CallBlock { .. }) => {
-                            Ok(ExecutionStatus::Running)
-                        }
-                        CoroutineResult::Yield(YieldReason::ResumeFiber { fiber, arg }) => {
-                            vm.do_resume_switch(mc, fiber, arg)?;
-                            Ok(ExecutionStatus::Running)
-                        }
-                        CoroutineResult::Yield(YieldReason::YieldFiber { value }) => {
-                            vm.do_yield_switch(mc, value)?;
-                            Ok(ExecutionStatus::Running)
-                        }
-                        CoroutineResult::Yield(YieldReason::Return(val)) => {
-                            vm.sched.active_fiber = None;
-                            vm.push(val);
-                            Ok(ExecutionStatus::Finished)
-                        }
-                        CoroutineResult::Return(res) => {
-                            if vm.sched.current_fiber.is_some() {
-                                // A guest fiber's block returned; hand the result
-                                // back to its resumer and keep scheduling.
-                                vm.do_fiber_done(mc, res)?;
+                        match res {
+                            CoroutineResult::Yield(YieldReason::CooperativeYield)
+                            | CoroutineResult::Yield(YieldReason::CallBlock { .. }) => {
                                 Ok(ExecutionStatus::Running)
-                            } else {
+                            }
+                            CoroutineResult::Yield(YieldReason::ResumeFiber { fiber, arg }) => {
+                                vm.do_resume_switch(mc, fiber, arg)?;
+                                Ok(ExecutionStatus::Running)
+                            }
+                            CoroutineResult::Yield(YieldReason::YieldFiber { value }) => {
+                                vm.do_yield_switch(mc, value)?;
+                                Ok(ExecutionStatus::Running)
+                            }
+                            CoroutineResult::Yield(YieldReason::AwaitIo { req }) => {
+                                // Park the request; the driver fulfills it outside the
+                                // arena borrow and resumes with the result.
+                                vm.sched.pending_io_request = Some(req);
+                                Ok(ExecutionStatus::AwaitIo)
+                            }
+                            CoroutineResult::Yield(YieldReason::Return(val)) => {
                                 vm.sched.active_fiber = None;
-                                match res {
-                                    Ok(val) => {
-                                        vm.push(val);
-                                        Ok(ExecutionStatus::Finished)
+                                vm.push(val);
+                                Ok(ExecutionStatus::Finished)
+                            }
+                            CoroutineResult::Return(res) => {
+                                if vm.sched.current_fiber.is_some() {
+                                    // A guest fiber's block returned; hand the result
+                                    // back to its resumer and keep scheduling.
+                                    vm.do_fiber_done(mc, res)?;
+                                    Ok(ExecutionStatus::Running)
+                                } else {
+                                    vm.sched.active_fiber = None;
+                                    match res {
+                                        Ok(val) => {
+                                            vm.push(val);
+                                            Ok(ExecutionStatus::Finished)
+                                        }
+                                        Err(err) => Err(err),
                                     }
-                                    Err(err) => Err(err),
                                 }
                             }
                         }
-                    }
-                });
-                match status {
-                    Ok(ExecutionStatus::Running) => {
-                        step_count += 1;
-                        if crate::tuning::gc_stress() || step_count % 10 == 0 {
-                            arena.collect_debt();
+                    });
+                    match status {
+                        Ok(ExecutionStatus::Running) => {
+                            step_count += 1;
+                            if crate::tuning::gc_stress() || step_count % 10 == 0 {
+                                arena.collect_debt();
+                            }
+                        }
+                        Ok(ExecutionStatus::AwaitIo) => {
+                            // Outside the arena borrow: the single `.await` in the VM.
+                            let req = arena.mutate_root(|_mc, vm| {
+                                vm.sched
+                                    .pending_io_request
+                                    .take()
+                                    .expect("AwaitIo yielded without a pending request")
+                            });
+                            let result = backend.perform(req).await;
+                            arena.mutate_root(|_mc, vm| {
+                                vm.sched.pending_io_result = Some(result);
+                            });
+                            step_count += 1;
+                            if crate::tuning::gc_stress() || step_count % 10 == 0 {
+                                arena.collect_debt();
+                            }
+                        }
+                        Ok(ExecutionStatus::Finished) => {
+                            break;
+                        }
+                        Ok(ExecutionStatus::Yeeted) => {
+                            aborted = true;
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("VM execution error: {}", e);
+                            aborted = true;
+                            break;
                         }
                     }
-                    Ok(ExecutionStatus::Finished) => {
-                        break;
-                    }
-                    Ok(ExecutionStatus::Yeeted) => {
-                        aborted = true;
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("VM execution error: {}", e);
-                        aborted = true;
-                        break;
-                    }
                 }
-            }
+            });
         }
 
         // The last program run leaves its result on top of the stack. Treat a VM
@@ -423,6 +458,9 @@ impl VmRunner {
                     CoroutineResult::Yield(YieldReason::ResumeFiber { .. })
                     | CoroutineResult::Yield(YieldReason::YieldFiber { .. }) => {
                         panic!("guest fibers are not supported in benchmark mode")
+                    }
+                    CoroutineResult::Yield(YieldReason::AwaitIo { .. }) => {
+                        panic!("async I/O is not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
                         vm.sched.active_fiber = None;
@@ -570,6 +608,9 @@ impl VmRunner {
                         if crate::tuning::gc_stress() || step_count % 10 == 0 {
                             arena.collect_debt();
                         }
+                    }
+                    Ok(ExecutionStatus::AwaitIo) => {
+                        unreachable!("benchmark initialization does not perform async I/O")
                     }
                     Ok(ExecutionStatus::Finished) => {
                         break;

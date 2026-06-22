@@ -1,0 +1,17 @@
+(TestSuite.new:{ name = 'Async' }).add:{
+    "* Stage 1 async I/O: `Runtime.sleep:` parks the running fiber via an AwaitIo
+    "* suspension and resumes with a value, all driven by the async IoBackend.
+
+    "* The call round-trips out to the backend and back, returning nil.
+    .test:
+    sleepReturnsNil -> {
+        .is:{ Runtime.sleep: 1 } equalTo:nil;
+    };
+
+    "* Lower-bound timing only (non-flaky): a 30ms sleep really parked, proving a
+    "* genuine reactor round-trip rather than a no-op.
+    .test:
+    sleepParksForRequestedTime -> {
+        .is:{ Timer.time:{ Runtime.sleep: 30 } } greaterThanOrEqualTo:20;
+    };
+}

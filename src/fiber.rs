@@ -1,4 +1,5 @@
 use crate::error::QuoinError;
+use crate::io_backend::IoRequest;
 use crate::value::{Block, Value};
 use crate::vm::{VmState, VmStatus};
 
@@ -34,6 +35,13 @@ pub enum YieldReason<'gc> {
     /// resumed it. Bubbles to the scheduler.
     YieldFiber {
         value: Value<'gc>,
+    },
+    /// A fiber is suspending to perform async I/O. The plain-data request bubbles to
+    /// the scheduler, which fulfills it via the `IoBackend` and resumes the fiber with
+    /// the result in `Scheduler::pending_io_result`. See `docs/ASYNC_ARCH.md`.
+    AwaitIo {
+        #[collect(require_static)]
+        req: IoRequest,
     },
 }
 

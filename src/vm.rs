@@ -3,6 +3,7 @@ use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMYielder, YieldReason};
 use crate::highlighter::{HighlightParser, HighlightSpan, format_ansi};
 use crate::instruction::{Constant, Instruction};
+use crate::io_backend::{IoRequest, IoResult};
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
 use crate::parser::parse_quoin_string;
 use crate::runtime::fiber::{FiberStatus, NativeFiberState};
@@ -141,6 +142,13 @@ pub struct Scheduler<'gc> {
     /// An error raised inside a guest fiber, delivered to its resumer.
     #[collect(require_static)]
     pub fiber_error: Option<QuoinError>,
+    /// I/O round-trip slots (Stage 1). `await_io` suspends with the request in
+    /// `pending_io_request`; the driver fulfills it and stashes the answer in
+    /// `pending_io_result` before resuming. Both plain data — they cross the yield.
+    #[collect(require_static)]
+    pub pending_io_request: Option<IoRequest>,
+    #[collect(require_static)]
+    pub pending_io_result: Option<IoResult>,
 }
 
 #[derive(Collect)]
@@ -269,6 +277,8 @@ impl<'gc> VmState<'gc> {
                 main_saved_frames: Vec::new(),
                 main_saved_native_args: Vec::new(),
                 fiber_error: None,
+                pending_io_request: None,
+                pending_io_result: None,
             },
             method_cache: FxHashMap::default(),
             dispatch_uncacheable: false,
@@ -1164,6 +1174,27 @@ impl<'gc> VmState<'gc> {
             .fiber_transfer
             .take()
             .unwrap_or_else(|| self.new_nil(mc)))
+    }
+
+    /// Suspend the running coroutine to perform async I/O, returning the result the
+    /// scheduler delivers on resume. Mirrors `fiber_yield`: the request bubbles up as
+    /// `YieldReason::AwaitIo`, and on resume the driver has stashed the answer in
+    /// `self.sched.pending_io_result`. Only plain data crosses the yield. Works from
+    /// the main program too (it runs as a coroutine with `main_yielder`).
+    #[allow(no_gc_across_yield)]
+    pub fn await_io(&mut self, req: IoRequest) -> Result<IoResult, QuoinError> {
+        if let Some(yielder) = unsafe { self.get_yielder() } {
+            yielder.suspend(YieldReason::AwaitIo { req });
+        } else {
+            return Err(QuoinError::Other(
+                "I/O attempted outside the VM scheduler".to_string(),
+            ));
+        }
+        // On resume the driver has stashed the result for us.
+        self.sched
+            .pending_io_result
+            .take()
+            .ok_or_else(|| QuoinError::Other("I/O resumed without a result".to_string()))
     }
 
     fn fiber_status(&self, fiber_val: Value<'gc>) -> Result<FiberStatus, QuoinError> {
