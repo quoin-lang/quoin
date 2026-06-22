@@ -266,7 +266,8 @@ Added through Stage 2a:
 
 Still to add for later stages:
 
-- `async-net` (or `blocking` directly) for async DNS (Stage 3)
+- `async-net` for async DNS + resolve-and-connect (Stage 3; `blocking`-direct is the
+  leaner alternative)
 - `futures-rustls` + `rustls` (+ `webpki-roots` / `rustls-native-certs`) for TLS
   (Stage 4)
 - `httparse` for HTTP/1.1 header parsing (Stage 5)
@@ -404,11 +405,78 @@ Plan:
   a cancel-all round in `async_soak.qn` (checksum-stable across the stress knobs) + Async
   suite tests (cancel runs `finally`, `catch:` can't swallow it, `join` observes it).
 
-**Stage 3 — TCP sockets stdlib.**
-`src/runtime/net.rs`: a `Socket` class over `StreamId` with `connect:`/`read:`/
-`writeAll:`/`close`, backed by `AwaitIo`. `qnlib/std/net/*` exposing a clean QN
-API. *Test:* QN client against a local echo server (Rust-side harness), multiple
-concurrent connections.
+**Stage 3 — `Bytes` + TCP sockets (designed).**
+The async *core* is done and generic, so a socket read already round-trips through the
+scheduler and is cancellable (abortable) for free; Stage 3 is the QN surface, DNS, a
+new `Bytes` primitive, and the resource lifecycle.
+
+Design notes (all five settled):
+
+- **`Bytes` — a binary-data primitive (prerequisite).** Quoin's `String` is UTF-8
+  text and *cannot* hold arbitrary bytes (an image, a gzip stream, a TLS record), and a
+  `Value`-per-byte list is wasteful — so socket I/O needs `Bytes`. Immutable
+  `ObjectPayload::Bytes(Gc<Vec<u8>>)`, mirroring `String`'s `Gc<String>` (a GC leaf).
+  The backend is *already* byte-based (`Read(Vec<u8>)` / `Write{bytes}` cross the yield
+  as plain data), so `Bytes` is purely the QN-facing wrapper at the native boundary —
+  one copy in/out, and `no_gc_across_yield` is satisfied because the `Gc` `Bytes` is
+  never held across the suspend (the `Vec<u8>` is extracted *before* the await). The
+  text boundary: `string.asBytes` (infallible UTF-8 encode), `bytes.asString` (throws on
+  invalid UTF-8), `bytes.asStringLossy`. Min API: `size`/`count`, `at:` (→0–255),
+  `from:to:`, `+`, `==`, `each:`, `Bytes of:#(…)` / `Bytes empty`; inspect = length +
+  short hex preview. A mutable `BytesBuilder` and a `#b'HEX'` literal (the `#`-prefixed
+  user-literal syntax, like `#(…)`/`#/…/`) are deferred.
+- **Naming + hierarchy.** `TcpSocket` (not `Socket` — ambiguous with Unix sockets; and
+  `Stream`/`TcpStream` are reserved for lazy streaming). Future: `TcpSocket` →
+  `TcpStream` (lazy byte streaming) → `TcpStringStream` (text). **Lines are a text
+  concept, not a byte one**, so `readLine` lives at `TcpStringStream`, not `TcpSocket`.
+  This isn't just tidy — it's *necessary*: a fixed-size read is intrinsically a byte op
+  (a UTF-8 code point is 1–4 bytes, and any `read:n` can land mid-sequence), so you
+  cannot stream text as `{ read:n . asString }` (a chunk ending mid-character is invalid
+  UTF-8 in isolation). The text layer must hold a **trailing-partial-byte buffer** and
+  decode incrementally (`str::from_utf8`'s `valid_up_to`) — a *decoding* concern, which
+  is why the buffer belongs to `TcpStringStream` and `TcpSocket` needs none. HTTP
+  (Stage 5) does not block on these layers — `httparse` parses headers from raw
+  `TcpSocket` bytes.
+- **DNS folded into `Connect`.** The lower-level socket takes `'host:port'` and resolves
+  internally (manual DNS is a rare need, a future class). `IoRequest::Connect { host,
+  port }` resolves-and-connects in one op (async-net's connect does `getaddrinfo` on the
+  blocking pool); a standalone `Resolve` stays available off the hot path.
+- **`read:` semantics (byte-only on `TcpSocket`).** `read:n` returns *up to* n bytes
+  (POSIX-style, may be short; empty = EOF), `readAll` loops to EOF. No buffer, no lines
+  (those are `TcpStringStream`). `writeAll:` is complete-or-throw.
+- **Errors are thrown.** `IoError` is a catchable exception (result objects fit poorly
+  without generics). **EOF is not an error** — a read at end-of-stream returns empty
+  `Bytes`, so `readAll` terminates cleanly; only genuine failures (refused, reset,
+  timeout) throw.
+- **Resource lifecycle — the reap queue's real home.** A `TcpSocket` wraps an fd
+  (scarce, *outside* the arena), with three cleanup paths: (1) explicit `close`; (2) a
+  scope combinator `TcpSocket connect:'host:port' do:{|s|…}` that closes on exit even on
+  throw/cancel (`finally`, made cancel-safe in 2b-ii) — the idiomatic primary; (3) a GC
+  **reap-queue backstop** — the handle's `Drop` pushes its `StreamId` onto a non-GC
+  `Rc<RefCell<Vec<StreamId>>>` (the only thing `Drop` can do — it can't touch other `Gc`
+  or reach the backend). This is the mechanism we *deliberately didn't* build for tasks
+  (a task result is GC memory; an fd is an external resource — the boundary the reap
+  queue exists to cross). The queue lives in `VmState`, the driver drains it between
+  steps and closes **synchronously** (drop the stream; no `await`, no task context at
+  `Drop` time). **Both** forms ship — scope as primary, bare `connect:` for sockets that
+  must outlive a scope (a connection pool, accepted server sockets).
+
+Sharp edges (documented, accepted): the reap backstop is GC-timed, so a leak-heavy
+program can exhaust fds before a collection runs (`connect:do:` is the mitigation);
+the backend's take-out/put-back enforces **one in-flight op per socket**, so two
+concurrent tasks on the same `TcpSocket` → the second gets an `IoError`; double-`close`
+is a no-op and read-after-close throws.
+
+Plan:
+
+- **3a — `Bytes`.** `src/runtime/bytes.rs`: the immutable type + `BytesClass` + the
+  `String`↔`Bytes` conversions. *Test:* `'hi'.asBytes.asString` round-trip, concat,
+  slice, `at:`, invalid-UTF-8 throws.
+- **3b — `TcpSocket`.** `src/runtime/net.rs`: `connect:` (bare) + `connect:do:` (scope),
+  `read:n`, `readAll`, `writeAll:`, `close`; backend `Connect{host,port}` (async-net) +
+  sync `close`; the reap queue (`VmState` + driver drain). *Test:* Rust-side echo server
+  + QN client over `Bytes`, **N concurrent connections overlapping**, scope closes on
+  throw, use-after-close throws; `MockBackend` for deterministic suite tests.
 
 **Stage 4 — TLS.**
 Wrap streams with `futures-rustls` (cert roots via `webpki-roots`). Either new
@@ -436,5 +504,9 @@ hit by a QN client, both on the same scheduler.
 - **Structured concurrency / cancellation API in QN** (e.g. nurseries, deadlines,
   detached `Task.spawn:` + join) — this is **Stage 2b**, to design now that 2a's
   scheduler is in place; `Async.gather:` is the only 2a surface.
-- **Exact QN-facing API shapes** (`Socket` vs `TcpStream` naming, blocking-looking
-  `read:` semantics, error model) — settle during Stage 3.
+- **Lazy stream layers** — `TcpStream` (buffered byte streaming) and `TcpStringStream`
+  (incremental UTF-8 decode + `readLine`) over `TcpSocket`. Ergonomics, not a Stage 5
+  prerequisite (`httparse` works on raw bytes). Build when there's demand.
+- **`Bytes` extras** — a mutable `BytesBuilder` (if concat churn shows up) and a
+  `#b'HEX'` literal (the `#`-prefixed user-literal syntax; a parser change). Deferred
+  until needed.
