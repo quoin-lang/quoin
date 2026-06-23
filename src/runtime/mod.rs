@@ -1,6 +1,7 @@
 pub mod async_rt;
 pub mod block;
 pub mod boolean;
+pub mod bytes;
 pub mod class;
 pub mod double;
 pub mod fiber;

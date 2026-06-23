@@ -541,6 +541,20 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
+    /// Build an immutable `Bytes` value from raw bytes (mirrors `new_string`). One
+    /// copy at the native boundary; the inner `Vec<u8>` is a GC leaf.
+    pub fn new_bytes(&self, mc: &Mutation<'gc>, bytes: Vec<u8>) -> Value<'gc> {
+        let class = self.get_or_create_builtin_class(mc, "Bytes");
+        Value::Object(gcl!(
+            mc,
+            Object {
+                class,
+                fields: Box::default(),
+                payload: ObjectPayload::Bytes(gc!(mc, bytes)),
+            }
+        ))
+    }
+
     /// Return the interned `Symbol` value for `name`, creating it on first use.
     /// All occurrences of the same name share one value, so symbols compare by
     /// identity.
@@ -3781,6 +3795,7 @@ mod tests {
                         res.unwrap_or_else(|_| ValueSpec::Instance("Regex".to_string()))
                     }
                     ObjectPayload::Block(b) => ValueSpec::Block(b.name.clone()),
+                    ObjectPayload::Bytes(_) => ValueSpec::Instance("Bytes".to_string()),
                     ObjectPayload::Instance | ObjectPayload::NativeState(_) => {
                         ValueSpec::Instance(borrowed.class.borrow().name.to_string())
                     }
