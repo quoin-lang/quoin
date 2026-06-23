@@ -1,0 +1,187 @@
+"* ===========================================================================
+"* Async scheduler soak / stress test.
+"*
+"* Designed to run for long periods under the two stress knobs:
+"*
+"*   QN_GC_STRESS=1   QN_SCHED_STRESS=1   qn qnlib/stress/async_soak.qn
+"*
+"* QN_GC_STRESS collects on every VM step (flushing rooting bugs); QN_SCHED_STRESS
+"* preempts at every cooperative yield and picks ready tasks at random (flushing
+"* per-task state-swap and ordering bugs, and printing a replayable seed). Run with
+"* either, both, or neither.
+"*
+"* Every round runs a mixed concurrent workload and checks each result against an
+"* independent SERIAL reference. A corrupted task swap, a lost result, or a value
+"* collected too early then surfaces immediately, rather than passing silently.
+"*
+"* DETECTION (Run mode always exits 0, so check the output, not the exit code):
+"*   success  -> a final  "OK: N rounds passed ..."  line, and no failure line.
+"*   failure  -> a        "SOAK FAILED: ..."         line (the loop then aborts,
+"*               and the VM also prints the detail to stderr). The checksum is
+"*               deterministic, so it must match across every stress combination.
+"*
+"* Optional first argument = number of rounds (default below):
+"*   qn qnlib/stress/async_soak.qn 50
+"* ===========================================================================
+
+"* --- configuration ---
+rounds = 200000;      "* high by default — a soak. Ctrl-C anytime, or pass a count.
+width = 8;            "* concurrent tasks per gather batch
+progressEvery = 200;  "* print a progress line every N rounds
+
+args = Runtime.arguments;
+(args.count > 0).if:{ rounds = (args.at:0).to_integer };
+
+"* --- deterministic per-task computation ---
+"* A short summing loop seeded by round `r` and task index `k`. Pure and
+"* order-independent, so the concurrent task and the serial reference share it and
+"* cannot drift. (`r + i + 1` and `k + 1` keep every term non-zero.)
+worker = { |r k|
+    acc = 0;
+    i = 0;
+    { i < 40 }.whileDo:{
+        acc = acc + ((r + i + 1) * (k + 1));
+        i = i + 1
+    };
+    acc
+};
+
+"* The serial reference list for round `r` (no concurrency, no sleeps).
+expectedCompute = { |r| (0..width).collect:{ |k| worker.valueWithArgs:#(r k) } };
+
+"* The concurrent batch for round `r`: each task computes worker(r, k); a few park
+"* on a real sleep so the batch mixes parked and ready tasks through the reactor.
+gatherCompute = { |r|
+    Async.gather:((0..width).collect:{ |k|
+        {
+            v = worker.valueWithArgs:#(r k);
+            ((k % 3) == 0).if:{ Runtime.sleep: 1 };
+            v
+        }
+    })
+};
+
+"* A nested gather (a task that itself gathers) plus a sleeper — exercises the
+"* save/load swap at two levels and gather-slot reuse.
+gatherNested = { |r|
+    Async.gather:#(
+        { Async.gather:#( { r + 1 } { r + 2 } ) }
+        { worker.valueWithArgs:#(r 0) }
+        { Runtime.sleep: 1; r * 2 }
+    )
+};
+expectedNested = { |r|
+    #( #( (r + 1) (r + 2) ) (worker.valueWithArgs:#(r 0)) (r * 2) )
+};
+
+"* A guest Fiber driven inside a task (the hardest swap path: a child task is
+"* preempted while holding an active resume chain), alongside a sleeper.
+gatherFiber = { |r|
+    Async.gather:#(
+        {
+            f = Fiber.new:{ Fiber.yield: (r + 1); Fiber.yield: (r + 2); (r + 3) };
+            #( f.resume f.resume f.resume )
+        }
+        { Runtime.sleep: 1; r }
+    )
+};
+expectedFiber = { |r| #( #( (r + 1) (r + 2) (r + 3) ) r ) };
+
+"* Detached spawn + join (Stage 2b): spawn one task per index, then join them all.
+"* Each task computes worker(r, k); a few sleep so some are parked when joined. The
+"* joined results, in spawn order, must equal the serial reference. Handles fall out
+"* of scope each round and their slots are freed on completion, so nothing leaks.
+spawnJoin = { |r|
+    handles = (0..width).collect:{ |k|
+        Task.spawn:{
+            v = worker.valueWithArgs:#(r k);
+            ((k % 4) == 0).if:{ Runtime.sleep: 1 };
+            v
+        }
+    };
+    handles.collect:{ |h| h.join }
+};
+
+"* Detached spawn + cancel (Stage 2b-ii): spawn one sleeper per index, cancel them
+"* all, and join. Each sleeps far longer than a round so cancel always wins (whether
+"* the task is still ready or already parked on the sleep) — deterministic under the
+"* stress knobs. Every join must observe a (catchable) cancellation, mapped to -1.
+spawnCancel = { |r|
+    handles = (0..width).collect:{ |k| Task.spawn:{ Runtime.sleep: 100000; r + k } };
+    handles.each:{ |h| h.cancel };
+    handles.collect:{ |h| { h.join }.catch:{ |ex| 0 - 1 } }
+};
+expectedCancel = (0..width).collect:{ |k| 0 - 1 };
+
+"* Timeout combinator (Stage 5a): deterministic by construction. Even indices complete
+"* within a huge deadline (the work runs, returns its value); odd indices always blow a
+"* 1ms deadline (their sleep is far longer) and the `onCancel:` handler computes the same
+"* value. So every element equals worker(r, k) regardless of scheduling — the margins are
+"* enormous, so the deadline-vs-completion outcomes never race. Exercises spawn + the
+"* timed-join race + cancel-on-deadline (finally/abort) every round, under all stress knobs.
+timeoutRound = { |r|
+    (0..width).collect:{ |k|
+        ((k % 2) == 0).if:{
+            Async.timeout: 1000000 do:{ worker.valueWithArgs:#(r k) }
+        } else:{
+            Async.timeout: 1 do:{ Runtime.sleep: 100000; 0 }
+                onCancel:{ worker.valueWithArgs:#(r k) }
+        }
+    }
+};
+
+"* Compare, or fail loudly: print a greppable SOAK FAILED line to stdout (Run mode
+"* exits 0 even on an uncaught throw) and then throw to abort the loop and dump the
+"* detail to stderr.
+check = { |phase r actual expected|
+    (actual == expected).else:{
+        detail = ('round ' + r + ' phase ' + phase
+            + ': expected ' + expected + ' got ' + actual);
+        ('SOAK FAILED: ' + detail).print;
+        detail.throw
+    }
+};
+
+"* --- the soak loop ---
+('async_soak: ' + rounds + ' rounds, ' + width + ' tasks/batch').print;
+
+round = 0;
+checksum = 0;
+{ round < rounds }.whileDo:{
+    "* 1. concurrent compute vs serial reference
+    actual = gatherCompute.value:round;
+    check.valueWithArgs:#( 'compute' round actual (expectedCompute.value:round) );
+
+    "* 2. nested gather
+    check.valueWithArgs:#(
+        'nested' round (gatherNested.value:round) (expectedNested.value:round)
+    );
+
+    "* 3. guest fiber inside a task
+    check.valueWithArgs:#(
+        'fiber' round (gatherFiber.value:round) (expectedFiber.value:round)
+    );
+
+    "* 4. detached spawn + join-all
+    check.valueWithArgs:#(
+        'spawnjoin' round (spawnJoin.value:round) (expectedCompute.value:round)
+    );
+
+    "* 5. detached spawn + cancel-all
+    check.valueWithArgs:#( 'spawncancel' round (spawnCancel.value:round) expectedCancel );
+
+    "* 6. timeout combinator (each element == worker(r,k), as in compute)
+    check.valueWithArgs:#( 'timeout' round (timeoutRound.value:round) (expectedCompute.value:round) );
+
+    "* 6. allocation pressure (give the GC debt) folded into a running checksum
+    pressure = (0..width).collect:{ |k| (round + k) * (k + 1) };
+    rsum = actual.sum + (pressure.select:{ |x| (x % 2) == 0 }).sum;
+    checksum = (checksum + rsum) % 1000000007;
+
+    ((round % progressEvery) == 0).if:{
+        ('  round ' + round + '  checksum ' + checksum).print
+    };
+    round = round + 1
+};
+
+('OK: ' + rounds + ' rounds passed, final checksum ' + checksum).print

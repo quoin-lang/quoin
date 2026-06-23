@@ -1,4 +1,5 @@
 use crate::arg;
+use crate::error::QuoinError;
 use crate::recv;
 use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};
@@ -34,6 +35,21 @@ pub fn build_block_class() -> NativeClassBuilder {
                 && let Some(text) = &source_info.source_text
             {
                 Ok(vm.new_string(mc, text.clone()))
+            } else {
+                Ok(vm.new_nil(mc))
+            }
+        })
+        // source -> #( filenameStr lineInt columnInt ) for where this block was
+        // defined, or nil if the block carries no source info. `line` is 1-indexed and
+        // `column` is 0-indexed (the raw `SourceInfo` convention). Used by the test
+        // reporter to point a failed assertion at its source location.
+        .instance_method("source", |vm, mc, receiver, _args| {
+            let block = recv!(receiver, Block);
+            if let Some(si) = &block.source_info {
+                let file = vm.new_string(mc, si.filename.clone());
+                let line = vm.new_int(mc, si.line as i64);
+                let column = vm.new_int(mc, si.column as i64);
+                Ok(vm.new_list(mc, vec![file, line, column]))
             } else {
                 Ok(vm.new_nil(mc))
             }
@@ -85,6 +101,14 @@ pub fn build_block_class() -> NativeClassBuilder {
             let res = vm.execute_block(mc, receiver_block, Vec::new(), None);
             match res {
                 Ok(val) => Ok(val),
+                // Cancellation is not catchable: unwind frames and re-propagate so the
+                // task still cancels (a `catch:` cannot swallow it).
+                Err(QuoinError::Cancelled) => {
+                    while vm.frames.len() > initial_frame_count {
+                        vm.frames.pop();
+                    }
+                    Err(QuoinError::Cancelled)
+                }
                 Err(e) => {
                     let active_args = &vm.active_native_args.last().unwrap().args;
                     let catch_block = arg!(active_args, Block, 0);
@@ -114,6 +138,21 @@ pub fn build_block_class() -> NativeClassBuilder {
                     let finally_res = vm.execute_block(mc, finally_block, Vec::new(), None);
                     let val = vm.pop()?;
                     finally_res.map(|_| val)
+                }
+                // Cancellation runs `finally` (its always-runs guarantee holds) but is
+                // not caught — re-propagate so the task still cancels. Cancellation wins
+                // over any error the `finally` block itself raises.
+                Err(QuoinError::Cancelled) => {
+                    while vm.frames.len() > initial_frame_count {
+                        vm.frames.pop();
+                    }
+                    let active_args = &vm.active_native_args.last().unwrap().args;
+                    let finally_block = arg!(active_args, Block, 1);
+                    let _ = vm.execute_block(mc, finally_block, Vec::new(), None);
+                    while vm.frames.len() > initial_frame_count {
+                        vm.frames.pop();
+                    }
+                    Err(QuoinError::Cancelled)
                 }
                 Err(e) => {
                     while vm.frames.len() > initial_frame_count {

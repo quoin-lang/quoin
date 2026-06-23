@@ -1,6 +1,7 @@
 use crate::error::QuoinError;
+use crate::io_backend::IoRequest;
 use crate::value::{Block, Value};
-use crate::vm::{VmState, VmStatus};
+use crate::vm::{TaskId, VmState, VmStatus};
 
 use corosensei::stack::DefaultStack;
 use gc_arena::{Collect, Gc, Mutation};
@@ -34,6 +35,39 @@ pub enum YieldReason<'gc> {
     /// resumed it. Bubbles to the scheduler.
     YieldFiber {
         value: Value<'gc>,
+    },
+    /// A fiber is suspending to perform async I/O. The plain-data request bubbles to
+    /// the scheduler, which fulfills it via the `IoBackend` and resumes the fiber with
+    /// the result in `Scheduler::wake`. See `docs/ASYNC_ARCH.md`.
+    AwaitIo {
+        #[collect(require_static)]
+        req: IoRequest,
+    },
+    /// The running task is spawning one child task per block and parking until all
+    /// of them complete (`Async.gather:`). The blocks carry `Gc` just like
+    /// `CallBlock`; the scheduler spawns the children and resumes the parent with the
+    /// list of results in `Scheduler::wake`. See `docs/ASYNC_ARCH.md` (Stage 2a).
+    Gather {
+        blocks: Vec<Gc<'gc, Block<'gc>>>,
+    },
+    /// The running task is parking in `join` on another (detached) task. The plain
+    /// `TaskId` bubbles to the scheduler; the joiner was already added to the target's
+    /// waiter list, and is resumed with the outcome in `Scheduler::wake` when the
+    /// target completes. See `docs/ASYNC_ARCH.md` (Stage 2b).
+    Join {
+        #[collect(require_static)]
+        task: TaskId,
+    },
+    /// Like `Join`, but with a deadline: the running task parks on `task` *or* a timer
+    /// of `ms` milliseconds, whichever fires first (`Async.timeout:do:`). The scheduler
+    /// arms a deadline timer alongside the join; the first to resolve wins and the loser
+    /// is disarmed. Resumes with the join outcome, or `Wake::TimedOut` on the deadline.
+    /// See `docs/ASYNC_ARCH.md` (Stage 5a).
+    JoinTimed {
+        #[collect(require_static)]
+        task: TaskId,
+        #[collect(require_static)]
+        ms: u64,
     },
 }
 

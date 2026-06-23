@@ -62,6 +62,12 @@ pub fn build_string_class() -> NativeClassBuilder {
             };
             Ok(vm.new_string(mc, format!("{}{}", a, b)))
         })
+        // asBytes -> the string's UTF-8 bytes as a `Bytes` (infallible). The inverse
+        // is `Bytes.asString` (which can fail). See `docs/ASYNC_ARCH.md`.
+        .instance_method("asBytes", |vm, mc, receiver, _args| {
+            let s = recv!(receiver, String);
+            Ok(vm.new_bytes(mc, s.as_bytes().to_vec()))
+        })
         // `a % b` -> `Send(a, "%:", [b])`: printf-like formatting. A List RHS supplies
         // positional args (`%1`, `%2`, … and bare `%`); a Map RHS additionally supplies
         // named substitutions (`%<key>`); any other RHS is a single positional arg.

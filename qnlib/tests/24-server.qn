@@ -1,0 +1,61 @@
+"* Stage 7 servers: a QN TcpListener accepting connections, driven by a QN client — both
+"* on the same scheduler, so the whole test is self-contained (no external peer). Each test
+"* binds 127.0.0.1:0 (ephemeral) and reads the chosen port back. Async.timeout: guards
+"* against a regression hanging the suite.
+
+"* Echo `n` connections, then break out of the infinite acceptLoop via a non-local return
+"* (^^) — which propagates straight through the native loop, returning the count.
+[Test]EchoServer <- {
+    .meta <-- {
+        serve:on: -> { |n listener|
+            count = 0;
+            listener.acceptLoop:{ |conn|
+                conn.writeAll:(conn.read:4);
+                count = count + 1;
+                (count >= n).if:{ ^^count };
+            };
+            ^-1   "* unreachable: acceptLoop only exits via the ^^ above
+        };
+    };
+};
+
+(TestSuite.new:{ name = 'Server' }).add:{
+    "* acceptOnce: accept a single connection, echo it, close; the client gets it back.
+    .test:
+    acceptOnceEchoesOneConnection -> {
+        listener = TcpListener.listen:'127.0.0.1:0';
+        target = '127.0.0.1:' + listener.port.s;
+        results = Async.timeout:5000 do:{
+            Async.gather:#(
+                { listener.acceptOnce:{ |conn| conn.writeAll:(conn.read:5) }; 'served' }
+                { c = TcpSocket.connect:target; c.writeAll:'hello'.asBytes;
+                  reply = (c.read:5).asString; c.close; reply }
+            )
+        };
+        listener.close;
+        .is:{ results.at:0 } equalTo:'served';
+        .is:{ results.at:1 } equalTo:'hello';
+        .is:{ listener.closed? } equalTo:true;
+    };
+
+    "* acceptLoop: accept forever; two concurrent clients are each echoed on their own
+    "* connection, then the server breaks out with ^^ after the 2nd (returning the count).
+    .test:
+    acceptLoopHandlesManyThenBreaks -> {
+        listener = TcpListener.listen:'127.0.0.1:0';
+        target = '127.0.0.1:' + listener.port.s;
+        served = Async.timeout:5000 do:{
+            Async.gather:#(
+                { [Test]EchoServer.serve:2 on:listener }
+                { c = TcpSocket.connect:target; c.writeAll:'AAAA'.asBytes;
+                  r = (c.read:4).asString; c.close; r }
+                { c = TcpSocket.connect:target; c.writeAll:'BBBB'.asBytes;
+                  r = (c.read:4).asString; c.close; r }
+            )
+        };
+        listener.close;
+        .is:{ served.at:0 } equalTo:2;        "* serve:on: returned the count via ^^
+        .is:{ served.at:1 } equalTo:'AAAA';
+        .is:{ served.at:2 } equalTo:'BBBB';
+    };
+};

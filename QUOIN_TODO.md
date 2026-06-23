@@ -21,6 +21,15 @@ This document outlines the language features, compiler updates, and VM modificat
   temporary that's reachable only via the Rust stack across a step boundary in the `add:` /
   collection-builder path. See `profiling/send-receiver-split/notes.md`.
 - [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
+- [ ] **Streaming chunked HTTP responses (lazy generator).** Stage 6c decodes
+  `Transfer-Encoding: chunked` by buffering the whole body into one `Bytes` (in
+  `qnlib/net/http.qn`'s `send`, over a Stage 6 `ByteStream`). Offer an alternative that
+  exposes the body as a **lazy generator over each chunk** — yielding each decoded chunk
+  as it arrives instead of buffering all of it, with the response headers attached (and
+  any trailer headers that follow the terminating `0\r\n`). Lets a caller stream a large
+  or unbounded response without holding it all in memory. Built on the Stage 6 streams +
+  the `Generator`/`Iterator` machinery (`qnlib/core/02-iterate.qn`). See
+  `docs/ASYNC_ARCH.md`.
 - [ ] Add a Quoin builtin for exiting the process with a status code (like C's `exit(status)`) —
   e.g. `Runtime.exit:0` / `Runtime.exit:1` — threading a requested exit code out of the VM to
   `std::process::exit`. Once it exists, the `qn test` harness (`qnlib/main.qn`) can call it

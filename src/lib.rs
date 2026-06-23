@@ -7,6 +7,7 @@ pub mod error;
 pub mod fiber;
 pub mod highlighter;
 pub mod instruction;
+pub mod io_backend;
 pub mod packages;
 pub mod parser;
 pub mod runner;
@@ -15,6 +16,7 @@ pub mod symbol;
 pub mod tuning;
 pub mod value;
 pub mod vm;
+pub mod vm_scheduler;
 
 #[macro_export]
 macro_rules! gc {

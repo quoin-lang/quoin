@@ -1,0 +1,151 @@
+"* These suites (and the rest) are expected to stay green under a sweep of
+"* `QN_SCHED_STRESS=<seed>` runs, which preempt at every cooperative yield and
+"* pick ready tasks at random — exercising the per-task state swap and a wide
+"* range of interleavings. See `docs/ASYNC_ARCH.md` and `src/tuning.rs`.
+(TestSuite.new:{ name = 'Async' }).add:{
+    "* Stage 1 async I/O: `Runtime.sleep:` parks the running fiber via an AwaitIo
+    "* suspension and resumes with a value, all driven by the async IoBackend.
+
+    "* The call round-trips out to the backend and back, returning nil.
+    .test:
+    sleepReturnsNil -> {
+        .is:{ Runtime.sleep: 1 } equalTo:nil;
+    };
+
+    "* Lower-bound timing only (non-flaky): a 30ms sleep really parked, proving a
+    "* genuine reactor round-trip rather than a no-op.
+    .test:
+    sleepParksForRequestedTime -> {
+        .is:{ Timer.time:{ Runtime.sleep: 30 } } greaterThanOrEqualTo:20;
+    };
+
+    "* Stage 2a: `Async.gather:` runs each block as a concurrent task whose I/O
+    "* overlaps. Eight 30ms sleeps run together finish in well under the 240ms a
+    "* serial run would take — proof the scheduler overlaps parked tasks.
+    .test:
+    gatherRunsTasksConcurrently -> {
+        .is:{ Timer.time:{ Async.gather:#(
+            { Runtime.sleep: 30 } { Runtime.sleep: 30 }
+            { Runtime.sleep: 30 } { Runtime.sleep: 30 }
+            { Runtime.sleep: 30 } { Runtime.sleep: 30 }
+            { Runtime.sleep: 30 } { Runtime.sleep: 30 }
+        ) } } lessThan:150;
+    };
+
+    "* Results come back in spawn order, not completion order: the block that
+    "* sleeps longest is first in the list, so its result must still lead.
+    .test:
+    gatherReturnsResultsInSpawnOrder -> {
+        .is:{ Async.gather:#(
+            { Runtime.sleep: 30; 1 }
+            { Runtime.sleep: 10; 2 }
+            { 3 }
+        ) } equalTo:#(1 2 3);
+    };
+
+    "* Stage 2b: a detached `Task.spawn:` runs concurrently with the spawner; `join`
+    "* parks until it finishes and returns its result.
+    .test:
+    spawnAndJoinReturnsResult -> {
+        .is:{ (Task.spawn:{ Runtime.sleep: 10; 42 }).join } equalTo:42;
+    };
+
+    "* The result is re-readable: joining twice yields the same value (Promise-style).
+    .test:
+    joinIsReadableMoreThanOnce -> {
+        h = Task.spawn:{ 7 };
+        .is:{ h.join } equalTo:7;
+        .is:{ h.join } equalTo:7;
+    };
+
+    "* Detached tasks overlap: eight 30ms tasks joined together finish well under the
+    "* 240ms a serial run would take.
+    .test:
+    spawnedTasksRunConcurrently -> {
+        .is:{ Timer.time:{
+            hs = (0..8).collect:{ |k| Task.spawn:{ Runtime.sleep: 30; k } };
+            hs.each:{ |h| h.join }
+        } } lessThan:150;
+    };
+
+    "* A failed task re-raises its exception out of `join` — catchable, not the
+    "* joiner's own (uncatchable) cancellation.
+    .test:
+    joinReRaisesTaskFailure -> {
+        .is:{ { (Task.spawn:{ 'boom'.throw }).join }.catch:{ |ex| ex } } equalTo:'boom';
+    };
+
+    "* Stage 2b-ii: `cancel` raises an uncatchable Cancelled at the task's next
+    "* checkpoint, so its `finally` runs but its own `catch:` cannot swallow it; the
+    "* joiner observes a catchable cancellation and the status becomes 'cancelled'.
+    .test:
+    cancelRunsFinallyAndIsObservable -> {
+        trace = #();
+        entered = #();
+        h = Task.spawn:{
+            { entered.add:1; Runtime.sleep: 1000 }
+                .catch:{ |e| trace.add:'caught' } finally:{ trace.add:'finally' }
+        };
+        "* Wait until the task is *inside* the protected block (non-flaky under stress),
+        "* so cancel hits its sleep and `finally` is guaranteed to run.
+        { entered.count == 0 }.whileDo:{ Runtime.sleep: 1 };
+        h.cancel;
+        .is:{ { h.join }.catch:{ |ex| 'observed' } } equalTo:'observed';
+        .is:{ h.status } equalTo:'cancelled';
+        .is:{ trace } equalTo:#('finally');
+    };
+
+    "* Stage 5a: `Async.timeout:ms do:{…}` runs the block raced against a deadline.
+    "* A block that finishes in time returns its value.
+    .test:
+    timeoutReturnsValueWhenInTime -> {
+        .is:{ Async.timeout: 1000 do:{ 40 + 2 } } equalTo:42;
+        .is:{ Async.timeout: 1000 do:{ Runtime.sleep: 2; 7 } } equalTo:7;
+    };
+
+    "* On the deadline, the bare form throws a catchable `'timeout'` (the block is
+    "* cancelled — its in-flight sleep aborts promptly, so this does not hang).
+    .test:
+    timeoutThrowsOnDeadline -> {
+        .does:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } } throw:'timeout';
+    };
+
+    "* `onCancel:{…}` replaces the throw with the handler's value on the deadline;
+    "* `onCancel:{ nil }` is the non-throwing form.
+    .test:
+    timeoutOnCancelReturnsHandlerValue -> {
+        .is:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ 'handled' } }
+            equalTo:'handled';
+        .is:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ nil } } equalTo:nil;
+    };
+
+    "* `onCancel:` catches only the timeout: a *normal* error from the block propagates
+    "* past it (the handler does not run).
+    .test:
+    timeoutOnCancelDoesNotCatchErrors -> {
+        .is:{ { Async.timeout: 1000 do:{ 'boom'.throw } onCancel:{ 'handled' } }
+                .catch:{ |e| e } }
+            equalTo:'boom';
+    };
+
+    "* The block's `finally` runs on the deadline (cooperative unwind, like cancel).
+    .test:
+    timeoutRunsFinallyOnDeadline -> {
+        trace = #();
+        Async.timeout: 5 do:{
+            { Runtime.sleep: 100000 }.catch:{ |e| nil } finally:{ trace.add:'finally' }
+        } onCancel:{ nil };
+        .is:{ trace } equalTo:#('finally');
+    };
+
+    "* Timeouts nest: an inner deadline fires its own handler and the outer (still well
+    "* within its own deadline) returns that value — the inner timeout does not leak out.
+    .test:
+    timeoutNests -> {
+        .is:{
+            Async.timeout: 1000 do:{
+                Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ 'inner' }
+            }
+        } equalTo:'inner';
+    };
+}

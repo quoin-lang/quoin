@@ -179,6 +179,10 @@ pub enum ObjectPayload<'gc> {
     /// An interned symbol (`#foo`). The inner string is shared across all
     /// occurrences of the same name, so symbols compare by pointer identity.
     Symbol(Gc<'gc, String>),
+    /// Immutable binary data (the `Bytes` class). A GC leaf like `String`, but raw
+    /// `Vec<u8>` rather than UTF-8 — the currency of the socket/TLS/HTTP layers, which
+    /// can't be represented as text. Converts to/from `String` at the edges.
+    Bytes(Gc<'gc, Vec<u8>>),
     Block(Gc<'gc, Block<'gc>>),
     Instance,
     NativeState(Gc<'gc, RefLock<Box<dyn AnyCollect>>>),
@@ -244,6 +248,7 @@ impl<'gc> Value<'gc> {
                 match &borrowed.payload {
                     ObjectPayload::String(_) => "String",
                     ObjectPayload::Symbol(_) => "Symbol",
+                    ObjectPayload::Bytes(_) => "Bytes",
                     ObjectPayload::Block(_) => "Block",
                     _ => match borrowed.class_name().as_str() {
                         "List" => "List",
@@ -306,6 +311,7 @@ impl<'gc> PartialEq for Value<'gc> {
                 match (&a_borrow.payload, &b_borrow.payload) {
                     (ObjectPayload::String(x), ObjectPayload::String(y)) => **x == **y,
                     (ObjectPayload::Symbol(x), ObjectPayload::Symbol(y)) => Gc::ptr_eq(*x, *y),
+                    (ObjectPayload::Bytes(x), ObjectPayload::Bytes(y)) => **x == **y,
                     (ObjectPayload::Block(x), ObjectPayload::Block(y)) => Gc::ptr_eq(*x, *y),
                     _ => Gc::ptr_eq(*a, *b),
                 }
@@ -329,6 +335,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
                 match &o_borrow.payload {
                     ObjectPayload::String(s) => write!(f, "String({:?})", *s),
                     ObjectPayload::Symbol(s) => write!(f, "#{}", **s),
+                    ObjectPayload::Bytes(b) => write!(f, "Bytes[{}]", b.len()),
                     _ if o_borrow.class_name() == "List" => write!(f, "List(...)"),
                     _ if o_borrow.class_name() == "Map" => write!(f, "Map(...)"),
                     _ if o_borrow.class_name() == "Set" => write!(f, "Set(...)"),
@@ -401,6 +408,17 @@ impl<'gc> fmt::Display for Value<'gc> {
                 match &o_borrow.payload {
                     ObjectPayload::String(s) => write!(f, "{}", **s),
                     ObjectPayload::Symbol(s) => write!(f, "#{}", **s),
+                    ObjectPayload::Bytes(b) => {
+                        // Length + a short hex preview; never dump raw bytes to a terminal.
+                        write!(f, "Bytes[{}]", b.len())?;
+                        for byte in b.iter().take(16) {
+                            write!(f, " {:02x}", byte)?;
+                        }
+                        if b.len() > 16 {
+                            write!(f, " …")?;
+                        }
+                        Ok(())
+                    }
                     _ if o_borrow.class_name() == "List" => {
                         if let Ok(res) = self.with_native_state::<NativeListState, _, _>(|l| {
                             let vec = l.get_vec();

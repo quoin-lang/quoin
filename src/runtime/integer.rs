@@ -1,6 +1,9 @@
 use crate::error::QuoinError;
-use crate::recv;
 use crate::value::{NativeClassBuilder, Value};
+use crate::vm::VmState;
+use crate::{arg, recv};
+
+use gc_arena::Mutation;
 
 /// Generate `[Integer]` and `[Double]` typed variants for a binary numeric
 /// operator on an `Integer` receiver. `Int op Int` stays `Int`; a `Double` RHS
@@ -56,7 +59,36 @@ pub fn build_integer_class() -> NativeClassBuilder {
     let b = int_binop!(b, "%:", divop %);
     // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
     let b = int_binop!(b, "<:", cmp <);
-    b.instance_method("==:", |vm, mc, receiver, args| {
+    let b = b.instance_method("==:", |vm, mc, receiver, args| {
         Ok(vm.new_bool(mc, receiver == args[0]))
+    });
+    // Integer.fromHex: 'ff' -> 255. Parses a hexadecimal string (surrounding whitespace
+    // ignored; an optional '0x'/'0X' prefix accepted); throws on a non-hex string. Used
+    // e.g. for HTTP chunk sizes so that logic can stay in Quoin.
+    b.typed_class_method("fromHex:", &["String"], |vm, mc, _receiver, args| {
+        let s = arg!(args, String, 0);
+        let trimmed = s.trim();
+        let hex = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+        match i64::from_str_radix(hex, 16) {
+            Ok(n) => Ok(vm.new_int(mc, n)),
+            Err(_) => Err(raise(
+                vm,
+                mc,
+                format!(
+                    "Integer.fromHex:: not a hexadecimal integer: '{}'",
+                    s.as_str()
+                ),
+            )),
+        }
     })
+}
+
+/// Throw a (catchable) string exception.
+fn raise<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, msg: String) -> QuoinError {
+    let val = vm.new_string(mc, msg);
+    vm.active_exception = Some(val);
+    QuoinError::Thrown
 }

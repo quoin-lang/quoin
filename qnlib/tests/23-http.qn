@@ -1,0 +1,36 @@
+"* Network-free coverage of the [HTTP] client's pure logic (URL parsing, request
+"* serialization, the Response object). The full round-trip lives in tests/http.rs.
+use std:net/http;
+
+(TestSuite.new:{ name = 'HTTP' }).add:{
+    .test:
+    parsesUrlWithPortAndPath -> {
+        .is:{ [HTTP]Request.parseUrl: 'https://example.org:8443/a/b' }
+            equalTo:#( 'https' 'example.org' '8443' '/a/b' );
+    };
+
+    .test:
+    parsesUrlDefaultsPortAndPath -> {
+        .is:{ [HTTP]Request.parseUrl: 'http://localhost' } equalTo:#( 'http' 'localhost' '80' '/' );
+        .is:{ [HTTP]Request.parseUrl: 'https://localhost' } equalTo:#( 'https' 'localhost' '443' '/' );
+    };
+
+    .test:
+    buildsRequestBytes -> {
+        r = [HTTP]Request.new:{ url = 'http://h/p' };
+        r.method:'POST';
+        r.body:'hi'.asBytes;
+        .is:{ (r.requestBytes:'h' path:'/p').asStringLossy }
+            equalTo:'POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi';
+    };
+
+    .test:
+    responseHeaderLookupIsCaseInsensitive -> {
+        resp = [HTTP]Response.new:{ status = 200; reason = 'OK';
+            headers = #( #('Content-Type' 'text/plain') ); body = 'x'.asBytes };
+        .is:{ resp.header:'CONTENT-TYPE' } equalTo:'text/plain';
+        .is:{ (resp.header:'missing').defined? } equalTo:false;
+        .is:{ resp.ok? } equalTo:true;
+        .is:{ resp.bodyText } equalTo:'x';
+    };
+};

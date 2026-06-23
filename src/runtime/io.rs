@@ -1,4 +1,5 @@
 use crate::error::QuoinError;
+use crate::io_backend::{IoError, IoRequest, IoResult};
 use crate::value::{NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::VmState;
 use crate::{ansi_colorizer, arg};
@@ -168,6 +169,48 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 Err(_) => Ok(vm.new_bool(mc, false)),
             }
         })
+        // byteStream -> open the file (read-only) and return a buffered ByteStream over it,
+        // the same stream class a socket yields. The file's path stays an OsString through
+        // the open; a fresh fd is opened each call (the [IO]File is not consumed).
+        .instance_method("byteStream", |vm, mc, receiver, _args| {
+            let path = receiver
+                .with_native_state(|io: &NativeIoFile| io.path.clone())
+                .map_err(QuoinError::Other)?;
+            match vm.await_io(IoRequest::OpenFile { path })? {
+                IoResult::Connected(id) => {
+                    Ok(crate::runtime::streams::make_byte_stream(vm, mc, id))
+                }
+                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                other => Err(QuoinError::Other(format!(
+                    "[IO]File.byteStream: unexpected I/O result {other:?}"
+                ))),
+            }
+        })
+        // stringStream -> open the file (read-only) and return a text StringStream over it.
+        .instance_method("stringStream", |vm, mc, receiver, _args| {
+            let path = receiver
+                .with_native_state(|io: &NativeIoFile| io.path.clone())
+                .map_err(QuoinError::Other)?;
+            match vm.await_io(IoRequest::OpenFile { path })? {
+                IoResult::Connected(id) => Ok(crate::runtime::streams::make_string_stream(
+                    vm,
+                    mc,
+                    id,
+                    Vec::new(),
+                )),
+                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                other => Err(QuoinError::Other(format!(
+                    "[IO]File.stringStream: unexpected I/O result {other:?}"
+                ))),
+            }
+        })
+}
+
+/// Throw a (catchable) network/file error carrying the backend's message.
+fn raise_io<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, e: &IoError) -> QuoinError {
+    let val = vm.new_string(mc, e.message.clone());
+    vm.active_exception = Some(val);
+    QuoinError::Thrown
 }
 
 pub enum NativeIoHandleWrapper {

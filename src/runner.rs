@@ -3,21 +3,29 @@ use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
 use crate::highlighter::highlight_to_ansi;
+use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend, StreamId};
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file};
 use crate::runtime::{
-    block, boolean, class, double, fiber as fiber_class, integer, io, list, map, method, nil,
-    object, regex, runtime, set, string, symbol, timer,
+    async_rt, block, boolean, bytes, class, double, fiber as fiber_class, http, integer, io, list,
+    map, method, nil, object, regex, runtime, set, sockets, streams, string, symbol, task, timer,
 };
-use crate::value::{Block, NamespacedName};
-use crate::vm::{VmOptions, VmState, VmStatus};
+use crate::value::{Block, NamespacedName, Value};
+use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
 
 use corosensei::CoroutineResult;
-use gc_arena::{Arena, Gc, Rootable};
+use futures_lite::StreamExt;
+use futures_lite::future::block_on;
+use futures_util::future::{Aborted, abortable};
+use futures_util::stream::FuturesUnordered;
+use gc_arena::{Arena, Gc, Mutation, Rootable};
 use std::fs::read_to_string;
+use std::future::Future;
 use std::iter::once_with;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::exit;
+use std::sync::Once;
 use std::time::Instant;
 
 /// The prelude AST: a single `qnlib/prelude.qn` whose `use core/*` loads the core
@@ -27,11 +35,196 @@ fn prelude_asts() -> impl Iterator<Item = Node> {
     once_with(|| parse_quoin_file(&PathBuf::from("qnlib/prelude.qn")))
 }
 
+/// Step status for the benchmark driver, which runs a single fiber to completion
+/// with no async I/O (the run/test driver uses `RunStep` and the task scheduler).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionStatus {
     Running,
     Finished,
     Yeeted,
+}
+
+/// What a completed background future tells the driver to do for the task that owns it.
+/// The scheduler keeps these in a `FuturesUnordered`; `.next().await` is the one reactor
+/// wait. Both arms are `abortable` so `cancel` (and a won race) interrupts them promptly.
+enum TaskWakeup {
+    /// An async I/O op finished (`Ok`), or was aborted by `cancel` (`Err(Aborted)`).
+    Io(Result<IoResult, Aborted>),
+    /// A `JoinTimed` deadline timer elapsed. Carries the joined `target` and the park
+    /// `epoch` captured at park time, so `deliver_deadline` can ignore a stale firing.
+    Deadline { target: TaskId, epoch: u64 },
+}
+
+/// A boxed, single-threaded background future tagged with the task that is waiting on it.
+type IoTaskFuture = Pin<Box<dyn Future<Output = (TaskId, TaskWakeup)>>>;
+
+/// A tiny deterministic PRNG (SplitMix64) for `QN_SCHED_STRESS`. Seeded so a
+/// randomized scheduling failure can be replayed exactly. Not used outside stress.
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A uniform index in `0..n` (caller ensures `n > 0`).
+    fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+}
+
+/// What the current task did when the run/test scheduler resumed it once.
+enum RunStep {
+    /// Suspended at a cooperative-yield boundary (between VM steps). Mailboxes are
+    /// empty here, so this is the one point it is safe to *preempt* the task — the
+    /// scheduler stress mode does exactly that. Without stress, it just keeps running.
+    Yielded,
+    /// Made progress mid-work — a block call or a guest-fiber switch — and is still
+    /// the current task. Not a safe preemption point (a fiber switch leaves a value
+    /// in the `fiber_transfer` mailbox the target has not consumed yet), so the
+    /// driver always keeps running it.
+    Running,
+    /// Parked on async I/O. Its context is already saved; the driver fulfills `req`
+    /// and resumes it later with the result.
+    ParkedIo(IoRequest),
+    /// Parked waiting on other tasks — a `gather` batch, or a `join` — which were
+    /// already wired up (children/waiters enqueued, context saved) inside the resume.
+    /// The driver just picks the next ready task; the wakeup comes from a completion.
+    Parked,
+    /// Parked in `JoinTimed` on `target` with a deadline of `ms` ms: like `Parked`, but
+    /// the driver must also arm a deadline timer that wakes this task if `target` has not
+    /// finished in time (`Async.timeout:do:`). The joiner is already a waiter on `target`.
+    ParkedJoinTimed { target: TaskId, ms: u64 },
+    /// A non-main task finished; its waker(s) were already enqueued to `ready`.
+    Done,
+    /// The main task (#0) finished — the program is done; its result is on the stack.
+    Finished,
+}
+
+/// Resume the current task's coroutine once and classify what happened. The guest
+/// `Fiber` switches (`ResumeFiber`/`YieldFiber`) and the GC-cooperative yield stay
+/// internal to the task; only I/O, gather, and completion surface to the driver.
+fn resume_current_task<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+) -> Result<RunStep, QuoinError> {
+    // Resume the coroutine of the currently-running fiber: a guest `Fiber` if one is
+    // active in this task, otherwise the task's own root coroutine.
+    let coro_holder = match vm.sched.current_fiber {
+        None => match vm
+            .sched
+            .tasks
+            .get(vm.sched.current_task.0)
+            .and_then(|t| t.as_ref())
+        {
+            Some(task) => task.coro,
+            None => return Ok(RunStep::Finished),
+        },
+        Some(fv) => fv
+            .with_native_state::<fiber_class::NativeFiberState, _, _>(|s| s.coro())
+            .map_err(QuoinError::Other)?,
+    };
+
+    // Point `vm.sched.yielder` at the coroutine we're about to run, sourced from its
+    // own GC-rooted slot, so it never dangles.
+    vm.sched.yielder = vm.current_fiber_yielder();
+
+    let ctx = VMContext {
+        vm: vm as *mut _,
+        mc: mc as *const _,
+    };
+    let res = {
+        let mut opt = coro_holder.coroutine.borrow_mut();
+        let coro = opt.as_mut().expect("Coroutine already finished");
+        coro.resume(ctx)
+    };
+
+    match res {
+        CoroutineResult::Yield(YieldReason::CooperativeYield) => Ok(RunStep::Yielded),
+        CoroutineResult::Yield(YieldReason::CallBlock { .. }) => Ok(RunStep::Running),
+        CoroutineResult::Yield(YieldReason::ResumeFiber { fiber, arg }) => {
+            vm.do_resume_switch(mc, fiber, arg)?;
+            Ok(RunStep::Running)
+        }
+        CoroutineResult::Yield(YieldReason::YieldFiber { value }) => {
+            vm.do_yield_switch(mc, value)?;
+            Ok(RunStep::Running)
+        }
+        CoroutineResult::Yield(YieldReason::AwaitIo { req }) => {
+            // Park: stash this task's context so another can run while I/O is in flight.
+            vm.save_task_context(vm.sched.current_task);
+            Ok(RunStep::ParkedIo(req))
+        }
+        CoroutineResult::Yield(YieldReason::Gather { blocks }) => {
+            // Park the parent on its gather; children are enqueued inside spawn_gather.
+            vm.spawn_gather(mc, blocks);
+            Ok(RunStep::Parked)
+        }
+        CoroutineResult::Yield(YieldReason::Join { .. }) => {
+            // The joiner already added itself to the target's waiter list in await_join;
+            // park its context until the target completes and wakes it.
+            vm.save_task_context(vm.sched.current_task);
+            Ok(RunStep::Parked)
+        }
+        CoroutineResult::Yield(YieldReason::JoinTimed { task, ms }) => {
+            // Like Join (the joiner is already a waiter on `task`), but the driver also
+            // arms a deadline timer — carry the target and `ms` up to it.
+            vm.save_task_context(vm.sched.current_task);
+            Ok(RunStep::ParkedJoinTimed { target: task, ms })
+        }
+        CoroutineResult::Yield(YieldReason::Return(val)) => complete_current_task(vm, mc, Ok(val)),
+        CoroutineResult::Return(res) => {
+            if vm.sched.current_fiber.is_some() {
+                // A guest fiber's block returned; hand the result back to its resumer
+                // and keep running this same task.
+                vm.do_fiber_done(mc, res)?;
+                Ok(RunStep::Running)
+            } else {
+                complete_current_task(vm, mc, res)
+            }
+        }
+    }
+}
+
+/// The current task's root coroutine completed with `result`. Dispatch by kind: a
+/// gather child reports into its parent's batch; a detached task writes its outcome to
+/// its handle and wakes joiners; the main task ends the program, leaving its result on
+/// the stack. The first two enqueue any woken task to `ready` themselves.
+fn complete_current_task<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    result: Result<Value<'gc>, QuoinError>,
+) -> Result<RunStep, QuoinError> {
+    let cur = vm.sched.current_task;
+    let task = vm.sched.tasks[cur.0]
+        .as_ref()
+        .expect("completing task slot is empty");
+    if task.parent.is_some() {
+        vm.complete_child(mc, cur, result);
+        Ok(RunStep::Done)
+    } else if task.handle.is_some() {
+        vm.complete_detached(mc, cur, result);
+        Ok(RunStep::Done)
+    } else {
+        vm.sched.tasks[cur.0] = None;
+        match result {
+            Ok(val) => {
+                vm.push(val);
+                Ok(RunStep::Finished)
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 pub struct VmRunnerOptions {
@@ -165,12 +358,21 @@ impl VmRunner {
             vm.register_native_class(mc, class::build_class_class());
             vm.register_native_class(mc, boolean::build_boolean_class());
             vm.register_native_class(mc, block::build_block_class());
+            vm.register_native_class(mc, bytes::build_bytes_class());
+            vm.register_native_class(mc, sockets::build_tcp_socket_class());
+            vm.register_native_class(mc, sockets::build_tls_socket_class());
+            vm.register_native_class(mc, sockets::build_tcp_listener_class());
+            vm.register_native_class(mc, http::build_http_parser_class());
+            vm.register_native_class(mc, streams::build_byte_stream_class());
+            vm.register_native_class(mc, streams::build_string_stream_class());
             vm.register_native_class(mc, io::build_io_folder_class());
             vm.register_native_class(mc, io::build_io_file_class());
             vm.register_native_class(mc, io::build_io_handle_class());
             vm.register_native_class(mc, list::build_list_class());
             vm.register_native_class(mc, set::build_set_class());
             vm.register_native_class(mc, runtime::build_runtime_class());
+            vm.register_native_class(mc, async_rt::build_async_class());
+            vm.register_native_class(mc, task::build_task_class());
             vm.register_native_class(mc, method::build_method_class());
             vm.register_native_class(mc, timer::build_timer_class());
             vm.register_native_class(mc, double::build_double_class());
@@ -242,97 +444,196 @@ impl VmRunner {
                 );
                 vm.start_block(mc, main_block, Vec::new(), None, None);
 
+                // The main program runs as task #0; the run/test driver schedules
+                // over the task table (benchmark mode uses `active_fiber` instead).
+                // Its block is already started into the live context above, so this
+                // task is pre-started and its context lives in `VmState` until it parks.
                 let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
-                vm.active_fiber = Some(gc!(mc, fiber));
+                vm.sched.tasks = vec![Some(Task {
+                    coro: gc!(mc, fiber),
+                    root_yielder: None,
+                    block: None,
+                    started: true,
+                    stack: Vec::new(),
+                    frames: Vec::new(),
+                    native_args: Vec::new(),
+                    current_fiber: None,
+                    resume_stack: Vec::new(),
+                    wake: None,
+                    parent: None,
+                    gather: None,
+                    handle: None,
+                    waiters: Vec::new(),
+                    cancel_requested: false,
+                    abort_handle: None,
+                    joining: None,
+                    park_epoch: 0,
+                    deadline_abort: None,
+                })];
+                vm.sched.current_task = TaskId(0);
             });
 
-            let mut step_count = 0;
-            loop {
-                let status = arena.mutate_root(|mc, vm| {
-                    // Resume the coroutine of the currently-running fiber: a guest
-                    // `Fiber` if one is active, otherwise the main program (#0).
-                    let coro_holder = match vm.current_fiber {
-                        None => match vm.active_fiber {
-                            Some(f) => f,
-                            None => return Ok(ExecutionStatus::Finished),
-                        },
-                        Some(fv) => fv
-                            .with_native_state::<fiber_class::NativeFiberState, _, _>(|s| s.coro())
-                            .map_err(QuoinError::Other)?,
-                    };
+            // The scheduler: run tasks until each parks on I/O or finishes, overlapping
+            // their I/O via a `FuturesUnordered`. The runnable set is `vm.sched.ready`
+            // (so a native `spawn` can enqueue directly); the backend lives outside the
+            // arena and is the only async code; the await on `futures` is the single
+            // reactor wait. `QN_SCHED_STRESS` turns on a seeded PRNG that preempts at
+            // every cooperative yield and picks ready tasks at random — exercising the
+            // per-task state swap and a wide range of interleavings. Without it the
+            // scheduler is run-to-block.
+            let backend = SmolBackend::new();
+            let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
+            let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
+            // Announce the seed once per process so a failing run is reproducible with
+            // the same `QN_SCHED_STRESS=<seed>` (this driver runs once per program AST).
+            if let Some(seed) = crate::tuning::sched_stress() {
+                static ANNOUNCED: Once = Once::new();
+                ANNOUNCED.call_once(|| eprintln!("scheduler stress enabled (seed={seed})"));
+            }
+            // Task #0 starts current and already live; nothing to load on first resume.
+            let mut current: Option<TaskId> = Some(TaskId(0));
+            let mut needs_load = false;
 
-                    // Point `vm.yielder` at the coroutine we're about to run,
-                    // sourced from its own GC-rooted slot, so it never dangles.
-                    vm.yielder = vm.current_fiber_yielder();
-
-                    let ctx = VMContext {
-                        vm: vm as *mut _,
-                        mc: mc as *const _,
-                    };
-                    let res = {
-                        let mut opt = coro_holder.coroutine.borrow_mut();
-                        let coro = opt.as_mut().expect("Coroutine already finished");
-                        coro.resume(ctx)
-                    };
-
-                    match res {
-                        CoroutineResult::Yield(YieldReason::CooperativeYield)
-                        | CoroutineResult::Yield(YieldReason::CallBlock { .. }) => {
-                            Ok(ExecutionStatus::Running)
-                        }
-                        CoroutineResult::Yield(YieldReason::ResumeFiber { fiber, arg }) => {
-                            vm.do_resume_switch(mc, fiber, arg)?;
-                            Ok(ExecutionStatus::Running)
-                        }
-                        CoroutineResult::Yield(YieldReason::YieldFiber { value }) => {
-                            vm.do_yield_switch(mc, value)?;
-                            Ok(ExecutionStatus::Running)
-                        }
-                        CoroutineResult::Yield(YieldReason::Return(val)) => {
-                            vm.active_fiber = None;
-                            vm.push(val);
-                            Ok(ExecutionStatus::Finished)
-                        }
-                        CoroutineResult::Return(res) => {
-                            if vm.current_fiber.is_some() {
-                                // A guest fiber's block returned; hand the result
-                                // back to its resumer and keep scheduling.
-                                vm.do_fiber_done(mc, res)?;
-                                Ok(ExecutionStatus::Running)
+            block_on(async {
+                let mut step_count = 0;
+                loop {
+                    // Acquire a task to run after the previous one parked or finished:
+                    // pick from `ready` (random under stress); if none are ready but I/O
+                    // is in flight, await a completion, which feeds `ready`, and retry.
+                    if current.is_none() {
+                        let picked = arena.mutate_root(|_mc, vm| {
+                            let n = vm.sched.ready.len();
+                            if n == 0 {
+                                None
                             } else {
-                                vm.active_fiber = None;
-                                match res {
-                                    Ok(val) => {
-                                        vm.push(val);
-                                        Ok(ExecutionStatus::Finished)
-                                    }
-                                    Err(err) => Err(err),
+                                let idx = rng.as_mut().map(|r| r.below(n)).unwrap_or(0);
+                                Some(vm.sched.ready.remove(idx).expect("idx within ready"))
+                            }
+                        });
+                        match picked {
+                            Some(tid) => {
+                                current = Some(tid);
+                                needs_load = true;
+                            }
+                            None => {
+                                if futures.is_empty() {
+                                    break; // nothing ready and nothing in flight
                                 }
+                                // The single reactor wait: park until some background
+                                // future (I/O op or deadline timer) lands.
+                                let (tid, wakeup) =
+                                    futures.next().await.expect("futures is non-empty");
+                                arena.mutate_root(|_mc, vm| match wakeup {
+                                    TaskWakeup::Io(result) => {
+                                        {
+                                            let t = vm.sched.tasks[tid.0]
+                                                .as_mut()
+                                                .expect("woken task slot is empty");
+                                            t.abort_handle = None; // the future is done
+                                            // On `Err(Aborted)` the task was cancelled:
+                                            // leave `wake` unset — `await_io` raises
+                                            // `Cancelled` from `cancel_current` instead.
+                                            if let Ok(io_result) = result {
+                                                t.wake = Some(Wake::Io { result: io_result });
+                                            }
+                                        }
+                                        vm.sched.ready.push_back(tid);
+                                    }
+                                    // A deadline elapsed: `deliver_deadline` resolves the
+                                    // race (wakes the joiner with `TimedOut`, or ignores a
+                                    // stale/superseded firing) and enqueues it if it won.
+                                    TaskWakeup::Deadline { target, epoch } => {
+                                        vm.deliver_deadline(tid, target, epoch);
+                                    }
+                                });
+                                continue;
                             }
                         }
                     }
-                });
-                match status {
-                    Ok(ExecutionStatus::Running) => {
-                        step_count += 1;
-                        if crate::tuning::gc_stress() || step_count % 10 == 0 {
-                            arena.collect_debt();
+                    let cur = current.expect("current task set above");
+                    if needs_load {
+                        arena.mutate_root(|mc, vm| vm.load_task_context(mc, cur));
+                        needs_load = false;
+                    }
+
+                    let step = arena.mutate_root(|mc, vm| resume_current_task(vm, mc));
+                    match step {
+                        Ok(RunStep::Yielded) => {
+                            // A clean cooperative-yield boundary. Under scheduler stress,
+                            // preempt: stash this task and requeue it, so the save/load
+                            // round-trip runs every step and task ordering varies. Without
+                            // stress, keep running it (run-to-block).
+                            if rng.is_some() {
+                                arena.mutate_root(|_mc, vm| {
+                                    vm.save_task_context(cur);
+                                    vm.sched.ready.push_back(cur);
+                                });
+                                current = None;
+                            }
+                        }
+                        Ok(RunStep::Running) => {}
+                        Ok(RunStep::ParkedIo(req)) => {
+                            // Hand the op to the backend; the future is tagged with the
+                            // parked task so its result routes back on completion, and
+                            // wrapped in `abortable` so `cancel` can interrupt it. Stash
+                            // the abort handle on the task for `request_cancel`.
+                            let (fut, abort_handle) = abortable(backend.perform(req));
+                            arena.mutate_root(|_mc, vm| {
+                                vm.sched.tasks[cur.0]
+                                    .as_mut()
+                                    .expect("parked task slot is empty")
+                                    .abort_handle = Some(abort_handle);
+                            });
+                            futures.push(Box::pin(async move { (cur, TaskWakeup::Io(fut.await)) }));
+                            current = None;
+                        }
+                        Ok(RunStep::ParkedJoinTimed { target, ms }) => {
+                            // Arm the deadline alongside the join: a `Sleep` timer tagged
+                            // with this joiner + the park epoch, wrapped in `abortable` so a
+                            // normal completion / cancel can disarm it. The first of {target
+                            // completes, deadline fires} wins; `deliver_deadline` ignores a
+                            // stale firing via the epoch. (See the `JoinTimed` race notes.)
+                            let (fut, abort_handle) =
+                                abortable(backend.perform(IoRequest::Sleep { ms }));
+                            let epoch = arena.mutate_root(|_mc, vm| {
+                                let t = vm.sched.tasks[cur.0]
+                                    .as_mut()
+                                    .expect("timed-join parked task slot is empty");
+                                t.deadline_abort = Some(abort_handle);
+                                t.park_epoch
+                            });
+                            futures.push(Box::pin(async move {
+                                let _ = fut.await; // resolved (Slept) or aborted; either way
+                                (cur, TaskWakeup::Deadline { target, epoch })
+                            }));
+                            current = None;
+                        }
+                        // Parked on a gather batch or a join, or finished: any task that
+                        // became runnable was already enqueued to `ready` in the resume.
+                        Ok(RunStep::Parked) | Ok(RunStep::Done) => {
+                            current = None;
+                        }
+                        Ok(RunStep::Finished) => break,
+                        Err(e) => {
+                            eprintln!("VM execution error: {}", e);
+                            aborted = true;
+                            break;
                         }
                     }
-                    Ok(ExecutionStatus::Finished) => {
-                        break;
-                    }
-                    Ok(ExecutionStatus::Yeeted) => {
-                        aborted = true;
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("VM execution error: {}", e);
-                        aborted = true;
-                        break;
+                    step_count += 1;
+                    if crate::tuning::gc_stress() || step_count % 10 == 0 {
+                        arena.collect_debt();
+                        // Reap fds whose handle was closed (explicit/scope) or collected
+                        // (GC Drop) — both enqueue on `socket_reap`; close them now,
+                        // outside the arena borrow (no task context needed).
+                        let reaped: Vec<StreamId> = arena
+                            .mutate_root(|_mc, vm| vm.socket_reap.borrow_mut().drain(..).collect());
+                        for id in reaped {
+                            backend.close(id);
+                        }
                     }
                 }
-            }
+            });
         }
 
         // The last program run leaves its result on top of the stack. Treat a VM
@@ -369,33 +670,33 @@ impl VmRunner {
         arena.mutate_root(|mc, vm| {
             let fiber = Fiber::new(move |yielder, mut ctx| {
                 let (vm, _mc) = unsafe { ctx.get() };
-                vm.yielder = Some(yielder as *const _ as *const ());
+                vm.sched.yielder = Some(yielder as *const _ as *const ());
 
                 loop {
                     let (vm, _mc) = unsafe { ctx.get() };
                     match vm.step(_mc) {
                         Ok(VmStatus::Running) => {
-                            vm.yielder = None;
+                            vm.sched.yielder = None;
                             ctx = yielder.suspend(YieldReason::CooperativeYield);
                             let (vm, _mc) = unsafe { ctx.get() };
-                            vm.yielder = Some(yielder as *const _ as *const ());
+                            vm.sched.yielder = Some(yielder as *const _ as *const ());
                         }
                         Ok(VmStatus::Finished(val)) => {
-                            vm.yielder = None;
+                            vm.sched.yielder = None;
                             return Ok(val);
                         }
                         Ok(VmStatus::Yeeted(val)) => {
-                            vm.yielder = None;
+                            vm.sched.yielder = None;
                             return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
                         }
                         Err(err) => {
-                            vm.yielder = None;
+                            vm.sched.yielder = None;
                             return Err(err);
                         }
                     }
                 }
             });
-            vm.active_fiber = Some(gc!(mc, fiber));
+            vm.sched.active_fiber = Some(gc!(mc, fiber));
         });
 
         let alloc_before = arena.mutate_root(|mc, _| mc.metrics().total_gc_allocation());
@@ -404,7 +705,7 @@ impl VmRunner {
         let mut step_count = 0;
         loop {
             let is_done = arena.mutate_root(|mc, vm| {
-                let Some(fiber) = vm.active_fiber else {
+                let Some(fiber) = vm.sched.active_fiber else {
                     return Ok(true);
                 };
 
@@ -424,13 +725,19 @@ impl VmRunner {
                     | CoroutineResult::Yield(YieldReason::YieldFiber { .. }) => {
                         panic!("guest fibers are not supported in benchmark mode")
                     }
+                    CoroutineResult::Yield(YieldReason::AwaitIo { .. })
+                    | CoroutineResult::Yield(YieldReason::Gather { .. })
+                    | CoroutineResult::Yield(YieldReason::Join { .. })
+                    | CoroutineResult::Yield(YieldReason::JoinTimed { .. }) => {
+                        panic!("async I/O is not supported in benchmark mode")
+                    }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
-                        vm.active_fiber = None;
+                        vm.sched.active_fiber = None;
                         vm.push(val);
                         Ok(true)
                     }
                     CoroutineResult::Return(res) => {
-                        vm.active_fiber = None;
+                        vm.sched.active_fiber = None;
                         match res {
                             Ok(val) => {
                                 vm.push(val);
@@ -475,12 +782,21 @@ impl VmRunner {
             vm.register_native_class(mc, class::build_class_class());
             vm.register_native_class(mc, boolean::build_boolean_class());
             vm.register_native_class(mc, block::build_block_class());
+            vm.register_native_class(mc, bytes::build_bytes_class());
+            vm.register_native_class(mc, sockets::build_tcp_socket_class());
+            vm.register_native_class(mc, sockets::build_tls_socket_class());
+            vm.register_native_class(mc, sockets::build_tcp_listener_class());
+            vm.register_native_class(mc, http::build_http_parser_class());
+            vm.register_native_class(mc, streams::build_byte_stream_class());
+            vm.register_native_class(mc, streams::build_string_stream_class());
             vm.register_native_class(mc, io::build_io_folder_class());
             vm.register_native_class(mc, io::build_io_file_class());
             vm.register_native_class(mc, io::build_io_handle_class());
             vm.register_native_class(mc, list::build_list_class());
             vm.register_native_class(mc, set::build_set_class());
             vm.register_native_class(mc, runtime::build_runtime_class());
+            vm.register_native_class(mc, async_rt::build_async_class());
+            vm.register_native_class(mc, task::build_task_class());
             vm.register_native_class(mc, method::build_method_class());
             vm.register_native_class(mc, timer::build_timer_class());
             vm.register_native_class(mc, double::build_double_class());

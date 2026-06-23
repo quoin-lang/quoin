@@ -5,11 +5,19 @@ const ANSI_PREFIX: &str = "\x1b[";
 const ANSI_SUFFIX: &str = "m";
 const RESET_ALL: &str = "\x1b[0;00;22;39;49m";
 
-static STRIP_ANSI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[.+?m").unwrap());
+// `.*?` (not `.+?`) so a zero-parameter SGR — `\x1b[m`, a valid reset, which
+// `parse_attribute` emits when an attribute contributes no code (e.g. a `#xx` that
+// isn't a 6-digit hex) — strips as a unit. With `.+?` the closing `m` was consumed as
+// content, and the match ran on to the *next* `m`, deleting the visible text between.
+static STRIP_ANSI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[.*?m").unwrap());
 // Match either $$ (escaped dollar) or $attr[text$] (color pattern).
 // Ordered alternation ensures $$ is consumed before it could start a color pattern.
+// The text group is `*?` (not `+?`) so an *empty* colored body — e.g. `$#ff6961[$]`,
+// which arises when an interpolated value is empty (a nil renders as "") — still
+// matches and renders as an empty span, instead of leaking the literal `$#ff6961[`
+// and leaving an orphaned `$]` that starts a spurious match in the following text.
 static COLORIZE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\$\$|\$(?P<attr>[^\[\n]+?)\[(?P<text>(?:\$\$|[^$])+?)\$]").unwrap());
+    Lazy::new(|| Regex::new(r"\$\$|\$(?P<attr>[^\[\n]+?)\[(?P<text>(?:\$\$|[^$])*?)\$]").unwrap());
 static HEX_COLOR_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"#([A-Fa-f0-9]{2})([A-Fa-f0-9]{2})([A-Fa-f0-9]{2})").unwrap());
 
@@ -95,6 +103,17 @@ mod tests {
     }
 
     #[test]
+    fn decolorize_strips_empty_sgr_without_eating_text() {
+        // A zero-parameter SGR (`\x1b[m`, reset) must strip on its own, not swallow the
+        // text up to the next `m`. Regression: `$#bw[!=$]` renders `\x1b[m!=\x1b[…m`
+        // (empty SGR because `#bw` isn't a hex), and `.+?` deleted the `!=`.
+        let s = "\x1b[m!=\x1b[0;00;22;39;49m";
+        assert_eq!(decolorize(s), "!=");
+        // And it composes with the colorizer end to end.
+        assert_eq!(decolorize(&colorize("$#bw[!=$]")), "!=");
+    }
+
+    #[test]
     fn colorize_bold() {
         let result = colorize("$bw[hello$]");
         assert!(result.contains("hello"));
@@ -120,6 +139,23 @@ mod tests {
     fn dollar_dollar_in_text_becomes_dollar() {
         let result = colorize("$bw[price: $$5$]");
         assert!(result.contains("price: $5"), "got: {result}");
+    }
+
+    #[test]
+    fn colorize_empty_body_does_not_leak() {
+        // An empty colored body (an interpolated value that rendered as "") must still
+        // be consumed as a color span, not leak the literal `$#ff6961[` and orphan the
+        // `$]`. Regression: a failed `equalTo:` whose actual was nil printed
+        // `… $#ff6961[?:?:?` because the empty `$#ff6961[$]` failed to match.
+        let result = colorize("a $#ff6961[$] at $#ffffff[?$]");
+        assert!(
+            !result.contains("$#ff6961["),
+            "leaked literal marker: {result}"
+        );
+        // The empty span renders as prefix immediately followed by reset, and the
+        // following ` at ?` survives intact (no spurious cascade ate it).
+        assert!(result.contains("38;2;255;105;97"), "got: {result}");
+        assert_eq!(decolorize(&result), "a  at ?");
     }
 
     #[test]
