@@ -169,6 +169,13 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 }
             }
         })
+        // readAll -> read until EOF, returning all remaining bytes as one Bytes.
+        .instance_method("readAll", |vm, mc, receiver, _args| {
+            let id = open_stream_id(vm, mc, receiver)?;
+            while !fill_once(vm, mc, receiver, id)? {}
+            let all = drain_up_to(mc, receiver, usize::MAX)?;
+            Ok(vm.new_bytes(mc, all))
+        })
         // readExactly:n -> exactly n bytes, or throw if the stream ends first.
         .typed_instance_method("readExactly:", &["Integer"], |vm, mc, receiver, args| {
             let id = open_stream_id(vm, mc, receiver)?;

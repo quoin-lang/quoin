@@ -8,10 +8,10 @@
 "*
 "* The only native piece is [HTTP]Parser.parseHead: (the `httparse` head parser);
 "* request building and body framing live here. HTTPS rides TlsSocket, so it falls
-"* out for free. Stage 5: GET/POST + arbitrary verbs/headers/body, Content-Length
-"* and connection-close bodies. Deferred: chunked transfer-encoding (needs the
-"* Stage 6 lazy streams), keep-alive/pooling, redirects, cookies, gzip. See
-"* docs/ASYNC_ARCH.md.
+"* out for free. GET/POST + arbitrary verbs/headers/body; bodies are framed by
+"* chunked transfer-encoding, Content-Length, or connection-close (the response is
+"* read over a Stage 6 ByteStream). Deferred: keep-alive/pooling, redirects, cookies,
+"* gzip, and a streaming (per-chunk generator) body. See docs/ASYNC_ARCH.md.
 "* ===========================================================================
 
 "* An HTTP response: status line, headers (a list of #(name value) pairs, order- and
@@ -72,6 +72,33 @@
             port = (hp.count > 1).if:{ hp.at:1 } else:{ (scheme == 'https').if:{ '443' } else:{ '80' } };
             ^#( scheme (hp.at:0) port path )
         };
+
+        "* Decode a chunked transfer-encoding body from a ByteStream, returning the
+        "* assembled Bytes. Each chunk is a hex size line ('<hex>[;ext]\r\n'), then that
+        "* many bytes, then CRLF; a 0-size chunk ends the body. Trailer headers (if any)
+        "* are not parsed — we read until the terminating empty line and discard them.
+        readChunkedBody: -> { |stream|
+            body = Bytes.empty;
+            reading = true;
+            { reading }.whileDo:{
+                sizeLine = stream.readUntil:'\r\n';
+                hexPart = ((sizeLine.asString).splitString:';').first;
+                size = Integer.fromHex:hexPart;
+                (size == 0).if:{
+                    reading = false;
+                    "* consume trailer lines up to (and including) the terminating "\r\n"
+                    trailing = true;
+                    { trailing }.whileDo:{
+                        line = stream.readUntil:'\r\n';
+                        (line.count <= 2).if:{ trailing = false };
+                    };
+                } else:{
+                    body = body + (stream.readExactly:size);
+                    stream.readExactly:2;   "* the CRLF after the chunk data
+                };
+            };
+            ^body
+        };
     };
 
     method: -> { |m| @method = m; self };
@@ -92,9 +119,10 @@
         ^bytes
     };
 
-    "* Connect, send, read the response, and return an [HTTP]Response. Always closes
-    "* the socket. Throws (catchable strings) on connection errors or a malformed /
-    "* unsupported (chunked) response.
+    "* Connect, send, read the response, and return an [HTTP]Response. The response is read
+    "* over a ByteStream (Stage 6), whose `over:do:` scope always closes the socket — on
+    "* normal return, a throw, or cancel. Throws (catchable strings) on connection errors or
+    "* a malformed response. Bodies: chunked, Content-Length, and connection-close.
     send -> {
         url = [HTTP]Request.parseUrl:@url;
         scheme = url.at:0;
@@ -110,48 +138,28 @@
 
         sock.writeAll:(.requestBytes:host path:path);
 
-        "* Read until the head is complete.
-        buf = Bytes.empty;
-        parsed = nil;
-        { parsed == nil }.whileDo:{
-            chunk = sock.read:8192;
-            (chunk.count == 0).if:{ sock.close; 'HTTP: connection closed before response head'.throw };
-            buf = buf + chunk;
-            parsed = [HTTP]Parser.parseHead:buf;
-        };
-        status = parsed.at:0;
-        reason = parsed.at:1;
-        headLen = parsed.at:2;
-        headers = parsed.at:3;
+        "* Read the whole response over a buffered stream; over:do: owns the fd and closes
+        "* it on every exit path. The block uses only the stream + class-sends (no @ivars).
+        ^ByteStream.over:sock do:{ |stream|
+            "* The head ends at the first CRLF CRLF; readUntil: returns exactly those bytes.
+            headBytes = stream.readUntil:'\r\n\r\n';
+            parsed = [HTTP]Parser.parseHead:headBytes;
+            (parsed == nil).if:{ 'HTTP: connection closed before response head'.throw };
+            status = parsed.at:0;
+            reason = parsed.at:1;
+            headers = parsed.at:3;
 
-        "* Chunked needs the Stage 6 lazy streams — refuse clearly for now.
-        te = [HTTP]Response.find:headers named:'transfer-encoding';
-        (te.defined? && (te.lower.contains?:'chunked')).if:{
-            sock.close;
-            'HTTP: chunked transfer-encoding not yet supported (needs Stage 6 streams)'.throw
-        };
-
-        "* The body starts right after the head in `buf`; frame the rest.
-        body = buf.from:headLen to:(buf.count);
-        cl = [HTTP]Response.find:headers named:'content-length';
-        cl.defined?.if:{
-            n = cl.to_integer;
-            { body.count < n }.whileDo:{
-                chunk = sock.read:8192;
-                (chunk.count == 0).if:{ sock.close; 'HTTP: connection closed before full body'.throw };
-                body = body + chunk;
+            "* Frame the body: chunked, else Content-Length, else read-to-close.
+            te = [HTTP]Response.find:headers named:'transfer-encoding';
+            body = (te.defined? && (te.lower.contains?:'chunked')).if:{
+                [HTTP]Request.readChunkedBody:stream
+            } else:{
+                cl = [HTTP]Response.find:headers named:'content-length';
+                cl.defined?.if:{ stream.readExactly:(cl.to_integer) } else:{ stream.readAll }
             };
-        } else:{
-            "* No Content-Length: read to EOF (the Connection: close case).
-            reading = true;
-            { reading }.whileDo:{
-                chunk = sock.read:8192;
-                (chunk.count == 0).if:{ reading = false } else:{ body = body + chunk };
-            };
-        };
 
-        sock.close;
-        ^[HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = body }
+            [HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = body }
+        }
     };
 };
 

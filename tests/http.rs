@@ -1,7 +1,8 @@
-//! Integration test for the Stage 5 `[HTTP]` client: drive the real `qn` binary over a
+//! Integration test for the `[HTTP]` client: drive the real `qn` binary over a
 //! `use std:net/http` script that talks to local Rust HTTP/1.1 servers. Covers a
-//! Content-Length GET, a POST body echo, a connection-close-delimited body, and the
-//! same over HTTPS via `TlsSocket` with `insecure: true`. The script decides pass/fail.
+//! Content-Length GET, a POST body echo, a connection-close-delimited body, a chunked
+//! transfer-encoding body (Stage 6c), and a Content-Length GET over HTTPS via `TlsSocket`
+//! with `insecure: true`. The script decides pass/fail.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -45,8 +46,15 @@ fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
 }
 
 /// The canned response for a given request path. `/close` is Content-Length-less (the
-/// body is delimited by the connection close), the others carry Content-Length.
+/// body is delimited by the connection close), `/chunked` is `Transfer-Encoding: chunked`,
+/// the others carry Content-Length.
 fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
+    if path == "/chunked" {
+        // "Hello, world!" as two chunks ("Hello, " = 0x7, "world!" = 0x6) + the 0 terminator.
+        return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 7\r\nHello, \r\n6\r\nworld!\r\n0\r\n\r\n"
+            .to_vec();
+    }
     let (head, body): (String, Vec<u8>) = match path {
         "/cl" => (
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\n".into(),
@@ -142,6 +150,11 @@ r2 = [HTTP]Client.post: base + '/post' body: 'ping-pong'.asBytes;
 r3 = [HTTP]Client.get: base + '/close';
 (r3.bodyText == 'closed-body').else:{{ ok = false }};
 
+"* chunked transfer-encoding (two chunks reassembled)
+r4 = [HTTP]Client.get: base + '/chunked';
+(r4.status == 200).else:{{ ok = false }};
+(r4.bodyText == 'Hello, world!').else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
@@ -191,19 +204,18 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 }
 
 /// The webpki secure (validating) path through the QN client against a real host — so
-/// ignored by default. Many public hosts serve `Transfer-Encoding: chunked`, which is a
-/// Stage 6 item, so reaching the chunked refusal still proves connect + TLS handshake +
-/// head parse worked end to end; a Content-Length host gives a clean 200.
+/// ignored by default. Exercises the full stack end to end: DNS + connect + TLS handshake
+/// with real cert validation + head parse + body framing. Public hosts typically serve
+/// `Transfer-Encoding: chunked`, which now decodes (Stage 6c), so this asserts a real
+/// 200 with a non-empty body.
 #[test]
 #[ignore = "hits the public internet (example.org); run with --ignored"]
 fn http_secure_real_host() {
     let script = r#"
 use std:net/http;
-{ r = [HTTP]Client.get: 'https://example.org/';
-  (r.status == 200).if:{ 'PASS'.print } else:{ ('FAIL status ' + r.status).print }
-}.catch:{ |e|
-    (e.contains?:'chunked').if:{ 'PASS'.print } else:{ ('FAIL ' + e).print }
-};
+r = [HTTP]Client.get: 'https://example.org/';
+ok = (r.status == 200) && (r.body.size > 0);
+ok.if:{ 'PASS'.print } else:{ ('FAIL status ' + r.status + ' size ' + r.body.size).print };
 "#;
     run_pass(script, "realhost");
 }
