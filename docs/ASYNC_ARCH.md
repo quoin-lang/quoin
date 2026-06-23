@@ -495,6 +495,15 @@ hit by a QN client, both on the same scheduler.
 
 ## Deferred / open
 
+- **Timeout combinator** — `Async.timeout:ms do:{…}` (throws `TimeoutError`) /
+  `Async.timeoutOrNil:ms do:{…}` (returns `nil`), bounding *any* async work with a
+  deadline. A timeout is deadline-cancellation, so it builds on 2b-ii: run the block as
+  a task, watchdog `sleep`-then-`cancel`, `join`; the cancelled block's in-flight I/O is
+  aborted promptly. Crucially this keeps the timeout *out* of `read:` — `read:` stays
+  two-valued (empty = EOF), and a timed read is `Async.timeoutOrNil:ms do:{ s.read:n }`
+  (`nil` = timed out vs empty = EOF). The watchdog tags its cancel as a deadline so it's
+  distinguishable from an outer cancellation. Build as a native combinator (race
+  correctness) after Stage 3; needs no socket-specific code.
 - **HTTP/2, QUIC, websockets, connection pooling, proxies** — where tokio's
   ecosystem (h2, quinn, tungstenite, hyper-util) runs far ahead. If/when needed,
   add a `TokioBackend` behind the same trait rather than rewriting upward.
