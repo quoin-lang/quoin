@@ -44,11 +44,19 @@ enum ExecutionStatus {
     Yeeted,
 }
 
-/// A boxed, single-threaded I/O completion future tagged with the task that is
-/// waiting on it. The scheduler keeps these in a `FuturesUnordered` and resumes a
-/// task the instant its op completes — that `.next().await` is the one reactor wait.
-/// `abortable`, so `handle.cancel` interrupts the op promptly (`Err(Aborted)`).
-type IoTaskFuture = Pin<Box<dyn Future<Output = (TaskId, Result<IoResult, Aborted>)>>>;
+/// What a completed background future tells the driver to do for the task that owns it.
+/// The scheduler keeps these in a `FuturesUnordered`; `.next().await` is the one reactor
+/// wait. Both arms are `abortable` so `cancel` (and a won race) interrupts them promptly.
+enum TaskWakeup {
+    /// An async I/O op finished (`Ok`), or was aborted by `cancel` (`Err(Aborted)`).
+    Io(Result<IoResult, Aborted>),
+    /// A `JoinTimed` deadline timer elapsed. Carries the joined `target` and the park
+    /// `epoch` captured at park time, so `deliver_deadline` can ignore a stale firing.
+    Deadline { target: TaskId, epoch: u64 },
+}
+
+/// A boxed, single-threaded background future tagged with the task that is waiting on it.
+type IoTaskFuture = Pin<Box<dyn Future<Output = (TaskId, TaskWakeup)>>>;
 
 /// A tiny deterministic PRNG (SplitMix64) for `QN_SCHED_STRESS`. Seeded so a
 /// randomized scheduling failure can be replayed exactly. Not used outside stress.
@@ -93,6 +101,10 @@ enum RunStep {
     /// already wired up (children/waiters enqueued, context saved) inside the resume.
     /// The driver just picks the next ready task; the wakeup comes from a completion.
     Parked,
+    /// Parked in `JoinTimed` on `target` with a deadline of `ms` ms: like `Parked`, but
+    /// the driver must also arm a deadline timer that wakes this task if `target` has not
+    /// finished in time (`Async.timeout:do:`). The joiner is already a waiter on `target`.
+    ParkedJoinTimed { target: TaskId, ms: u64 },
     /// A non-main task finished; its waker(s) were already enqueued to `ready`.
     Done,
     /// The main task (#0) finished — the program is done; its result is on the stack.
@@ -163,6 +175,12 @@ fn resume_current_task<'gc>(
             // park its context until the target completes and wakes it.
             vm.save_task_context(vm.sched.current_task);
             Ok(RunStep::Parked)
+        }
+        CoroutineResult::Yield(YieldReason::JoinTimed { task, ms }) => {
+            // Like Join (the joiner is already a waiter on `task`), but the driver also
+            // arms a deadline timer — carry the target and `ms` up to it.
+            vm.save_task_context(vm.sched.current_task);
+            Ok(RunStep::ParkedJoinTimed { target: task, ms })
         }
         CoroutineResult::Yield(YieldReason::Return(val)) => complete_current_task(vm, mc, Ok(val)),
         CoroutineResult::Return(res) => {
@@ -445,6 +463,8 @@ impl VmRunner {
                     cancel_requested: false,
                     abort_handle: None,
                     joining: None,
+                    park_epoch: 0,
+                    deadline_abort: None,
                 })];
                 vm.sched.current_task = TaskId(0);
             });
@@ -495,23 +515,32 @@ impl VmRunner {
                                 if futures.is_empty() {
                                     break; // nothing ready and nothing in flight
                                 }
-                                // The single reactor wait: park until some I/O lands.
-                                let (tid, result) =
+                                // The single reactor wait: park until some background
+                                // future (I/O op or deadline timer) lands.
+                                let (tid, wakeup) =
                                     futures.next().await.expect("futures is non-empty");
-                                arena.mutate_root(|_mc, vm| {
-                                    {
-                                        let t = vm.sched.tasks[tid.0]
-                                            .as_mut()
-                                            .expect("woken task slot is empty");
-                                        t.abort_handle = None; // the future is done
-                                        // On `Err(Aborted)` the task was cancelled: leave
-                                        // `wake` unset — `await_io` raises `Cancelled` from
-                                        // the live `cancel_current` flag instead.
-                                        if let Ok(io_result) = result {
-                                            t.wake = Some(Wake::Io { result: io_result });
+                                arena.mutate_root(|_mc, vm| match wakeup {
+                                    TaskWakeup::Io(result) => {
+                                        {
+                                            let t = vm.sched.tasks[tid.0]
+                                                .as_mut()
+                                                .expect("woken task slot is empty");
+                                            t.abort_handle = None; // the future is done
+                                            // On `Err(Aborted)` the task was cancelled:
+                                            // leave `wake` unset — `await_io` raises
+                                            // `Cancelled` from `cancel_current` instead.
+                                            if let Ok(io_result) = result {
+                                                t.wake = Some(Wake::Io { result: io_result });
+                                            }
                                         }
+                                        vm.sched.ready.push_back(tid);
                                     }
-                                    vm.sched.ready.push_back(tid);
+                                    // A deadline elapsed: `deliver_deadline` resolves the
+                                    // race (wakes the joiner with `TimedOut`, or ignores a
+                                    // stale/superseded firing) and enqueues it if it won.
+                                    TaskWakeup::Deadline { target, epoch } => {
+                                        vm.deliver_deadline(tid, target, epoch);
+                                    }
                                 });
                                 continue;
                             }
@@ -551,7 +580,28 @@ impl VmRunner {
                                     .expect("parked task slot is empty")
                                     .abort_handle = Some(abort_handle);
                             });
-                            futures.push(Box::pin(async move { (cur, fut.await) }));
+                            futures.push(Box::pin(async move { (cur, TaskWakeup::Io(fut.await)) }));
+                            current = None;
+                        }
+                        Ok(RunStep::ParkedJoinTimed { target, ms }) => {
+                            // Arm the deadline alongside the join: a `Sleep` timer tagged
+                            // with this joiner + the park epoch, wrapped in `abortable` so a
+                            // normal completion / cancel can disarm it. The first of {target
+                            // completes, deadline fires} wins; `deliver_deadline` ignores a
+                            // stale firing via the epoch. (See the `JoinTimed` race notes.)
+                            let (fut, abort_handle) =
+                                abortable(backend.perform(IoRequest::Sleep { ms }));
+                            let epoch = arena.mutate_root(|_mc, vm| {
+                                let t = vm.sched.tasks[cur.0]
+                                    .as_mut()
+                                    .expect("timed-join parked task slot is empty");
+                                t.deadline_abort = Some(abort_handle);
+                                t.park_epoch
+                            });
+                            futures.push(Box::pin(async move {
+                                let _ = fut.await; // resolved (Slept) or aborted; either way
+                                (cur, TaskWakeup::Deadline { target, epoch })
+                            }));
                             current = None;
                         }
                         // Parked on a gather batch or a join, or finished: any task that
@@ -673,7 +723,8 @@ impl VmRunner {
                     }
                     CoroutineResult::Yield(YieldReason::AwaitIo { .. })
                     | CoroutineResult::Yield(YieldReason::Gather { .. })
-                    | CoroutineResult::Yield(YieldReason::Join { .. }) => {
+                    | CoroutineResult::Yield(YieldReason::Join { .. })
+                    | CoroutineResult::Yield(YieldReason::JoinTimed { .. }) => {
                         panic!("async I/O is not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {

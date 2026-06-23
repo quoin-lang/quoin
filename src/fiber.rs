@@ -58,6 +58,17 @@ pub enum YieldReason<'gc> {
         #[collect(require_static)]
         task: TaskId,
     },
+    /// Like `Join`, but with a deadline: the running task parks on `task` *or* a timer
+    /// of `ms` milliseconds, whichever fires first (`Async.timeout:do:`). The scheduler
+    /// arms a deadline timer alongside the join; the first to resolve wins and the loser
+    /// is disarmed. Resumes with the join outcome, or `Wake::TimedOut` on the deadline.
+    /// See `docs/ASYNC_ARCH.md` (Stage 5a).
+    JoinTimed {
+        #[collect(require_static)]
+        task: TaskId,
+        #[collect(require_static)]
+        ms: u64,
+    },
 }
 
 /// The standard VM driver loop, shared by the main program and every guest

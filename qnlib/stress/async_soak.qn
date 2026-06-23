@@ -113,6 +113,23 @@ spawnCancel = { |r|
 };
 expectedCancel = (0..width).collect:{ |k| 0 - 1 };
 
+"* Timeout combinator (Stage 5a): deterministic by construction. Even indices complete
+"* within a huge deadline (the work runs, returns its value); odd indices always blow a
+"* 1ms deadline (their sleep is far longer) and the `onCancel:` handler computes the same
+"* value. So every element equals worker(r, k) regardless of scheduling — the margins are
+"* enormous, so the deadline-vs-completion outcomes never race. Exercises spawn + the
+"* timed-join race + cancel-on-deadline (finally/abort) every round, under all stress knobs.
+timeoutRound = { |r|
+    (0..width).collect:{ |k|
+        ((k % 2) == 0).if:{
+            Async.timeout: 1000000 do:{ worker.valueWithArgs:#(r k) }
+        } else:{
+            Async.timeout: 1 do:{ Runtime.sleep: 100000; 0 }
+                onCancel:{ worker.valueWithArgs:#(r k) }
+        }
+    }
+};
+
 "* Compare, or fail loudly: print a greppable SOAK FAILED line to stdout (Run mode
 "* exits 0 even on an uncaught throw) and then throw to abort the loop and dump the
 "* detail to stderr.
@@ -152,6 +169,9 @@ checksum = 0;
 
     "* 5. detached spawn + cancel-all
     check.valueWithArgs:#( 'spawncancel' round (spawnCancel.value:round) expectedCancel );
+
+    "* 6. timeout combinator (each element == worker(r,k), as in compute)
+    check.valueWithArgs:#( 'timeout' round (timeoutRound.value:round) (expectedCompute.value:round) );
 
     "* 6. allocation pressure (give the GC debt) folded into a running checksum
     pressure = (0..width).collect:{ |k| (round + k) * (k + 1) };

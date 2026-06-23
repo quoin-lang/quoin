@@ -1,7 +1,7 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
 Status: **Stages 0–4 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket`
-lands Stage 4); Stages 5–6 are design. Companion to `USE_ARCH.md`. See the *Staged plan*
+lands Stage 4); Stages 5–7 are design. Companion to `USE_ARCH.md`. See the *Staged plan*
 below for what has landed.
 
 ## Decision
@@ -504,27 +504,48 @@ scheduler/lint changes.
   connections overlapping. No new soak round — TLS adds no concurrency primitive (it rides
   the existing `await_io` path).
 
+**Stage 5a — Timeout combinator. ✅ done.** `Async.timeout:ms do:{…}` (throws a catchable
+`'timeout'`) and `… onCancel:{…}` (runs the handler on the deadline, returning *its* value;
+`onCancel:{ nil }` is the non-throwing form). Deadline-cancellation on 2b-ii: the block runs
+as a detached child raced against a deadline timer; the first to resolve wins and the loser
+is disarmed. The race is **exact** because the new **timed-join** park (`YieldReason::JoinTimed`
++ `Wake::TimedOut` + a per-task park epoch) arms/disarms/resolves entirely inside the
+single-threaded scheduler — the deadline is a `Sleep` leaf future in the reactor, and
+`deliver_deadline` ignores a stale firing via the epoch (robust to slot-id reuse). On the
+deadline the child is cancelled (its `finally` runs, in-flight I/O aborts via `abortable`),
+then the handler runs / `'timeout'` throws; an *outer* cancel propagates `Cancelled` (handler
+skipped); the block's *normal* errors propagate past `onCancel:`. Kept off `read:` (a timed
+read is `Async.timeout:ms do:{ s.read:n } onCancel:{ nil }` — `nil` = timed out vs empty =
+EOF). *Tests:* the `Async` suite (in-time, throws-on-deadline, `onCancel:` value/nil,
+errors-propagate, `finally`-on-deadline, nesting) + a deterministic `timeout` round in
+`async_soak.qn` (identical checksum across all four stress modes). Sharp edge: cooperative —
+a non-yielding CPU loop is not preempted by the deadline until it hits a checkpoint.
+
 **Stage 5 — HTTP/1.1 in the stdlib (the payoff).**
 `qnlib/std/http/*` in Quoin: build request line + headers + body; read status +
 headers to `\r\n\r\n`; body by `Content-Length` or chunked transfer-encoding. Use
 `httparse` via a tiny native helper for parsing robustness. *Test:* `Http get:` a
 local server; assert status/headers/body; chunked + Content-Length cases.
 
-**Stage 6 — listeners/servers (optional/future).**
-`Listen`/`Accept` as `AwaitIo`, enabling QN servers. *Test:* a QN echo/HTTP server
-hit by a QN client, both on the same scheduler.
+**Stage 6 — Streams & StringStreams.**
+The lazy layers over `TcpSocket`/`TlsSocket`: `TcpStream` (buffered byte streaming —
+`read` whatever's available, peek, read-until-delimiter) and `TcpStringStream`
+(incremental UTF-8 decode + `readLine`/line iteration) on top of it. Sequenced *before*
+listeners deliberately: a server handed only raw `read:n` is painful for line/record
+protocols, so the stream layers are what make accepted connections pleasant to handle.
+Not an HTTP (Stage 5) prerequisite — `httparse` works on raw bytes — but the natural
+substrate for server-side protocol code. Hierarchy: `TcpSocket` → `TcpStream` →
+`TcpStringStream` (lines are a text concept; a fixed byte read can land mid-UTF-8). *Test:*
+read-until-delimiter and `readLine` over a mock/echo peer, incl. a sequence split awkwardly
+across reads and across a multi-byte UTF-8 boundary.
+
+**Stage 7 — listeners/servers (optional/future).**
+`Listen`/`Accept` as `AwaitIo`, enabling QN servers (built on the Stage 6 streams for
+request parsing). *Test:* a QN echo/HTTP server hit by a QN client, both on the same
+scheduler.
 
 ## Deferred / open
 
-- **Timeout combinator** — `Async.timeout:ms do:{…}` (throws `TimeoutError`) /
-  `Async.timeoutOrNil:ms do:{…}` (returns `nil`), bounding *any* async work with a
-  deadline. A timeout is deadline-cancellation, so it builds on 2b-ii: run the block as
-  a task, watchdog `sleep`-then-`cancel`, `join`; the cancelled block's in-flight I/O is
-  aborted promptly. Crucially this keeps the timeout *out* of `read:` — `read:` stays
-  two-valued (empty = EOF), and a timed read is `Async.timeoutOrNil:ms do:{ s.read:n }`
-  (`nil` = timed out vs empty = EOF). The watchdog tags its cancel as a deadline so it's
-  distinguishable from an outer cancellation. Build as a native combinator (race
-  correctness) after Stage 3; needs no socket-specific code.
 - **HTTP/2, QUIC, websockets, connection pooling, proxies** — where tokio's
   ecosystem (h2, quinn, tungstenite, hyper-util) runs far ahead. If/when needed,
   add a `TokioBackend` behind the same trait rather than rewriting upward.
@@ -534,9 +555,6 @@ hit by a QN client, both on the same scheduler.
 - **Structured concurrency / cancellation API in QN** (e.g. nurseries, deadlines,
   detached `Task.spawn:` + join) — this is **Stage 2b**, to design now that 2a's
   scheduler is in place; `Async.gather:` is the only 2a surface.
-- **Lazy stream layers** — `TcpStream` (buffered byte streaming) and `TcpStringStream`
-  (incremental UTF-8 decode + `readLine`) over `TcpSocket`. Ergonomics, not a Stage 5
-  prerequisite (`httparse` works on raw bytes). Build when there's demand.
 - **`Bytes` extras** — a mutable `BytesBuilder` (if concat churn shows up) and a
   `#b'HEX'` literal (the `#`-prefixed user-literal syntax; a parser change). Deferred
   until needed.

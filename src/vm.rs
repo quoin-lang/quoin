@@ -179,6 +179,17 @@ pub struct Task<'gc> {
     /// joiner from that target's waiter list and wake it. Cleared on becoming current.
     #[collect(require_static)]
     pub joining: Option<TaskId>,
+    /// Park generation, bumped each time this task becomes current (`load_task_context`).
+    /// A `JoinTimed` deadline timer captures the epoch at park time; a stale timer whose
+    /// epoch no longer matches (the task was resumed and re-parked, possibly on a reused
+    /// slot id) is ignored. This is what makes the deadline-vs-completion race exact.
+    #[collect(require_static)]
+    pub park_epoch: u64,
+    /// While parked in `JoinTimed`: aborts the in-flight deadline timer, so a normal
+    /// completion (or a cancel) can disarm the deadline promptly instead of letting it
+    /// linger in the reactor. Set by the driver on park, taken on wake.
+    #[collect(require_static)]
+    pub deadline_abort: Option<AbortHandle>,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -222,6 +233,9 @@ pub enum Wake<'gc> {
     /// A joined task was cancelled. The joiner observes this as a *catchable* error
     /// (distinct from its own uncatchable `Cancelled`).
     JoinedCancelled,
+    /// A `JoinTimed` park hit its deadline before the joined task finished. Delivered
+    /// by the driver when the deadline timer wins the race (see `Async.timeout:do:`).
+    TimedOut,
 }
 
 /// Classification of a finished detached task's outcome, used by `complete_detached`
@@ -231,6 +245,14 @@ enum DetachedOutcome<'gc> {
     Done(Value<'gc>),
     Failed(Value<'gc>),
     Cancelled,
+}
+
+/// Outcome of a `JoinTimed` park (`await_join_timed`): either the joined task finished
+/// with a value before the deadline, or the deadline won the race. The error cases
+/// (the child threw / was cancelled / our own cancellation) are returned as `Err`.
+enum TimedJoin<'gc> {
+    Completed(Value<'gc>),
+    TimedOut,
 }
 
 /// Coroutine / guest-fiber scheduler state, grouped out of [`VmState`] for
@@ -1483,6 +1505,153 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Like [`await_join`], but parks on `target` *or* a deadline of `ms` ms — whichever
+    /// fires first (the join machinery for `Async.timeout:do:`). Registers as a waiter so
+    /// completion wakes us, then bubbles `JoinTimed`; the driver arms the deadline timer
+    /// and resumes us with whichever won in `wake`. `Wake::TimedOut` means the deadline.
+    #[allow(no_gc_across_yield)]
+    fn await_join_timed(&mut self, target: TaskId, ms: u64) -> Result<TimedJoin<'gc>, QuoinError> {
+        let me = self.sched.current_task;
+        match self.sched.tasks.get_mut(target.0).and_then(|t| t.as_mut()) {
+            Some(t) => t.waiters.push(me),
+            None => {
+                return Err(QuoinError::Other(
+                    "timeout join target is no longer running".to_string(),
+                ));
+            }
+        }
+        if let Some(t) = self.sched.tasks[me.0].as_mut() {
+            t.joining = Some(target);
+        }
+        if let Some(yielder) = unsafe { self.get_yielder() } {
+            yielder.suspend(YieldReason::JoinTimed { task: target, ms });
+        } else {
+            return Err(QuoinError::Other(
+                "timeout attempted outside the VM scheduler".to_string(),
+            ));
+        }
+        // On resume: an *outer* cancel of this task raises first (handler is skipped).
+        if self.sched.cancel_current {
+            return Err(self.take_cancellation());
+        }
+        match self.sched.wake.take() {
+            Some(Wake::Joined { value }) => Ok(TimedJoin::Completed(value)),
+            Some(Wake::Failed { error }) => {
+                self.active_exception = Some(error);
+                Err(QuoinError::Thrown)
+            }
+            Some(Wake::JoinedCancelled) => {
+                Err(QuoinError::Other("joined task was cancelled".to_string()))
+            }
+            Some(Wake::TimedOut) => Ok(TimedJoin::TimedOut),
+            _ => Err(QuoinError::Other(
+                "timeout join resumed without a result".to_string(),
+            )),
+        }
+    }
+
+    /// `Async.timeout:ms do:{block}` (and `… onCancel:{handler}`). Run `block` as a child
+    /// task raced against a deadline of `ms` ms:
+    /// - finishes first → its value (or its error/`Cancelled` propagate);
+    /// - deadline first → cancel and drain the child (its `finally` runs, in-flight I/O
+    ///   aborts), then run the handler — `onCancel:` returns its value; the bare form
+    ///   throws a catchable `'timeout'`;
+    /// - this call is cancelled from *outside* while waiting → cancel/drain the child and
+    ///   re-raise `Cancelled` (the handler does *not* run).
+    ///
+    /// `on_cancel` is rooted as a live argument of the calling native method, so holding
+    /// it across the await is sound. See `docs/ASYNC_ARCH.md` (Stage 5a).
+    pub fn await_timeout(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        ms: u64,
+        on_cancel: Option<Gc<'gc, Block<'gc>>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        // Spawn the work before any suspend, so `block` is consumed (not held across it).
+        let child = self.spawn_detached_id(mc, block);
+        match self.await_join_timed(child, ms) {
+            Ok(TimedJoin::Completed(value)) => Ok(value),
+            Ok(TimedJoin::TimedOut) => {
+                self.drain_cancelled(child);
+                match on_cancel {
+                    Some(handler) => self.execute_block(mc, handler, vec![], None),
+                    None => Err(self.raise_timeout(mc)),
+                }
+            }
+            // Outer cancellation: tear down the child, then propagate (handler skipped).
+            Err(QuoinError::Cancelled) => {
+                self.drain_cancelled(child);
+                Err(QuoinError::Cancelled)
+            }
+            // The child finished with an error/cancel and is already gone; propagate it.
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Cancel `child` (if still running) and wait for it to unwind, discarding the
+    /// outcome — so its `finally` runs and its resources free before we move on. The
+    /// `request_cancel`/`await_join` pair is atomic w.r.t. the child (single-threaded:
+    /// nothing runs between them), so the child cannot vanish in the gap.
+    #[allow(no_gc_across_yield)]
+    fn drain_cancelled(&mut self, child: TaskId) {
+        if self
+            .sched
+            .tasks
+            .get(child.0)
+            .and_then(|t| t.as_ref())
+            .is_none()
+        {
+            return; // already finished
+        }
+        self.request_cancel(child);
+        if self
+            .sched
+            .tasks
+            .get(child.0)
+            .and_then(|t| t.as_ref())
+            .is_some()
+        {
+            let _ = self.await_join(child); // JoinedCancelled expected; we want the unwind
+        }
+    }
+
+    /// Throw a catchable `'timeout'` (the Stage-5a error model — a string, like the
+    /// socket errors; a structured `TimeoutError` class is a noted refinement).
+    fn raise_timeout(&mut self, mc: &Mutation<'gc>) -> QuoinError {
+        let val = self.new_string(mc, "timeout".to_string());
+        self.active_exception = Some(val);
+        QuoinError::Thrown
+    }
+
+    /// Deliver a `JoinTimed` deadline. If `joiner` is still parked on this exact
+    /// timed-join — `target`/`epoch` match and no wake is pending — disarm the join
+    /// (drop it from `target`'s waiters) and wake it with `Wake::TimedOut`. A stale or
+    /// superseded timer (the join already completed, or the joiner was resumed and
+    /// re-parked, possibly on a reused slot id) is ignored. This, run inside the
+    /// single-threaded scheduler, is the exact deadline-vs-completion race resolution.
+    pub fn deliver_deadline(&mut self, joiner: TaskId, target: TaskId, epoch: u64) {
+        let live = self
+            .sched
+            .tasks
+            .get(joiner.0)
+            .and_then(|t| t.as_ref())
+            .is_some_and(|t| {
+                t.joining == Some(target) && t.park_epoch == epoch && t.wake.is_none()
+            });
+        if !live {
+            return;
+        }
+        if let Some(tt) = self.sched.tasks.get_mut(target.0).and_then(|t| t.as_mut()) {
+            tt.waiters.retain(|w| *w != joiner);
+        }
+        let t = self.sched.tasks[joiner.0].as_mut().unwrap();
+        t.joining = None;
+        t.deadline_abort = None;
+        t.wake = Some(Wake::TimedOut);
+        self.sched.ready.push_back(joiner);
+    }
+
     fn fiber_status(&self, fiber_val: Value<'gc>) -> Result<FiberStatus, QuoinError> {
         fiber_val
             .with_native_state::<NativeFiberState, _, _>(|s| s.status)
@@ -1699,13 +1868,16 @@ impl<'gc> VmState<'gc> {
     pub fn load_task_context(&mut self, mc: &Mutation<'gc>, tid: TaskId) {
         self.sched.current_task = tid;
         {
-            // Becoming current: surface any pending cancel, and drop the join park-state
-            // (it is no longer waiting on anything).
+            // Becoming current: surface any pending cancel, drop the join park-state
+            // (no longer waiting on anything), bump the park generation, and clear any
+            // deadline-timer handle (a `JoinTimed` park is over once we run).
             let t = self.sched.tasks[tid.0]
                 .as_mut()
                 .expect("load_task_context: task slot is empty");
             self.sched.cancel_current = t.cancel_requested;
             t.joining = None;
+            t.park_epoch = t.park_epoch.wrapping_add(1);
+            t.deadline_abort = None;
         }
         let started = self.sched.tasks[tid.0].as_ref().unwrap().started;
         if started {
@@ -1758,6 +1930,19 @@ impl<'gc> VmState<'gc> {
     /// handle (a `Task`-class object over the new id) is rooted by the task while it
     /// runs and receives the outcome on completion (see `complete_detached`).
     pub fn spawn_detached(&mut self, mc: &Mutation<'gc>, block: Gc<'gc, Block<'gc>>) -> Value<'gc> {
+        let id = self.spawn_detached_id(mc, block);
+        self.sched.tasks[id.0]
+            .as_ref()
+            .unwrap()
+            .handle
+            .expect("spawn_detached_id just set the handle")
+    }
+
+    /// As [`spawn_detached`], but returns the new task's [`TaskId`]. A handle is still
+    /// created (`complete_detached` needs one to record the outcome and wake joiners),
+    /// but the caller joins by id — used by `await_timeout`, which joins/cancels the
+    /// child directly rather than through a QN handle.
+    pub fn spawn_detached_id(&mut self, mc: &Mutation<'gc>, block: Gc<'gc, Block<'gc>>) -> TaskId {
         // Reserve the slot first so the handle can carry the real id, then root the
         // handle back on the task.
         let task = self.new_child_task(mc, block, None, None);
@@ -1766,7 +1951,7 @@ impl<'gc> VmState<'gc> {
         let handle = self.new_native_state(mc, class, NativeTaskHandle::new(id));
         self.sched.tasks[id.0].as_mut().unwrap().handle = Some(handle);
         self.sched.ready.push_back(id);
-        handle
+        id
     }
 
     /// Build a fresh, unstarted child/detached task wrapping `block`.
@@ -1796,6 +1981,8 @@ impl<'gc> VmState<'gc> {
             cancel_requested: false,
             abort_handle: None,
             joining: None,
+            park_epoch: 0,
+            deadline_abort: None,
         }
     }
 
@@ -1921,6 +2108,10 @@ impl<'gc> VmState<'gc> {
                 DetachedOutcome::Cancelled => Wake::JoinedCancelled,
             };
             if let Some(t) = self.sched.tasks.get_mut(w.0).and_then(|t| t.as_mut()) {
+                // A timed joiner: disarm its deadline so it doesn't linger / fire stale.
+                if let Some(ah) = t.deadline_abort.take() {
+                    ah.abort();
+                }
                 t.wake = Some(wake);
                 self.sched.ready.push_back(w);
             }
@@ -1943,7 +2134,11 @@ impl<'gc> VmState<'gc> {
         if let Some(ah) = t.abort_handle.take() {
             ah.abort(); // parked on I/O: the aborted future wakes it
         } else if let Some(joined) = t.joining.take() {
-            // parked on join: dequeue from the target's waiters and make it runnable.
+            // parked on (timed) join: disarm any deadline timer, dequeue from the
+            // target's waiters, and make this task runnable so it sees the cancel.
+            if let Some(ah) = t.deadline_abort.take() {
+                ah.abort();
+            }
             if let Some(jt) = self.sched.tasks.get_mut(joined.0).and_then(|t| t.as_mut()) {
                 jt.waiters.retain(|w| *w != target);
             }

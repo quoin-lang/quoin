@@ -94,4 +94,58 @@
         .is:{ h.status } equalTo:'cancelled';
         .is:{ trace } equalTo:#('finally');
     };
+
+    "* Stage 5a: `Async.timeout:ms do:{…}` runs the block raced against a deadline.
+    "* A block that finishes in time returns its value.
+    .test:
+    timeoutReturnsValueWhenInTime -> {
+        .is:{ Async.timeout: 1000 do:{ 40 + 2 } } equalTo:42;
+        .is:{ Async.timeout: 1000 do:{ Runtime.sleep: 2; 7 } } equalTo:7;
+    };
+
+    "* On the deadline, the bare form throws a catchable `'timeout'` (the block is
+    "* cancelled — its in-flight sleep aborts promptly, so this does not hang).
+    .test:
+    timeoutThrowsOnDeadline -> {
+        .does:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } } throw:'timeout';
+    };
+
+    "* `onCancel:{…}` replaces the throw with the handler's value on the deadline;
+    "* `onCancel:{ nil }` is the non-throwing form.
+    .test:
+    timeoutOnCancelReturnsHandlerValue -> {
+        .is:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ 'handled' } }
+            equalTo:'handled';
+        .is:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ nil } } equalTo:nil;
+    };
+
+    "* `onCancel:` catches only the timeout: a *normal* error from the block propagates
+    "* past it (the handler does not run).
+    .test:
+    timeoutOnCancelDoesNotCatchErrors -> {
+        .is:{ { Async.timeout: 1000 do:{ 'boom'.throw } onCancel:{ 'handled' } }
+                .catch:{ |e| e } }
+            equalTo:'boom';
+    };
+
+    "* The block's `finally` runs on the deadline (cooperative unwind, like cancel).
+    .test:
+    timeoutRunsFinallyOnDeadline -> {
+        trace = #();
+        Async.timeout: 5 do:{
+            { Runtime.sleep: 100000 }.catch:{ |e| nil } finally:{ trace.add:'finally' }
+        } onCancel:{ nil };
+        .is:{ trace } equalTo:#('finally');
+    };
+
+    "* Timeouts nest: an inner deadline fires its own handler and the outer (still well
+    "* within its own deadline) returns that value — the inner timeout does not leak out.
+    .test:
+    timeoutNests -> {
+        .is:{
+            Async.timeout: 1000 do:{
+                Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ 'inner' }
+            }
+        } equalTo:'inner';
+    };
 }
