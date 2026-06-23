@@ -443,3 +443,194 @@ fn raise<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, msg: &str) -> QuoinErro
 fn unexpected(op: &str, got: IoResult) -> QuoinError {
     QuoinError::Other(format!("socket {op}: unexpected I/O result {got:?}"))
 }
+
+// ===========================================================================
+// TcpListener — Stage 7: accept incoming connections (QN servers).
+// ===========================================================================
+
+/// Native backing for a listening socket. Like `NativeSocket` it is just an fd in the
+/// backend registry (reaped via the same queue), plus the actual bound `port` (so a `:0`
+/// ephemeral bind is usable). A listener accepts connections rather than reading/writing,
+/// so it is a distinct class — but the resource lifecycle is identical.
+pub struct NativeListener {
+    id: StreamId,
+    reap: Rc<RefCell<Vec<StreamId>>>,
+    closed: bool,
+    port: u16,
+}
+
+impl NativeListener {
+    fn id(&self) -> StreamId {
+        self.id
+    }
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
+    fn port(&self) -> u16 {
+        self.port
+    }
+    fn mark_closed(&mut self) -> bool {
+        std::mem::replace(&mut self.closed, true)
+    }
+}
+
+impl std::fmt::Debug for NativeListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "NativeListener{{id:{} port:{} closed:{}}}",
+            self.id.0, self.port, self.closed
+        )
+    }
+}
+
+impl AnyCollect for NativeListener {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {} // no Gc fields
+}
+
+impl Drop for NativeListener {
+    fn drop(&mut self) {
+        if !self.closed {
+            self.reap.borrow_mut().push(self.id);
+        }
+    }
+}
+
+pub fn build_tcp_listener_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("TcpListener", Some("Object"))
+        // TcpListener.listen:'host:port' -> a bound listening socket. Port 0 binds an
+        // ephemeral port; read the chosen port back with `port`.
+        .class_method("listen:", |vm, mc, _r, args| {
+            let hostport = arg!(args, String, 0);
+            let (host, port) = parse_host_port(hostport.as_str())?;
+            match vm.await_io(IoRequest::Listen { host, port })? {
+                IoResult::Listening { id, port } => Ok(make_listener(vm, mc, id, port)),
+                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                other => Err(unexpected("listen:", other)),
+            }
+        })
+        // accept -> block until a peer connects, returning the connected TcpSocket. The
+        // caller owns it (close it, scope it, or rely on the reap backstop).
+        .instance_method("accept", |vm, mc, receiver, _args| {
+            accept_one(vm, mc, receiver)
+        })
+        // acceptOnce:{|sock| ...} -> accept one connection, run the block with it, and
+        // close it on exit (normal/throw/cancel); returns the block's value.
+        .instance_method("acceptOnce:", |vm, mc, receiver, args| {
+            let conn = accept_one(vm, mc, receiver)?;
+            // Extract the block only after the await (a Gc pulled out before a suspend
+            // would be live across it), as elsewhere in this file.
+            let block = arg!(args, Block, 0);
+            scope_socket(vm, mc, conn, block)
+        })
+        // acceptLoop:{|sock| ...} -> accept connections forever, running the block on each
+        // (each closed after the block). The caller breaks out with a non-local return
+        // (^^) — which, like a throw or cancel, propagates straight through this loop.
+        .instance_method("acceptLoop:", |vm, mc, receiver, args| {
+            let block = arg!(args, Block, 0);
+            accept_loop(vm, mc, receiver, block)
+        })
+        // port -> the bound local port (useful after a `:0` ephemeral bind).
+        .instance_method("port", |vm, mc, receiver, _args| {
+            let port = receiver
+                .with_native_state::<NativeListener, _, _>(|l| l.port())
+                .map_err(QuoinError::Other)?;
+            Ok(vm.new_int(mc, port as i64))
+        })
+        .instance_method("close", |vm, mc, receiver, _args| {
+            reap_listener_handle(vm, mc, receiver);
+            Ok(vm.new_nil(mc))
+        })
+        .instance_method("closed?", |vm, mc, receiver, _args| {
+            let closed = receiver
+                .with_native_state::<NativeListener, _, _>(|l| l.is_closed())
+                .map_err(QuoinError::Other)?;
+            Ok(vm.new_bool(mc, closed))
+        })
+}
+
+/// Accept one connection from the listener `receiver`, returning the connected `TcpSocket`.
+fn accept_one<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+) -> Result<Value<'gc>, QuoinError> {
+    let id = open_listener_id(vm, mc, receiver)?;
+    match vm.await_io(IoRequest::Accept { id })? {
+        IoResult::Connected(conn_id) => Ok(make_socket(vm, mc, "TcpSocket", conn_id)),
+        IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+        other => Err(unexpected("accept", other)),
+    }
+}
+
+/// Accept connections forever, running `block` on each (closing each on exit). Returns only
+/// by *propagating* a non-`Ok` from the block — a non-local return (`^^`), a throw, or a
+/// cancellation — which unwinds straight through this native loop. The accepted socket is
+/// closed before propagating, so resources are released on every exit path.
+fn accept_loop<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+    block: Gc<'gc, Block<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    loop {
+        let conn = accept_one(vm, mc, receiver)?;
+        let result = vm.execute_block(mc, block, vec![conn], None);
+        reap_handle(vm, mc, conn); // close the accepted socket (no-op if the block consumed it)
+        result?; // Ok -> accept the next; Err (^^ / throw / cancel) -> propagate out
+    }
+}
+
+/// The `StreamId` of an open listener receiver, or a thrown error if it is closed.
+fn open_listener_id<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+) -> Result<StreamId, QuoinError> {
+    let (id, closed) = receiver
+        .with_native_state::<NativeListener, _, _>(|l| (l.id(), l.is_closed()))
+        .map_err(QuoinError::Other)?;
+    if closed {
+        return Err(raise(vm, mc, "listener: operation on a closed listener"));
+    }
+    Ok(id)
+}
+
+/// Build a `TcpListener` handle over `id`, storing the bound `port`, wired to the reap queue.
+fn make_listener<'gc>(
+    vm: &VmState<'gc>,
+    mc: &Mutation<'gc>,
+    id: StreamId,
+    port: u16,
+) -> Value<'gc> {
+    let class = vm.get_or_create_builtin_class(mc, "TcpListener");
+    vm.new_native_state(
+        mc,
+        class,
+        NativeListener {
+            id,
+            reap: vm.socket_reap.clone(),
+            closed: false,
+            port,
+        },
+    )
+}
+
+/// Mark a listener closed (idempotent) and enqueue its fd for the driver to reap.
+fn reap_listener_handle<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, handle: Value<'gc>) {
+    let to_reap = handle
+        .with_native_state_mut::<NativeListener, _, _>(mc, |l| {
+            if l.mark_closed() { None } else { Some(l.id()) }
+        })
+        .ok()
+        .flatten();
+    if let Some(id) = to_reap {
+        vm.socket_reap.borrow_mut().push(id);
+    }
+}

@@ -89,6 +89,12 @@ pub enum IoRequest {
     /// `OsString` end to end (the QN String → path conversion happens at the `[IO]File`
     /// boundary, not here). Result reuses `Connected(id)`.
     OpenFile { path: OsString },
+    /// Bind a listening TCP socket on `host:port` (`port` 0 = ephemeral). Registers the
+    /// listener and returns `Listening { id, port }` with the actual bound port.
+    Listen { host: String, port: u16 },
+    /// Accept one connection from the listener `id`, registering the accepted stream and
+    /// returning its `Connected(id)`. Parks until a peer connects.
+    Accept { id: StreamId },
 }
 
 /// The plain-data outcome of an [`IoRequest`].
@@ -96,6 +102,12 @@ pub enum IoRequest {
 pub enum IoResult {
     Slept,
     Connected(StreamId),
+    /// A bound listening socket: its id plus the *actual* local port (so a `:0`
+    /// ephemeral bind is usable — the caller can read the port it got).
+    Listening {
+        id: StreamId,
+        port: u16,
+    },
     /// Bytes read; empty = EOF.
     Read(Vec<u8>),
     Wrote(usize),
@@ -128,6 +140,9 @@ pub trait IoBackend {
 
 struct SmolInner {
     streams: RefCell<HashMap<StreamId, Box<dyn AsyncStream>>>,
+    // Listening sockets live in their own registry: a `TcpListener` accepts connections
+    // (it isn't an `AsyncStream`), so it can't share the `streams` map. Same id space.
+    listeners: RefCell<HashMap<StreamId, async_net::TcpListener>>,
     next_id: Cell<u64>,
     // TLS connectors are built lazily and cached: loading the webpki root bundle once
     // (rather than per connection) is the whole reason `TlsWrap` is cheap. `unsync`
@@ -148,6 +163,13 @@ impl SmolInner {
     /// `TlsWrap` swaps the conduit in place without minting a new id.
     fn insert_at(&self, id: StreamId, stream: Box<dyn AsyncStream>) -> StreamId {
         self.streams.borrow_mut().insert(id, stream);
+        id
+    }
+
+    fn insert_listener(&self, listener: async_net::TcpListener) -> StreamId {
+        let id = StreamId(self.next_id.get());
+        self.next_id.set(self.next_id.get() + 1);
+        self.listeners.borrow_mut().insert(id, listener);
         id
     }
 
@@ -270,6 +292,7 @@ impl SmolBackend {
         SmolBackend {
             inner: Rc::new(SmolInner {
                 streams: RefCell::new(HashMap::new()),
+                listeners: RefCell::new(HashMap::new()),
                 next_id: Cell::new(1),
                 tls_secure: OnceCell::new(),
                 tls_insecure: OnceCell::new(),
@@ -348,10 +371,45 @@ impl IoBackend for SmolBackend {
             }),
 
             IoRequest::Close { id } => Box::pin(async move {
-                // Drop the stream (closing the fd) without holding the borrow across
-                // any await; missing ids are a no-op so double-close is harmless.
+                // Drop the stream/listener (closing the fd) without holding the borrow
+                // across any await; missing ids are a no-op so double-close is harmless.
                 let _ = inner.streams.borrow_mut().remove(&id);
+                let _ = inner.listeners.borrow_mut().remove(&id);
                 IoResult::Closed
+            }),
+
+            IoRequest::Listen { host, port } => Box::pin(async move {
+                match async_net::TcpListener::bind((host.as_str(), port)).await {
+                    Ok(listener) => match listener.local_addr() {
+                        Ok(addr) => IoResult::Listening {
+                            id: inner.insert_listener(listener),
+                            port: addr.port(),
+                        },
+                        Err(e) => IoResult::Err(e.into()),
+                    },
+                    Err(e) => IoResult::Err(e.into()),
+                }
+            }),
+
+            IoRequest::Accept { id } => Box::pin(async move {
+                // Take the listener out for the accept (no map borrow held across the
+                // await — one accept in flight per listener, like the byte ops), then put
+                // it back. The accepted stream drops into the shared `AsyncStream` registry.
+                let listener = match inner.listeners.borrow_mut().remove(&id) {
+                    Some(l) => l,
+                    None => {
+                        return IoResult::Err(IoError {
+                            kind: std::io::ErrorKind::NotFound,
+                            message: format!("unknown listener id {}", id.0),
+                        });
+                    }
+                };
+                let res = listener.accept().await;
+                inner.listeners.borrow_mut().insert(id, listener);
+                match res {
+                    Ok((stream, _peer)) => IoResult::Connected(inner.insert(Box::new(stream))),
+                    Err(e) => IoResult::Err(e.into()),
+                }
             }),
 
             IoRequest::OpenFile { path } => Box::pin(async move {
@@ -460,6 +518,16 @@ impl IoBackend for MockBackend {
             // native backend's in-place swap.
             IoRequest::TlsWrap { id, .. } => IoResult::Connected(id),
             IoRequest::OpenFile { .. } => {
+                let id = StreamId(self.next_id.get());
+                self.next_id.set(self.next_id.get() + 1);
+                IoResult::Connected(id)
+            }
+            IoRequest::Listen { .. } => {
+                let id = StreamId(self.next_id.get());
+                self.next_id.set(self.next_id.get() + 1);
+                IoResult::Listening { id, port: 0 }
+            }
+            IoRequest::Accept { .. } => {
                 let id = StreamId(self.next_id.get());
                 self.next_id.set(self.next_id.get() + 1);
                 IoResult::Connected(id)

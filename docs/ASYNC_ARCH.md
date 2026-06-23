@@ -1,10 +1,10 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **Stages 0–6 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket` lands
+Status: **Stages 0–7 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket` lands
 Stage 4; `Async.timeout` is 5a; the `[HTTP]` client lands Stage 5; **Stage 6** is the lazy
-`ByteStream`/`StringStream` layers — which also unblocked chunked HTTP — and file streams);
-Stage 7 (listeners) is design. Companion to `USE_ARCH.md`. See the *Staged plan* below for
-what has landed.
+`ByteStream`/`StringStream` layers — which also unblocked chunked HTTP — and file streams;
+**Stage 7** is `TcpListener` — QN servers). The async-networking arc is feature-complete;
+remaining items are refinements. Companion to `USE_ARCH.md`. See the *Staged plan* below.
 
 ## Decision
 
@@ -624,10 +624,20 @@ No new soak round — streams add no concurrency primitive (they ride `await_io`
 made. *Test (overall):* read-until-delimiter and `readLine` over a mock/echo peer, incl. a
 sequence split awkwardly across reads and across a multi-byte UTF-8 boundary.
 
-**Stage 7 — listeners/servers (optional/future).**
-`Listen`/`Accept` as `AwaitIo`, enabling QN servers (built on the Stage 6 streams for
-request parsing). *Test:* a QN echo/HTTP server hit by a QN client, both on the same
-scheduler.
+**Stage 7 — listeners/servers (`TcpListener`). ✅ done.**
+Two backend creation ops (`Listen`/`Accept`) + a listener registry; `Listen` returns
+`Listening { id, port }` (the actual bound port, so `:0` ephemeral binds are usable);
+`Accept` parks until a peer connects and drops the accepted `TcpStream` into the shared
+`AsyncStream` registry — zero scheduler change, rides `await_io` like every byte op. The
+`TcpListener` class (backed by a `NativeListener`, reaped via the shared queue):
+`listen:'host:port'`, `accept` (→ a connected `TcpSocket`), `acceptOnce:{|s| …}` (one
+connection, scoped-closed), `acceptLoop:{|s| …}` (accept forever, each connection scoped;
+the caller breaks out with a non-local return `^^` — which, like a throw/cancel, propagates
+straight through the native loop, closing the in-flight connection first), `port`, `close`,
+`closed?`. TLS server-side is deferred (needs a server cert/key config). *Test:*
+`qnlib/tests/24-server.qn` — a self-contained QN server + client on one scheduler (no
+external peer): `acceptOnce:` echo round-trip, and `acceptLoop:` handling two concurrent
+clients then breaking via `^^`; `Async.timeout:`-guarded so a regression can't hang the suite.
 
 ## Deferred / open
 
