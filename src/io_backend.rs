@@ -15,10 +15,15 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_io::Timer;
 use futures_lite::{AsyncReadExt, AsyncWriteExt};
+use futures_rustls::TlsConnector;
+use futures_rustls::rustls::pki_types::ServerName;
+use futures_rustls::rustls::{ClientConfig, RootCertStore};
+use once_cell::unsync::OnceCell;
 
 /// An opaque handle to a backend-owned resource. The QN side holds only this
 /// integer (wrapped in a small GC object); the real stream lives in the backend
@@ -66,6 +71,18 @@ pub enum IoRequest {
     Write { id: StreamId, bytes: Vec<u8> },
     /// Close and deregister the stream.
     Close { id: StreamId },
+    /// Upgrade the stream at `id` to TLS *in place*: take it out of the registry, run
+    /// the client handshake (`domain` is the SNI / certificate name), and put the
+    /// resulting `TlsStream` back at the *same* id — so this composes for both the
+    /// "TLS from byte zero" case (`Connect` then `TlsWrap`) and STARTTLS-style upgrade
+    /// of an already-used plaintext socket. `insecure` skips certificate validation
+    /// (local debugging only). On failure the underlying stream is dropped (fd closed)
+    /// and the id is left vacant. Result reuses `Connected(id)`.
+    TlsWrap {
+        id: StreamId,
+        domain: String,
+        insecure: bool,
+    },
 }
 
 /// The plain-data outcome of an [`IoRequest`].
@@ -106,6 +123,11 @@ pub trait IoBackend {
 struct SmolInner {
     streams: RefCell<HashMap<StreamId, Box<dyn AsyncStream>>>,
     next_id: Cell<u64>,
+    // TLS connectors are built lazily and cached: loading the webpki root bundle once
+    // (rather than per connection) is the whole reason `TlsWrap` is cheap. `unsync`
+    // because the VM + backend live on one thread (gc_arena is `!Send`).
+    tls_secure: OnceCell<TlsConnector>,
+    tls_insecure: OnceCell<TlsConnector>,
 }
 
 impl SmolInner {
@@ -114,6 +136,112 @@ impl SmolInner {
         self.next_id.set(self.next_id.get() + 1);
         self.streams.borrow_mut().insert(id, stream);
         id
+    }
+
+    /// Reinsert a (now-TLS) stream at an id that was just vacated by `take_stream` —
+    /// `TlsWrap` swaps the conduit in place without minting a new id.
+    fn insert_at(&self, id: StreamId, stream: Box<dyn AsyncStream>) -> StreamId {
+        self.streams.borrow_mut().insert(id, stream);
+        id
+    }
+
+    fn connector(&self, insecure: bool) -> TlsConnector {
+        if insecure {
+            self.tls_insecure.get_or_init(insecure_connector).clone()
+        } else {
+            self.tls_secure.get_or_init(secure_connector).clone()
+        }
+    }
+}
+
+/// A validating client connector trusting the Mozilla webpki root bundle. The ring
+/// crypto provider is pinned explicitly (via `builder_with_provider`) so we never
+/// depend on a process-default provider being installed — with aws-lc-rs disabled
+/// there is none, and the default-provider builder would panic.
+fn secure_connector() -> TlsConnector {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        futures_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring provider supports the default protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    TlsConnector::from(Arc::new(config))
+}
+
+/// A connector that accepts any server certificate. For local debugging only — the
+/// `insecure:` flag at the QN surface is the deterrent. The handshake signature is
+/// still checked (only the certificate *chain/identity* is skipped), which is the
+/// conventional shape of rustls' "dangerous: accept any cert" verifier.
+fn insecure_connector() -> TlsConnector {
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        futures_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring provider supports the default protocol versions")
+    .dangerous()
+    .with_custom_certificate_verifier(Arc::new(danger::NoCertVerification::new()))
+    .with_no_client_auth();
+    TlsConnector::from(Arc::new(config))
+}
+
+/// The "accept any certificate" verifier behind `insecure:`. Skips chain/name
+/// validation but still verifies handshake signatures against the ring provider's
+/// algorithms — the standard rustls danger-verifier pattern.
+mod danger {
+    use futures_rustls::rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
+    use futures_rustls::rustls::crypto::{
+        WebPkiSupportedAlgorithms, ring, verify_tls12_signature, verify_tls13_signature,
+    };
+    use futures_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use futures_rustls::rustls::{DigitallySignedStruct, Error, SignatureScheme};
+
+    #[derive(Debug)]
+    pub struct NoCertVerification(WebPkiSupportedAlgorithms);
+
+    impl NoCertVerification {
+        pub fn new() -> Self {
+            NoCertVerification(ring::default_provider().signature_verification_algorithms)
+        }
+    }
+
+    impl ServerCertVerifier for NoCertVerification {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls12_signature(message, cert, dss, &self.0)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls13_signature(message, cert, dss, &self.0)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.0.supported_schemes()
+        }
     }
 }
 
@@ -137,6 +265,8 @@ impl SmolBackend {
             inner: Rc::new(SmolInner {
                 streams: RefCell::new(HashMap::new()),
                 next_id: Cell::new(1),
+                tls_secure: OnceCell::new(),
+                tls_insecure: OnceCell::new(),
             }),
         }
     }
@@ -217,6 +347,37 @@ impl IoBackend for SmolBackend {
                 let _ = inner.streams.borrow_mut().remove(&id);
                 IoResult::Closed
             }),
+
+            IoRequest::TlsWrap {
+                id,
+                domain,
+                insecure,
+            } => Box::pin(async move {
+                // Take the plaintext stream out by value for the handshake (same as the
+                // byte ops — no registry borrow is held across the await). The server
+                // name drives SNI and certificate verification; `.to_owned()` lifts it
+                // to `'static` for the connector.
+                let stream = match take_stream(&inner, id) {
+                    Ok(s) => s,
+                    Err(e) => return IoResult::Err(e),
+                };
+                let server_name = match ServerName::try_from(domain.as_str()) {
+                    Ok(name) => name.to_owned(),
+                    Err(_) => {
+                        // `stream` drops here → fd closed; the id stays vacant.
+                        return IoResult::Err(IoError {
+                            kind: std::io::ErrorKind::InvalidInput,
+                            message: format!("invalid TLS server name '{domain}'"),
+                        });
+                    }
+                };
+                match inner.connector(insecure).connect(server_name, stream).await {
+                    // Swap the conduit in place: the TLS stream takes over the same id.
+                    Ok(tls) => IoResult::Connected(inner.insert_at(id, Box::new(tls))),
+                    // Handshake failed: the underlying stream was consumed (fd closed).
+                    Err(e) => IoResult::Err(e.into()),
+                }
+            }),
         }
     }
 
@@ -279,6 +440,9 @@ impl IoBackend for MockBackend {
                 IoResult::Wrote(n)
             }
             IoRequest::Close { .. } => IoResult::Closed,
+            // No real handshake in the mock — the conduit keeps its id, as in the
+            // native backend's in-place swap.
+            IoRequest::TlsWrap { id, .. } => IoResult::Connected(id),
         };
         Box::pin(async move { result })
     }
@@ -385,5 +549,133 @@ mod tests {
             max: 16,
         }));
         assert!(matches!(r, IoResult::Err(e) if e.kind == std::io::ErrorKind::NotFound));
+    }
+
+    /// End-to-end TLS over the loopback: a local rustls echo server with a self-signed
+    /// cert, and a client that `Connect`s then `TlsWrap`s with `insecure: true` (the
+    /// same escape hatch real users get) — so no test-only trust-anchor plumbing. Proves
+    /// the handshake completes and bytes round-trip through the swapped-in TLS conduit.
+    #[test]
+    fn smol_tls_insecure_handshake_and_echo() {
+        use futures_rustls::TlsAcceptor;
+        use futures_rustls::rustls::ServerConfig;
+        use futures_rustls::rustls::crypto::ring;
+        use futures_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_der = cert.cert.der().clone();
+        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()));
+
+        let server_config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+
+        // Bind on the main thread so the port is known synchronously, then hand the
+        // listener to the server thread (it has its own reactor via `block_on`).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let acceptor = TlsAcceptor::from(Arc::new(server_config));
+            block_on(async {
+                let listener = async_io::Async::<std::net::TcpListener>::new(listener).unwrap();
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut tls = acceptor.accept(tcp).await.unwrap();
+                let mut buf = [0u8; 5];
+                tls.read_exact(&mut buf).await.unwrap();
+                tls.write_all(&buf).await.unwrap();
+                tls.flush().await.unwrap();
+                // Hold the conduit open briefly so the client reads before the drop
+                // closes the fd (simpler than a TLS half-close).
+                Timer::after(Duration::from_millis(50)).await;
+            });
+        });
+
+        let backend = SmolBackend::new();
+        block_on(async {
+            let id = match backend
+                .perform(IoRequest::Connect {
+                    host: "127.0.0.1".to_string(),
+                    port: addr.port(),
+                })
+                .await
+            {
+                IoResult::Connected(id) => id,
+                other => panic!("connect failed: {other:?}"),
+            };
+            let id = match backend
+                .perform(IoRequest::TlsWrap {
+                    id,
+                    domain: "localhost".to_string(),
+                    insecure: true,
+                })
+                .await
+            {
+                IoResult::Connected(id) => id,
+                other => panic!("tls wrap failed: {other:?}"),
+            };
+            match backend
+                .perform(IoRequest::Write {
+                    id,
+                    bytes: b"hello".to_vec(),
+                })
+                .await
+            {
+                IoResult::Wrote(5) => {}
+                other => panic!("write failed: {other:?}"),
+            }
+            match backend.perform(IoRequest::Read { id, max: 64 }).await {
+                IoResult::Read(data) => assert_eq!(data, b"hello"),
+                other => panic!("read failed: {other:?}"),
+            }
+        });
+
+        server.join().unwrap();
+    }
+
+    /// The secure path (webpki roots) against a real host — the one thing the offline
+    /// test can't cover, since a self-signed cert is rejected by the real verifier.
+    /// Ignored by default (needs the network); run with `--ignored`.
+    #[test]
+    #[ignore = "hits the public internet (example.org:443); run with --ignored"]
+    fn smol_tls_secure_real_host() {
+        let backend = SmolBackend::new();
+        block_on(async {
+            let id = match backend
+                .perform(IoRequest::Connect {
+                    host: "example.org".to_string(),
+                    port: 443,
+                })
+                .await
+            {
+                IoResult::Connected(id) => id,
+                other => panic!("connect failed: {other:?}"),
+            };
+            let id = match backend
+                .perform(IoRequest::TlsWrap {
+                    id,
+                    domain: "example.org".to_string(),
+                    insecure: false,
+                })
+                .await
+            {
+                IoResult::Connected(id) => id,
+                other => panic!("tls handshake failed: {other:?}"),
+            };
+            let req = b"GET / HTTP/1.0\r\nHost: example.org\r\nConnection: close\r\n\r\n".to_vec();
+            match backend.perform(IoRequest::Write { id, bytes: req }).await {
+                IoResult::Wrote(_) => {}
+                other => panic!("write failed: {other:?}"),
+            }
+            match backend.perform(IoRequest::Read { id, max: 256 }).await {
+                IoResult::Read(data) => {
+                    let head = String::from_utf8_lossy(&data);
+                    assert!(head.starts_with("HTTP/1."), "unexpected response: {head:?}");
+                }
+                other => panic!("read failed: {other:?}"),
+            }
+        });
     }
 }

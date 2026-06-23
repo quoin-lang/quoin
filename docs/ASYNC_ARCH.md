@@ -1,7 +1,8 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **Stages 0–3 implemented** (`Bytes` + `TcpSocket` land Stage 3); Stages 4–6
-are design. Companion to `USE_ARCH.md`. See the *Staged plan* below for what has landed.
+Status: **Stages 0–4 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket`
+lands Stage 4); Stages 5–6 are design. Companion to `USE_ARCH.md`. See the *Staged plan*
+below for what has landed.
 
 ## Decision
 
@@ -97,7 +98,7 @@ pub enum IoRequest {
     Read    { id: StreamId, max: usize },
     Write   { id: StreamId, bytes: Vec<u8> },
     Close   { id: StreamId },
-    // Stage 4+: TlsConnect / TlsWrap, Stage 6: Listen / Accept
+    // Stage 4: TlsWrap { id, domain, insecure } (shipped); Stage 6: Listen / Accept
 }
 
 pub enum IoResult {
@@ -266,10 +267,9 @@ Added through Stage 2a:
 
 Still to add for later stages:
 
-- `async-net` for async DNS + resolve-and-connect (Stage 3; `blocking`-direct is the
-  leaner alternative)
-- `futures-rustls` + `rustls` (+ `webpki-roots` / `rustls-native-certs`) for TLS
-  (Stage 4)
+- ✅ `async-net` for async DNS + resolve-and-connect (Stage 3)
+- ✅ `futures-rustls` + `rustls` + `webpki-roots`, **`ring`** provider, for TLS (Stage 4;
+  `rustls-native-certs` for the OS trust store remains a future opt-in)
 - `httparse` for HTTP/1.1 header parsing (Stage 5)
 - `IoBackend::perform` returns a plain `Pin<Box<dyn Future<Output = IoResult>>>`
   (`'static` — each future owns the `Rc` clones it needs and borrows nothing from
@@ -472,7 +472,7 @@ Plan:
 - **3a — `Bytes`. ✅ done.** `src/runtime/bytes.rs`: the immutable type + `BytesClass` +
   the `String`↔`Bytes` conversions. *Test:* a `Bytes` suite (round-trip, concat, slice,
   `at:`, invalid-UTF-8 throws), green under the stress knobs.
-- **3b — `TcpSocket`. ✅ done.** `src/runtime/net.rs`: `connect:` (bare) + `connect:do:`
+- **3b — `TcpSocket`. ✅ done.** `src/runtime/sockets.rs`: `connect:` (bare) + `connect:do:`
   (scope), `read:n`, `readAll`, `writeAll:`, `close`/`closed?` over `Bytes`; backend
   `Connect{host,port}` (async-net) + sync `close`; the reap queue (`VmState` + driver
   drain). Errors thrown (a catchable string; structured `IoError` class is a noted
@@ -480,10 +480,29 @@ Plan:
   server: connect/write/read/close, scope close, use-after-close throws, and **8
   concurrent connections overlapping** (≈ one round-trip, not the sum).
 
-**Stage 4 — TLS.**
-Wrap streams with `futures-rustls` (cert roots via `webpki-roots`). Either new
-`IoRequest` variants (`TlsConnect`) or a "wrap handle" op. *Test:* QN connects to a
-known TLS host (or a local rustls server) and completes a handshake + round-trip.
+**Stage 4 — TLS. ✅ done.** `TlsSocket`, sharing all byte ops with `TcpSocket` (both back
+onto `NativeSocket` in `src/runtime/sockets.rs`; the two classes differ only in *creation*).
+The proof that the per-operation request waist pays off: **one** new backend op and **zero**
+scheduler/lint changes.
+- **4a — backend.** `io_backend.rs`: `TlsWrap { id, domain, insecure }` — takes the stream
+  at `id` out of the registry, runs the `futures-rustls` client handshake, and reinserts the
+  `TlsStream` at the *same* id (in-place conduit swap; reuses `IoResult::Connected(id)`). On
+  failure the stream drops (fd closed). Two lazily-built, cached `TlsConnector`s (secure =
+  `webpki-roots`; insecure = an accept-any-cert verifier that still checks handshake sigs);
+  the **`ring`** provider is pinned via `builder_with_provider` (with aws-lc-rs off there is
+  no process-default provider — the default builder would panic). `MockBackend` returns the
+  same id. *Tests:* a local rustls echo server via the `insecure` path (offline, no test-only
+  trust plumbing) + an `#[ignore]`d real-host (`example.org:443`) check of the webpki path.
+- **4b — `TlsSocket`.** `connect:` / `connect:do:` = `Connect` then `TlsWrap` (SNI from the
+  host part); `wrap:host:` / `wrap:host:do:` upgrade an existing `TcpSocket` in place
+  (STARTTLS et al.), **consuming** it — the plaintext handle is marked closed *without*
+  reaping so its fd transfers to TLS instead of being closed (and its `Drop` backstop is
+  disarmed). Each creation selector has an `insecure:` variant (cert validation off, for
+  local debugging); the bare forms forward `false`. *Test:* `tests/tls_socket.rs` — the real
+  `qn` binary vs a local rustls echo server (`insecure`): connect/write/read/close, scope,
+  the `wrap:host:` upgrade (consumed `TcpSocket` throws on reuse), and 8 concurrent TLS
+  connections overlapping. No new soak round — TLS adds no concurrency primitive (it rides
+  the existing `await_io` path).
 
 **Stage 5 — HTTP/1.1 in the stdlib (the payoff).**
 `qnlib/std/http/*` in Quoin: build request line + headers + body; read status +
