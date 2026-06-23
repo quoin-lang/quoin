@@ -1,9 +1,10 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **Stages 0–5 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket` lands
-Stage 4; `Async.timeout` is 5a; the `[HTTP]` client lands Stage 5 — chunked bodies excepted,
-deferred to Stage 6); Stages 6–7 are design. Companion to `USE_ARCH.md`. See the *Staged
-plan* below for what has landed.
+Status: **Stages 0–6 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket` lands
+Stage 4; `Async.timeout` is 5a; the `[HTTP]` client lands Stage 5; **Stage 6** is the lazy
+`ByteStream`/`StringStream` layers — which also unblocked chunked HTTP — and file streams);
+Stage 7 (listeners) is design. Companion to `USE_ARCH.md`. See the *Staged plan* below for
+what has landed.
 
 ## Decision
 
@@ -542,7 +543,11 @@ GET, POST echo, close-delimited body, case-insensitive headers; HTTPS via a loca
 server + `insecure:`; an `#[ignore]`d real-host secure GET) + `qnlib/tests/23-http.qn`
 (network-free URL-parse / request-build / Response unit tests).
 
-**Stage 6 — Streams (`ByteStream` / `StringStream`).**
+**Stage 6 — Streams (`ByteStream` / `StringStream`). ✅ done** (6a `5697450`, 6b `72fe196`,
+6c `06135ce`, 6d `3c68a51`). Conduit-neutral over TCP/TLS/files; chunked HTTP now decodes
+(real-host verified); file streams via `OpenFile`/`async-fs`. Tests: `tests/byte_stream.rs`,
+`string_stream.rs` (incl. 4-byte emoji + RTL), `file_stream.rs`, the chunked path in
+`http.rs`. The plan below records the as-built design.
 Two lazy buffering layers over any open conduit, each *consuming* the layer below
 (transferring fd ownership exactly as `TlsSocket.wrap:` consumes a `TcpSocket`):
 `TcpSocket`/`TlsSocket`/`[IO]File` → **`ByteStream`** (buffered bytes) → **`StringStream`**
