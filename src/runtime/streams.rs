@@ -1,6 +1,6 @@
 use crate::arg;
-use crate::error::QuoinError;
-use crate::io_backend::{IoError, IoRequest, IoResult, StreamId};
+use crate::error::{IoErrorKind, QuoinError};
+use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::sockets::consume_socket;
 use crate::value::{AnyCollect, Block, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
@@ -81,13 +81,13 @@ pub fn build_byte_stream_class() -> NativeClassBuilder {
         // the fd transfers to the stream and the socket is left closed (further ops on it
         // throw). Works over any conduit that is a `StreamId` — TcpSocket/TlsSocket today.
         .class_method("over:", |vm, mc, _r, args| {
-            let id = consume_or_raise(vm, mc, args[0], "ByteStream.over:")?;
+            let id = consume_or_raise(mc, args[0], "ByteStream.over:")?;
             Ok(make_byte_stream(vm, mc, id))
         })
         // ByteStream.over: aSocket do:{|st| ...} -> run the block with the stream, closing
         // it on every exit path (normal/throw/cancel); returns the block's value.
         .class_method("over:do:", |vm, mc, _r, args| {
-            let id = consume_or_raise(vm, mc, args[0], "ByteStream.over:do:")?;
+            let id = consume_or_raise(mc, args[0], "ByteStream.over:do:")?;
             let handle = make_byte_stream(vm, mc, id);
             let block = arg!(args, Block, 1);
             scope_stream(vm, mc, handle, block)
@@ -117,7 +117,7 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         // read -> whatever is available right now: drain the buffer, or if empty do one
         // fill. Empty `Bytes` = EOF.
         .instance_method("read", |vm, mc, receiver, _args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             if buffered_len(receiver)? == 0 {
                 fill_once(vm, mc, receiver, id)?;
             }
@@ -127,7 +127,7 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         // read:n -> up to n bytes (may be short; empty = EOF). Buffer first, then at most
         // one fill — POSIX-style, like `TcpSocket.read:`.
         .typed_instance_method("read:", &["Integer"], |vm, mc, receiver, args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             let n = arg!(args, Int, 0).max(0) as usize;
             if buffered_len(receiver)? == 0 {
                 fill_once(vm, mc, receiver, id)?;
@@ -138,7 +138,7 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         // peek:n -> up to n bytes *without* consuming them. Fills until the buffer holds n
         // bytes (or EOF). Lets a caller look ahead before deciding how to frame.
         .typed_instance_method("peek:", &["Integer"], |vm, mc, receiver, args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             let n = arg!(args, Int, 0).max(0) as usize;
             while buffered_len(receiver)? < n {
                 if fill_once(vm, mc, receiver, id)? {
@@ -156,7 +156,7 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             if delim.is_empty() {
                 return Err(raise(vm, mc, "ByteStream.readUntil:: empty delimiter"));
             }
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             loop {
                 if let Some(end) = find_subsequence(receiver, &delim)? {
                     let bytes = drain_up_to(mc, receiver, end)?;
@@ -171,21 +171,20 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         })
         // readAll -> read until EOF, returning all remaining bytes as one Bytes.
         .instance_method("readAll", |vm, mc, receiver, _args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             while !fill_once(vm, mc, receiver, id)? {}
             let all = drain_up_to(mc, receiver, usize::MAX)?;
             Ok(vm.new_bytes(mc, all))
         })
         // readExactly:n -> exactly n bytes, or throw if the stream ends first.
         .typed_instance_method("readExactly:", &["Integer"], |vm, mc, receiver, args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             let n = arg!(args, Int, 0).max(0) as usize;
             while buffered_len(receiver)? < n {
                 if fill_once(vm, mc, receiver, id)? {
-                    return Err(raise(
-                        vm,
-                        mc,
-                        &format!("ByteStream.readExactly:: stream ended with fewer than {n} bytes"),
+                    return Err(QuoinError::io(
+                        IoErrorKind::UnexpectedEof,
+                        format!("ByteStream.readExactly:: stream ended with fewer than {n} bytes"),
                     ));
                 }
             }
@@ -195,11 +194,11 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         // writeAll:bytes -> write all of `bytes` straight through to the conduit
         // (complete-or-throw); the buffer is read-side only. Returns nil.
         .typed_instance_method("writeAll:", &["Bytes"], |vm, mc, receiver, args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             let bytes = arg!(args, Bytes, 0).to_vec(); // owned, before the await
             match vm.await_io(IoRequest::Write { id, bytes })? {
                 IoResult::Wrote(_) => Ok(vm.new_nil(mc)),
-                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
                 other => Err(unexpected("writeAll:", other)),
             }
         })
@@ -219,7 +218,7 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         // stringStream -> a text `StringStream` that *consumes* this byte stream: the fd
         // and any buffered read-ahead transfer up; this handle is left closed.
         .instance_method("stringStream", |vm, mc, receiver, _args| {
-            let (id, rbuf) = consume_stream_or_raise(vm, mc, receiver, "stringStream")?;
+            let (id, rbuf) = consume_stream_or_raise(mc, receiver, "stringStream")?;
             Ok(make_string_stream(vm, mc, id, rbuf))
         })
 }
@@ -229,11 +228,11 @@ pub fn build_string_stream_class() -> NativeClassBuilder {
         // StringStream.over: aByteStream -> a text stream that *consumes* the byte stream
         // (its fd and buffered read-ahead transfer; the byte stream is left closed).
         .class_method("over:", |vm, mc, _r, args| {
-            let (id, rbuf) = consume_stream_or_raise(vm, mc, args[0], "StringStream.over:")?;
+            let (id, rbuf) = consume_stream_or_raise(mc, args[0], "StringStream.over:")?;
             Ok(make_string_stream(vm, mc, id, rbuf))
         })
         .class_method("over:do:", |vm, mc, _r, args| {
-            let (id, rbuf) = consume_stream_or_raise(vm, mc, args[0], "StringStream.over:do:")?;
+            let (id, rbuf) = consume_stream_or_raise(mc, args[0], "StringStream.over:do:")?;
             let handle = make_string_stream(vm, mc, id, rbuf);
             let block = arg!(args, Block, 1);
             scope_stream(vm, mc, handle, block)
@@ -269,7 +268,7 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
         // nil at EOF. An empty line returns ""; a final line without a newline is returned
         // once (then nil). Throws if a line is not valid UTF-8.
         .instance_method("readLine", |vm, mc, receiver, _args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             match read_line(vm, mc, receiver, id)? {
                 Some(line) => Ok(line),
                 None => Ok(vm.new_nil(mc)),
@@ -277,7 +276,7 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
         })
         // eachLine:{|line| ...} -> run the block on each line to EOF; returns self.
         .instance_method("eachLine:", |vm, mc, receiver, args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             let block = arg!(args, Block, 0);
             while let Some(line) = read_line(vm, mc, receiver, id)? {
                 vm.execute_block(mc, block, vec![line], None)?;
@@ -288,7 +287,7 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
         // String, retaining any trailing partial code point for the next read; empty
         // String = EOF. Throws if the stream ends mid-sequence or on a truly invalid byte.
         .instance_method("read", |vm, mc, receiver, _args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             loop {
                 if buffered_len(receiver)? == 0 && fill_once(vm, mc, receiver, id)? {
                     return Ok(vm.new_string(mc, String::new())); // EOF
@@ -315,7 +314,7 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
         })
         // readAll -> the whole remaining stream as one String (throws on invalid UTF-8).
         .instance_method("readAll", |vm, mc, receiver, _args| {
-            let id = open_stream_id(vm, mc, receiver)?;
+            let id = open_stream_id(receiver)?;
             while !fill_once(vm, mc, receiver, id)? {}
             let all = drain_up_to(mc, receiver, usize::MAX)?;
             let s = decode_utf8(vm, mc, all, "readAll")?;
@@ -411,18 +410,15 @@ fn consume_stream<'gc>(
 }
 
 fn consume_stream_or_raise<'gc>(
-    vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     source: Value<'gc>,
     op: &str,
 ) -> Result<(StreamId, Vec<u8>), QuoinError> {
     match consume_stream(mc, source)? {
         Some(pair) => Ok(pair),
-        None => Err(raise(
-            vm,
-            mc,
-            &format!("{op}: the source is already closed"),
-        )),
+        None => Err(QuoinError::io_closed(format!(
+            "{op}: the source is already closed"
+        ))),
     }
 }
 
@@ -448,25 +444,22 @@ fn fill_once<'gc>(
                 .map_err(QuoinError::Other)?;
             Ok(false)
         }
-        IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
         other => Err(unexpected("read", other)),
     }
 }
 
 /// Consume a socket into a `StreamId`, or throw if it was already closed / isn't a socket.
 fn consume_or_raise<'gc>(
-    vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     source: Value<'gc>,
     op: &str,
 ) -> Result<StreamId, QuoinError> {
     match consume_socket(mc, source)? {
         Some(id) => Ok(id),
-        None => Err(raise(
-            vm,
-            mc,
-            &format!("{op}: the source is already closed"),
-        )),
+        None => Err(QuoinError::io_closed(format!(
+            "{op}: the source is already closed"
+        ))),
     }
 }
 
@@ -484,16 +477,14 @@ fn scope_stream<'gc>(
 }
 
 /// The `StreamId` of an open stream receiver, or a thrown error if it is closed.
-fn open_stream_id<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    receiver: Value<'gc>,
-) -> Result<StreamId, QuoinError> {
+fn open_stream_id<'gc>(receiver: Value<'gc>) -> Result<StreamId, QuoinError> {
     let (id, closed) = receiver
         .with_native_state::<NativeStream, _, _>(|s| (s.id(), s.is_closed()))
         .map_err(QuoinError::Other)?;
     if closed {
-        return Err(raise(vm, mc, "stream: operation on a closed stream"));
+        return Err(QuoinError::io_closed(
+            "stream: operation on a closed stream",
+        ));
     }
     Ok(id)
 }
@@ -573,12 +564,8 @@ fn delim_bytes<'gc>(args: &[Value<'gc>], idx: usize) -> Result<Vec<u8>, QuoinErr
     })
 }
 
-/// Throw a (catchable) network error carrying the backend's message.
-fn raise_io<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, e: &IoError) -> QuoinError {
-    raise(vm, mc, &e.message)
-}
-
-/// Throw a (catchable) string exception (the Stage-3/5 error model).
+/// Throw a (catchable) string exception (the Stage-3/5 error model). Still used by the
+/// UTF-8 / delimiter cases below, which become typed errors in a later tranche.
 fn raise<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, msg: &str) -> QuoinError {
     let val = vm.new_string(mc, msg.to_string());
     vm.active_exception = Some(val);

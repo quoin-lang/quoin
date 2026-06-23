@@ -1943,9 +1943,33 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Build a Quoin `IoError` carrying `message` and a `kind` symbol (e.g.
+    /// `#connectionRefused`). Same bootstrap-safety as `make_error`: falls back to a
+    /// plain string if the `IoError` class isn't registered yet.
+    pub fn make_io_error(&self, mc: &Mutation<'gc>, kind: &str, message: &str) -> Value<'gc> {
+        let key = NamespacedName::new(Vec::new(), "IoError".to_string());
+        let class_opt = self.globals.borrow().get(&key).copied();
+        if let Some(Value::Class(cls)) = class_opt {
+            let obj = self.new_object(mc, cls);
+            let msg_val = self.new_string(mc, message.to_string());
+            if let Some(slot) = self.field_slot(cls, "message") {
+                obj.borrow_mut(mc).fields[slot] = msg_val;
+            }
+            let kind_val = self.new_symbol(mc, kind.to_string());
+            if let Some(slot) = self.field_slot(cls, "kind") {
+                obj.borrow_mut(mc).fields[slot] = kind_val;
+            }
+            Value::Object(obj)
+        } else {
+            self.new_string(mc, message.to_string())
+        }
+    }
+
     /// Convert an internal `QuoinError` into the Quoin value a `catch:` handler should
-    /// receive. Structured variants become typed `Error` objects so guest code
-    /// can dispatch on them; everything else stays a descriptive string.
+    /// receive. Domain variants become typed `Error` objects so guest code can dispatch
+    /// on them; control-flow signals and internal errors stay a descriptive string. The
+    /// match is exhaustive over domain variants on purpose — a new typed error that
+    /// forgets its arm here is then a compile error, not a silent fall-through to string.
     pub fn quoinerror_to_value(&self, mc: &Mutation<'gc>, error: &QuoinError) -> Value<'gc> {
         match error {
             QuoinError::TypeError { msg, .. } => self.make_error(mc, "TypeError", msg, None),
@@ -1962,9 +1986,15 @@ impl<'gc> VmState<'gc> {
             QuoinError::AmbiguousMethod { msg, .. } => {
                 self.make_error(mc, "AmbiguousMethodError", msg, None)
             }
+            QuoinError::Io { kind, message } => self.make_io_error(mc, kind.symbol(), message),
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
-            other => {
-                let s = format!("{}", other);
+            QuoinError::NotCallable(_)
+            | QuoinError::StackUnderflow(_)
+            | QuoinError::Other(_)
+            | QuoinError::Thrown
+            | QuoinError::NonLocalReturn
+            | QuoinError::Cancelled => {
+                let s = format!("{}", error);
                 self.new_string(mc, s)
             }
         }

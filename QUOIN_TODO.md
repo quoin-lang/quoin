@@ -126,7 +126,7 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Make the `^>` yield operator usable in expression position.
   - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.
 - [ ] Have the `LoadGlobal` instruction consult the `BuiltinCache`. Currently it always does a `HashMap<NamespacedName, Value>` lookup against `globals` (see `vm.rs` `Instruction::LoadGlobal`); builtin classes (`Fiber`, `List`, `Integer`, etc.) could be served from the cache to avoid hashing the name on every load (e.g. for the `^>` -> `Fiber.yield:` lowering). `BuiltinCache` may need to be keyed more generally by name to cover all builtins.
-- [ ] Repurpose the Yeet instruction and make sure .../???/!!! are all working.
+- [ ] Implement .../???/!!!
 - [x] Formalize an interface for Quoin error types.
   - `Error` base (`message`/`payload`, class-side `throw:`/`throw:payload:`) + core subtypes (`TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`) in `00-bootstrap.qn`. Catch-by-type via `case`/`~`.
   - Runtime now raises structured errors: `QuoinError::Thrown` marker (value rides in `active_exception`), and `vm.quoinerror_to_value` maps internal `QuoinError` variants to typed Quoin `Error` objects at the `catch:` boundary. `does:throw:` widened to match by value/type or message string.
@@ -175,11 +175,17 @@ Quoin over the current sockets/streams).
   aren't seekable; the first real reason to consider a file-stream subclass).
 - [ ] **IPv6 `[host]:port` parsing.** `parse_host_port` (`src/runtime/sockets.rs`) splits on
   the last `:`, so a bracketed IPv6 literal (`[::1]:8080`) mis-parses. Handle the bracket form.
-- [ ] **Structured `IoError` class.** Socket/stream/HTTP errors throw plain strings today
-  (the Stage-3 error model). Promote to a typed Quoin `IoError` (an `Error` subtype carrying
-  `kind`/`message`) so `catch:`-by-type works — the backend already produces a structured
-  `IoError { kind, message }` (`src/io_backend.rs`); map it at the native boundary instead of
-  flattening to a string.
+- [x] **Structured `IoError` class.** Socket/stream/file errors now throw a typed Quoin
+  `IoError` (an `Error` subtype carrying a `kind` symbol + `message`), so `catch:`-by-type and
+  `e.kind == #connectionRefused` work. New `QuoinError::Io { kind, message }` + `IoErrorKind`
+  (`src/error.rs`) maps the backend `IoError { kind, message }` (and closed-handle / unexpected-EOF
+  cases) to the class at the `catch:` boundary (`vm.quoinerror_to_value` / `make_io_error`); the
+  per-module string `raise_io` helpers are retired in favour of `return Err(QuoinError::io*(..))`.
+  From Quoin: `IoError.throw:msg kind:k`. `quoinerror_to_value` is now exhaustive over domain
+  variants so a future typed error can't silently fall through to a string. *Remaining string I/O
+  sites, deferred to later error tranches:* the `parse_host_port` bad-host/port and the
+  `ByteStream`/`StringStream` UTF-8 / empty-delimiter cases (a `ValueError` / `ParseError` tranche),
+  and the `unexpected I/O result` internal-invariant guards.
 - [ ] **`Bytes` extras.** A mutable `BytesBuilder` (if concat churn shows up — body assembly
   is `bytes + chunk` today) and a `#b'HEX'` byte literal (the `#`-prefixed user-literal
   syntax, like `#(…)`/`#/…/`; a parser change).

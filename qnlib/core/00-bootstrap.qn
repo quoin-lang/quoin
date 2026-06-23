@@ -89,6 +89,20 @@ Error <- ArithmeticError <- {};
 Error <- IndexError <- {};
 Error <- FiberError <- {};
 
+"* Raised by socket/stream/file operations. `kind` is a symbol categorizing the
+"* failure — #connectionRefused, #connectionReset, #timedOut, #unexpectedEof,
+"* #notFound, #closed (a closed/consumed handle), … — so a handler can branch on
+"* the cause without parsing the message. The VM populates `kind` when it raises
+"* (see src/error.rs `IoErrorKind`); from Quoin, use `IoError.throw:msg kind:k`
+"* (the inherited bare `throw:` / `throw:payload:` leave `kind` nil).
+Error <- IoError <- { |@kind|
+    .meta <-- {
+        throw:kind: -> { |msg k| ^(.new:{ message = msg; kind = k }).throw }
+    }
+
+    kind -> { @kind }
+};
+
 Double <-- {
     .meta <-- {
         default -> { 0.0 }

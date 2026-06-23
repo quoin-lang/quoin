@@ -1,5 +1,5 @@
 use crate::error::QuoinError;
-use crate::io_backend::{IoError, IoRequest, IoResult};
+use crate::io_backend::{IoRequest, IoResult};
 use crate::value::{NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::VmState;
 use crate::{ansi_colorizer, arg};
@@ -113,7 +113,7 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 vm,
                 mc,
                 os_string.clone(),
-                metadata(os_string).map_err(|e| QuoinError::Other(e.to_string()))?,
+                metadata(os_string).map_err(|e| QuoinError::from_io_error(&e.into()))?,
             ))
         })
         .instance_method("fullpath", |vm, mc, receiver, _args| {
@@ -180,7 +180,7 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 IoResult::Connected(id) => {
                     Ok(crate::runtime::streams::make_byte_stream(vm, mc, id))
                 }
-                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
                 other => Err(QuoinError::Other(format!(
                     "[IO]File.byteStream: unexpected I/O result {other:?}"
                 ))),
@@ -198,19 +198,12 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                     id,
                     Vec::new(),
                 )),
-                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
                 other => Err(QuoinError::Other(format!(
                     "[IO]File.stringStream: unexpected I/O result {other:?}"
                 ))),
             }
         })
-}
-
-/// Throw a (catchable) network/file error carrying the backend's message.
-fn raise_io<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, e: &IoError) -> QuoinError {
-    let val = vm.new_string(mc, e.message.clone());
-    vm.active_exception = Some(val);
-    QuoinError::Thrown
 }
 
 pub enum NativeIoHandleWrapper {

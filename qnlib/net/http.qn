@@ -144,7 +144,9 @@
             "* The head ends at the first CRLF CRLF; readUntil: returns exactly those bytes.
             headBytes = stream.readUntil:'\r\n\r\n';
             parsed = [HTTP]Parser.parseHead:headBytes;
-            (parsed == nil).if:{ 'HTTP: connection closed before response head'.throw };
+            (parsed == nil).if:{
+                IoError.throw:'HTTP: connection closed before response head' kind:#unexpectedEof
+            };
             status = parsed.at:0;
             reason = parsed.at:1;
             headers = parsed.at:3;
