@@ -1,0 +1,174 @@
+"* ===========================================================================
+"* [HTTP] — a minimal HTTP/1.1 client, pure Quoin over TcpSocket/TlsSocket.
+"*
+"*   use std:net/http;
+"*   resp = [HTTP]Client.get: 'https://example.org/';
+"*   resp.status        "* 200
+"*   resp.bodyText      "* the body decoded as a String
+"*
+"* The only native piece is [HTTP]Parser.parseHead: (the `httparse` head parser);
+"* request building and body framing live here. HTTPS rides TlsSocket, so it falls
+"* out for free. Stage 5: GET/POST + arbitrary verbs/headers/body, Content-Length
+"* and connection-close bodies. Deferred: chunked transfer-encoding (needs the
+"* Stage 6 lazy streams), keep-alive/pooling, redirects, cookies, gzip. See
+"* docs/ASYNC_ARCH.md.
+"* ===========================================================================
+
+"* An HTTP response: status line, headers (a list of #(name value) pairs, order- and
+"* duplicate-preserving), and the raw body Bytes.
+[HTTP]Response <- { | @status @reason @headers @body |
+    init: -> { |status reason headers body|
+        @status = status;
+        @reason = reason;
+        @headers = headers;
+        @body = body;
+    };
+
+    .meta <-- {
+        "* Case-insensitive lookup of the first header named `name` in a #(name value)
+        "* pair list, or nil. Shared by `send` (Content-Length/Transfer-Encoding) and
+        "* the `header:` accessor.
+        find:named: -> { |headers name|
+            target = name.lower;
+            found = nil;
+            headers.each:{ |pair|
+                ((pair.at:0).lower == target).if:{ found.defined?.else:{ found = pair.at:1 } }
+            };
+            ^found
+        };
+    };
+
+    status -> { @status };
+    reason -> { @reason };
+    ok? -> { (@status >= 200) && (@status < 300) };
+    headers -> { @headers };
+    header: -> { |name| [HTTP]Response.find:@headers named:name };
+    body -> { @body };
+    bodyText -> { @body.asStringLossy };
+};
+
+"* The request Builder. Convenience methods on [HTTP]Client cover the common cases;
+"* a library reaches for this to set a custom verb, headers, body, or `insecure:`.
+"* The setters return self so calls can be threaded.
+[HTTP]Request <- { | @method @url @headers @body @insecure |
+    init: -> { |url|
+        @method = 'GET';
+        @url = url;
+        @headers = #();
+        @body = nil;
+        @insecure = false;
+    };
+
+    .meta <-- {
+        "* Parse 'scheme://host[:port]/path' into #( scheme host port path ). Port
+        "* defaults by scheme; path defaults to '/'. Query (if any) rides in `path`.
+        parseUrl: -> { |url|
+            afterScheme = url.splitString:'://';
+            scheme = afterScheme.at:0;
+            rest = afterScheme.at:1;
+            restParts = rest.splitString:'/';
+            host_port = restParts.at:0;
+            path = '/' + ((restParts.drop:1).join:'/');
+            hp = host_port.splitString:':';
+            port = (hp.count > 1).if:{ hp.at:1 } else:{ (scheme == 'https').if:{ '443' } else:{ '80' } };
+            ^#( scheme (hp.at:0) port path )
+        };
+    };
+
+    method: -> { |m| @method = m; self };
+    header:value: -> { |name val| @headers.add:#(name val); self };
+    headers: -> { |pairs| @headers = pairs; self };
+    body: -> { |b| @body = b; self };
+    insecure: -> { |flag| @insecure = flag; self };
+
+    "* Serialize the request to Bytes for a given Host header value.
+    requestBytes:path: -> { |hostHeader path|
+        head = @method + ' ' + path + ' HTTP/1.1\r\n';
+        head = head + 'Host: ' + hostHeader + '\r\n';
+        @headers.each:{ |pair| head = head + (pair.at:0) + ': ' + (pair.at:1) + '\r\n' };
+        @body.defined?.if:{ head = head + 'Content-Length: ' + (@body.count) + '\r\n' };
+        head = head + 'Connection: close\r\n\r\n';
+        bytes = head.asBytes;
+        @body.defined?.if:{ bytes = bytes + @body };
+        ^bytes
+    };
+
+    "* Connect, send, read the response, and return an [HTTP]Response. Always closes
+    "* the socket. Throws (catchable strings) on connection errors or a malformed /
+    "* unsupported (chunked) response.
+    send -> {
+        url = [HTTP]Request.parseUrl:@url;
+        scheme = url.at:0;
+        host = url.at:1;
+        port = url.at:2;
+        path = url.at:3;
+        target = host + ':' + port;
+
+        sock = (scheme == 'https').if:{
+            @insecure.if:{ TlsSocket.connect:target insecure:true }
+                     else:{ TlsSocket.connect:target }
+        } else:{ TcpSocket.connect:target };
+
+        sock.writeAll:(.requestBytes:host path:path);
+
+        "* Read until the head is complete.
+        buf = Bytes.empty;
+        parsed = nil;
+        { parsed == nil }.whileDo:{
+            chunk = sock.read:8192;
+            (chunk.count == 0).if:{ sock.close; 'HTTP: connection closed before response head'.throw };
+            buf = buf + chunk;
+            parsed = [HTTP]Parser.parseHead:buf;
+        };
+        status = parsed.at:0;
+        reason = parsed.at:1;
+        headLen = parsed.at:2;
+        headers = parsed.at:3;
+
+        "* Chunked needs the Stage 6 lazy streams — refuse clearly for now.
+        te = [HTTP]Response.find:headers named:'transfer-encoding';
+        (te.defined? && (te.lower.contains?:'chunked')).if:{
+            sock.close;
+            'HTTP: chunked transfer-encoding not yet supported (needs Stage 6 streams)'.throw
+        };
+
+        "* The body starts right after the head in `buf`; frame the rest.
+        body = buf.from:headLen to:(buf.count);
+        cl = [HTTP]Response.find:headers named:'content-length';
+        cl.defined?.if:{
+            n = cl.to_integer;
+            { body.count < n }.whileDo:{
+                chunk = sock.read:8192;
+                (chunk.count == 0).if:{ sock.close; 'HTTP: connection closed before full body'.throw };
+                body = body + chunk;
+            };
+        } else:{
+            "* No Content-Length: read to EOF (the Connection: close case).
+            reading = true;
+            { reading }.whileDo:{
+                chunk = sock.read:8192;
+                (chunk.count == 0).if:{ reading = false } else:{ body = body + chunk };
+            };
+        };
+
+        sock.close;
+        ^[HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = body }
+    };
+};
+
+"* The convenience facade: class-side helpers for the common verbs. Kept thin so a
+"* future stateful client (base URL, default headers, pooling) can be an *instance*
+"* of this class without disturbing these.
+[HTTP]Client <- {
+    .meta <-- {
+        request: -> { |url| ^[HTTP]Request.new:{ url = url } };
+
+        get: -> { |url| ^(.request:url).send };
+        get:headers: -> { |url headers| ^((.request:url).headers:headers).send };
+
+        post:body: -> { |url body| ^(((.request:url).method:'POST').body:body).send };
+        post:body:headers: -> { |url body headers|
+            ^((((.request:url).method:'POST').body:body).headers:headers).send
+        };
+    };
+};

@@ -1,8 +1,9 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **Stages 0–4 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket`
-lands Stage 4); Stages 5–7 are design. Companion to `USE_ARCH.md`. See the *Staged plan*
-below for what has landed.
+Status: **Stages 0–5 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket` lands
+Stage 4; `Async.timeout` is 5a; the `[HTTP]` client lands Stage 5 — chunked bodies excepted,
+deferred to Stage 6); Stages 6–7 are design. Companion to `USE_ARCH.md`. See the *Staged
+plan* below for what has landed.
 
 ## Decision
 
@@ -521,11 +522,22 @@ errors-propagate, `finally`-on-deadline, nesting) + a deterministic `timeout` ro
 `async_soak.qn` (identical checksum across all four stress modes). Sharp edge: cooperative —
 a non-yielding CPU loop is not preempted by the deadline until it hits a checkpoint.
 
-**Stage 5 — HTTP/1.1 in the stdlib (the payoff).**
-`qnlib/std/http/*` in Quoin: build request line + headers + body; read status +
-headers to `\r\n\r\n`; body by `Content-Length` or chunked transfer-encoding. Use
-`httparse` via a tiny native helper for parsing robustness. *Test:* `Http get:` a
-local server; assert status/headers/body; chunked + Content-Length cases.
+**Stage 5 — HTTP/1.1 client. ✅ done.** Pure Quoin in **`qnlib/net/http.qn`** (loaded on
+demand via `use std:net/http`) over `TcpSocket`/`TlsSocket`, so HTTPS falls out for free.
+The only native piece is **`[HTTP]Parser.parseHead:`** (`src/runtime/http.rs`, a thin
+`httparse` wrapper returning `#( status reason headLen headers )` or nil-when-incomplete);
+URL parsing, request building, and body framing are all QN. Surface (all under the `[HTTP]`
+namespace): **`[HTTP]Client`** class-side convenience (`get:`, `get:headers:`, `post:body:`,
+`post:body:headers:`, `request:`) — kept thin so a future stateful client can be an
+*instance*; **`[HTTP]Request`** builder (`method:`, `header:value:`, `headers:`, `body:`,
+`insecure:`, `send`); **`[HTTP]Response`** (`status`/`ok?`/`reason`/`header:`
+case-insensitive/`headers`/`body`/`bodyText`). Bodies: **Content-Length** and
+**connection-close**; **chunked is deferred to Stage 6** (it needs the lazy streams — the
+client throws a clear error meanwhile). Timeouts compose via 5a; errors are catchable
+strings. *Tests:* `tests/http.rs` (real `qn` vs local Rust HTTP servers — Content-Length
+GET, POST echo, close-delimited body, case-insensitive headers; HTTPS via a local rustls
+server + `insecure:`; an `#[ignore]`d real-host secure GET) + `qnlib/tests/23-http.qn`
+(network-free URL-parse / request-build / Response unit tests).
 
 **Stage 6 — Streams & StringStreams.**
 The lazy layers over `TcpSocket`/`TlsSocket`: `TcpStream` (buffered byte streaming —

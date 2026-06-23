@@ -5,6 +5,7 @@ pub mod bytes;
 pub mod class;
 pub mod double;
 pub mod fiber;
+pub mod http;
 pub mod integer;
 pub mod io;
 pub mod list;

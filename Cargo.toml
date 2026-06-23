@@ -47,6 +47,9 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 # (not the default aws-lc-rs) keeps the build C-toolchain-free and WASM-friendlier.
 futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots = "0.26"
+# HTTP/1.1 response-head parsing for the (otherwise pure-Quoin) [HTTP] client. Same
+# runtime-independent parser hyper uses; operates on raw socket bytes, no stream layer.
+httparse = "1"
 console = "0.15"
 mimalloc = { version = "0.1", optional = true }
 rustc-hash = "2"
