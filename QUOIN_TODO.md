@@ -21,15 +21,6 @@ This document outlines the language features, compiler updates, and VM modificat
   temporary that's reachable only via the Rust stack across a step boundary in the `add:` /
   collection-builder path. See `profiling/send-receiver-split/notes.md`.
 - [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
-- [ ] **Streaming chunked HTTP responses (lazy generator).** Stage 6c decodes
-  `Transfer-Encoding: chunked` by buffering the whole body into one `Bytes` (in
-  `qnlib/net/http.qn`'s `send`, over a Stage 6 `ByteStream`). Offer an alternative that
-  exposes the body as a **lazy generator over each chunk** — yielding each decoded chunk
-  as it arrives instead of buffering all of it, with the response headers attached (and
-  any trailer headers that follow the terminating `0\r\n`). Lets a caller stream a large
-  or unbounded response without holding it all in memory. Built on the Stage 6 streams +
-  the `Generator`/`Iterator` machinery (`qnlib/core/02-iterate.qn`). See
-  `docs/ASYNC_ARCH.md`.
 - [ ] Add a Quoin builtin for exiting the process with a status code (like C's `exit(status)`) —
   e.g. `Runtime.exit:0` / `Runtime.exit:1` — threading a requested exit code out of the VM to
   `std::process::exit`. Once it exists, the `qn test` harness (`qnlib/main.qn`) can call it
@@ -152,6 +143,48 @@ This document outlines the language features, compiler updates, and VM modificat
   - Capture the subtle/surprising behaviors here as they surface so they can be folded into the doc.
   - **`new:{}` block initialization & lexical scope.** Instance variables are *not* pre-bound inside a `new:{}` block, so an empty `new:{}` leaves every field at its default (`nil`) — it does **not** silently capture a same-named variable from the surrounding scope. Only an explicit assignment binds a field. The right-hand side of such an assignment resolves up the lexical chain (so `{ x = x }` copies the enclosing `x` into the field), but the assignment itself binds in the block's own frame and never mutates the enclosing variable. Corollary: a plain-assignment `init:` like `init: -> {|a| @a = a }` is redundant — field population already sets `@a` from the block before `init:` runs — so it behaves identically to the default no-op `init`.
   - **`init`/`init:` run the whole chain.** `new`/`new:{}` invoke the initializer of every class in the hierarchy (ancestors and mixins included), base→derived, with `init:` preferred over `init` per class. A derived `init:` no longer shadows/skips an ancestor or mixin `init`.
+
+## Networking & Async I/O
+
+The async-networking stack (Stages 0–7) shipped on `main` (PR #1; design + as-built notes in
+`docs/ASYNC_ARCH.md`): cooperative tasks/cancellation, `TcpSocket`/`TlsSocket`,
+`Async.timeout:`, the `[HTTP]` client (incl. chunked), `ByteStream`/`StringStream`, file
+streams, and `TcpListener` servers. These are the deferred refinements — none blocks the
+core, and each fits the existing narrow-waist seam (a thin backend op + a QN class, or pure
+Quoin over the current sockets/streams).
+
+- [ ] **HTTP client refinements.** Keep-alive / connection pooling (a *stateful* client as
+  an instance of `[HTTP]Client` — the class-side facade was kept thin for exactly this),
+  redirects (3xx + `Location`), cookies, and `Content-Encoding` (gzip/deflate, e.g. via
+  `flate2`). All pure Quoin over the existing sockets/streams except the gzip decode (one
+  native helper or a `flate2` stream wrapper). See `qnlib/net/http.qn`.
+- [ ] **Streaming chunked HTTP responses (lazy generator).** `send` decodes
+  `Transfer-Encoding: chunked` by buffering the whole body into one `Bytes`. Offer an
+  alternative that exposes the body as a **lazy generator over each chunk** — yielding each
+  decoded chunk as it arrives instead of buffering all of it, with the response headers
+  attached (and any trailer headers after the terminating `0\r\n`). Lets a caller stream a
+  large or unbounded response without holding it all in memory. Built on the Stage 6 streams
+  + the `Generator`/`Iterator` machinery (`qnlib/core/02-iterate.qn`).
+- [ ] **TLS server-side.** Pair with `TcpListener`: accept a `TcpSocket`, then upgrade it
+  with a *server* handshake (a rustls `ServerConfig` built from a cert/key) — the mirror of
+  `TlsSocket.wrap:host:`. Needs a config-loading surface plus a backend op (e.g.
+  `TlsAccept { id, config }`). Enables QN HTTPS servers.
+- [ ] **Write-mode file streams + `seek:`.** `[IO]File` streams are read-only today
+  (`OpenFile` opens read-only). Add a write/append mode (a `mode` on `OpenFile`, or a
+  separate selector) and `seek:` on a file-backed `ByteStream` — a file-only op (sockets
+  aren't seekable; the first real reason to consider a file-stream subclass).
+- [ ] **IPv6 `[host]:port` parsing.** `parse_host_port` (`src/runtime/sockets.rs`) splits on
+  the last `:`, so a bracketed IPv6 literal (`[::1]:8080`) mis-parses. Handle the bracket form.
+- [ ] **Structured `IoError` class.** Socket/stream/HTTP errors throw plain strings today
+  (the Stage-3 error model). Promote to a typed Quoin `IoError` (an `Error` subtype carrying
+  `kind`/`message`) so `catch:`-by-type works — the backend already produces a structured
+  `IoError { kind, message }` (`src/io_backend.rs`); map it at the native boundary instead of
+  flattening to a string.
+- [ ] **`Bytes` extras.** A mutable `BytesBuilder` (if concat churn shows up — body assembly
+  is `bytes + chunk` today) and a `#b'HEX'` byte literal (the `#`-prefixed user-literal
+  syntax, like `#(…)`/`#/…/`; a parser change).
+- [ ] **(Separate, larger track) Polyglot extension system.** Out-of-process, shared-memory
+  extensions — design captured in `docs/FUTURE_EXT_ARCH.md` (not started).
 
 ## Bugs/Odd Behavior
 - [x] **Operator precedence was inverted for arithmetic.** In the pest Pratt parser (`src/parser/pest/parser.rs`), `+`/`-` bound *tighter* than `*`/`/`/`%`, and `..` bound tighter than all arithmetic (`2 + 3 * 4 == 20`; `2 .. 3 + 1` errored as `(2..3) + 1`). Fixed by reordering the `.op(...)` levels to the conventional ordering — loosest→tightest: `||` · `&&` · `== !=` · comparison · `~` · `..` · `+ -` · `* / %`, with postfix `.method` tighter than any infix and prefix tightest. Now `2 + 3 * 4 == 14` and `2 .. n + 1` is `2 .. (n + 1)`. Full `qnlib` test suite passes (0 regressions); docs updated (`docs/language/01-foundations.md` §6 and appendices A/C).
