@@ -17,6 +17,7 @@ pub mod regex;
 pub mod runtime;
 pub mod set;
 pub mod sockets;
+pub mod streams;
 pub mod string;
 pub mod symbol;
 pub mod task;

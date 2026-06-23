@@ -8,7 +8,7 @@ use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file};
 use crate::runtime::{
     async_rt, block, boolean, bytes, class, double, fiber as fiber_class, http, integer, io, list,
-    map, method, nil, object, regex, runtime, set, sockets, string, symbol, task, timer,
+    map, method, nil, object, regex, runtime, set, sockets, streams, string, symbol, task, timer,
 };
 use crate::value::{Block, NamespacedName, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -362,6 +362,7 @@ impl VmRunner {
             vm.register_native_class(mc, sockets::build_tcp_socket_class());
             vm.register_native_class(mc, sockets::build_tls_socket_class());
             vm.register_native_class(mc, http::build_http_parser_class());
+            vm.register_native_class(mc, streams::build_byte_stream_class());
             vm.register_native_class(mc, io::build_io_folder_class());
             vm.register_native_class(mc, io::build_io_file_class());
             vm.register_native_class(mc, io::build_io_handle_class());
@@ -783,6 +784,7 @@ impl VmRunner {
             vm.register_native_class(mc, sockets::build_tcp_socket_class());
             vm.register_native_class(mc, sockets::build_tls_socket_class());
             vm.register_native_class(mc, http::build_http_parser_class());
+            vm.register_native_class(mc, streams::build_byte_stream_class());
             vm.register_native_class(mc, io::build_io_folder_class());
             vm.register_native_class(mc, io::build_io_file_class());
             vm.register_native_class(mc, io::build_io_handle_class());

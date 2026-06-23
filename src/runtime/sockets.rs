@@ -217,6 +217,38 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_bool(mc, closed))
         })
+        // byteStream -> a buffered `ByteStream` that *consumes* this socket: the fd
+        // transfers to the stream and the socket is left closed (further ops throw). The
+        // `ByteStream.over:` class form is equivalent.
+        .instance_method("byteStream", |vm, mc, receiver, _args| {
+            let id = match consume_socket(mc, receiver)? {
+                Some(id) => id,
+                None => return Err(raise(vm, mc, "byteStream: the socket is already closed")),
+            };
+            Ok(crate::runtime::streams::make_byte_stream(vm, mc, id))
+        })
+}
+
+/// Consume a socket handle, handing its fd up to a higher layer (a `ByteStream`): read the
+/// `StreamId`, mark the socket closed *without* reaping (the fd transfers, exactly as
+/// `tls_wrap` does for a TLS upgrade), and return the id. `Ok(None)` if the socket was
+/// already closed; errors only if `value` is not a socket. The consumed handle's `Drop`
+/// backstop is disarmed by the `mark_closed`, so it won't reap the id now owned upstream.
+pub(crate) fn consume_socket<'gc>(
+    mc: &Mutation<'gc>,
+    value: Value<'gc>,
+) -> Result<Option<StreamId>, QuoinError> {
+    value
+        .with_native_state_mut::<NativeSocket, _, _>(mc, |s| {
+            if s.is_closed() {
+                None
+            } else {
+                let id = s.id();
+                s.mark_closed(); // no reap: the fd moves into the stream layer
+                Some(id)
+            }
+        })
+        .map_err(QuoinError::Other)
 }
 
 /// TLS from byte zero: connect plaintext, then upgrade. No intermediate `TcpSocket`
