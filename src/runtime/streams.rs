@@ -209,6 +209,214 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_bool(mc, closed))
         })
+        // stringStream -> a text `StringStream` that *consumes* this byte stream: the fd
+        // and any buffered read-ahead transfer up; this handle is left closed.
+        .instance_method("stringStream", |vm, mc, receiver, _args| {
+            let (id, rbuf) = consume_stream_or_raise(vm, mc, receiver, "stringStream")?;
+            Ok(make_string_stream(vm, mc, id, rbuf))
+        })
+}
+
+pub fn build_string_stream_class() -> NativeClassBuilder {
+    let builder = NativeClassBuilder::new("StringStream", Some("Object"))
+        // StringStream.over: aByteStream -> a text stream that *consumes* the byte stream
+        // (its fd and buffered read-ahead transfer; the byte stream is left closed).
+        .class_method("over:", |vm, mc, _r, args| {
+            let (id, rbuf) = consume_stream_or_raise(vm, mc, args[0], "StringStream.over:")?;
+            Ok(make_string_stream(vm, mc, id, rbuf))
+        })
+        .class_method("over:do:", |vm, mc, _r, args| {
+            let (id, rbuf) = consume_stream_or_raise(vm, mc, args[0], "StringStream.over:do:")?;
+            let handle = make_string_stream(vm, mc, id, rbuf);
+            let block = arg!(args, Block, 1);
+            scope_stream(vm, mc, handle, block)
+        });
+    add_string_stream_methods(builder)
+}
+
+/// Build a `StringStream` over an open `id`, seeded with `rbuf` (read-ahead inherited from
+/// a consumed `ByteStream`, or empty when wrapping a socket directly). `pub` so the socket
+/// `stringStream` method can construct one.
+pub fn make_string_stream<'gc>(
+    vm: &VmState<'gc>,
+    mc: &Mutation<'gc>,
+    id: StreamId,
+    rbuf: Vec<u8>,
+) -> Value<'gc> {
+    let class = vm.get_or_create_builtin_class(mc, "StringStream");
+    vm.new_native_state(
+        mc,
+        class,
+        NativeStream {
+            id,
+            reap: vm.socket_reap.clone(),
+            closed: false,
+            rbuf,
+        },
+    )
+}
+
+fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
+    builder
+        // readLine -> the next line as a String, with a trailing "\r\n" or "\n" stripped;
+        // nil at EOF. An empty line returns ""; a final line without a newline is returned
+        // once (then nil). Throws if a line is not valid UTF-8.
+        .instance_method("readLine", |vm, mc, receiver, _args| {
+            let id = open_stream_id(vm, mc, receiver)?;
+            match read_line(vm, mc, receiver, id)? {
+                Some(line) => Ok(line),
+                None => Ok(vm.new_nil(mc)),
+            }
+        })
+        // eachLine:{|line| ...} -> run the block on each line to EOF; returns self.
+        .instance_method("eachLine:", |vm, mc, receiver, args| {
+            let id = open_stream_id(vm, mc, receiver)?;
+            let block = arg!(args, Block, 0);
+            while let Some(line) = read_line(vm, mc, receiver, id)? {
+                vm.execute_block(mc, block, vec![line], None)?;
+            }
+            Ok(receiver)
+        })
+        // read -> the largest valid-UTF-8 prefix of what's currently available, as a
+        // String, retaining any trailing partial code point for the next read; empty
+        // String = EOF. Throws if the stream ends mid-sequence or on a truly invalid byte.
+        .instance_method("read", |vm, mc, receiver, _args| {
+            let id = open_stream_id(vm, mc, receiver)?;
+            loop {
+                if buffered_len(receiver)? == 0 && fill_once(vm, mc, receiver, id)? {
+                    return Ok(vm.new_string(mc, String::new())); // EOF
+                }
+                let (valid, hard_invalid) = utf8_split(receiver)?;
+                if valid > 0 {
+                    let bytes = drain_up_to(mc, receiver, valid)?;
+                    let s = decode_utf8(vm, mc, bytes, "read")?;
+                    return Ok(vm.new_string(mc, s));
+                }
+                // No valid leading bytes: either a definitively-invalid byte, or an
+                // incomplete code point that more reads might complete.
+                if hard_invalid {
+                    return Err(raise(vm, mc, "StringStream.read: invalid UTF-8 byte"));
+                }
+                if fill_once(vm, mc, receiver, id)? {
+                    return Err(raise(
+                        vm,
+                        mc,
+                        "StringStream.read: stream ended mid UTF-8 sequence",
+                    ));
+                }
+            }
+        })
+        // readAll -> the whole remaining stream as one String (throws on invalid UTF-8).
+        .instance_method("readAll", |vm, mc, receiver, _args| {
+            let id = open_stream_id(vm, mc, receiver)?;
+            while !fill_once(vm, mc, receiver, id)? {}
+            let all = drain_up_to(mc, receiver, usize::MAX)?;
+            let s = decode_utf8(vm, mc, all, "readAll")?;
+            Ok(vm.new_string(mc, s))
+        })
+        .instance_method("close", |vm, mc, receiver, _args| {
+            reap_stream_handle(vm, mc, receiver);
+            Ok(vm.new_nil(mc))
+        })
+        .instance_method("closed?", |vm, mc, receiver, _args| {
+            let closed = receiver
+                .with_native_state::<NativeStream, _, _>(|s| s.is_closed())
+                .map_err(QuoinError::Other)?;
+            Ok(vm.new_bool(mc, closed))
+        })
+}
+
+/// Read one line (consuming through the next `\n`), or `None` at EOF. The `\n` and an
+/// optional preceding `\r` are stripped; a final line without a newline is returned as-is.
+/// Lines split across reads / multibyte code points split across reads are reassembled by
+/// the buffer before decoding (a `\n` byte never falls inside a UTF-8 sequence).
+fn read_line<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+    id: StreamId,
+) -> Result<Option<Value<'gc>>, QuoinError> {
+    loop {
+        if let Some(end) = find_subsequence(receiver, b"\n")? {
+            let mut line = drain_up_to(mc, receiver, end)?;
+            line.pop(); // the '\n'
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            let s = decode_utf8(vm, mc, line, "readLine")?;
+            return Ok(Some(vm.new_string(mc, s)));
+        }
+        if fill_once(vm, mc, receiver, id)? {
+            // EOF: the remainder (if any) is the final, newline-less line.
+            let rem = drain_up_to(mc, receiver, usize::MAX)?;
+            if rem.is_empty() {
+                return Ok(None);
+            }
+            let s = decode_utf8(vm, mc, rem, "readLine")?;
+            return Ok(Some(vm.new_string(mc, s)));
+        }
+    }
+}
+
+/// Decode bytes as UTF-8, throwing a catchable error (named by `op`) on invalid input —
+/// the same text-boundary policy as `Bytes.asString`.
+fn decode_utf8<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    bytes: Vec<u8>,
+    op: &str,
+) -> Result<String, QuoinError> {
+    String::from_utf8(bytes)
+        .map_err(|_| raise(vm, mc, &format!("StringStream.{op}: not valid UTF-8")))
+}
+
+/// `(valid_up_to, has_invalid_byte)` for the buffered bytes: how many leading bytes are
+/// valid UTF-8, and whether the bytes at that boundary are *definitively* invalid (vs. a
+/// merely-incomplete trailing sequence that more reads could complete).
+fn utf8_split<'gc>(receiver: Value<'gc>) -> Result<(usize, bool), QuoinError> {
+    receiver
+        .with_native_state::<NativeStream, _, _>(|s| match std::str::from_utf8(&s.rbuf) {
+            Ok(_) => (s.rbuf.len(), false),
+            Err(e) => (e.valid_up_to(), e.error_len().is_some()),
+        })
+        .map_err(QuoinError::Other)
+}
+
+/// Consume a `ByteStream`, returning its `(id, rbuf)` and leaving it closed (the fd and
+/// buffered read-ahead transfer up to a `StringStream`). The `ByteStream` analogue of
+/// `consume_socket`. `Ok(None)` if already closed; errors only if `value` isn't a stream.
+fn consume_stream<'gc>(
+    mc: &Mutation<'gc>,
+    value: Value<'gc>,
+) -> Result<Option<(StreamId, Vec<u8>)>, QuoinError> {
+    value
+        .with_native_state_mut::<NativeStream, _, _>(mc, |s| {
+            if s.is_closed() {
+                None
+            } else {
+                let id = s.id();
+                let rbuf = std::mem::take(&mut s.rbuf); // hand the read-ahead upward
+                s.mark_closed(); // no reap: the fd moves into the string stream
+                Some((id, rbuf))
+            }
+        })
+        .map_err(QuoinError::Other)
+}
+
+fn consume_stream_or_raise<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    source: Value<'gc>,
+    op: &str,
+) -> Result<(StreamId, Vec<u8>), QuoinError> {
+    match consume_stream(mc, source)? {
+        Some(pair) => Ok(pair),
+        None => Err(raise(
+            vm,
+            mc,
+            &format!("{op}: the source is already closed"),
+        )),
+    }
 }
 
 /// Pull one `Read` from the conduit into `rbuf`. Returns `true` at EOF (an empty read).

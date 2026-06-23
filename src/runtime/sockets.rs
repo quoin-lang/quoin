@@ -227,6 +227,20 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             };
             Ok(crate::runtime::streams::make_byte_stream(vm, mc, id))
         })
+        // stringStream -> a text `StringStream` consuming this socket directly (= a
+        // `byteStream` immediately wrapped). Starts with an empty buffer.
+        .instance_method("stringStream", |vm, mc, receiver, _args| {
+            let id = match consume_socket(mc, receiver)? {
+                Some(id) => id,
+                None => return Err(raise(vm, mc, "stringStream: the socket is already closed")),
+            };
+            Ok(crate::runtime::streams::make_string_stream(
+                vm,
+                mc,
+                id,
+                Vec::new(),
+            ))
+        })
 }
 
 /// Consume a socket handle, handing its fd up to a higher layer (a `ByteStream`): read the
