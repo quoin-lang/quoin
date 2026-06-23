@@ -3,7 +3,7 @@ use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMYielder, YieldReason};
 use crate::highlighter::{HighlightParser, HighlightSpan, format_ansi};
 use crate::instruction::{Constant, Instruction};
-use crate::io_backend::{IoRequest, IoResult};
+use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
 use crate::parser::parse_quoin_string;
 use crate::runtime::fiber::{FiberStatus, NativeFiberState};
@@ -356,6 +356,13 @@ pub struct VmState<'gc> {
 
     #[collect(require_static)]
     pub options: VmOptions,
+
+    /// fds whose QN `TcpSocket` handle has been closed or collected, awaiting a
+    /// synchronous `IoBackend::close` by the driver. A non-GC queue (the handle's
+    /// `Drop` can only push a plain `StreamId`); see `docs/ASYNC_ARCH.md` resource
+    /// lifecycle. Shared `Rc` clone lives in each socket handle.
+    #[collect(require_static)]
+    pub socket_reap: std::rc::Rc<std::cell::RefCell<Vec<StreamId>>>,
 }
 
 pub enum VmStatus<'gc> {
@@ -445,6 +452,7 @@ impl<'gc> VmState<'gc> {
             resolver: Box::new(FsResolver::new()),
             loaded: Vec::new(),
             options,
+            socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         }
     }
 

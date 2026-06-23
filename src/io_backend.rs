@@ -13,12 +13,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use async_io::{Async, Timer};
+use async_io::Timer;
 use futures_lite::{AsyncReadExt, AsyncWriteExt};
 
 /// An opaque handle to a backend-owned resource. The QN side holds only this
@@ -56,8 +55,11 @@ impl From<std::io::Error> for IoError {
 pub enum IoRequest {
     /// Park for `ms` milliseconds (the simplest op — no socket; ideal Stage 1 proof).
     Sleep { ms: u64 },
-    /// Open a TCP connection; on success registers the stream and returns its id.
-    Connect { addr: SocketAddr },
+    /// Open a TCP connection to `host:port`, resolving DNS internally; on success
+    /// registers the stream and returns its id. Carrying `host`/`port` (rather than a
+    /// pre-resolved `SocketAddr`) folds resolution into the one op — manual DNS is a
+    /// future class. See `docs/ASYNC_ARCH.md`.
+    Connect { host: String, port: u16 },
     /// Read up to `max` bytes. An empty result means EOF.
     Read { id: StreamId, max: usize },
     /// Write all of `bytes`.
@@ -89,6 +91,12 @@ pub type IoFuture = Pin<Box<dyn Future<Output = IoResult>>>;
 /// tokio → a WASM host backend without touching anything above this trait.
 pub trait IoBackend {
     fn perform(&self, req: IoRequest) -> IoFuture;
+
+    /// Synchronously close and deregister a stream (drop it → close the fd). Used by
+    /// the reap path: the QN socket handle's `Drop`, and explicit/scope close, push a
+    /// `StreamId` onto a non-GC queue the scheduler drains here — no `await`, no task
+    /// context. Missing ids are a no-op, so double-close is harmless.
+    fn close(&self, id: StreamId);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,8 +167,10 @@ impl IoBackend for SmolBackend {
                 IoResult::Slept
             }),
 
-            IoRequest::Connect { addr } => Box::pin(async move {
-                match Async::<std::net::TcpStream>::connect(addr).await {
+            IoRequest::Connect { host, port } => Box::pin(async move {
+                // `async-net` resolves `host:port` (getaddrinfo on the blocking pool)
+                // and connects; the stream drops into the same `AsyncStream` registry.
+                match async_net::TcpStream::connect((host.as_str(), port)).await {
                     Ok(stream) => IoResult::Connected(inner.insert(Box::new(stream))),
                     Err(e) => IoResult::Err(e.into()),
                 }
@@ -208,6 +218,10 @@ impl IoBackend for SmolBackend {
                 IoResult::Closed
             }),
         }
+    }
+
+    fn close(&self, id: StreamId) {
+        let _ = self.inner.streams.borrow_mut().remove(&id);
     }
 }
 
@@ -268,6 +282,8 @@ impl IoBackend for MockBackend {
         };
         Box::pin(async move { result })
     }
+
+    fn close(&self, _id: StreamId) {} // no fds in the mock
 }
 
 #[cfg(test)]
@@ -328,7 +344,13 @@ mod tests {
 
         let backend = SmolBackend::new();
         block_on(async {
-            let id = match backend.perform(IoRequest::Connect { addr }).await {
+            let id = match backend
+                .perform(IoRequest::Connect {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                })
+                .await
+            {
                 IoResult::Connected(id) => id,
                 other => panic!("connect failed: {other:?}"),
             };

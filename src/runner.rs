@@ -3,7 +3,7 @@ use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
 use crate::highlighter::highlight_to_ansi;
-use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend};
+use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend, StreamId};
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file};
 use crate::runtime::{
@@ -567,6 +567,14 @@ impl VmRunner {
                     step_count += 1;
                     if crate::tuning::gc_stress() || step_count % 10 == 0 {
                         arena.collect_debt();
+                        // Reap fds whose handle was closed (explicit/scope) or collected
+                        // (GC Drop) — both enqueue on `socket_reap`; close them now,
+                        // outside the arena borrow (no task context needed).
+                        let reaped: Vec<StreamId> = arena
+                            .mutate_root(|_mc, vm| vm.socket_reap.borrow_mut().drain(..).collect());
+                        for id in reaped {
+                            backend.close(id);
+                        }
                     }
                 }
             });
