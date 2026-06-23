@@ -10,6 +10,7 @@ pub mod io;
 pub mod list;
 pub mod map;
 pub mod method;
+pub mod net;
 pub mod nil;
 pub mod object;
 pub mod regex;

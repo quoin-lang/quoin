@@ -1,7 +1,7 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **Phase 2 complete (Stages 0–2b implemented)**; Stages 3–6 are design.
-Companion to `USE_ARCH.md`. See the *Staged plan* below for what has landed.
+Status: **Stages 0–3 implemented** (`Bytes` + `TcpSocket` land Stage 3); Stages 4–6
+are design. Companion to `USE_ARCH.md`. See the *Staged plan* below for what has landed.
 
 ## Decision
 
@@ -405,7 +405,7 @@ Plan:
   a cancel-all round in `async_soak.qn` (checksum-stable across the stress knobs) + Async
   suite tests (cancel runs `finally`, `catch:` can't swallow it, `join` observes it).
 
-**Stage 3 — `Bytes` + TCP sockets (designed).**
+**Stage 3 — `Bytes` + TCP sockets (done).**
 The async *core* is done and generic, so a socket read already round-trips through the
 scheduler and is cancellable (abortable) for free; Stage 3 is the QN surface, DNS, a
 new `Bytes` primitive, and the resource lifecycle.
@@ -469,14 +469,16 @@ is a no-op and read-after-close throws.
 
 Plan:
 
-- **3a — `Bytes`.** `src/runtime/bytes.rs`: the immutable type + `BytesClass` + the
-  `String`↔`Bytes` conversions. *Test:* `'hi'.asBytes.asString` round-trip, concat,
-  slice, `at:`, invalid-UTF-8 throws.
-- **3b — `TcpSocket`.** `src/runtime/net.rs`: `connect:` (bare) + `connect:do:` (scope),
-  `read:n`, `readAll`, `writeAll:`, `close`; backend `Connect{host,port}` (async-net) +
-  sync `close`; the reap queue (`VmState` + driver drain). *Test:* Rust-side echo server
-  + QN client over `Bytes`, **N concurrent connections overlapping**, scope closes on
-  throw, use-after-close throws; `MockBackend` for deterministic suite tests.
+- **3a — `Bytes`. ✅ done.** `src/runtime/bytes.rs`: the immutable type + `BytesClass` +
+  the `String`↔`Bytes` conversions. *Test:* a `Bytes` suite (round-trip, concat, slice,
+  `at:`, invalid-UTF-8 throws), green under the stress knobs.
+- **3b — `TcpSocket`. ✅ done.** `src/runtime/net.rs`: `connect:` (bare) + `connect:do:`
+  (scope), `read:n`, `readAll`, `writeAll:`, `close`/`closed?` over `Bytes`; backend
+  `Connect{host,port}` (async-net) + sync `close`; the reap queue (`VmState` + driver
+  drain). Errors thrown (a catchable string; structured `IoError` class is a noted
+  refinement). *Test:* `tests/tcp_socket.rs` — the real `qn` binary against a Rust echo
+  server: connect/write/read/close, scope close, use-after-close throws, and **8
+  concurrent connections overlapping** (≈ one round-trip, not the sum).
 
 **Stage 4 — TLS.**
 Wrap streams with `futures-rustls` (cert roots via `webpki-roots`). Either new
