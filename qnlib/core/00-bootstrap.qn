@@ -97,6 +97,11 @@ Error <- FiberError <- {};
 "* A value of the right type but invalid content (e.g. a non-hex string to
 "* `Integer.fromHex:`, a byte outside 0..255, a malformed `host:port`).
 Error <- ValueError <- {};
+"* A parse/decode failure of input data (invalid UTF-8, a malformed HTTP response
+"* head, a compile error from `eval:`).
+Error <- ParseError <- {};
+"* Raised by an exhausted iterator's `next` (see core/02-iterate.qn).
+Error <- StopIteration <- {};
 
 "* Raised by socket/stream/file operations. `kind` is a symbol categorizing the
 "* failure — #connectionRefused, #connectionReset, #timedOut, #unexpectedEof,

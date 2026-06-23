@@ -96,6 +96,14 @@
         .does:{ TcpSocket.connect:'host:notaport' } throw:ValueError;
     };
 
+    "* A parse/decode failure of input data raises a typed ParseError (here, bytes that
+    "* are not valid UTF-8).
+    .test:
+    parseErrorOnBadInput -> {
+        .does:{ (Bytes.of:#(255 254)).asString } throw:ParseError;
+        .does:{ (Bytes.of:#(255 254)).asString } throw:Error;
+    };
+
     "* Methods that enforce an argument's type through the dispatcher (a typed
     "* variant) raise MessageNotUnderstood for a wrong-typed arg - no variant
     "* matches - rather than a hand-rolled TypeError. Correctly typed args dispatch.

@@ -283,7 +283,7 @@ Iterator <- { |@fiber @nextVal @hasNext|
     hasNext? -> { @hasNext }
 
     next -> {
-        @hasNext.else:{ 'Iterator exhausted'.throw };
+        @hasNext.else:{ StopIteration.throw:'Iterator exhausted' };
         r = @nextVal;
         .advance;
         ^r

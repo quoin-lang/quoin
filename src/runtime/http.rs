@@ -1,9 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, Value};
-use crate::vm::VmState;
-
-use gc_arena::Mutation;
 
 /// Max response headers we'll parse. A response with more is rejected (thrown) rather
 /// than silently truncated — generous enough for real traffic.
@@ -79,16 +76,11 @@ pub fn build_http_parser_class() -> NativeClassBuilder {
                     let head_len = vm.new_int(mc, head.head_len as i64);
                     Ok(vm.new_list(mc, vec![status, reason, head_len, headers_list]))
                 }
-                Err(msg) => Err(raise(vm, mc, &format!("[HTTP]Parser.parseHead:: {msg}"))),
+                Err(msg) => Err(QuoinError::ParseError(format!(
+                    "[HTTP]Parser.parseHead:: {msg}"
+                ))),
             }
         })
-}
-
-/// Throw a (catchable) string exception (the Stage-3/5 error model).
-fn raise<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, msg: &str) -> QuoinError {
-    let val = vm.new_string(mc, msg.to_string());
-    vm.active_exception = Some(val);
-    QuoinError::Thrown
 }
 
 #[cfg(test)]

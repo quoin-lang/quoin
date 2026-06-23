@@ -117,7 +117,7 @@ fn compile_and_execute_source<'gc>(
     };
     let static_block = Compiler::new()
         .compile_program(program_node)
-        .map_err(|e| QuoinError::Other(format!("Compilation error: {}", e)))?;
+        .map_err(|e| QuoinError::ParseError(format!("Compilation error: {}", e)))?;
     let block = build_block(mc, &static_block);
     vm.execute_block(mc, block, Vec::new(), self_val)
 }

@@ -93,17 +93,10 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             let bytes = recv!(receiver, Bytes).to_vec();
             match String::from_utf8(bytes) {
                 Ok(s) => Ok(vm.new_string(mc, s)),
-                Err(e) => {
-                    let msg = vm.new_string(
-                        mc,
-                        format!(
-                            "Bytes.asString: invalid UTF-8 (valid up to byte {})",
-                            e.utf8_error().valid_up_to()
-                        ),
-                    );
-                    vm.active_exception = Some(msg);
-                    Err(QuoinError::Thrown)
-                }
+                Err(e) => Err(QuoinError::ParseError(format!(
+                    "Bytes.asString: invalid UTF-8 (valid up to byte {})",
+                    e.utf8_error().valid_up_to()
+                ))),
             }
         })
         // asStringLossy -> UTF-8 decode with replacement characters (never throws).

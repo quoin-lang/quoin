@@ -58,6 +58,8 @@
         .is:{ it.next } equalTo:20;
         .is:{ it.next } equalTo:30;
         .isFalse:{ it.hasNext? };
+        "* pulling past the end raises a typed StopIteration.
+        .does:{ it.next } throw:StopIteration;
     };
 
     "* zip: and drop: are built on the external iterator."

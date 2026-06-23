@@ -297,19 +297,19 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
                 let (valid, hard_invalid) = utf8_split(receiver)?;
                 if valid > 0 {
                     let bytes = drain_up_to(mc, receiver, valid)?;
-                    let s = decode_utf8(vm, mc, bytes, "read")?;
+                    let s = decode_utf8(bytes, "read")?;
                     return Ok(vm.new_string(mc, s));
                 }
                 // No valid leading bytes: either a definitively-invalid byte, or an
                 // incomplete code point that more reads might complete.
                 if hard_invalid {
-                    return Err(raise(vm, mc, "StringStream.read: invalid UTF-8 byte"));
+                    return Err(QuoinError::ParseError(
+                        "StringStream.read: invalid UTF-8 byte".to_string(),
+                    ));
                 }
                 if fill_once(vm, mc, receiver, id)? {
-                    return Err(raise(
-                        vm,
-                        mc,
-                        "StringStream.read: stream ended mid UTF-8 sequence",
+                    return Err(QuoinError::ParseError(
+                        "StringStream.read: stream ended mid UTF-8 sequence".to_string(),
                     ));
                 }
             }
@@ -319,7 +319,7 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
             let id = open_stream_id(receiver)?;
             while !fill_once(vm, mc, receiver, id)? {}
             let all = drain_up_to(mc, receiver, usize::MAX)?;
-            let s = decode_utf8(vm, mc, all, "readAll")?;
+            let s = decode_utf8(all, "readAll")?;
             Ok(vm.new_string(mc, s))
         })
         .instance_method("close", |vm, mc, receiver, _args| {
@@ -351,7 +351,7 @@ fn read_line<'gc>(
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            let s = decode_utf8(vm, mc, line, "readLine")?;
+            let s = decode_utf8(line, "readLine")?;
             return Ok(Some(vm.new_string(mc, s)));
         }
         if fill_once(vm, mc, receiver, id)? {
@@ -360,7 +360,7 @@ fn read_line<'gc>(
             if rem.is_empty() {
                 return Ok(None);
             }
-            let s = decode_utf8(vm, mc, rem, "readLine")?;
+            let s = decode_utf8(rem, "readLine")?;
             return Ok(Some(vm.new_string(mc, s)));
         }
     }
@@ -368,14 +368,9 @@ fn read_line<'gc>(
 
 /// Decode bytes as UTF-8, throwing a catchable error (named by `op`) on invalid input —
 /// the same text-boundary policy as `Bytes.asString`.
-fn decode_utf8<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    bytes: Vec<u8>,
-    op: &str,
-) -> Result<String, QuoinError> {
+fn decode_utf8(bytes: Vec<u8>, op: &str) -> Result<String, QuoinError> {
     String::from_utf8(bytes)
-        .map_err(|_| raise(vm, mc, &format!("StringStream.{op}: not valid UTF-8")))
+        .map_err(|_| QuoinError::ParseError(format!("StringStream.{op}: not valid UTF-8")))
 }
 
 /// `(valid_up_to, has_invalid_byte)` for the buffered bytes: how many leading bytes are
@@ -564,14 +559,6 @@ fn delim_bytes<'gc>(args: &[Value<'gc>], idx: usize) -> Result<Vec<u8>, QuoinErr
             .unwrap_or_else(|| "None".to_string()),
         msg: format!("Expected a Bytes or String delimiter at argument index {idx}"),
     })
-}
-
-/// Throw a (catchable) string exception (the Stage-3/5 error model). Still used by the
-/// UTF-8 / delimiter cases below, which become typed errors in a later tranche.
-fn raise<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, msg: &str) -> QuoinError {
-    let val = vm.new_string(mc, msg.to_string());
-    vm.active_exception = Some(val);
-    QuoinError::Thrown
 }
 
 fn unexpected(op: &str, got: IoResult) -> QuoinError {

@@ -127,6 +127,10 @@ pub enum QuoinError {
     /// `Integer.fromHex:`, a byte outside `0..=255`, a malformed `host:port`). Mapped to a
     /// typed Quoin `ValueError` at the `catch:` boundary. Message-only.
     ValueError(String),
+    /// A parse/decode failure of input data: invalid UTF-8 (`Bytes.asString`,
+    /// `StringStream`), a malformed HTTP response head, or a compile error from `eval:`.
+    /// Mapped to a typed Quoin `ParseError` at the `catch:` boundary. Message-only.
+    ParseError(String),
     /// Marker that a Quoin-level exception value has been parked in
     /// `VmState.active_exception` (set by `throw`). Carries no payload — the
     /// thrown value travels in the GC-rooted `active_exception` slot, not here.
@@ -235,6 +239,7 @@ impl fmt::Display for QuoinError {
             QuoinError::IndexError { msg, .. } => write!(f, "{}", msg),
             QuoinError::Timeout { ms } => write!(f, "operation timed out after {}ms", ms),
             QuoinError::ValueError(msg) => write!(f, "{}", msg),
+            QuoinError::ParseError(msg) => write!(f, "{}", msg),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),
