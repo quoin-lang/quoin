@@ -2009,6 +2009,10 @@ impl<'gc> VmState<'gc> {
             QuoinError::IndexError { index, len, msg } => {
                 self.make_index_error(mc, *index, *len, msg)
             }
+            QuoinError::Timeout { ms } => {
+                let ms_val = self.new_int(mc, *ms);
+                self.build_error_object(mc, "TimeoutError", &error.to_string(), &[("ms", ms_val)])
+            }
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)
             | QuoinError::StackUnderflow(_)

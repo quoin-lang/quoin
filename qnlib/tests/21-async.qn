@@ -103,11 +103,17 @@
         .is:{ Async.timeout: 1000 do:{ Runtime.sleep: 2; 7 } } equalTo:7;
     };
 
-    "* On the deadline, the bare form throws a catchable `'timeout'` (the block is
-    "* cancelled — its in-flight sleep aborts promptly, so this does not hang).
+    "* On the deadline, the bare form throws a catchable typed `TimeoutError` carrying the
+    "* deadline `ms` (the block is cancelled — its in-flight sleep aborts promptly, so this
+    "* does not hang).
     .test:
     timeoutThrowsOnDeadline -> {
-        .does:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } } throw:'timeout';
+        .does:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } } throw:TimeoutError;
+        "* a TimeoutError is-an Error, and exposes the deadline it elapsed.
+        .does:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } } throw:Error;
+        caught = nil;
+        { Async.timeout: 5 do:{ Runtime.sleep: 100000 } }.catch:{ |e| caught = e };
+        .is:{ caught.ms } equalTo:5;
     };
 
     "* `onCancel:{…}` replaces the throw with the handler's value on the deadline;

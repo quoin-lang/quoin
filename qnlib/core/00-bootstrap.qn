@@ -109,6 +109,13 @@ Error <- IoError <- { |@kind|
     kind -> { @kind }
 };
 
+"* Raised by the `Async.timeout:ms do:{…}` deadline combinator (the bare form, no
+"* `onCancel:`). `ms` is the elapsed deadline. A direct Error subtype — a timeout can wrap
+"* any block, not just I/O (an OS-level socket/read timeout is an `IoError` with #timedOut).
+Error <- TimeoutError <- { |@ms|
+    ms -> { @ms }
+};
+
 Double <-- {
     .meta <-- {
         default -> { 0.0 }

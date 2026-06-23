@@ -118,6 +118,11 @@ pub enum QuoinError {
     /// typed Quoin `IndexError` (exposing `index`/`length`) at the `catch:` boundary via
     /// `make_index_error`. Plain data only — holds no `Gc`.
     IndexError { index: i64, len: i64, msg: String },
+    /// A deadline elapsed in `Async.timeout:ms do:{…}` (the bare form, no `onCancel:`).
+    /// Mapped to a typed Quoin `TimeoutError` (exposing `ms`, the deadline) at the
+    /// `catch:` boundary. Distinct from an OS-level I/O timeout, which is an
+    /// `Io { kind: TimedOut }`. Plain data only — holds no `Gc`.
+    Timeout { ms: i64 },
     /// Marker that a Quoin-level exception value has been parked in
     /// `VmState.active_exception` (set by `throw`). Carries no payload — the
     /// thrown value travels in the GC-rooted `active_exception` slot, not here.
@@ -224,6 +229,7 @@ impl fmt::Display for QuoinError {
             QuoinError::Other(msg) => write!(f, "{}", msg),
             QuoinError::Io { message, .. } => write!(f, "{}", message),
             QuoinError::IndexError { msg, .. } => write!(f, "{}", msg),
+            QuoinError::Timeout { ms } => write!(f, "operation timed out after {}ms", ms),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),
