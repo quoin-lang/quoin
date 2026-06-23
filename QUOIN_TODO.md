@@ -126,7 +126,7 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Make the `^>` yield operator usable in expression position.
   - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.
 - [ ] Have the `LoadGlobal` instruction consult the `BuiltinCache`. Currently it always does a `HashMap<NamespacedName, Value>` lookup against `globals` (see `vm.rs` `Instruction::LoadGlobal`); builtin classes (`Fiber`, `List`, `Integer`, etc.) could be served from the cache to avoid hashing the name on every load (e.g. for the `^>` -> `Fiber.yield:` lowering). `BuiltinCache` may need to be keyed more generally by name to cover all builtins.
-- [ ] Repurpose the Yeet instruction and make sure .../???/!!! are all working.
+- [ ] Implement .../???/!!!
 - [x] Formalize an interface for Quoin error types.
   - `Error` base (`message`/`payload`, class-side `throw:`/`throw:payload:`) + core subtypes (`TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`) in `00-bootstrap.qn`. Catch-by-type via `case`/`~`.
   - Runtime now raises structured errors: `QuoinError::Thrown` marker (value rides in `active_exception`), and `vm.quoinerror_to_value` maps internal `QuoinError` variants to typed Quoin `Error` objects at the `catch:` boundary. `does:throw:` widened to match by value/type or message string.
@@ -175,11 +175,17 @@ Quoin over the current sockets/streams).
   aren't seekable; the first real reason to consider a file-stream subclass).
 - [ ] **IPv6 `[host]:port` parsing.** `parse_host_port` (`src/runtime/sockets.rs`) splits on
   the last `:`, so a bracketed IPv6 literal (`[::1]:8080`) mis-parses. Handle the bracket form.
-- [ ] **Structured `IoError` class.** Socket/stream/HTTP errors throw plain strings today
-  (the Stage-3 error model). Promote to a typed Quoin `IoError` (an `Error` subtype carrying
-  `kind`/`message`) so `catch:`-by-type works — the backend already produces a structured
-  `IoError { kind, message }` (`src/io_backend.rs`); map it at the native boundary instead of
-  flattening to a string.
+- [x] **Structured `IoError` class.** Socket/stream/file errors now throw a typed Quoin
+  `IoError` (an `Error` subtype carrying a `kind` symbol + `message`), so `catch:`-by-type and
+  `e.kind == #connectionRefused` work. New `QuoinError::Io { kind, message }` + `IoErrorKind`
+  (`src/error.rs`) maps the backend `IoError { kind, message }` (and closed-handle / unexpected-EOF
+  cases) to the class at the `catch:` boundary (`vm.quoinerror_to_value` / `make_io_error`); the
+  per-module string `raise_io` helpers are retired in favour of `return Err(QuoinError::io*(..))`.
+  From Quoin: `IoError.throw:msg kind:k`. `quoinerror_to_value` is now exhaustive over domain
+  variants so a future typed error can't silently fall through to a string. *Remaining string I/O
+  sites, deferred to later error tranches:* the `parse_host_port` bad-host/port and the
+  `ByteStream`/`StringStream` UTF-8 / empty-delimiter cases (a `ValueError` / `ParseError` tranche),
+  and the `unexpected I/O result` internal-invariant guards.
 - [ ] **`Bytes` extras.** A mutable `BytesBuilder` (if concat churn shows up — body assembly
   is `bytes + chunk` today) and a `#b'HEX'` byte literal (the `#`-prefixed user-literal
   syntax, like `#(…)`/`#/…/`; a parser change).
@@ -189,6 +195,7 @@ Quoin over the current sockets/streams).
 ## Bugs/Odd Behavior
 - [x] **Operator precedence was inverted for arithmetic.** In the pest Pratt parser (`src/parser/pest/parser.rs`), `+`/`-` bound *tighter* than `*`/`/`/`%`, and `..` bound tighter than all arithmetic (`2 + 3 * 4 == 20`; `2 .. 3 + 1` errored as `(2..3) + 1`). Fixed by reordering the `.op(...)` levels to the conventional ordering — loosest→tightest: `||` · `&&` · `== !=` · comparison · `~` · `..` · `+ -` · `* / %`, with postfix `.method` tighter than any infix and prefix tightest. Now `2 + 3 * 4 == 14` and `2 .. n + 1` is `2 .. (n + 1)`. Full `qnlib` test suite passes (0 regressions); docs updated (`docs/language/01-foundations.md` §6 and appendices A/C).
 - [x] **`-->` / `->` didn't override a same-signature method.** Both appended a variant to the selector's multimethod chain; equal-specificity ties resolved to the *first-defined*, so a plain redefinition (`Foo <- { bar -> { 1 } }; Foo <-- { bar --> { 2 } }`) was dead code and `bar` returned `1`. The originally-planned fix (reverse the equal-specificity tie-break) turned out **wrong** — it breaks ordered guard dispatch (the `dispatchByBlock` test relies on first-defined guards winning over a later `.class==Object` catch-all). Fixed instead by **replace-at-definition**: a new *unguarded* variant whose `param_types` match an existing unguarded variant replaces that variant's block in place (`replace_or_append_method_in_chain`, `src/vm.rs`); guard- and type-differentiated variants still append and dispatch by specificity. `Foo.new.bar` now returns `2`; full suite passes; regression test `overridesSameSignature` added; docs updated (`docs/language/03-objects.md` §10/§13, appendix C). **Known limitation:** overriding a *guarded* variant with an identical guard does not replace (guards aren't compared for equality) — subsumed by the scoring overhaul below.
+- [ ] **`Runtime.eval:` panics on a syntax error instead of throwing.** A syntactically-invalid source string panics the whole VM in the pest parser (`parse_quoin_string_named` → `crates/quoin-syntax/src/pest/parser.rs`, which unwraps the `PestError`) rather than surfacing a catchable error, so `{ Runtime.eval:'1 +' }.catch:{…}` aborts the process instead of recovering. Found during the structured-error work (Tranche 4b): the typed `ParseError` now raised by `compile_and_execute_source` (`runtime.rs`) only covers *semantic* compile failures of already-parseable source; the parse step upstream still panics. The fix wants the parser to return a `Result` (mapped to `ParseError` at the `eval:` boundary) instead of panicking — **tricky because `quoin-syntax` now has other clients**, so changing the parse entry point's signature ripples beyond the VM.
 
 ## 1. Class & Method Definition Semantics
 - [x] **Class Creation (`<-` operator)**:

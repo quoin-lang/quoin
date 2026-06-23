@@ -1,6 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
-use crate::io_backend::{IoError, IoRequest, IoResult, StreamId};
+use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::value::{AnyCollect, Block, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -78,7 +78,7 @@ pub fn build_tcp_socket_class() -> NativeClassBuilder {
             let (host, port) = parse_host_port(hostport.as_str())?;
             match vm.await_io(IoRequest::Connect { host, port })? {
                 IoResult::Connected(id) => Ok(make_socket(vm, mc, "TcpSocket", id)),
-                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
                 other => Err(unexpected("connect:", other)),
             }
         })
@@ -89,7 +89,7 @@ pub fn build_tcp_socket_class() -> NativeClassBuilder {
             let (host, port) = parse_host_port(hostport.as_str())?;
             let handle = match vm.await_io(IoRequest::Connect { host, port })? {
                 IoResult::Connected(id) => make_socket(vm, mc, "TcpSocket", id),
-                IoResult::Err(e) => return Err(raise_io(vm, mc, &e)),
+                IoResult::Err(e) => return Err(QuoinError::from_io_error(&e)),
                 other => return Err(unexpected("connect:do:", other)),
             };
             // Extract the block only *after* the await (as everywhere in this file): a
@@ -172,23 +172,23 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         // read:n -> up to n bytes as Bytes (empty = EOF). Throws on a closed socket
         // or an I/O error.
         .typed_instance_method("read:", &["Integer"], |vm, mc, receiver, args| {
-            let id = open_id(vm, mc, receiver)?;
+            let id = open_id(receiver)?;
             let n = arg!(args, Int, 0).max(0) as usize;
             match vm.await_io(IoRequest::Read { id, max: n })? {
                 IoResult::Read(bytes) => Ok(vm.new_bytes(mc, bytes)),
-                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
                 other => Err(unexpected("read:", other)),
             }
         })
         // readAll -> read until EOF, returning all bytes as one Bytes.
         .instance_method("readAll", |vm, mc, receiver, _args| {
-            let id = open_id(vm, mc, receiver)?;
+            let id = open_id(receiver)?;
             let mut all = Vec::new();
             loop {
                 match vm.await_io(IoRequest::Read { id, max: 8192 })? {
                     IoResult::Read(chunk) if chunk.is_empty() => break, // EOF
                     IoResult::Read(chunk) => all.extend_from_slice(&chunk),
-                    IoResult::Err(e) => return Err(raise_io(vm, mc, &e)),
+                    IoResult::Err(e) => return Err(QuoinError::from_io_error(&e)),
                     other => return Err(unexpected("readAll", other)),
                 }
             }
@@ -196,11 +196,11 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         })
         // writeAll:bytes -> write all of `bytes` (complete-or-throw); returns nil.
         .typed_instance_method("writeAll:", &["Bytes"], |vm, mc, receiver, args| {
-            let id = open_id(vm, mc, receiver)?;
+            let id = open_id(receiver)?;
             let bytes = arg!(args, Bytes, 0).to_vec(); // owned, before the await
             match vm.await_io(IoRequest::Write { id, bytes })? {
                 IoResult::Wrote(_) => Ok(vm.new_nil(mc)),
-                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
                 other => Err(unexpected("writeAll:", other)),
             }
         })
@@ -223,7 +223,11 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         .instance_method("byteStream", |vm, mc, receiver, _args| {
             let id = match consume_socket(mc, receiver)? {
                 Some(id) => id,
-                None => return Err(raise(vm, mc, "byteStream: the socket is already closed")),
+                None => {
+                    return Err(QuoinError::io_closed(
+                        "byteStream: the socket is already closed",
+                    ));
+                }
             };
             Ok(crate::runtime::streams::make_byte_stream(vm, mc, id))
         })
@@ -232,7 +236,11 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         .instance_method("stringStream", |vm, mc, receiver, _args| {
             let id = match consume_socket(mc, receiver)? {
                 Some(id) => id,
-                None => return Err(raise(vm, mc, "stringStream: the socket is already closed")),
+                None => {
+                    return Err(QuoinError::io_closed(
+                        "stringStream: the socket is already closed",
+                    ));
+                }
             };
             Ok(crate::runtime::streams::make_string_stream(
                 vm,
@@ -279,7 +287,7 @@ fn tls_connect<'gc>(
     let domain = host.clone();
     let id = match vm.await_io(IoRequest::Connect { host, port })? {
         IoResult::Connected(id) => id,
-        IoResult::Err(e) => return Err(raise_io(vm, mc, &e)),
+        IoResult::Err(e) => return Err(QuoinError::from_io_error(&e)),
         other => return Err(unexpected("connect:", other)),
     };
     match vm.await_io(IoRequest::TlsWrap {
@@ -289,7 +297,7 @@ fn tls_connect<'gc>(
     })? {
         IoResult::Connected(id) => Ok(make_socket(vm, mc, "TlsSocket", id)),
         // Handshake failed: the backend dropped the underlying stream (fd closed).
-        IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
         other => Err(unexpected("connect:", other)),
     }
 }
@@ -326,9 +334,7 @@ fn tls_wrap<'gc>(
         .with_native_state::<NativeSocket, _, _>(|s| (s.id(), s.is_closed()))
         .map_err(QuoinError::Other)?;
     if closed {
-        return Err(raise(
-            vm,
-            mc,
+        return Err(QuoinError::io_closed(
             "TlsSocket.wrap:: the socket is already closed",
         ));
     }
@@ -344,7 +350,7 @@ fn tls_wrap<'gc>(
         insecure,
     })? {
         IoResult::Connected(id) => Ok(make_socket(vm, mc, "TlsSocket", id)),
-        IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
         other => Err(unexpected("wrap:host:", other)),
     }
 }
@@ -384,16 +390,14 @@ fn make_socket<'gc>(
 }
 
 /// The `StreamId` of an open socket receiver, or a thrown error if it is closed.
-fn open_id<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    receiver: Value<'gc>,
-) -> Result<StreamId, QuoinError> {
+fn open_id<'gc>(receiver: Value<'gc>) -> Result<StreamId, QuoinError> {
     let (id, closed) = receiver
         .with_native_state::<NativeSocket, _, _>(|s| (s.id(), s.is_closed()))
         .map_err(QuoinError::Other)?;
     if closed {
-        return Err(raise(vm, mc, "socket: operation on a closed socket"));
+        return Err(QuoinError::io_closed(
+            "socket: operation on a closed socket",
+        ));
     }
     Ok(id)
 }
@@ -415,29 +419,16 @@ fn reap_handle<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, handle: Value<'gc>) {
 fn parse_host_port(s: &str) -> Result<(String, u16), QuoinError> {
     match s.rsplit_once(':') {
         Some((host, port)) if !host.is_empty() => {
-            let port = port
-                .parse::<u16>()
-                .map_err(|_| QuoinError::Other(format!("socket connect: bad port in '{}'", s)))?;
+            let port = port.parse::<u16>().map_err(|_| {
+                QuoinError::ValueError(format!("socket connect: bad port in '{}'", s))
+            })?;
             Ok((host.to_string(), port))
         }
-        _ => Err(QuoinError::Other(format!(
+        _ => Err(QuoinError::ValueError(format!(
             "socket connect: expected 'host:port', got '{}'",
             s
         ))),
     }
-}
-
-/// Throw a (catchable) network error carrying the backend's message.
-fn raise_io<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, e: &IoError) -> QuoinError {
-    raise(vm, mc, &e.message)
-}
-
-/// Throw a (catchable) string exception (the Stage-3 error model; a structured
-/// `IoError` class is a noted refinement).
-fn raise<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, msg: &str) -> QuoinError {
-    let val = vm.new_string(mc, msg.to_string());
-    vm.active_exception = Some(val);
-    QuoinError::Thrown
 }
 
 fn unexpected(op: &str, got: IoResult) -> QuoinError {
@@ -511,7 +502,7 @@ pub fn build_tcp_listener_class() -> NativeClassBuilder {
             let (host, port) = parse_host_port(hostport.as_str())?;
             match vm.await_io(IoRequest::Listen { host, port })? {
                 IoResult::Listening { id, port } => Ok(make_listener(vm, mc, id, port)),
-                IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
                 other => Err(unexpected("listen:", other)),
             }
         })
@@ -561,10 +552,10 @@ fn accept_one<'gc>(
     mc: &Mutation<'gc>,
     receiver: Value<'gc>,
 ) -> Result<Value<'gc>, QuoinError> {
-    let id = open_listener_id(vm, mc, receiver)?;
+    let id = open_listener_id(receiver)?;
     match vm.await_io(IoRequest::Accept { id })? {
         IoResult::Connected(conn_id) => Ok(make_socket(vm, mc, "TcpSocket", conn_id)),
-        IoResult::Err(e) => Err(raise_io(vm, mc, &e)),
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
         other => Err(unexpected("accept", other)),
     }
 }
@@ -588,16 +579,14 @@ fn accept_loop<'gc>(
 }
 
 /// The `StreamId` of an open listener receiver, or a thrown error if it is closed.
-fn open_listener_id<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
-    receiver: Value<'gc>,
-) -> Result<StreamId, QuoinError> {
+fn open_listener_id<'gc>(receiver: Value<'gc>) -> Result<StreamId, QuoinError> {
     let (id, closed) = receiver
         .with_native_state::<NativeListener, _, _>(|l| (l.id(), l.is_closed()))
         .map_err(QuoinError::Other)?;
     if closed {
-        return Err(raise(vm, mc, "listener: operation on a closed listener"));
+        return Err(QuoinError::io_closed(
+            "listener: operation on a closed listener",
+        ));
     }
     Ok(id)
 }

@@ -86,8 +86,43 @@ Error <- ArgumentError <- {};
 Error <- MessageNotUnderstood <- {};
 Error <- AmbiguousMethodError <- {};
 Error <- ArithmeticError <- {};
-Error <- IndexError <- {};
+"* Raised by an out-of-bounds index (e.g. `List.at:put:`, `Bytes.at:`). The VM
+"* populates `index` (the offending index) and `length` (the collection's size) so a
+"* handler can report or recover without parsing the message.
+Error <- IndexError <- { |@index @length|
+    index -> { @index }
+    length -> { @length }
+};
 Error <- FiberError <- {};
+"* A value of the right type but invalid content (e.g. a non-hex string to
+"* `Integer.fromHex:`, a byte outside 0..255, a malformed `host:port`).
+Error <- ValueError <- {};
+"* A parse/decode failure of input data (invalid UTF-8, a malformed HTTP response
+"* head, a compile error from `eval:`).
+Error <- ParseError <- {};
+"* Raised by an exhausted iterator's `next` (see core/02-iterate.qn).
+Error <- StopIteration <- {};
+
+"* Raised by socket/stream/file operations. `kind` is a symbol categorizing the
+"* failure — #connectionRefused, #connectionReset, #timedOut, #unexpectedEof,
+"* #notFound, #closed (a closed/consumed handle), … — so a handler can branch on
+"* the cause without parsing the message. The VM populates `kind` when it raises
+"* (see src/error.rs `IoErrorKind`); from Quoin, use `IoError.throw:msg kind:k`
+"* (the inherited bare `throw:` / `throw:payload:` leave `kind` nil).
+Error <- IoError <- { |@kind|
+    .meta <-- {
+        throw:kind: -> { |msg k| ^(.new:{ message = msg; kind = k }).throw }
+    }
+
+    kind -> { @kind }
+};
+
+"* Raised by the `Async.timeout:ms do:{…}` deadline combinator (the bare form, no
+"* `onCancel:`). `ms` is the elapsed deadline. A direct Error subtype — a timeout can wrap
+"* any block, not just I/O (an OS-level socket/read timeout is an `IoError` with #timedOut).
+Error <- TimeoutError <- { |@ms|
+    ms -> { @ms }
+};
 
 Double <-- {
     .meta <-- {

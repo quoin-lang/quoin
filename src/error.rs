@@ -1,8 +1,74 @@
 use crate::highlighter::{HighlightParser, HighlightSpan};
+use crate::io_backend::IoError;
 use crate::parser::parse_quoin_string;
 use crate::value::SourceInfo;
 use std::error::Error;
 use std::{cmp, fmt, fs};
+
+/// The category of a [`QuoinError::Io`], surfaced to Quoin code as `IoError.kind`
+/// (a `#symbol`). A small, stable set rather than `std::io::ErrorKind` (which is
+/// `#[non_exhaustive]` and large); OS kinds we don't name fold into `Other`. `Closed`
+/// is synthetic — operating on a closed/consumed handle, which has no OS errno.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoErrorKind {
+    Closed,
+    NotFound,
+    PermissionDenied,
+    ConnectionRefused,
+    ConnectionReset,
+    ConnectionAborted,
+    BrokenPipe,
+    AddrInUse,
+    AddrNotAvailable,
+    TimedOut,
+    UnexpectedEof,
+    InvalidInput,
+    InvalidData,
+    Other,
+}
+
+impl IoErrorKind {
+    /// The camelCase name used for the Quoin `#symbol` (e.g. `#connectionRefused`).
+    pub fn symbol(self) -> &'static str {
+        match self {
+            IoErrorKind::Closed => "closed",
+            IoErrorKind::NotFound => "notFound",
+            IoErrorKind::PermissionDenied => "permissionDenied",
+            IoErrorKind::ConnectionRefused => "connectionRefused",
+            IoErrorKind::ConnectionReset => "connectionReset",
+            IoErrorKind::ConnectionAborted => "connectionAborted",
+            IoErrorKind::BrokenPipe => "brokenPipe",
+            IoErrorKind::AddrInUse => "addrInUse",
+            IoErrorKind::AddrNotAvailable => "addrNotAvailable",
+            IoErrorKind::TimedOut => "timedOut",
+            IoErrorKind::UnexpectedEof => "unexpectedEof",
+            IoErrorKind::InvalidInput => "invalidInput",
+            IoErrorKind::InvalidData => "invalidData",
+            IoErrorKind::Other => "other",
+        }
+    }
+}
+
+impl From<std::io::ErrorKind> for IoErrorKind {
+    fn from(k: std::io::ErrorKind) -> Self {
+        use std::io::ErrorKind as E;
+        match k {
+            E::NotFound => IoErrorKind::NotFound,
+            E::PermissionDenied => IoErrorKind::PermissionDenied,
+            E::ConnectionRefused => IoErrorKind::ConnectionRefused,
+            E::ConnectionReset => IoErrorKind::ConnectionReset,
+            E::ConnectionAborted => IoErrorKind::ConnectionAborted,
+            E::BrokenPipe => IoErrorKind::BrokenPipe,
+            E::AddrInUse => IoErrorKind::AddrInUse,
+            E::AddrNotAvailable => IoErrorKind::AddrNotAvailable,
+            E::TimedOut => IoErrorKind::TimedOut,
+            E::UnexpectedEof => IoErrorKind::UnexpectedEof,
+            E::InvalidInput => IoErrorKind::InvalidInput,
+            E::InvalidData => IoErrorKind::InvalidData,
+            _ => IoErrorKind::Other,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum QuoinError {
@@ -43,6 +109,28 @@ pub enum QuoinError {
     StackUnderflow(String),
     /// Generic other error
     Other(String),
+    /// An I/O failure from a socket, stream, or file: a backend error (carrying the
+    /// OS error kind), a closed/consumed-handle access (`Closed`), or an unexpected
+    /// EOF. Mapped to a typed Quoin `IoError` (with a `kind` symbol) at the `catch:`
+    /// boundary via `make_io_error`. Plain data only — holds no `Gc`.
+    Io { kind: IoErrorKind, message: String },
+    /// An out-of-bounds index access (e.g. `List.at:put:`, `Bytes.at:`). Mapped to a
+    /// typed Quoin `IndexError` (exposing `index`/`length`) at the `catch:` boundary via
+    /// `make_index_error`. Plain data only — holds no `Gc`.
+    IndexError { index: i64, len: i64, msg: String },
+    /// A deadline elapsed in `Async.timeout:ms do:{…}` (the bare form, no `onCancel:`).
+    /// Mapped to a typed Quoin `TimeoutError` (exposing `ms`, the deadline) at the
+    /// `catch:` boundary. Distinct from an OS-level I/O timeout, which is an
+    /// `Io { kind: TimedOut }`. Plain data only — holds no `Gc`.
+    Timeout { ms: i64 },
+    /// A value of the right type but invalid content (e.g. a non-hex string to
+    /// `Integer.fromHex:`, a byte outside `0..=255`, a malformed `host:port`). Mapped to a
+    /// typed Quoin `ValueError` at the `catch:` boundary. Message-only.
+    ValueError(String),
+    /// A parse/decode failure of input data: invalid UTF-8 (`Bytes.asString`,
+    /// `StringStream`), a malformed HTTP response head, or a compile error from `eval:`.
+    /// Mapped to a typed Quoin `ParseError` at the `catch:` boundary. Message-only.
+    ParseError(String),
     /// Marker that a Quoin-level exception value has been parked in
     /// `VmState.active_exception` (set by `throw`). Carries no payload — the
     /// thrown value travels in the GC-rooted `active_exception` slot, not here.
@@ -147,6 +235,11 @@ impl fmt::Display for QuoinError {
             QuoinError::NotCallable(msg) => write!(f, "Not callable: {}", msg),
             QuoinError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             QuoinError::Other(msg) => write!(f, "{}", msg),
+            QuoinError::Io { message, .. } => write!(f, "{}", message),
+            QuoinError::IndexError { msg, .. } => write!(f, "{}", msg),
+            QuoinError::Timeout { ms } => write!(f, "operation timed out after {}ms", ms),
+            QuoinError::ValueError(msg) => write!(f, "{}", msg),
+            QuoinError::ParseError(msg) => write!(f, "{}", msg),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),
@@ -222,6 +315,35 @@ impl fmt::Display for QuoinError {
 }
 
 impl Error for QuoinError {}
+
+impl QuoinError {
+    /// A structured I/O error of the given `kind` carrying a human-readable `message`.
+    /// No `vm`/`mc` needed — the typed Quoin `IoError` object is built lazily at the
+    /// `catch:` boundary (`quoinerror_to_value`), which is what lets I/O raise sites
+    /// stay a plain `return Err(..)` with nothing borrowed across.
+    pub fn io(kind: IoErrorKind, message: impl Into<String>) -> Self {
+        QuoinError::Io {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// An I/O error for operating on a closed/consumed handle (`kind: #closed`).
+    pub fn io_closed(message: impl Into<String>) -> Self {
+        QuoinError::Io {
+            kind: IoErrorKind::Closed,
+            message: message.into(),
+        }
+    }
+
+    /// Lift a backend [`IoError`] (OS error kind + message) into a structured I/O error.
+    pub fn from_io_error(e: &IoError) -> Self {
+        QuoinError::Io {
+            kind: IoErrorKind::from(e.kind),
+            message: e.message.clone(),
+        }
+    }
+}
 
 impl From<String> for QuoinError {
     fn from(s: String) -> Self {

@@ -501,7 +501,7 @@ impl<'gc> VmState<'gc> {
     /// - finishes first → its value (or its error/`Cancelled` propagate);
     /// - deadline first → cancel and drain the child (its `finally` runs, in-flight I/O
     ///   aborts), then run the handler — `onCancel:` returns its value; the bare form
-    ///   throws a catchable `'timeout'`;
+    ///   throws a catchable `TimeoutError` (carrying the deadline `ms`);
     /// - this call is cancelled from *outside* while waiting → cancel/drain the child and
     ///   re-raise `Cancelled` (the handler does *not* run).
     ///
@@ -522,7 +522,7 @@ impl<'gc> VmState<'gc> {
                 self.drain_cancelled(child);
                 match on_cancel {
                     Some(handler) => self.execute_block(mc, handler, vec![], None),
-                    None => Err(self.raise_timeout(mc)),
+                    None => Err(QuoinError::Timeout { ms: ms as i64 }),
                 }
             }
             // Outer cancellation: tear down the child, then propagate (handler skipped).
@@ -560,14 +560,6 @@ impl<'gc> VmState<'gc> {
         {
             let _ = self.await_join(child); // JoinedCancelled expected; we want the unwind
         }
-    }
-
-    /// Throw a catchable `'timeout'` (the Stage-5a error model — a string, like the
-    /// socket errors; a structured `TimeoutError` class is a noted refinement).
-    fn raise_timeout(&mut self, mc: &Mutation<'gc>) -> QuoinError {
-        let val = self.new_string(mc, "timeout".to_string());
-        self.active_exception = Some(val);
-        QuoinError::Thrown
     }
 
     /// Deliver a `JoinTimed` deadline. If `joiner` is still parked on this exact
