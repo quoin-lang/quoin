@@ -148,7 +148,10 @@ mod tests {
         // `$]`. Regression: a failed `equalTo:` whose actual was nil printed
         // `… $#ff6961[?:?:?` because the empty `$#ff6961[$]` failed to match.
         let result = colorize("a $#ff6961[$] at $#ffffff[?$]");
-        assert!(!result.contains("$#ff6961["), "leaked literal marker: {result}");
+        assert!(
+            !result.contains("$#ff6961["),
+            "leaked literal marker: {result}"
+        );
         // The empty span renders as prefix immediately followed by reset, and the
         // following ` at ?` survives intact (no spurious cascade ate it).
         assert!(result.contains("38;2;255;105;97"), "got: {result}");
