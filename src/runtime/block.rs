@@ -39,6 +39,21 @@ pub fn build_block_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
+        // source -> #( filenameStr lineInt columnInt ) for where this block was
+        // defined, or nil if the block carries no source info. `line` is 1-indexed and
+        // `column` is 0-indexed (the raw `SourceInfo` convention). Used by the test
+        // reporter to point a failed assertion at its source location.
+        .instance_method("source", |vm, mc, receiver, _args| {
+            let block = recv!(receiver, Block);
+            if let Some(si) = &block.source_info {
+                let file = vm.new_string(mc, si.filename.clone());
+                let line = vm.new_int(mc, si.line as i64);
+                let column = vm.new_int(mc, si.column as i64);
+                Ok(vm.new_list(mc, vec![file, line, column]))
+            } else {
+                Ok(vm.new_nil(mc))
+            }
+        })
         // .instance_method("value", |vm, mc, receiver, args| {
         //     let block = recv!(receiver, Block);
         //     vm.execute_block(mc, block, Vec::new(), None)

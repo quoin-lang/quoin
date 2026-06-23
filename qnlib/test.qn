@@ -30,8 +30,7 @@ Mixin <- BuiltinAssertions <- {
             passed? = (assertionResult == true);
             evidence = evidenceTemp;
             elapsed = assertionElapsed;
-
-            "* block.source.defined?.if:{ location = block.source }
+            location = block.source;
         };
 
         .reporter.endAssertion:r;
@@ -83,7 +82,7 @@ BuiltinAssertions <- IterateAssertions <- {
 }
 
 TestAssertionResult <- { |@test @name @passed? @location @elapsed @evidence|
-    init: -> { |test name:String passed?:Boolean location:String evidence:List elapsed|
+    init: -> { |test name:String passed?:Boolean location evidence:List elapsed|
         @test = test
         @name = name
         @passed? = passed?
@@ -101,6 +100,13 @@ TestAssertionResult <- { |@test @name @passed? @location @elapsed @evidence|
     expected -> { @evidence.first }
     comparison -> { @evidence.second }
     actual -> { @evidence.third }
+
+    "* Source location of the failed block as #( file line column ), via Block#source;
+    "* nil when unavailable. `column` is reported 1-indexed to match the VM's error
+    "* output; all three fall back to '?' so the reporter always has something to show.
+    locationFile   -> { @location.defined?.if:{ @location.first }       else:{ '?' } }
+    locationLine   -> { @location.defined?.if:{ @location.second }      else:{ '?' } }
+    locationColumn -> { @location.defined?.if:{ (@location.third) + 1 } else:{ '?' } }
 
     s --> {
         'TestAssertionResult{%1 %2 %3%4%5 %6ms %7}' % #(
@@ -259,9 +265,9 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
                     fr.expected.s.replace:#/\s+/ with:' '
                     fr.comparison
                     fr.actual.s.replace:#/\s+/ with:' '
-                    '?' "*fr.location.file
-                    '?' "*fr.location.line
-                    '?' "*fr.location.column
+                    fr.locationFile
+                    fr.locationLine
+                    fr.locationColumn
                 )
             };
         }
@@ -312,9 +318,9 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite|
                     r.expected.s.replace:#/\s+/ with:' '
                     r.comparison
                     r.actual.s.replace:#/\s+/ with:' '
-                    '?' "*r.location.file
-                    '?' "*r.location.line
-                    '?' "*r.location.column
+                    r.locationFile
+                    r.locationLine
+                    r.locationColumn
                 )
             };
             outTemp = @out;
