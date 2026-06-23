@@ -99,7 +99,8 @@ pub enum IoRequest {
     Read    { id: StreamId, max: usize },
     Write   { id: StreamId, bytes: Vec<u8> },
     Close   { id: StreamId },
-    // Stage 4: TlsWrap { id, domain, insecure } (shipped); Stage 6: Listen / Accept
+    // Stage 4: TlsWrap { id, domain, insecure } (shipped);
+    // Stage 6: OpenFile { path, mode } -> id (file streams); Stage 7: Listen / Accept
 }
 
 pub enum IoResult {
@@ -427,9 +428,11 @@ Design notes (all five settled):
   short hex preview. A mutable `BytesBuilder` and a `#b'HEX'` literal (the `#`-prefixed
   user-literal syntax, like `#(…)`/`#/…/`) are deferred.
 - **Naming + hierarchy.** `TcpSocket` (not `Socket` — ambiguous with Unix sockets; and
-  `Stream`/`TcpStream` are reserved for lazy streaming). Future: `TcpSocket` →
-  `TcpStream` (lazy byte streaming) → `TcpStringStream` (text). **Lines are a text
-  concept, not a byte one**, so `readLine` lives at `TcpStringStream`, not `TcpSocket`.
+  `Stream` is reserved for lazy streaming). Future (Stage 6): any conduit →
+  **`ByteStream`** (lazy byte streaming) → **`StringStream`** (text) — conduit-neutral
+  and *one class each*, shared by `TcpSocket`/`TlsSocket`/`[IO]File`, since the buffer
+  and decode key only on the `StreamId`. **Lines are a text concept, not a byte one**, so
+  `readLine` lives at `StringStream`, not `ByteStream`.
   This isn't just tidy — it's *necessary*: a fixed-size read is intrinsically a byte op
   (a UTF-8 code point is 1–4 bytes, and any `read:n` can land mid-sequence), so you
   cannot stream text as `{ read:n . asString }` (a chunk ending mid-character is invalid
@@ -539,17 +542,82 @@ GET, POST echo, close-delimited body, case-insensitive headers; HTTPS via a loca
 server + `insecure:`; an `#[ignore]`d real-host secure GET) + `qnlib/tests/23-http.qn`
 (network-free URL-parse / request-build / Response unit tests).
 
-**Stage 6 — Streams & StringStreams.**
-The lazy layers over `TcpSocket`/`TlsSocket`: `TcpStream` (buffered byte streaming —
-`read` whatever's available, peek, read-until-delimiter) and `TcpStringStream`
-(incremental UTF-8 decode + `readLine`/line iteration) on top of it. Sequenced *before*
-listeners deliberately: a server handed only raw `read:n` is painful for line/record
-protocols, so the stream layers are what make accepted connections pleasant to handle.
-Not an HTTP (Stage 5) prerequisite — `httparse` works on raw bytes — but the natural
-substrate for server-side protocol code. Hierarchy: `TcpSocket` → `TcpStream` →
-`TcpStringStream` (lines are a text concept; a fixed byte read can land mid-UTF-8). *Test:*
-read-until-delimiter and `readLine` over a mock/echo peer, incl. a sequence split awkwardly
-across reads and across a multi-byte UTF-8 boundary.
+**Stage 6 — Streams (`ByteStream` / `StringStream`).**
+Two lazy buffering layers over any open conduit, each *consuming* the layer below
+(transferring fd ownership exactly as `TlsSocket.wrap:` consumes a `TcpSocket`):
+`TcpSocket`/`TlsSocket`/`[IO]File` → **`ByteStream`** (buffered bytes) → **`StringStream`**
+(incremental UTF-8 + lines). Entirely *above the waist* — **zero** new scheduler/backend ops
+for the buffering itself (it rides the existing `Read`/`Write`/`Close`); the only new backend
+op is `OpenFile` (6d), so a file can join the stream world. Creation does **no** `await` — it
+is a synchronous handle transfer.
+
+*Conduit-neutral, one class each.* Once a conduit is a `StreamId` in the registry, the
+buffer scan and the incremental UTF-8 decode key only on the id and are blind to whether the
+bytes are TCP, TLS, or a file — so a file stream and a socket stream are the *same class*,
+differing only in construction (the registry is already `dyn AsyncStream`). Hence unprefixed
+`ByteStream`/`StringStream` (not `Tcp*`/`Io*`), built natively on a shared
+`NativeStream { id, reap, closed, rbuf }` (`rbuf` = unconsumed read-ahead, doubling as the
+trailing-partial-UTF-8 buffer). Native because `Bytes` has no `indexOf:` and no sub-codepoint
+validation — the delimiter scan and `str::from_utf8().valid_up_to()` are byte-level concerns;
+pure-QN HTTP sits on top.
+
+*Why a buffer at all.* Lines are a *text* concept and a fixed `read:n` can land mid-UTF-8 (a
+code point is 1–4 bytes), so you can't stream text as `{ read:n . asString }`. `StringStream`
+holds the partial-byte buffer and decodes incrementally; `readLine` splits on the byte `\n`
+(0x0A, which never appears inside a multibyte sequence) then decodes, so it's boundary-safe
+for free. `ByteStream` is the same buffering minus the decode.
+
+*Construction & consume semantics.* `aTcpSocket.byteStream` / `aTlsSocket.byteStream` /
+`aFile.byteStream` (+ `.stringStream` convenience = `.byteStream.stringStream`), and the
+explicit class forms `ByteStream.over: aConduit` / `StringStream.over: aByteStream` (+
+`over:do:` scopes). Each consumes its source: the source's `id` **and** `rbuf` move up, the
+source is marked **closed** (`closed? == true`, further ops throw) but its fd is **not** torn
+down — it transfers — and its `Drop` reap-backstop is disarmed (no double-close; `.close` on a
+spent handle is a safe no-op). `closed?` thus means "this handle is spent", not "the
+connection is gone" — the same wrinkle `TlsSocket.wrap:` already has, kept for consistency
+over a separate `consumed?` state. The topmost live handle owns the fd; closing it (or its
+`Drop`) reaps.
+
+*API.* `ByteStream`: `read` (drain buffer else one fill; empty `Bytes` = EOF), `read:n` (up
+to n, may be short), `peek:n` (no consume), `readUntil:delim` (through and *including* the
+first `delim`; returns the partial remainder if EOF hits first), `readExactly:n` (exactly n or
+throw on premature EOF), `writeAll:`/`close`/`closed?`. `StringStream`: `readLine` (line as
+`String`, trailing `\r?\n` stripped, `nil` at EOF), `eachLine:{…}`, `read` (available text,
+partial trailing code point retained), `readAll` → `String`. `no_gc_across_yield` holds
+because every fill reads `id` out, drops the borrow, awaits, then re-borrows to append — never
+a `&mut` into native state across the suspend (`rbuf` is plain, non-`Gc`).
+
+Sequenced *before* listeners deliberately: a server handed only raw `read:n` is painful for
+line/record protocols. Not an HTTP prerequisite (`httparse` works on raw bytes), but it
+*unblocks chunked* (6c) and is the natural substrate for server-side code.
+
+Plan:
+- **6a — `ByteStream`.** `src/runtime/streams.rs`: the `NativeStream` backing + buffer ops
+  (`fill`/`read`/`read:`/`peek:`/`readUntil:`/`readExactly:`) + `writeAll:`/`close`/`closed?`,
+  sharing `vm.socket_reap` and the `Drop` backstop; `byteStream` on `TcpSocket`/`TlsSocket`
+  (+ `ByteStream.over:`/`over:do:`). *Test:* `tests/byte_stream.rs` — real `qn` vs a Rust
+  peer: `readUntil:` with the delimiter split across reads, `readExactly:`, `peek:`, EOF.
+- **6b — `StringStream`.** Same backing (consumes a `ByteStream`): `readLine`/`eachLine:`/
+  `read`/`readAll`, incremental UTF-8. *Test:* `readLine` over lines split awkwardly across
+  reads *and* across a multibyte UTF-8 boundary; `read` retaining a partial code point.
+- **6c — chunked HTTP (the payoff).** Refactor `qnlib/net/http.qn` `send` to read the response
+  over a `ByteStream`: head via `readUntil:'\r\n\r\n'` → `parseHead:`; body chunked (hex
+  size-line + `readExactly:` + CRLF, loop to 0, consume trailers) / Content-Length
+  (`readExactly:n`) / close (`readAll`). Delete the deferred-chunked throw. *Test:* a chunked
+  server in `tests/http.rs`; flip the `#[ignore]` real-host secure GET to an actual pass.
+- **6d — file streams (parity).** New `IoRequest::OpenFile { path, mode } -> Connected(id)` in
+  `io_backend.rs` via **`async-fs::File`** (`AsyncRead+AsyncWrite+Unpin` → drops into the
+  existing registry; blocking-pool under the hood, like async-net's DNS); `MockBackend`
+  returns an id. `[IO]File.byteStream`/`stringStream`. *Test:* read a file via
+  `StringStream.readLine`, incl. a line split across the buffer / a multibyte boundary.
+  *Caveats:* a read-only file throws on `writeAll:` (a handle property, like read-after-close);
+  files are seekable and sockets aren't — a sequential `ByteStream` ignores it (`seek:` would
+  be the first file-only extra, YAGNI now); the existing sync whole-file `[IO]File` read/write
+  stays — these are the async *streaming* entry alongside it.
+
+No new soak round — streams add no concurrency primitive (they ride `await_io`), the call TLS
+made. *Test (overall):* read-until-delimiter and `readLine` over a mock/echo peer, incl. a
+sequence split awkwardly across reads and across a multi-byte UTF-8 boundary.
 
 **Stage 7 — listeners/servers (optional/future).**
 `Listen`/`Accept` as `AwaitIo`, enabling QN servers (built on the Stage 6 streams for
