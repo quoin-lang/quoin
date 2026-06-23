@@ -12,6 +12,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -83,6 +84,11 @@ pub enum IoRequest {
         domain: String,
         insecure: bool,
     },
+    /// Open a file (read-only) and register it as a stream, returning its id — so a file
+    /// reads through the same `ByteStream`/`StringStream` as a socket. `path` stays an
+    /// `OsString` end to end (the QN String → path conversion happens at the `[IO]File`
+    /// boundary, not here). Result reuses `Connected(id)`.
+    OpenFile { path: OsString },
 }
 
 /// The plain-data outcome of an [`IoRequest`].
@@ -348,6 +354,16 @@ impl IoBackend for SmolBackend {
                 IoResult::Closed
             }),
 
+            IoRequest::OpenFile { path } => Box::pin(async move {
+                // `async-fs` opens on the blocking pool (regular files aren't pollable),
+                // same trick as `async-net`'s DNS. The `File` is `AsyncRead + AsyncWrite +
+                // Unpin`, so it drops into the same registry as any socket.
+                match async_fs::File::open(&path).await {
+                    Ok(file) => IoResult::Connected(inner.insert(Box::new(file))),
+                    Err(e) => IoResult::Err(e.into()),
+                }
+            }),
+
             IoRequest::TlsWrap {
                 id,
                 domain,
@@ -443,6 +459,11 @@ impl IoBackend for MockBackend {
             // No real handshake in the mock — the conduit keeps its id, as in the
             // native backend's in-place swap.
             IoRequest::TlsWrap { id, .. } => IoResult::Connected(id),
+            IoRequest::OpenFile { .. } => {
+                let id = StreamId(self.next_id.get());
+                self.next_id.set(self.next_id.get() + 1);
+                IoResult::Connected(id)
+            }
         };
         Box::pin(async move { result })
     }
