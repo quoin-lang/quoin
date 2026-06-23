@@ -16,6 +16,7 @@ pub mod symbol;
 pub mod tuning;
 pub mod value;
 pub mod vm;
+pub mod vm_scheduler;
 
 #[macro_export]
 macro_rules! gc {
