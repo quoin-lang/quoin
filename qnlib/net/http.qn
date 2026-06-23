@@ -30,11 +30,10 @@
         "* the `header:` accessor.
         find:named: -> { |headers name|
             target = name.lower;
-            found = nil;
             headers.each:{ |pair|
-                ((pair.at:0).lower == target).if:{ found.defined?.else:{ found = pair.at:1 } }
+                ((pair.at:0).lower == target).if:{ ^^pair.at:1 }
             };
-            ^found
+            ^nil
         };
     };
 
