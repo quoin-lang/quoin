@@ -314,7 +314,7 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite|
         )
         (result.failures.any?).if:{
             failedTests = result.failures.collect:{ |r|
-                #ANSI'$#69ff61[%1$] $#bw[%2$] $#ff6961[%3$] at $#ffffff;bw[%4$]:$#00bfff[%5$]:$#00bfff[%6$]' % #(
+                #ANSI'$#69ff61[%1$] $bw[%2$] $#ff6961[%3$] at $#ffffff;bw[%4$]:$#00bfff[%5$]:$#00bfff[%6$]' % #(
                     r.expected.s.replace:#/\s+/ with:' '
                     r.comparison
                     r.actual.s.replace:#/\s+/ with:' '
