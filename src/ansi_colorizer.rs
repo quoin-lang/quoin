@@ -5,7 +5,11 @@ const ANSI_PREFIX: &str = "\x1b[";
 const ANSI_SUFFIX: &str = "m";
 const RESET_ALL: &str = "\x1b[0;00;22;39;49m";
 
-static STRIP_ANSI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[.+?m").unwrap());
+// `.*?` (not `.+?`) so a zero-parameter SGR — `\x1b[m`, a valid reset, which
+// `parse_attribute` emits when an attribute contributes no code (e.g. a `#xx` that
+// isn't a 6-digit hex) — strips as a unit. With `.+?` the closing `m` was consumed as
+// content, and the match ran on to the *next* `m`, deleting the visible text between.
+static STRIP_ANSI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[.*?m").unwrap());
 // Match either $$ (escaped dollar) or $attr[text$] (color pattern).
 // Ordered alternation ensures $$ is consumed before it could start a color pattern.
 // The text group is `*?` (not `+?`) so an *empty* colored body — e.g. `$#ff6961[$]`,
@@ -96,6 +100,17 @@ mod tests {
     fn decolorize_strips_ansi() {
         let colored = "\x1b[1mhello\x1b[0m";
         assert_eq!(decolorize(colored), "hello");
+    }
+
+    #[test]
+    fn decolorize_strips_empty_sgr_without_eating_text() {
+        // A zero-parameter SGR (`\x1b[m`, reset) must strip on its own, not swallow the
+        // text up to the next `m`. Regression: `$#bw[!=$]` renders `\x1b[m!=\x1b[…m`
+        // (empty SGR because `#bw` isn't a hex), and `.+?` deleted the `!=`.
+        let s = "\x1b[m!=\x1b[0;00;22;39;49m";
+        assert_eq!(decolorize(s), "!=");
+        // And it composes with the colorizer end to end.
+        assert_eq!(decolorize(&colorize("$#bw[!=$]")), "!=");
     }
 
     #[test]
