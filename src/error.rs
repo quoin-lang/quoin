@@ -114,6 +114,10 @@ pub enum QuoinError {
     /// EOF. Mapped to a typed Quoin `IoError` (with a `kind` symbol) at the `catch:`
     /// boundary via `make_io_error`. Plain data only — holds no `Gc`.
     Io { kind: IoErrorKind, message: String },
+    /// An out-of-bounds index access (e.g. `List.at:put:`, `Bytes.at:`). Mapped to a
+    /// typed Quoin `IndexError` (exposing `index`/`length`) at the `catch:` boundary via
+    /// `make_index_error`. Plain data only — holds no `Gc`.
+    IndexError { index: i64, len: i64, msg: String },
     /// Marker that a Quoin-level exception value has been parked in
     /// `VmState.active_exception` (set by `throw`). Carries no payload — the
     /// thrown value travels in the GC-rooted `active_exception` slot, not here.
@@ -219,6 +223,7 @@ impl fmt::Display for QuoinError {
             QuoinError::StackUnderflow(msg) => write!(f, "Stack underflow: {}", msg),
             QuoinError::Other(msg) => write!(f, "{}", msg),
             QuoinError::Io { message, .. } => write!(f, "{}", message),
+            QuoinError::IndexError { msg, .. } => write!(f, "{}", msg),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),

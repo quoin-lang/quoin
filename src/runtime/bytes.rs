@@ -48,11 +48,11 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             let i = arg!(args, Int, 0);
             match usize::try_from(i).ok().and_then(|i| b.get(i).copied()) {
                 Some(byte) => Ok(vm.new_int(mc, byte as i64)),
-                None => Err(QuoinError::Other(format!(
-                    "Bytes.at:: index {} out of range (size {})",
-                    i,
-                    b.len()
-                ))),
+                None => Err(QuoinError::IndexError {
+                    index: i,
+                    len: b.len() as i64,
+                    msg: format!("Bytes.at:: index {} out of range (size {})", i, b.len()),
+                }),
             }
         })
         // from:to: -> the slice [from, to), clamped to bounds.

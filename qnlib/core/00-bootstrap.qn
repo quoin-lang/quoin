@@ -86,7 +86,13 @@ Error <- ArgumentError <- {};
 Error <- MessageNotUnderstood <- {};
 Error <- AmbiguousMethodError <- {};
 Error <- ArithmeticError <- {};
-Error <- IndexError <- {};
+"* Raised by an out-of-bounds index (e.g. `List.at:put:`, `Bytes.at:`). The VM
+"* populates `index` (the offending index) and `length` (the collection's size) so a
+"* handler can report or recover without parsing the message.
+Error <- IndexError <- { |@index @length|
+    index -> { @index }
+    length -> { @length }
+};
 Error <- FiberError <- {};
 
 "* Raised by socket/stream/file operations. `kind` is a symbol categorizing the

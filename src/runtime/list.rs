@@ -95,11 +95,15 @@ pub fn build_list_class() -> NativeClassBuilder {
                         vec[idx as usize] = val;
                         Ok(())
                     } else {
-                        Err(QuoinError::Other(format!(
-                            "Index out of bounds: index is {}, but length is {}",
-                            idx,
-                            vec.len()
-                        )))
+                        Err(QuoinError::IndexError {
+                            index: idx,
+                            len: vec.len() as i64,
+                            msg: format!(
+                                "Index out of bounds: index is {}, but length is {}",
+                                idx,
+                                vec.len()
+                            ),
+                        })
                     }
                 })
                 .map_err(|e| QuoinError::Other(e))??;

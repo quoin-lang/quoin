@@ -1914,15 +1914,17 @@ impl<'gc> VmState<'gc> {
         error
     }
 
-    /// Build a Quoin `Error` instance of the named class with `message`/`payload`.
-    /// Falls back to a plain string if the class isn't registered yet (e.g. an
-    /// error fired during bootstrap before the Error hierarchy is defined).
-    pub fn make_error(
+    /// Build a typed Quoin error object: an instance of `class_name` with its `message`
+    /// field set, plus any `extra` (name, value) fields. Falls back to a plain string if
+    /// the class isn't registered yet (e.g. an error fired during bootstrap before the
+    /// Error hierarchy is defined). The typed `make_*` helpers below are thin wrappers —
+    /// each domain error sets `message` plus its own structured fields.
+    fn build_error_object(
         &self,
         mc: &Mutation<'gc>,
         class_name: &str,
         message: &str,
-        payload: Option<Value<'gc>>,
+        extra: &[(&str, Value<'gc>)],
     ) -> Value<'gc> {
         let key = NamespacedName::new(Vec::new(), class_name.to_string());
         let class_opt = self.globals.borrow().get(&key).copied();
@@ -1932,10 +1934,10 @@ impl<'gc> VmState<'gc> {
             if let Some(slot) = self.field_slot(cls, "message") {
                 obj.borrow_mut(mc).fields[slot] = msg_val;
             }
-            if let Some(p) = payload
-                && let Some(slot) = self.field_slot(cls, "payload")
-            {
-                obj.borrow_mut(mc).fields[slot] = p;
+            for (name, val) in extra {
+                if let Some(slot) = self.field_slot(cls, name) {
+                    obj.borrow_mut(mc).fields[slot] = *val;
+                }
             }
             Value::Object(obj)
         } else {
@@ -1943,26 +1945,43 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    /// Build a Quoin `IoError` carrying `message` and a `kind` symbol (e.g.
-    /// `#connectionRefused`). Same bootstrap-safety as `make_error`: falls back to a
-    /// plain string if the `IoError` class isn't registered yet.
-    pub fn make_io_error(&self, mc: &Mutation<'gc>, kind: &str, message: &str) -> Value<'gc> {
-        let key = NamespacedName::new(Vec::new(), "IoError".to_string());
-        let class_opt = self.globals.borrow().get(&key).copied();
-        if let Some(Value::Class(cls)) = class_opt {
-            let obj = self.new_object(mc, cls);
-            let msg_val = self.new_string(mc, message.to_string());
-            if let Some(slot) = self.field_slot(cls, "message") {
-                obj.borrow_mut(mc).fields[slot] = msg_val;
-            }
-            let kind_val = self.new_symbol(mc, kind.to_string());
-            if let Some(slot) = self.field_slot(cls, "kind") {
-                obj.borrow_mut(mc).fields[slot] = kind_val;
-            }
-            Value::Object(obj)
-        } else {
-            self.new_string(mc, message.to_string())
+    /// Build a Quoin `Error` instance of the named class with `message`/`payload`.
+    pub fn make_error(
+        &self,
+        mc: &Mutation<'gc>,
+        class_name: &str,
+        message: &str,
+        payload: Option<Value<'gc>>,
+    ) -> Value<'gc> {
+        match payload {
+            Some(p) => self.build_error_object(mc, class_name, message, &[("payload", p)]),
+            None => self.build_error_object(mc, class_name, message, &[]),
         }
+    }
+
+    /// Build a Quoin `IoError` carrying `message` and a `kind` symbol (e.g.
+    /// `#connectionRefused`).
+    pub fn make_io_error(&self, mc: &Mutation<'gc>, kind: &str, message: &str) -> Value<'gc> {
+        let kind_val = self.new_symbol(mc, kind.to_string());
+        self.build_error_object(mc, "IoError", message, &[("kind", kind_val)])
+    }
+
+    /// Build a Quoin `IndexError` carrying `message` and the offending `index`/`length`.
+    pub fn make_index_error(
+        &self,
+        mc: &Mutation<'gc>,
+        index: i64,
+        len: i64,
+        message: &str,
+    ) -> Value<'gc> {
+        let index_val = self.new_int(mc, index);
+        let length_val = self.new_int(mc, len);
+        self.build_error_object(
+            mc,
+            "IndexError",
+            message,
+            &[("index", index_val), ("length", length_val)],
+        )
     }
 
     /// Convert an internal `QuoinError` into the Quoin value a `catch:` handler should
@@ -1987,6 +2006,9 @@ impl<'gc> VmState<'gc> {
                 self.make_error(mc, "AmbiguousMethodError", msg, None)
             }
             QuoinError::Io { kind, message } => self.make_io_error(mc, kind.symbol(), message),
+            QuoinError::IndexError { index, len, msg } => {
+                self.make_index_error(mc, *index, *len, msg)
+            }
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)
             | QuoinError::StackUnderflow(_)

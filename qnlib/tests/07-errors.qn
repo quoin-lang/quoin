@@ -68,6 +68,23 @@
         .does:{ 'abc'.contains?:5 } throw:#/String/;
     };
 
+    "* An out-of-bounds index surfaces a structured IndexError carrying the offending
+    "* index and the collection length (both populated by the VM).
+    .test:
+    indexErrorIsStructured -> {
+        caught = nil;
+        { (Bytes.of:#(10 20 30)).at:10 }.catch:{ |e| caught = e };
+        .isTrue:{ IndexError ~ caught };
+        .is:{ caught.index } equalTo:10;
+        .is:{ caught.length } equalTo:3;
+
+        "* List.at:put: with a bad index throws the same typed error.
+        .does:{ l = #(1 2 3); l.at:10 put:99 } throw:IndexError;
+        "* is-an Error, and still matchable by message.
+        .does:{ (Bytes.of:#(1 2)).at:5 } throw:Error;
+        .does:{ (Bytes.of:#(1 2)).at:5 } throw:#/out of range/;
+    };
+
     "* Methods that enforce an argument's type through the dispatcher (a typed
     "* variant) raise MessageNotUnderstood for a wrong-typed arg - no variant
     "* matches - rather than a hand-rolled TypeError. Correctly typed args dispatch.
