@@ -1,9 +1,6 @@
 use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, Value};
-use crate::vm::VmState;
 use crate::{arg, recv};
-
-use gc_arena::Mutation;
 
 /// Generate `[Integer]` and `[Double]` typed variants for a binary numeric
 /// operator on an `Integer` receiver. `Int op Int` stays `Int`; a `Double` RHS
@@ -74,21 +71,10 @@ pub fn build_integer_class() -> NativeClassBuilder {
             .unwrap_or(trimmed);
         match i64::from_str_radix(hex, 16) {
             Ok(n) => Ok(vm.new_int(mc, n)),
-            Err(_) => Err(raise(
-                vm,
-                mc,
-                format!(
-                    "Integer.fromHex:: not a hexadecimal integer: '{}'",
-                    s.as_str()
-                ),
-            )),
+            Err(_) => Err(QuoinError::ValueError(format!(
+                "Integer.fromHex:: not a hexadecimal integer: '{}'",
+                s.as_str()
+            ))),
         }
     })
-}
-
-/// Throw a (catchable) string exception.
-fn raise<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, msg: String) -> QuoinError {
-    let val = vm.new_string(mc, msg);
-    vm.active_exception = Some(val);
-    QuoinError::Thrown
 }

@@ -85,6 +85,17 @@
         .does:{ (Bytes.of:#(1 2)).at:5 } throw:#/out of range/;
     };
 
+    "* A value of the right type but invalid content raises a typed ValueError.
+    .test:
+    valueErrorOnBadContent -> {
+        .does:{ Integer.fromHex:'xyz' } throw:ValueError;
+        .does:{ Integer.fromHex:'xyz' } throw:Error;
+        .does:{ Bytes.of:#(1 2 999) } throw:ValueError;
+        "* a malformed host:port is rejected before any connection is attempted.
+        .does:{ TcpSocket.connect:'nocolon' } throw:ValueError;
+        .does:{ TcpSocket.connect:'host:notaport' } throw:ValueError;
+    };
+
     "* Methods that enforce an argument's type through the dispatcher (a typed
     "* variant) raise MessageNotUnderstood for a wrong-typed arg - no variant
     "* matches - rather than a hand-rolled TypeError. Correctly typed args dispatch.

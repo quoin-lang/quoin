@@ -123,6 +123,10 @@ pub enum QuoinError {
     /// `catch:` boundary. Distinct from an OS-level I/O timeout, which is an
     /// `Io { kind: TimedOut }`. Plain data only — holds no `Gc`.
     Timeout { ms: i64 },
+    /// A value of the right type but invalid content (e.g. a non-hex string to
+    /// `Integer.fromHex:`, a byte outside `0..=255`, a malformed `host:port`). Mapped to a
+    /// typed Quoin `ValueError` at the `catch:` boundary. Message-only.
+    ValueError(String),
     /// Marker that a Quoin-level exception value has been parked in
     /// `VmState.active_exception` (set by `throw`). Carries no payload — the
     /// thrown value travels in the GC-rooted `active_exception` slot, not here.
@@ -230,6 +234,7 @@ impl fmt::Display for QuoinError {
             QuoinError::Io { message, .. } => write!(f, "{}", message),
             QuoinError::IndexError { msg, .. } => write!(f, "{}", msg),
             QuoinError::Timeout { ms } => write!(f, "operation timed out after {}ms", ms),
+            QuoinError::ValueError(msg) => write!(f, "{}", msg),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),

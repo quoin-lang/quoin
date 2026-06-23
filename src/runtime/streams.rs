@@ -154,7 +154,9 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         .instance_method("readUntil:", |vm, mc, receiver, args| {
             let delim = delim_bytes(&args, 0)?;
             if delim.is_empty() {
-                return Err(raise(vm, mc, "ByteStream.readUntil:: empty delimiter"));
+                return Err(QuoinError::ValueError(
+                    "ByteStream.readUntil:: empty delimiter".to_string(),
+                ));
             }
             let id = open_stream_id(receiver)?;
             loop {

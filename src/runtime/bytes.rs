@@ -22,7 +22,7 @@ pub fn build_bytes_class() -> NativeClassBuilder {
                 match el {
                     Value::Int(i) if (0..=255).contains(i) => bytes.push(*i as u8),
                     Value::Int(_) => {
-                        return Err(QuoinError::Other(
+                        return Err(QuoinError::ValueError(
                             "Bytes of: each element must be an Integer in 0..=255".to_string(),
                         ));
                     }

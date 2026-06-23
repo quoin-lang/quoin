@@ -94,6 +94,9 @@ Error <- IndexError <- { |@index @length|
     length -> { @length }
 };
 Error <- FiberError <- {};
+"* A value of the right type but invalid content (e.g. a non-hex string to
+"* `Integer.fromHex:`, a byte outside 0..255, a malformed `host:port`).
+Error <- ValueError <- {};
 
 "* Raised by socket/stream/file operations. `kind` is a symbol categorizing the
 "* failure — #connectionRefused, #connectionReset, #timedOut, #unexpectedEof,

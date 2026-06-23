@@ -2013,6 +2013,7 @@ impl<'gc> VmState<'gc> {
                 let ms_val = self.new_int(mc, *ms);
                 self.build_error_object(mc, "TimeoutError", &error.to_string(), &[("ms", ms_val)])
             }
+            QuoinError::ValueError(msg) => self.make_error(mc, "ValueError", msg, None),
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)
             | QuoinError::StackUnderflow(_)

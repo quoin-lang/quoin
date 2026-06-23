@@ -419,12 +419,12 @@ fn reap_handle<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, handle: Value<'gc>) {
 fn parse_host_port(s: &str) -> Result<(String, u16), QuoinError> {
     match s.rsplit_once(':') {
         Some((host, port)) if !host.is_empty() => {
-            let port = port
-                .parse::<u16>()
-                .map_err(|_| QuoinError::Other(format!("socket connect: bad port in '{}'", s)))?;
+            let port = port.parse::<u16>().map_err(|_| {
+                QuoinError::ValueError(format!("socket connect: bad port in '{}'", s))
+            })?;
             Ok((host.to_string(), port))
         }
-        _ => Err(QuoinError::Other(format!(
+        _ => Err(QuoinError::ValueError(format!(
             "socket connect: expected 'host:port', got '{}'",
             s
         ))),
