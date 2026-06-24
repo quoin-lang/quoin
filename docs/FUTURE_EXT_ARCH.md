@@ -1,4 +1,4 @@
-# Extension Architecture — out-of-process, polyglot, shared-memory extensions
+# Extension Architecture — out-of-process, polyglot, unix-socket extensions
 
 Status: **Design capture, not started.** This records the reasoning and the decisions
 from a design discussion; no code exists yet and none should be written without a fresh
@@ -90,7 +90,7 @@ connection, the caller holds only a handle to it.
 
 ---
 
-## 3. Transport decision: out-of-process native extensions over shared memory
+## 3. Transport decision: out-of-process native extensions over unix domain sockets
 
 The two motivating categories collapse the option space in a slightly counterintuitive
 direction.
@@ -103,7 +103,7 @@ Options considered:
 | In-process C-ABI plugin (`libloading`) | via C ABI | **C-ABI langs only** | yes | yes | no | `unsafe`; GC-entangled; forces a cdylib |
 | `abi_stable` (Rust↔Rust) | yes | Rust only | yes | yes | no | Still can't carry `Gc`; niche |
 | **WASM component** | yes | yes (to-sandbox) | **no** | **no** | yes | Sandboxed; **fails (a) and (b)** |
-| **Out-of-process + shared memory** | **yes** | **yes (any lang)** | **yes** | **yes** | **yes (crash)** | Per-call latency; shm setup |
+| **Out-of-process + unix domain socket** | **yes** | **yes (any lang)** | **yes** | **yes** | **yes (crash)** | Per-call latency; socket setup |
 
 ### Why out-of-process wins for our categories
 
@@ -122,10 +122,36 @@ in-process shim must be a C-ABI `cdylib`, so it's "polyglot among AOT-native lan
 (Rust/C/Zig/C++) — excluding exactly the dynamic languages people most want to write glue
 in. Out-of-process is the only option that is *truly* any-language.
 
-So: **out-of-process native extensions, shared-memory transport.** Justified — once the
+So: **out-of-process native extensions, unix-domain-socket transport.** Justified — once the
 trust decision below removes security from the list — by **polyglot + crash isolation +
 parallelism** (a buggy-but-trusted video codec must not take down the VM, and it gets its
-own threads/runtime, escaping the VM's single-threaded `!Send` arena).
+own threads/runtime, escaping the VM's single-threaded `!Send` arena). The transport itself is
+now a detail, not a headline — which the profiling below earns.
+
+### Why a socket, not shared memory
+
+Shared memory's *only* advantage over a kernel-mediated transport is skipping the per-message
+syscall — and you realize that **only by busy-polling** a memory location (io_uring's
+SQPOLL-style spin). That is incompatible with the cooperative scheduler: a parked fiber must
+yield its core to other tasks, not burn it spinning. Once an extension call parks and takes a
+wakeup syscall — which it must, under async — the shared-memory read is no cheaper than reading
+the same bytes off a socket.
+
+A proof-of-concept (`../scratch/shm-vs-uds/`, Apple M4) confirms it. With the spin variant
+excluded (off the table by the async constraint), **blocking** shared memory is equal-or-worse
+than a UDS `socketpair` on exactly the traffic this transport carries:
+
+| metric (blocking shm vs UDS) | UDS | shm + semaphore |
+|---|---|---|
+| latency p50, 64 B RTT | **2.3 µs** | 4.0 µs |
+| one-way throughput, 1 KiB | **2.3 GB/s** | 2.0 GB/s |
+| bidir aggregate, 1 KiB | **1.5M msg/s** | 1.3M msg/s |
+
+Shared memory keeps an edge only on **large one-way streaming** (~2× at 1 MiB) — and that edge
+is a copy *through* a ring, not the in-place zero-copy that alone would justify a shared mapping
+(which the bench never measured). So the SQ/CQ-rings-in-shm transport costs complexity and buys
+nothing we can use under async: **unix domain sockets.** The socket fd also drops into the
+existing reactor unchanged (§7) — shared-memory rings would need a new wakeup primitive.
 
 ### The real cost of native binding is friction, not latency
 
@@ -159,9 +185,10 @@ Consequences:
   not a competitor to this.)
 - Out-of-process is **not** for security here; it's for polyglot + crash isolation +
   parallelism.
-- The shared-memory boundary **validation pass is no longer mandatory** — against a trusted
-  peer it becomes a debug-only bug-catcher, so "access in place, no decode, no verify" is
-  genuinely free on release builds. **Trust buys the real zero-copy.**
+- The cross-process boundary **validation pass is no longer mandatory** — against a trusted
+  peer the FlatBuffers/Arrow verifier becomes a debug-only bug-catcher, so "access the received
+  frame in place, no decode, no verify" is genuinely free on release builds. **Trust buys the
+  real zero-copy** (in the no-deserialize sense; §6).
 
 ---
 
@@ -171,7 +198,7 @@ Consequences:
 extension↔dylib boundary.**
 
 ```
-Quoin VM  ⟷  [shm protocol: rings + records/Arrow + handles]  ⟷  extension process (lang X)
+Quoin VM  ⟷  [UDS: framed records / Arrow / handles]  ⟷  extension process (lang X)
                                                                    ⟷ [X's native FFI] ⟷ dylib
 ```
 
@@ -186,7 +213,7 @@ becomes "not our problem to bind," only "our problem to talk to a process."
 Polyglot is never magic — it's a **stable wire protocol + a thin SDK per language**, exactly
 like gRPC / Thrift / Cap'n Proto RPC / dbus and, most relevantly, **LSP/DAP** (a JSON-RPC
 spec + servers in every language — the proof that "protocol + any-language implementers"
-beats a native plugin ABI for ecosystem breadth). Deliverable: the ring/shm protocol +
+beats a native plugin ABI for ecosystem breadth). Deliverable: the socket framing +
 handle semantics, a schema with codegen, and reference SDKs in two or three languages to
 seed it. The community writes the rest because the contract is the wire, not a linkage.
 
@@ -210,9 +237,8 @@ genuinely different needs:
    error", "call handle H". Small, heterogeneous, request/response, latency-sensitive.
    → **Record format** (FlatBuffers / Cap'n Proto). *Not* Arrow — a one-row columnar table
    is all overhead. This is the bulk of category-(a) glue.
-2. **Opaque blobs** — an image, a gzip stream, a file chunk. Just `bytes`: a raw
-   `(offset, len)` into the region the extension interprets itself. Arrow adds nothing for a
-   single blob.
+2. **Opaque blobs** — an image, a gzip stream, a file chunk. Just `bytes`: a length-framed
+   byte run the extension interprets itself. Arrow adds nothing for a single blob.
 3. **Bulk tabular / array data** — many homogeneous rows, numeric arrays, dataframes, result
    sets. → **Apache Arrow**, specifically its **C Data Interface** (decided). The C Data
    Interface is a *tiny stable ABI* (a couple of structs) for zero-copy columnar handoff that
@@ -242,10 +268,14 @@ layout, so "access a field" replaces "parse a message". Precisions that bound th
   the arena. A Quoin object/map/list is a GC graph, not already in the flat layout, so the
   host still walks it to write the record. Truly free only for **bytes and scalars**;
   structured graphs still pay a projection walk.
-- True zero-copy for **bulk** (no copy at all, not even into the ring) requires backing the
-  buffer storage with the shm region — e.g. a Quoin array type whose store is a shm-resident
-  Arrow buffer. Start with **copy-once-into-ring** (one memcpy, usually noise) and reserve
-  shm-backed storage for a *measured* high-bandwidth path (video, large-array streaming).
+- True zero-copy for **bulk** (no copy at all) would need host and extension to *share* the
+  buffer's backing store — which a socket does not do; bytes are copied through the kernel.
+  Start with **copy-through-the-socket** (one `write`/`read`, usually noise next to the native
+  work) and treat in-place sharing as **deferred**: if a *measured* high-bandwidth path (video,
+  large-array streaming) ever demands it, the extension can hand the host a buffer fd over the
+  socket (`SCM_RIGHTS` + `mmap`) without touching the control protocol. Not in the baseline —
+  profiling already showed shared memory buys nothing for messaging (§3), and the in-place bulk
+  case is itself unmeasured.
 - rkyv is **out** — Rust-only, defeats polyglot.
 
 ---
@@ -255,17 +285,17 @@ layout, so "access a field" replaces "parse a message". Precisions that bound th
 This design is a **transport for the plain-data waist** (`IoRequest`/`IoResult`), not a new
 API. It drops into the existing machinery almost 1:1:
 
-- **Sync = the io_uring pattern.** SQ/CQ ring buffers in shm + an **eventfd** (or futex) for
-  wakeups — io_uring's submission/completion design with VM↔extension instead of app↔kernel.
-  Register the completion eventfd with the `async-io` reactor and an **extension call becomes
-  just another `IoRequest` variant**: "write to the SQ, park the fiber on the CQ eventfd".
-  The calling fiber parks, other tasks run, the child signals completion, the fiber resumes.
-  Async extension calls for free; a slow extension never stalls the VM; `no_gc_across_yield`
-  already holds (handles/plain data across the await, not `Gc`).
-- **Offsets, not pointers**, inside the region (different base addresses across processes).
+- **Async call = a socket read already in the waist.** The extension's UDS fd registers with
+  the `async-io` reactor exactly as `NativeSocket` already does, so an **extension call becomes
+  just another `IoRequest`**: write the request frame, park the fiber on the readable socket,
+  resume when the reply frame arrives. The calling fiber parks, other tasks run, the child
+  writes its reply, the fiber resumes. Async extension calls for free; a slow extension never
+  stalls the VM; `no_gc_across_yield` already holds (handles/plain data across the await, not
+  `Gc`). This is a *tighter* reuse than a bespoke ring — no new wakeup primitive, no eventfd to
+  register, just the socket the reactor already waits on.
 - **Resource lifecycle reuses the reap queue.** An extension resource handle (a libpq conn,
-  a shm slab) drops → host reaps, exactly like `NativeSocket`'s `StreamId`. The socket reap
-  queue is the prototype for all extension resources.
+  a prepared statement, a cursor) drops → host reaps, exactly like `NativeSocket`'s `StreamId`.
+  The socket reap queue is the prototype for all extension resources.
 - **Crash/timeout reuses cancellation.** Child crash mid-call must not deadlock the parked
   fiber → timeout + park-cancellation, i.e. the 2b-ii cancellation machinery + the deferred
   timeout combinator. Dead child → release the handle-table roots it held (else they never
@@ -274,11 +304,13 @@ API. It drops into the existing machinery almost 1:1:
 
 ### Quoin-side consequence: a bulk array / dataframe Value type
 
-Arrow pairs with a **bulk array/dataframe Value type** whose backing store is the shm-
-resident Arrow buffer (a handle), **distinct from ordinary objects** — you must *not* explode
-a million-element column into a million `Value`s. Ordinary control data maps to normal Quoin
-objects/maps (small, projected, copy is fine). The columnar data plane and the "array Value
-type for NumPy-in-QN" are the **same design decision seen twice**.
+Arrow pairs with a **bulk array/dataframe Value type** held as a handle over one contiguous
+buffer, **distinct from ordinary objects** — you must *not* explode a million-element column
+into a million `Value`s. Ordinary control data maps to normal Quoin objects/maps (small,
+projected, copy is fine). The columnar data plane and the "array Value type for NumPy-in-QN"
+are the **same design decision seen twice**. (Baseline: that buffer is filled by copying the
+column off the socket once; the deferred §6 in-place path would back it with a shared buffer
+fd instead.)
 
 ---
 
@@ -288,8 +320,8 @@ Good fit: **trusted native code, OS access, parallelism, byte/array-heavy, coars
 low re-entrancy.** Both motivating categories qualify — a DB query returns rows; a vectorized
 array op runs over millions of elements; neither calls *back* into Quoin per element, so the
 µs cross-process round-trip amortizes and the "chatty callback thrash" failure mode doesn't
-bite. The rule that makes (b) work: **keep arrays shm-resident as handles and ops whole-array**
-so successive operations never re-copy.
+bite. The rule that makes (b) work: **keep arrays resident extension-side as handles and ops
+whole-array** so successive operations never re-copy them across the boundary.
 
 Poor fit (use a different tier): **fine-grained value juggling and frequent callbacks into
 Quoin** (a host call per row/field). Cross-process host calls are µs, not ns; chatty APIs
@@ -305,7 +337,7 @@ thrash. If an extension needs frequent re-entry, it belongs in-process (the stat
   full speed/safety. Real value: **forces stabilization of the host API surface** that the
   out-of-process protocol then mirrors, while we control both sides. This is the natural
   *first* build and the home for first-party / perf-critical / chatty extensions.
-- **Primary public tier — out-of-process native over shared memory** (this document).
+- **Primary public tier — out-of-process native over unix domain sockets** (this document).
   Polyglot, trusted, crash-isolated, native-speed. The flagship third-party story.
 - **Deferred — WASM** for untrusted drop-in plugins, only if that need ever materializes.
   Separate product; not a competitor to the above.
@@ -331,8 +363,9 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
 
 ## 10. Prior art / design templates
 
-- **io_uring** — SQ/CQ rings in shared memory + eventfd wakeups; offsets not pointers. The
-  transport template.
+- **io_uring** — SQ/CQ rings in shared memory + eventfd wakeups. Considered as the transport
+  and **dropped**: its edge needs busy-polling, which the async scheduler can't spend (§3). A
+  reference for the submit/complete *shape*, not the mechanism.
 - **FlatBuffers / Cap'n Proto** — schema-driven, in-place access, verifier, schema evolution.
   The control-plane record format (choice pending).
 - **Apache Arrow** — the data-plane format; zero-copy columnar interchange across languages
@@ -344,7 +377,8 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
 - **JNI / Lua stack / CPython `Py_LIMITED_API` (abi3) / Ruby `RTypedData` mark** — handle &
   rooting models; CPython's lesson: keep the stable surface *small*.
 - **Erlang ports (out-of-process) vs NIFs/dirty schedulers** — the isolation-vs-speed split.
-- **Terraform go-plugin** — subprocess + gRPC (the pipe-based, no-zero-copy contrast).
+- **Terraform / HashiCorp go-plugin** — subprocess + gRPC over a socket; the closest mainstream
+  analog to our shape (subprocess + framed RPC over a UDS), modulo our handle/Arrow payload layer.
 - **Deno FFI / ops** — core + WASM + a guarded `dlopen` escape hatch.
 
 ---
@@ -353,19 +387,24 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
 
 **Decided**
 
-- Extension system is **out-of-process native processes over shared memory** (polyglot,
+- Extension system is **out-of-process native processes over unix domain sockets** (polyglot,
   trusted, crash-isolated). Accepted trade: **link/ABI/toolchain friction → process-lifecycle
   friction**, which the survey's "friction, not latency" finding supports for heavy cases.
+- **Transport is a unix domain socket, not shared memory** (`../scratch/shm-vs-uds/`). With
+  busy-polling off the table under async, blocking shared memory is equal-or-worse than a UDS
+  socketpair on control-plane traffic; its only edge (large one-way streaming) is a
+  copy-through-a-ring, not in-place sharing. The socket fd reuses the reactor unchanged (§7).
+  In-place bulk sharing (`SCM_RIGHTS` fd-passing) is deferred until a measured workload needs it.
 - **Single trust domain** — extensions are trusted; no per-extension sandbox; untrusted-WASM
   tier dropped.
 - **Quoin owns the Quoin↔extension protocol; each language's FFI owns extension↔dylib.**
 - Polyglot delivered as **wire protocol + per-language SDKs**; **first SDKs: Rust + Python**
   (where the energy and hardest perf cases are; Go a distant third).
-- **Transport is format-agnostic** (shm rings + handles); **payload format is per-message**:
-  records (control) + raw bytes (blobs) + **Arrow C Data Interface (columnar)**.
+- **Transport is format-agnostic** (framed socket messages + handles); **payload format is
+  per-message**: records (control) + raw bytes (blobs) + **Arrow C Data Interface (columnar)**.
 - **Handles are bidirectional** — host Values held by the extension, and extension-side
   resources (connection/statement/context) held by the host; both opaque, both reaped on drop.
-- Reuse the **plain-data waist, the reactor (extension-call-as-parked-fiber on an eventfd),
+- Reuse the **plain-data waist, the reactor (extension-call-as-parked-fiber on the socket fd),
   the reap queue, and 2b-ii cancellation/timeout**. Handle table = GC root set.
 - "Zero-copy" = **no serialize/deserialize step**, not zero-copy into a `Value`.
 - **Core vs extension:** TLS/crypto, regex, JSON, compression, hashing in core; DBs,
@@ -377,8 +416,10 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
 **Open**
 
 - Control-plane record format: **FlatBuffers vs Cap'n Proto**.
-- Bulk data: **copy-into-ring first vs commit to shm-backed storage** (start simple, measure).
+- Bulk data: stay **copy-through-the-socket**, or add **`SCM_RIGHTS` shared-buffer fd-passing**
+  for a measured large-array path (start simple, measure — the in-place case is unprofiled; §6).
 - **Re-entrancy / callback protocol** (how an extension invokes a Quoin block — batched?).
-- The Quoin-side **bulk array / dataframe Value type** (shm-backed, handle-based).
+- The Quoin-side **bulk array / dataframe Value type** (handle-based; shared-buffer-backed
+  only if the deferred §6 fd-passing path lands).
 - **Handle table / rooting protocol** specifics (alloc, release, lifetime on crash).
 - Whether **Tier 0 (`quoin-sdk`)** is built first to harden the host API before the protocol.
