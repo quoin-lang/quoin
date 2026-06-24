@@ -89,15 +89,20 @@ fn pp_color_uses_the_highlighter_palette() {
         vm
     });
     arena.mutate_root(|mc, vm| {
-        let value = run(mc, vm, "#(1 'a')");
+        let value = run(mc, vm, "#(1 'a' true nil)");
         let colored = render(value, 80, true);
         // Decolorizes back to the plain layout.
         assert_eq!(decolorize(&colored), render(value, 80, false));
         // Each token carries its palette color (truecolor SGR for the highlighter hexes):
-        // number `#00bfff`, string `#4682b4`, collection delim `#93c6a5`.
+        // number `#00bfff`, string `#4682b4`, collection delim `#93c6a5`, and the reserved
+        // literals `true`/`nil` as Global `#ef65a5` (matching the input highlighter).
         assert!(colored.contains("38;2;0;191;255"), "number: {colored:?}");
         assert!(colored.contains("38;2;70;130;180"), "string: {colored:?}");
         assert!(colored.contains("38;2;147;198;165"), "delim: {colored:?}");
+        assert!(
+            colored.contains("38;2;239;101;165"),
+            "reserved: {colored:?}"
+        );
     });
 }
 

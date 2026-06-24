@@ -71,6 +71,7 @@ enum Mode {
 enum Role {
     Delim,     // collection sigils + structural braces/parens  -> CollectionBrace
     ClassName, // class names                                   -> Global
+    Reserved,  // `true` / `false` / `nil`                      -> Global (as in the highlighter)
     Ivar,      // `@field` labels                               -> InstanceIdentifier
     Selector,  // method signatures inside `Method(…)`          -> MethodSignature
     Number,    // Int / Double                                  -> NumberLiteral
@@ -83,7 +84,7 @@ impl Role {
     fn highlight(self) -> HighlightType {
         match self {
             Role::Delim => HighlightType::CollectionBrace,
-            Role::ClassName => HighlightType::Global,
+            Role::ClassName | Role::Reserved => HighlightType::Global,
             Role::Ivar => HighlightType::InstanceIdentifier,
             Role::Selector => HighlightType::MethodSignature,
             Role::Number => HighlightType::NumberLiteral,
@@ -254,8 +255,8 @@ fn value_to_doc<'gc>(value: Value<'gc>, visited: &mut HashSet<usize>) -> Doc {
     match value {
         Value::Int(i) => styled(Role::Number, text(i.to_string())),
         Value::Double(d) => styled(Role::Number, text(format!("{d}"))),
-        Value::Bool(b) => text(if b { "true" } else { "false" }),
-        Value::Nil => text("nil"),
+        Value::Bool(b) => styled(Role::Reserved, text(if b { "true" } else { "false" })),
+        Value::Nil => styled(Role::Reserved, text("nil")),
         Value::Class(c) => Doc::Cat(vec![
             text("class "),
             styled(Role::ClassName, text(c.borrow().name.to_string())),
