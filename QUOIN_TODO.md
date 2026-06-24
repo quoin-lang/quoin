@@ -298,6 +298,15 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   not for piped scripts or `qn -e`); errors are reported but non-fatal. Banner suppressible with
   `QN_NO_BANNER`; prompt overridable with `QN_PROMPT` (default `qn> `). (`QN_*` to match the binary
   and the `tuning` stress knobs.) The shared arena setup is factored into `build_repl_arena`.
+  - [ ] **Evaluate `~/.quoinrc` against a `QuoinRepl` object** (`self` bound to a fresh `QuoinRepl`
+    instance) so the rc can both define helpers *and* act as a config file — calling setter methods
+    (`.prompt: 'λ> '`, `.banner: false`, …) on `self` to configure the session, plus overriding
+    `QuoinRepl` methods to customize behavior. This generalizes the env-var knobs above into a
+    first-class, scriptable config surface. Needs a native `QuoinRepl` class exposing the REPL's
+    settings (a sibling/consumer of the introspection API and the future `Mirror`).
+    - [ ] Once `QuoinRepl` exists, **drive the prompt from it** (`self.prompt:`), superseding
+      `QN_PROMPT` — initially a read-once-at-startup value is fine (a live/dynamic prompt can come
+      later). Same for the banner and any other knobs that graduate from `QN_*` env vars.
 - [x] One-shot eval `qn -e '<expr>'`: evaluates one expression in a fresh prelude-loaded session and
   prints its `.s` result (a `nil` result prints nothing); parse/compile/runtime errors go to stderr
   with a non-zero exit, so it composes in pipelines. Non-interactive `qn repl < script` (pipe mode)
