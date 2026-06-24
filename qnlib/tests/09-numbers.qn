@@ -136,4 +136,74 @@
         .isTrue:{ 1 != nil };
         .isTrue:{ 1 != #sym };
     };
+
+    .test:
+    rounding -> {
+        "* floor/ceil/round/truncate: identity on Integer; round to an Integer on Double.
+        .is:{ 5.floor } equalTo:5;
+        .is:{ 5.ceil } equalTo:5;
+        .is:{ 5.round } equalTo:5;
+        .is:{ 5.truncate } equalTo:5;
+        .is:{ 5.floor } a:Integer;
+
+        .is:{ 3.7.floor } equalTo:3;
+        .is:{ 3.2.ceil } equalTo:4;
+        .is:{ 3.7.truncate } equalTo:3;
+        .is:{ 3.7.floor } a:Integer;
+        "* round is half-away-from-zero
+        .is:{ 2.5.round } equalTo:3;
+        .is:{ (0.0-2.5).round } equalTo:-3;
+        .is:{ (0.0-3.7).floor } equalTo:-4;
+        .is:{ (0.0-3.7).truncate } equalTo:-3;
+    };
+
+    .test:
+    sign -> {
+        .is:{ 5.sign } equalTo:1;
+        .is:{ 0.sign } equalTo:0;
+        .is:{ (0-5).sign } equalTo:-1;
+        .is:{ 2.5.sign } equalTo:1.0;
+        .is:{ 0.0.sign } equalTo:0.0;
+        .is:{ (0.0-2.5).sign } equalTo:(0.0-1.0);
+    };
+
+    .test:
+    power -> {
+        "* Int**Int stays Integer (checked); a negative exponent or a Double operand -> Double.
+        .is:{ 2.pow: 10 } equalTo:1024;
+        .is:{ 2.pow: 10 } a:Integer;
+        .is:{ 5.pow: 0 } equalTo:1;
+        .is:{ 2.pow: (0-1) } a:Double;
+        .is:{ 2.pow: (0-1) } closeTo:0.5;
+        .is:{ 2.0.pow: 3 } a:Double;
+        .is:{ 2.0.pow: 3 } closeTo:8.0;
+        .is:{ 9.pow: 0.5 } closeTo:3.0;
+        "* checked: i64::MAX squared overflows rather than wrapping
+        .does:{ 9223372036854775807.pow: 2 } throw:ArithmeticError;
+    };
+
+    .test:
+    minMax -> {
+        .is:{ 3.min: 7 } equalTo:3;
+        .is:{ 3.max: 7 } equalTo:7;
+        .is:{ 3.min: 7 } a:Integer;
+        "* selection semantics: the winner keeps its own type across a mixed comparison.
+        .is:{ 5.max: 3.0 } equalTo:5;
+        .is:{ 5.max: 3.0 } a:Integer;
+        .is:{ 5.max: 7.0 } equalTo:7.0;
+        .is:{ 5.max: 7.0 } a:Double;
+        .is:{ 5.min: 3.0 } equalTo:3.0;
+        .is:{ 5.min: 3.0 } a:Double;
+        .is:{ 5.0.min: 7 } equalTo:5.0;
+        .is:{ 5.0.min: 7 } a:Double;
+    };
+
+    .test:
+    sqrtDomain -> {
+        "* sqrt is IEEE correctly-rounded, so perfect squares are exact; negatives error.
+        .is:{ 9.sqrt } equalTo:3.0;
+        .is:{ 2.25.sqrt } equalTo:1.5;
+        .does:{ (0-4).sqrt } throw:ArithmeticError;
+        .does:{ (0.0-4.0).sqrt } throw:ArithmeticError;
+    };
 }

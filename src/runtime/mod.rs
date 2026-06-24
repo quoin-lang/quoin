@@ -10,6 +10,7 @@ pub mod integer;
 pub mod io;
 pub mod list;
 pub mod map;
+pub mod math;
 pub mod method;
 pub mod nil;
 pub mod object;

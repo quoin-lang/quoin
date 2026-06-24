@@ -47,6 +47,12 @@ Mixin <- BuiltinAssertions <- {
     is:equalTo: -> {|block:Block expected| actual = block.value; .recordResult:{expected == actual} evidence:#(expected '!=' actual) block:block }
     is:notEqualTo: -> {|block:Block expected| actual = block.value; .recordResult:{expected != actual} evidence:#(expected '==' actual) block:block }
 
+    "* Approximate float comparison: |actual - expected| < tolerance. `closeTo:` uses a default
+    "* tolerance (1e-9), enough to absorb last-ULP variation in non-correctly-rounded libm results
+    "* (log/exp/pow/trig) across platforms; `closeTo:within:` sets the tolerance explicitly.
+    is:closeTo: -> {|block:Block expected| .is:block closeTo:expected within:0.000000001 }
+    is:closeTo:within: -> {|block:Block expected tolerance| actual = block.value; .recordResult:{(actual - expected).abs < tolerance} evidence:#(expected 'not within tolerance of' actual) block:block }
+
     is:lessThan: -> {|block:Block expected| actual = block.value; .recordResult:{actual < expected} evidence:#(actual 'not <' expected) block:block }
     is:greaterThan: -> {|block:Block expected| actual = block.value; .recordResult:{actual > expected} evidence:#(actual 'not >' expected) block:block }
     is:lessThanOrEqualTo: -> {|block:Block expected| actual = block.value; .recordResult:{actual < = expected} evidence:#(actual 'not <=' expected) block:block }

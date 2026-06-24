@@ -1,0 +1,55 @@
+"* The `Math` namespace: constants + trig/transcendental free functions. Number-centric ops
+"* (abs/floor/round/sqrt/pow:/min:/max:/sign) live on Integer/Double and are tested in
+"* 09-numbers. libm results (log/exp/pow/hypot/non-trivial trig) aren't IEEE correctly-rounded,
+"* so they use closeTo:; exact special points and the correctly-rounded sqrt use equalTo.
+
+(TestSuite.new:{ name = 'Math' }).add:{
+    .test:
+    constants -> {
+        .is:{ Math.pi } equalTo:3.141592653589793;
+        .is:{ Math.e } equalTo:2.718281828459045;
+        .is:{ Math.tau } equalTo:6.283185307179586;
+        .is:{ Math.pi } a:Double;
+    };
+
+    .test:
+    roots -> {
+        .is:{ Math.sqrt: 16 } equalTo:4.0;
+        .is:{ Math.sqrt: 2.25 } equalTo:1.5;
+        .does:{ Math.sqrt: (0-1) } throw:ArithmeticError;
+    };
+
+    .test:
+    powAndHypot -> {
+        .is:{ Math.pow: 2 to: 10 } closeTo:1024.0;
+        .is:{ Math.pow: 2 to: 10 } a:Double;
+        .is:{ Math.pow: 2 to: 0 } closeTo:1.0;
+        .is:{ Math.hypot: 3 over: 4 } closeTo:5.0;
+    };
+
+    .test:
+    expAndLog -> {
+        .is:{ Math.exp: 0 } equalTo:1.0;
+        .is:{ Math.ln: 1 } equalTo:0.0;
+        .is:{ Math.log: 1000 } closeTo:3.0;
+        .is:{ Math.log2: 8 } closeTo:3.0;
+        .is:{ Math.log: 8 base: 2 } closeTo:3.0;
+        .does:{ Math.ln: 0 } throw:ArithmeticError;
+        .does:{ Math.log: (0-5) } throw:ArithmeticError;
+    };
+
+    .test:
+    trig -> {
+        "* Special points are exact; non-trivial angles use closeTo.
+        .is:{ Math.sin: 0 } equalTo:0.0;
+        .is:{ Math.cos: 0 } equalTo:1.0;
+        .is:{ Math.tan: 0 } equalTo:0.0;
+        .is:{ Math.asin: 0 } equalTo:0.0;
+        .is:{ Math.acos: 1 } equalTo:0.0;
+        .is:{ Math.atan: 0 } equalTo:0.0;
+        .is:{ Math.atan: 0 over: 1 } equalTo:0.0;
+        .is:{ Math.sin: (Math.pi / 2) } closeTo:1.0;
+        .is:{ Math.cos: (Math.pi) } closeTo:(0.0-1.0);
+        .is:{ Math.atan: 1 over: 1 } closeTo:(Math.pi / 4);
+    };
+};
