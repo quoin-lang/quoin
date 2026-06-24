@@ -1,5 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::runtime::pretty::{PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmStatus;
 
@@ -27,6 +28,23 @@ impl NativeMapState {
 
     pub fn get_map_mut<'gc>(&mut self) -> &mut HashMap<String, Value<'gc>> {
         unsafe { transmute(&mut self.map) }
+    }
+}
+
+impl PrettyPrint for NativeMapState {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        // Sort by key so the dump is deterministic (the underlying map is unordered).
+        let mut entries: Vec<(String, Value<'gc>)> = self
+            .get_map()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        PpShape::Entries {
+            open: "#{",
+            close: "}",
+            entries,
+        }
     }
 }
 

@@ -342,7 +342,7 @@ deferred `Mirror` in `## REPL`.
   **MessagePack** (binary, pairs with `Bytes`).
 
 **Text & presentation**
-- [ ] **Pretty-printer** — structural, width-aware rendering of nested collections/objects
+- [x] **Pretty-printer** — structural, width-aware rendering of nested collections/objects
   (Wadler/Leijen-style groups + line breaks). Wire into the REPL result display for large values;
   console width is already plumbed (`VmOptions.console_width`).
 - [ ] ⭐ **ANSI / color** — public terminal styling API (`[Term]`/`Color`): colors, bold/underline,

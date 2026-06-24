@@ -1,0 +1,321 @@
+//! Structural value pretty-printing (`.pp`): a width-aware, canonical dump of a value graph
+//! for debugging/inspection — distinct from `.s` (human/UI string) and from the Rust `Display`
+//! impl (Rust-level debugging). `.pp` never calls `.s`: it renders value types and collections
+//! intrinsically, escapes + quotes strings, and shows an object's instance variables. It is a
+//! single entrypoint that encodes the whole graph itself — no per-element method dispatch — so
+//! the output is canonical (and not overridable from Quoin).
+//!
+//! Layout uses a Wadler/Leijen document algebra: each collection is a `Group` that prints flat
+//! when it fits the target width, else breaks onto indented lines.
+
+use crate::runtime::list::NativeListState;
+use crate::runtime::map::NativeMapState;
+use crate::runtime::set::NativeSetState;
+use crate::value::{Object, ObjectPayload, Value};
+
+use gc_arena::{Gc, lock::RefLock};
+use std::collections::HashSet;
+
+/// The structural shape a native class contributes to a `.pp` dump: delimiters plus its child
+/// values (already lifetime-correct), which the walker lays out and recurses into. Implementing
+/// this trait is how a native collection type joins `.pp` (see `NativeListState` etc.).
+pub enum PpShape<'gc> {
+    /// A sequence — `open item … close` (List `#( )`, Set `#< >`).
+    Seq {
+        open: &'static str,
+        close: &'static str,
+        items: Vec<Value<'gc>>,
+    },
+    /// Keyed entries rendered `key: value` (Map `#{ }`); keys are quoted by the walker.
+    Entries {
+        open: &'static str,
+        close: &'static str,
+        entries: Vec<(String, Value<'gc>)>,
+    },
+}
+
+pub trait PrettyPrint {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc>;
+}
+
+// ---- Wadler/Leijen layout algebra ----
+
+enum Doc {
+    Text(String),
+    /// Flat: a single space; broken: newline + current indent.
+    Line,
+    /// Flat: nothing; broken: newline + current indent.
+    Soft,
+    Cat(Vec<Doc>),
+    Nest(usize, Box<Doc>),
+    Group(Box<Doc>),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Flat,
+    Break,
+}
+
+fn text(s: impl Into<String>) -> Doc {
+    Doc::Text(s.into())
+}
+
+/// Wrap `items` between `open`/`close` (with a `prefix` like a class name) as a breakable
+/// group: flat `pre#(a b c)`; broken, one item per indented line with `pre#(` / `)` on their
+/// own lines.
+fn bracket(prefix: &str, open: &str, close: &str, items: Vec<Doc>) -> Doc {
+    if items.is_empty() {
+        return text(format!("{prefix}{open}{close}"));
+    }
+    let mut inner = Vec::with_capacity(items.len() * 2);
+    for (i, it) in items.into_iter().enumerate() {
+        if i > 0 {
+            inner.push(Doc::Line);
+        }
+        inner.push(it);
+    }
+    Doc::Group(Box::new(Doc::Cat(vec![
+        text(format!("{prefix}{open}")),
+        Doc::Nest(2, Box::new(Doc::Cat(vec![Doc::Soft, Doc::Cat(inner)]))),
+        Doc::Soft,
+        text(close),
+    ])))
+}
+
+/// Does the doc on `stack` fit in `remaining` columns laid out flat (until a forced break)?
+fn fits(mut remaining: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
+    while remaining >= 0 {
+        let (indent, mode, doc) = match stack.pop() {
+            Some(x) => x,
+            None => return true,
+        };
+        match doc {
+            Doc::Text(s) => remaining -= s.chars().count() as isize,
+            Doc::Line => match mode {
+                Mode::Flat => remaining -= 1,
+                Mode::Break => return true,
+            },
+            Doc::Soft => {
+                if mode == Mode::Break {
+                    return true;
+                }
+            }
+            Doc::Cat(ds) => {
+                for d in ds.iter().rev() {
+                    stack.push((indent, mode, d));
+                }
+            }
+            Doc::Nest(n, d) => stack.push((indent + n, mode, d.as_ref())),
+            Doc::Group(d) => stack.push((indent, Mode::Flat, d.as_ref())),
+        }
+    }
+    false
+}
+
+/// Lay `doc` out to a string, breaking each group that doesn't fit in `width` columns.
+fn best(width: usize, doc: &Doc) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    let mut stack: Vec<(usize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
+    while let Some((indent, mode, doc)) = stack.pop() {
+        match doc {
+            Doc::Text(s) => {
+                out.push_str(s);
+                col += s.chars().count();
+            }
+            Doc::Line if mode == Mode::Flat => {
+                out.push(' ');
+                col += 1;
+            }
+            Doc::Line | Doc::Soft => match mode {
+                // `Soft` flat = nothing; both break the same way.
+                Mode::Flat => {}
+                Mode::Break => {
+                    out.push('\n');
+                    out.extend(std::iter::repeat(' ').take(indent));
+                    col = indent;
+                }
+            },
+            Doc::Cat(ds) => {
+                for d in ds.iter().rev() {
+                    stack.push((indent, mode, d));
+                }
+            }
+            Doc::Nest(n, d) => stack.push((indent + n, mode, d.as_ref())),
+            Doc::Group(d) => {
+                let fit = fits(
+                    width as isize - col as isize,
+                    vec![(indent, Mode::Flat, d.as_ref())],
+                );
+                let m = if fit { Mode::Flat } else { Mode::Break };
+                stack.push((indent, m, d.as_ref()));
+            }
+        }
+    }
+    out
+}
+
+// ---- value -> Doc walk ----
+
+/// Pretty-print `value` to a string laid out within `width` columns. The single canonical
+/// entrypoint: walks the whole graph here (no method dispatch), cycle-guarded.
+pub fn render<'gc>(value: Value<'gc>, width: usize) -> String {
+    let mut visited = HashSet::new();
+    best(width, &value_to_doc(value, &mut visited))
+}
+
+fn value_to_doc<'gc>(value: Value<'gc>, visited: &mut HashSet<usize>) -> Doc {
+    match value {
+        Value::Int(i) => text(i.to_string()),
+        Value::Double(d) => text(format!("{d}")),
+        Value::Bool(b) => text(if b { "true" } else { "false" }),
+        Value::Nil => text("nil"),
+        Value::Class(c) => text(format!("class {}", c.borrow().name)),
+        Value::ClassMeta(c) => text(format!("class {} meta", c.borrow().name)),
+        Value::Object(o) => {
+            let id = Gc::as_ptr(o) as usize;
+            let cname = value.class_name();
+            // Cycle guard: elide a node already on the current path.
+            if !visited.insert(id) {
+                return text(format!("{cname}{{…}}"));
+            }
+            let doc = object_doc(value, o, &cname, visited);
+            visited.remove(&id);
+            doc
+        }
+    }
+}
+
+/// Render an `Object` value: strings/symbols/bytes/blocks intrinsically, native collections
+/// via their `PrettyPrint` shape, and a plain instance as `ClassName{ @ivar: value … }`.
+fn object_doc<'gc>(
+    value: Value<'gc>,
+    o: Gc<'gc, RefLock<Object<'gc>>>,
+    cname: &str,
+    visited: &mut HashSet<usize>,
+) -> Doc {
+    // Classify the payload (extracting any children) without holding the borrow across the
+    // recursion below.
+    enum Payload<'gc> {
+        Str(String),
+        Sym(String),
+        Bytes(Vec<u8>, usize),
+        Block,
+        Ivars(Vec<(String, Value<'gc>)>),
+        Native,
+    }
+    let payload = {
+        let b = o.borrow();
+        match &b.payload {
+            ObjectPayload::String(s) => Payload::Str((**s).clone()),
+            ObjectPayload::Symbol(s) => Payload::Sym((**s).clone()),
+            ObjectPayload::Bytes(by) => {
+                Payload::Bytes(by.iter().take(16).copied().collect(), by.len())
+            }
+            ObjectPayload::Block(_) => Payload::Block,
+            ObjectPayload::Instance => {
+                // Instance vars in slot (declaration) order, mirroring `introspect::describe_value`.
+                let cls = b.class.borrow();
+                let mut slots: Vec<(String, usize)> = cls
+                    .field_slots
+                    .iter()
+                    .map(|(n, &s)| (n.clone(), s))
+                    .collect();
+                slots.sort_by_key(|x| x.1);
+                let ivars = slots
+                    .into_iter()
+                    .filter_map(|(n, s)| b.fields.get(s).map(|v| (n, *v)))
+                    .collect();
+                Payload::Ivars(ivars)
+            }
+            ObjectPayload::NativeState(_) => Payload::Native,
+        }
+    };
+    match payload {
+        Payload::Str(s) => text(quote(&s)),
+        Payload::Sym(s) => text(format!("#{s}")),
+        Payload::Bytes(preview, len) => text(bytes_repr(&preview, len)),
+        Payload::Block => text("<block>"),
+        Payload::Ivars(ivars) => {
+            let items = ivars
+                .into_iter()
+                .map(|(n, v)| Doc::Cat(vec![text(format!("@{n}: ")), value_to_doc(v, visited)]))
+                .collect();
+            bracket(cname, "{", "}", items)
+        }
+        Payload::Native => native_doc(value, cname, visited),
+    }
+}
+
+/// Render a native collection via its `PrettyPrint` shape (List/Set/Map), or an opaque
+/// `<ClassName>` for any other native object whose internals `.pp` doesn't expose.
+fn native_doc<'gc>(value: Value<'gc>, cname: &str, visited: &mut HashSet<usize>) -> Doc {
+    let shape = match cname {
+        "List" => value
+            .with_native_state::<NativeListState, _, _>(|s| s.pp_shape())
+            .ok(),
+        "Set" => value
+            .with_native_state::<NativeSetState, _, _>(|s| s.pp_shape())
+            .ok(),
+        "Map" => value
+            .with_native_state::<NativeMapState, _, _>(|s| s.pp_shape())
+            .ok(),
+        _ => None,
+    };
+    match shape {
+        Some(PpShape::Seq { open, close, items }) => {
+            let docs = items
+                .into_iter()
+                .map(|v| value_to_doc(v, visited))
+                .collect();
+            bracket("", open, close, docs)
+        }
+        Some(PpShape::Entries {
+            open,
+            close,
+            entries,
+        }) => {
+            let docs = entries
+                .into_iter()
+                .map(|(k, v)| Doc::Cat(vec![text(quote(&k)), text(": "), value_to_doc(v, visited)]))
+                .collect();
+            bracket("", open, close, docs)
+        }
+        None => text(format!("<{cname}>")),
+    }
+}
+
+/// A `'`-quoted, escaped string literal (`it's` → `'it\'s'`).
+fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        match c {
+            '\'' => out.push_str("\\'"),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// `Bytes[len] <hex preview>` — never dumps raw bytes (mirrors the Display preview).
+fn bytes_repr(preview: &[u8], len: usize) -> String {
+    let mut out = format!("Bytes[{len}]");
+    for b in preview {
+        out.push_str(&format!(" {b:02x}"));
+    }
+    if len > preview.len() {
+        out.push_str(" …");
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "pretty_tests.rs"]
+mod tests;

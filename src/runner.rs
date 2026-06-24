@@ -12,7 +12,8 @@ use crate::repl_complete::{CompletionIndex, build_completion_index, complete_inp
 use crate::runtime::runtime::build_block;
 use crate::runtime::{
     async_rt, block, boolean, bytes, class, double, fiber as fiber_class, http, integer, io, list,
-    map, method, nil, object, regex, runtime, set, sockets, streams, string, symbol, task, timer,
+    map, method, nil, object, pretty, regex, runtime, set, sockets, streams, string, symbol, task,
+    timer,
 };
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -234,14 +235,17 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
 }
 
 /// Evaluate one complete REPL input and return the line to print (`=> <value>`, an error,
-/// or `None` for a value-less `nil` result).
+/// or `None` for a value-less `nil` result). The result is rendered with `.pp` (structural,
+/// width-aware) — the canonical repr a REPL wants (quoted strings, instance vars), like a
+/// `repr`/`inspect` rather than `.s`.
 fn eval_repl_input(arena: &mut ReplArena, input: &str) -> Option<String> {
-    eval_value(arena, input, |vm, mc, val| {
+    eval_value(arena, input, |vm, _mc, val| {
         // Suppress a bare `nil` result (a value-less statement).
         if val.type_name() == "Nil" {
             None
         } else {
-            Some(format!("=> {}", render_value(vm, mc, val)))
+            let width = vm.options.console_width.map(|w| w as usize).unwrap_or(80);
+            Some(format!("=> {}", pretty::render(val, width)))
         }
     })
 }

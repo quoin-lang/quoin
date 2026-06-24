@@ -1,4 +1,5 @@
 use crate::error::QuoinError;
+use crate::runtime::pretty::{PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 
 use gc_arena::collect::{DynCollect, Trace};
@@ -25,6 +26,16 @@ impl NativeSetState {
 
     pub fn get_vec_mut<'gc>(&mut self) -> &mut Vec<Value<'gc>> {
         unsafe { transmute(&mut self.vec) }
+    }
+}
+
+impl PrettyPrint for NativeSetState {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        PpShape::Seq {
+            open: "#<",
+            close: ">",
+            items: self.get_vec().to_vec(),
+        }
     }
 }
 
