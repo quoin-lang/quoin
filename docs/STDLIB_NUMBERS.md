@@ -135,21 +135,25 @@ already existed; added `mean`, `median`, `variance` + `populationVariance`, `std
 `sqrt` from deliverable 1. Gotcha for future qnlib: guards use `^^` (non-local return) — a plain
 `^` exits only the enclosing `if:` block, not the method. Tests: `qnlib/tests/26-statistics.qn`.
 
-### 3 — BigDecimal  (native value type; `rust_decimal`)
+### 3 — BigDecimal  ✅ done (`src/runtime/big_decimal.rs`; `rust_decimal`)
 
-Exact base-10 arithmetic (money). No decimal literal in the grammar, so construct explicitly:
-`BigDecimal.of: '1.50'` (string) and/or `BigDecimal.of: 150 scale: 2`. Methods: `+:` `-:` `*:`
-`/:`, `<:` `==:`, `abs`, `round:` / `scale`, `.s`, conversions `asDouble` / `asInteger`. Mixing
-rules still open (§5.6). Files: `src/runtime/big_decimal.rs` (new), `runner.rs`, `Cargo.toml`;
-tests `tests/big_decimal.rs` and/or a qnlib suite.
+Exact base-10 arithmetic (money). First native value type — a Rust-state-backed `BigDecimal`
+(`AnyCollect` + `new_native_state`, no `Gc`/no reap). Construct: `BigDecimal.of: '1.50'`
+(string), `BigDecimal.of: 42` (Integer), `BigDecimal.of: 150 scale: 2`. Methods: `+:` `-:` `*:`
+`/:` (checked, divide-by-zero guarded), `<:` and `==:` (value compare — native `==` is pointer
+identity, so both are defined), `abs`, `scale`, `round:` (half-away-from-zero, matching
+`Double.round`), `asDouble`/`asInteger`, `.s`. Mixing → **explicit only** (§5.6): a foreign
+operand matches no typed variant and surfaces as `MessageNotUnderstood`. Tests:
+`qnlib/tests/27-bigdecimal.qn`.
 
-### 4 — BigInteger  (native value type; `num-bigint`)
+### 4 — BigInteger  ✅ done (`src/runtime/big_integer.rs`; `num-bigint`)
 
-Arbitrary-precision integers. Construct `BigInteger.of: '123…'` / `BigInteger.of: someInteger`
-(and maybe `123.asBigInteger`). Methods: arithmetic, comparison, `pow:`, `.s`, conversions.
-**Decided: a distinct opt-in type, no auto-promotion** — `Integer` stays an unboxed i64 and the
-hot arithmetic path is untouched; you reach BigInteger explicitly. Files:
-`src/runtime/big_integer.rs` (new), `runner.rs`, `Cargo.toml`; tests.
+Arbitrary-precision integers — a Rust-state-backed `BigInteger` (`BigInt` is `Clone`, extracted
+by cloning). Construct `BigInteger.of: '123…'` / `BigInteger.of: 42` / `42.asBigInteger`
+(`qnlib/core/08-bignum.qn`). Methods: `+:` `-:` `*:` `/:` (truncating) `%:` (zero-guarded), `<:`
+`==:`, `abs`, `pow:` (non-negative exponent; negative errors — no Double escape), `asInteger`
+(range-checked) / `asDouble`, `.s`. **Distinct opt-in type, no auto-promotion** — `Integer` stays
+an unboxed i64; mixing is explicit only. Tests: `qnlib/tests/28-biginteger.qn`.
 
 ---
 
@@ -191,18 +195,20 @@ than inventing new string errors.
    (first-encountered on a tie) and **`modes`** returns every maximally-frequent value; empty
    collections → `nil` (`modes` → `#()`).
 
-**Still open (my recommendation in parens):**
+6. **BigDecimal mixing — explicit conversion** (approved). No implicit `BigDecimal + Integer/Double`:
+   a foreign operand matches no typed variant and raises `MessageNotUnderstood`, so an exact value
+   can't be silently contaminated by a float. (Applies to `BigInteger` too.)
 
-6. **BigDecimal mixing** — allow `BigDecimal + Integer/Double` implicitly, or require explicit
-   conversion. (Recommend **explicit**, to avoid silent float contamination of exact values.)
+All §5 decisions are now settled.
 
 ## 6. Suggested order
 
 1. **Math** ✅ done — number methods + `Math` namespace + `closeTo:` test assertion.
 2. **Statistics** ✅ done — `qnlib/core/07-statistics.qn` + `qnlib/tests/26-statistics.qn`.
-3. **BigDecimal** — next: first native value type; introduces the `rust_decimal` dep; settle the
-   mixing rule (§5.6).
-4. **BigInteger** — last; the promotion question is settled (distinct type, no auto-promotion).
+3. **BigDecimal** ✅ done — `src/runtime/big_decimal.rs` + `qnlib/tests/27-bigdecimal.qn`.
+4. **BigInteger** ✅ done — `src/runtime/big_integer.rs` + `qnlib/tests/28-biginteger.qn`.
+
+All four "Numbers & math" deliverables are complete.
 
 ## 7. Build & test
 

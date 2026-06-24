@@ -1,0 +1,51 @@
+"* BigInteger: arbitrary-precision integers (src/runtime/big_integer.rs). Arithmetic is exact at
+"* any size; division truncates toward zero. Mixing with Integer/Double requires an explicit
+"* BigInteger.of: (or Integer#asBigInteger) — there is no silent coercion.
+
+(TestSuite.new:{ name = 'BigInteger' }).add:{
+    .test:
+    construct -> {
+        .is:{ (BigInteger.of:'123').s } equalTo:'123';
+        .is:{ (BigInteger.of:42).s } equalTo:'42';
+        .is:{ 42.asBigInteger.s } equalTo:'42';
+        .does:{ BigInteger.of:'12x' } throw:ValueError;
+    };
+
+    .test:
+    bigArithmetic -> {
+        "* beyond i64: 10^30 and 2^100 are exact.
+        big = (BigInteger.of:'1000000000000000000000000000000');
+        .is:{ (big + big).s } equalTo:'2000000000000000000000000000000';
+        .is:{ (BigInteger.of:'2').pow:100 } equalTo:(BigInteger.of:'1267650600228229401496703205376');
+        .is:{ ((BigInteger.of:'10') * (BigInteger.of:'10')).s } equalTo:'100';
+        .is:{ ((BigInteger.of:'17') / (BigInteger.of:'5')).s } equalTo:'3';   "* truncates toward zero
+        .is:{ ((BigInteger.of:'17') % (BigInteger.of:'5')).s } equalTo:'2';
+        .does:{ (BigInteger.of:'1') / (BigInteger.of:'0') } throw:ArithmeticError;
+        .does:{ (BigInteger.of:'2').pow:(0-1) } throw:ArithmeticError; "* negative exponent isn't an integer
+    };
+
+    .test:
+    comparison -> {
+        .isTrue:{ (BigInteger.of:'100') > (BigInteger.of:'99') };
+        .isTrue:{ (BigInteger.of:'5') == (BigInteger.of:'5') };
+        .isFalse:{ (BigInteger.of:'5') == (BigInteger.of:'6') };
+        "* equality with a non-BigInteger is false, never an error
+        .isFalse:{ (BigInteger.of:'5') == 5 };
+        .is:{ ((BigInteger.of:'0') - (BigInteger.of:'8')).abs.s } equalTo:'8';
+    };
+
+    .test:
+    explicitConversionOnly -> {
+        .does:{ (BigInteger.of:'1') + 1 } throw:MessageNotUnderstood;
+        .does:{ (BigInteger.of:'1') < 1 } throw:MessageNotUnderstood;
+    };
+
+    .test:
+    conversions -> {
+        .is:{ (BigInteger.of:'42').asInteger } equalTo:42;
+        .is:{ (BigInteger.of:'42').asInteger } a:Integer;
+        "* out of i64 range -> error rather than a silent wrap
+        .does:{ (BigInteger.of:'100000000000000000000000').asInteger } throw:ArithmeticError;
+        .is:{ (BigInteger.of:'8').asDouble } closeTo:8.0;
+    };
+};

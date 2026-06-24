@@ -58,6 +58,9 @@ rustc-hash = "2"
 rustyline = "18"
 # Exact base-10 decimal arithmetic backing the BigDecimal stdlib type (money etc.).
 rust_decimal = "1"
+# Arbitrary-precision integers backing the BigInteger stdlib type.
+num-bigint = "0.4"
+num-traits = "0.2"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

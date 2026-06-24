@@ -1,5 +1,6 @@
 pub mod async_rt;
 pub mod big_decimal;
+pub mod big_integer;
 pub mod block;
 pub mod boolean;
 pub mod bytes;
