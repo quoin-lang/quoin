@@ -227,19 +227,23 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   (`annotate_error`) and the loop continues; `execute_repl_line` resets frames/stack/active-exception
   to the baseline after an error.
 - [x] **Multiline continuation**: incomplete input re-prompts (`... `), detected by the `try_parse`
-  error being positioned at end-of-input; a blank line abandons the buffer.
+  error being positioned at end-of-input. (Abandoning an in-progress multiline buffer is deferred to
+  a P1 readline keybinding; for now exit/complete the input or Ctrl-C.)
 - [x] Exit on `Ctrl-D` (EOF) and `$quit`/`$exit`; bonus `$help`, `$reset`.
 - Known P0 limitations (see design doc): synchronous eval only (top-level async needs the scheduler
   driver); plain stdin (editing/history is P1); result uses `Display`, not `.s` (P1).
 
 **P1 — ergonomics:**
-- [ ] Line editing via the chosen readline crate (cursor movement, kill/yank).
+- [ ] Line editing via `rustyline` (cursor movement, kill/yank). Its `Validator` trait replaces the
+  P0 end-of-input parse-error heuristic for multiline detection.
+- [ ] **Abandon an in-progress multiline buffer** via a keybinding (Ctrl-C clears the buffer and
+  returns to the `qn> ` prompt without exiting) — the replacement for the removed P0 blank-line hack.
 - [ ] **History** with up/down recall, persisted (`~/.quoin_history` or XDG).
 - [ ] **Input syntax highlighting** (reuse the highlighter spans / `highlight_to_ansi`).
-- [ ] Result pretty-printing: `=>` prefix, optional color, truncate huge collections; suppress (or
-  dim) a bare `nil` result for value-less statements.
-- [ ] Meta-commands: `:help`, `:reset` (clear REPL state), `:type <expr>` (show class), `:load
-  <file.qn>`, `:time <expr>`. (Prefix per the decision above.)
+- [ ] Result pretty-printing: render via `.s` (honor user overrides) instead of `Display`; `=>`
+  prefix, optional color, truncate huge collections.
+- [ ] More `$`-commands (P0 ships `$help`/`$reset`/`$quit`): `$type <expr>` (show class), `$load
+  <file.qn>`, `$time <expr>`.
 
 **P2 — power features:**
 - [ ] Tab completion: globals, class names, keywords, and `.`-completion of method selectors

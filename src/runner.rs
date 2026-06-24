@@ -455,6 +455,12 @@ impl VmRunner {
                 break;
             }
 
+            // Pressing Enter at an empty prompt: nothing to evaluate, just re-prompt.
+            // (A blank line *within* a multiline buffer is kept as whitespace.)
+            if buffer.is_empty() && line.trim().is_empty() {
+                continue;
+            }
+
             // A `$`-command (only at the start of a fresh input, never mid-multiline).
             if buffer.is_empty() {
                 if let Some(cmd) = line.trim().strip_prefix('$') {
@@ -480,12 +486,6 @@ impl VmRunner {
                     }
                     continue;
                 }
-            }
-
-            // A blank line while continuing a multiline input abandons it.
-            if !buffer.is_empty() && line.trim().is_empty() {
-                buffer.clear();
-                continue;
             }
 
             buffer.push_str(&line);
