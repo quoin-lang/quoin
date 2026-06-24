@@ -285,13 +285,35 @@ Quoin over the current sockets/streams).
 - [x] **Alternative Parser Architecture Evaluation**:
   - Evaluate replacing ANTLR with Tree-sitter for faster full-file compiles using its compiled C engine.
   - Assess native Rust parser generators (e.g., LALRPOP or Pest) or hand-writing a recursive-descent parser for optimal compiler performance.
-- [ ] **Method-dispatch optimization** (baseline + plan in `profiling/dispatch-cache/notes.md`). The Send
-  path is malloc-dominated (37.8% self) and `lookup_method` is 21.5% inclusive (13.6% walk + 2.7% scoring).
-  - [ ] **Selector interning** (in progress). Replace `Instruction::Send(String, …)` with an interned
+- [ ] **Method-dispatch optimization** — live rollup in `profiling/status.md` (the authoritative
+  before/after + next-options doc). Original baseline (`profiling/dispatch-cache/notes.md`): the Send path
+  was malloc-dominated (37.8% self), `lookup_method` 21.5% inclusive (13.6% walk + 2.7% scoring). Since
+  then the bounded wins (caching, hashing, allocator, per-step/per-send allocs) **and** the first
+  structural swing (superinstructions) have landed — cumulatively ~65-78% faster than the start-of-session
+  baseline. The resolution-side levers are spent (IC ruled out); remaining headroom is structural.
+  - [x] **Selector interning.** Replaced `Instruction::Send(String, …)` with an interned
     `Symbol(&'static str)` (Eq/Hash by pointer, lock-free `as_str()`; global leak-forever interner in
     `src/symbol.rs`). Kills the per-Send `selector.clone()` (~8.8% `String::clone`) and gives the dispatch
     cache a `Copy`, collision-free, pointer-stable key. Scoped to selectors in the dispatch path; method
     tables / globals stay `String`-keyed for now (the walk resolves via `as_str()`).
+  - [x] **mimalloc** as the default global allocator (separate session) — absorbed much of the
+    allocation cost; the biggest single help on the alloc-bound benchmark (Binary Trees).
+  - [x] **FxHash** on the dispatch `method_cache`, replacing SipHash on the hot resolution key.
+  - **Inline call-site cache — BUILT, MEASURED, RULED OUT (reverted).** A recv-class-monomorphic IC on
+    top of FxHash was a net regression (flat Fib/Sieve, +4.6% Binary Trees): post-FxHash the global cache
+    is already cheap, and the probe is paid on *every* send while only single-untyped guard-free *user*
+    sends qualify (the hot typed-multimethod arithmetic/indexing pays it for nothing). Parked on branch
+    `experiment/inline-cache`; full reasoning in `profiling/inline-cache/notes.md`. **Don't rebuild** unless
+    dispatch becomes hash-bound again.
+  - [x] **Superinstructions.** Fuse the hot `<operand-load>; Send` instruction pairs
+    (`Push`/`LoadLocal`/`LoadField` → `SendConst`/`SendLocal`/`SendField`) so one dispatch-loop step does
+    the operand-load + send. Pairs chosen from a dynamic histogram of executed bytecode (~3.9M of the hot
+    sends). A `fuse_bytecode` peephole pass (`src/compiler.rs`) runs per block at compile time: never fuses
+    across a jump target, recomputes relative jump offsets + keeps the source map index-aligned; the `Send`
+    body is extracted to `exec_send` (shared by the fused handlers), and the stack-trace formatter reads
+    the selector from the fused forms. **~8-10%** (release best-of-4: Fib 21→19, Sieve 52→47, Binary Trees
+    769→707). See `profiling/superinstructions/notes.md`. Cheap follow-ons: 3-instruction sends (fuse the
+    receiver load too) and the `Dup → StoreField`/`StoreLocal` assignment pairs.
   - [x] **Method-resolution cache** (the headline). Global `HashMap<MethodCacheKey → Option<Value>>`
     where the key is `(searched-class ptr, selector: Symbol, class_side, n_args, arg_class_ptrs,
     arg_kinds)`. Guard-free resolutions only — `match_score` sets `VmState.dispatch_uncacheable` when a

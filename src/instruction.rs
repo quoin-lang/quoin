@@ -107,6 +107,14 @@ pub enum Instruction {
     Pop,
     Dup,
     Send(Symbol, usize), // selector, num_args
+    // Superinstructions: a single fused op for the hot `<operand-load>; Send` pairs (the
+    // last operand of a send is overwhelmingly a local / constant / field — see
+    // profiling/superinstructions). Each pushes its operand then runs the normal send,
+    // saving one dispatch-loop step per send. Produced by the `fuse_bytecode` peephole
+    // pass; never emitted directly by the AST compiler.
+    SendLocal(Symbol, Symbol, usize), // var, selector, num_args  (was LoadLocal; Send)
+    SendConst(Constant, Symbol, usize), // constant, selector, num_args  (was Push; Send)
+    SendField(String, Symbol, usize), // field, selector, num_args  (was LoadField; Send)
     Return,
     Yeet,
     BlockReturn,

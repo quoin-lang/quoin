@@ -1711,11 +1711,18 @@ impl<'gc> VmState<'gc> {
                         .or(f.block.source_info.as_ref())
                         .cloned();
 
-                    let formatted_selector = if let Some(Instruction::Send(selector, num_args)) =
-                        f.block.bytecode.get(frame_ip)
-                    {
+                    // The failing instruction is a send — plain or a fused superinstruction;
+                    // pull `(selector, num_args)` from whichever form it is.
+                    let send_at_ip = match f.block.bytecode.get(frame_ip) {
+                        Some(Instruction::Send(s, n))
+                        | Some(Instruction::SendLocal(_, s, n))
+                        | Some(Instruction::SendConst(_, s, n))
+                        | Some(Instruction::SendField(_, s, n)) => Some((*s, *n)),
+                        _ => None,
+                    };
+                    let formatted_selector = if let Some((selector, num_args)) = send_at_ip {
                         let selector = selector.as_str();
-                        let args_vec = if *num_args > 0 {
+                        let args_vec = if num_args > 0 {
                             if i == n - 1 {
                                 self.last_send_args.clone()
                             } else {
@@ -2154,6 +2161,136 @@ impl<'gc> VmState<'gc> {
         Some(snippet_text.to_string())
     }
 
+    /// Materialize a `Constant` into a runtime `Value`. The body of the `Push` handler,
+    /// shared with the fused `SendConst` superinstruction.
+    fn materialize_constant(&mut self, mc: &Mutation<'gc>, constant: &Constant) -> Value<'gc> {
+        match constant {
+            Constant::Nil => self.new_nil(mc),
+            Constant::Bool(b) => self.new_bool(mc, *b),
+            Constant::Int(i) => self.new_int(mc, *i),
+            Constant::Double(f) => self.new_double(mc, *f),
+            Constant::String(s) => self.new_string(mc, s.clone()),
+            Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
+            Constant::Block(sb) => {
+                let parent_env = self.frames.last().map(|f| f.env);
+                let enclosing_method_id = self.frames.last().and_then(|f| f.enclosing_method_id);
+                let decl_block = sb.decl_block.as_ref().map(|db| {
+                    gc!(
+                        mc,
+                        Block {
+                            name: db.name.clone(),
+                            is_nested_block: db.is_nested_block,
+                            param_syms: db.param_syms.clone(),
+                            param_types: db.param_types.clone(),
+                            bytecode: db.bytecode.clone(),
+                            parent_env,
+                            enclosing_method_id,
+                            source_info: db.source_info.clone(),
+                            decl_block: None,
+                            source_map: db.source_map.clone(),
+                        }
+                    )
+                });
+                let block = Block {
+                    name: sb.name.clone(),
+                    is_nested_block: sb.is_nested_block,
+                    param_syms: sb.param_syms.clone(),
+                    param_types: sb.param_types.clone(),
+                    bytecode: sb.bytecode.clone(),
+                    parent_env,
+                    enclosing_method_id,
+                    source_info: sb.source_info.clone(),
+                    decl_block,
+                    source_map: sb.source_map.clone(),
+                };
+                self.new_block(mc, block)
+            }
+        }
+    }
+
+    /// Read instance field `name` off `self` in the current frame. The body of the
+    /// `LoadField` handler, shared with the fused `SendField` superinstruction.
+    /// Missing/undeclared field (or a non-object `self`) reads as nil.
+    fn load_field(&mut self, mc: &Mutation<'gc>, frame_idx: usize, name: &str) -> Value<'gc> {
+        let frame = &self.frames[frame_idx];
+        let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
+        if let Value::Object(obj) = self_val {
+            let class = obj.borrow().class;
+            // No slot (undeclared) or a slot past this instance's array (declared on the
+            // class after this object was created) => nil.
+            self.field_slot(class, name)
+                .and_then(|slot| obj.borrow().fields.get(slot).copied())
+                .unwrap_or_else(|| self.new_nil(mc))
+        } else {
+            self.new_nil(mc)
+        }
+    }
+
+    /// Execute a send: pop `num_args` then the receiver off the stack and dispatch
+    /// `selector`. Shared by the `Send` handler and the fused `Send*` superinstructions
+    /// (which push the send's last operand first). Advances the caller frame's ip by one
+    /// slot, then either tail-starts a block, invokes the resolved callable, or raises MNU.
+    fn exec_send(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        selector: Symbol,
+        num_args: usize,
+    ) -> Result<VmStatus<'gc>, QuoinError> {
+        let mut args = Vec::new();
+        for _ in 0..num_args {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+
+        let receiver = self.pop()?;
+        self.frames[frame_idx].ip += 1; // Advance caller frame IP
+
+        if let Value::Object(obj) = receiver
+            && let ObjectPayload::Block(block) = &obj.borrow().payload
+        {
+            if selector.as_str() == "value" || selector.as_str() == "value:" {
+                self.start_block(mc, *block, args, Some(receiver), Some(selector));
+                return Ok(VmStatus::Running);
+            }
+        }
+
+        // `last_send_args` is read only by the stack-trace formatter, and only for an
+        // innermost send that fails *in place* (no callee frame of its own): a failed
+        // lookup, a `MessageNotUnderstood`, or a native-method error (the last captured
+        // inside `Callable::call`). On success the args move into the callee frame
+        // (`Frame.args`), which the formatter reads instead — so we snapshot only on
+        // these error branches, not every send.
+        let method_opt = match self.lookup_method(mc, receiver, selector, &args) {
+            Ok(m) => m,
+            Err(e) => {
+                self.last_send_args = args;
+                return Err(e);
+            }
+        };
+        if let Some(callable) = method_opt {
+            callable.call(self, mc, Some(receiver), args, Some(selector))?;
+        } else {
+            // The selector may still exist with non-matching signatures; surface those
+            // filtered-out variants as a hint.
+            let candidates = self
+                .collect_method_candidates(receiver, selector)
+                .iter()
+                .map(|&mv| self.format_candidate_signature(mv, selector))
+                .collect();
+            let receiver_name = receiver.class_name();
+            let arg_names = args.iter().map(|a| a.class_name()).collect();
+            self.last_send_args = args;
+            return Err(QuoinError::MessageNotUnderstood {
+                receiver: receiver_name,
+                selector: selector.as_str().to_string(),
+                args: arg_names,
+                candidates,
+            });
+        }
+        Ok(VmStatus::Running)
+    }
+
     pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, QuoinError> {
         let res = self.step_internal(mc);
         if let Err(QuoinError::NonLocalReturn) = res {
@@ -2293,49 +2430,7 @@ impl<'gc> VmState<'gc> {
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::Push(constant) => {
-                let val = match constant {
-                    Constant::Nil => self.new_nil(mc),
-                    Constant::Bool(b) => self.new_bool(mc, *b),
-                    Constant::Int(i) => self.new_int(mc, *i),
-                    Constant::Double(f) => self.new_double(mc, *f),
-                    Constant::String(s) => self.new_string(mc, s.clone()),
-                    Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
-                    Constant::Block(sb) => {
-                        let parent_env = self.frames.last().map(|f| f.env);
-                        let enclosing_method_id =
-                            self.frames.last().and_then(|f| f.enclosing_method_id);
-                        let decl_block = sb.decl_block.as_ref().map(|db| {
-                            gc!(
-                                mc,
-                                Block {
-                                    name: db.name.clone(),
-                                    is_nested_block: db.is_nested_block,
-                                    param_syms: db.param_syms.clone(),
-                                    param_types: db.param_types.clone(),
-                                    bytecode: db.bytecode.clone(),
-                                    parent_env,
-                                    enclosing_method_id,
-                                    source_info: db.source_info.clone(),
-                                    decl_block: None,
-                                    source_map: db.source_map.clone(),
-                                }
-                            )
-                        });
-                        let block = Block {
-                            name: sb.name.clone(),
-                            is_nested_block: sb.is_nested_block,
-                            param_syms: sb.param_syms.clone(),
-                            param_types: sb.param_types.clone(),
-                            bytecode: sb.bytecode.clone(),
-                            parent_env,
-                            enclosing_method_id,
-                            source_info: sb.source_info.clone(),
-                            decl_block,
-                            source_map: sb.source_map.clone(),
-                        };
-                        self.new_block(mc, block)
-                    }
-                };
+                let val = self.materialize_constant(mc, constant);
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
@@ -2350,57 +2445,28 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::Send(selector, num_args) => {
                 let (selector, num_args) = (*selector, *num_args);
-                let mut args = Vec::new();
-                for _ in 0..num_args {
-                    args.push(self.pop()?);
-                }
-                args.reverse();
-
-                let receiver = self.pop()?;
-                self.frames[frame_idx].ip += 1; // Advance caller frame IP
-
-                if let Value::Object(obj) = receiver
-                    && let ObjectPayload::Block(block) = &obj.borrow().payload
-                {
-                    if selector.as_str() == "value" || selector.as_str() == "value:" {
-                        self.start_block(mc, *block, args, Some(receiver), Some(selector));
-                        return Ok(VmStatus::Running);
-                    }
-                }
-
-                // `last_send_args` is read only by the stack-trace formatter, and only
-                // for an innermost send that fails *in place* (no callee frame of its
-                // own): a failed lookup, a `MessageNotUnderstood`, or a native-method
-                // error (the last captured inside `Callable::call`). On success the args
-                // move into the callee frame (`Frame.args`), which the formatter reads
-                // instead — so we snapshot only on these error branches, not every send.
-                let method_opt = match self.lookup_method(mc, receiver, selector, &args) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        self.last_send_args = args;
-                        return Err(e);
-                    }
-                };
-                if let Some(callable) = method_opt {
-                    callable.call(self, mc, Some(receiver), args, Some(selector))?;
-                } else {
-                    // The selector may still exist with non-matching signatures;
-                    // surface those filtered-out variants as a hint.
-                    let candidates = self
-                        .collect_method_candidates(receiver, selector)
-                        .iter()
-                        .map(|&mv| self.format_candidate_signature(mv, selector))
-                        .collect();
-                    let receiver_name = receiver.class_name();
-                    let arg_names = args.iter().map(|a| a.class_name()).collect();
-                    self.last_send_args = args;
-                    return Err(QuoinError::MessageNotUnderstood {
-                        receiver: receiver_name,
-                        selector: selector.as_str().to_string(),
-                        args: arg_names,
-                        candidates,
-                    });
-                }
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            // Fused superinstructions (see `Instruction::SendLocal` doc): push the last
+            // operand the send consumes, then run the identical send path.
+            Instruction::SendLocal(var, selector, num_args) => {
+                let (var, selector, num_args) = (*var, *selector, *num_args);
+                let frame = &self.frames[frame_idx];
+                let val = EnvFrame::get(frame.env, var).unwrap_or_else(|| self.new_nil(mc));
+                self.push(val);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            Instruction::SendConst(constant, selector, num_args) => {
+                let (selector, num_args) = (*selector, *num_args);
+                let val = self.materialize_constant(mc, constant);
+                self.push(val);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            Instruction::SendField(field, selector, num_args) => {
+                let (selector, num_args) = (*selector, *num_args);
+                let val = self.load_field(mc, frame_idx, field);
+                self.push(val);
+                return self.exec_send(mc, frame_idx, selector, num_args);
             }
             Instruction::Return | Instruction::BlockReturn => {
                 // Run calls deferred during this frame (e.g. mixin requirement
@@ -2808,19 +2874,7 @@ impl<'gc> VmState<'gc> {
             }
 
             Instruction::LoadField(name) => {
-                let frame = &self.frames[frame_idx];
-                let self_val =
-                    EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-                let val = if let Value::Object(obj) = self_val {
-                    let class = obj.borrow().class;
-                    // No slot (undeclared) or a slot past this instance's array
-                    // (declared on the class after this object was created) => nil.
-                    self.field_slot(class, name)
-                        .and_then(|slot| obj.borrow().fields.get(slot).copied())
-                        .unwrap_or_else(|| self.new_nil(mc))
-                } else {
-                    self.new_nil(mc)
-                };
+                let val = self.load_field(mc, frame_idx, name);
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }

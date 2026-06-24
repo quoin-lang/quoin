@@ -50,6 +50,94 @@ impl CodeBlock {
     }
 }
 
+fn jump_offset(inst: &Instruction) -> Option<isize> {
+    match inst {
+        Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => Some(*o),
+        _ => None,
+    }
+}
+
+fn set_jump_offset(inst: &mut Instruction, off: isize) {
+    match inst {
+        Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => *o = off,
+        _ => {}
+    }
+}
+
+/// Peephole pass: fuse the hot `<operand-load>; Send` instruction pairs into single
+/// superinstructions (`SendLocal`/`SendConst`/`SendField`), saving one dispatch-loop step
+/// per fused send (the send's last operand is overwhelmingly a local / constant / field —
+/// see `profiling/superinstructions`). Jumps are relative and block-local, so removing an
+/// instruction requires: (a) never fusing a pair whose *second* op is a jump target (a jump
+/// landing there must run only the Send, not re-run the load), and (b) recomputing every
+/// jump offset against the old→new index map. `source_map` stays index-aligned — the fused
+/// slot keeps the *Send's* entry, where a dispatch error surfaces. Targeting the *first* of
+/// a fused pair stays correct: the fused op reproduces load-then-send.
+pub(crate) fn fuse_bytecode(
+    bytecode: Vec<Instruction>,
+    source_map: Vec<Option<SourceInfo>>,
+) -> (Vec<Instruction>, Vec<Option<SourceInfo>>) {
+    let n = bytecode.len();
+
+    // (a) Absolute jump-target set.
+    let mut is_target = vec![false; n];
+    for (i, inst) in bytecode.iter().enumerate() {
+        if let Some(off) = jump_offset(inst) {
+            let tgt = i as isize + off;
+            if (0..n as isize).contains(&tgt) {
+                is_target[tgt as usize] = true;
+            }
+        }
+    }
+
+    // Fuse eligible pairs; track old→new and new→old index maps for the jump fixup.
+    let mut new_code: Vec<Instruction> = Vec::with_capacity(n);
+    let mut new_smap: Vec<Option<SourceInfo>> = Vec::with_capacity(n);
+    let mut old_to_new = vec![0usize; n + 1]; // +1 so a jump-to-end target maps cleanly
+    let mut new_to_old: Vec<usize> = Vec::with_capacity(n);
+
+    let mut i = 0;
+    while i < n {
+        old_to_new[i] = new_code.len();
+        if i + 1 < n
+            && !is_target[i + 1]
+            && let Instruction::Send(sel, nargs) = &bytecode[i + 1]
+        {
+            let fused = match &bytecode[i] {
+                Instruction::LoadLocal(v) => Some(Instruction::SendLocal(*v, *sel, *nargs)),
+                Instruction::Push(c) => Some(Instruction::SendConst(c.clone(), *sel, *nargs)),
+                Instruction::LoadField(f) => Some(Instruction::SendField(f.clone(), *sel, *nargs)),
+                _ => None,
+            };
+            if let Some(fused) = fused {
+                old_to_new[i + 1] = new_code.len(); // never a jump target (guarded above)
+                new_to_old.push(i);
+                new_code.push(fused);
+                new_smap.push(source_map[i + 1].clone()); // keep the Send's source entry
+                i += 2;
+                continue;
+            }
+        }
+        new_to_old.push(i);
+        new_code.push(bytecode[i].clone());
+        new_smap.push(source_map[i].clone());
+        i += 1;
+    }
+    old_to_new[n] = new_code.len();
+
+    // (b) Recompute each jump's relative offset against the new layout.
+    for new_idx in 0..new_code.len() {
+        if let Some(old_off) = jump_offset(&new_code[new_idx]) {
+            let old_idx = new_to_old[new_idx];
+            let old_target = (old_idx as isize + old_off) as usize;
+            let new_target = old_to_new[old_target] as isize;
+            set_jump_offset(&mut new_code[new_idx], new_target - new_idx as isize);
+        }
+    }
+
+    (new_code, new_smap)
+}
+
 struct Scope {
     locals: HashSet<String>,
 }
@@ -159,15 +247,16 @@ impl Compiler {
 
         cb.push(Instruction::Return);
 
+        let (bytecode, source_map) = fuse_bytecode(cb.bytecode, cb.source_map);
         Ok(StaticBlock {
             name: None,
             is_nested_block: false,
             param_syms: Vec::new(),
             param_types: Vec::new(),
-            bytecode: SharedBytecode(Rc::new(cb.bytecode)),
+            bytecode: SharedBytecode(Rc::new(bytecode)),
             source_info: program.source_info.clone(),
             decl_block: None,
-            source_map: SharedSourceMap(Rc::new(cb.source_map)),
+            source_map: SharedSourceMap(Rc::new(source_map)),
         })
     }
 
@@ -811,15 +900,17 @@ impl Compiler {
 
         let block_name = block.name.as_ref().map(|s| s.value.clone());
 
+        let (fused_bytecode, fused_source_map) =
+            fuse_bytecode(block_bytecode.bytecode, block_bytecode.source_map);
         let static_block = StaticBlock {
             name: block_name,
             is_nested_block: true,
             param_syms: crate::value::intern_param_syms(&param_names),
             param_types,
-            bytecode: SharedBytecode(Rc::new(block_bytecode.bytecode)),
+            bytecode: SharedBytecode(Rc::new(fused_bytecode)),
             source_info: block.source_info.clone(),
             decl_block,
-            source_map: SharedSourceMap(Rc::new(block_bytecode.source_map)),
+            source_map: SharedSourceMap(Rc::new(fused_source_map)),
         };
 
         bytecode.push(Instruction::Push(Constant::Block(static_block)));
@@ -969,27 +1060,36 @@ mod tests {
         ]
     }
 
+    // Apply the same superinstruction fusion the compiler runs, so these tests can express
+    // their expected bytecode as the readable *unfused* lowering and assert the compiler
+    // emits its fused form. (Fusion itself is pinned by the `fuse_*` tests above; for a
+    // snippet with no fuseable pair this is the identity.)
+    fn fused(v: Vec<Instruction>) -> Vec<Instruction> {
+        let n = v.len();
+        fuse_bytecode(v, vec![None; n]).0
+    }
+
     #[test]
     fn test_compile_literals() {
         let res = compile(vec![int(123)]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Int(123)));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         let res = compile(vec![double(1.5)]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Double(1.5)));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         let res = compile(vec![string("hello")]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::String("hello".to_string())));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         let res = compile(vec![sym("mysym")]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Symbol("mysym".to_string())));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
     }
 
     #[test]
@@ -997,29 +1097,29 @@ mod tests {
         let res = compile(vec![local_id("nil")]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Nil));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         let res = compile(vec![local_id("true")]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Bool(true)));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         let res = compile(vec![local_id("false")]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Bool(false)));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // self is always local
         let res = compile(vec![local_id("self")]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadLocal(Symbol::intern("self")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // unknown name defaults to LoadGlobal
         let res = compile(vec![local_id("my_var")]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("my_var")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
     }
 
     #[test]
@@ -1041,7 +1141,7 @@ mod tests {
         expected.push(Instruction::Push(Constant::Int(42)));
         expected.push(Instruction::Dup);
         expected.push(Instruction::DefineLocal(Symbol::intern("x")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // Destructuring assignment (e.g. a b = x)
         let lval_a = Node {
@@ -1079,7 +1179,7 @@ mod tests {
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send(Symbol::intern("at:"), 1));
         expected.push(Instruction::DefineLocal(Symbol::intern("b")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // Splat: *rest = x; (under destruct)
         let lval_rest = Node {
@@ -1110,7 +1210,7 @@ mod tests {
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send(Symbol::intern("sliceFrom:"), 1));
         expected.push(Instruction::DefineLocal(Symbol::intern("rest")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // IgnoredSplatLValue: _ *_ = x;
         let lval_ignore = Node {
@@ -1130,7 +1230,7 @@ mod tests {
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Dup);
         expected.push(Instruction::DefineLocal(Symbol::intern("__qn_temp_1")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // SubLValue: a (b c) = x;
         let lval_a = Node {
@@ -1193,7 +1293,7 @@ mod tests {
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send(Symbol::intern("at:"), 1));
         expected.push(Instruction::DefineLocal(Symbol::intern("c")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
     }
 
     #[test]
@@ -1204,14 +1304,14 @@ mod tests {
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Send(Symbol::intern("foo:"), 1));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // Implicit subject (self): .foo
         let res = compile(vec![call(None, "foo", vec![])]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadLocal(Symbol::intern("self")));
         expected.push(Instruction::Send(Symbol::intern("foo"), 0));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
     }
 
     #[test]
@@ -1222,28 +1322,28 @@ mod tests {
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Push(Constant::Int(2)));
         expected.push(Instruction::Send(Symbol::intern("+:"), 1));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // -x
         let res = compile(vec![unary(UnaryOperatorType::Sub, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Send(Symbol::intern("-"), 0));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // !x
         let res = compile(vec![unary(UnaryOperatorType::Bang, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Send(Symbol::intern("!"), 0));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // +x
         let res = compile(vec![unary(UnaryOperatorType::Add, local_id("x"))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::LoadGlobal(ns("x")));
         expected.push(Instruction::Send(Symbol::intern("+"), 0));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // x && y
         let res = compile(vec![binary(
@@ -1258,7 +1358,7 @@ mod tests {
         expected.push(Instruction::ElseJump(3));
         expected.push(Instruction::Pop);
         expected.push(Instruction::LoadGlobal(ns("y")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // x || y
         let res = compile(vec![binary(
@@ -1273,7 +1373,7 @@ mod tests {
         expected.push(Instruction::IfJump(3));
         expected.push(Instruction::Pop);
         expected.push(Instruction::LoadGlobal(ns("y")));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
     }
 
     #[test]
@@ -1305,24 +1405,30 @@ mod tests {
         }])
         .unwrap();
 
+        // The inner block body fuses too: LoadLocal(x); Push(1); Send(+:) -> LoadLocal(x);
+        // SendConst(1, +:). Fuse the readable lowering (bytecode + source map together).
+        let (inner_bc, inner_sm) = fuse_bytecode(
+            vec![
+                Instruction::LoadLocal(Symbol::intern("x")),
+                Instruction::Push(Constant::Int(1)),
+                Instruction::Send(Symbol::intern("+:"), 1),
+                Instruction::Return,
+            ],
+            vec![None; 4],
+        );
         let inner_static = StaticBlock {
             name: None,
             is_nested_block: true,
             param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
             param_types: vec!["Object".to_string()],
-            bytecode: SharedBytecode(Rc::new(vec![
-                Instruction::LoadLocal(Symbol::intern("x")),
-                Instruction::Push(Constant::Int(1)),
-                Instruction::Send(Symbol::intern("+:"), 1),
-                Instruction::Return,
-            ])),
+            bytecode: SharedBytecode(Rc::new(inner_bc)),
             source_info: None,
             decl_block: None,
-            source_map: SharedSourceMap(Rc::new(vec![None; 4])),
+            source_map: SharedSourceMap(Rc::new(inner_sm)),
         };
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Block(inner_static)));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
     }
 
     #[test]
@@ -1339,7 +1445,7 @@ mod tests {
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Push(Constant::Int(2)));
         expected.push(Instruction::NewList(2));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // #{'a': 1}
         let map = Node {
@@ -1354,7 +1460,7 @@ mod tests {
         expected.push(Instruction::Push(Constant::String("a".to_string())));
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::NewMap(1));
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
 
         // #/^[a-z]+$/
         let regex = Node {
@@ -1367,7 +1473,7 @@ mod tests {
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::String("^[a-z]+$".to_string())));
         expected.push(Instruction::NewRegex);
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
     }
 
     #[test]
@@ -1466,7 +1572,7 @@ mod tests {
         });
         expected.push(Instruction::Push(Constant::Block(expected_block)));
         expected.push(Instruction::ExecuteBlockWithSelf);
-        assert_eq!(res.bytecode, expected);
+        assert_eq!(res.bytecode, fused(expected));
     }
 
     #[test]
@@ -1518,5 +1624,151 @@ mod tests {
             }
         }
         assert!(found_inner_block);
+    }
+
+    // --- superinstruction fusion (`fuse_bytecode`) ---
+
+    fn si(line: usize) -> Option<SourceInfo> {
+        Some(SourceInfo {
+            filename: String::new(),
+            line,
+            column: 0,
+            start: 0,
+            end: 0,
+            source_text: None,
+        })
+    }
+
+    #[test]
+    fn fuse_basic_operand_send_pairs() {
+        let sel = Symbol::intern("foo:");
+        let code = vec![
+            Instruction::LoadLocal(Symbol::intern("a")),
+            Instruction::Send(sel, 1),
+            Instruction::Push(Constant::Int(3)),
+            Instruction::Send(sel, 1),
+            Instruction::LoadField("x".into()),
+            Instruction::Send(sel, 1),
+            Instruction::Return,
+        ];
+        let (out, out_smap) = fuse_bytecode(code.clone(), vec![None; code.len()]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::SendLocal(Symbol::intern("a"), sel, 1),
+                Instruction::SendConst(Constant::Int(3), sel, 1),
+                Instruction::SendField("x".into(), sel, 1),
+                Instruction::Return,
+            ]
+        );
+        assert_eq!(out.len(), out_smap.len());
+    }
+
+    #[test]
+    fn fuse_leaves_non_fuseable_sends_alone() {
+        // A Send with no preceding fuseable operand-load stays a plain Send.
+        let sel = Symbol::intern("g");
+        let code = vec![Instruction::Send(sel, 0), Instruction::Return];
+        let (out, _) = fuse_bytecode(code.clone(), vec![None; code.len()]);
+        assert_eq!(out, code);
+    }
+
+    #[test]
+    fn fuse_does_not_cross_jump_target() {
+        let sel = Symbol::intern("f");
+        // The IfJump targets the Send of a (LoadLocal, Send) pair — fusing would let the
+        // jump skip the LoadLocal, so it must stay unfused.
+        let code = vec![
+            Instruction::Push(Constant::Bool(true)),     // 0
+            Instruction::IfJump(3),                      // 1 -> target 4 (the Send)
+            Instruction::Push(Constant::Nil),            // 2
+            Instruction::LoadLocal(Symbol::intern("a")), // 3
+            Instruction::Send(sel, 1),                   // 4  (jump target)
+            Instruction::Return,                         // 5
+        ];
+        let (out, _) = fuse_bytecode(code.clone(), vec![None; code.len()]);
+        assert_eq!(out, code); // nothing fuseable here, all left intact
+        let jpos = out
+            .iter()
+            .position(|i| matches!(i, Instruction::IfJump(_)))
+            .unwrap();
+        if let Instruction::IfJump(off) = out[jpos] {
+            assert!(matches!(
+                out[(jpos as isize + off) as usize],
+                Instruction::Send(_, _)
+            ));
+        }
+    }
+
+    #[test]
+    fn fuse_fixes_forward_jump_offset() {
+        let sel = Symbol::intern("f");
+        // Jump forward *over* a fused pair: the collapsed slot shrinks the offset.
+        let code = vec![
+            Instruction::Push(Constant::Bool(true)),     // 0
+            Instruction::IfJump(4),                      // 1 -> target 5 (Return)
+            Instruction::LoadLocal(Symbol::intern("a")), // 2 \ fuse
+            Instruction::Send(sel, 0),                   // 3 /
+            Instruction::Pop,                            // 4
+            Instruction::Return,                         // 5  (target)
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 6]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::Push(Constant::Bool(true)),
+                Instruction::IfJump(3),
+                Instruction::SendLocal(Symbol::intern("a"), sel, 0),
+                Instruction::Pop,
+                Instruction::Return,
+            ]
+        );
+        if let Instruction::IfJump(off) = out[1] {
+            assert!(matches!(out[(1 + off) as usize], Instruction::Return));
+        }
+    }
+
+    #[test]
+    fn fuse_fixes_backward_jump_offset() {
+        let sel = Symbol::intern("f");
+        // Back-edge over a fused pair at the loop top: offset grows toward 0 by one.
+        let code = vec![
+            Instruction::LoadLocal(Symbol::intern("a")), // 0 \ fuse (loop top)
+            Instruction::Send(sel, 0),                   // 1 /
+            Instruction::Push(Constant::Bool(true)),     // 2
+            Instruction::IfJump(-3),                     // 3 -> target 0
+            Instruction::Return,                         // 4
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 5]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::SendLocal(Symbol::intern("a"), sel, 0),
+                Instruction::Push(Constant::Bool(true)),
+                Instruction::IfJump(-2),
+                Instruction::Return,
+            ]
+        );
+        if let Instruction::IfJump(off) = out[2] {
+            assert!(matches!(
+                out[(2 + off) as usize],
+                Instruction::SendLocal(..)
+            ));
+        }
+    }
+
+    #[test]
+    fn fuse_keeps_source_map_aligned_to_send() {
+        let sel = Symbol::intern("f");
+        let code = vec![
+            Instruction::LoadLocal(Symbol::intern("a")),
+            Instruction::Send(sel, 0),
+            Instruction::Return,
+        ];
+        let (out, out_smap) = fuse_bytecode(code, vec![si(1), si(2), si(3)]);
+        assert_eq!(out.len(), out_smap.len());
+        // The fused slot keeps the Send's entry (line 2), not the LoadLocal's (line 1).
+        assert_eq!(out_smap[0], si(2));
+        assert_eq!(out_smap[1], si(3));
     }
 }
