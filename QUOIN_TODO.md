@@ -131,9 +131,6 @@ This document outlines the language features, compiler updates, and VM modificat
   - `Error` base (`message`/`payload`, class-side `throw:`/`throw:payload:`) + core subtypes (`TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`) in `00-bootstrap.qn`. Catch-by-type via `case`/`~`.
   - Runtime now raises structured errors: `QuoinError::Thrown` marker (value rides in `active_exception`), and `vm.quoinerror_to_value` maps internal `QuoinError` variants to typed Quoin `Error` objects at the `catch:` boundary. `does:throw:` widened to match by value/type or message string.
   - [ ] Future: give the VM more fine-grained internal error variants and route more raise sites through typed Quoin errors.
-- [ ] Implement DateTime.
-- [ ] Implement Decimal.
-  - rust_decimal crate
 - [x] Make sure #symbol types are working.
 - [x] Language server (~/code/quoin-language-server/)
   - [x] VSCode plugin (~/code/quoin-language-server/editors/vscode/)
@@ -317,6 +314,84 @@ exist — depends on [[eval-bindings]] (`eval:bindings:`, §8), the `Runtime.eva
 (Bugs below), and an `[IO]Stdin` line-read helper. The Rust REPL is the bootstrap; move pieces over
 incrementally (read+eval+print loop first, then meta-commands, then editing if a Quoin-side line
 editor ever exists).
+
+## Standard Library
+
+A modular stdlib backlog — mostly self-contained native classes (often a thin wrapper over a Rust
+crate) plus `qnlib` glue, sized to pick up between larger changes. **⭐ = small, self-contained,
+foundational** (good first picks). Suggested crates are noted where one fits; for small formats a
+hand-rolled parser may be preferable to taking on a dependency's surface. Cross-refs: the async/net
+primitives live under `## Networking & Async I/O`, and reflection-over-the-*running*-program is the
+deferred `Mirror` in `## REPL`.
+
+**Numbers & math**
+- [ ] ⭐ **Math** — `sqrt`/`pow:`/`exp`/`ln`/`log:`, trig (`sin:`/`cos:`/`tan:` + inverses),
+  `floor`/`ceil`/`round`/`abs`, `min:`/`max:`, constants `pi`/`e`/`tau`. Native methods on
+  `Integer`/`Double` plus a `Math` namespace. Clearly missing; broadly depended on.
+- [ ] **Decimal** — arbitrary-precision / exact decimal arithmetic (money, etc.) (`rust_decimal`).
+- [ ] **BigInt** — arbitrary-precision integers (`num-bigint`). Open design Q: does `Integer`
+  auto-promote on overflow, or is `BigInt` a distinct type?
+- [ ] **Statistics** — `sum`/`mean`/`median`/`mode`/`variance`/`stddev`/`percentile:` on `List`
+  (pure `qnlib` over the collection protocol — no native needed).
+
+**Data formats & serialization**
+- [ ] **JSON** — `parse`/`generate` mapping to Map/List/String/Number/Bool/Nil, with a pretty
+  option (`serde_json`, or hand-rolled to avoid the serde surface).
+- [ ] ⭐ **base64 / hex** — encode/decode between `Bytes` and `String`.
+- [ ] **CSV** — read/write with quoting/escaping. Later: **TOML**/**YAML** (config) and
+  **MessagePack** (binary, pairs with `Bytes`).
+
+**Text & presentation**
+- [ ] **Pretty-printer** — structural, width-aware rendering of nested collections/objects
+  (Wadler/Leijen-style groups + line breaks). Wire into the REPL result display for large values;
+  console width is already plumbed (`VmOptions.console_width`).
+- [ ] ⭐ **ANSI / color** — public terminal styling API (`[Term]`/`Color`): colors, bold/underline,
+  `NO_COLOR`-aware. (The internal `ansi_colorizer` is for highlighting; this is the user-facing one.)
+- [ ] **Logging** — leveled logger (`debug`/`info`/`warn`/`error`), formatting, pluggable sinks,
+  defaulting to `[IO]Stderr`.
+
+**Time**
+- [ ] **DateTime** — civil date/time + instants, RFC 3339 parse/format, components, arithmetic,
+  time zones (`jiff`, or `time`).
+- [ ] **Duration & monotonic clock** — a `Duration` value type and `Instant.now`/elapsed
+  (generalizes the millisecond-only `Timer`).
+
+**Crypto & hashing**
+- [ ] ⭐ **Digests** — `sha256`/`sha1`/`md5`/`blake3` + HMAC over `Bytes`/`String` (`sha2`, `blake3`).
+- [ ] ⭐ **UUID** — v4 (random) and v7 (time-ordered) (`uuid`).
+- [ ] **Secure random** — CSPRNG bytes (pairs with Random/UUID). Later: symmetric (AES-GCM) and
+  signatures (Ed25519).
+
+**Compression & archives**
+- [ ] ⭐ **gzip / zlib / deflate** (`flate2`) — one-shot + streaming over `Bytes`/streams.
+- [ ] ⭐ **zstd** (`zstd`).
+- [ ] **tar** (`tar`) and **zip** (`zip`) — archive read/write.
+
+**System & process**
+- [ ] ⭐ **Environment** — read/iterate/set process env vars (`[OS]Env`).
+- [ ] ⭐ **Path** — `join:`/`dirname`/`basename`/`extension`/`normalize`/`isAbsolute?` (string-level
+  path manipulation, separate from `[IO]File`).
+- [ ] **Process / subprocess** — spawn a command, capture stdout/stderr/exit; async-aware (parks on
+  the scheduler like socket I/O).
+- [ ] ⭐ **`[IO]Stdin`** — line/byte reading. Also unblocks P3 "REPL in Quoin" (see `## REPL`).
+- [ ] **CLI argument parsing** — options/flags/positionals/subcommands on top of
+  `VmOptions.arguments`.
+
+**Networking** (built on the async arc — see `## Networking & Async I/O`)
+- [ ] **HTTP client (high-level)** — `get:`/`post:…`/`request:`, headers/body, redirects, over
+  sockets + the `[HTTP]Parser` + TLS. The natural next layer above the raw sockets/parser.
+- [ ] ⭐ **URL** — parse/build (scheme/host/port/path/query); `qnlib/net/http.qn` already splits
+  URLs ad hoc.
+- [ ] **DNS** resolution (async) and **WebSocket** (over the HTTP upgrade) — later.
+
+**Metaprogramming**
+- [ ] **Parser / AST to Quoin** — expose the parser and a visitable AST as Quoin objects so Quoin
+  code can read/transform source. Foundation for macros; companion to the deferred REPL `Mirror`
+  (reflection over the running program) and `Runtime.eval:`.
+
+**Concurrency** (on the async scheduler)
+- [ ] **Channels** — buffered/unbuffered async queues passing values between tasks (send/receive
+  park on the scheduler); enables CSP-style structured concurrency above raw `gather`/`spawn`.
 
 ## Bugs/Odd Behavior
 - [x] **Operator precedence was inverted for arithmetic.** In the pest Pratt parser (`src/parser/pest/parser.rs`), `+`/`-` bound *tighter* than `*`/`/`/`%`, and `..` bound tighter than all arithmetic (`2 + 3 * 4 == 20`; `2 .. 3 + 1` errored as `(2..3) + 1`). Fixed by reordering the `.op(...)` levels to the conventional ordering — loosest→tightest: `||` · `&&` · `== !=` · comparison · `~` · `..` · `+ -` · `* / %`, with postfix `.method` tighter than any infix and prefix tightest. Now `2 + 3 * 4 == 14` and `2 .. n + 1` is `2 .. (n + 1)`. Full `qnlib` test suite passes (0 regressions); docs updated (`docs/language/01-foundations.md` §6 and appendices A/C).
