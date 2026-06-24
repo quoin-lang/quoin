@@ -2,7 +2,7 @@
 //! directly; the value walk is tested end-to-end by running `<expr>.pp` through a VM and
 //! comparing the resulting string.
 
-use super::{best, bracket, text};
+use super::{best, bracket, render, text};
 use crate::parser::NodeValue;
 use crate::value::{ObjectPayload, Value};
 use crate::vm::{VmOptions, VmState};
@@ -119,6 +119,64 @@ fn s_is_decoupled_from_display() {
     );
     // A regex's `.s` (no override) likewise goes through `.pp` → its literal form.
     assert_eq!(pp("#/ab/.s"), "#/ab/");
+}
+
+#[test]
+fn pp_methods_show_variant_signatures() {
+    // No Quoin reflection surfaces a `Method` value, so pull one from the class's method map.
+    let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+        let mut vm = VmState::new(mc, VmOptions::default());
+        crate::runner::register_builtins(mc, &mut vm);
+        vm
+    });
+    arena.mutate_root(|mc, vm| {
+        let src = "Foo <- { greet -> { 'hi' } fetch: -> { |x:Integer| x } \
+                   fetch: --> { |y:String| y } }";
+        let node = crate::parser::parse_quoin_string(src);
+        let NodeValue::Program(p) = &node.value else {
+            panic!("not a program");
+        };
+        let sb = crate::compiler::Compiler::new().compile_program(p).unwrap();
+        let block = crate::runtime::runtime::build_block(mc, &sb);
+        vm.execute_block(mc, block, Vec::new(), None).unwrap();
+
+        let foo = vm
+            .globals
+            .borrow()
+            .iter()
+            .find(|(k, _)| k.to_string() == "Foo")
+            .map(|(_, v)| *v)
+            .expect("Foo global");
+        let Value::Class(c) = foo else {
+            panic!("Foo is not a class");
+        };
+        let method = |sel: &str| *c.borrow().instance_methods.get(sel).expect(sel);
+
+        // A unary user method.
+        assert_eq!(render(method("greet"), 80), "Method(greet)");
+        // A typed multimethod: both variant signatures over the chain.
+        let fetch = render(method("fetch:"), 80);
+        assert!(
+            fetch.starts_with("Method(")
+                && fetch.contains("fetch:Integer")
+                && fetch.contains("fetch:String"),
+            "{fetch}"
+        );
+
+        // A native method (inherited `pp` on Object) is marked `(native)`.
+        let object = vm
+            .globals
+            .borrow()
+            .iter()
+            .find(|(k, _)| k.to_string() == "Object")
+            .map(|(_, v)| *v)
+            .expect("Object global");
+        let Value::Class(oc) = object else {
+            panic!("Object is not a class");
+        };
+        let pp_method = *oc.borrow().instance_methods.get("pp").expect("Object#pp");
+        assert_eq!(render(pp_method, 80), "Method(pp (native))");
+    });
 }
 
 #[test]

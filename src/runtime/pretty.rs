@@ -8,8 +8,10 @@
 //! Layout uses a Wadler/Leijen document algebra: each collection is a `Group` that prints flat
 //! when it fits the target width, else breaks onto indented lines.
 
+use crate::introspect::{self, MethodVariant};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
+use crate::runtime::method::NativeMethodState;
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
 use crate::value::{Object, ObjectPayload, Value};
@@ -315,6 +317,8 @@ fn non_collection_native_doc<'gc>(
             ),
             Err(_) => text("<KeyValuePair>"),
         },
+        // A method shows its selector + each multimethod variant's signature.
+        "Method" => method_doc(value),
         _ => text(format!("<{cname}>")),
     }
 }
@@ -322,6 +326,68 @@ fn non_collection_native_doc<'gc>(
 /// A `label: <value>` doc with an unquoted label (named object / pair fields).
 fn field_doc<'gc>(label: &str, v: Value<'gc>, visited: &mut HashSet<usize>) -> Doc {
     Doc::Cat(vec![text(format!("{label}: ")), value_to_doc(v, visited)])
+}
+
+/// `Method(<sig> | <sig> | …)` over the multimethod chain; each variant's signature via
+/// `introspect::signature` (selector with param types, ` {…}` if guarded, ` (native)` if a
+/// native body).
+fn method_doc<'gc>(value: Value<'gc>) -> Doc {
+    let mut sigs: Vec<String> = Vec::new();
+    let mut cur = Some(value);
+    while let Some(node) = cur {
+        if sigs.len() >= 64 {
+            sigs.push("…".to_string()); // guard against a malformed cyclic chain
+            break;
+        }
+        match node
+            .with_native_state::<NativeMethodState, _, _>(|m| (variant_signature(m), m.get_next()))
+        {
+            Ok((sig, next)) => {
+                sigs.push(sig);
+                cur = next;
+            }
+            Err(_) => break,
+        }
+    }
+    if sigs.is_empty() {
+        text("<Method>")
+    } else {
+        text(format!("Method({})", sigs.join(" | ")))
+    }
+}
+
+/// One chain node's signature: param types from the user block (with its guard) or from the
+/// native method's declared types; an `"Object"` type is normalized to an untyped param.
+fn variant_signature(m: &NativeMethodState) -> String {
+    let untyped = |t: &String| (t != "Object").then(|| t.clone());
+    let (param_types, guarded, native): (Vec<Option<String>>, bool, bool) =
+        if let Some(Value::Object(o)) = m.get_block() {
+            let b = o.borrow();
+            if let ObjectPayload::Block(blk) = &b.payload {
+                (
+                    blk.param_types.iter().map(untyped).collect(),
+                    blk.decl_block.is_some(),
+                    false,
+                )
+            } else {
+                (Vec::new(), false, false)
+            }
+        } else {
+            let pts = m
+                .native_param_types()
+                .map(|v| v.iter().map(untyped).collect())
+                .unwrap_or_default();
+            (pts, false, true)
+        };
+    introspect::signature(
+        &m.selector,
+        &MethodVariant {
+            param_types,
+            guarded,
+            native,
+            source: None,
+        },
+    )
 }
 
 /// A `'`-quoted, escaped string literal (`it's` → `'it\'s'`).
