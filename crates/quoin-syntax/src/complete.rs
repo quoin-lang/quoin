@@ -177,6 +177,15 @@ mod tests {
     }
 
     #[test]
+    fn trailing_range_operator() {
+        // A trailing `..` (range with the RHS not yet typed), with and without a space and on
+        // various LHS shapes. The placeholder operand supplies the missing bound.
+        for src in ["1..", "1 ..", "n..", "arr ..", "(1 + 2)..", "1.0.."] {
+            assert!(completes(src), "should complete: {src:?}");
+        }
+    }
+
+    #[test]
     fn open_delimiters_and_strings() {
         for src in [
             "#(1 2", "Foo <- {", "( a + b", "#{ 'a':", "#< 1 2", "'hello", "#/ab",

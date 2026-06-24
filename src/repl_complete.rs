@@ -26,6 +26,9 @@ pub struct CompletionIndex {
     pub words: Vec<String>,
     /// Namespace path names (`IO`, `HTTP`, …) — completed inside `[ … ]`.
     pub namespaces: Vec<String>,
+    /// Fully-qualified namespaced global names (`[IO]File`, `[HTTP]Parser`, …) — completed
+    /// after a closed `[ns]` (`[IO]Fi` → `[IO]File`).
+    pub namespaced: Vec<String>,
     /// Class name → its class-side selectors (for a `ClassName.` receiver).
     pub class_side: HashMap<String, Vec<String>>,
     /// Class name → its instance selectors, inherited included (for a value receiver).
@@ -38,13 +41,16 @@ pub struct CompletionIndex {
 /// returns owned data with no `'gc` lifetime, so the caller keeps it past the arena borrow.
 pub fn build_completion_index<'gc>(vm: &VmState<'gc>) -> CompletionIndex {
     let mut words: Vec<String> = Vec::new();
+    let mut namespaced: Vec<String> = Vec::new();
     let mut class_side: HashMap<String, Vec<String>> = HashMap::new();
     let mut instance_side: HashMap<String, Vec<String>> = HashMap::new();
 
     for g in introspect::globals(vm) {
-        // Only plain identifiers are completable as bare words; namespaced names like
-        // `[IO]File` are reachable via the `[ … ]` path, not a bare fragment.
-        if is_plain_ident(&g.name) {
+        // A namespaced name (`[IO]File`) is completed via the `[ns]…` path, not as a bare
+        // word; a plain identifier is a bare-word candidate.
+        if g.name.starts_with('[') {
+            namespaced.push(g.name.clone());
+        } else if is_plain_ident(&g.name) {
             words.push(g.name.clone());
         }
         if let GlobalKind::Class = g.kind {
@@ -76,9 +82,13 @@ pub fn build_completion_index<'gc>(vm: &VmState<'gc>) -> CompletionIndex {
     words.sort();
     words.dedup();
 
+    namespaced.sort();
+    namespaced.dedup();
+
     CompletionIndex {
         words,
         namespaces: introspect::find_namespaces(vm, ""),
+        namespaced,
         class_side,
         instance_side,
         local_class,
@@ -99,6 +109,16 @@ pub fn complete_input(line: &str, pos: usize, index: &CompletionIndex) -> (usize
     if let Some(open) = open_namespace_bracket(&bytes[..fstart]) {
         let nsfrag = &line[open + 1..pos];
         return (open + 1, filter_prefix(&index.namespaces, nsfrag));
+    }
+
+    // Namespaced-name position: the fragment sits right after a closed `[ns]` (`[IO]Fi`).
+    // Complete the fully-qualified name, replacing from the `[`. (`[` is namespace-only in the
+    // grammar, so a `]` here always closes one.)
+    if fstart > 0 && bytes[fstart - 1] == b']' {
+        if let Some(open) = bytes[..fstart - 1].iter().rposition(|&c| c == b'[') {
+            let prefix = &line[open..pos];
+            return (open, filter_prefix(&index.namespaced, prefix));
+        }
     }
 
     // Method-send position: the fragment is directly preceded by a single `.` (a `..` is a

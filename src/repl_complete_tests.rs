@@ -62,6 +62,12 @@ fn idx() -> CompletionIndex {
             "spot".to_string(),
         ],
         namespaces: vec!["HTTP".to_string(), "IO".to_string()],
+        namespaced: vec![
+            "[HTTP]Parser".to_string(),
+            "[IO]File".to_string(),
+            "[IO]Folder".to_string(),
+            "[IO]Handle".to_string(),
+        ],
         class_side,
         instance_side,
         local_class,
@@ -201,8 +207,36 @@ fn namespace_position_completes_paths() {
         complete_input("[", 1, &idx()),
         (1, vec!["HTTP".to_string(), "IO".to_string()])
     );
-    // A closed `[IO]` is no longer a namespace position.
-    assert_ne!(complete_input("[IO]M", 5, &idx()).0, 1);
+}
+
+#[test]
+fn namespaced_name_completes_after_close_bracket() {
+    // After a closed `[ns]`, complete the fully-qualified name, anchored at the `[`.
+    assert_eq!(
+        complete_input("[IO]Fi", 6, &idx()),
+        (0, vec!["[IO]File".to_string()])
+    );
+    assert_eq!(
+        complete_input("[HTTP]Pa", 8, &idx()),
+        (0, vec!["[HTTP]Parser".to_string()])
+    );
+    // Empty fragment right after `]` lists every name in that namespace.
+    assert_eq!(
+        complete_input("[IO]", 4, &idx()),
+        (
+            0,
+            vec![
+                "[IO]File".to_string(),
+                "[IO]Folder".to_string(),
+                "[IO]Handle".to_string()
+            ]
+        )
+    );
+    // No match → empty, still anchored at the `[`.
+    assert_eq!(
+        complete_input("[IO]Zz", 6, &idx()),
+        (0, Vec::<String>::new())
+    );
 }
 
 #[test]

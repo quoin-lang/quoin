@@ -257,9 +257,10 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   - [x] **Trailing postfix dot `a.` heuristic.** `complete_source` now appends a selector
     placeholder (` x`) so input ending in a method-send dot (`a.`/`@x.`/`Foo.`) parses and stays
     colored while the completion popup is open. Shipped with `.`-completion (P2 below).
-  - [ ] **Trailing range `..` heuristic.** `1..` (range, RHS missing) isn't covered, and `.` vs
-    `..` vs a float `1.` are ambiguous at end-of-input. Add a primary-after-`..` candidate
-    (`1 .. 0`), keyed on the trailing-token shape.
+  - [x] **Trailing range `..` heuristic.** A trailing `..` (range with the RHS not yet typed) is
+    already covered by the existing ` 0`/` x` placeholder operands (`1..` → `1 .. 0`); ditto a
+    float-in-progress `1.` (→ `1. x`). Confirmed by `trailing_range_operator` in `complete.rs`; no
+    new candidate needed (the placeholder set the dot heuristic added already supplies the bound).
 - [x] Result pretty-printing: render the result via its `.s` method (honors user `s` overrides;
   e.g. a custom `Point` prints `Point(3, 4)`), falling back to `Display` if `.s` errors. (`=>`
   prefix, nil suppression. Color/truncation still open.)
@@ -277,10 +278,9 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   selectors of a syntactically-typed literal — string / integer / `true`/`false` / `nil`, plus the
   `#`-sigil collections & regex (`#(…)`→List, `#{…}`→Map, `#<…>`→Set, `#/…/`→Regex), symbols
   (`#sym`/`#'sym'`), and bare blocks (`{…}`→Block), detected by a string/nesting-aware delimiter
-  match; else a bare word. The rustyline `Completer` (`CompletionType::List`) is a thin adapter.
-  **v1 limits:** only receivers whose class genuinely needs evaluation (`@ivars`, `(expr)` groupings,
-  chained sends) and namespaced class names after `]` yield nothing; the `..` range-RHS heuristic
-  (under P1 above) is still open — completion treats a `..` tail as a bare-word RHS for now.
+  match. A closed `[ns]` completes the fully-qualified name (`[IO]Fi`→`[IO]File`); else a bare word.
+  The rustyline `Completer` (`CompletionType::List`) is a thin adapter. **v1 limit:** only receivers
+  whose class genuinely needs evaluation (`@ivars`, `(expr)` groupings, chained sends) yield nothing.
 - [ ] **VM introspection API** (`src/introspect.rs`; design in `docs/INTROSPECTION.md`). Read-only
   surface metadata as plain owned structs (no `'gc`), owning the VM-internal walking so the REPL /
   completion / a future Quoin `Mirror` stay ignorant of internals. Exact: `globals` /
