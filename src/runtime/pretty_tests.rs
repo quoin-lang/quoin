@@ -93,6 +93,35 @@ fn pp_object_shows_instance_vars() {
 }
 
 #[test]
+fn pp_value_like_native_types() {
+    // A regex prints as its literal.
+    assert_eq!(pp("#/ab+/.pp"), "#/ab+/");
+    // A key/value pair shows its two named fields (the string key is quoted as a value).
+    assert_eq!(
+        pp("(KeyValuePair.new:{ key='a'; value=1 }).pp"),
+        "KeyValuePair{key: 'a' value: 1}"
+    );
+    // A bare (unnamed) block.
+    assert_eq!(pp("{ 1 }.pp"), "<block>");
+}
+
+#[test]
+fn s_is_decoupled_from_display() {
+    // Phase 2: value types have an explicit human `.s`; no `.s` routes through Rust Display.
+    assert_eq!(pp("5.s"), "5");
+    assert_eq!(pp("1.5.s"), "1.5");
+    assert_eq!(pp("'hi'.s"), "hi"); // raw (unquoted) — distinct from `.pp`
+    assert_eq!(pp("'hi'.pp"), "'hi'");
+    // A plain object's default `.s` falls back to the structural `.pp` (not Display).
+    assert_eq!(
+        pp("Animal <- { |@legs| }; Animal.new.s"),
+        "Animal{@legs: nil}"
+    );
+    // A regex's `.s` (no override) likewise goes through `.pp` → its literal form.
+    assert_eq!(pp("#/ab/.s"), "#/ab/");
+}
+
+#[test]
 fn pp_elides_cycles() {
     // `n.next = n` — the cycle guard renders the revisited node as `Node{…}`.
     assert_eq!(

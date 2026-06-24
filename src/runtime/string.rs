@@ -14,6 +14,9 @@ use std::collections::{HashMap, HashSet};
 
 pub fn build_string_class() -> NativeClassBuilder {
     NativeClassBuilder::new("String", Some("Object"))
+        // Human string form is the string itself (no quoting — that's `.pp`'s job). Explicit so
+        // `.s` never routes through the Rust Display impl (the default `Object.s` fallback).
+        .instance_method("s", |_vm, _mc, receiver, _args| Ok(receiver))
         // `replace:with:` is a multimethod: the pattern's type selects the variant
         // (a non-String/non-Regex pattern matches neither → MessageNotUnderstood).
         // The replacement is always a String.

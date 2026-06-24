@@ -42,13 +42,17 @@ macro_rules! int_binop {
 pub fn build_integer_class() -> NativeClassBuilder {
     // Binary operators are the `:` keyword selectors (`a + b` -> `Send(a, "+:", [b])`);
     // the bare forms are reserved for unary operators.
-    let b = NativeClassBuilder::new("Integer", Some("Object")).instance_method(
-        "sqrt",
-        |vm, mc, receiver, _args| {
+    let b = NativeClassBuilder::new("Integer", Some("Object"))
+        .instance_method("sqrt", |vm, mc, receiver, _args| {
             let val = recv!(receiver, Int);
             Ok(vm.new_double(mc, (val as f64).sqrt()))
-        },
-    );
+        })
+        // Human string form — the decimal digits. Explicit so `.s` never routes through the
+        // Rust Display impl (which is the default `Object.s` fallback this replaces).
+        .instance_method("s", |vm, mc, receiver, _args| {
+            let val = recv!(receiver, Int);
+            Ok(vm.new_string(mc, val.to_string()))
+        });
     let b = int_binop!(b, "+:", arith+);
     let b = int_binop!(b, "-:", arith -);
     let b = int_binop!(b, "*:", arith *);

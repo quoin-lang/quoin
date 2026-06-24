@@ -9,7 +9,8 @@
 //! when it fits the target width, else breaks onto indented lines.
 
 use crate::runtime::list::NativeListState;
-use crate::runtime::map::NativeMapState;
+use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
+use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
 use crate::value::{Object, ObjectPayload, Value};
 
@@ -201,7 +202,7 @@ fn object_doc<'gc>(
         Str(String),
         Sym(String),
         Bytes(Vec<u8>, usize),
-        Block,
+        Block(Option<String>),
         Ivars(Vec<(String, Value<'gc>)>),
         Native,
     }
@@ -213,7 +214,7 @@ fn object_doc<'gc>(
             ObjectPayload::Bytes(by) => {
                 Payload::Bytes(by.iter().take(16).copied().collect(), by.len())
             }
-            ObjectPayload::Block(_) => Payload::Block,
+            ObjectPayload::Block(blk) => Payload::Block(blk.name.clone()),
             ObjectPayload::Instance => {
                 // Instance vars in slot (declaration) order, mirroring `introspect::describe_value`.
                 let cls = b.class.borrow();
@@ -236,7 +237,10 @@ fn object_doc<'gc>(
         Payload::Str(s) => text(quote(&s)),
         Payload::Sym(s) => text(format!("#{s}")),
         Payload::Bytes(preview, len) => text(bytes_repr(&preview, len)),
-        Payload::Block => text("<block>"),
+        Payload::Block(name) => text(match name {
+            Some(n) => format!("<block {n}>"),
+            None => "<block>".to_string(),
+        }),
         Payload::Ivars(ivars) => {
             let items = ivars
                 .into_iter()
@@ -282,8 +286,42 @@ fn native_doc<'gc>(value: Value<'gc>, cname: &str, visited: &mut HashSet<usize>)
                 .collect();
             bracket("", open, close, docs)
         }
-        None => text(format!("<{cname}>")),
+        None => non_collection_native_doc(value, cname, visited),
     }
+}
+
+/// A few non-collection native types have a canonical literal/structural `.pp` form; anything
+/// else is opaque (`<ClassName>`).
+fn non_collection_native_doc<'gc>(
+    value: Value<'gc>,
+    cname: &str,
+    visited: &mut HashSet<usize>,
+) -> Doc {
+    match cname {
+        // A regex prints as its literal `#/pattern/`.
+        "Regex" => value
+            .with_native_state::<NativeRegexState, _, _>(|r| format!("#/{}/", r.regex.as_str()))
+            .map(text)
+            .unwrap_or_else(|_| text("<Regex>")),
+        // A key/value pair shows its two named fields.
+        "KeyValuePair" => match value.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
+            (kvp.get_key(), kvp.get_value())
+        }) {
+            Ok((k, v)) => bracket(
+                "KeyValuePair",
+                "{",
+                "}",
+                vec![field_doc("key", k, visited), field_doc("value", v, visited)],
+            ),
+            Err(_) => text("<KeyValuePair>"),
+        },
+        _ => text(format!("<{cname}>")),
+    }
+}
+
+/// A `label: <value>` doc with an unquoted label (named object / pair fields).
+fn field_doc<'gc>(label: &str, v: Value<'gc>, visited: &mut HashSet<usize>) -> Doc {
+    Doc::Cat(vec![text(format!("{label}: ")), value_to_doc(v, visited)])
 }
 
 /// A `'`-quoted, escaped string literal (`it's` → `'it\'s'`).
