@@ -4,6 +4,7 @@ use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
 use crate::gcl;
 use crate::highlighter::highlight_to_ansi;
+use crate::introspect::{self, ClassInfo, GlobalInfo, GlobalKind, ValueInfo};
 use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend, StreamId};
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
@@ -145,12 +146,15 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
         "quit" | "exit" | "q" => return Some(ReplAction::Quit),
         "help" | "h" | "?" => {
             println!("Commands:");
-            println!("  $type <expr>     show the class of an expression's result");
-            println!("  $time <expr>     evaluate and report wall-clock time");
-            println!("  $load <file.qn>  run a .qn file into the session");
-            println!("  $reset           clear session locals");
-            println!("  $help            this help");
-            println!("  $quit / $exit    leave the REPL (also Ctrl-D)");
+            println!("  $type <expr>      show the class of an expression's result");
+            println!("  $inspect <expr>   evaluate and show the value's class + fields");
+            println!("  $time <expr>      evaluate and report wall-clock time");
+            println!("  $globals [pre]    list defined classes and values (optional prefix)");
+            println!("  $class <Name>     show a class: parent, mixins, ivars, methods");
+            println!("  $load <file.qn>   run a .qn file into the session");
+            println!("  $reset            clear session locals");
+            println!("  $help             this help");
+            println!("  $quit / $exit     leave the REPL (also Ctrl-D)");
             println!("Anything else is evaluated as Quoin; definitions and lowercase");
             println!("variables persist across lines.");
         }
@@ -166,6 +170,30 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
             }
         }
         "type" => eprintln!("usage: $type <expr>"),
+        "inspect" if !rest.is_empty() => {
+            if let Some(out) = eval_repl_inspect(arena, rest) {
+                println!("{out}");
+            }
+        }
+        "inspect" => eprintln!("usage: $inspect <expr>"),
+        "globals" => {
+            // Pure read: pull the owned infos out of the arena, format outside it. `rest`
+            // (possibly empty) filters by name prefix. Wrap to the detected terminal width.
+            let (infos, width) = arena.mutate_root(|_mc, vm| {
+                (
+                    introspect::globals(vm),
+                    vm.options.console_width.map(|w| w as usize),
+                )
+            });
+            print!("{}", format_globals(&infos, rest, width.unwrap_or(80)));
+        }
+        "class" if !rest.is_empty() => {
+            match arena.mutate_root(|_mc, vm| introspect::describe_class(vm, rest)) {
+                Some(info) => print!("{}", format_class(&info)),
+                None => eprintln!("$class: no class named {rest}"),
+            }
+        }
+        "class" => eprintln!("usage: $class <Name>"),
         "time" if !rest.is_empty() => {
             let start = Instant::now();
             let out = eval_repl_input(arena, rest);
@@ -194,18 +222,42 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
 /// Evaluate one complete REPL input and return the line to print (`=> <value>`, an error,
 /// or `None` for a value-less `nil` result).
 fn eval_repl_input(arena: &mut ReplArena, input: &str) -> Option<String> {
-    eval_repl(arena, input, false)
+    eval_value(arena, input, |vm, mc, val| {
+        // Suppress a bare `nil` result (a value-less statement).
+        if val.type_name() == "Nil" {
+            None
+        } else {
+            Some(format!("=> {}", render_value(vm, mc, val)))
+        }
+    })
 }
 
 /// `$type` form: evaluate `input` and return its class (the `.class`), never suppressed.
 fn eval_repl_type(arena: &mut ReplArena, input: &str) -> Option<String> {
-    eval_repl(arena, input, true)
+    eval_value(arena, input, |vm, mc, val| {
+        let cls = vm.call_method(mc, val, "class", Vec::new()).unwrap_or(val);
+        Some(render_value(vm, mc, cls))
+    })
 }
 
-/// Parse, compile, and run one complete REPL input in the persistent env. With
-/// `show_class`, the result's `.class` is rendered (for `$type`) and a `nil` result is not
-/// suppressed; otherwise the value is rendered (`=> …`) and a bare `nil` prints nothing.
-fn eval_repl(arena: &mut ReplArena, input: &str, show_class: bool) -> Option<String> {
+/// `$inspect` form: evaluate `input` and show its value, class, and (for an object) its
+/// instance fields — the surface metadata from `introspect::describe_value`.
+fn eval_repl_inspect(arena: &mut ReplArena, input: &str) -> Option<String> {
+    eval_value(arena, input, |vm, mc, val| {
+        let info = introspect::describe_value(vm, val);
+        let repr = render_value(vm, mc, val);
+        Some(format_inspect(&repr, &info))
+    })
+}
+
+/// Parse, compile, and run one complete REPL input in the persistent env, then hand the
+/// result `Value` to `render` (still inside the GC borrow, so it may call back into the VM —
+/// e.g. `.s`/`.class`) to produce the line to print. Parse/compile/runtime failures short-
+/// circuit to an error string; `render` only sees a successful value.
+fn eval_value<F>(arena: &mut ReplArena, input: &str, render: F) -> Option<String>
+where
+    F: for<'gc> FnOnce(&mut VmState<'gc>, &Mutation<'gc>, Value<'gc>) -> Option<String>,
+{
     let node = match try_parse_quoin_string_named(input, "<repl>") {
         Ok(n) => n,
         Err(pe) => {
@@ -237,16 +289,127 @@ fn eval_repl(arena: &mut ReplArena, input: &str, show_class: bool) -> Option<Str
         };
         let block = build_block(mc, &sb);
         match vm.execute_repl_line(mc, block) {
-            Ok(val) if show_class => {
-                let cls = vm.call_method(mc, val, "class", Vec::new()).unwrap_or(val);
-                Some(render_value(vm, mc, cls))
-            }
-            // Suppress a bare `nil` result (a value-less statement).
-            Ok(val) if val.type_name() == "Nil" => None,
-            Ok(val) => Some(format!("=> {}", render_value(vm, mc, val))),
+            Ok(val) => render(vm, mc, val),
             Err(e) => Some(format!("{e}")),
         }
     })
+}
+
+/// `$globals` output: surface globals split into classes (flowed to `width` columns) and
+/// values (one `name: Class` per line), filtered by `prefix` (empty = all).
+fn format_globals(infos: &[GlobalInfo], prefix: &str, width: usize) -> String {
+    let mut classes: Vec<&str> = Vec::new();
+    let mut values: Vec<(&str, &str)> = Vec::new();
+    for info in infos {
+        if !info.name.starts_with(prefix) {
+            continue;
+        }
+        match &info.kind {
+            GlobalKind::Class => classes.push(&info.name),
+            GlobalKind::Value { class } => values.push((&info.name, class)),
+        }
+    }
+    let mut out = String::new();
+    if !classes.is_empty() {
+        out.push_str(&format!("Classes ({}):\n", classes.len()));
+        out.push_str(&flow_names(&classes, width));
+    }
+    if !values.is_empty() {
+        out.push_str(&format!("Values ({}):\n", values.len()));
+        for (name, class) in &values {
+            out.push_str(&format!("  {name}: {class}\n"));
+        }
+    }
+    if out.is_empty() {
+        out.push_str(if prefix.is_empty() {
+            "(no globals)\n"
+        } else {
+            "(none matching prefix)\n"
+        });
+    }
+    out
+}
+
+/// `$class` output: a header line (`Name < Parent (mixins…) [flags]`) followed by indented
+/// ivars and method signatures (own instance methods, then class methods).
+fn format_class(info: &ClassInfo) -> String {
+    let mut out = String::new();
+    // Quoin-style inheritance: `Parent <- Child` (the arrow points at the subclass, as in a
+    // `Parent <- Child <- { … }` definition). Mixins/flags trail the class name.
+    if let Some(parent) = &info.parent {
+        out.push_str(&format!("{parent} <- "));
+    }
+    out.push_str(&info.name);
+    if !info.mixins.is_empty() {
+        out.push_str(&format!(" ({})", info.mixins.join(", ")));
+    }
+    let mut flags: Vec<&str> = Vec::new();
+    if info.is_sealed {
+        flags.push("sealed");
+    }
+    if info.is_abstract {
+        flags.push("abstract");
+    }
+    if !flags.is_empty() {
+        out.push_str(&format!(" [{}]", flags.join(" ")));
+    }
+    out.push('\n');
+
+    if !info.instance_vars.is_empty() {
+        out.push_str(&format!("  ivars: {}\n", info.instance_vars.join(", ")));
+    }
+    let mut section = |label: &str, methods: &[introspect::MethodInfo]| {
+        if methods.is_empty() {
+            return;
+        }
+        out.push_str(&format!("  {label}:\n"));
+        for m in methods {
+            for v in &m.variants {
+                out.push_str(&format!("    {}\n", introspect::signature(&m.selector, v)));
+            }
+        }
+    };
+    section("methods", &info.instance_methods);
+    section("class methods", &info.class_methods);
+    out
+}
+
+/// `$inspect` output: the value's repr + class, then one `@field: Class` line per instance
+/// field (objects only; scalars and fieldless objects show just the first line).
+fn format_inspect(repr: &str, info: &ValueInfo) -> String {
+    let mut out = format!("{repr}  (class {})", info.class);
+    for (name, class) in &info.fields {
+        out.push_str(&format!("\n  @{name}: {class}"));
+    }
+    out
+}
+
+/// Wrap `names` into indented lines no wider than `width` columns (two-space indent, two
+/// spaces between names). Names are ASCII identifiers, so byte length is display width.
+fn flow_names(names: &[&str], width: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for name in names {
+        if col == 0 {
+            // Line start: two-space indent, no separator.
+            out.push_str("  ");
+            col = 2;
+        } else if col + 2 + name.len() <= width {
+            // Fits on the current line: two-space separator before it.
+            out.push_str("  ");
+            col += 2;
+        } else {
+            // Wrap to a fresh indented line.
+            out.push_str("\n  ");
+            col = 2;
+        }
+        out.push_str(name);
+        col += name.len();
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 /// Render a result value for display via its `.s` method (so a user-defined `s` override is
@@ -1296,5 +1459,23 @@ impl VmRunner {
         println!("==================================================");
 
         arena.finish_cycle();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_names_wraps_to_width() {
+        let names = vec!["aaa", "bbb", "ccc", "ddd"];
+        // Width 12: "  aaa  bbb" is 10 cols; adding "  ccc" (→15) overflows, so it wraps.
+        assert_eq!(flow_names(&names, 12), "  aaa  bbb\n  ccc  ddd\n");
+        // A wide width keeps everything on one line.
+        assert_eq!(flow_names(&names, 80), "  aaa  bbb  ccc  ddd\n");
+        // No line carries trailing whitespace, at any width.
+        for w in [8, 12, 40, 80] {
+            assert!(flow_names(&names, w).lines().all(|l| l == l.trim_end()));
+        }
     }
 }
