@@ -781,6 +781,27 @@ impl<'gc> VmState<'gc> {
     // driver in `runner.rs` decides *when* to switch; these just move the state.
     // =====================================================================
 
+    /// Discard transient execution/scheduler bookkeeping so the next top-level run starts on a
+    /// clean slate. The REPL reuses one `VmState` across lines; a line that errors mid-fiber or
+    /// mid-native-call can leave the run-queue, guest-fiber chain, saved main context, native
+    /// args, or value/error mailboxes dirty. The task table itself is rebuilt by the caller
+    /// (`install_main_task`); frames/stack are restored separately by `end_repl_line`. (The
+    /// file runner aborts on the first error and never continues, so it has no use for this.)
+    pub(crate) fn reset_scheduler(&mut self) {
+        self.active_native_args.clear();
+        self.sched.yielder = None;
+        self.sched.ready.clear();
+        self.sched.current_fiber = None;
+        self.sched.resume_stack.clear();
+        self.sched.fiber_transfer = None;
+        self.sched.main_saved_stack.clear();
+        self.sched.main_saved_frames.clear();
+        self.sched.main_saved_native_args.clear();
+        self.sched.fiber_error = None;
+        self.sched.wake = None;
+        self.sched.cancel_current = false;
+    }
+
     /// Stash the live per-task context into `tasks[tid]` (the task is parking or
     /// being preempted). Mailboxes (`fiber_transfer`/`fiber_error`) are empty at
     /// every switch boundary, so they are not saved.

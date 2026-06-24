@@ -271,10 +271,84 @@ fn eval_repl_inspect(arena: &mut ReplArena, input: &str) -> Option<String> {
     })
 }
 
-/// Parse, compile, and run one complete REPL input in the persistent env, then hand the
-/// result `Value` to `render` (still inside the GC borrow, so it may call back into the VM —
-/// e.g. `.s`/`.class`) to produce the line to print. Parse/compile/runtime failures short-
-/// circuit to an error string; `render` only sees a successful value.
+/// The session's top-level binding names, seeded into the compiler so references to them
+/// resolve as locals (`LoadLocal` -> `repl_env`) rather than globals.
+fn repl_locals(vm: &VmState<'_>) -> HashSet<String> {
+    vm.repl_env
+        .map(|env| {
+            env.borrow()
+                .vars
+                .iter()
+                .map(|(s, _)| s.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Compile one REPL program and run it **through the scheduler** as task #0 in the persistent
+/// `repl_env`, so the line can do async I/O, sleep, spawn tasks, and resume fibers — and its
+/// top-level bindings persist across lines. The outcome (`Ok(value)` on a clean finish,
+/// `Err(..)` for a compile or runtime error) is handed to `finish` inside the final arena
+/// borrow, so `finish` may call back into the VM (e.g. `.s`/`.class`). A non-program node
+/// yields `nil`. Shared by `eval_value` (interactive/piped REPL) and `eval_once` (`-e`,
+/// `~/.quoinrc`); both used to call the synchronous `execute_repl_line`, which had no
+/// scheduler and so failed on any async op.
+fn run_scheduled_line<F, R>(arena: &mut ReplArena, node: &Node, finish: F) -> R
+where
+    F: for<'gc> FnOnce(&mut VmState<'gc>, &Mutation<'gc>, Result<Value<'gc>, QuoinError>) -> R,
+{
+    enum Setup {
+        Ready(usize, usize),
+        Empty,
+        CompileErr(String),
+    }
+
+    // Setup: compile in the session's locals, start the line as the live task #0 in
+    // `repl_env`, recording the frame/stack baseline to restore afterward.
+    let setup = arena.mutate_root(|mc, vm| {
+        let NodeValue::Program(p) = &node.value else {
+            return Setup::Empty;
+        };
+        let sb = match Compiler::new_with_locals(repl_locals(vm)).compile_program(p) {
+            Ok(sb) => sb,
+            Err(e) => return Setup::CompileErr(format!("Compile error: {e}")),
+        };
+        let block = build_block(mc, &sb);
+        let (base_frames, base_stack) = vm.begin_repl_line(block);
+        install_main_task(mc, vm);
+        Setup::Ready(base_frames, base_stack)
+    });
+
+    match setup {
+        Setup::Empty => arena.mutate_root(|mc, vm| {
+            let nil = vm.new_nil(mc);
+            finish(vm, mc, Ok(nil))
+        }),
+        Setup::CompileErr(msg) => {
+            arena.mutate_root(|mc, vm| finish(vm, mc, Err(QuoinError::Other(msg))))
+        }
+        Setup::Ready(base_frames, base_stack) => {
+            // Drive the scheduler outside any arena borrow (it interleaves `mutate_root`s
+            // with the reactor `.await`). `step` already source-annotated any error.
+            let drive = drive_main_task(arena);
+            arena.mutate_root(|mc, vm| {
+                let outcome = match drive {
+                    Ok(()) => Ok(vm.end_repl_line(mc, base_frames, base_stack, true)),
+                    Err(e) => {
+                        vm.end_repl_line(mc, base_frames, base_stack, false);
+                        Err(e)
+                    }
+                };
+                finish(vm, mc, outcome)
+            })
+        }
+    }
+}
+
+/// Parse and run one complete REPL input, then hand the result `Value` to `render` (inside the
+/// GC borrow, so it may call back into the VM — e.g. `.s`/`.class`) to produce the line to
+/// print. Parse/compile/runtime failures short-circuit to an error string; `render` only sees
+/// a successful value.
 fn eval_value<F>(arena: &mut ReplArena, input: &str, render: F) -> Option<String>
 where
     F: for<'gc> FnOnce(&mut VmState<'gc>, &Mutation<'gc>, Value<'gc>) -> Option<String>,
@@ -288,38 +362,16 @@ where
             ));
         }
     };
-    arena.mutate_root(|mc, vm| {
-        let NodeValue::Program(p) = &node.value else {
-            return None;
-        };
-        // Seed the compiler with the session's existing bindings so references to them
-        // resolve as locals (LoadLocal -> repl_env), not globals.
-        let locals: HashSet<String> = vm
-            .repl_env
-            .map(|env| {
-                env.borrow()
-                    .vars
-                    .iter()
-                    .map(|(s, _)| s.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let sb = match Compiler::new_with_locals(locals).compile_program(p) {
-            Ok(sb) => sb,
-            Err(e) => return Some(format!("Compile error: {e}")),
-        };
-        let block = build_block(mc, &sb);
-        match vm.execute_repl_line(mc, block) {
-            Ok(val) => render(vm, mc, val),
-            Err(e) => Some(format!("{e}")),
-        }
+    run_scheduled_line(arena, &node, |vm, mc, outcome| match outcome {
+        Ok(val) => render(vm, mc, val),
+        Err(e) => Some(format!("{e}")),
     })
 }
 
-/// Parse, compile, and run one complete input in `arena`'s session env, returning the rendered
-/// non-`nil` result (`Ok(Some)`), `Ok(None)` for a `nil` result, or an error message. Unlike
-/// `eval_value` — which folds errors into the printed string for the interactive loop — this
-/// keeps success and failure distinct, so `qn -e` / `~/.quoinrc` can act on a real error.
+/// Parse and run one complete input, returning the rendered non-`nil` result (`Ok(Some)`),
+/// `Ok(None)` for a `nil` result, or an error message. Unlike `eval_value` — which folds
+/// errors into the printed string for the interactive loop — this keeps success and failure
+/// distinct, so `qn -e` / `~/.quoinrc` can act on a real error.
 fn eval_once(arena: &mut ReplArena, input: &str) -> Result<Option<String>, String> {
     let node = try_parse_quoin_string_named(input, "<eval>").map_err(|pe| {
         format!(
@@ -327,29 +379,10 @@ fn eval_once(arena: &mut ReplArena, input: &str) -> Result<Option<String>, Strin
             pe.line, pe.column, pe.message
         )
     })?;
-    arena.mutate_root(|mc, vm| {
-        let NodeValue::Program(p) = &node.value else {
-            return Ok(None);
-        };
-        let locals: HashSet<String> = vm
-            .repl_env
-            .map(|env| {
-                env.borrow()
-                    .vars
-                    .iter()
-                    .map(|(s, _)| s.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let sb = Compiler::new_with_locals(locals)
-            .compile_program(p)
-            .map_err(|e| format!("Compile error: {e}"))?;
-        let block = build_block(mc, &sb);
-        match vm.execute_repl_line(mc, block) {
-            Ok(val) if val.type_name() == "Nil" => Ok(None),
-            Ok(val) => Ok(Some(render_value(vm, mc, val))),
-            Err(e) => Err(format!("{e}")),
-        }
+    run_scheduled_line(arena, &node, |vm, mc, outcome| match outcome {
+        Ok(val) if val.type_name() == "Nil" => Ok(None),
+        Ok(val) => Ok(Some(render_value(vm, mc, val))),
+        Err(e) => Err(format!("{e}")),
     })
 }
 
@@ -814,6 +847,188 @@ fn complete_current_task<'gc>(
     }
 }
 
+/// Install the already-started top-level block as scheduler task #0: wrap `run_vm_loop` in
+/// a fiber, make it the sole task, and mark it current. The block must already be live on
+/// `vm`'s frames (via `start_block` or `push_repl_frame`); the task is pre-started, so its
+/// context lives in `VmState` until it parks. Shared by the file runner and the REPL so
+/// every top-level unit runs under the scheduler.
+fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
+    let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
+    vm.sched.tasks = vec![Some(Task {
+        coro: gc!(mc, fiber),
+        root_yielder: None,
+        block: None,
+        started: true,
+        stack: Vec::new(),
+        frames: Vec::new(),
+        native_args: Vec::new(),
+        current_fiber: None,
+        resume_stack: Vec::new(),
+        wake: None,
+        parent: None,
+        gather: None,
+        handle: None,
+        waiters: Vec::new(),
+        cancel_requested: false,
+        abort_handle: None,
+        joining: None,
+        park_epoch: 0,
+        deadline_abort: None,
+    })];
+    vm.sched.current_task = TaskId(0);
+}
+
+/// Drive the scheduler until the main task (#0) — already installed via `install_main_task`
+/// — finishes. Background I/O overlaps on a fresh `SmolBackend`; the single
+/// `futures.next().await` is the one reactor wait. The runnable set is `vm.sched.ready` (so a
+/// native `spawn` enqueues directly); `QN_SCHED_STRESS` preempts at every cooperative yield
+/// and picks ready tasks at random, otherwise the scheduler is run-to-block. On a clean
+/// finish the unit's result is on the VM stack (pushed by `complete_current_task`); a runtime
+/// error is returned (already source-annotated by `step`). Shared by the file runner, the
+/// REPL, `-e`, and `~/.quoinrc` so every top-level run gets async I/O, sleep, tasks, fibers.
+fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
+    let backend = SmolBackend::new();
+    let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
+    let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
+    // Announce the seed once per process so a failing run is reproducible with the same
+    // `QN_SCHED_STRESS=<seed>`.
+    if let Some(seed) = crate::tuning::sched_stress() {
+        static ANNOUNCED: Once = Once::new();
+        ANNOUNCED.call_once(|| eprintln!("scheduler stress enabled (seed={seed})"));
+    }
+    // Task #0 starts current and already live; nothing to load on first resume.
+    let mut current: Option<TaskId> = Some(TaskId(0));
+    let mut needs_load = false;
+
+    block_on(async {
+        let mut step_count = 0;
+        loop {
+            // Acquire a task to run after the previous one parked or finished: pick from
+            // `ready` (random under stress); if none are ready but I/O is in flight, await a
+            // completion, which feeds `ready`, and retry.
+            if current.is_none() {
+                let picked = arena.mutate_root(|_mc, vm| {
+                    let n = vm.sched.ready.len();
+                    if n == 0 {
+                        None
+                    } else {
+                        let idx = rng.as_mut().map(|r| r.below(n)).unwrap_or(0);
+                        Some(vm.sched.ready.remove(idx).expect("idx within ready"))
+                    }
+                });
+                match picked {
+                    Some(tid) => {
+                        current = Some(tid);
+                        needs_load = true;
+                    }
+                    None => {
+                        if futures.is_empty() {
+                            break; // nothing ready and nothing in flight
+                        }
+                        // The single reactor wait: park until some background future (I/O op
+                        // or deadline timer) lands.
+                        let (tid, wakeup) = futures.next().await.expect("futures is non-empty");
+                        arena.mutate_root(|_mc, vm| match wakeup {
+                            TaskWakeup::Io(result) => {
+                                {
+                                    let t = vm.sched.tasks[tid.0]
+                                        .as_mut()
+                                        .expect("woken task slot is empty");
+                                    t.abort_handle = None; // the future is done
+                                    // On `Err(Aborted)` the task was cancelled: leave `wake`
+                                    // unset — `await_io` raises `Cancelled` instead.
+                                    if let Ok(io_result) = result {
+                                        t.wake = Some(Wake::Io { result: io_result });
+                                    }
+                                }
+                                vm.sched.ready.push_back(tid);
+                            }
+                            // A deadline elapsed: `deliver_deadline` resolves the race and
+                            // enqueues the joiner if it won.
+                            TaskWakeup::Deadline { target, epoch } => {
+                                vm.deliver_deadline(tid, target, epoch);
+                            }
+                        });
+                        continue;
+                    }
+                }
+            }
+            let cur = current.expect("current task set above");
+            if needs_load {
+                arena.mutate_root(|mc, vm| vm.load_task_context(mc, cur));
+                needs_load = false;
+            }
+
+            let step = arena.mutate_root(|mc, vm| resume_current_task(vm, mc));
+            match step {
+                Ok(RunStep::Yielded) => {
+                    // A clean cooperative-yield boundary. Under stress, preempt: stash and
+                    // requeue so the save/load round-trip runs every step and ordering varies.
+                    if rng.is_some() {
+                        arena.mutate_root(|_mc, vm| {
+                            vm.save_task_context(cur);
+                            vm.sched.ready.push_back(cur);
+                        });
+                        current = None;
+                    }
+                }
+                Ok(RunStep::Running) => {}
+                Ok(RunStep::ParkedIo(req)) => {
+                    // Hand the op to the backend; the future is tagged with the parked task so
+                    // its result routes back, and wrapped in `abortable` so `cancel` can
+                    // interrupt it. Stash the abort handle for `request_cancel`.
+                    let (fut, abort_handle) = abortable(backend.perform(req));
+                    arena.mutate_root(|_mc, vm| {
+                        vm.sched.tasks[cur.0]
+                            .as_mut()
+                            .expect("parked task slot is empty")
+                            .abort_handle = Some(abort_handle);
+                    });
+                    futures.push(Box::pin(async move { (cur, TaskWakeup::Io(fut.await)) }));
+                    current = None;
+                }
+                Ok(RunStep::ParkedJoinTimed { target, ms }) => {
+                    // Arm the deadline alongside the join: a `Sleep` timer tagged with this
+                    // joiner + the park epoch, wrapped in `abortable` so a normal completion /
+                    // cancel can disarm it. `deliver_deadline` ignores a stale firing.
+                    let (fut, abort_handle) = abortable(backend.perform(IoRequest::Sleep { ms }));
+                    let epoch = arena.mutate_root(|_mc, vm| {
+                        let t = vm.sched.tasks[cur.0]
+                            .as_mut()
+                            .expect("timed-join parked task slot is empty");
+                        t.deadline_abort = Some(abort_handle);
+                        t.park_epoch
+                    });
+                    futures.push(Box::pin(async move {
+                        let _ = fut.await; // resolved (Slept) or aborted; either way
+                        (cur, TaskWakeup::Deadline { target, epoch })
+                    }));
+                    current = None;
+                }
+                // Parked on a gather batch or a join, or finished: any task that became
+                // runnable was already enqueued to `ready` in the resume.
+                Ok(RunStep::Parked) | Ok(RunStep::Done) => {
+                    current = None;
+                }
+                Ok(RunStep::Finished) => break,
+                Err(e) => return Err(e),
+            }
+            step_count += 1;
+            if crate::tuning::gc_stress() || step_count % 10 == 0 {
+                arena.collect_debt();
+                // Reap fds whose handle was closed or collected — both enqueue on
+                // `socket_reap`; close them now, outside the arena borrow.
+                let reaped: Vec<StreamId> =
+                    arena.mutate_root(|_mc, vm| vm.socket_reap.borrow_mut().drain(..).collect());
+                for id in reaped {
+                    backend.close(id);
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 pub struct VmRunnerOptions {
     pub mode: VmRunnerMode,
     pub target_path: Option<String>,
@@ -1114,197 +1329,16 @@ impl VmRunner {
                     }
                 );
                 vm.start_block(mc, main_block, Vec::new(), None, None);
-
-                // The main program runs as task #0; the run/test driver schedules
-                // over the task table (benchmark mode uses `active_fiber` instead).
-                // Its block is already started into the live context above, so this
-                // task is pre-started and its context lives in `VmState` until it parks.
-                let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
-                vm.sched.tasks = vec![Some(Task {
-                    coro: gc!(mc, fiber),
-                    root_yielder: None,
-                    block: None,
-                    started: true,
-                    stack: Vec::new(),
-                    frames: Vec::new(),
-                    native_args: Vec::new(),
-                    current_fiber: None,
-                    resume_stack: Vec::new(),
-                    wake: None,
-                    parent: None,
-                    gather: None,
-                    handle: None,
-                    waiters: Vec::new(),
-                    cancel_requested: false,
-                    abort_handle: None,
-                    joining: None,
-                    park_epoch: 0,
-                    deadline_abort: None,
-                })];
-                vm.sched.current_task = TaskId(0);
+                // Run this program unit as scheduler task #0; driven to completion below.
+                install_main_task(mc, vm);
             });
 
-            // The scheduler: run tasks until each parks on I/O or finishes, overlapping
-            // their I/O via a `FuturesUnordered`. The runnable set is `vm.sched.ready`
-            // (so a native `spawn` can enqueue directly); the backend lives outside the
-            // arena and is the only async code; the await on `futures` is the single
-            // reactor wait. `QN_SCHED_STRESS` turns on a seeded PRNG that preempts at
-            // every cooperative yield and picks ready tasks at random — exercising the
-            // per-task state swap and a wide range of interleavings. Without it the
-            // scheduler is run-to-block.
-            let backend = SmolBackend::new();
-            let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
-            let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
-            // Announce the seed once per process so a failing run is reproducible with
-            // the same `QN_SCHED_STRESS=<seed>` (this driver runs once per program AST).
-            if let Some(seed) = crate::tuning::sched_stress() {
-                static ANNOUNCED: Once = Once::new();
-                ANNOUNCED.call_once(|| eprintln!("scheduler stress enabled (seed={seed})"));
+            // Drive the unit to completion through the shared scheduler (async I/O, sleep,
+            // tasks, fibers). An error aborts the remaining ASTs (and fails a test run).
+            if let Err(e) = drive_main_task(&mut arena) {
+                eprintln!("VM execution error: {}", e);
+                aborted = true;
             }
-            // Task #0 starts current and already live; nothing to load on first resume.
-            let mut current: Option<TaskId> = Some(TaskId(0));
-            let mut needs_load = false;
-
-            block_on(async {
-                let mut step_count = 0;
-                loop {
-                    // Acquire a task to run after the previous one parked or finished:
-                    // pick from `ready` (random under stress); if none are ready but I/O
-                    // is in flight, await a completion, which feeds `ready`, and retry.
-                    if current.is_none() {
-                        let picked = arena.mutate_root(|_mc, vm| {
-                            let n = vm.sched.ready.len();
-                            if n == 0 {
-                                None
-                            } else {
-                                let idx = rng.as_mut().map(|r| r.below(n)).unwrap_or(0);
-                                Some(vm.sched.ready.remove(idx).expect("idx within ready"))
-                            }
-                        });
-                        match picked {
-                            Some(tid) => {
-                                current = Some(tid);
-                                needs_load = true;
-                            }
-                            None => {
-                                if futures.is_empty() {
-                                    break; // nothing ready and nothing in flight
-                                }
-                                // The single reactor wait: park until some background
-                                // future (I/O op or deadline timer) lands.
-                                let (tid, wakeup) =
-                                    futures.next().await.expect("futures is non-empty");
-                                arena.mutate_root(|_mc, vm| match wakeup {
-                                    TaskWakeup::Io(result) => {
-                                        {
-                                            let t = vm.sched.tasks[tid.0]
-                                                .as_mut()
-                                                .expect("woken task slot is empty");
-                                            t.abort_handle = None; // the future is done
-                                            // On `Err(Aborted)` the task was cancelled:
-                                            // leave `wake` unset — `await_io` raises
-                                            // `Cancelled` from `cancel_current` instead.
-                                            if let Ok(io_result) = result {
-                                                t.wake = Some(Wake::Io { result: io_result });
-                                            }
-                                        }
-                                        vm.sched.ready.push_back(tid);
-                                    }
-                                    // A deadline elapsed: `deliver_deadline` resolves the
-                                    // race (wakes the joiner with `TimedOut`, or ignores a
-                                    // stale/superseded firing) and enqueues it if it won.
-                                    TaskWakeup::Deadline { target, epoch } => {
-                                        vm.deliver_deadline(tid, target, epoch);
-                                    }
-                                });
-                                continue;
-                            }
-                        }
-                    }
-                    let cur = current.expect("current task set above");
-                    if needs_load {
-                        arena.mutate_root(|mc, vm| vm.load_task_context(mc, cur));
-                        needs_load = false;
-                    }
-
-                    let step = arena.mutate_root(|mc, vm| resume_current_task(vm, mc));
-                    match step {
-                        Ok(RunStep::Yielded) => {
-                            // A clean cooperative-yield boundary. Under scheduler stress,
-                            // preempt: stash this task and requeue it, so the save/load
-                            // round-trip runs every step and task ordering varies. Without
-                            // stress, keep running it (run-to-block).
-                            if rng.is_some() {
-                                arena.mutate_root(|_mc, vm| {
-                                    vm.save_task_context(cur);
-                                    vm.sched.ready.push_back(cur);
-                                });
-                                current = None;
-                            }
-                        }
-                        Ok(RunStep::Running) => {}
-                        Ok(RunStep::ParkedIo(req)) => {
-                            // Hand the op to the backend; the future is tagged with the
-                            // parked task so its result routes back on completion, and
-                            // wrapped in `abortable` so `cancel` can interrupt it. Stash
-                            // the abort handle on the task for `request_cancel`.
-                            let (fut, abort_handle) = abortable(backend.perform(req));
-                            arena.mutate_root(|_mc, vm| {
-                                vm.sched.tasks[cur.0]
-                                    .as_mut()
-                                    .expect("parked task slot is empty")
-                                    .abort_handle = Some(abort_handle);
-                            });
-                            futures.push(Box::pin(async move { (cur, TaskWakeup::Io(fut.await)) }));
-                            current = None;
-                        }
-                        Ok(RunStep::ParkedJoinTimed { target, ms }) => {
-                            // Arm the deadline alongside the join: a `Sleep` timer tagged
-                            // with this joiner + the park epoch, wrapped in `abortable` so a
-                            // normal completion / cancel can disarm it. The first of {target
-                            // completes, deadline fires} wins; `deliver_deadline` ignores a
-                            // stale firing via the epoch. (See the `JoinTimed` race notes.)
-                            let (fut, abort_handle) =
-                                abortable(backend.perform(IoRequest::Sleep { ms }));
-                            let epoch = arena.mutate_root(|_mc, vm| {
-                                let t = vm.sched.tasks[cur.0]
-                                    .as_mut()
-                                    .expect("timed-join parked task slot is empty");
-                                t.deadline_abort = Some(abort_handle);
-                                t.park_epoch
-                            });
-                            futures.push(Box::pin(async move {
-                                let _ = fut.await; // resolved (Slept) or aborted; either way
-                                (cur, TaskWakeup::Deadline { target, epoch })
-                            }));
-                            current = None;
-                        }
-                        // Parked on a gather batch or a join, or finished: any task that
-                        // became runnable was already enqueued to `ready` in the resume.
-                        Ok(RunStep::Parked) | Ok(RunStep::Done) => {
-                            current = None;
-                        }
-                        Ok(RunStep::Finished) => break,
-                        Err(e) => {
-                            eprintln!("VM execution error: {}", e);
-                            aborted = true;
-                            break;
-                        }
-                    }
-                    step_count += 1;
-                    if crate::tuning::gc_stress() || step_count % 10 == 0 {
-                        arena.collect_debt();
-                        // Reap fds whose handle was closed (explicit/scope) or collected
-                        // (GC Drop) — both enqueue on `socket_reap`; close them now,
-                        // outside the arena borrow (no task context needed).
-                        let reaped: Vec<StreamId> = arena
-                            .mutate_root(|_mc, vm| vm.socket_reap.borrow_mut().drain(..).collect());
-                        for id in reaped {
-                            backend.close(id);
-                        }
-                    }
-                }
-            });
         }
 
         // The last program run leaves its result on top of the stack. Treat a VM
