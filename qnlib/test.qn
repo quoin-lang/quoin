@@ -109,7 +109,7 @@ TestAssertionResult <- { |@test @name @passed? @location @elapsed @evidence|
     locationColumn -> { @location.defined?.if:{ (@location.third) + 1 } else:{ '?' } }
 
     s --> {
-        'TestAssertionResult{%1 %2 %3%4%5 %6ms %7}' % #(
+        'TestAssertionResult{%1 %2 %3%4%5 %6µs %7}' % #(
             @test
             @passed?
             @evidence.first
@@ -181,7 +181,7 @@ TestResult <- { |@test @name @assertions @elapsed @wallElapsed|
     elapsed -> { @elapsed }
     wallElapsed -> { @wallElapsed }
 
-    s --> { 'TestResult{%1 %2 %3ms [%4]}' % #( @test @name @elapsed @assertions ) }
+    s --> { 'TestResult{%1 %2 %3µs [%4]}' % #( @test @name @elapsed @assertions ) }
 };
 
 TestSuite <- { |@name @tests|
@@ -235,12 +235,12 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
         passes = suite.tests.sum:{ .passes.count }
         failures = suite.tests.sum:{ .failures.count }
         testsElapsed = suite.tests.sum:{ .elapsed }
-        @out.writeln:'[%1] Finished in %4ms (%5ms) : %2 passes / %3 failures' % #(
+        @out.writeln:'[%1] Finished in %4µs (%5µs) : %2 passes / %3 failures' % #(
             @currentSuite.name
             passes
             failures
-            testsElapsed * 1000.0
-            elapsed * 1000.0
+            testsElapsed
+            elapsed
         )
     }
 
@@ -249,9 +249,9 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
     }
 
     endTest: --> { |result:TestResult|
-        @out.write:' %1ms (%2ms)' % #(
-            result.elapsed * 1000.0
-            result.wallElapsed * 1000.0
+        @out.write:' %1µs (%2µs)' % #(
+            result.elapsed
+            result.wallElapsed
         )
         (result.failures.any?).if:{
             outTemp = @out;
@@ -294,7 +294,7 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite|
         passes = suite.tests.sum:{ .passes.count }
         failures = suite.tests.sum:{ .failures.count }
         testsElapsed = suite.tests.sum:{ .elapsed }
-        @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Finished in $#00bfff[%4ms$] ($#00bfff[%5ms$]) : $#69ff61[%2 passes$] / $#ff6961[%3 failures$]' % #(
+        @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Finished in $#00bfff[%4µs$] ($#00bfff[%5µs$]) : $#69ff61[%2 passes$] / $#ff6961[%3 failures$]' % #(
             @currentSuite.name
             passes
             failures
@@ -308,7 +308,7 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite|
     }
 
     endTest: --> { |result:TestResult|
-        @out.write:#ANSI' $#00bfff[%1ms$] ($#00bfff[%2ms$])' % #(
+        @out.write:#ANSI' $#00bfff[%1µs$] ($#00bfff[%2µs$])' % #(
             result.elapsed
             result.wallElapsed
         )

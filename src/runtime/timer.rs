@@ -10,7 +10,7 @@ pub fn build_timer_class() -> NativeClassBuilder {
             let block = arg!(args, Block, 0);
             let start = Instant::now();
             vm.execute_block(mc, block, Vec::new(), None)?;
-            let elapsed = start.elapsed().as_millis() as i64;
+            let elapsed = start.elapsed().as_micros() as i64;
             Ok(vm.new_int(mc, elapsed))
         })
 }
