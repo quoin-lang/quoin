@@ -50,7 +50,6 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Wire `assertMeetsRequirements:` into `mix:` so a mixin can declare requirements its host class must satisfy.
   - [x] Implemented `can?:` (`src/runtime/object.rs`), overloaded by argument: a Symbol/String selector asks "does the receiver implement that method?" (instance/class methods for instance/class receivers, class-side for metaclass); a Class asks "is-a / mixes in?". Removed the `.can:` alias for `.mix:` to disambiguate (`.can:` call sites converted; obsolete `can?: -> {|clz| clz == Iterate}` defs removed). To make `ClassName.meta.can?:` reachable, a metaclass (`ClassMeta`) receiver now falls through to `Object`'s instance methods in dispatch (`src/vm.rs`) — i.e. metaclasses act as if they subclass `Object` (gaining `can?:`, `s`, `==:`, …). Tests in `qnlib/tests/17-can.qn`.
   - [x] `mix:` enqueues the mixin's class-side `assertMeetsRequirements:host` (if defined) as a **deferred call** that runs at the end of the host's definition block — added a general frame-level defer mechanism (`DeferredCall`, `Frame.defers`, run on *normal* block completion in the Return handler, `src/vm.rs`). Defers run *before* the frame is popped, so the queue stays GC-rooted via `self.frames` even if a defer yields (a collection during the suspension would otherwise free Values reachable only through the defer). Regression tests: `test_deferred_call_values_survive_collection` (Rust) and `yieldFromDeferredMixinCheck` (`qnlib/tests/13-fibers.qn`). Deferring to block-end means required methods may be defined *after* the `.mix:` (the universal idiom). On failure the class is unregistered (`Frame.unregister_on_defer_failure`, seeded by `pending_class_def`) so a class with unmet requirements is never left registered. `test.qn` switched from the undefined `implements?:` to `can?:`. Tests: `qnlib/tests/05-classes.qn` (mixinRequirements). Subclassing needs no separate check — a subclass inherits a parent that already passed.
-  - [ ] (Future) Expose the defer mechanism to Quoin source as a user-facing `defer` form.
 - [x] Implement the class-marker methods.
   - [x] `sealed!` — sets `Class.is_sealed`; refuses extension (`<--`, `->`/`-->`, `.mix:`) **and**
     subclassing, on a class or an instance's eigenclass (`Object#sealed!`). Guards in
@@ -126,7 +125,6 @@ This document outlines the language features, compiler updates, and VM modificat
 - [x] Make the `^>` yield operator usable in expression position.
   - Moved `yield_return` from `stmt` to `primary` in the pest grammar; it now works anywhere an expression does (e.g. `a = ^> v`), with greedy operand precedence matching `Fiber.yield:` (parenthesize to scope). ANTLR grammar (legacy/unused path) left as-is.
 - [ ] Have the `LoadGlobal` instruction consult the `BuiltinCache`. Currently it always does a `HashMap<NamespacedName, Value>` lookup against `globals` (see `vm.rs` `Instruction::LoadGlobal`); builtin classes (`Fiber`, `List`, `Integer`, etc.) could be served from the cache to avoid hashing the name on every load (e.g. for the `^>` -> `Fiber.yield:` lowering). `BuiltinCache` may need to be keyed more generally by name to cover all builtins.
-- [ ] Implement .../???/!!!
 - [x] Formalize an interface for Quoin error types.
   - `Error` base (`message`/`payload`, class-side `throw:`/`throw:payload:`) + core subtypes (`TypeError`, `ArgumentError`, `MessageNotUnderstood`, `ArithmeticError`, `IndexError`) in `00-bootstrap.qn`. Catch-by-type via `case`/`~`.
   - Runtime now raises structured errors: `QuoinError::Thrown` marker (value rides in `active_exception`), and `vm.quoinerror_to_value` maps internal `QuoinError` variants to typed Quoin `Error` objects at the `catch:` boundary. `does:throw:` widened to match by value/type or message string.
@@ -140,6 +138,35 @@ This document outlines the language features, compiler updates, and VM modificat
   - Capture the subtle/surprising behaviors here as they surface so they can be folded into the doc.
   - **`new:{}` block initialization & lexical scope.** Instance variables are *not* pre-bound inside a `new:{}` block, so an empty `new:{}` leaves every field at its default (`nil`) — it does **not** silently capture a same-named variable from the surrounding scope. Only an explicit assignment binds a field. The right-hand side of such an assignment resolves up the lexical chain (so `{ x = x }` copies the enclosing `x` into the field), but the assignment itself binds in the block's own frame and never mutates the enclosing variable. Corollary: a plain-assignment `init:` like `init: -> {|a| @a = a }` is redundant — field population already sets `@a` from the block before `init:` runs — so it behaves identically to the default no-op `init`.
   - **`init`/`init:` run the whole chain.** `new`/`new:{}` invoke the initializer of every class in the hierarchy (ancestors and mixins included), base→derived, with `init:` preferred over `init` per class. A derived `init:` no longer shadows/skips an ancestor or mixin `init`.
+
+## Syntax
+
+New surface syntax — grammar/parser changes and the language forms that ride on them. (Syntax
+that already shipped stays inline in its home section: the `#< … >` set literal and the `^>`
+yield operator in `## Misc`, operators-as-`:`-selectors in the dispatch overhaul, etc. Related
+but *not* parser changes — left in place: per-argument guard blocks and `#bind:{}` destructuring,
+both under `## Misc`.)
+
+- [ ] **Scope a namespace for definitions (`module`-like).** A way to open a namespace in code so
+  that `Class` and constant definitions inside the scope implicitly register under it — instead of
+  repeating the `[Ns]` prefix on every definition. Analogous to Ruby's `module Foo … end` (or
+  C#/Rust `namespace`/`mod`). The load *path* is already decoupled from the `[Ns]` namespace a file
+  registers under (see `use` in `## Misc` / `## 7. Namespaces`). Open design questions:
+  - **Form:** a block `namespace Foo { … }` vs a file-level `namespace Foo;` header applying to the
+    rest of the file; nesting; interaction with the existing `[Ns]` prefix.
+  - **Does this imply import scopes?** If a scope sets the *current namespace* for definitions, does
+    it also scope *resolution* — unqualified names inside resolving against the open namespace first
+    (scoped imports / `using`)?
+  - **`use` inside a namespace block:** does a `use` within the scope alias everything the imported
+    unit registers *under that namespace* — so those imports are visible unqualified within the
+    block — and is that aliasing confined to the block?
+- [ ] **`#b'HEX'` byte literal.** A `#`-prefixed user-literal for `Bytes`, like `#(…)` / `#/…/` /
+  `#< … >`; a parser change. (Companion to the `BytesBuilder` in `## Networking & Async I/O`.)
+- [ ] **User-facing `defer` form.** Expose the frame-level defer mechanism — today internal, used by
+  `mix:`'s deferred `assertMeetsRequirements:` — to Quoin source as a `defer` form (see the `mix:`
+  item in `## Misc`).
+- [ ] **Wildcard selector dispatch.** Grab examples from the old repo.
+- [ ] Implement `...` / `???` / `!!!`.
 
 ## Networking & Async I/O
 
@@ -184,8 +211,7 @@ Quoin over the current sockets/streams).
   `ByteStream`/`StringStream` UTF-8 / empty-delimiter cases (a `ValueError` / `ParseError` tranche),
   and the `unexpected I/O result` internal-invariant guards.
 - [ ] **`Bytes` extras.** A mutable `BytesBuilder` (if concat churn shows up — body assembly
-  is `bytes + chunk` today) and a `#b'HEX'` byte literal (the `#`-prefixed user-literal
-  syntax, like `#(…)`/`#/…/`; a parser change).
+  is `bytes + chunk` today). (The `#b'HEX'` byte literal moved to `## Syntax`.)
 - [ ] **(Separate, larger track) Polyglot extension system.** Out-of-process, shared-memory
   extensions — design captured in `docs/FUTURE_EXT_ARCH.md` (not started).
 
@@ -443,8 +469,6 @@ deferred `Mirror` in `## REPL`.
 - [x] **Method Overloading**:
   - Resolve messages by matching both the selector name *and* matching the types of the arguments passed at runtime.
   - E.g., `split: -> { |pat:String| ... }` vs `split: --> { |p:Regex| ... }` must dispatch correctly depending on whether the argument is a `String` or a `Regex`.
-- [ ] Wildcard selector dispatch.
-  - Grab examples from old repo.
 
 ## 5. Non-Local Returns (`^^` operator)
 - [x] **Method-level returns (`^^`)**:
