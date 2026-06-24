@@ -1,5 +1,19 @@
 (TestSuite.new:{ name = 'Misc' }).add:{
     .test:
+    humanizeDuration -> {
+        "* Reporter renders elapsed µs in the largest unit >= 1, one decimal for ms/s."
+        r = PlainTestReporter.new:{ out = nil };
+        .is:{ r.humanize:0 } equalTo:'0us';
+        .is:{ r.humanize:524 } equalTo:'524us';
+        .is:{ r.humanize:999 } equalTo:'999us';
+        .is:{ r.humanize:1000 } equalTo:'1.0ms';
+        .is:{ r.humanize:12524 } equalTo:'12.5ms';
+        .is:{ r.humanize:999999 } equalTo:'999.9ms';
+        .is:{ r.humanize:1000000 } equalTo:'1.0s';
+        .is:{ r.humanize:1500000 } equalTo:'1.5s';
+    };
+
+    .test:
     defaultNotEq -> {
         .is:{
             EqTester1 <- {

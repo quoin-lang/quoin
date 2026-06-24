@@ -43,6 +43,16 @@
     };
 
     .test:
+    padRight -> {
+        "* Pads with trailing spaces to the requested width; a no-op once already wide enough."
+        .is:{ 'ab'.padRight:5 } equalTo:'ab   ';
+        .is:{ 'ab'.padRight:2 } equalTo:'ab';
+        .is:{ 'abcde'.padRight:3 } equalTo:'abcde';
+        .is:{ ''.padRight:3 } equalTo:'   ';
+        .is:{ ('ab'.padRight:5).length } equalTo:5;
+    };
+
+    .test:
     replaceWith -> {
         "* `replace:with:` dispatches on the pattern argument's type: a String
         "* pattern is a literal replace-all, a Regex pattern a regex replace-all.

@@ -112,12 +112,12 @@ Benchmark <- {
             i = 1;
             { i <= iterations }.whileDo: {
                 elapsed = Timer.time:block;
-                ('  Iteration ' + i + ': ' + elapsed + ' µs').print;
+                ('  Iteration ' + i + ': ' + elapsed + ' us').print;
                 total = total + elapsed;
                 i = i + 1;
             };
             avg = total / iterations;
-            ('  Average: ' + avg + ' µs').print;
+            ('  Average: ' + avg + ' us').print;
             '--------------------------------------------------'.print;
             ^avg
         }
