@@ -254,11 +254,14 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
     step — the AST builder still `unreachable!`s on some pest-valid shapes (e.g. `Foo <-- 0`), so a
     `parse_or_none` wrapper `catch_unwind`s the parse. It recovers (no crash) but the caught panic
     prints its message; a clean fix needs the parser to return a `Result` through AST building.
-  - [ ] **Trailing `.` and `..` need their own heuristics.** The fixed placeholder set (`{}`/`0`)
-    doesn't complete a trailing postfix dot `a.` (a method-call start expecting a `call_sig`
-    selector, not an operand — so `a.`/`@x.`/`Foo.` currently fail to complete → uncolored) or a
-    trailing range `1..` (and `.` vs `..` vs a float like `1.` are ambiguous at end-of-input). Add
-    candidates: a placeholder selector after a postfix `.` (e.g. `a.x`), and a primary after `..`
+  - [ ] **Trailing postfix dot `a.` heuristic — prerequisite for tab completion.** The fixed
+    placeholder set (`{}`/`0`) doesn't complete a trailing `.` (a method-call start expecting a
+    `call_sig` selector, not an operand — so `a.`/`@x.`/`Foo.` fail to complete → uncolored). Add a
+    placeholder-selector candidate (e.g. `a.x`). **This must land with `.`-completion (P2):** the
+    completer pops *exactly* when the input ends in `.`, so without this the line would lose its
+    colors every time the completion popup runs.
+  - [ ] **Trailing range `..` heuristic.** `1..` (range, RHS missing) isn't covered, and `.` vs
+    `..` vs a float `1.` are ambiguous at end-of-input. Add a primary-after-`..` candidate
     (`1 .. 0`), keyed on the trailing-token shape.
 - [x] Result pretty-printing: render the result via its `.s` method (honors user `s` overrides;
   e.g. a custom `Point` prints `Point(3, 4)`), falling back to `Display` if `.s` errors. (`=>`
@@ -268,7 +271,9 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
 
 **P2 — power features:**
 - [ ] Tab completion: globals, class names, keywords, and `.`-completion of method selectors
-  (needs method-table introspection).
+  (needs method-table introspection). **Depends on the trailing-`.` highlighting heuristic** (P1,
+  under the predictive-completion item): completion fires on `.`-ending input, so ship them together
+  or the input loses its colors whenever the popup is open.
 - [ ] Introspection: list defined globals/classes; inspect a class's methods (some already doable
   in-language via `.class`/`.meta`/`can?:`).
 - [ ] Startup file (`~/.quoinrc` run on REPL boot) + banner; configurable prompt.
