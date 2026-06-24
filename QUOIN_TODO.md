@@ -196,15 +196,16 @@ Quoin over the current sockets/streams).
 - [x] **Operator precedence was inverted for arithmetic.** In the pest Pratt parser (`src/parser/pest/parser.rs`), `+`/`-` bound *tighter* than `*`/`/`/`%`, and `..` bound tighter than all arithmetic (`2 + 3 * 4 == 20`; `2 .. 3 + 1` errored as `(2..3) + 1`). Fixed by reordering the `.op(...)` levels to the conventional ordering — loosest→tightest: `||` · `&&` · `== !=` · comparison · `~` · `..` · `+ -` · `* / %`, with postfix `.method` tighter than any infix and prefix tightest. Now `2 + 3 * 4 == 14` and `2 .. n + 1` is `2 .. (n + 1)`. Full `qnlib` test suite passes (0 regressions); docs updated (`docs/language/01-foundations.md` §6 and appendices A/C).
 - [x] **`-->` / `->` didn't override a same-signature method.** Both appended a variant to the selector's multimethod chain; equal-specificity ties resolved to the *first-defined*, so a plain redefinition (`Foo <- { bar -> { 1 } }; Foo <-- { bar --> { 2 } }`) was dead code and `bar` returned `1`. The originally-planned fix (reverse the equal-specificity tie-break) turned out **wrong** — it breaks ordered guard dispatch (the `dispatchByBlock` test relies on first-defined guards winning over a later `.class==Object` catch-all). Fixed instead by **replace-at-definition**: a new *unguarded* variant whose `param_types` match an existing unguarded variant replaces that variant's block in place (`replace_or_append_method_in_chain`, `src/vm.rs`); guard- and type-differentiated variants still append and dispatch by specificity. `Foo.new.bar` now returns `2`; full suite passes; regression test `overridesSameSignature` added; docs updated (`docs/language/03-objects.md` §10/§13, appendix C). **Known limitation:** overriding a *guarded* variant with an identical guard does not replace (guards aren't compared for equality) — subsumed by the scoring overhaul below.
 - [ ] **`Runtime.eval:` panics on a syntax error instead of throwing.** A syntactically-invalid source string panics the whole VM in the pest parser (`parse_quoin_string_named` → `crates/quoin-syntax/src/pest/parser.rs`, which unwraps the `PestError`) rather than surfacing a catchable error, so `{ Runtime.eval:'1 +' }.catch:{…}` aborts the process instead of recovering. Found during the structured-error work (Tranche 4b): the typed `ParseError` now raised by `compile_and_execute_source` (`runtime.rs`) only covers *semantic* compile failures of already-parseable source; the parse step upstream still panics. The fix wants the parser to return a `Result` (mapped to `ParseError` at the `eval:` boundary) instead of panicking — **tricky because `quoin-syntax` now has other clients**, so changing the parse entry point's signature ripples beyond the VM.
-- [ ] **A multibyte char in an `#ANSI'…'` string leaks a stray `'` into the rendered output.** Any
-  non-ASCII glyph inside an `#ANSI` template (e.g. `µs` / `µ`, U+00B5) emits a spurious apostrophe per
-  multibyte char in the colorized output — visible in the `qn test` runner when elapsed times used `µs`
-  (every line carried a `'`). The colorizer itself (`src/ansi_colorizer.rs`) is UTF-8-safe (regex over
-  `&str`), so the leak is upstream in the `#ANSI` literal render/`%:`-format pipeline — likely a byte-vs-char
-  index mismatch when slicing the template (the raw `.print` path also doubles the closing quote around a
-  multibyte char). **Workaround in place:** the test runner (`qnlib/test.qn`, `TestReporter#humanize:`) uses
-  ASCII `us` instead of `µs`. The real fix is char-safe indexing in the `#ANSI` string handling so any
-  Unicode renders cleanly.
+- [x] **A multibyte char in a string literal leaked a stray `'` into the value.** Any non-ASCII glyph in a
+  string literal (e.g. `µ`, U+00B5) appended the closing quote to the parsed value — `'µ'.length` was 2,
+  `'café'` became `café'`, and `#ANSI'…µs…'` rendered a spurious apostrophe. Root cause was *not* the
+  colorizer (`src/ansi_colorizer.rs` is UTF-8-safe) but the lexer: `parse_primary_expr`
+  (`crates/quoin-syntax/src/pest/parser.rs`) extracted literal bodies with `raw.substring(1, raw.len() - 1)`
+  — the `substring` crate is **char**-indexed while `raw.len()` is **byte** length, so on multibyte content
+  the end index overshot and (clamped) swallowed the closing `'`. Affected both `string_expr` and
+  `user_string_expr` (`#ident'…'`). Fixed by byte-slicing between the single-byte `'`/`#` delimiters
+  (`&raw[1..raw.len() - 1]`), which is char-boundary-safe. The `us`→`µs` workaround in `qnlib/test.qn` was
+  reverted. Regression test: `multibyteLiterals` (`qnlib/tests/08-strings.qn`).
 
 ## 1. Class & Method Definition Semantics
 - [x] **Class Creation (`<-` operator)**:

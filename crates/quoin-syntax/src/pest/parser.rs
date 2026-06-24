@@ -571,7 +571,10 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         }
         Rule::string_expr => {
             let raw = inner.as_str();
-            let string_val = raw.substring(1, raw.len() - 1).to_string();
+            // Byte-slice between the single-byte `'` delimiters (not the char-indexed
+            // `substring`, which mixed a char start with a byte-length end and swallowed
+            // the closing quote on any multibyte content).
+            let string_val = raw[1..raw.len() - 1].to_string();
             let unescaped = unescape(string_val);
             Node {
                 source_info,
@@ -625,10 +628,12 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
             let string_start = raw_string
                 .find('\'')
                 .unwrap_or_else(|| panic!("Invalid user string: {}", raw_string));
-            let ident_string = raw_string.substring(1, string_start);
-            let string_string = raw_string
-                .substring(string_start + 1, raw_string.len() - 1)
-                .to_string();
+            // Byte-slice at the single-byte `#`/`'` delimiters: `[1..first_quote]` is the
+            // identifier, `[first_quote+1..last_byte]` the body. `string_start` is already a
+            // byte index (from `find`); the old char-indexed `substring` mixed the two and
+            // leaked the closing quote on multibyte content.
+            let ident_string = &raw_string[1..string_start];
+            let string_string = raw_string[string_start + 1..raw_string.len() - 1].to_string();
             let unescaped_string = unescape(string_string);
             Node {
                 source_info,

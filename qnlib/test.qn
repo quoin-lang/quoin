@@ -109,7 +109,7 @@ TestAssertionResult <- { |@test @name @passed? @location @elapsed @evidence|
     locationColumn -> { @location.defined?.if:{ (@location.third) + 1 } else:{ '?' } }
 
     s --> {
-        'TestAssertionResult{%1 %2 %3%4%5 %6us %7}' % #(
+        'TestAssertionResult{%1 %2 %3%4%5 %6µs %7}' % #(
             @test
             @passed?
             @evidence.first
@@ -181,7 +181,7 @@ TestResult <- { |@test @name @assertions @elapsed @wallElapsed|
     elapsed -> { @elapsed }
     wallElapsed -> { @wallElapsed }
 
-    s --> { 'TestResult{%1 %2 %3us [%4]}' % #( @test @name @elapsed @assertions ) }
+    s --> { 'TestResult{%1 %2 %3µs [%4]}' % #( @test @name @elapsed @assertions ) }
 };
 
 TestSuite <- { |@name @tests|
@@ -214,13 +214,11 @@ TestReporter <- {
     .abstract!;
 
     "* Render an elapsed time (microseconds) in the largest unit that keeps it >= 1:
-    "* sub-millisecond stays us; >= 1ms shows ms; >= 1s shows s. One truncated decimal
-    "* for ms/s, via integer math (float division renders at ugly full precision).
-    "* ASCII 'us' (not 'µs') on purpose: a multibyte glyph leaks a stray quote through
-    "* the #ANSI colorize path."
+    "* sub-millisecond stays µs; >= 1ms shows ms; >= 1s shows s. One truncated decimal
+    "* for ms/s, via integer math (float division renders at ugly full precision)."
     humanize: -> { |us|
-        us.defined?.else:{ ^^'0us' };
-        (us < 1000).if:{ ^^('%1us' % us) };
+        us.defined?.else:{ ^^'0µs' };
+        (us < 1000).if:{ ^^('%1µs' % us) };
         (us < 1000000).if:{ ^^('%1.%2ms' % #( (us / 1000) ((us / 100) % 10) )) };
         '%1.%2s' % #( (us / 1000000) ((us / 100000) % 10) )
     }

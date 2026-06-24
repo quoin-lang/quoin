@@ -43,6 +43,18 @@
     };
 
     .test:
+    multibyteLiterals -> {
+        "* String literals measure char length and stop at the closing quote even with
+        "* multibyte content. A byte-vs-char slicing bug in the lexer once leaked the
+        "* delimiter (so 'µ'.length was 2) — applied to plain and #ANSI'…' strings alike."
+        .is:{ 'µ'.length } equalTo:1;
+        .is:{ 'abµde'.length } equalTo:5;
+        .is:{ 'aµbµc'.length } equalTo:5;
+        .is:{ 'café' } equalTo:'café';
+        .is:{ 'x' + #ANSI'µs'.string } equalTo:'xµs';
+    };
+
+    .test:
     padRight -> {
         "* Pads with trailing spaces to the requested width; a no-op once already wide enough."
         .is:{ 'ab'.padRight:5 } equalTo:'ab   ';
