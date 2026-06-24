@@ -151,9 +151,28 @@ name.case:{
     .when:11..20 do:'High';
 })).print;
 
+false.if:{
+    server = TcpServer.new:{
+        address = '127.0.0.1:0'
+    }
 
-(1+2) <-- {|@x|};
+    i = 0
+    #( 'Listening on' server.port ).print;
+    server.start:{ |conn|
+        #( 'Received connection' conn ).print;
 
+        conn.writeAll:'Hi\n'.asBytes
+        conn.close
+
+        i = i + 1
+        (i > 3).if:{server.stop}
+        i
+    }
+
+    #( 'Server respponses: ' server.join ).print;
+}
+
+"*
 "* Test 8: Ambiguous method dispatch. Two variants are equally specific for `pick:10`
 "* — same parameter type (Integer) and both guards pass — so dispatch has no
 "* tiebreaker and raises AmbiguousMethodError. This is UNCAUGHT, so it halts the

@@ -1,0 +1,12 @@
+"* Async helpers layered over the native `Async`/`Task` scheduler primitives.
+
+Async <-- {
+    .meta <-- {
+        "* Join a list of already-started Tasks concurrently, returning their values in the
+        "* list's order. Unlike `gather:` (which spawns the work itself), this assumes each
+        "* Task is already running — joining one parks the caller while the rest keep
+        "* progressing on the scheduler, so the total wait is ~max(task), not the sum. A
+        "* failed or cancelled task propagates its error out of the join.
+        joinAll: -> { |tasks| tasks.collect:{ |task| task.join } };
+    };
+};

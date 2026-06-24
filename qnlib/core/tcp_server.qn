@@ -1,0 +1,39 @@
+"* A minimal concurrent TCP server. `start:` accepts connections in the background, handling
+"* each in its own Task so they overlap; the *caller* decides when to stop accepting (`stop`)
+"* and then drains the in-flight handlers (`join`). Termination is deliberately external — a
+"* server doesn't know on its own when it should quit, so that policy lives with the caller.
+TcpServer <- { |@address @listener @tasks @acceptTask|
+    init: -> { |address|
+        @address = address;
+        @tasks = #();
+        @listener = TcpListener.listen:@address;
+    };
+
+    "* The bound local port (e.g. after an ephemeral ':0' bind).
+    port -> { @listener.port };
+
+    "* Begin accepting in the background and return immediately. Each accepted connection is
+    "* handled in its own Task, which owns the socket and closes it when the handler returns.
+    "* The accept loop runs as its own Task so `stop` can cancel it — including a parked accept.
+    start: -> { |block|
+        @acceptTask = Task.spawn:{
+            { true }.whileDo:{
+                conn = @listener.accept;
+                @tasks.add:Task.spawn:{ result = block.value:conn; conn.close; result };
+            };
+        };
+    };
+
+    "* Stop accepting: cancel the accept loop, which aborts its parked `accept`. In-flight
+    "* handler tasks keep running — drain them with `join`. A no-op before `start:`.
+    stop -> { @acceptTask.defined?.if:{ @acceptTask.cancel } };
+
+    "* Wait for all connection-handler tasks and return their values, in connection order.
+    join -> {
+        { @acceptTask.join }.catch:{}
+        Async.joinAll:@tasks
+    };
+
+    "* Release the listening socket / bound port.
+    close -> { @listener.close };
+}

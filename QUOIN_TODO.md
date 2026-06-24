@@ -193,6 +193,22 @@ Quoin over the current sockets/streams).
   with a *server* handshake (a rustls `ServerConfig` built from a cert/key) — the mirror of
   `TlsSocket.wrap:host:`. Needs a config-loading surface plus a backend op (e.g.
   `TlsAccept { id, config }`). Enables QN HTTPS servers.
+- [ ] **Servers: serial `acceptLoop:` vs concurrent `TcpServer` — document the seam (and
+  reconsider `acceptLoop:`).** `acceptLoop:` (native, `sockets.rs`) is **serial**: it runs the
+  block to completion and *closes the accepted socket* before accepting the next, breaking only
+  on a non-local exit (`^^`) from the block. That's great for tests/fixtures (see
+  `qnlib/tests/24-server.qn`) and simple request-response, and its win is ergonomic (automatic
+  socket cleanup on return/throw/cancel + a clean `^^` break). But it's a **footgun for real
+  servers**: the natural "spawn a Task per connection" instinct silently breaks under it (the
+  socket is closed the instant the spawning block returns, so the deferred handler writes to a
+  dead socket, and a per-task `^^`/throw never reaches the loop). Concurrent serving belongs one
+  layer up: `TcpServer` (`qnlib/core/tcp_server.qn`) built on manual `accept` + `Task.spawn:`
+  (each task owns/closes its socket), with **external** termination via cancelling the
+  accept-loop task (cancel aborts even a parked `accept`). To capture in the eventual docs: the
+  layering (`accept`/`acceptOnce:`/`acceptLoop:` = thin native primitives; `TcpServer` = the
+  blessed concurrent server), and a decision on whether `acceptLoop:` should stay once `TcpServer`
+  is standard or at least cross-reference it. A *native* concurrent-accept variant is probably not
+  worth it — the pure-Quoin `TcpServer` already nails it, and the native surface is better kept thin.
 - [ ] **Write-mode file streams + `seek:`.** `[IO]File` streams are read-only today
   (`OpenFile` opens read-only). Add a write/append mode (a `mode` on `OpenFile`, or a
   separate selector) and `seek:` on a file-backed `ByteStream` — a file-only op (sockets
