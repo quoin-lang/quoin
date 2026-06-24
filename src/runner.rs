@@ -12,7 +12,7 @@ use crate::runtime::{
     async_rt, block, boolean, bytes, class, double, fiber as fiber_class, http, integer, io, list,
     map, method, nil, object, regex, runtime, set, sockets, streams, string, symbol, task, timer,
 };
-use crate::value::{Block, EnvFrame, NamespacedName, Value};
+use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
 
 use corosensei::CoroutineResult;
@@ -119,13 +119,20 @@ enum ReplAction {
 /// If `line` is a `$`-command, run it and return its action; `None` means "not a command,
 /// evaluate it".
 fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> {
-    let cmd = line.trim().strip_prefix('$')?;
+    let cmd = line.trim().strip_prefix('$')?.trim_start();
     let word = cmd.split_whitespace().next().unwrap_or("");
+    let rest = cmd[word.len()..].trim();
     match word {
         "quit" | "exit" | "q" => return Some(ReplAction::Quit),
         "help" | "h" | "?" => {
-            println!("Commands: $help, $reset (clear session locals), $quit/$exit.");
-            println!("Everything else is evaluated as Quoin; definitions and lowercase");
+            println!("Commands:");
+            println!("  $type <expr>     show the class of an expression's result");
+            println!("  $time <expr>     evaluate and report wall-clock time");
+            println!("  $load <file.qn>  run a .qn file into the session");
+            println!("  $reset           clear session locals");
+            println!("  $help            this help");
+            println!("  $quit / $exit    leave the REPL (also Ctrl-D)");
+            println!("Anything else is evaluated as Quoin; definitions and lowercase");
             println!("variables persist across lines.");
         }
         "reset" => {
@@ -134,14 +141,52 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
             });
             println!("Session locals cleared.");
         }
+        "type" if !rest.is_empty() => {
+            if let Some(out) = eval_repl_type(arena, rest) {
+                println!("{out}");
+            }
+        }
+        "type" => eprintln!("usage: $type <expr>"),
+        "time" if !rest.is_empty() => {
+            let start = Instant::now();
+            let out = eval_repl_input(arena, rest);
+            let elapsed = start.elapsed();
+            if let Some(out) = out {
+                println!("{out}");
+            }
+            println!("   ({:.3} ms)", elapsed.as_secs_f64() * 1000.0);
+        }
+        "time" => eprintln!("usage: $time <expr>"),
+        "load" if !rest.is_empty() => match read_to_string(rest) {
+            Ok(src) => {
+                if let Some(out) = eval_repl_input(arena, &src) {
+                    println!("{out}");
+                }
+                println!("loaded {rest}");
+            }
+            Err(e) => eprintln!("$load: cannot read {rest}: {e}"),
+        },
+        "load" => eprintln!("usage: $load <file.qn>"),
         other => eprintln!("Unknown command: ${other} (try $help)"),
     }
     Some(ReplAction::Continue)
 }
 
-/// Parse, compile, and run one complete REPL input in the persistent env. Returns the line
-/// to print: `=> <value>`, an error message, or `None` (nothing — e.g. a `nil` result).
+/// Evaluate one complete REPL input and return the line to print (`=> <value>`, an error,
+/// or `None` for a value-less `nil` result).
 fn eval_repl_input(arena: &mut ReplArena, input: &str) -> Option<String> {
+    eval_repl(arena, input, false)
+}
+
+/// `$type` form: evaluate `input` and return its class (the `.class`), never suppressed.
+fn eval_repl_type(arena: &mut ReplArena, input: &str) -> Option<String> {
+    eval_repl(arena, input, true)
+}
+
+/// Parse, compile, and run one complete REPL input in the persistent env. With
+/// `show_class`, the result's `.class` is rendered (for `$type`) and a `nil` result is not
+/// suppressed; otherwise the value is rendered (`=> …`) and a bare `nil` prints nothing.
+fn eval_repl(arena: &mut ReplArena, input: &str, show_class: bool) -> Option<String> {
     let node = match try_parse_quoin_string_named(input, "<repl>") {
         Ok(n) => n,
         Err(pe) => {
@@ -173,12 +218,31 @@ fn eval_repl_input(arena: &mut ReplArena, input: &str) -> Option<String> {
         };
         let block = build_block(mc, &sb);
         match vm.execute_repl_line(mc, block) {
+            Ok(val) if show_class => {
+                let cls = vm.call_method(mc, val, "class", Vec::new()).unwrap_or(val);
+                Some(render_value(vm, mc, cls))
+            }
             // Suppress a bare `nil` result (a value-less statement).
             Ok(val) if val.type_name() == "Nil" => None,
-            Ok(val) => Some(format!("=> {val}")),
+            Ok(val) => Some(format!("=> {}", render_value(vm, mc, val))),
             Err(e) => Some(format!("{e}")),
         }
     })
+}
+
+/// Render a result value for display via its `.s` method (so a user-defined `s` override is
+/// honored), falling back to the `Value` `Display` if `.s` errors or returns a non-string.
+/// Safe to run here: a `mutate_root` closure holds the `Mutation`, so no GC occurs while
+/// `val` sits only on the Rust stack.
+fn render_value<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, val: Value<'gc>) -> String {
+    match vm.call_method(mc, val, "s", Vec::new()) {
+        Ok(Value::Object(o)) => match &o.borrow().payload {
+            ObjectPayload::String(s) => s.to_string(),
+            _ => format!("{val}"),
+        },
+        Ok(other) => format!("{other}"),
+        Err(_) => format!("{val}"),
+    }
 }
 
 /// Interactive loop: rustyline editing, history, multiline via the `Validator`, and Ctrl-C

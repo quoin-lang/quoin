@@ -241,10 +241,11 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   input, fresh prompt; Ctrl-D exits).
 - [x] **History** with up/down recall, persisted to `~/.quoin_history` (load on start, save on exit).
 - [ ] **Input syntax highlighting** (reuse the highlighter spans / `highlight_to_ansi`).
-- [ ] Result pretty-printing: render via `.s` (honor user overrides) instead of `Display`; `=>`
-  prefix, optional color, truncate huge collections.
-- [ ] More `$`-commands (P0 ships `$help`/`$reset`/`$quit`): `$type <expr>` (show class), `$load
-  <file.qn>`, `$time <expr>`.
+- [x] Result pretty-printing: render the result via its `.s` method (honors user `s` overrides;
+  e.g. a custom `Point` prints `Point(3, 4)`), falling back to `Display` if `.s` errors. (`=>`
+  prefix, nil suppression. Color/truncation still open.)
+- [x] `$`-commands: `$type <expr>` (result's class), `$time <expr>` (eval + wall-clock), `$load
+  <file.qn>` (run a file into the session), plus the P0 `$help`/`$reset`/`$quit`.
 
 **P2 — power features:**
 - [ ] Tab completion: globals, class names, keywords, and `.`-completion of method selectors
