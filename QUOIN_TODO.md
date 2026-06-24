@@ -240,7 +240,10 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
 - [x] **Abandon an in-progress multiline buffer** with Ctrl-C (rustyline `Interrupted` → drop the
   input, fresh prompt; Ctrl-D exits).
 - [x] **History** with up/down recall, persisted to `~/.quoin_history` (load on start, save on exit).
-- [ ] **Input syntax highlighting** (reuse the highlighter spans / `highlight_to_ansi`).
+- [x] **Input syntax highlighting** via the rustyline `Highlighter` (reuses `highlight_to_ansi`).
+  Guarded by `try_parse`: the highlighter's parser panics on partial input, so an incomplete line
+  shows uncolored and colors in once it parses. (Token-level highlighting of partial input — to
+  color while typing — would need a non-panicking, gap-free lexer; left as a future refinement.)
 - [x] Result pretty-printing: render the result via its `.s` method (honors user `s` overrides;
   e.g. a custom `Point` prints `Point(3, 4)`), falling back to `Display` if `.s` errors. (`=>`
   prefix, nil suppression. Color/truncation still open.)

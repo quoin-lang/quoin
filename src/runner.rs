@@ -80,7 +80,7 @@ type ReplArena = Arena<Rootable![VmState<'_>]>;
 /// rustyline helper. Its `Validator` keeps the editor open for continuation while the input
 /// is syntactically incomplete (a parse error positioned at end-of-input); a complete input
 /// — or one with a *real* mid-input syntax error — submits, and the eval loop shows any
-/// error. Completion/hinting/highlighting are no-ops for now (later P1).
+/// error. The `Highlighter` colorizes valid input. Completion/hinting are no-ops (P2).
 struct ReplHelper;
 
 impl rustyline::completion::Completer for ReplHelper {
@@ -89,7 +89,27 @@ impl rustyline::completion::Completer for ReplHelper {
 impl rustyline::hint::Hinter for ReplHelper {
     type Hint = String;
 }
-impl rustyline::highlight::Highlighter for ReplHelper {}
+impl rustyline::highlight::Highlighter for ReplHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
+        // Highlight only syntactically valid input: the highlighter's parser panics on a
+        // partial/invalid line, and rustyline calls this on every keystroke. While typing an
+        // incomplete expression the line shows uncolored, then colors in once it parses.
+        if line.trim().is_empty() || try_parse_quoin_string_named(line, "<repl>").is_err() {
+            std::borrow::Cow::Borrowed(line)
+        } else {
+            std::borrow::Cow::Owned(highlight_to_ansi(line))
+        }
+    }
+
+    fn highlight_char(
+        &self,
+        _line: &str,
+        _pos: usize,
+        _kind: rustyline::highlight::CmdKind,
+    ) -> bool {
+        true
+    }
+}
 impl rustyline::Helper for ReplHelper {}
 
 impl rustyline::validate::Validator for ReplHelper {
