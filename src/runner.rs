@@ -91,10 +91,9 @@ impl rustyline::hint::Hinter for ReplHelper {
 }
 impl rustyline::highlight::Highlighter for ReplHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
-        // Highlight only syntactically valid input: the highlighter's parser panics on a
-        // partial/invalid line, and rustyline calls this on every keystroke. While typing an
-        // incomplete expression the line shows uncolored, then colors in once it parses.
-        if line.trim().is_empty() || try_parse_quoin_string_named(line, "<repl>").is_err() {
+        // `highlight_to_ansi` is resilient (it predictively completes incomplete input and
+        // never panics), so we colorize as-you-type, including partial lines.
+        if line.trim().is_empty() {
             std::borrow::Cow::Borrowed(line)
         } else {
             std::borrow::Cow::Owned(highlight_to_ansi(line))

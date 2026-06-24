@@ -243,15 +243,17 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
 - [x] **Input syntax highlighting** via the rustyline `Highlighter` (reuses `highlight_to_ansi`).
   Guarded by `try_parse`: the highlighter's parser panics on partial input, so an incomplete line
   shows uncolored and colors in once it parses. (Color-while-typing is the refinement below.)
-- [ ] **Highlight incomplete input by predictive completion.** To color a partial line *while
-  typing* without a separate lexer: when `try_parse` fails at end-of-input, append a minimal
-  synthetic suffix that makes it parse — an operand after a trailing binary operator, closing
-  delimiters for unbalanced `{`/`(`/`#(`/`#{`, a closing quote for an open string, etc. (a small
-  set of heuristics keyed on the parse error / trailing tokens). Highlight the *completed* source,
-  then keep only the spans lying within the original input's byte length (the suffix is
-  append-only, so the real spans' offsets are unchanged) and render those — the predicted
-  completion is highlighted but never displayed. Cap the attempt and fall back to uncolored if no
-  completion parses. Reuses the existing AST highlighter rather than building a partial-input lexer.
+- [x] **Highlight incomplete input by predictive completion.** Done in `quoin-syntax`
+  (`complete::complete_source` + `highlight::highlight_resilient`), reusable by the REPL and the
+  language server. A context-aware mini-lexer closes open strings/regex/brackets; a placeholder
+  operand (`{}` then `0`) completes a trailing operator / keyword selector / `=` / definition op;
+  every candidate is verified by re-parsing (first that parses wins — the suffix is cropped away, so
+  the choice is irrelevant to the result). `highlight_resilient` parses-or-completes, then returns
+  only the spans within the original length. The REPL now colors partial lines as you type.
+  - **Caveat (tied to the `Runtime.eval:` parse-panic bug below):** `try_parse` only guards the pest
+    step — the AST builder still `unreachable!`s on some pest-valid shapes (e.g. `Foo <-- 0`), so a
+    `parse_or_none` wrapper `catch_unwind`s the parse. It recovers (no crash) but the caught panic
+    prints its message; a clean fix needs the parser to return a `Result` through AST building.
 - [x] Result pretty-printing: render the result via its `.s` method (honors user `s` overrides;
   e.g. a custom `Point` prints `Point(3, 4)`), falling back to `Display` if `.s` errors. (`=>`
   prefix, nil suppression. Color/truncation still open.)
