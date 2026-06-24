@@ -24,7 +24,7 @@ use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
 use std::collections::HashSet;
 use std::fs::read_to_string;
 use std::future::Future;
-use std::io::{BufRead, IsTerminal, Write, stdin, stdout};
+use std::io::{BufRead, IsTerminal, stdin};
 use std::iter::once_with;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -72,6 +72,202 @@ fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
     vm.register_native_class(mc, map::build_key_value_pair_class());
     vm.register_native_class(mc, regex::build_regex_class());
     vm.register_native_class(mc, fiber_class::build_fiber_class());
+}
+
+/// The persistent REPL arena: one `VmState` kept alive across all lines.
+type ReplArena = Arena<Rootable![VmState<'_>]>;
+
+/// rustyline helper. Its `Validator` keeps the editor open for continuation while the input
+/// is syntactically incomplete (a parse error positioned at end-of-input); a complete input
+/// — or one with a *real* mid-input syntax error — submits, and the eval loop shows any
+/// error. Completion/hinting/highlighting are no-ops for now (later P1).
+struct ReplHelper;
+
+impl rustyline::completion::Completer for ReplHelper {
+    type Candidate = String;
+}
+impl rustyline::hint::Hinter for ReplHelper {
+    type Hint = String;
+}
+impl rustyline::highlight::Highlighter for ReplHelper {}
+impl rustyline::Helper for ReplHelper {}
+
+impl rustyline::validate::Validator for ReplHelper {
+    fn validate(
+        &self,
+        ctx: &mut rustyline::validate::ValidationContext,
+    ) -> rustyline::Result<rustyline::validate::ValidationResult> {
+        use rustyline::validate::ValidationResult;
+        let input = ctx.input();
+        if input.trim().is_empty() {
+            return Ok(ValidationResult::Valid(None));
+        }
+        match try_parse_quoin_string_named(input, "<repl>") {
+            Ok(_) => Ok(ValidationResult::Valid(None)),
+            Err(pe) if pe.start >= input.trim_end().len() => Ok(ValidationResult::Incomplete),
+            Err(_) => Ok(ValidationResult::Valid(None)),
+        }
+    }
+}
+
+/// Outcome of a `$`-command.
+enum ReplAction {
+    Continue,
+    Quit,
+}
+
+/// If `line` is a `$`-command, run it and return its action; `None` means "not a command,
+/// evaluate it".
+fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> {
+    let cmd = line.trim().strip_prefix('$')?;
+    let word = cmd.split_whitespace().next().unwrap_or("");
+    match word {
+        "quit" | "exit" | "q" => return Some(ReplAction::Quit),
+        "help" | "h" | "?" => {
+            println!("Commands: $help, $reset (clear session locals), $quit/$exit.");
+            println!("Everything else is evaluated as Quoin; definitions and lowercase");
+            println!("variables persist across lines.");
+        }
+        "reset" => {
+            arena.mutate_root(|mc, vm| {
+                vm.repl_env = Some(gcl!(mc, EnvFrame::new(None)));
+            });
+            println!("Session locals cleared.");
+        }
+        other => eprintln!("Unknown command: ${other} (try $help)"),
+    }
+    Some(ReplAction::Continue)
+}
+
+/// Parse, compile, and run one complete REPL input in the persistent env. Returns the line
+/// to print: `=> <value>`, an error message, or `None` (nothing — e.g. a `nil` result).
+fn eval_repl_input(arena: &mut ReplArena, input: &str) -> Option<String> {
+    let node = match try_parse_quoin_string_named(input, "<repl>") {
+        Ok(n) => n,
+        Err(pe) => {
+            return Some(format!(
+                "Parse error at line {}, col {}: {}",
+                pe.line, pe.column, pe.message
+            ));
+        }
+    };
+    arena.mutate_root(|mc, vm| {
+        let NodeValue::Program(p) = &node.value else {
+            return None;
+        };
+        // Seed the compiler with the session's existing bindings so references to them
+        // resolve as locals (LoadLocal -> repl_env), not globals.
+        let locals: HashSet<String> = vm
+            .repl_env
+            .map(|env| {
+                env.borrow()
+                    .vars
+                    .iter()
+                    .map(|(s, _)| s.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let sb = match Compiler::new_with_locals(locals).compile_program(p) {
+            Ok(sb) => sb,
+            Err(e) => return Some(format!("Compile error: {e}")),
+        };
+        let block = build_block(mc, &sb);
+        match vm.execute_repl_line(mc, block) {
+            // Suppress a bare `nil` result (a value-less statement).
+            Ok(val) if val.type_name() == "Nil" => None,
+            Ok(val) => Some(format!("=> {val}")),
+            Err(e) => Some(format!("{e}")),
+        }
+    })
+}
+
+/// Interactive loop: rustyline editing, history, multiline via the `Validator`, and Ctrl-C
+/// to abandon an in-progress input (Ctrl-D to exit).
+fn run_repl_interactive(arena: &mut ReplArena) {
+    let mut editor =
+        match rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::new() {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("repl: failed to start line editor: {e}");
+                return;
+            }
+        };
+    editor.set_helper(Some(ReplHelper));
+
+    let history =
+        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".quoin_history"));
+    if let Some(ref p) = history {
+        let _ = editor.load_history(p);
+    }
+
+    println!("Quoin REPL — $help for commands, $quit (or Ctrl-D) to exit.");
+
+    loop {
+        match editor.readline("qn> ") {
+            Ok(input) => {
+                if input.trim().is_empty() {
+                    continue;
+                }
+                let _ = editor.add_history_entry(input.as_str());
+                if let Some(action) = handle_repl_command(arena, &input) {
+                    match action {
+                        ReplAction::Quit => break,
+                        ReplAction::Continue => continue,
+                    }
+                }
+                if let Some(out) = eval_repl_input(arena, &input) {
+                    println!("{out}");
+                }
+            }
+            // Ctrl-C abandons the in-progress input; Ctrl-D / EOF exits.
+            Err(rustyline::error::ReadlineError::Interrupted) => continue,
+            Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(e) => {
+                eprintln!("repl: input error: {e}");
+                break;
+            }
+        }
+    }
+
+    if let Some(ref p) = history {
+        let _ = editor.save_history(p);
+    }
+}
+
+/// Non-interactive loop (piped / redirected stdin): no editor, no prompts. Accumulates
+/// lines until the buffer parses (or errors mid-input), then evaluates. Enables
+/// `echo '…' | qn repl` and `qn repl < script.qn`.
+fn run_repl_piped(arena: &mut ReplArena) {
+    let stdin = stdin();
+    let mut buffer = String::new();
+    loop {
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        if buffer.is_empty() && line.trim().is_empty() {
+            continue;
+        }
+        if buffer.is_empty() {
+            if let Some(action) = handle_repl_command(arena, &line) {
+                match action {
+                    ReplAction::Quit => break,
+                    ReplAction::Continue => continue,
+                }
+            }
+        }
+        buffer.push_str(&line);
+        match try_parse_quoin_string_named(&buffer, "<repl>") {
+            // Incomplete — keep accumulating.
+            Err(pe) if pe.start >= buffer.trim_end().len() => continue,
+            _ => {
+                if let Some(out) = eval_repl_input(arena, &buffer) {
+                    println!("{out}");
+                }
+                buffer.clear();
+            }
+        }
+    }
 }
 
 /// Step status for the benchmark driver, which runs a single fiber to completion
@@ -441,104 +637,12 @@ impl VmRunner {
             vm.repl_env = Some(gcl!(mc, EnvFrame::new(None)));
         });
 
-        println!("Quoin REPL — $help for commands, $quit (or Ctrl-D) to exit.");
-
-        let stdin = stdin();
-        let mut buffer = String::new();
-        loop {
-            print!("{}", if buffer.is_empty() { "qn> " } else { "... " });
-            let _ = stdout().flush();
-
-            let mut line = String::new();
-            if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
-                println!(); // newline past the dangling prompt on Ctrl-D / EOF
-                break;
-            }
-
-            // Pressing Enter at an empty prompt: nothing to evaluate, just re-prompt.
-            // (A blank line *within* a multiline buffer is kept as whitespace.)
-            if buffer.is_empty() && line.trim().is_empty() {
-                continue;
-            }
-
-            // A `$`-command (only at the start of a fresh input, never mid-multiline).
-            if buffer.is_empty() {
-                if let Some(cmd) = line.trim().strip_prefix('$') {
-                    let word = cmd.split_whitespace().next().unwrap_or("");
-                    match word {
-                        "quit" | "exit" | "q" => break,
-                        "help" | "h" | "?" => {
-                            println!(
-                                "Commands: $help, $reset (clear session locals), $quit/$exit."
-                            );
-                            println!(
-                                "Everything else is evaluated as Quoin; definitions and lowercase"
-                            );
-                            println!("variables persist across lines.");
-                        }
-                        "reset" => {
-                            arena.mutate_root(|mc, vm| {
-                                vm.repl_env = Some(gcl!(mc, EnvFrame::new(None)));
-                            });
-                            println!("Session locals cleared.");
-                        }
-                        other => eprintln!("Unknown command: ${other} (try $help)"),
-                    }
-                    continue;
-                }
-            }
-
-            buffer.push_str(&line);
-
-            match try_parse_quoin_string_named(&buffer, "<repl>") {
-                Ok(node) => {
-                    let output = arena.mutate_root(|mc, vm| {
-                        let NodeValue::Program(p) = &node.value else {
-                            return None;
-                        };
-                        // Seed the compiler with the session's existing bindings so
-                        // references to them resolve as locals (LoadLocal -> repl_env), not
-                        // globals — each line is its own compilation unit otherwise.
-                        let locals: HashSet<String> = vm
-                            .repl_env
-                            .map(|env| {
-                                env.borrow()
-                                    .vars
-                                    .iter()
-                                    .map(|(s, _)| s.as_str().to_string())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let sb = match Compiler::new_with_locals(locals).compile_program(p) {
-                            Ok(sb) => sb,
-                            Err(e) => return Some(format!("Compile error: {e}")),
-                        };
-                        let block = build_block(mc, &sb);
-                        match vm.execute_repl_line(mc, block) {
-                            // Suppress a bare `nil` result (a value-less statement).
-                            Ok(val) if val.type_name() == "Nil" => None,
-                            Ok(val) => Some(format!("=> {val}")),
-                            Err(e) => Some(format!("{e}")),
-                        }
-                    });
-                    if let Some(out) = output {
-                        println!("{out}");
-                    }
-                    buffer.clear();
-                }
-                Err(pe) => {
-                    // A parse error positioned at end-of-input means "expecting more" —
-                    // keep reading (multiline). A mid-input error is a real syntax error.
-                    if pe.start >= buffer.trim_end().len() {
-                        continue;
-                    }
-                    eprintln!(
-                        "Parse error at line {}, col {}: {}",
-                        pe.line, pe.column, pe.message
-                    );
-                    buffer.clear();
-                }
-            }
+        // Interactive terminals get the line editor; piped/redirected stdin uses the
+        // promptless accumulation loop (rustyline's editor/validator only apply to a tty).
+        if stdin().is_terminal() {
+            run_repl_interactive(&mut arena);
+        } else {
+            run_repl_piped(&mut arena);
         }
     }
 

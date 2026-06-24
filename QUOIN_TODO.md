@@ -234,11 +234,12 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   driver); plain stdin (editing/history is P1); result uses `Display`, not `.s` (P1).
 
 **P1 — ergonomics:**
-- [ ] Line editing via `rustyline` (cursor movement, kill/yank). Its `Validator` trait replaces the
-  P0 end-of-input parse-error heuristic for multiline detection.
-- [ ] **Abandon an in-progress multiline buffer** via a keybinding (Ctrl-C clears the buffer and
-  returns to the `qn> ` prompt without exiting) — the replacement for the removed P0 blank-line hack.
-- [ ] **History** with up/down recall, persisted (`~/.quoin_history` or XDG).
+- [x] Line editing via `rustyline` (cursor movement, kill/yank, multiline via its `Validator`).
+  Interactive tty only; piped/redirected stdin falls back to a promptless accumulation loop (which
+  also covers the P2 `qn repl < script` case). Helper traits are hand-impl'd (no `derive` feature).
+- [x] **Abandon an in-progress multiline buffer** with Ctrl-C (rustyline `Interrupted` → drop the
+  input, fresh prompt; Ctrl-D exits).
+- [x] **History** with up/down recall, persisted to `~/.quoin_history` (load on start, save on exit).
 - [ ] **Input syntax highlighting** (reuse the highlighter spans / `highlight_to_ansi`).
 - [ ] Result pretty-printing: render via `.s` (honor user overrides) instead of `Display`; `=>`
   prefix, optional color, truncate huge collections.
