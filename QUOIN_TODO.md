@@ -192,10 +192,146 @@ Quoin over the current sockets/streams).
 - [ ] **(Separate, larger track) Polyglot extension system.** Out-of-process, shared-memory
   extensions — design captured in `docs/FUTURE_EXT_ARCH.md` (not started).
 
+## REPL (`qn repl`)
+
+An interactive read-eval-print loop. Bootstrap it in Rust (a new `VmRunnerMode::Repl`), but
+design toward eventually re-implementing the loop in Quoin once the enabling primitives land
+(`eval:bindings:`, the `eval:` parse-panic fix, stdin line reading). Existing building blocks:
+`try_parse_quoin_string_named` (`Result`, not panic — distinguishes *incomplete* from *invalid*
+input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `highlight_to_ansi`
+(input highlighting), `annotate_error` (pretty errors w/ source snippets), persistent
+`vm.globals`, `[IO]Handle.stdin`.
+
+**Key design decisions to settle first:**
+- **Persistent locals.** `vm.globals` already persists across lines (class defs, `Uppercase`
+  consts), but `eval`/run uses `parent_env: None`, so lowercase `x = 5` would not carry. Pick:
+  (a) keep a persistent REPL `EnvFrame` injected as each line's parent env and accumulate
+  bindings (the "right" model, and what [[eval-bindings]] in §8 enables), vs (b) auto-promote
+  top-level bindings to globals (simpler, but bends the uppercase=global/lowercase=local rule).
+- **Meta-command prefix.** `:` collides with keyword-message selectors. Need a leading sigil that
+  can't begin a valid Quoin expression (e.g. `\`, `%`, or a `:` only honored as the first char).
+- **Line-editor crate.** No readline dep today. `rustyline` (mature, batteries-included:
+  history/Highlighter/Completer traits) vs `reedline` (nicer multiline + live highlighting,
+  heavier). Needed for P1; choose before then.
+
+**P0 — MVP (a genuinely usable REPL): DONE** (branch `feat/repl`; design in `docs/REPL_DESIGN.md`).
+- [x] `qn repl` wiring: `VmRunnerMode::Repl` + dispatch in `runner.rs`. Boots one VM with the
+  prelude loaded, kept alive across the loop; native-class registration extracted to a shared
+  `register_builtins`.
+- [x] The loop: read a line → `try_parse` → compile → run sharing persistent globals → print the
+  result (`=> <value>`), prompt `qn> `.
+- [x] **Persistent state** across lines: a `repl_env` on `VmState` (GC-rooted), reused as each
+  line's frame env via `VmState::execute_repl_line`; each line's compiler is seeded with the
+  session's binding names (`Compiler::new_with_locals`) so references resolve as locals, not globals.
+- [x] **Graceful recovery**: parse (`try_parse`), compile, and runtime/`throw` failures are shown
+  (`annotate_error`) and the loop continues; `execute_repl_line` resets frames/stack/active-exception
+  to the baseline after an error.
+- [x] **Multiline continuation**: incomplete input re-prompts (`... `), detected by the `try_parse`
+  error being positioned at end-of-input. (Abandoning an in-progress multiline buffer is deferred to
+  a P1 readline keybinding; for now exit/complete the input or Ctrl-C.)
+- [x] Exit on `Ctrl-D` (EOF) and `$quit`/`$exit`; bonus `$help`, `$reset`.
+- Known P0 limitations (see design doc): synchronous eval only (top-level async needs the scheduler
+  driver); plain stdin (editing/history is P1); result uses `Display`, not `.s` (P1).
+
+**P1 — ergonomics:**
+- [x] Line editing via `rustyline` (cursor movement, kill/yank, multiline via its `Validator`).
+  Interactive tty only; piped/redirected stdin falls back to a promptless accumulation loop (which
+  also covers the P2 `qn repl < script` case). Helper traits are hand-impl'd (no `derive` feature).
+- [x] **Abandon an in-progress multiline buffer** with Ctrl-C (rustyline `Interrupted` → drop the
+  input, fresh prompt; Ctrl-D exits).
+- [x] **History** with up/down recall, persisted to `~/.quoin_history` (load on start, save on exit).
+- [x] **Input syntax highlighting** via the rustyline `Highlighter` (reuses `highlight_to_ansi`).
+  Guarded by `try_parse`: the highlighter's parser panics on partial input, so an incomplete line
+  shows uncolored and colors in once it parses. (Color-while-typing is the refinement below.)
+- [x] **Highlight incomplete input by predictive completion.** Done in `quoin-syntax`
+  (`complete::complete_source` + `highlight::highlight_resilient`), reusable by the REPL and the
+  language server. A context-aware mini-lexer closes open strings/regex/brackets; a placeholder
+  operand (`{}` then `0`) completes a trailing operator / keyword selector / `=` / definition op;
+  every candidate is verified by re-parsing (first that parses wins — the suffix is cropped away, so
+  the choice is irrelevant to the result). `highlight_resilient` parses-or-completes, then returns
+  only the spans within the original length. The REPL now colors partial lines as you type.
+  - **Caveat (tied to the `Runtime.eval:` parse-panic bug below):** `try_parse` only guards the pest
+    step — the AST builder still `unreachable!`s on some pest-valid shapes (e.g. `Foo <-- 0`), so a
+    `parse_or_none` wrapper `catch_unwind`s the parse. It recovers (no crash) but the caught panic
+    prints its message; a clean fix needs the parser to return a `Result` through AST building.
+  - [x] **Trailing postfix dot `a.` heuristic.** `complete_source` now appends a selector
+    placeholder (` x`) so input ending in a method-send dot (`a.`/`@x.`/`Foo.`) parses and stays
+    colored while the completion popup is open. Shipped with `.`-completion (P2 below).
+  - [x] **Trailing range `..` heuristic.** A trailing `..` (range with the RHS not yet typed) is
+    already covered by the existing ` 0`/` x` placeholder operands (`1..` → `1 .. 0`); ditto a
+    float-in-progress `1.` (→ `1. x`). Confirmed by `trailing_range_operator` in `complete.rs`; no
+    new candidate needed (the placeholder set the dot heuristic added already supplies the bound).
+- [x] Result pretty-printing: render the result via its `.s` method (honors user `s` overrides;
+  e.g. a custom `Point` prints `Point(3, 4)`), falling back to `Display` if `.s` errors. (`=>`
+  prefix, nil suppression. Color/truncation still open.)
+- [x] `$`-commands: `$type <expr>` (result's class), `$time <expr>` (eval + wall-clock), `$load
+  <file.qn>` (run a file into the session), plus the P0 `$help`/`$reset`/`$quit`.
+
+**P2 — power features:**
+- [x] Tab completion (`src/repl_complete.rs`). A `CompletionIndex` snapshots the surface metadata
+  (globals/locals/namespaces + per-class class-side & instance selectors) once per line from the
+  live VM via the `introspect` API — owned/`'static`, so no arena access in the completer; refreshed
+  through `editor.helper_mut()` before each `readline` (the VM is frozen during editing, so it's
+  never stale). `complete_input(line, pos, &index)` is a pure, unit-tested function of lexical
+  context: inside `[ … ]` → namespaces; `recv.` where the receiver's class is statically known →
+  class-side selectors (class-name receiver), instance selectors (session local), or instance
+  selectors of a syntactically-typed literal — string / integer / `true`/`false` / `nil`, plus the
+  `#`-sigil collections & regex (`#(…)`→List, `#{…}`→Map, `#<…>`→Set, `#/…/`→Regex), symbols
+  (`#sym`/`#'sym'`), and bare blocks (`{…}`→Block), detected by a string/nesting-aware delimiter
+  match. A closed `[ns]` completes the fully-qualified name (`[IO]Fi`→`[IO]File`); else a bare word.
+  The rustyline `Completer` (`CompletionType::List`) is a thin adapter. **v1 limit:** only receivers
+  whose class genuinely needs evaluation (`@ivars`, `(expr)` groupings, chained sends) yield nothing.
+- [ ] **VM introspection API** (`src/introspect.rs`; design in `docs/INTROSPECTION.md`). Read-only
+  surface metadata as plain owned structs (no `'gc`), owning the VM-internal walking so the REPL /
+  completion / a future Quoin `Mirror` stay ignorant of internals. Exact: `globals` /
+  `describe_class` / `describe_value` / `session_locals`; prefix finds: `find_globals` /
+  `find_namespaces` / `find_selectors`. Consumed by the `$`-commands and tab completion above.
+  - [x] **`$`-introspection commands.** `$globals [prefix]` (→ `introspect::globals`, classes flowed
+    + values as `name: Class`), `$class <Name>` (→ `describe_class`: header `Parent <- Name (mixins…)
+    [flags]`, ivars, own + class-method signatures via `introspect::signature`), `$inspect <expr>` (→
+    eval then `describe_value`: value repr + `(class X)` + `@field: Class` lines). Built on a generic
+    `eval_value(arena, input, render)` (HRTB `render` closure) with `eval_repl_input`/`_type`/`_inspect`
+    as the three renders; `format_globals`/`format_class`/`format_inspect`/`flow_names` helpers.
+  - [ ] Later: the Quoin `Mirror` wrapper (native reflection class converting the structs to Quoin
+    objects) — a layer over this API, not part of it.
+- [x] Startup file: `~/.quoinrc` is run into the session on interactive REPL boot (shell-style:
+  not for piped scripts or `qn -e`); errors are reported but non-fatal. Banner suppressible with
+  `QN_NO_BANNER`; prompt overridable with `QN_PROMPT` (default `qn> `). (`QN_*` to match the binary
+  and the `tuning` stress knobs.) The shared arena setup is factored into `build_repl_arena`.
+  - [ ] **Evaluate `~/.quoinrc` against a `QuoinRepl` object** (`self` bound to a fresh `QuoinRepl`
+    instance) so the rc can both define helpers *and* act as a config file — calling setter methods
+    (`.prompt: 'λ> '`, `.banner: false`, …) on `self` to configure the session, plus overriding
+    `QuoinRepl` methods to customize behavior. This generalizes the env-var knobs above into a
+    first-class, scriptable config surface. Needs a native `QuoinRepl` class exposing the REPL's
+    settings (a sibling/consumer of the introspection API and the future `Mirror`).
+    - [ ] Once `QuoinRepl` exists, **drive the prompt from it** (`self.prompt:`), superseding
+      `QN_PROMPT` — initially a read-once-at-startup value is fine (a live/dynamic prompt can come
+      later). Same for the banner and any other knobs that graduate from `QN_*` env vars.
+- [x] One-shot eval `qn -e '<expr>'`: evaluates one expression in a fresh prelude-loaded session and
+  prints its `.s` result (a `nil` result prints nothing); parse/compile/runtime errors go to stderr
+  with a non-zero exit, so it composes in pipelines. Non-interactive `qn repl < script` (pipe mode)
+  already works via the promptless accumulation loop.
+
+**P3 — "REPL in Quoin" (the eventual goal):** migrate the loop into `qnlib` once its primitives
+exist — depends on [[eval-bindings]] (`eval:bindings:`, §8), the `Runtime.eval:` parse-panic fix
+(Bugs below), and an `[IO]Stdin` line-read helper. The Rust REPL is the bootstrap; move pieces over
+incrementally (read+eval+print loop first, then meta-commands, then editing if a Quoin-side line
+editor ever exists).
+
 ## Bugs/Odd Behavior
 - [x] **Operator precedence was inverted for arithmetic.** In the pest Pratt parser (`src/parser/pest/parser.rs`), `+`/`-` bound *tighter* than `*`/`/`/`%`, and `..` bound tighter than all arithmetic (`2 + 3 * 4 == 20`; `2 .. 3 + 1` errored as `(2..3) + 1`). Fixed by reordering the `.op(...)` levels to the conventional ordering — loosest→tightest: `||` · `&&` · `== !=` · comparison · `~` · `..` · `+ -` · `* / %`, with postfix `.method` tighter than any infix and prefix tightest. Now `2 + 3 * 4 == 14` and `2 .. n + 1` is `2 .. (n + 1)`. Full `qnlib` test suite passes (0 regressions); docs updated (`docs/language/01-foundations.md` §6 and appendices A/C).
 - [x] **`-->` / `->` didn't override a same-signature method.** Both appended a variant to the selector's multimethod chain; equal-specificity ties resolved to the *first-defined*, so a plain redefinition (`Foo <- { bar -> { 1 } }; Foo <-- { bar --> { 2 } }`) was dead code and `bar` returned `1`. The originally-planned fix (reverse the equal-specificity tie-break) turned out **wrong** — it breaks ordered guard dispatch (the `dispatchByBlock` test relies on first-defined guards winning over a later `.class==Object` catch-all). Fixed instead by **replace-at-definition**: a new *unguarded* variant whose `param_types` match an existing unguarded variant replaces that variant's block in place (`replace_or_append_method_in_chain`, `src/vm.rs`); guard- and type-differentiated variants still append and dispatch by specificity. `Foo.new.bar` now returns `2`; full suite passes; regression test `overridesSameSignature` added; docs updated (`docs/language/03-objects.md` §10/§13, appendix C). **Known limitation:** overriding a *guarded* variant with an identical guard does not replace (guards aren't compared for equality) — subsumed by the scoring overhaul below.
 - [ ] **`Runtime.eval:` panics on a syntax error instead of throwing.** A syntactically-invalid source string panics the whole VM in the pest parser (`parse_quoin_string_named` → `crates/quoin-syntax/src/pest/parser.rs`, which unwraps the `PestError`) rather than surfacing a catchable error, so `{ Runtime.eval:'1 +' }.catch:{…}` aborts the process instead of recovering. Found during the structured-error work (Tranche 4b): the typed `ParseError` now raised by `compile_and_execute_source` (`runtime.rs`) only covers *semantic* compile failures of already-parseable source; the parse step upstream still panics. The fix wants the parser to return a `Result` (mapped to `ParseError` at the `eval:` boundary) instead of panicking — **tricky because `quoin-syntax` now has other clients**, so changing the parse entry point's signature ripples beyond the VM.
+- [x] **A multibyte char in a string literal leaked a stray `'` into the value.** Any non-ASCII glyph in a
+  string literal (e.g. `µ`, U+00B5) appended the closing quote to the parsed value — `'µ'.length` was 2,
+  `'café'` became `café'`, and `#ANSI'…µs…'` rendered a spurious apostrophe. Root cause was *not* the
+  colorizer (`src/ansi_colorizer.rs` is UTF-8-safe) but the lexer: `parse_primary_expr`
+  (`crates/quoin-syntax/src/pest/parser.rs`) extracted literal bodies with `raw.substring(1, raw.len() - 1)`
+  — the `substring` crate is **char**-indexed while `raw.len()` is **byte** length, so on multibyte content
+  the end index overshot and (clamped) swallowed the closing `'`. Affected both `string_expr` and
+  `user_string_expr` (`#ident'…'`). Fixed by byte-slicing between the single-byte `'`/`#` delimiters
+  (`&raw[1..raw.len() - 1]`), which is char-boundary-safe. The `us`→`µs` workaround in `qnlib/test.qn` was
+  reverted. Regression test: `multibyteLiterals` (`qnlib/tests/08-strings.qn`).
 
 ## 1. Class & Method Definition Semantics
 - [x] **Class Creation (`<-` operator)**:
@@ -275,13 +411,35 @@ Quoin over the current sockets/streams).
 - [x] **Alternative Parser Architecture Evaluation**:
   - Evaluate replacing ANTLR with Tree-sitter for faster full-file compiles using its compiled C engine.
   - Assess native Rust parser generators (e.g., LALRPOP or Pest) or hand-writing a recursive-descent parser for optimal compiler performance.
-- [ ] **Method-dispatch optimization** (baseline + plan in `profiling/dispatch-cache/notes.md`). The Send
-  path is malloc-dominated (37.8% self) and `lookup_method` is 21.5% inclusive (13.6% walk + 2.7% scoring).
-  - [ ] **Selector interning** (in progress). Replace `Instruction::Send(String, …)` with an interned
+- [ ] **Method-dispatch optimization** — live rollup in `profiling/status.md` (the authoritative
+  before/after + next-options doc). Original baseline (`profiling/dispatch-cache/notes.md`): the Send path
+  was malloc-dominated (37.8% self), `lookup_method` 21.5% inclusive (13.6% walk + 2.7% scoring). Since
+  then the bounded wins (caching, hashing, allocator, per-step/per-send allocs) **and** the first
+  structural swing (superinstructions) have landed — cumulatively ~65-78% faster than the start-of-session
+  baseline. The resolution-side levers are spent (IC ruled out); remaining headroom is structural.
+  - [x] **Selector interning.** Replaced `Instruction::Send(String, …)` with an interned
     `Symbol(&'static str)` (Eq/Hash by pointer, lock-free `as_str()`; global leak-forever interner in
     `src/symbol.rs`). Kills the per-Send `selector.clone()` (~8.8% `String::clone`) and gives the dispatch
     cache a `Copy`, collision-free, pointer-stable key. Scoped to selectors in the dispatch path; method
     tables / globals stay `String`-keyed for now (the walk resolves via `as_str()`).
+  - [x] **mimalloc** as the default global allocator (separate session) — absorbed much of the
+    allocation cost; the biggest single help on the alloc-bound benchmark (Binary Trees).
+  - [x] **FxHash** on the dispatch `method_cache`, replacing SipHash on the hot resolution key.
+  - **Inline call-site cache — BUILT, MEASURED, RULED OUT (reverted).** A recv-class-monomorphic IC on
+    top of FxHash was a net regression (flat Fib/Sieve, +4.6% Binary Trees): post-FxHash the global cache
+    is already cheap, and the probe is paid on *every* send while only single-untyped guard-free *user*
+    sends qualify (the hot typed-multimethod arithmetic/indexing pays it for nothing). Parked on branch
+    `experiment/inline-cache`; full reasoning in `profiling/inline-cache/notes.md`. **Don't rebuild** unless
+    dispatch becomes hash-bound again.
+  - [x] **Superinstructions.** Fuse the hot `<operand-load>; Send` instruction pairs
+    (`Push`/`LoadLocal`/`LoadField` → `SendConst`/`SendLocal`/`SendField`) so one dispatch-loop step does
+    the operand-load + send. Pairs chosen from a dynamic histogram of executed bytecode (~3.9M of the hot
+    sends). A `fuse_bytecode` peephole pass (`src/compiler.rs`) runs per block at compile time: never fuses
+    across a jump target, recomputes relative jump offsets + keeps the source map index-aligned; the `Send`
+    body is extracted to `exec_send` (shared by the fused handlers), and the stack-trace formatter reads
+    the selector from the fused forms. **~8-10%** (release best-of-4: Fib 21→19, Sieve 52→47, Binary Trees
+    769→707). See `profiling/superinstructions/notes.md`. Cheap follow-ons: 3-instruction sends (fuse the
+    receiver load too) and the `Dup → StoreField`/`StoreLocal` assignment pairs.
   - [x] **Method-resolution cache** (the headline). Global `HashMap<MethodCacheKey → Option<Value>>`
     where the key is `(searched-class ptr, selector: Symbol, class_side, n_args, arg_class_ptrs,
     arg_kinds)`. Guard-free resolutions only — `match_score` sets `VmState.dispatch_uncacheable` when a

@@ -137,6 +137,12 @@ pub struct VmState<'gc> {
 
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
+    /// The REPL's persistent top-level environment. `Some` only under `qn repl`: each
+    /// evaluated line runs in a frame whose env *is* this one (not a fresh child), so
+    /// top-level `x = 5` binds here and is visible on later lines. GC-rooted via `VmState`
+    /// so it survives between `arena.mutate_root` calls. `None` in every other mode.
+    pub repl_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+
     /// Coroutine / guest-fiber scheduler state, grouped out for legibility (see
     /// the [`Scheduler`] struct). Stored inline by value — no indirection.
     pub sched: Scheduler<'gc>,
@@ -246,6 +252,7 @@ impl<'gc> VmState<'gc> {
             last_send_args: Vec::new(),
             active_native_args: Vec::new(),
             last_popped_env: None,
+            repl_env: None,
             sched: Scheduler {
                 yielder: None,
                 tasks: Vec::new(),
@@ -1075,6 +1082,78 @@ impl<'gc> VmState<'gc> {
         Ok(self.pop()?)
     }
 
+    /// Run a REPL line's top-level `block` in the persistent `repl_env` and return its value.
+    /// Like `execute_block`, but the frame's env *is* the reused `repl_env` (not a fresh child)
+    /// so top-level `x = 5` binds there and persists across lines. Synchronous (no cooperative
+    /// yield) — top-level async is a documented P0 limitation. `repl_env` must be `Some`.
+    pub fn execute_repl_line(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        let env = self
+            .repl_env
+            .expect("execute_repl_line called without a repl_env");
+        let base_frames = self.frames.len();
+        let base_stack = self.stack.len();
+
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+        self.frames.push(Frame {
+            id: frame_id,
+            is_nested_block: false,
+            enclosing_method_id: Some(frame_id),
+            block,
+            ip: 0,
+            env,
+            instantiating_obj: None,
+            receiver: None,
+            selector: None,
+            args: Vec::new(),
+            stack_base: base_stack,
+            return_receiver: false,
+            defers: Vec::new(),
+            unregister_on_defer_failure: None,
+        });
+
+        let mut err: Option<QuoinError> = None;
+        while self.frames.len() > base_frames {
+            match self.step_internal(mc) {
+                Ok(VmStatus::Running) => {}
+                Ok(VmStatus::Finished(_)) => break,
+                Ok(VmStatus::Yeeted(val)) => {
+                    err = Some(QuoinError::Other(format!("Uncaught exception: {}", val)));
+                    break;
+                }
+                Err(QuoinError::NonLocalReturn) => {
+                    if self.frames.len() > base_frames {
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        if let Some(e) = err {
+            // Annotate while the failing frames are still live (the trace reads them), then
+            // reset the VM's transient state to the REPL baseline so the next line is clean.
+            let e = self.annotate_error(e);
+            self.frames.truncate(base_frames);
+            self.stack.truncate(base_stack);
+            self.active_exception = None;
+            return Err(e);
+        }
+
+        let val = self.pop().unwrap_or_else(|_| self.new_nil(mc));
+        self.stack.truncate(base_stack);
+        Ok(val)
+    }
+
     pub fn execute_validation_block(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1711,11 +1790,20 @@ impl<'gc> VmState<'gc> {
                         .or(f.block.source_info.as_ref())
                         .cloned();
 
-                    let formatted_selector = if let Some(Instruction::Send(selector, num_args)) =
-                        f.block.bytecode.get(frame_ip)
-                    {
+                    // The failing instruction is a send — plain or a fused superinstruction;
+                    // pull `(selector, num_args)` from whichever form it is.
+                    let send_at_ip = match f.block.bytecode.get(frame_ip) {
+                        Some(Instruction::Send(s, n))
+                        | Some(Instruction::SendLocal(_, s, n))
+                        | Some(Instruction::SendConst(_, s, n))
+                        | Some(Instruction::SendField(_, s, n))
+                        | Some(Instruction::SendLocalLocal(_, _, s, n))
+                        | Some(Instruction::SendLocalConst(_, _, s, n)) => Some((*s, *n)),
+                        _ => None,
+                    };
+                    let formatted_selector = if let Some((selector, num_args)) = send_at_ip {
                         let selector = selector.as_str();
-                        let args_vec = if *num_args > 0 {
+                        let args_vec = if num_args > 0 {
                             if i == n - 1 {
                                 self.last_send_args.clone()
                             } else {
@@ -2154,6 +2242,225 @@ impl<'gc> VmState<'gc> {
         Some(snippet_text.to_string())
     }
 
+    /// Materialize a `Constant` into a runtime `Value`. The body of the `Push` handler,
+    /// shared with the fused `SendConst` superinstruction.
+    fn materialize_constant(&mut self, mc: &Mutation<'gc>, constant: &Constant) -> Value<'gc> {
+        match constant {
+            Constant::Nil => self.new_nil(mc),
+            Constant::Bool(b) => self.new_bool(mc, *b),
+            Constant::Int(i) => self.new_int(mc, *i),
+            Constant::Double(f) => self.new_double(mc, *f),
+            Constant::String(s) => self.new_string(mc, s.clone()),
+            Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
+            Constant::Block(sb) => {
+                let parent_env = self.frames.last().map(|f| f.env);
+                let enclosing_method_id = self.frames.last().and_then(|f| f.enclosing_method_id);
+                let decl_block = sb.decl_block.as_ref().map(|db| {
+                    gc!(
+                        mc,
+                        Block {
+                            name: db.name.clone(),
+                            is_nested_block: db.is_nested_block,
+                            param_syms: db.param_syms.clone(),
+                            param_types: db.param_types.clone(),
+                            bytecode: db.bytecode.clone(),
+                            parent_env,
+                            enclosing_method_id,
+                            source_info: db.source_info.clone(),
+                            decl_block: None,
+                            source_map: db.source_map.clone(),
+                        }
+                    )
+                });
+                let block = Block {
+                    name: sb.name.clone(),
+                    is_nested_block: sb.is_nested_block,
+                    param_syms: sb.param_syms.clone(),
+                    param_types: sb.param_types.clone(),
+                    bytecode: sb.bytecode.clone(),
+                    parent_env,
+                    enclosing_method_id,
+                    source_info: sb.source_info.clone(),
+                    decl_block,
+                    source_map: sb.source_map.clone(),
+                };
+                self.new_block(mc, block)
+            }
+        }
+    }
+
+    /// Read instance field `name` off `self` in the current frame. The body of the
+    /// `LoadField` handler, shared with the fused `SendField` superinstruction.
+    /// Missing/undeclared field (or a non-object `self`) reads as nil.
+    fn load_field(&mut self, mc: &Mutation<'gc>, frame_idx: usize, name: &str) -> Value<'gc> {
+        let frame = &self.frames[frame_idx];
+        let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
+        if let Value::Object(obj) = self_val {
+            let class = obj.borrow().class;
+            // No slot (undeclared) or a slot past this instance's array (declared on the
+            // class after this object was created) => nil.
+            self.field_slot(class, name)
+                .and_then(|slot| obj.borrow().fields.get(slot).copied())
+                .unwrap_or_else(|| self.new_nil(mc))
+        } else {
+            self.new_nil(mc)
+        }
+    }
+
+    /// Execute a send: pop `num_args` then the receiver off the stack and dispatch
+    /// `selector`. Shared by the `Send` handler and the fused `Send*` superinstructions
+    /// (which push the send's last operand first). Advances the caller frame's ip by one
+    /// slot, then either tail-starts a block, invokes the resolved callable, or raises MNU.
+    fn exec_send(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        selector: Symbol,
+        num_args: usize,
+    ) -> Result<VmStatus<'gc>, QuoinError> {
+        let mut args = Vec::new();
+        for _ in 0..num_args {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+
+        let receiver = self.pop()?;
+        self.frames[frame_idx].ip += 1; // Advance caller frame IP
+
+        if let Value::Object(obj) = receiver
+            && let ObjectPayload::Block(block) = &obj.borrow().payload
+        {
+            if selector.as_str() == "value" || selector.as_str() == "value:" {
+                self.start_block(mc, *block, args, Some(receiver), Some(selector));
+                return Ok(VmStatus::Running);
+            }
+        }
+
+        // `last_send_args` is read only by the stack-trace formatter, and only for an
+        // innermost send that fails *in place* (no callee frame of its own): a failed
+        // lookup, a `MessageNotUnderstood`, or a native-method error (the last captured
+        // inside `Callable::call`). On success the args move into the callee frame
+        // (`Frame.args`), which the formatter reads instead — so we snapshot only on
+        // these error branches, not every send.
+        let method_opt = match self.lookup_method(mc, receiver, selector, &args) {
+            Ok(m) => m,
+            Err(e) => {
+                self.last_send_args = args;
+                return Err(e);
+            }
+        };
+        if let Some(callable) = method_opt {
+            callable.call(self, mc, Some(receiver), args, Some(selector))?;
+        } else {
+            // The selector may still exist with non-matching signatures; surface those
+            // filtered-out variants as a hint.
+            let candidates = self
+                .collect_method_candidates(receiver, selector)
+                .iter()
+                .map(|&mv| self.format_candidate_signature(mv, selector))
+                .collect();
+            let receiver_name = receiver.class_name();
+            let arg_names = args.iter().map(|a| a.class_name()).collect();
+            self.last_send_args = args;
+            return Err(QuoinError::MessageNotUnderstood {
+                receiver: receiver_name,
+                selector: selector.as_str().to_string(),
+                args: arg_names,
+                candidates,
+            });
+        }
+        Ok(VmStatus::Running)
+    }
+
+    /// Bind `name` in the current frame to an already-obtained `val`. Shared by the
+    /// `DefineLocal` handler (pops) and `DefineLocalKeep` (peeks).
+    fn store_define_local(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        name: Symbol,
+        val: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        if matches!(name.as_str(), "true" | "false" | "nil") {
+            let err_msg = format!("Can't modify reserved identifier {}", name);
+            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+            return Err(QuoinError::Other(err_msg));
+        }
+        self.frames[frame_idx].env.borrow_mut(mc).bind(name, val);
+        Ok(())
+    }
+
+    /// Assign `name` to an already-obtained `val`: inside a `new:{}` block bind locally
+    /// (object init), else set up the lexical chain or bind. Shared by `StoreLocal`
+    /// (pops) and `StoreLocalKeep` (peeks).
+    fn store_set_local(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        name: Symbol,
+        val: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        if matches!(name.as_str(), "true" | "false" | "nil") {
+            let err_msg = format!("Can't modify reserved identifier {}", name);
+            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+            return Err(QuoinError::Other(err_msg));
+        }
+        let frame = &mut self.frames[frame_idx];
+        if frame.instantiating_obj.is_some() {
+            frame.env.borrow_mut(mc).bind(name, val);
+        } else if !EnvFrame::set(frame.env, mc, name, val) {
+            frame.env.borrow_mut(mc).bind(name, val);
+        }
+        Ok(())
+    }
+
+    /// Store an already-obtained `val` into instance field `name` on `self`. Shared by
+    /// `StoreField` (pops) and `StoreFieldKeep` (peeks).
+    fn store_field_value(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        name: &str,
+        val: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        let frame = &self.frames[frame_idx];
+        let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
+        if let Value::Object(obj) = self_val {
+            let class = obj.borrow().class;
+            match self.field_slot(class, name) {
+                Some(slot) if slot < obj.borrow().fields.len() => {
+                    obj.borrow_mut(mc).fields[slot] = val;
+                }
+                Some(_) => {
+                    // Declared on the class, but this instance predates it (a mixin added
+                    // the ivar after the object was created); shape is fixed at construction.
+                    return Err(QuoinError::Other(format!(
+                        "Instance of '{}' has no '@{}' (it was added after this instance was created)",
+                        class.borrow().name,
+                        name
+                    )));
+                }
+                None => {
+                    // You cannot create an instance variable by assigning to it.
+                    return Err(QuoinError::Other(format!(
+                        "No instance variable '@{}' declared on '{}'",
+                        name,
+                        class.borrow().name
+                    )));
+                }
+            }
+        } else {
+            // Immediate value types (Integer/Double/Boolean/Nil) have no per-instance
+            // fields — setting `@x` on one is an error.
+            return Err(QuoinError::Other(format!(
+                "Cannot set instance variable '@{}' on a value type ({})",
+                name,
+                self_val.type_name()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, QuoinError> {
         let res = self.step_internal(mc);
         if let Err(QuoinError::NonLocalReturn) = res {
@@ -2218,36 +2525,29 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::DefineLocal(name) => {
                 let name = *name;
-                if matches!(name.as_str(), "true" | "false" | "nil") {
-                    let err_msg = format!("Can't modify reserved identifier {}", name);
-                    self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                    return Err(QuoinError::Other(err_msg));
-                }
                 let val = self.pop()?;
-                let frame = &mut self.frames[frame_idx];
-                frame.env.borrow_mut(mc).bind(name, val);
-                frame.ip += 1;
+                self.store_define_local(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
+            }
+            // Store-and-keep: store the top of stack without popping it (fused `Dup;
+            // DefineLocal`, an assignment used as an expression).
+            Instruction::DefineLocalKeep(name) => {
+                let name = *name;
+                let val = self.peek()?;
+                self.store_define_local(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
             }
             Instruction::StoreLocal(name) => {
                 let name = *name;
-                if matches!(name.as_str(), "true" | "false" | "nil") {
-                    let err_msg = format!("Can't modify reserved identifier {}", name);
-                    self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                    return Err(QuoinError::Other(err_msg));
-                }
                 let val = self.pop()?;
-                let frame = &mut self.frames[frame_idx];
-                // Assignments inside a `new:{}` block always bind in this frame:
-                // they initialize the new object (fields and `init:` args), so they
-                // must not walk up the lexical chain and mutate an enclosing
-                // variable that happens to share the name. RHS reads still resolve
-                // lexically (LoadLocal), so `{ x = x }` copies the outer `x`.
-                if frame.instantiating_obj.is_some() {
-                    frame.env.borrow_mut(mc).bind(name, val);
-                } else if !EnvFrame::set(frame.env, mc, name, val) {
-                    frame.env.borrow_mut(mc).bind(name, val);
-                }
-                frame.ip += 1;
+                self.store_set_local(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
+            }
+            Instruction::StoreLocalKeep(name) => {
+                let name = *name;
+                let val = self.peek()?;
+                self.store_set_local(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
             }
             Instruction::LoadGlobal(name) => {
                 let val = self
@@ -2293,49 +2593,7 @@ impl<'gc> VmState<'gc> {
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::Push(constant) => {
-                let val = match constant {
-                    Constant::Nil => self.new_nil(mc),
-                    Constant::Bool(b) => self.new_bool(mc, *b),
-                    Constant::Int(i) => self.new_int(mc, *i),
-                    Constant::Double(f) => self.new_double(mc, *f),
-                    Constant::String(s) => self.new_string(mc, s.clone()),
-                    Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
-                    Constant::Block(sb) => {
-                        let parent_env = self.frames.last().map(|f| f.env);
-                        let enclosing_method_id =
-                            self.frames.last().and_then(|f| f.enclosing_method_id);
-                        let decl_block = sb.decl_block.as_ref().map(|db| {
-                            gc!(
-                                mc,
-                                Block {
-                                    name: db.name.clone(),
-                                    is_nested_block: db.is_nested_block,
-                                    param_syms: db.param_syms.clone(),
-                                    param_types: db.param_types.clone(),
-                                    bytecode: db.bytecode.clone(),
-                                    parent_env,
-                                    enclosing_method_id,
-                                    source_info: db.source_info.clone(),
-                                    decl_block: None,
-                                    source_map: db.source_map.clone(),
-                                }
-                            )
-                        });
-                        let block = Block {
-                            name: sb.name.clone(),
-                            is_nested_block: sb.is_nested_block,
-                            param_syms: sb.param_syms.clone(),
-                            param_types: sb.param_types.clone(),
-                            bytecode: sb.bytecode.clone(),
-                            parent_env,
-                            enclosing_method_id,
-                            source_info: sb.source_info.clone(),
-                            decl_block,
-                            source_map: sb.source_map.clone(),
-                        };
-                        self.new_block(mc, block)
-                    }
-                };
+                let val = self.materialize_constant(mc, constant);
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
@@ -2350,57 +2608,47 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::Send(selector, num_args) => {
                 let (selector, num_args) = (*selector, *num_args);
-                let mut args = Vec::new();
-                for _ in 0..num_args {
-                    args.push(self.pop()?);
-                }
-                args.reverse();
-
-                let receiver = self.pop()?;
-                self.frames[frame_idx].ip += 1; // Advance caller frame IP
-
-                if let Value::Object(obj) = receiver
-                    && let ObjectPayload::Block(block) = &obj.borrow().payload
-                {
-                    if selector.as_str() == "value" || selector.as_str() == "value:" {
-                        self.start_block(mc, *block, args, Some(receiver), Some(selector));
-                        return Ok(VmStatus::Running);
-                    }
-                }
-
-                // `last_send_args` is read only by the stack-trace formatter, and only
-                // for an innermost send that fails *in place* (no callee frame of its
-                // own): a failed lookup, a `MessageNotUnderstood`, or a native-method
-                // error (the last captured inside `Callable::call`). On success the args
-                // move into the callee frame (`Frame.args`), which the formatter reads
-                // instead — so we snapshot only on these error branches, not every send.
-                let method_opt = match self.lookup_method(mc, receiver, selector, &args) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        self.last_send_args = args;
-                        return Err(e);
-                    }
-                };
-                if let Some(callable) = method_opt {
-                    callable.call(self, mc, Some(receiver), args, Some(selector))?;
-                } else {
-                    // The selector may still exist with non-matching signatures;
-                    // surface those filtered-out variants as a hint.
-                    let candidates = self
-                        .collect_method_candidates(receiver, selector)
-                        .iter()
-                        .map(|&mv| self.format_candidate_signature(mv, selector))
-                        .collect();
-                    let receiver_name = receiver.class_name();
-                    let arg_names = args.iter().map(|a| a.class_name()).collect();
-                    self.last_send_args = args;
-                    return Err(QuoinError::MessageNotUnderstood {
-                        receiver: receiver_name,
-                        selector: selector.as_str().to_string(),
-                        args: arg_names,
-                        candidates,
-                    });
-                }
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            // Fused superinstructions (see `Instruction::SendLocal` doc): push the last
+            // operand the send consumes, then run the identical send path.
+            Instruction::SendLocal(var, selector, num_args) => {
+                let (var, selector, num_args) = (*var, *selector, *num_args);
+                let frame = &self.frames[frame_idx];
+                let val = EnvFrame::get(frame.env, var).unwrap_or_else(|| self.new_nil(mc));
+                self.push(val);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            Instruction::SendConst(constant, selector, num_args) => {
+                let (selector, num_args) = (*selector, *num_args);
+                let val = self.materialize_constant(mc, constant);
+                self.push(val);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            Instruction::SendField(field, selector, num_args) => {
+                let (selector, num_args) = (*selector, *num_args);
+                let val = self.load_field(mc, frame_idx, field);
+                self.push(val);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            // 3-instruction sends: push two operands (left-to-right) then dispatch.
+            Instruction::SendLocalLocal(a, b, selector, num_args) => {
+                let (a, b, selector, num_args) = (*a, *b, *selector, *num_args);
+                let env = self.frames[frame_idx].env;
+                let va = EnvFrame::get(env, a).unwrap_or_else(|| self.new_nil(mc));
+                self.push(va);
+                let vb = EnvFrame::get(env, b).unwrap_or_else(|| self.new_nil(mc));
+                self.push(vb);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            Instruction::SendLocalConst(a, constant, selector, num_args) => {
+                let (a, selector, num_args) = (*a, *selector, *num_args);
+                let env = self.frames[frame_idx].env;
+                let va = EnvFrame::get(env, a).unwrap_or_else(|| self.new_nil(mc));
+                self.push(va);
+                let vc = self.materialize_constant(mc, constant);
+                self.push(vc);
+                return self.exec_send(mc, frame_idx, selector, num_args);
             }
             Instruction::Return | Instruction::BlockReturn => {
                 // Run calls deferred during this frame (e.g. mixin requirement
@@ -2808,62 +3056,18 @@ impl<'gc> VmState<'gc> {
             }
 
             Instruction::LoadField(name) => {
-                let frame = &self.frames[frame_idx];
-                let self_val =
-                    EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-                let val = if let Value::Object(obj) = self_val {
-                    let class = obj.borrow().class;
-                    // No slot (undeclared) or a slot past this instance's array
-                    // (declared on the class after this object was created) => nil.
-                    self.field_slot(class, name)
-                        .and_then(|slot| obj.borrow().fields.get(slot).copied())
-                        .unwrap_or_else(|| self.new_nil(mc))
-                } else {
-                    self.new_nil(mc)
-                };
+                let val = self.load_field(mc, frame_idx, name);
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::StoreField(name) => {
                 let val = self.pop()?;
-                let frame = &self.frames[frame_idx];
-                let self_val =
-                    EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-                if let Value::Object(obj) = self_val {
-                    let class = obj.borrow().class;
-                    match self.field_slot(class, &name) {
-                        Some(slot) if slot < obj.borrow().fields.len() => {
-                            obj.borrow_mut(mc).fields[slot] = val;
-                        }
-                        Some(_) => {
-                            // Declared on the class, but this instance predates it
-                            // (a mixin added the ivar after the object was created);
-                            // an object's shape is fixed at construction.
-                            return Err(QuoinError::Other(format!(
-                                "Instance of '{}' has no '@{}' (it was added after this instance was created)",
-                                class.borrow().name,
-                                name
-                            )));
-                        }
-                        None => {
-                            // You cannot create an instance variable by assigning to
-                            // it — it must be declared in the class.
-                            return Err(QuoinError::Other(format!(
-                                "No instance variable '@{}' declared on '{}'",
-                                name,
-                                class.borrow().name
-                            )));
-                        }
-                    }
-                } else {
-                    // Immediate value types (Integer/Double/Boolean/Nil) have no
-                    // per-instance fields — setting `@x` on one is an error.
-                    return Err(QuoinError::Other(format!(
-                        "Cannot set instance variable '@{}' on a value type ({})",
-                        name,
-                        self_val.type_name()
-                    )));
-                }
+                self.store_field_value(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
+            }
+            Instruction::StoreFieldKeep(name) => {
+                let val = self.peek()?;
+                self.store_field_value(mc, frame_idx, name, val)?;
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::Use {

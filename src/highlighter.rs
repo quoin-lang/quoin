@@ -8,7 +8,6 @@
 pub use quoin_syntax::highlight::*;
 
 use crate::ansi_colorizer;
-use crate::parser::parse_quoin_string;
 
 fn slice(source: &str, start: usize, end: usize) -> &str {
     source.get(start..end).unwrap_or("")
@@ -38,11 +37,16 @@ pub fn format_ansi(source: &str, mut spans: Vec<HighlightSpan>) -> String {
     ansi_colorizer::colorize(&sb)
 }
 
-/// Convenience: parse, highlight, and ANSI-format a source string.
+/// Parse (or, for incomplete input, predictively complete), highlight, and ANSI-format a
+/// source string. Resilient: it never panics and returns the source unchanged when there are
+/// no spans (an uncompletable line), so a live-highlighting caller's text/cursor stay correct.
 pub fn highlight_to_ansi(source: &str) -> String {
-    let program = parse_quoin_string(source);
-    let mut parser = HighlightParser::new(source);
-    let spans = parser.highlight_program(&program);
+    let spans = highlight_resilient(source);
+    if spans.is_empty() {
+        // Uncompletable (or empty) input: render the text verbatim. `format_ansi` would emit
+        // `""` here (it builds output only from spans), which would corrupt the visible line.
+        return source.to_string();
+    }
     format_ansi(source, spans)
 }
 
@@ -55,9 +59,30 @@ mod tests {
     }
 
     fn highlight(source: &str) -> Vec<HighlightSpan> {
-        let program = parse_quoin_string(source);
+        let program = crate::parser::parse_quoin_string(source);
         let mut parser = HighlightParser::new(source);
         parser.highlight_program(&program)
+    }
+
+    #[test]
+    fn highlight_to_ansi_preserves_text() {
+        // Live highlighting requires the rendered (decolorized) text to equal the input
+        // exactly — including for incomplete input, where the predictive completion is
+        // highlighted but cropped — or the editor's cursor positioning breaks.
+        for src in [
+            "1 + 2 * foo", // valid
+            "1 +",         // trailing operator
+            "Foo <- {",    // open block
+            "#(1 2",       // open list
+            "'hello",      // open string
+            "x = 1 +",     // assignment + trailing op
+            "a.foo:",      // open keyword selector
+            "Box <--",     // definition operator
+            ")",           // uncompletable — rendered verbatim
+        ] {
+            let plain = ansi_colorizer::decolorize(&highlight_to_ansi(src));
+            assert_eq!(plain, src, "text not preserved for {src:?}");
+        }
     }
 
     #[test]

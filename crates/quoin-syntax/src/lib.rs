@@ -7,17 +7,19 @@
 //! crate enables it, tooling does not.
 
 pub mod ast;
+pub mod complete;
 pub mod highlight;
 pub mod pest;
 pub mod source_info;
 
 pub use ast::*;
+pub use complete::complete_source;
+pub use highlight::highlight_resilient;
 pub use source_info::{ParseError, SourceInfo};
 
 // Parsing entry points. `try_parse_quoin_string_named` returns a structured
 // error (for diagnostics); the other three preserve the historical panic-on-error
 // behavior the VM/CLI rely on.
 pub use pest::parser::{
-    parse_quoin_file, parse_quoin_string, parse_quoin_string_named,
-    try_parse_quoin_string_named,
+    parse_quoin_file, parse_quoin_string, parse_quoin_string_named, try_parse_quoin_string_named,
 };

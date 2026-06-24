@@ -2,15 +2,19 @@ use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
+use crate::gcl;
 use crate::highlighter::highlight_to_ansi;
+use crate::introspect::{self, ClassInfo, GlobalInfo, GlobalKind, ValueInfo};
 use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend, StreamId};
 use crate::parser::ast::Node;
-use crate::parser::{NodeValue, parse_quoin_file};
+use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
+use crate::repl_complete::{CompletionIndex, build_completion_index, complete_input};
+use crate::runtime::runtime::build_block;
 use crate::runtime::{
     async_rt, block, boolean, bytes, class, double, fiber as fiber_class, http, integer, io, list,
     map, method, nil, object, regex, runtime, set, sockets, streams, string, symbol, task, timer,
 };
-use crate::value::{Block, NamespacedName, Value};
+use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
 
 use corosensei::CoroutineResult;
@@ -18,9 +22,11 @@ use futures_lite::StreamExt;
 use futures_lite::future::block_on;
 use futures_util::future::{Aborted, abortable};
 use futures_util::stream::FuturesUnordered;
-use gc_arena::{Arena, Gc, Mutation, Rootable};
+use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
+use std::collections::HashSet;
 use std::fs::read_to_string;
 use std::future::Future;
+use std::io::{BufRead, IsTerminal, stdin};
 use std::iter::once_with;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -33,6 +39,580 @@ use std::time::Instant;
 /// so the prelude composition lives in Quoin rather than a hardcoded glob here.
 fn prelude_asts() -> impl Iterator<Item = Node> {
     once_with(|| parse_quoin_file(&PathBuf::from("qnlib/prelude.qn")))
+}
+
+/// Register every native (Rust-backed) class on a fresh `VmState`. Shared by all runner
+/// modes (run/test/benchmark/repl) so the builtin set can't drift between them.
+pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
+    vm.register_native_class(mc, object::build_object_class());
+    vm.register_native_class(mc, class::build_class_class());
+    vm.register_native_class(mc, boolean::build_boolean_class());
+    vm.register_native_class(mc, block::build_block_class());
+    vm.register_native_class(mc, bytes::build_bytes_class());
+    vm.register_native_class(mc, sockets::build_tcp_socket_class());
+    vm.register_native_class(mc, sockets::build_tls_socket_class());
+    vm.register_native_class(mc, sockets::build_tcp_listener_class());
+    vm.register_native_class(mc, http::build_http_parser_class());
+    vm.register_native_class(mc, streams::build_byte_stream_class());
+    vm.register_native_class(mc, streams::build_string_stream_class());
+    vm.register_native_class(mc, io::build_io_folder_class());
+    vm.register_native_class(mc, io::build_io_file_class());
+    vm.register_native_class(mc, io::build_io_handle_class());
+    vm.register_native_class(mc, list::build_list_class());
+    vm.register_native_class(mc, set::build_set_class());
+    vm.register_native_class(mc, runtime::build_runtime_class());
+    vm.register_native_class(mc, async_rt::build_async_class());
+    vm.register_native_class(mc, task::build_task_class());
+    vm.register_native_class(mc, method::build_method_class());
+    vm.register_native_class(mc, timer::build_timer_class());
+    vm.register_native_class(mc, double::build_double_class());
+    vm.register_native_class(mc, integer::build_integer_class());
+    vm.register_native_class(mc, string::build_string_class());
+    vm.register_native_class(mc, symbol::build_symbol_class());
+    vm.register_native_class(mc, nil::build_nil_class());
+    vm.register_native_class(mc, map::build_map_class());
+    vm.register_native_class(mc, map::build_key_value_pair_class());
+    vm.register_native_class(mc, regex::build_regex_class());
+    vm.register_native_class(mc, fiber_class::build_fiber_class());
+}
+
+/// The persistent REPL arena: one `VmState` kept alive across all lines.
+type ReplArena = Arena<Rootable![VmState<'_>]>;
+
+/// rustyline helper. Its `Validator` keeps the editor open for continuation while the input
+/// is syntactically incomplete (a parse error positioned at end-of-input); a complete input
+/// — or one with a *real* mid-input syntax error — submits, and the eval loop shows any
+/// error. The `Highlighter` colorizes valid input. Completion/hinting are no-ops (P2).
+struct ReplHelper {
+    /// Tab-completion snapshot, refreshed from the live VM before each `readline` (the VM is
+    /// frozen during editing, so a per-line snapshot is never stale).
+    index: CompletionIndex,
+}
+
+impl rustyline::completion::Completer for ReplHelper {
+    type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        Ok(complete_input(line, pos, &self.index))
+    }
+}
+impl rustyline::hint::Hinter for ReplHelper {
+    type Hint = String;
+}
+impl rustyline::highlight::Highlighter for ReplHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
+        // `highlight_to_ansi` is resilient (it predictively completes incomplete input and
+        // never panics), so we colorize as-you-type, including partial lines.
+        if line.trim().is_empty() {
+            std::borrow::Cow::Borrowed(line)
+        } else {
+            std::borrow::Cow::Owned(highlight_to_ansi(line))
+        }
+    }
+
+    fn highlight_char(
+        &self,
+        _line: &str,
+        _pos: usize,
+        _kind: rustyline::highlight::CmdKind,
+    ) -> bool {
+        true
+    }
+}
+impl rustyline::Helper for ReplHelper {}
+
+impl rustyline::validate::Validator for ReplHelper {
+    fn validate(
+        &self,
+        ctx: &mut rustyline::validate::ValidationContext,
+    ) -> rustyline::Result<rustyline::validate::ValidationResult> {
+        use rustyline::validate::ValidationResult;
+        let input = ctx.input();
+        if input.trim().is_empty() {
+            return Ok(ValidationResult::Valid(None));
+        }
+        match try_parse_quoin_string_named(input, "<repl>") {
+            Ok(_) => Ok(ValidationResult::Valid(None)),
+            Err(pe) if pe.start >= input.trim_end().len() => Ok(ValidationResult::Incomplete),
+            Err(_) => Ok(ValidationResult::Valid(None)),
+        }
+    }
+}
+
+/// Outcome of a `$`-command.
+enum ReplAction {
+    Continue,
+    Quit,
+}
+
+/// If `line` is a `$`-command, run it and return its action; `None` means "not a command,
+/// evaluate it".
+fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> {
+    let cmd = line.trim().strip_prefix('$')?.trim_start();
+    let word = cmd.split_whitespace().next().unwrap_or("");
+    let rest = cmd[word.len()..].trim();
+    match word {
+        "quit" | "exit" | "q" => return Some(ReplAction::Quit),
+        "help" | "h" | "?" => {
+            println!("Commands:");
+            println!("  $type <expr>      show the class of an expression's result");
+            println!("  $inspect <expr>   evaluate and show the value's class + fields");
+            println!("  $time <expr>      evaluate and report wall-clock time");
+            println!("  $globals [pre]    list defined classes and values (optional prefix)");
+            println!("  $class <Name>     show a class: parent, mixins, ivars, methods");
+            println!("  $load <file.qn>   run a .qn file into the session");
+            println!("  $reset            clear session locals");
+            println!("  $help             this help");
+            println!("  $quit / $exit     leave the REPL (also Ctrl-D)");
+            println!("Anything else is evaluated as Quoin; definitions and lowercase");
+            println!("variables persist across lines.");
+        }
+        "reset" => {
+            arena.mutate_root(|mc, vm| {
+                vm.repl_env = Some(gcl!(mc, EnvFrame::new(None)));
+            });
+            println!("Session locals cleared.");
+        }
+        "type" if !rest.is_empty() => {
+            if let Some(out) = eval_repl_type(arena, rest) {
+                println!("{out}");
+            }
+        }
+        "type" => eprintln!("usage: $type <expr>"),
+        "inspect" if !rest.is_empty() => {
+            if let Some(out) = eval_repl_inspect(arena, rest) {
+                println!("{out}");
+            }
+        }
+        "inspect" => eprintln!("usage: $inspect <expr>"),
+        "globals" => {
+            // Pure read: pull the owned infos out of the arena, format outside it. `rest`
+            // (possibly empty) filters by name prefix. Wrap to the detected terminal width.
+            let (infos, width) = arena.mutate_root(|_mc, vm| {
+                (
+                    introspect::globals(vm),
+                    vm.options.console_width.map(|w| w as usize),
+                )
+            });
+            print!("{}", format_globals(&infos, rest, width.unwrap_or(80)));
+        }
+        "class" if !rest.is_empty() => {
+            match arena.mutate_root(|_mc, vm| introspect::describe_class(vm, rest)) {
+                Some(info) => print!("{}", format_class(&info)),
+                None => eprintln!("$class: no class named {rest}"),
+            }
+        }
+        "class" => eprintln!("usage: $class <Name>"),
+        "time" if !rest.is_empty() => {
+            let start = Instant::now();
+            let out = eval_repl_input(arena, rest);
+            let elapsed = start.elapsed();
+            if let Some(out) = out {
+                println!("{out}");
+            }
+            println!("   ({:.3} ms)", elapsed.as_secs_f64() * 1000.0);
+        }
+        "time" => eprintln!("usage: $time <expr>"),
+        "load" if !rest.is_empty() => match read_to_string(rest) {
+            Ok(src) => {
+                if let Some(out) = eval_repl_input(arena, &src) {
+                    println!("{out}");
+                }
+                println!("loaded {rest}");
+            }
+            Err(e) => eprintln!("$load: cannot read {rest}: {e}"),
+        },
+        "load" => eprintln!("usage: $load <file.qn>"),
+        other => eprintln!("Unknown command: ${other} (try $help)"),
+    }
+    Some(ReplAction::Continue)
+}
+
+/// Evaluate one complete REPL input and return the line to print (`=> <value>`, an error,
+/// or `None` for a value-less `nil` result).
+fn eval_repl_input(arena: &mut ReplArena, input: &str) -> Option<String> {
+    eval_value(arena, input, |vm, mc, val| {
+        // Suppress a bare `nil` result (a value-less statement).
+        if val.type_name() == "Nil" {
+            None
+        } else {
+            Some(format!("=> {}", render_value(vm, mc, val)))
+        }
+    })
+}
+
+/// `$type` form: evaluate `input` and return its class (the `.class`), never suppressed.
+fn eval_repl_type(arena: &mut ReplArena, input: &str) -> Option<String> {
+    eval_value(arena, input, |vm, mc, val| {
+        let cls = vm.call_method(mc, val, "class", Vec::new()).unwrap_or(val);
+        Some(render_value(vm, mc, cls))
+    })
+}
+
+/// `$inspect` form: evaluate `input` and show its value, class, and (for an object) its
+/// instance fields — the surface metadata from `introspect::describe_value`.
+fn eval_repl_inspect(arena: &mut ReplArena, input: &str) -> Option<String> {
+    eval_value(arena, input, |vm, mc, val| {
+        let info = introspect::describe_value(vm, val);
+        let repr = render_value(vm, mc, val);
+        Some(format_inspect(&repr, &info))
+    })
+}
+
+/// Parse, compile, and run one complete REPL input in the persistent env, then hand the
+/// result `Value` to `render` (still inside the GC borrow, so it may call back into the VM —
+/// e.g. `.s`/`.class`) to produce the line to print. Parse/compile/runtime failures short-
+/// circuit to an error string; `render` only sees a successful value.
+fn eval_value<F>(arena: &mut ReplArena, input: &str, render: F) -> Option<String>
+where
+    F: for<'gc> FnOnce(&mut VmState<'gc>, &Mutation<'gc>, Value<'gc>) -> Option<String>,
+{
+    let node = match try_parse_quoin_string_named(input, "<repl>") {
+        Ok(n) => n,
+        Err(pe) => {
+            return Some(format!(
+                "Parse error at line {}, col {}: {}",
+                pe.line, pe.column, pe.message
+            ));
+        }
+    };
+    arena.mutate_root(|mc, vm| {
+        let NodeValue::Program(p) = &node.value else {
+            return None;
+        };
+        // Seed the compiler with the session's existing bindings so references to them
+        // resolve as locals (LoadLocal -> repl_env), not globals.
+        let locals: HashSet<String> = vm
+            .repl_env
+            .map(|env| {
+                env.borrow()
+                    .vars
+                    .iter()
+                    .map(|(s, _)| s.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let sb = match Compiler::new_with_locals(locals).compile_program(p) {
+            Ok(sb) => sb,
+            Err(e) => return Some(format!("Compile error: {e}")),
+        };
+        let block = build_block(mc, &sb);
+        match vm.execute_repl_line(mc, block) {
+            Ok(val) => render(vm, mc, val),
+            Err(e) => Some(format!("{e}")),
+        }
+    })
+}
+
+/// Parse, compile, and run one complete input in `arena`'s session env, returning the rendered
+/// non-`nil` result (`Ok(Some)`), `Ok(None)` for a `nil` result, or an error message. Unlike
+/// `eval_value` — which folds errors into the printed string for the interactive loop — this
+/// keeps success and failure distinct, so `qn -e` / `~/.quoinrc` can act on a real error.
+fn eval_once(arena: &mut ReplArena, input: &str) -> Result<Option<String>, String> {
+    let node = try_parse_quoin_string_named(input, "<eval>").map_err(|pe| {
+        format!(
+            "Parse error at line {}, col {}: {}",
+            pe.line, pe.column, pe.message
+        )
+    })?;
+    arena.mutate_root(|mc, vm| {
+        let NodeValue::Program(p) = &node.value else {
+            return Ok(None);
+        };
+        let locals: HashSet<String> = vm
+            .repl_env
+            .map(|env| {
+                env.borrow()
+                    .vars
+                    .iter()
+                    .map(|(s, _)| s.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let sb = Compiler::new_with_locals(locals)
+            .compile_program(p)
+            .map_err(|e| format!("Compile error: {e}"))?;
+        let block = build_block(mc, &sb);
+        match vm.execute_repl_line(mc, block) {
+            Ok(val) if val.type_name() == "Nil" => Ok(None),
+            Ok(val) => Ok(Some(render_value(vm, mc, val))),
+            Err(e) => Err(format!("{e}")),
+        }
+    })
+}
+
+/// A `QN_*` boolean toggle, using the same convention as the internal `tuning` knobs: set and
+/// not `""`/`"0"`/`"false"` → on. These are user-facing REPL toggles, so they live here rather
+/// than in the (explicitly non-user-facing) `tuning` module.
+fn env_flag(name: &str) -> bool {
+    matches!(std::env::var(name), Ok(v) if !matches!(v.as_str(), "" | "0" | "false"))
+}
+
+/// Run `~/.quoinrc` into the session if it exists. Missing/unreadable/empty is fine (silent);
+/// a successful run is silent too (its definitions just persist); an error is reported but
+/// non-fatal — the prompt still opens.
+fn load_quoinrc(arena: &mut ReplArena) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let path = PathBuf::from(home).join(".quoinrc");
+    let src = match read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if src.trim().is_empty() {
+        return;
+    }
+    if let Err(msg) = eval_once(arena, &src) {
+        eprintln!("~/.quoinrc: {msg}");
+    }
+}
+
+/// `$globals` output: surface globals split into classes (flowed to `width` columns) and
+/// values (one `name: Class` per line), filtered by `prefix` (empty = all).
+fn format_globals(infos: &[GlobalInfo], prefix: &str, width: usize) -> String {
+    let mut classes: Vec<&str> = Vec::new();
+    let mut values: Vec<(&str, &str)> = Vec::new();
+    for info in infos {
+        if !info.name.starts_with(prefix) {
+            continue;
+        }
+        match &info.kind {
+            GlobalKind::Class => classes.push(&info.name),
+            GlobalKind::Value { class } => values.push((&info.name, class)),
+        }
+    }
+    let mut out = String::new();
+    if !classes.is_empty() {
+        out.push_str(&format!("Classes ({}):\n", classes.len()));
+        out.push_str(&flow_names(&classes, width));
+    }
+    if !values.is_empty() {
+        out.push_str(&format!("Values ({}):\n", values.len()));
+        for (name, class) in &values {
+            out.push_str(&format!("  {name}: {class}\n"));
+        }
+    }
+    if out.is_empty() {
+        out.push_str(if prefix.is_empty() {
+            "(no globals)\n"
+        } else {
+            "(none matching prefix)\n"
+        });
+    }
+    out
+}
+
+/// `$class` output: a header line (`Name < Parent (mixins…) [flags]`) followed by indented
+/// ivars and method signatures (own instance methods, then class methods).
+fn format_class(info: &ClassInfo) -> String {
+    let mut out = String::new();
+    // Quoin-style inheritance: `Parent <- Child` (the arrow points at the subclass, as in a
+    // `Parent <- Child <- { … }` definition). Mixins/flags trail the class name.
+    if let Some(parent) = &info.parent {
+        out.push_str(&format!("{parent} <- "));
+    }
+    out.push_str(&info.name);
+    if !info.mixins.is_empty() {
+        out.push_str(&format!(" ({})", info.mixins.join(", ")));
+    }
+    let mut flags: Vec<&str> = Vec::new();
+    if info.is_sealed {
+        flags.push("sealed");
+    }
+    if info.is_abstract {
+        flags.push("abstract");
+    }
+    if !flags.is_empty() {
+        out.push_str(&format!(" [{}]", flags.join(" ")));
+    }
+    out.push('\n');
+
+    if !info.instance_vars.is_empty() {
+        out.push_str(&format!("  ivars: {}\n", info.instance_vars.join(", ")));
+    }
+    let mut section = |label: &str, methods: &[introspect::MethodInfo]| {
+        if methods.is_empty() {
+            return;
+        }
+        out.push_str(&format!("  {label}:\n"));
+        for m in methods {
+            for v in &m.variants {
+                out.push_str(&format!("    {}\n", introspect::signature(&m.selector, v)));
+            }
+        }
+    };
+    section("methods", &info.instance_methods);
+    section("class methods", &info.class_methods);
+    out
+}
+
+/// `$inspect` output: the value's repr + class, then one `@field: Class` line per instance
+/// field (objects only; scalars and fieldless objects show just the first line).
+fn format_inspect(repr: &str, info: &ValueInfo) -> String {
+    let mut out = format!("{repr}  (class {})", info.class);
+    for (name, class) in &info.fields {
+        out.push_str(&format!("\n  @{name}: {class}"));
+    }
+    out
+}
+
+/// Wrap `names` into indented lines no wider than `width` columns (two-space indent, two
+/// spaces between names). Names are ASCII identifiers, so byte length is display width.
+fn flow_names(names: &[&str], width: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for name in names {
+        if col == 0 {
+            // Line start: two-space indent, no separator.
+            out.push_str("  ");
+            col = 2;
+        } else if col + 2 + name.len() <= width {
+            // Fits on the current line: two-space separator before it.
+            out.push_str("  ");
+            col += 2;
+        } else {
+            // Wrap to a fresh indented line.
+            out.push_str("\n  ");
+            col = 2;
+        }
+        out.push_str(name);
+        col += name.len();
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// Render a result value for display via its `.s` method (so a user-defined `s` override is
+/// honored), falling back to the `Value` `Display` if `.s` errors or returns a non-string.
+/// Safe to run here: a `mutate_root` closure holds the `Mutation`, so no GC occurs while
+/// `val` sits only on the Rust stack.
+fn render_value<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, val: Value<'gc>) -> String {
+    match vm.call_method(mc, val, "s", Vec::new()) {
+        Ok(Value::Object(o)) => match &o.borrow().payload {
+            ObjectPayload::String(s) => s.to_string(),
+            _ => format!("{val}"),
+        },
+        Ok(other) => format!("{other}"),
+        Err(_) => format!("{val}"),
+    }
+}
+
+/// Interactive loop: rustyline editing, history, multiline via the `Validator`, and Ctrl-C
+/// to abandon an in-progress input (Ctrl-D to exit).
+fn run_repl_interactive(arena: &mut ReplArena) {
+    // `List` completion shows all candidates beneath the prompt (vs the default circular
+    // cycle-on-Tab), which suits selector/global menus.
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::List)
+        .build();
+    let mut editor =
+        match rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::with_config(
+            config,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("repl: failed to start line editor: {e}");
+                return;
+            }
+        };
+    editor.set_helper(Some(ReplHelper {
+        index: CompletionIndex::default(),
+    }));
+
+    let history =
+        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".quoin_history"));
+    if let Some(ref p) = history {
+        let _ = editor.load_history(p);
+    }
+
+    // `QN_NO_BANNER` (matching the `QN_*` tuning knobs) suppresses the greeting; `QN_NO_BANNER=0`
+    // still shows it.
+    if !env_flag("QN_NO_BANNER") {
+        println!("Quoin REPL — $help for commands, $quit (or Ctrl-D) to exit.");
+    }
+    // `QN_PROMPT` overrides the prompt string (default `qn> `).
+    let prompt = std::env::var("QN_PROMPT").unwrap_or_else(|_| "qn> ".to_string());
+
+    loop {
+        // Refresh the completion snapshot from the VM as it stands before this line (it can't
+        // change until we eval below). `helper_mut` and `arena` are disjoint borrows.
+        let index = arena.mutate_root(|_mc, vm| build_completion_index(vm));
+        if let Some(helper) = editor.helper_mut() {
+            helper.index = index;
+        }
+        match editor.readline(&prompt) {
+            Ok(input) => {
+                if input.trim().is_empty() {
+                    continue;
+                }
+                let _ = editor.add_history_entry(input.as_str());
+                if let Some(action) = handle_repl_command(arena, &input) {
+                    match action {
+                        ReplAction::Quit => break,
+                        ReplAction::Continue => continue,
+                    }
+                }
+                if let Some(out) = eval_repl_input(arena, &input) {
+                    println!("{out}");
+                }
+            }
+            // Ctrl-C abandons the in-progress input; Ctrl-D / EOF exits.
+            Err(rustyline::error::ReadlineError::Interrupted) => continue,
+            Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(e) => {
+                eprintln!("repl: input error: {e}");
+                break;
+            }
+        }
+    }
+
+    if let Some(ref p) = history {
+        let _ = editor.save_history(p);
+    }
+}
+
+/// Non-interactive loop (piped / redirected stdin): no editor, no prompts. Accumulates
+/// lines until the buffer parses (or errors mid-input), then evaluates. Enables
+/// `echo '…' | qn repl` and `qn repl < script.qn`.
+fn run_repl_piped(arena: &mut ReplArena) {
+    let stdin = stdin();
+    let mut buffer = String::new();
+    loop {
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        if buffer.is_empty() && line.trim().is_empty() {
+            continue;
+        }
+        if buffer.is_empty() {
+            if let Some(action) = handle_repl_command(arena, &line) {
+                match action {
+                    ReplAction::Quit => break,
+                    ReplAction::Continue => continue,
+                }
+            }
+        }
+        buffer.push_str(&line);
+        match try_parse_quoin_string_named(&buffer, "<repl>") {
+            // Incomplete — keep accumulating.
+            Err(pe) if pe.start >= buffer.trim_end().len() => continue,
+            _ => {
+                if let Some(out) = eval_repl_input(arena, &buffer) {
+                    println!("{out}");
+                }
+                buffer.clear();
+            }
+        }
+    }
 }
 
 /// Step status for the benchmark driver, which runs a single fiber to completion
@@ -239,6 +819,10 @@ pub enum VmRunnerMode {
     Test,
     Benchmark,
     Run,
+    Repl,
+    /// `qn -e '<expr>'`: evaluate one expression and print its result. The expression source
+    /// is carried in `VmRunnerOptions::target_path`.
+    Eval,
 }
 
 impl VmRunnerOptions {
@@ -264,6 +848,19 @@ impl VmRunnerOptions {
                 if args.len() > 2 {
                     vm_args = args[2..].to_vec();
                 }
+            } else if arg == "repl" {
+                mode = VmRunnerMode::Repl;
+                if args.len() > 2 {
+                    vm_args = args[2..].to_vec();
+                }
+            } else if arg == "-e" {
+                // `qn -e '<expr>'`: the next arg is the expression source; anything after it
+                // is passed through as VM arguments.
+                mode = VmRunnerMode::Eval;
+                target_path = args.get(2).cloned();
+                if args.len() > 3 {
+                    vm_args = args[3..].to_vec();
+                }
             } else {
                 mode = VmRunnerMode::Run;
                 target_path = Some(arg.clone());
@@ -273,12 +870,15 @@ impl VmRunnerOptions {
             }
         }
 
+        // The REPL is interactive: colorize errors/output when stdout is a terminal.
+        let supports_color = mode == VmRunnerMode::Repl && std::io::stdout().is_terminal();
+
         Self {
             mode,
             target_path,
             vm_options: VmOptions {
                 arguments: vm_args,
-                supports_color: false,
+                supports_color,
                 console_width: None,
             },
         }
@@ -343,6 +943,101 @@ impl VmRunner {
                 self.compile_and_run_asts(ast_iter);
                 Ok(())
             }
+            VmRunnerMode::Repl => {
+                self.run_repl();
+                Ok(())
+            }
+            VmRunnerMode::Eval => {
+                let Some(ref expr) = self.options.target_path else {
+                    eprintln!("Usage: qn -e '<expr>'");
+                    exit(2);
+                };
+                self.run_eval(expr);
+                Ok(())
+            }
+        }
+    }
+
+    /// Interactive read-eval-print loop (`qn repl`). One VM is built and the prelude
+    /// loaded; a persistent `repl_env` holds top-level bindings so they survive across
+    /// lines. Each input is parsed without panicking (`try_parse`), compiled, and run in
+    /// that env. Incomplete input re-prompts (`... `); parse/compile/runtime failures are
+    /// shown and the loop continues. A line starting with `$` is a REPL command.
+    fn run_repl(&self) {
+        let Some(mut arena) = self.build_repl_arena() else {
+            return;
+        };
+
+        // Interactive terminals get the line editor; piped/redirected stdin uses the
+        // promptless accumulation loop (rustyline's editor/validator only apply to a tty).
+        if stdin().is_terminal() {
+            // `~/.quoinrc` is interactive-only, like a shell rc file (a piped script or a
+            // one-shot `-e` doesn't run it).
+            load_quoinrc(&mut arena);
+            run_repl_interactive(&mut arena);
+        } else {
+            run_repl_piped(&mut arena);
+        }
+    }
+
+    /// Build a fresh session arena: a `VmState` with the native builtins registered, the core
+    /// stdlib prelude loaded, and an empty persistent `repl_env`. Returns `None` (after
+    /// printing the failure) if the prelude fails to load. Shared by `run_repl` and `run_eval`.
+    fn build_repl_arena(&self) -> Option<ReplArena> {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, self.options.vm_options.clone());
+            register_builtins(mc, &mut vm);
+            vm
+        });
+
+        // Load the core stdlib into the persistent VM (prelude `use core/*`).
+        for ast in prelude_asts() {
+            let mut failed = false;
+            arena.mutate_root(|mc, vm| {
+                let NodeValue::Program(p) = &ast.value else {
+                    return;
+                };
+                match Compiler::new().compile_program(p) {
+                    Ok(sb) => {
+                        let block = build_block(mc, &sb);
+                        if let Err(e) = vm.execute_block(mc, block, Vec::new(), None) {
+                            eprintln!("repl: failed to load prelude: {}", e);
+                            failed = true;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("repl: prelude compile error: {}", e);
+                        failed = true;
+                    }
+                }
+            });
+            if failed {
+                return None;
+            }
+        }
+
+        // The session's persistent top-level environment.
+        arena.mutate_root(|mc, vm| {
+            vm.repl_env = Some(gcl!(mc, EnvFrame::new(None)));
+        });
+
+        Some(arena)
+    }
+
+    /// `qn -e '<expr>'`: evaluate one expression in a fresh prelude-loaded session and print
+    /// its result via `.s` (a `nil` result prints nothing). Parse/compile/runtime errors go to
+    /// stderr with a non-zero exit, so `-e` composes in pipelines.
+    fn run_eval(&self, expr: &str) {
+        let Some(mut arena) = self.build_repl_arena() else {
+            exit(1);
+        };
+        match eval_once(&mut arena, expr) {
+            Ok(Some(out)) => println!("{out}"),
+            Ok(None) => {}
+            Err(msg) => {
+                eprintln!("{msg}");
+                exit(1);
+            }
         }
     }
 
@@ -353,38 +1048,7 @@ impl VmRunner {
     fn compile_and_run_asts(&self, ast_iter: impl Iterator<Item = Node>) -> bool {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
-
-            vm.register_native_class(mc, object::build_object_class());
-            vm.register_native_class(mc, class::build_class_class());
-            vm.register_native_class(mc, boolean::build_boolean_class());
-            vm.register_native_class(mc, block::build_block_class());
-            vm.register_native_class(mc, bytes::build_bytes_class());
-            vm.register_native_class(mc, sockets::build_tcp_socket_class());
-            vm.register_native_class(mc, sockets::build_tls_socket_class());
-            vm.register_native_class(mc, sockets::build_tcp_listener_class());
-            vm.register_native_class(mc, http::build_http_parser_class());
-            vm.register_native_class(mc, streams::build_byte_stream_class());
-            vm.register_native_class(mc, streams::build_string_stream_class());
-            vm.register_native_class(mc, io::build_io_folder_class());
-            vm.register_native_class(mc, io::build_io_file_class());
-            vm.register_native_class(mc, io::build_io_handle_class());
-            vm.register_native_class(mc, list::build_list_class());
-            vm.register_native_class(mc, set::build_set_class());
-            vm.register_native_class(mc, runtime::build_runtime_class());
-            vm.register_native_class(mc, async_rt::build_async_class());
-            vm.register_native_class(mc, task::build_task_class());
-            vm.register_native_class(mc, method::build_method_class());
-            vm.register_native_class(mc, timer::build_timer_class());
-            vm.register_native_class(mc, double::build_double_class());
-            vm.register_native_class(mc, integer::build_integer_class());
-            vm.register_native_class(mc, string::build_string_class());
-            vm.register_native_class(mc, symbol::build_symbol_class());
-            vm.register_native_class(mc, nil::build_nil_class());
-            vm.register_native_class(mc, map::build_map_class());
-            vm.register_native_class(mc, map::build_key_value_pair_class());
-            vm.register_native_class(mc, regex::build_regex_class());
-            vm.register_native_class(mc, fiber_class::build_fiber_class());
-
+            register_builtins(mc, &mut vm);
             vm
         });
 
@@ -777,38 +1441,7 @@ impl VmRunner {
     fn compile_and_benchmark(&self, ast_iter: impl Iterator<Item = Node>) {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
-
-            vm.register_native_class(mc, object::build_object_class());
-            vm.register_native_class(mc, class::build_class_class());
-            vm.register_native_class(mc, boolean::build_boolean_class());
-            vm.register_native_class(mc, block::build_block_class());
-            vm.register_native_class(mc, bytes::build_bytes_class());
-            vm.register_native_class(mc, sockets::build_tcp_socket_class());
-            vm.register_native_class(mc, sockets::build_tls_socket_class());
-            vm.register_native_class(mc, sockets::build_tcp_listener_class());
-            vm.register_native_class(mc, http::build_http_parser_class());
-            vm.register_native_class(mc, streams::build_byte_stream_class());
-            vm.register_native_class(mc, streams::build_string_stream_class());
-            vm.register_native_class(mc, io::build_io_folder_class());
-            vm.register_native_class(mc, io::build_io_file_class());
-            vm.register_native_class(mc, io::build_io_handle_class());
-            vm.register_native_class(mc, list::build_list_class());
-            vm.register_native_class(mc, set::build_set_class());
-            vm.register_native_class(mc, runtime::build_runtime_class());
-            vm.register_native_class(mc, async_rt::build_async_class());
-            vm.register_native_class(mc, task::build_task_class());
-            vm.register_native_class(mc, method::build_method_class());
-            vm.register_native_class(mc, timer::build_timer_class());
-            vm.register_native_class(mc, double::build_double_class());
-            vm.register_native_class(mc, integer::build_integer_class());
-            vm.register_native_class(mc, string::build_string_class());
-            vm.register_native_class(mc, symbol::build_symbol_class());
-            vm.register_native_class(mc, nil::build_nil_class());
-            vm.register_native_class(mc, map::build_map_class());
-            vm.register_native_class(mc, map::build_key_value_pair_class());
-            vm.register_native_class(mc, regex::build_regex_class());
-            vm.register_native_class(mc, fiber_class::build_fiber_class());
-
+            register_builtins(mc, &mut vm);
             vm
         });
 
@@ -975,5 +1608,23 @@ impl VmRunner {
         println!("==================================================");
 
         arena.finish_cycle();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_names_wraps_to_width() {
+        let names = vec!["aaa", "bbb", "ccc", "ddd"];
+        // Width 12: "  aaa  bbb" is 10 cols; adding "  ccc" (→15) overflows, so it wraps.
+        assert_eq!(flow_names(&names, 12), "  aaa  bbb\n  ccc  ddd\n");
+        // A wide width keeps everything on one line.
+        assert_eq!(flow_names(&names, 80), "  aaa  bbb  ccc  ddd\n");
+        // No line carries trailing whitespace, at any width.
+        for w in [8, 12, 40, 80] {
+            assert!(flow_names(&names, w).lines().all(|l| l == l.trim_end()));
+        }
     }
 }

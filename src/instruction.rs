@@ -107,6 +107,29 @@ pub enum Instruction {
     Pop,
     Dup,
     Send(Symbol, usize), // selector, num_args
+    // Superinstructions: a single fused op for the hot `<operand-load>; Send` pairs (the
+    // last operand of a send is overwhelmingly a local / constant / field — see
+    // profiling/superinstructions). Each pushes its operand then runs the normal send,
+    // saving one dispatch-loop step per send. Produced by the `fuse_bytecode` peephole
+    // pass; never emitted directly by the AST compiler.
+    SendLocal(Symbol, Symbol, usize), // var, selector, num_args  (was LoadLocal; Send)
+    SendConst(Constant, Symbol, usize), // constant, selector, num_args  (was Push; Send)
+    SendField(String, Symbol, usize), // field, selector, num_args  (was LoadField; Send)
+    // Store-and-keep superinstructions: a `Dup; Store*` pair (an assignment whose value is
+    // used as an expression) fused into one op that stores the *top* of stack without
+    // popping it. The statement-position form `Dup; Store*; Pop` is instead collapsed to a
+    // plain `Store*` (both by the `fuse_bytecode` pass). Mirror DefineLocal/StoreLocal/
+    // StoreField but peek instead of pop.
+    DefineLocalKeep(Symbol),
+    StoreLocalKeep(Symbol),
+    StoreFieldKeep(String),
+    // 3-instruction sends: absorb a *second* operand-load into a fused send, so one op
+    // pushes two operands (left-to-right) then dispatches. Covers the two hottest
+    // receiver+last-operand shapes — `LoadLocal; LoadLocal; Send` (e.g. `i < n`) and
+    // `LoadLocal; Push; Send` (e.g. `n - 1`). The operands are just the last two pushed
+    // before the send (receiver + arg for a 1-arg send); produced by `fuse_bytecode`.
+    SendLocalLocal(Symbol, Symbol, Symbol, usize), // local, local, selector, num_args
+    SendLocalConst(Symbol, Constant, Symbol, usize), // local, constant, selector, num_args
     Return,
     Yeet,
     BlockReturn,

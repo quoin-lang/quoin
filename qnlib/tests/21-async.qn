@@ -16,7 +16,7 @@
     "* genuine reactor round-trip rather than a no-op.
     .test:
     sleepParksForRequestedTime -> {
-        .is:{ Timer.time:{ Runtime.sleep: 30 } } greaterThanOrEqualTo:20;
+        .is:{ Timer.time:{ Runtime.sleep: 30 } } greaterThanOrEqualTo:20000;
     };
 
     "* Stage 2a: `Async.gather:` runs each block as a concurrent task whose I/O
@@ -29,7 +29,7 @@
             { Runtime.sleep: 30 } { Runtime.sleep: 30 }
             { Runtime.sleep: 30 } { Runtime.sleep: 30 }
             { Runtime.sleep: 30 } { Runtime.sleep: 30 }
-        ) } } lessThan:150;
+        ) } } lessThan:150000;
     };
 
     "* Results come back in spawn order, not completion order: the block that
@@ -65,7 +65,7 @@
         .is:{ Timer.time:{
             hs = (0..8).collect:{ |k| Task.spawn:{ Runtime.sleep: 30; k } };
             hs.each:{ |h| h.join }
-        } } lessThan:150;
+        } } lessThan:150000;
     };
 
     "* A failed task re-raises its exception out of `join` — catchable, not the

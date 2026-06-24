@@ -63,6 +63,33 @@ impl HighlightSpan {
     }
 }
 
+/// Highlight `source`, tolerating syntactically **incomplete** input. If `source` parses,
+/// it is highlighted directly. Otherwise a minimal completion (see
+/// [`crate::complete::complete_source`]) is appended so it parses, the completed source is
+/// highlighted, and only the spans lying within the original input are returned — the
+/// synthetic completion is highlighted but cropped away (it is append-only, so the original
+/// tokens keep their offsets). Never panics; an input that cannot be completed yields no
+/// spans. This is the entry point for live highlighting of as-you-type input (the REPL, the
+/// language server) where the underlying parser would otherwise panic on a partial line.
+pub fn highlight_resilient(source: &str) -> Vec<HighlightSpan> {
+    if let Some(node) = crate::complete::parse_or_none(source) {
+        return HighlightParser::new(source).highlight_program(&node);
+    }
+    if let Some(suffix) = crate::complete::complete_source(source) {
+        let completed = format!("{source}{suffix}");
+        if let Some(node) = crate::complete::parse_or_none(&completed) {
+            let orig = source.len();
+            let mut spans = HighlightParser::new(&completed).highlight_program(&node);
+            spans.retain(|s| s.start < orig);
+            for s in &mut spans {
+                s.end = s.end.min(orig);
+            }
+            return spans;
+        }
+    }
+    Vec::new()
+}
+
 /// The **reserved identifiers** — `true`/`false`/`nil`. These are distinct from
 /// *keywords* (e.g. `use`, `HighlightType::Keyword`); reserved identifiers are colored
 /// as globals, keywords get their own type.
@@ -740,4 +767,51 @@ fn text_span(source: &str, start: usize, end: usize, depth: usize) -> Vec<Highli
     }
 
     fill_in_gaps(source, start, end, spans, depth)
+}
+
+#[cfg(test)]
+mod resilient_tests {
+    use super::*;
+
+    #[test]
+    fn crops_completion_to_original() {
+        for src in ["1 +", "Foo <- {", "#(1 2", "'hello", "a.foo:", "Box <--"] {
+            let spans = highlight_resilient(src);
+            assert!(
+                spans
+                    .iter()
+                    .all(|s| s.start < src.len() && s.end <= src.len()),
+                "spans escape original input for {src:?}: {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn matches_plain_highlight_when_valid() {
+        let src = "x = 1 + 2";
+        let node = crate::try_parse_quoin_string_named(src, "<t>").unwrap();
+        let plain = HighlightParser::new(src).highlight_program(&node);
+        assert_eq!(highlight_resilient(src), plain);
+    }
+
+    #[test]
+    fn never_panics_on_arbitrary_input() {
+        // Includes `Box <-- 0`, which pest-parses but panics in the AST builder — the
+        // resilient path must catch it (it prints a panic message but does not abort).
+        for src in [
+            "",
+            ")",
+            "@",
+            "1 +",
+            "'",
+            "#/ab",
+            "{{{{",
+            "})(",
+            "Foo <-",
+            "use ",
+            "Box <-- 0",
+        ] {
+            let _ = highlight_resilient(src);
+        }
+    }
 }

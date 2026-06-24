@@ -54,6 +54,8 @@ httparse = "1"
 console = "0.15"
 mimalloc = { version = "0.1", optional = true }
 rustc-hash = "2"
+# Line editing for `qn repl` (history, multiline via the Validator trait, key bindings).
+rustyline = "18"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

@@ -109,7 +109,7 @@ TestAssertionResult <- { |@test @name @passed? @location @elapsed @evidence|
     locationColumn -> { @location.defined?.if:{ (@location.third) + 1 } else:{ '?' } }
 
     s --> {
-        'TestAssertionResult{%1 %2 %3%4%5 %6ms %7}' % #(
+        'TestAssertionResult{%1 %2 %3%4%5 %6µs %7}' % #(
             @test
             @passed?
             @evidence.first
@@ -181,7 +181,7 @@ TestResult <- { |@test @name @assertions @elapsed @wallElapsed|
     elapsed -> { @elapsed }
     wallElapsed -> { @wallElapsed }
 
-    s --> { 'TestResult{%1 %2 %3ms [%4]}' % #( @test @name @elapsed @assertions ) }
+    s --> { 'TestResult{%1 %2 %3µs [%4]}' % #( @test @name @elapsed @assertions ) }
 };
 
 TestSuite <- { |@name @tests|
@@ -213,6 +213,19 @@ TestSuite <- { |@name @tests|
 TestReporter <- {
     .abstract!;
 
+    "* Render an elapsed time (microseconds) in the largest unit that keeps it >= 1:
+    "* sub-millisecond stays µs; >= 1ms shows ms; >= 1s shows s. One truncated decimal
+    "* for ms/s, via integer math (float division renders at ugly full precision)."
+    humanize: -> { |us|
+        us.defined?.else:{ ^^'0µs' };
+        (us < 1000).if:{ ^^('%1µs' % us) };
+        (us < 1000000).if:{ ^^('%1.%2ms' % #( (us / 1000) ((us / 100) % 10) )) };
+        '%1.%2s' % #( (us / 1000000) ((us / 100000) % 10) )
+    }
+
+    startRun: -> { |suites:List| ... }
+    endRun:elapsed: -> { |suites:List elapsed| ... }
+
     startSuite: -> { |suite:TestSuite| ... }
     endSuite:elapsed: -> { |suite:TestSuite elapsed| ... }
 
@@ -223,39 +236,58 @@ TestReporter <- {
     endAssertion: -> { |result| ... }
 };
 
-TestReporter <- PlainTestReporter <- { |@out @currentSuite|
+TestReporter <- PlainTestReporter <- { |@out @currentSuite @nameWidth|
     init: -> { |out| @out = out }
+
+    "* Current suite's name padded to the widest suite name, so every [Tag] aligns."
+    paddedName -> { @currentSuite.name.padRight:@nameWidth }
+
+    startRun: --> { |suites:List|
+        @nameWidth = (suites.collect:{ |s| s.name.length }).max
+    }
+
+    endRun:elapsed: --> { |suites:List elapsed|
+        passes = suites.sum:{ |s| s.tests.sum:{ .passes.count } }
+        failures = suites.sum:{ |s| s.tests.sum:{ .failures.count } }
+        testsElapsed = suites.sum:{ |s| s.tests.sum:{ .elapsed } }
+        @out.writeln:'All suites finished in %1 (%2) : %3 passes / %4 failures' % #(
+            (.humanize:testsElapsed)
+            (.humanize:elapsed)
+            passes
+            failures
+        )
+    }
 
     startSuite: --> { |suite:TestSuite|
         @currentSuite = suite;
-        @out.writeln:'[%1] Running %2 tests' % #( @currentSuite.name suite.tests.count )
+        @out.writeln:'[%1] Running %2 tests' % #( .paddedName suite.tests.count )
     }
 
     endSuite:elapsed: --> { |suite:TestSuite elapsed|
         passes = suite.tests.sum:{ .passes.count }
         failures = suite.tests.sum:{ .failures.count }
         testsElapsed = suite.tests.sum:{ .elapsed }
-        @out.writeln:'[%1] Finished in %4ms (%5ms) : %2 passes / %3 failures' % #(
-            @currentSuite.name
+        @out.writeln:'[%1] Finished in %4 (%5) : %2 passes / %3 failures' % #(
+            .paddedName
             passes
             failures
-            testsElapsed * 1000.0
-            elapsed * 1000.0
+            (.humanize:testsElapsed)
+            (.humanize:elapsed)
         )
     }
 
     startTest: --> { |test:Test|
-        @out.write:'[%1]   Test %2 ' % #(@currentSuite.name test)
+        @out.write:'[%1]   Test %2 ' % #(.paddedName test)
     }
 
     endTest: --> { |result:TestResult|
-        @out.write:' %1ms (%2ms)' % #(
-            result.elapsed * 1000.0
-            result.wallElapsed * 1000.0
+        @out.write:' %1 (%2)' % #(
+            (.humanize:result.elapsed)
+            (.humanize:result.wallElapsed)
         )
         (result.failures.any?).if:{
             outTemp = @out;
-            suiteName = @currentSuite.name;
+            suiteName = .paddedName;
             @out.writeln:' %1 of %2 assertions failed:' % #(
                 result.failures.count result.assertions.count
             );
@@ -282,35 +314,54 @@ TestReporter <- PlainTestReporter <- { |@out @currentSuite|
     }
 };
 
-TestReporter <- AnsiTestReporter <- { |@out @currentSuite|
+TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
     init: -> { |out| @out = out }
+
+    "* Current suite's name padded to the widest suite name, so every [Tag] aligns."
+    paddedName -> { @currentSuite.name.padRight:@nameWidth }
+
+    startRun: --> { |suites:List|
+        @nameWidth = (suites.collect:{ |s| s.name.length }).max
+    }
+
+    endRun:elapsed: --> { |suites:List elapsed|
+        passes = suites.sum:{ |s| s.tests.sum:{ .passes.count } }
+        failures = suites.sum:{ |s| s.tests.sum:{ .failures.count } }
+        testsElapsed = suites.sum:{ |s| s.tests.sum:{ .elapsed } }
+        @out.writeln:#ANSI'All suites finished in $#00bfff[%1$] ($#00bfff[%2$]) : $#69ff61[%3 passes$] / $#ff6961[%4 failures$]' % #(
+            (.humanize:testsElapsed)
+            (.humanize:elapsed)
+            passes
+            failures
+        )
+    }
 
     startSuite: --> { |suite:TestSuite|
         @currentSuite = suite
-        @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Running %2 tests' % #( @currentSuite.name suite.tests.count )
+        @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Running %2 tests' % #( .paddedName suite.tests.count )
     }
 
     endSuite:elapsed: --> { |suite:TestSuite elapsed|
         passes = suite.tests.sum:{ .passes.count }
         failures = suite.tests.sum:{ .failures.count }
         testsElapsed = suite.tests.sum:{ .elapsed }
-        @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Finished in $#00bfff[%4ms$] ($#00bfff[%5ms$]) : $#69ff61[%2 passes$] / $#ff6961[%3 failures$]' % #(
-            @currentSuite.name
+        @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Finished in $#00bfff[%4$] ($#00bfff[%5$]) : $#69ff61[%2 passes$] / $#ff6961[%3 failures$]' % #(
+            .paddedName
             passes
             failures
-            testsElapsed
-            elapsed
+            (.humanize:testsElapsed)
+            (.humanize:elapsed)
         )
     }
 
     startTest: --> { |test:Test|
-        @out.write:#ANSI'[$#5fd7af;bw[%1$]]   Test $#ab82ff[%2$] ' % #(@currentSuite.name test.name)
+        @out.write:#ANSI'[$#5fd7af;bw[%1$]]   Test $#ab82ff[%2$] ' % #(.paddedName test.name)
     }
 
     endTest: --> { |result:TestResult|
-        @out.write:#ANSI' $#00bfff[%1ms$] ($#00bfff[%2ms$])' % #(
-            result.elapsed
-            result.wallElapsed
+        @out.write:#ANSI' $#00bfff[%1$] ($#00bfff[%2$])' % #(
+            (.humanize:result.elapsed)
+            (.humanize:result.wallElapsed)
         )
         (result.failures.any?).if:{
             failedTests = result.failures.collect:{ |r|
@@ -324,7 +375,7 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite|
                 )
             };
             outTemp = @out;
-            suiteName = @currentSuite.name;
+            suiteName = .paddedName;
             @out.writeln:#ANSI' $#ff6961[%1 of %2 assertions failed$]:' % #(
                 result.failures.count result.assertions.count
             );
@@ -352,26 +403,32 @@ TestRunner <- { |@suites|
 
     run: -> { |reporter|
         results = #()
-        @suites.each:{|s|
-            reporter.startSuite:s;
+        reporter.startRun:@suites;
 
-            tr = nil
-            elapsed = Timer.time:{
-                tr = s.tests.collect:{ #collectTests |t|
-                    reporter.startTest:t;
+        runElapsed = Timer.time:{
+            @suites.each:{|s|
+                reporter.startSuite:s;
 
-                    r = t.run:reporter
+                tr = nil
+                elapsed = Timer.time:{
+                    tr = s.tests.collect:{ #collectTests |t|
+                        reporter.startTest:t;
 
-                    reporter.endTest:r
+                        r = t.run:reporter
 
-                    ^r
-                }
-            };
+                        reporter.endTest:r
 
-            reporter.endSuite:s elapsed:elapsed;
+                        ^r
+                    }
+                };
 
-            results.add:tr
-        }
+                reporter.endSuite:s elapsed:elapsed;
+
+                results.add:tr
+            }
+        };
+
+        reporter.endRun:@suites elapsed:runElapsed;
         ^results.flatten
     }
 };

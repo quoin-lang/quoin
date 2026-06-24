@@ -43,6 +43,28 @@
     };
 
     .test:
+    multibyteLiterals -> {
+        "* String literals measure char length and stop at the closing quote even with
+        "* multibyte content. A byte-vs-char slicing bug in the lexer once leaked the
+        "* delimiter (so 'µ'.length was 2) — applied to plain and #ANSI'…' strings alike."
+        .is:{ 'µ'.length } equalTo:1;
+        .is:{ 'abµde'.length } equalTo:5;
+        .is:{ 'aµbµc'.length } equalTo:5;
+        .is:{ 'café' } equalTo:'café';
+        .is:{ 'x' + #ANSI'µs'.string } equalTo:'xµs';
+    };
+
+    .test:
+    padRight -> {
+        "* Pads with trailing spaces to the requested width; a no-op once already wide enough."
+        .is:{ 'ab'.padRight:5 } equalTo:'ab   ';
+        .is:{ 'ab'.padRight:2 } equalTo:'ab';
+        .is:{ 'abcde'.padRight:3 } equalTo:'abcde';
+        .is:{ ''.padRight:3 } equalTo:'   ';
+        .is:{ ('ab'.padRight:5).length } equalTo:5;
+    };
+
+    .test:
     replaceWith -> {
         "* `replace:with:` dispatches on the pattern argument's type: a String
         "* pattern is a literal replace-all, a Regex pattern a regex replace-all.

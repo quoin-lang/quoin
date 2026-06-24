@@ -60,7 +60,10 @@ pub fn build_runtime_class() -> NativeClassBuilder {
 }
 
 /// Build a runnable top-level `Block` from a freshly compiled `StaticBlock`.
-fn build_block<'gc>(mc: &Mutation<'gc>, static_block: &StaticBlock) -> Gc<'gc, Block<'gc>> {
+pub(crate) fn build_block<'gc>(
+    mc: &Mutation<'gc>,
+    static_block: &StaticBlock,
+) -> Gc<'gc, Block<'gc>> {
     let decl_block = static_block.decl_block.as_ref().map(|db| {
         crate::gc!(
             mc,
