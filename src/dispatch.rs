@@ -637,7 +637,7 @@ impl<'gc> VmState<'gc> {
 
     /// The declared parameter types of a candidate (a user block carries them
     /// directly; a native method via its signature, empty if signatureless).
-    fn candidate_param_types(&self, method_val: Value<'gc>) -> Vec<String> {
+    pub(crate) fn candidate_param_types(&self, method_val: Value<'gc>) -> Vec<String> {
         if let Some(block) = self.get_block_from_method(method_val) {
             block.param_types.clone()
         } else {

@@ -41,7 +41,7 @@ fn prelude_asts() -> impl Iterator<Item = Node> {
 
 /// Register every native (Rust-backed) class on a fresh `VmState`. Shared by all runner
 /// modes (run/test/benchmark/repl) so the builtin set can't drift between them.
-fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
+pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
     vm.register_native_class(mc, object::build_object_class());
     vm.register_native_class(mc, class::build_class_class());
     vm.register_native_class(mc, boolean::build_boolean_class());

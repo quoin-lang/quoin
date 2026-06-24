@@ -270,12 +270,20 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   <file.qn>` (run a file into the session), plus the P0 `$help`/`$reset`/`$quit`.
 
 **P2 — power features:**
-- [ ] Tab completion: globals, class names, keywords, and `.`-completion of method selectors
-  (needs method-table introspection). **Depends on the trailing-`.` highlighting heuristic** (P1,
-  under the predictive-completion item): completion fires on `.`-ending input, so ship them together
-  or the input loses its colors whenever the popup is open.
-- [ ] Introspection: list defined globals/classes; inspect a class's methods (some already doable
-  in-language via `.class`/`.meta`/`can?:`).
+- [ ] Tab completion: globals, class names, keywords, and `.`-completion of method selectors,
+  namespaces inside `[ … ]`. Driven by the introspection `find_*` prefix scans (see below); the
+  completion driver picks the primitive by lexical context. **Depends on the trailing-`.`
+  highlighting heuristic** (P1, under the predictive-completion item): completion fires on
+  `.`-ending input, so ship them together or the input loses its colors whenever the popup is open.
+- [ ] **VM introspection API** (`src/introspect.rs`; design in `docs/INTROSPECTION.md`). Read-only
+  surface metadata as plain owned structs (no `'gc`), owning the VM-internal walking so the REPL /
+  completion / a future Quoin `Mirror` stay ignorant of internals. Exact: `globals` /
+  `describe_class` / `describe_value` / `session_locals`; prefix finds: `find_globals` /
+  `find_namespaces` / `find_selectors`. Consumed by the `$`-commands and tab completion above.
+  - [ ] `$`-introspection commands on top of it: `$globals`, `$class <Name>` (parent/mixins/ivars/
+    methods), `$inspect <expr>` (object fields). (`$type` already exists.)
+  - [ ] Later: the Quoin `Mirror` wrapper (native reflection class converting the structs to Quoin
+    objects) — a layer over this API, not part of it.
 - [ ] Startup file (`~/.quoinrc` run on REPL boot) + banner; configurable prompt.
 - [ ] One-shot eval `qn -e '<expr>'` and non-interactive `qn repl < script` (pipe mode). Related
   but distinct from the interactive loop.

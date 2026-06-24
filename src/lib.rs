@@ -7,6 +7,7 @@ pub mod error;
 pub mod fiber;
 pub mod highlighter;
 pub mod instruction;
+pub mod introspect;
 pub mod io_backend;
 pub mod packages;
 pub mod parser;
