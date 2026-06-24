@@ -2,15 +2,17 @@ use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::fiber::{Fiber, VMContext, YieldReason, run_vm_loop};
 use crate::gc;
+use crate::gcl;
 use crate::highlighter::highlight_to_ansi;
 use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend, StreamId};
 use crate::parser::ast::Node;
-use crate::parser::{NodeValue, parse_quoin_file};
+use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
+use crate::runtime::runtime::build_block;
 use crate::runtime::{
     async_rt, block, boolean, bytes, class, double, fiber as fiber_class, http, integer, io, list,
     map, method, nil, object, regex, runtime, set, sockets, streams, string, symbol, task, timer,
 };
-use crate::value::{Block, NamespacedName, Value};
+use crate::value::{Block, EnvFrame, NamespacedName, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
 
 use corosensei::CoroutineResult;
@@ -18,9 +20,11 @@ use futures_lite::StreamExt;
 use futures_lite::future::block_on;
 use futures_util::future::{Aborted, abortable};
 use futures_util::stream::FuturesUnordered;
-use gc_arena::{Arena, Gc, Mutation, Rootable};
+use gc_arena::{Arena, Gc, Mutation, Rootable, lock::RefLock};
+use std::collections::HashSet;
 use std::fs::read_to_string;
 use std::future::Future;
+use std::io::{BufRead, IsTerminal, Write, stdin, stdout};
 use std::iter::once_with;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -33,6 +37,41 @@ use std::time::Instant;
 /// so the prelude composition lives in Quoin rather than a hardcoded glob here.
 fn prelude_asts() -> impl Iterator<Item = Node> {
     once_with(|| parse_quoin_file(&PathBuf::from("qnlib/prelude.qn")))
+}
+
+/// Register every native (Rust-backed) class on a fresh `VmState`. Shared by all runner
+/// modes (run/test/benchmark/repl) so the builtin set can't drift between them.
+fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
+    vm.register_native_class(mc, object::build_object_class());
+    vm.register_native_class(mc, class::build_class_class());
+    vm.register_native_class(mc, boolean::build_boolean_class());
+    vm.register_native_class(mc, block::build_block_class());
+    vm.register_native_class(mc, bytes::build_bytes_class());
+    vm.register_native_class(mc, sockets::build_tcp_socket_class());
+    vm.register_native_class(mc, sockets::build_tls_socket_class());
+    vm.register_native_class(mc, sockets::build_tcp_listener_class());
+    vm.register_native_class(mc, http::build_http_parser_class());
+    vm.register_native_class(mc, streams::build_byte_stream_class());
+    vm.register_native_class(mc, streams::build_string_stream_class());
+    vm.register_native_class(mc, io::build_io_folder_class());
+    vm.register_native_class(mc, io::build_io_file_class());
+    vm.register_native_class(mc, io::build_io_handle_class());
+    vm.register_native_class(mc, list::build_list_class());
+    vm.register_native_class(mc, set::build_set_class());
+    vm.register_native_class(mc, runtime::build_runtime_class());
+    vm.register_native_class(mc, async_rt::build_async_class());
+    vm.register_native_class(mc, task::build_task_class());
+    vm.register_native_class(mc, method::build_method_class());
+    vm.register_native_class(mc, timer::build_timer_class());
+    vm.register_native_class(mc, double::build_double_class());
+    vm.register_native_class(mc, integer::build_integer_class());
+    vm.register_native_class(mc, string::build_string_class());
+    vm.register_native_class(mc, symbol::build_symbol_class());
+    vm.register_native_class(mc, nil::build_nil_class());
+    vm.register_native_class(mc, map::build_map_class());
+    vm.register_native_class(mc, map::build_key_value_pair_class());
+    vm.register_native_class(mc, regex::build_regex_class());
+    vm.register_native_class(mc, fiber_class::build_fiber_class());
 }
 
 /// Step status for the benchmark driver, which runs a single fiber to completion
@@ -239,6 +278,7 @@ pub enum VmRunnerMode {
     Test,
     Benchmark,
     Run,
+    Repl,
 }
 
 impl VmRunnerOptions {
@@ -264,6 +304,11 @@ impl VmRunnerOptions {
                 if args.len() > 2 {
                     vm_args = args[2..].to_vec();
                 }
+            } else if arg == "repl" {
+                mode = VmRunnerMode::Repl;
+                if args.len() > 2 {
+                    vm_args = args[2..].to_vec();
+                }
             } else {
                 mode = VmRunnerMode::Run;
                 target_path = Some(arg.clone());
@@ -273,12 +318,15 @@ impl VmRunnerOptions {
             }
         }
 
+        // The REPL is interactive: colorize errors/output when stdout is a terminal.
+        let supports_color = mode == VmRunnerMode::Repl && std::io::stdout().is_terminal();
+
         Self {
             mode,
             target_path,
             vm_options: VmOptions {
                 arguments: vm_args,
-                supports_color: false,
+                supports_color,
                 console_width: None,
             },
         }
@@ -343,6 +391,154 @@ impl VmRunner {
                 self.compile_and_run_asts(ast_iter);
                 Ok(())
             }
+            VmRunnerMode::Repl => {
+                self.run_repl();
+                Ok(())
+            }
+        }
+    }
+
+    /// Interactive read-eval-print loop (`qn repl`). One VM is built and the prelude
+    /// loaded; a persistent `repl_env` holds top-level bindings so they survive across
+    /// lines. Each input is parsed without panicking (`try_parse`), compiled, and run in
+    /// that env. Incomplete input re-prompts (`... `); parse/compile/runtime failures are
+    /// shown and the loop continues. A line starting with `$` is a REPL command.
+    fn run_repl(&self) {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, self.options.vm_options.clone());
+            register_builtins(mc, &mut vm);
+            vm
+        });
+
+        // Load the core stdlib into the persistent VM (prelude `use core/*`).
+        for ast in prelude_asts() {
+            let mut failed = false;
+            arena.mutate_root(|mc, vm| {
+                let NodeValue::Program(p) = &ast.value else {
+                    return;
+                };
+                match Compiler::new().compile_program(p) {
+                    Ok(sb) => {
+                        let block = build_block(mc, &sb);
+                        if let Err(e) = vm.execute_block(mc, block, Vec::new(), None) {
+                            eprintln!("repl: failed to load prelude: {}", e);
+                            failed = true;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("repl: prelude compile error: {}", e);
+                        failed = true;
+                    }
+                }
+            });
+            if failed {
+                return;
+            }
+        }
+
+        // The session's persistent top-level environment.
+        arena.mutate_root(|mc, vm| {
+            vm.repl_env = Some(gcl!(mc, EnvFrame::new(None)));
+        });
+
+        println!("Quoin REPL — $help for commands, $quit (or Ctrl-D) to exit.");
+
+        let stdin = stdin();
+        let mut buffer = String::new();
+        loop {
+            print!("{}", if buffer.is_empty() { "qn> " } else { "... " });
+            let _ = stdout().flush();
+
+            let mut line = String::new();
+            if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
+                println!(); // newline past the dangling prompt on Ctrl-D / EOF
+                break;
+            }
+
+            // A `$`-command (only at the start of a fresh input, never mid-multiline).
+            if buffer.is_empty() {
+                if let Some(cmd) = line.trim().strip_prefix('$') {
+                    let word = cmd.split_whitespace().next().unwrap_or("");
+                    match word {
+                        "quit" | "exit" | "q" => break,
+                        "help" | "h" | "?" => {
+                            println!(
+                                "Commands: $help, $reset (clear session locals), $quit/$exit."
+                            );
+                            println!(
+                                "Everything else is evaluated as Quoin; definitions and lowercase"
+                            );
+                            println!("variables persist across lines.");
+                        }
+                        "reset" => {
+                            arena.mutate_root(|mc, vm| {
+                                vm.repl_env = Some(gcl!(mc, EnvFrame::new(None)));
+                            });
+                            println!("Session locals cleared.");
+                        }
+                        other => eprintln!("Unknown command: ${other} (try $help)"),
+                    }
+                    continue;
+                }
+            }
+
+            // A blank line while continuing a multiline input abandons it.
+            if !buffer.is_empty() && line.trim().is_empty() {
+                buffer.clear();
+                continue;
+            }
+
+            buffer.push_str(&line);
+
+            match try_parse_quoin_string_named(&buffer, "<repl>") {
+                Ok(node) => {
+                    let output = arena.mutate_root(|mc, vm| {
+                        let NodeValue::Program(p) = &node.value else {
+                            return None;
+                        };
+                        // Seed the compiler with the session's existing bindings so
+                        // references to them resolve as locals (LoadLocal -> repl_env), not
+                        // globals — each line is its own compilation unit otherwise.
+                        let locals: HashSet<String> = vm
+                            .repl_env
+                            .map(|env| {
+                                env.borrow()
+                                    .vars
+                                    .iter()
+                                    .map(|(s, _)| s.as_str().to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let sb = match Compiler::new_with_locals(locals).compile_program(p) {
+                            Ok(sb) => sb,
+                            Err(e) => return Some(format!("Compile error: {e}")),
+                        };
+                        let block = build_block(mc, &sb);
+                        match vm.execute_repl_line(mc, block) {
+                            // Suppress a bare `nil` result (a value-less statement).
+                            Ok(val) if val.type_name() == "Nil" => None,
+                            Ok(val) => Some(format!("=> {val}")),
+                            Err(e) => Some(format!("{e}")),
+                        }
+                    });
+                    if let Some(out) = output {
+                        println!("{out}");
+                    }
+                    buffer.clear();
+                }
+                Err(pe) => {
+                    // A parse error positioned at end-of-input means "expecting more" —
+                    // keep reading (multiline). A mid-input error is a real syntax error.
+                    if pe.start >= buffer.trim_end().len() {
+                        continue;
+                    }
+                    eprintln!(
+                        "Parse error at line {}, col {}: {}",
+                        pe.line, pe.column, pe.message
+                    );
+                    buffer.clear();
+                }
+            }
         }
     }
 
@@ -353,38 +549,7 @@ impl VmRunner {
     fn compile_and_run_asts(&self, ast_iter: impl Iterator<Item = Node>) -> bool {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
-
-            vm.register_native_class(mc, object::build_object_class());
-            vm.register_native_class(mc, class::build_class_class());
-            vm.register_native_class(mc, boolean::build_boolean_class());
-            vm.register_native_class(mc, block::build_block_class());
-            vm.register_native_class(mc, bytes::build_bytes_class());
-            vm.register_native_class(mc, sockets::build_tcp_socket_class());
-            vm.register_native_class(mc, sockets::build_tls_socket_class());
-            vm.register_native_class(mc, sockets::build_tcp_listener_class());
-            vm.register_native_class(mc, http::build_http_parser_class());
-            vm.register_native_class(mc, streams::build_byte_stream_class());
-            vm.register_native_class(mc, streams::build_string_stream_class());
-            vm.register_native_class(mc, io::build_io_folder_class());
-            vm.register_native_class(mc, io::build_io_file_class());
-            vm.register_native_class(mc, io::build_io_handle_class());
-            vm.register_native_class(mc, list::build_list_class());
-            vm.register_native_class(mc, set::build_set_class());
-            vm.register_native_class(mc, runtime::build_runtime_class());
-            vm.register_native_class(mc, async_rt::build_async_class());
-            vm.register_native_class(mc, task::build_task_class());
-            vm.register_native_class(mc, method::build_method_class());
-            vm.register_native_class(mc, timer::build_timer_class());
-            vm.register_native_class(mc, double::build_double_class());
-            vm.register_native_class(mc, integer::build_integer_class());
-            vm.register_native_class(mc, string::build_string_class());
-            vm.register_native_class(mc, symbol::build_symbol_class());
-            vm.register_native_class(mc, nil::build_nil_class());
-            vm.register_native_class(mc, map::build_map_class());
-            vm.register_native_class(mc, map::build_key_value_pair_class());
-            vm.register_native_class(mc, regex::build_regex_class());
-            vm.register_native_class(mc, fiber_class::build_fiber_class());
-
+            register_builtins(mc, &mut vm);
             vm
         });
 
@@ -777,38 +942,7 @@ impl VmRunner {
     fn compile_and_benchmark(&self, ast_iter: impl Iterator<Item = Node>) {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
-
-            vm.register_native_class(mc, object::build_object_class());
-            vm.register_native_class(mc, class::build_class_class());
-            vm.register_native_class(mc, boolean::build_boolean_class());
-            vm.register_native_class(mc, block::build_block_class());
-            vm.register_native_class(mc, bytes::build_bytes_class());
-            vm.register_native_class(mc, sockets::build_tcp_socket_class());
-            vm.register_native_class(mc, sockets::build_tls_socket_class());
-            vm.register_native_class(mc, sockets::build_tcp_listener_class());
-            vm.register_native_class(mc, http::build_http_parser_class());
-            vm.register_native_class(mc, streams::build_byte_stream_class());
-            vm.register_native_class(mc, streams::build_string_stream_class());
-            vm.register_native_class(mc, io::build_io_folder_class());
-            vm.register_native_class(mc, io::build_io_file_class());
-            vm.register_native_class(mc, io::build_io_handle_class());
-            vm.register_native_class(mc, list::build_list_class());
-            vm.register_native_class(mc, set::build_set_class());
-            vm.register_native_class(mc, runtime::build_runtime_class());
-            vm.register_native_class(mc, async_rt::build_async_class());
-            vm.register_native_class(mc, task::build_task_class());
-            vm.register_native_class(mc, method::build_method_class());
-            vm.register_native_class(mc, timer::build_timer_class());
-            vm.register_native_class(mc, double::build_double_class());
-            vm.register_native_class(mc, integer::build_integer_class());
-            vm.register_native_class(mc, string::build_string_class());
-            vm.register_native_class(mc, symbol::build_symbol_class());
-            vm.register_native_class(mc, nil::build_nil_class());
-            vm.register_native_class(mc, map::build_map_class());
-            vm.register_native_class(mc, map::build_key_value_pair_class());
-            vm.register_native_class(mc, regex::build_regex_class());
-            vm.register_native_class(mc, fiber_class::build_fiber_class());
-
+            register_builtins(mc, &mut vm);
             vm
         });
 

@@ -192,6 +192,70 @@ Quoin over the current sockets/streams).
 - [ ] **(Separate, larger track) Polyglot extension system.** Out-of-process, shared-memory
   extensions — design captured in `docs/FUTURE_EXT_ARCH.md` (not started).
 
+## REPL (`qn repl`)
+
+An interactive read-eval-print loop. Bootstrap it in Rust (a new `VmRunnerMode::Repl`), but
+design toward eventually re-implementing the loop in Quoin once the enabling primitives land
+(`eval:bindings:`, the `eval:` parse-panic fix, stdin line reading). Existing building blocks:
+`try_parse_quoin_string_named` (`Result`, not panic — distinguishes *incomplete* from *invalid*
+input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `highlight_to_ansi`
+(input highlighting), `annotate_error` (pretty errors w/ source snippets), persistent
+`vm.globals`, `[IO]Handle.stdin`.
+
+**Key design decisions to settle first:**
+- **Persistent locals.** `vm.globals` already persists across lines (class defs, `Uppercase`
+  consts), but `eval`/run uses `parent_env: None`, so lowercase `x = 5` would not carry. Pick:
+  (a) keep a persistent REPL `EnvFrame` injected as each line's parent env and accumulate
+  bindings (the "right" model, and what [[eval-bindings]] in §8 enables), vs (b) auto-promote
+  top-level bindings to globals (simpler, but bends the uppercase=global/lowercase=local rule).
+- **Meta-command prefix.** `:` collides with keyword-message selectors. Need a leading sigil that
+  can't begin a valid Quoin expression (e.g. `\`, `%`, or a `:` only honored as the first char).
+- **Line-editor crate.** No readline dep today. `rustyline` (mature, batteries-included:
+  history/Highlighter/Completer traits) vs `reedline` (nicer multiline + live highlighting,
+  heavier). Needed for P1; choose before then.
+
+**P0 — MVP (a genuinely usable REPL): DONE** (branch `feat/repl`; design in `docs/REPL_DESIGN.md`).
+- [x] `qn repl` wiring: `VmRunnerMode::Repl` + dispatch in `runner.rs`. Boots one VM with the
+  prelude loaded, kept alive across the loop; native-class registration extracted to a shared
+  `register_builtins`.
+- [x] The loop: read a line → `try_parse` → compile → run sharing persistent globals → print the
+  result (`=> <value>`), prompt `qn> `.
+- [x] **Persistent state** across lines: a `repl_env` on `VmState` (GC-rooted), reused as each
+  line's frame env via `VmState::execute_repl_line`; each line's compiler is seeded with the
+  session's binding names (`Compiler::new_with_locals`) so references resolve as locals, not globals.
+- [x] **Graceful recovery**: parse (`try_parse`), compile, and runtime/`throw` failures are shown
+  (`annotate_error`) and the loop continues; `execute_repl_line` resets frames/stack/active-exception
+  to the baseline after an error.
+- [x] **Multiline continuation**: incomplete input re-prompts (`... `), detected by the `try_parse`
+  error being positioned at end-of-input; a blank line abandons the buffer.
+- [x] Exit on `Ctrl-D` (EOF) and `$quit`/`$exit`; bonus `$help`, `$reset`.
+- Known P0 limitations (see design doc): synchronous eval only (top-level async needs the scheduler
+  driver); plain stdin (editing/history is P1); result uses `Display`, not `.s` (P1).
+
+**P1 — ergonomics:**
+- [ ] Line editing via the chosen readline crate (cursor movement, kill/yank).
+- [ ] **History** with up/down recall, persisted (`~/.quoin_history` or XDG).
+- [ ] **Input syntax highlighting** (reuse the highlighter spans / `highlight_to_ansi`).
+- [ ] Result pretty-printing: `=>` prefix, optional color, truncate huge collections; suppress (or
+  dim) a bare `nil` result for value-less statements.
+- [ ] Meta-commands: `:help`, `:reset` (clear REPL state), `:type <expr>` (show class), `:load
+  <file.qn>`, `:time <expr>`. (Prefix per the decision above.)
+
+**P2 — power features:**
+- [ ] Tab completion: globals, class names, keywords, and `.`-completion of method selectors
+  (needs method-table introspection).
+- [ ] Introspection: list defined globals/classes; inspect a class's methods (some already doable
+  in-language via `.class`/`.meta`/`can?:`).
+- [ ] Startup file (`~/.quoinrc` run on REPL boot) + banner; configurable prompt.
+- [ ] One-shot eval `qn -e '<expr>'` and non-interactive `qn repl < script` (pipe mode). Related
+  but distinct from the interactive loop.
+
+**P3 — "REPL in Quoin" (the eventual goal):** migrate the loop into `qnlib` once its primitives
+exist — depends on [[eval-bindings]] (`eval:bindings:`, §8), the `Runtime.eval:` parse-panic fix
+(Bugs below), and an `[IO]Stdin` line-read helper. The Rust REPL is the bootstrap; move pieces over
+incrementally (read+eval+print loop first, then meta-commands, then editing if a Quoin-side line
+editor ever exists).
+
 ## Bugs/Odd Behavior
 - [x] **Operator precedence was inverted for arithmetic.** In the pest Pratt parser (`src/parser/pest/parser.rs`), `+`/`-` bound *tighter* than `*`/`/`/`%`, and `..` bound tighter than all arithmetic (`2 + 3 * 4 == 20`; `2 .. 3 + 1` errored as `(2..3) + 1`). Fixed by reordering the `.op(...)` levels to the conventional ordering — loosest→tightest: `||` · `&&` · `== !=` · comparison · `~` · `..` · `+ -` · `* / %`, with postfix `.method` tighter than any infix and prefix tightest. Now `2 + 3 * 4 == 14` and `2 .. n + 1` is `2 .. (n + 1)`. Full `qnlib` test suite passes (0 regressions); docs updated (`docs/language/01-foundations.md` §6 and appendices A/C).
 - [x] **`-->` / `->` didn't override a same-signature method.** Both appended a variant to the selector's multimethod chain; equal-specificity ties resolved to the *first-defined*, so a plain redefinition (`Foo <- { bar -> { 1 } }; Foo <-- { bar --> { 2 } }`) was dead code and `bar` returned `1`. The originally-planned fix (reverse the equal-specificity tie-break) turned out **wrong** — it breaks ordered guard dispatch (the `dispatchByBlock` test relies on first-defined guards winning over a later `.class==Object` catch-all). Fixed instead by **replace-at-definition**: a new *unguarded* variant whose `param_types` match an existing unguarded variant replaces that variant's block in place (`replace_or_append_method_in_chain`, `src/vm.rs`); guard- and type-differentiated variants still append and dispatch by specificity. `Foo.new.bar` now returns `2`; full suite passes; regression test `overridesSameSignature` added; docs updated (`docs/language/03-objects.md` §10/§13, appendix C). **Known limitation:** overriding a *guarded* variant with an identical guard does not replace (guards aren't compared for equality) — subsumed by the scoring overhaul below.

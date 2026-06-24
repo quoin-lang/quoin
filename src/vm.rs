@@ -137,6 +137,12 @@ pub struct VmState<'gc> {
 
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
+    /// The REPL's persistent top-level environment. `Some` only under `qn repl`: each
+    /// evaluated line runs in a frame whose env *is* this one (not a fresh child), so
+    /// top-level `x = 5` binds here and is visible on later lines. GC-rooted via `VmState`
+    /// so it survives between `arena.mutate_root` calls. `None` in every other mode.
+    pub repl_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+
     /// Coroutine / guest-fiber scheduler state, grouped out for legibility (see
     /// the [`Scheduler`] struct). Stored inline by value — no indirection.
     pub sched: Scheduler<'gc>,
@@ -246,6 +252,7 @@ impl<'gc> VmState<'gc> {
             last_send_args: Vec::new(),
             active_native_args: Vec::new(),
             last_popped_env: None,
+            repl_env: None,
             sched: Scheduler {
                 yielder: None,
                 tasks: Vec::new(),
@@ -1073,6 +1080,78 @@ impl<'gc> VmState<'gc> {
         }
 
         Ok(self.pop()?)
+    }
+
+    /// Run a REPL line's top-level `block` in the persistent `repl_env` and return its value.
+    /// Like `execute_block`, but the frame's env *is* the reused `repl_env` (not a fresh child)
+    /// so top-level `x = 5` binds there and persists across lines. Synchronous (no cooperative
+    /// yield) — top-level async is a documented P0 limitation. `repl_env` must be `Some`.
+    pub fn execute_repl_line(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        let env = self
+            .repl_env
+            .expect("execute_repl_line called without a repl_env");
+        let base_frames = self.frames.len();
+        let base_stack = self.stack.len();
+
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+        self.frames.push(Frame {
+            id: frame_id,
+            is_nested_block: false,
+            enclosing_method_id: Some(frame_id),
+            block,
+            ip: 0,
+            env,
+            instantiating_obj: None,
+            receiver: None,
+            selector: None,
+            args: Vec::new(),
+            stack_base: base_stack,
+            return_receiver: false,
+            defers: Vec::new(),
+            unregister_on_defer_failure: None,
+        });
+
+        let mut err: Option<QuoinError> = None;
+        while self.frames.len() > base_frames {
+            match self.step_internal(mc) {
+                Ok(VmStatus::Running) => {}
+                Ok(VmStatus::Finished(_)) => break,
+                Ok(VmStatus::Yeeted(val)) => {
+                    err = Some(QuoinError::Other(format!("Uncaught exception: {}", val)));
+                    break;
+                }
+                Err(QuoinError::NonLocalReturn) => {
+                    if self.frames.len() > base_frames {
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        if let Some(e) = err {
+            // Annotate while the failing frames are still live (the trace reads them), then
+            // reset the VM's transient state to the REPL baseline so the next line is clean.
+            let e = self.annotate_error(e);
+            self.frames.truncate(base_frames);
+            self.stack.truncate(base_stack);
+            self.active_exception = None;
+            return Err(e);
+        }
+
+        let val = self.pop().unwrap_or_else(|_| self.new_nil(mc));
+        self.stack.truncate(base_stack);
+        Ok(val)
     }
 
     pub fn execute_validation_block(
