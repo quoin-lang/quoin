@@ -32,11 +32,13 @@ pub fn complete_source(source: &str) -> Option<String> {
     let close = closing_delimiters(source);
     // In order: close open delimiters only (a complete expression with open brackets), then a
     // block placeholder (`{}` — valid as the right side of *any* operator incl. definition
-    // ops `<-`/`<--`/`->`, and AST-safe), then a primitive placeholder (`0`) as a last resort.
-    // The first that parses wins; the placeholder is cropped away by callers, so the choice
-    // only needs to make *some* completion parse — `{}` before `0` also avoids the
-    // `Foo <-- 0` AST-build panic.
-    for operand in ["", " {}", " 0"] {
+    // ops `<-`/`<--`/`->`, and AST-safe), then a primitive placeholder (`0`), and finally a
+    // selector placeholder (` x`) for input ending in a method-send dot (`a.`/`@x.`/`Foo.`),
+    // where the grammar wants a `call_sig` selector, not an operand. The first that parses
+    // wins; the placeholder is cropped away by callers, so the choice only needs to make
+    // *some* completion parse — `{}` before `0` also avoids the `Foo <-- 0` AST-build panic,
+    // and ` x` is last so it only kicks in for the dot case the others can't reach.
+    for operand in ["", " {}", " 0", " x"] {
         let suffix = format!("{operand}{close}");
         if suffix.is_empty() {
             continue; // `source` already failed to parse; an empty suffix can't help.
@@ -160,6 +162,16 @@ mod tests {
     #[test]
     fn definition_operators_take_a_block() {
         for src in ["Foo <-", "Box <--", "bar ->", "baz -->"] {
+            assert!(completes(src), "should complete: {src:?}");
+        }
+    }
+
+    #[test]
+    fn trailing_method_send_dot() {
+        // A trailing `.` starts a method send expecting a selector — the `{}`/`0` operands
+        // don't fit, so the ` x` selector placeholder is what makes these parse (and keeps
+        // the line colored while the completion popup is open).
+        for src in ["a.", "@x.", "Foo.", "list.map: 0 .", "(1 + 2)."] {
             assert!(completes(src), "should complete: {src:?}");
         }
     }

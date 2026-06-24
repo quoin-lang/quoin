@@ -254,12 +254,9 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
     step — the AST builder still `unreachable!`s on some pest-valid shapes (e.g. `Foo <-- 0`), so a
     `parse_or_none` wrapper `catch_unwind`s the parse. It recovers (no crash) but the caught panic
     prints its message; a clean fix needs the parser to return a `Result` through AST building.
-  - [ ] **Trailing postfix dot `a.` heuristic — prerequisite for tab completion.** The fixed
-    placeholder set (`{}`/`0`) doesn't complete a trailing `.` (a method-call start expecting a
-    `call_sig` selector, not an operand — so `a.`/`@x.`/`Foo.` fail to complete → uncolored). Add a
-    placeholder-selector candidate (e.g. `a.x`). **This must land with `.`-completion (P2):** the
-    completer pops *exactly* when the input ends in `.`, so without this the line would lose its
-    colors every time the completion popup runs.
+  - [x] **Trailing postfix dot `a.` heuristic.** `complete_source` now appends a selector
+    placeholder (` x`) so input ending in a method-send dot (`a.`/`@x.`/`Foo.`) parses and stays
+    colored while the completion popup is open. Shipped with `.`-completion (P2 below).
   - [ ] **Trailing range `..` heuristic.** `1..` (range, RHS missing) isn't covered, and `.` vs
     `..` vs a float `1.` are ambiguous at end-of-input. Add a primary-after-`..` candidate
     (`1 .. 0`), keyed on the trailing-token shape.
@@ -270,11 +267,17 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   <file.qn>` (run a file into the session), plus the P0 `$help`/`$reset`/`$quit`.
 
 **P2 — power features:**
-- [ ] Tab completion: globals, class names, keywords, and `.`-completion of method selectors,
-  namespaces inside `[ … ]`. Driven by the introspection `find_*` prefix scans (see below); the
-  completion driver picks the primitive by lexical context. **Depends on the trailing-`.`
-  highlighting heuristic** (P1, under the predictive-completion item): completion fires on
-  `.`-ending input, so ship them together or the input loses its colors whenever the popup is open.
+- [x] Tab completion (`src/repl_complete.rs`). A `CompletionIndex` snapshots the surface metadata
+  (globals/locals/namespaces + per-class class-side & instance selectors) once per line from the
+  live VM via the `introspect` API — owned/`'static`, so no arena access in the completer; refreshed
+  through `editor.helper_mut()` before each `readline` (the VM is frozen during editing, so it's
+  never stale). `complete_input(line, pos, &index)` is a pure, unit-tested function of lexical
+  context: inside `[ … ]` → namespaces; `recv.` where `recv` is an identifier → class-side selectors
+  (class receiver) or inherited instance selectors (session-local receiver); else a bare word. The
+  rustyline `Completer` (`CompletionType::List`) is a thin adapter. **v1 limits:** complex receivers
+  (literals, `@ivars`, `(expr)`, chained sends) and namespaced class names after `]` yield nothing;
+  the `..` range-RHS heuristic (under P1 above) is still open — completion treats a `..` tail as a
+  bare-word RHS for now.
 - [ ] **VM introspection API** (`src/introspect.rs`; design in `docs/INTROSPECTION.md`). Read-only
   surface metadata as plain owned structs (no `'gc`), owning the VM-internal walking so the REPL /
   completion / a future Quoin `Mirror` stay ignorant of internals. Exact: `globals` /

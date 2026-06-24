@@ -11,6 +11,7 @@ pub mod introspect;
 pub mod io_backend;
 pub mod packages;
 pub mod parser;
+pub mod repl_complete;
 pub mod runner;
 pub mod runtime;
 pub mod symbol;

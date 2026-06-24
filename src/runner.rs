@@ -8,6 +8,7 @@ use crate::introspect::{self, ClassInfo, GlobalInfo, GlobalKind, ValueInfo};
 use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend, StreamId};
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
+use crate::repl_complete::{CompletionIndex, build_completion_index, complete_input};
 use crate::runtime::runtime::build_block;
 use crate::runtime::{
     async_rt, block, boolean, bytes, class, double, fiber as fiber_class, http, integer, io, list,
@@ -82,10 +83,23 @@ type ReplArena = Arena<Rootable![VmState<'_>]>;
 /// is syntactically incomplete (a parse error positioned at end-of-input); a complete input
 /// — or one with a *real* mid-input syntax error — submits, and the eval loop shows any
 /// error. The `Highlighter` colorizes valid input. Completion/hinting are no-ops (P2).
-struct ReplHelper;
+struct ReplHelper {
+    /// Tab-completion snapshot, refreshed from the live VM before each `readline` (the VM is
+    /// frozen during editing, so a per-line snapshot is never stale).
+    index: CompletionIndex,
+}
 
 impl rustyline::completion::Completer for ReplHelper {
     type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        Ok(complete_input(line, pos, &self.index))
+    }
 }
 impl rustyline::hint::Hinter for ReplHelper {
     type Hint = String;
@@ -430,15 +444,24 @@ fn render_value<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, val: Value<'gc>)
 /// Interactive loop: rustyline editing, history, multiline via the `Validator`, and Ctrl-C
 /// to abandon an in-progress input (Ctrl-D to exit).
 fn run_repl_interactive(arena: &mut ReplArena) {
+    // `List` completion shows all candidates beneath the prompt (vs the default circular
+    // cycle-on-Tab), which suits selector/global menus.
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::List)
+        .build();
     let mut editor =
-        match rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::new() {
+        match rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::with_config(
+            config,
+        ) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("repl: failed to start line editor: {e}");
                 return;
             }
         };
-    editor.set_helper(Some(ReplHelper));
+    editor.set_helper(Some(ReplHelper {
+        index: CompletionIndex::default(),
+    }));
 
     let history =
         std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".quoin_history"));
@@ -449,6 +472,12 @@ fn run_repl_interactive(arena: &mut ReplArena) {
     println!("Quoin REPL — $help for commands, $quit (or Ctrl-D) to exit.");
 
     loop {
+        // Refresh the completion snapshot from the VM as it stands before this line (it can't
+        // change until we eval below). `helper_mut` and `arena` are disjoint borrows.
+        let index = arena.mutate_root(|_mc, vm| build_completion_index(vm));
+        if let Some(helper) = editor.helper_mut() {
+            helper.index = index;
+        }
         match editor.readline("qn> ") {
             Ok(input) => {
                 if input.trim().is_empty() {
