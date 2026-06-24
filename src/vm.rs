@@ -1717,7 +1717,9 @@ impl<'gc> VmState<'gc> {
                         Some(Instruction::Send(s, n))
                         | Some(Instruction::SendLocal(_, s, n))
                         | Some(Instruction::SendConst(_, s, n))
-                        | Some(Instruction::SendField(_, s, n)) => Some((*s, *n)),
+                        | Some(Instruction::SendField(_, s, n))
+                        | Some(Instruction::SendLocalLocal(_, _, s, n))
+                        | Some(Instruction::SendLocalConst(_, _, s, n)) => Some((*s, *n)),
                         _ => None,
                     };
                     let formatted_selector = if let Some((selector, num_args)) = send_at_ip {
@@ -2548,6 +2550,25 @@ impl<'gc> VmState<'gc> {
                 let (selector, num_args) = (*selector, *num_args);
                 let val = self.load_field(mc, frame_idx, field);
                 self.push(val);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            // 3-instruction sends: push two operands (left-to-right) then dispatch.
+            Instruction::SendLocalLocal(a, b, selector, num_args) => {
+                let (a, b, selector, num_args) = (*a, *b, *selector, *num_args);
+                let env = self.frames[frame_idx].env;
+                let va = EnvFrame::get(env, a).unwrap_or_else(|| self.new_nil(mc));
+                self.push(va);
+                let vb = EnvFrame::get(env, b).unwrap_or_else(|| self.new_nil(mc));
+                self.push(vb);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            Instruction::SendLocalConst(a, constant, selector, num_args) => {
+                let (a, selector, num_args) = (*a, *selector, *num_args);
+                let env = self.frames[frame_idx].env;
+                let va = EnvFrame::get(env, a).unwrap_or_else(|| self.new_nil(mc));
+                self.push(va);
+                let vc = self.materialize_constant(mc, constant);
+                self.push(vc);
                 return self.exec_send(mc, frame_idx, selector, num_args);
             }
             Instruction::Return | Instruction::BlockReturn => {

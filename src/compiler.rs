@@ -85,7 +85,9 @@ fn store_keep_variant(inst: &Instruction) -> Option<Instruction> {
 /// Peephole pass: fuse hot adjacent instructions into single superinstructions, saving a
 /// dispatch-loop step each. Two families:
 /// - `<operand-load>; Send` → `SendLocal`/`SendConst`/`SendField` (the send's last operand
-///   is overwhelmingly a local / constant / field).
+///   is overwhelmingly a local / constant / field). A leading `LoadLocal` receiver is also
+///   absorbed (`LoadLocal; LoadLocal; Send` / `LoadLocal; Push; Send` →
+///   `SendLocalLocal`/`SendLocalConst`), pushing two operands then dispatching.
 /// - assignment: `Dup; <store>; Pop` (statement position) → plain `<store>` (drops the Dup
 ///   *and* the Pop); `Dup; <store>` (expression position) → a store-and-keep variant.
 /// See `profiling/superinstructions`.
@@ -152,6 +154,36 @@ pub(crate) fn fuse_bytecode(
                 new_code.push(keep);
                 new_smap.push(source_map[i + 1].clone());
                 i += 2;
+                continue;
+            }
+        }
+
+        // 3-instruction send: a `LoadLocal` receiver + a second operand-load + Send fused
+        // into one op that pushes both operands then dispatches (the two hottest shapes:
+        // `LoadLocal; LoadLocal; Send` and `LoadLocal; Push; Send`). Checked before the
+        // 2-window so the receiver load is absorbed too rather than left standalone.
+        if i + 2 < n
+            && !is_target[i + 1]
+            && !is_target[i + 2]
+            && let Instruction::LoadLocal(a) = &bytecode[i]
+            && let Instruction::Send(sel, nargs) = &bytecode[i + 2]
+        {
+            let three = match &bytecode[i + 1] {
+                Instruction::LoadLocal(b) => {
+                    Some(Instruction::SendLocalLocal(*a, *b, *sel, *nargs))
+                }
+                Instruction::Push(c) => {
+                    Some(Instruction::SendLocalConst(*a, c.clone(), *sel, *nargs))
+                }
+                _ => None,
+            };
+            if let Some(three) = three {
+                old_to_new[i + 1] = new_code.len();
+                old_to_new[i + 2] = new_code.len();
+                new_to_old.push(i);
+                new_code.push(three);
+                new_smap.push(source_map[i + 2].clone()); // keep the Send's source entry
+                i += 3;
                 continue;
             }
         }
@@ -1913,5 +1945,94 @@ mod tests {
         ];
         let (out, _) = fuse_bytecode(code.clone(), vec![None; 6]);
         assert_eq!(out, code);
+    }
+
+    #[test]
+    fn fuse_3instr_send_local_local() {
+        let sel = Symbol::intern("foo:");
+        let code = vec![
+            Instruction::LoadLocal(Symbol::intern("a")),
+            Instruction::LoadLocal(Symbol::intern("b")),
+            Instruction::Send(sel, 1),
+            Instruction::Return,
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 4]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::SendLocalLocal(Symbol::intern("a"), Symbol::intern("b"), sel, 1),
+                Instruction::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn fuse_3instr_send_local_const() {
+        let sel = Symbol::intern("-:");
+        let code = vec![
+            Instruction::LoadLocal(Symbol::intern("n")),
+            Instruction::Push(Constant::Int(1)),
+            Instruction::Send(sel, 1),
+            Instruction::Return,
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 4]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::SendLocalConst(Symbol::intern("n"), Constant::Int(1), sel, 1),
+                Instruction::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn fuse_3instr_absorbs_only_the_last_two_operands() {
+        // A 2-arg send: the receiver load stays, the last two operand loads fuse.
+        let sel = Symbol::intern("at:put:");
+        let code = vec![
+            Instruction::LoadLocal(Symbol::intern("list")),
+            Instruction::LoadLocal(Symbol::intern("i")),
+            Instruction::LoadLocal(Symbol::intern("v")),
+            Instruction::Send(sel, 2),
+            Instruction::Return,
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 5]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::LoadLocal(Symbol::intern("list")),
+                Instruction::SendLocalLocal(Symbol::intern("i"), Symbol::intern("v"), sel, 2),
+                Instruction::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn fuse_3instr_fixes_jump_offset() {
+        let sel = Symbol::intern("f");
+        // Jump forward over a 3->1 collapse: offset shrinks by two.
+        let code = vec![
+            Instruction::Push(Constant::Bool(true)),     // 0
+            Instruction::IfJump(5),                      // 1 -> target 6 (Return)
+            Instruction::LoadLocal(Symbol::intern("a")), // 2 \
+            Instruction::LoadLocal(Symbol::intern("b")), // 3  > fuse
+            Instruction::Send(sel, 1),                   // 4 /
+            Instruction::Pop,                            // 5
+            Instruction::Return,                         // 6  (target)
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 7]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::Push(Constant::Bool(true)),
+                Instruction::IfJump(3),
+                Instruction::SendLocalLocal(Symbol::intern("a"), Symbol::intern("b"), sel, 1),
+                Instruction::Pop,
+                Instruction::Return,
+            ]
+        );
+        if let Instruction::IfJump(off) = out[1] {
+            assert!(matches!(out[(1 + off) as usize], Instruction::Return));
+        }
     }
 }

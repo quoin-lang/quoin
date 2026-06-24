@@ -123,6 +123,13 @@ pub enum Instruction {
     DefineLocalKeep(Symbol),
     StoreLocalKeep(Symbol),
     StoreFieldKeep(String),
+    // 3-instruction sends: absorb a *second* operand-load into a fused send, so one op
+    // pushes two operands (left-to-right) then dispatches. Covers the two hottest
+    // receiver+last-operand shapes — `LoadLocal; LoadLocal; Send` (e.g. `i < n`) and
+    // `LoadLocal; Push; Send` (e.g. `n - 1`). The operands are just the last two pushed
+    // before the send (receiver + arg for a 1-arg send); produced by `fuse_bytecode`.
+    SendLocalLocal(Symbol, Symbol, Symbol, usize), // local, local, selector, num_args
+    SendLocalConst(Symbol, Constant, Symbol, usize), // local, constant, selector, num_args
     Return,
     Yeet,
     BlockReturn,
