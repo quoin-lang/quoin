@@ -115,6 +115,14 @@ pub enum Instruction {
     SendLocal(Symbol, Symbol, usize), // var, selector, num_args  (was LoadLocal; Send)
     SendConst(Constant, Symbol, usize), // constant, selector, num_args  (was Push; Send)
     SendField(String, Symbol, usize), // field, selector, num_args  (was LoadField; Send)
+    // Store-and-keep superinstructions: a `Dup; Store*` pair (an assignment whose value is
+    // used as an expression) fused into one op that stores the *top* of stack without
+    // popping it. The statement-position form `Dup; Store*; Pop` is instead collapsed to a
+    // plain `Store*` (both by the `fuse_bytecode` pass). Mirror DefineLocal/StoreLocal/
+    // StoreField but peek instead of pop.
+    DefineLocalKeep(Symbol),
+    StoreLocalKeep(Symbol),
+    StoreFieldKeep(String),
     Return,
     Yeet,
     BlockReturn,

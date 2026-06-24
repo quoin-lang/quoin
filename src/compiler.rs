@@ -64,15 +64,39 @@ fn set_jump_offset(inst: &mut Instruction, off: isize) {
     }
 }
 
-/// Peephole pass: fuse the hot `<operand-load>; Send` instruction pairs into single
-/// superinstructions (`SendLocal`/`SendConst`/`SendField`), saving one dispatch-loop step
-/// per fused send (the send's last operand is overwhelmingly a local / constant / field —
-/// see `profiling/superinstructions`). Jumps are relative and block-local, so removing an
-/// instruction requires: (a) never fusing a pair whose *second* op is a jump target (a jump
-/// landing there must run only the Send, not re-run the load), and (b) recomputing every
-/// jump offset against the old→new index map. `source_map` stays index-aligned — the fused
-/// slot keeps the *Send's* entry, where a dispatch error surfaces. Targeting the *first* of
-/// a fused pair stays correct: the fused op reproduces load-then-send.
+fn is_store(inst: &Instruction) -> bool {
+    matches!(
+        inst,
+        Instruction::StoreLocal(_) | Instruction::DefineLocal(_) | Instruction::StoreField(_)
+    )
+}
+
+/// The store-and-keep superinstruction for a store (stores the top of stack without
+/// popping it), i.e. the fusion of `Dup; <store>`.
+fn store_keep_variant(inst: &Instruction) -> Option<Instruction> {
+    match inst {
+        Instruction::StoreLocal(s) => Some(Instruction::StoreLocalKeep(*s)),
+        Instruction::DefineLocal(s) => Some(Instruction::DefineLocalKeep(*s)),
+        Instruction::StoreField(f) => Some(Instruction::StoreFieldKeep(f.clone())),
+        _ => None,
+    }
+}
+
+/// Peephole pass: fuse hot adjacent instructions into single superinstructions, saving a
+/// dispatch-loop step each. Two families:
+/// - `<operand-load>; Send` → `SendLocal`/`SendConst`/`SendField` (the send's last operand
+///   is overwhelmingly a local / constant / field).
+/// - assignment: `Dup; <store>; Pop` (statement position) → plain `<store>` (drops the Dup
+///   *and* the Pop); `Dup; <store>` (expression position) → a store-and-keep variant.
+/// See `profiling/superinstructions`.
+///
+/// Jumps are relative and block-local, so removing an instruction requires: (a) never fusing
+/// across a jump target — a pair/triple may only be fused if its non-leading members aren't
+/// jump targets (a jump landing there must run that member, not a fused op that skipped it);
+/// and (b) recomputing every jump offset against the old→new index map. `source_map` stays
+/// index-aligned — the surviving slot keeps the entry where an error would surface (the Send
+/// / the store). Targeting the *first* of a fused group stays correct: the fused op
+/// reproduces the group's net effect.
 pub(crate) fn fuse_bytecode(
     bytecode: Vec<Instruction>,
     source_map: Vec<Option<SourceInfo>>,
@@ -99,6 +123,39 @@ pub(crate) fn fuse_bytecode(
     let mut i = 0;
     while i < n {
         old_to_new[i] = new_code.len();
+
+        // Assignment fusions (Dup is only ever an assignment's value-keep).
+        if matches!(bytecode[i], Instruction::Dup) {
+            // Statement position `Dup; <store>; Pop` -> plain `<store>` (drops Dup + Pop;
+            // the store pops, so the net stack effect is identical).
+            if i + 2 < n
+                && is_store(&bytecode[i + 1])
+                && matches!(bytecode[i + 2], Instruction::Pop)
+                && !is_target[i + 1]
+                && !is_target[i + 2]
+            {
+                old_to_new[i + 1] = new_code.len();
+                old_to_new[i + 2] = new_code.len();
+                new_to_old.push(i);
+                new_code.push(bytecode[i + 1].clone());
+                new_smap.push(source_map[i + 1].clone());
+                i += 3;
+                continue;
+            }
+            // Expression position `Dup; <store>` -> store-and-keep variant.
+            if i + 1 < n
+                && !is_target[i + 1]
+                && let Some(keep) = store_keep_variant(&bytecode[i + 1])
+            {
+                old_to_new[i + 1] = new_code.len();
+                new_to_old.push(i);
+                new_code.push(keep);
+                new_smap.push(source_map[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+
         if i + 1 < n
             && !is_target[i + 1]
             && let Instruction::Send(sel, nargs) = &bytecode[i + 1]
@@ -1770,5 +1827,91 @@ mod tests {
         // The fused slot keeps the Send's entry (line 2), not the LoadLocal's (line 1).
         assert_eq!(out_smap[0], si(2));
         assert_eq!(out_smap[1], si(3));
+    }
+
+    #[test]
+    fn fuse_dup_store_pop_collapses_to_plain_store() {
+        // Statement assignment: Dup; Store; Pop -> Store (drops Dup + Pop).
+        let code = vec![
+            Instruction::Push(Constant::Int(1)),
+            Instruction::Dup,
+            Instruction::StoreLocal(Symbol::intern("x")),
+            Instruction::Pop,
+            Instruction::Return,
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 5]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::Push(Constant::Int(1)),
+                Instruction::StoreLocal(Symbol::intern("x")),
+                Instruction::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn fuse_dup_store_keeps_in_expression_position() {
+        // Expression assignment (no trailing Pop): Dup; StoreField -> StoreFieldKeep.
+        let code = vec![
+            Instruction::Push(Constant::Int(1)),
+            Instruction::Dup,
+            Instruction::StoreField("y".into()),
+            Instruction::Return,
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 4]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::Push(Constant::Int(1)),
+                Instruction::StoreFieldKeep("y".into()),
+                Instruction::Return,
+            ]
+        );
+    }
+
+    #[test]
+    fn fuse_dup_store_pop_respects_jump_into_the_pop() {
+        // A jump targets the Pop -> can't drop it; fall back to the keep variant and fix
+        // the offset so the jump still lands on the standalone Pop.
+        let code = vec![
+            Instruction::Push(Constant::Bool(true)),      // 0
+            Instruction::IfJump(4),                       // 1 -> target 5 (the Pop)
+            Instruction::Push(Constant::Int(1)),          // 2
+            Instruction::Dup,                             // 3
+            Instruction::StoreLocal(Symbol::intern("x")), // 4
+            Instruction::Pop,                             // 5  (jump target)
+            Instruction::Return,                          // 6
+        ];
+        let (out, _) = fuse_bytecode(code, vec![None; 7]);
+        assert_eq!(
+            out,
+            vec![
+                Instruction::Push(Constant::Bool(true)),
+                Instruction::IfJump(3),
+                Instruction::Push(Constant::Int(1)),
+                Instruction::StoreLocalKeep(Symbol::intern("x")),
+                Instruction::Pop,
+                Instruction::Return,
+            ]
+        );
+        if let Instruction::IfJump(off) = out[1] {
+            assert!(matches!(out[(1 + off) as usize], Instruction::Pop));
+        }
+    }
+
+    #[test]
+    fn fuse_dup_store_not_fused_when_store_is_jump_target() {
+        // A jump targets the store itself (skipping the Dup) -> no fusion at all.
+        let code = vec![
+            Instruction::Push(Constant::Bool(true)),      // 0
+            Instruction::IfJump(3),                       // 1 -> target 4 (the store)
+            Instruction::Push(Constant::Int(1)),          // 2
+            Instruction::Dup,                             // 3
+            Instruction::StoreLocal(Symbol::intern("x")), // 4  (jump target)
+            Instruction::Return,                          // 5
+        ];
+        let (out, _) = fuse_bytecode(code.clone(), vec![None; 6]);
+        assert_eq!(out, code);
     }
 }

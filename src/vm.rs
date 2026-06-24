@@ -2291,6 +2291,95 @@ impl<'gc> VmState<'gc> {
         Ok(VmStatus::Running)
     }
 
+    /// Bind `name` in the current frame to an already-obtained `val`. Shared by the
+    /// `DefineLocal` handler (pops) and `DefineLocalKeep` (peeks).
+    fn store_define_local(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        name: Symbol,
+        val: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        if matches!(name.as_str(), "true" | "false" | "nil") {
+            let err_msg = format!("Can't modify reserved identifier {}", name);
+            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+            return Err(QuoinError::Other(err_msg));
+        }
+        self.frames[frame_idx].env.borrow_mut(mc).bind(name, val);
+        Ok(())
+    }
+
+    /// Assign `name` to an already-obtained `val`: inside a `new:{}` block bind locally
+    /// (object init), else set up the lexical chain or bind. Shared by `StoreLocal`
+    /// (pops) and `StoreLocalKeep` (peeks).
+    fn store_set_local(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        name: Symbol,
+        val: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        if matches!(name.as_str(), "true" | "false" | "nil") {
+            let err_msg = format!("Can't modify reserved identifier {}", name);
+            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+            return Err(QuoinError::Other(err_msg));
+        }
+        let frame = &mut self.frames[frame_idx];
+        if frame.instantiating_obj.is_some() {
+            frame.env.borrow_mut(mc).bind(name, val);
+        } else if !EnvFrame::set(frame.env, mc, name, val) {
+            frame.env.borrow_mut(mc).bind(name, val);
+        }
+        Ok(())
+    }
+
+    /// Store an already-obtained `val` into instance field `name` on `self`. Shared by
+    /// `StoreField` (pops) and `StoreFieldKeep` (peeks).
+    fn store_field_value(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        name: &str,
+        val: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        let frame = &self.frames[frame_idx];
+        let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
+        if let Value::Object(obj) = self_val {
+            let class = obj.borrow().class;
+            match self.field_slot(class, name) {
+                Some(slot) if slot < obj.borrow().fields.len() => {
+                    obj.borrow_mut(mc).fields[slot] = val;
+                }
+                Some(_) => {
+                    // Declared on the class, but this instance predates it (a mixin added
+                    // the ivar after the object was created); shape is fixed at construction.
+                    return Err(QuoinError::Other(format!(
+                        "Instance of '{}' has no '@{}' (it was added after this instance was created)",
+                        class.borrow().name,
+                        name
+                    )));
+                }
+                None => {
+                    // You cannot create an instance variable by assigning to it.
+                    return Err(QuoinError::Other(format!(
+                        "No instance variable '@{}' declared on '{}'",
+                        name,
+                        class.borrow().name
+                    )));
+                }
+            }
+        } else {
+            // Immediate value types (Integer/Double/Boolean/Nil) have no per-instance
+            // fields — setting `@x` on one is an error.
+            return Err(QuoinError::Other(format!(
+                "Cannot set instance variable '@{}' on a value type ({})",
+                name,
+                self_val.type_name()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn step(&mut self, mc: &Mutation<'gc>) -> Result<VmStatus<'gc>, QuoinError> {
         let res = self.step_internal(mc);
         if let Err(QuoinError::NonLocalReturn) = res {
@@ -2355,36 +2444,29 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::DefineLocal(name) => {
                 let name = *name;
-                if matches!(name.as_str(), "true" | "false" | "nil") {
-                    let err_msg = format!("Can't modify reserved identifier {}", name);
-                    self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                    return Err(QuoinError::Other(err_msg));
-                }
                 let val = self.pop()?;
-                let frame = &mut self.frames[frame_idx];
-                frame.env.borrow_mut(mc).bind(name, val);
-                frame.ip += 1;
+                self.store_define_local(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
+            }
+            // Store-and-keep: store the top of stack without popping it (fused `Dup;
+            // DefineLocal`, an assignment used as an expression).
+            Instruction::DefineLocalKeep(name) => {
+                let name = *name;
+                let val = self.peek()?;
+                self.store_define_local(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
             }
             Instruction::StoreLocal(name) => {
                 let name = *name;
-                if matches!(name.as_str(), "true" | "false" | "nil") {
-                    let err_msg = format!("Can't modify reserved identifier {}", name);
-                    self.active_exception = Some(self.new_string(mc, err_msg.clone()));
-                    return Err(QuoinError::Other(err_msg));
-                }
                 let val = self.pop()?;
-                let frame = &mut self.frames[frame_idx];
-                // Assignments inside a `new:{}` block always bind in this frame:
-                // they initialize the new object (fields and `init:` args), so they
-                // must not walk up the lexical chain and mutate an enclosing
-                // variable that happens to share the name. RHS reads still resolve
-                // lexically (LoadLocal), so `{ x = x }` copies the outer `x`.
-                if frame.instantiating_obj.is_some() {
-                    frame.env.borrow_mut(mc).bind(name, val);
-                } else if !EnvFrame::set(frame.env, mc, name, val) {
-                    frame.env.borrow_mut(mc).bind(name, val);
-                }
-                frame.ip += 1;
+                self.store_set_local(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
+            }
+            Instruction::StoreLocalKeep(name) => {
+                let name = *name;
+                let val = self.peek()?;
+                self.store_set_local(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
             }
             Instruction::LoadGlobal(name) => {
                 let val = self
@@ -2880,44 +2962,12 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::StoreField(name) => {
                 let val = self.pop()?;
-                let frame = &self.frames[frame_idx];
-                let self_val =
-                    EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-                if let Value::Object(obj) = self_val {
-                    let class = obj.borrow().class;
-                    match self.field_slot(class, &name) {
-                        Some(slot) if slot < obj.borrow().fields.len() => {
-                            obj.borrow_mut(mc).fields[slot] = val;
-                        }
-                        Some(_) => {
-                            // Declared on the class, but this instance predates it
-                            // (a mixin added the ivar after the object was created);
-                            // an object's shape is fixed at construction.
-                            return Err(QuoinError::Other(format!(
-                                "Instance of '{}' has no '@{}' (it was added after this instance was created)",
-                                class.borrow().name,
-                                name
-                            )));
-                        }
-                        None => {
-                            // You cannot create an instance variable by assigning to
-                            // it — it must be declared in the class.
-                            return Err(QuoinError::Other(format!(
-                                "No instance variable '@{}' declared on '{}'",
-                                name,
-                                class.borrow().name
-                            )));
-                        }
-                    }
-                } else {
-                    // Immediate value types (Integer/Double/Boolean/Nil) have no
-                    // per-instance fields — setting `@x` on one is an error.
-                    return Err(QuoinError::Other(format!(
-                        "Cannot set instance variable '@{}' on a value type ({})",
-                        name,
-                        self_val.type_name()
-                    )));
-                }
+                self.store_field_value(mc, frame_idx, name, val)?;
+                self.frames[frame_idx].ip += 1;
+            }
+            Instruction::StoreFieldKeep(name) => {
+                let val = self.peek()?;
+                self.store_field_value(mc, frame_idx, name, val)?;
                 self.frames[frame_idx].ip += 1;
             }
             Instruction::Use {
