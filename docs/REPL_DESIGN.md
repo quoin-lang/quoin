@@ -56,14 +56,19 @@ pub repl_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,   // traced; None outside
 and a REPL entry point that runs a line's block in that env instead of a fresh one:
 
 ```rust
-pub fn execute_repl_line(&mut self, mc, block) -> Result<Value, QuoinError>
+pub fn begin_repl_line(&mut self, block) -> (usize, usize)   // start the line as task #0
+pub fn end_repl_line(&mut self, mc, base_frames, base_stack, succeeded) -> Value
 ```
 
-It pushes a top-level `Frame` whose `env` is `repl_env` (reused, not a child), drives
-`step_internal` to completion exactly like `execute_block`, and returns the final value. Because
-the frame env *is* `repl_env`, `DefineLocal`/`StoreLocal` bind into it and `LoadLocal` reads from
-it — locals persist line-to-line. `repl_env` lives on the GC root (`VmState`), so it survives
-between `arena.mutate_root` calls.
+`begin_repl_line` pushes a top-level `Frame` whose `env` is `repl_env` (reused, not a child) and
+returns the frame/stack baseline. The caller (`run_scheduled_line` in `runner.rs`) installs it as
+scheduler **task #0** (`install_main_task`) and drives it to completion through the *shared*
+scheduler (`drive_main_task` — the same `block_on` + `FuturesUnordered` loop the file runner uses),
+then `end_repl_line` takes the result and restores the baseline. Because the frame env *is*
+`repl_env`, `DefineLocal`/`StoreLocal` bind into it and `LoadLocal` reads from it — locals persist
+line-to-line. `repl_env` lives on the GC root (`VmState`), so it survives between
+`arena.mutate_root` calls. Running under the scheduler is what lets a REPL line do async I/O,
+`Runtime.sleep`, spawn `Task`s, and resume fibers (iterators included).
 
 ### One iteration
 1. **Read** a logical input: read a physical line; if it doesn't yet parse (see multiline), keep
@@ -73,7 +78,7 @@ between `arena.mutate_root` calls.
    - `try_parse_quoin_string_named(input, "<repl>")`.
      - `Err(ParseError)` whose span is at EOF → **incomplete**: signal the reader to keep reading.
      - `Err(ParseError)` otherwise → **syntax error**: format and show, reset the buffer.
-     - `Ok(node)` → compile (`compile_program`, which fuses) → `build_block` → `execute_repl_line`.
+     - `Ok(node)` → compile (`compile_program`, which fuses) → `build_block` → `run_scheduled_line`.
    - `Ok(value)` → **print** `=> <value.s>` (suppress a bare `nil`, optionally colorized).
    - `Err(e)` → `annotate_error(e)` and print; the REPL stays up.
 4. **Loop.** Exit on EOF (Ctrl-D) or `$quit`/`$exit`.
@@ -90,8 +95,9 @@ immediately and the buffer is reset. P1's rustyline `Validator` implements exact
 Three failure points, none of which may crash the loop:
 - **Parse**: handled by `try_parse` returning `Err` (never panics).
 - **Compile**: `compile_program` returns `Err(String)` → wrap as a `ParseError`, show, continue.
-- **Runtime / uncaught throw**: `execute_repl_line` returns `Err(QuoinError)` (incl. the
-  `Uncaught exception` case) → `annotate_error` + show, continue.
+- **Runtime / uncaught throw**: the scheduler drive returns `Err(QuoinError)` (incl. the
+  `Uncaught exception` case), already source-annotated by `step` → show, continue. `begin_repl_line`
+  resets transient scheduler state, so an error mid-fiber can't corrupt the next line.
 
 ### Meta-commands (`$`)
 A small dispatch on the word after `$`. P0 ships `$help`, `$quit`/`$exit`. P1 adds `$reset` (drop
@@ -103,12 +109,13 @@ and recreate `repl_env`; optionally clear non-builtin globals), `$type <expr>` (
 optional (respect `supports_color`). A bare `nil` result (value-less statement) is suppressed or
 dimmed. Huge collections may be truncated (P1).
 
-## P0 scope and limitations
-- **Synchronous eval only.** `execute_repl_line` runs on the current fiber; a line that awaits
-  top-level I/O (`Async.gather:`, an HTTP call at the prompt) needs the async scheduler driver
-  (the `block_on` + `FuturesUnordered` loop in `compile_and_run_asts`). Deferred: P0 covers the
-  synchronous majority (defs, calls, arithmetic, inspection); top-level async is a follow-on that
-  swaps `execute_repl_line` for a scheduler-driven variant.
+## Scope and limitations
+- **Async at the prompt: done.** Every REPL line (and `qn -e` / `~/.quoinrc`) runs through the
+  same scheduler the file runner uses, so top-level I/O (`Async.gather:`, an HTTP call), a
+  `Runtime.sleep`, a spawned `Task`, or a fiber/iterator resume all work at the prompt. The
+  scheduler driver was extracted from `compile_and_run_asts` into the shared `install_main_task` +
+  `drive_main_task`; the REPL seam is `run_scheduled_line` (replacing the old synchronous
+  `execute_repl_line`). Each line is its own task #0, run to completion.
 - **Plain stdin** (no editing/history) until rustyline lands in P1.
 
 ## Path to a Quoin-native REPL (P3)

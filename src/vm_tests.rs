@@ -1844,8 +1844,7 @@ fn highlighted_snippet_does_not_panic_on_truncated_source() {
         let source = "([HTTP]Client.get:'https://quoinlang.dev/').pp.print;".to_string();
         // `w = 13` slices the source to `([HTTP]Client` — exactly the mid-expression cut that
         // used to panic. `<repl>` is not a real file, so the `source_text` branch is taken.
-        let out =
-            vm.get_highlighted_snippet("<repl>", 0, 0, 0, source.len(), Some(&source), 13);
+        let out = vm.get_highlighted_snippet("<repl>", 0, 0, 0, source.len(), Some(&source), 13);
         let out = out.expect("snippet should be produced, not a panic");
         // The highlighter preserves text exactly, so the colors strip back to the truncation.
         let expected: String = source.chars().take(13).collect();

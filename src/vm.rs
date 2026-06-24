@@ -1081,20 +1081,20 @@ impl<'gc> VmState<'gc> {
         Ok(self.pop()?)
     }
 
-    /// Run a REPL line's top-level `block` in the persistent `repl_env` and return its value.
-    /// Like `execute_block`, but the frame's env *is* the reused `repl_env` (not a fresh child)
-    /// so top-level `x = 5` binds there and persists across lines. Synchronous (no cooperative
-    /// yield) — top-level async is a documented P0 limitation. `repl_env` must be `Some`.
-    pub fn execute_repl_line(
-        &mut self,
-        mc: &Mutation<'gc>,
-        block: Gc<'gc, Block<'gc>>,
-    ) -> Result<Value<'gc>, QuoinError> {
+    /// Start a REPL line's top-level `block` in the persistent `repl_env`, returning the
+    /// `(frame, stack)` depths to restore once the line finishes. The frame's env *is* the
+    /// reused `repl_env` (not a fresh child), so top-level `x = 5` binds there and persists
+    /// across lines. Transient scheduler state is reset first so a line that errored mid-fiber
+    /// can't corrupt this one. The caller installs this as scheduler task #0 and drives it
+    /// (via the shared `drive_main_task`), so the line gets async I/O, sleep, tasks, and
+    /// fibers — which the old synchronous path could not. `repl_env` must be `Some`.
+    pub fn begin_repl_line(&mut self, block: Gc<'gc, Block<'gc>>) -> (usize, usize) {
         let env = self
             .repl_env
-            .expect("execute_repl_line called without a repl_env");
+            .expect("begin_repl_line called without a repl_env");
         let base_frames = self.frames.len();
         let base_stack = self.stack.len();
+        self.reset_scheduler();
 
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
@@ -1114,43 +1114,30 @@ impl<'gc> VmState<'gc> {
             defers: Vec::new(),
             unregister_on_defer_failure: None,
         });
+        (base_frames, base_stack)
+    }
 
-        let mut err: Option<QuoinError> = None;
-        while self.frames.len() > base_frames {
-            match self.step_internal(mc) {
-                Ok(VmStatus::Running) => {}
-                Ok(VmStatus::Finished(_)) => break,
-                Ok(VmStatus::Yeeted(val)) => {
-                    err = Some(QuoinError::Other(format!("Uncaught exception: {}", val)));
-                    break;
-                }
-                Err(QuoinError::NonLocalReturn) => {
-                    if self.frames.len() > base_frames {
-                        continue;
-                    } else {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    err = Some(e);
-                    break;
-                }
-            }
-        }
-
-        if let Some(e) = err {
-            // Annotate while the failing frames are still live (the trace reads them), then
-            // reset the VM's transient state to the REPL baseline so the next line is clean.
-            let e = self.annotate_error(e);
-            self.frames.truncate(base_frames);
-            self.stack.truncate(base_stack);
-            self.active_exception = None;
-            return Err(e);
-        }
-
-        let val = self.pop().unwrap_or_else(|_| self.new_nil(mc));
+    /// Finish a REPL line driven by the scheduler: take its result off the stack (or `nil` on
+    /// error / an empty stack), then restore the `(frame, stack)` baseline and clear any
+    /// pending exception so the next line starts clean. `succeeded` reflects whether the drive
+    /// finished without a runtime error; the error itself is already source-annotated by `step`
+    /// and surfaced by the caller. The returned value is meaningful only when `succeeded`.
+    pub fn end_repl_line(
+        &mut self,
+        mc: &Mutation<'gc>,
+        base_frames: usize,
+        base_stack: usize,
+        succeeded: bool,
+    ) -> Value<'gc> {
+        let result = if succeeded {
+            self.pop().unwrap_or_else(|_| self.new_nil(mc))
+        } else {
+            self.new_nil(mc)
+        };
+        self.frames.truncate(base_frames);
         self.stack.truncate(base_stack);
-        Ok(val)
+        self.active_exception = None;
+        result
     }
 
     pub fn execute_validation_block(
