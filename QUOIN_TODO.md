@@ -338,8 +338,9 @@ deferred `Mirror` in `## REPL`.
 - [ ] **JSON** — `parse`/`generate` mapping to Map/List/String/Number/Bool/Nil, with a pretty
   option (`serde_json`, or hand-rolled to avoid the serde surface).
 - [ ] ⭐ **base64 / hex** — encode/decode between `Bytes` and `String`.
-- [ ] **CSV** — read/write with quoting/escaping. Later: **TOML**/**YAML** (config) and
-  **MessagePack** (binary, pairs with `Bytes`).
+- [ ] **CSV** — read/write with quoting/escaping.
+- [ ] **TOML**/**YAML** (config)
+- [ ] **MessagePack** (binary, pairs with `Bytes`).
 
 **Text & presentation**
 - [x] **Pretty-printer** — structural, width-aware rendering of nested collections/objects
