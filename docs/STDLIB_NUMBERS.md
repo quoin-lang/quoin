@@ -127,14 +127,13 @@ better than `x.sin`):
 Files: `src/runtime/math.rs` (new), edits to `integer.rs`/`double.rs`, register in `runner.rs`.
 Tests: extend `qnlib/tests/09-numbers.qn`, add a `Math` suite.
 
-### 2 — Statistics  (pure qnlib; new `qnlib/core/07-statistics.qn`)
+### 2 — Statistics  ✅ done (`qnlib/core/07-statistics.qn`)
 
-Layer on `Iterate` (so `List`/`Set`/`NumberRange` all gain it). `sum`/`min`/`max` already exist;
-add: `mean`, `median`, `mode`, `variance`, `stddev`, `percentile:`. `stddev` needs `sqrt`
-(depends on deliverable 1). Decisions still open in §5.7 (sample vs population, percentile
-interpolation, mode ties, empty-collection result).
-
-Files: `qnlib/core/07-statistics.qn`, tests `qnlib/tests/27-statistics.qn`. No Rust.
+Pure qnlib on the `Iterate` mixin (so `List`/`Set`/`NumberRange` all gain it). `sum`/`min`/`max`
+already existed; added `mean`, `median`, `variance` + `populationVariance`, `stddev` +
+`populationStddev`, `percentile:`, `mode`, `modes` (decisions in §5.7). `stddev` uses the Double
+`sqrt` from deliverable 1. Gotcha for future qnlib: guards use `^^` (non-local return) — a plain
+`^` exits only the enclosing `if:` block, not the method. Tests: `qnlib/tests/26-statistics.qn`.
 
 ### 3 — BigDecimal  (native value type; `rust_decimal`)
 
@@ -182,29 +181,27 @@ than inventing new string errors.
 5. **`BigInteger`/`BigDecimal` are distinct opt-in types — no auto-promotion.** `Integer` stays an
    unboxed i64; overflow is an error, never a silent promotion. Big types are reached explicitly.
 
+4. **`min:`/`max:` on mixed Integer/Double — selection semantics** (approved). Return the winning
+   operand in its own type (`5.max: 3.0` → `5` the Integer; `5.max: 7.0` → `7.0`), as Python
+   (`max(5, 3.0) == 5`) and Ruby do — min/max *select* an existing value rather than compute a new
+   one. Arithmetic ops (`+:`, `pow:`) still promote because they genuinely compute a new value.
+7. **Statistics specifics** (approved). `variance`/`stddev` default to **sample (n−1)** with
+   `populationVariance`/`populationStddev` for the population (n) case; `percentile:` takes 0..100
+   and uses **linear interpolation** (so `percentile:50 == median`); **`mode`** returns one value
+   (first-encountered on a tie) and **`modes`** returns every maximally-frequent value; empty
+   collections → `nil` (`modes` → `#()`).
+
 **Still open (my recommendation in parens):**
 
-4. **`min:`/`max:` on mixed Integer/Double** — you leaned promote-to-Double; I'd lean **selection
-   semantics**: return the *winning operand in its own type* (`5.max: 3.0` → `5` the Integer;
-   `5.max: 7.0` → `7.0`). Rationale: min/max *select* an existing value rather than compute a new
-   one, so promoting `5`→`5.0` is a surprising lossy-looking change — and selection is what
-   Python (`max(5, 3.0) == 5`) and Ruby do. Arithmetic ops (`+:`, `pow:`) still promote because
-   they genuinely compute a new value. Trade-off: selection gives a value-dependent return type,
-   promotion gives a uniform Double. I'll default to **selection** unless you say promote.
 6. **BigDecimal mixing** — allow `BigDecimal + Integer/Double` implicitly, or require explicit
    conversion. (Recommend **explicit**, to avoid silent float contamination of exact values.)
-7. **Statistics specifics** — sample (n−1) vs population (n) for `variance`/`stddev` (recommend
-   sample default + a `population…` variant); `percentile:` interpolation (recommend linear);
-   `mode` tie-breaking (single vs list of modes); empty-collection result (recommend `nil`,
-   matching `sum`'s "nil for empty" feel — confirm against `Iterate`).
 
 ## 6. Suggested order
 
-1. **Math** — unblocks `stddev`; pure additive, low risk. Only the `min:`/`max:` mixing rule
-   (§5.4) is unsettled, and it doesn't block the rest of the step.
-2. **Statistics** — pure qnlib on top of Math + `Iterate`; settle §5.7.
-3. **BigDecimal** — first native value type; introduces the `rust_decimal` dep; settle the mixing
-   rule (§5.6).
+1. **Math** ✅ done — number methods + `Math` namespace + `closeTo:` test assertion.
+2. **Statistics** ✅ done — `qnlib/core/07-statistics.qn` + `qnlib/tests/26-statistics.qn`.
+3. **BigDecimal** — next: first native value type; introduces the `rust_decimal` dep; settle the
+   mixing rule (§5.6).
 4. **BigInteger** — last; the promotion question is settled (distinct type, no auto-promotion).
 
 ## 7. Build & test
