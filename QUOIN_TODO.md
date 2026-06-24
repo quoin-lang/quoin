@@ -274,11 +274,13 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   never stale). `complete_input(line, pos, &index)` is a pure, unit-tested function of lexical
   context: inside `[ … ]` → namespaces; `recv.` where the receiver's class is statically known →
   class-side selectors (class-name receiver), instance selectors (session local), or instance
-  selectors of a typed literal (string / integer / `true`/`false` / `nil`); else a bare word. The
-  rustyline `Completer` (`CompletionType::List`) is a thin adapter. **v1 limits:** receivers needing
-  evaluation (`@ivars`, `(expr)`, chained sends, richer literals like lists/maps/sets/regex) and
-  namespaced class names after `]` yield nothing; the `..` range-RHS heuristic (under P1 above) is
-  still open — completion treats a `..` tail as a bare-word RHS for now.
+  selectors of a syntactically-typed literal — string / integer / `true`/`false` / `nil`, plus the
+  `#`-sigil collections & regex (`#(…)`→List, `#{…}`→Map, `#<…>`→Set, `#/…/`→Regex), symbols
+  (`#sym`/`#'sym'`), and bare blocks (`{…}`→Block), detected by a string/nesting-aware delimiter
+  match; else a bare word. The rustyline `Completer` (`CompletionType::List`) is a thin adapter.
+  **v1 limits:** only receivers whose class genuinely needs evaluation (`@ivars`, `(expr)` groupings,
+  chained sends) and namespaced class names after `]` yield nothing; the `..` range-RHS heuristic
+  (under P1 above) is still open — completion treats a `..` tail as a bare-word RHS for now.
 - [ ] **VM introspection API** (`src/introspect.rs`; design in `docs/INTROSPECTION.md`). Read-only
   surface metadata as plain owned structs (no `'gc`), owning the VM-internal walking so the REPL /
   completion / a future Quoin `Mirror` stay ignorant of internals. Exact: `globals` /

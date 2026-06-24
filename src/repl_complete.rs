@@ -129,10 +129,15 @@ fn receiver_selectors<'i>(
     dot: usize,
     index: &'i CompletionIndex,
 ) -> Option<&'i Vec<String>> {
-    // Identifier / keyword / integer-literal receiver: the run of identifier bytes before `.`.
+    // Identifier / keyword / integer-literal / `#symbol` receiver: the run of identifier bytes
+    // before `.`.
     let rstart = ident_start(bytes, dot);
     let recv = &line[rstart..dot];
     if !recv.is_empty() {
+        // `#foo` is a bareword symbol literal — a Symbol value.
+        if rstart > 0 && bytes[rstart - 1] == b'#' {
+            return index.instance_side.get("Symbol");
+        }
         // Preceded by `@`/`.`/`)`/`]`/`}` → a sub-expression we can't type without evaluating.
         if rstart > 0 && matches!(bytes[rstart - 1], b'@' | b'.' | b')' | b']' | b'}') {
             return None;
@@ -150,12 +155,10 @@ fn receiver_selectors<'i>(
             .get(recv)
             .and_then(|c| index.instance_side.get(c));
     }
-    // Non-identifier receiver: a string literal closes with `'` immediately before the `.`
-    // (`'abc'.`, `''.`, `#tag'abc'.`). Best-effort — completion is advisory.
-    if dot > 0 && bytes[dot - 1] == b'\'' {
-        return index.instance_side.get("String");
-    }
-    None
+    // Non-identifier receiver: a literal whose closing delimiter sits just before the `.` — a
+    // string/symbol, a `#`-sigil collection/regex, or a block. Its class is fully determined
+    // by syntax, so no evaluation is needed.
+    closing_literal_class(bytes, dot).and_then(|cls| index.instance_side.get(cls))
 }
 
 /// The class of a receiver written as a bare keyword/integer literal: all-digits → `Integer`,
@@ -169,6 +172,88 @@ fn literal_class(recv: &str) -> Option<&'static str> {
         "nil" => Some("Nil"),
         _ => None,
     }
+}
+
+/// The class of a literal whose closing delimiter sits at byte `dot - 1`, determined purely
+/// from syntax by a string/regex/nesting-aware forward scan of `bytes[..dot]`: `'…'`→`String`,
+/// `#'…'`→`Symbol`, `#(…)`→`List`, `#{…}`→`Map`, `#<…>`→`Set`, `#/…/`→`Regex`, and a bare
+/// `{…}` block→`Block`. `None` if the closer is a plain `(…)` grouping (its value's type isn't
+/// syntactic) or doesn't close such a literal. Brackets/quotes inside strings and regexes are
+/// ignored, and `<`/`>` count as brackets only with a `#` sigil (else they're comparisons).
+fn closing_literal_class(bytes: &[u8], dot: usize) -> Option<&'static str> {
+    if dot == 0 {
+        return None;
+    }
+    enum St {
+        Normal,
+        Str { hash: bool },
+        Regex,
+    }
+    let mut st = St::Normal;
+    let mut stack: Vec<(u8, bool)> = Vec::new(); // (opening bracket, had a `#` sigil)
+    let target = dot - 1;
+    let mut i = 0;
+    while i < dot {
+        let c = bytes[i];
+        let hash = i > 0 && bytes[i - 1] == b'#';
+        match st {
+            St::Normal => match c {
+                b'\'' => st = St::Str { hash },
+                b'/' if hash => st = St::Regex,
+                b'(' => stack.push((b'(', hash)),
+                b'{' => stack.push((b'{', hash)),
+                b'<' if hash => stack.push((b'<', true)),
+                b')' => {
+                    if let Some((b'(', had)) = stack.last().copied() {
+                        stack.pop();
+                        if i == target {
+                            // `#(…)` is a List; a plain `(…)` grouping has no syntactic type.
+                            return had.then_some("List");
+                        }
+                    }
+                }
+                b'}' => {
+                    if let Some((b'{', had)) = stack.last().copied() {
+                        stack.pop();
+                        if i == target {
+                            return Some(if had { "Map" } else { "Block" });
+                        }
+                    }
+                }
+                b'>' => {
+                    if let Some((b'<', _)) = stack.last().copied() {
+                        stack.pop();
+                        if i == target {
+                            return Some("Set");
+                        }
+                    }
+                }
+                _ => {}
+            },
+            St::Str { hash } => match c {
+                b'\\' => i += 1, // skip the escaped char
+                b'\'' => {
+                    st = St::Normal;
+                    if i == target {
+                        return Some(if hash { "Symbol" } else { "String" });
+                    }
+                }
+                _ => {}
+            },
+            St::Regex => match c {
+                b'\\' => i += 1,
+                b'/' => {
+                    st = St::Normal;
+                    if i == target {
+                        return Some("Regex");
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Sorted, de-duplicated members of `items` that start with `prefix`.

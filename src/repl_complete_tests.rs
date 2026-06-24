@@ -22,6 +22,7 @@ fn idx() -> CompletionIndex {
             "at:".to_string(),
             "at:put:".to_string(),
             "count".to_string(),
+            "keys".to_string(),
         ],
     );
     instance_side.insert(
@@ -40,6 +41,15 @@ fn idx() -> CompletionIndex {
     instance_side.insert("Integer".to_string(), vec!["times:".to_string()]);
     instance_side.insert("Boolean".to_string(), vec!["not".to_string()]);
     instance_side.insert("Nil".to_string(), vec!["nil?".to_string()]);
+    // Classes behind `#`-sigil / delimited literals.
+    instance_side.insert(
+        "List".to_string(),
+        vec!["each:".to_string(), "map:".to_string()],
+    );
+    instance_side.insert("Set".to_string(), vec!["add:".to_string()]);
+    instance_side.insert("Regex".to_string(), vec!["match:".to_string()]);
+    instance_side.insert("Symbol".to_string(), vec!["asString".to_string()]);
+    instance_side.insert("Block".to_string(), vec!["value".to_string()]);
 
     let mut local_class = HashMap::new();
     local_class.insert("spot".to_string(), "Animal".to_string());
@@ -133,6 +143,53 @@ fn literal_receivers_complete_instance_side() {
     assert_eq!(
         complete_input("nil.n", 5, &idx()),
         (4, vec!["nil?".to_string()])
+    );
+}
+
+#[test]
+fn delimited_literal_receivers_complete_instance_side() {
+    let i = idx();
+    // `#`-sigil collections and regex — class is fully determined by the construction syntax,
+    // no evaluation needed.
+    assert_eq!(
+        complete_input("#(1 2 3).ma", 11, &i),
+        (9, vec!["map:".to_string()])
+    );
+    assert_eq!(
+        complete_input("#{ 'a': 1 }.k", 13, &i),
+        (12, vec!["keys".to_string()])
+    );
+    assert_eq!(
+        complete_input("#<1 2>.ad", 9, &i),
+        (7, vec!["add:".to_string()])
+    );
+    assert_eq!(
+        complete_input("#/ab/.ma", 8, &i),
+        (6, vec!["match:".to_string()])
+    );
+    // Symbols, both bareword and quoted.
+    assert_eq!(
+        complete_input("#sym.as", 7, &i),
+        (5, vec!["asString".to_string()])
+    );
+    assert_eq!(
+        complete_input("#'a b'.as", 9, &i),
+        (7, vec!["asString".to_string()])
+    );
+    // A bare block literal is a Block value.
+    assert_eq!(
+        complete_input("{ 1 }.va", 8, &i),
+        (6, vec!["value".to_string()])
+    );
+    // A plain `(…)` grouping's value type isn't syntactic → nothing.
+    assert_eq!(
+        complete_input("(1 + 2).x", 9, &i),
+        (8, Vec::<String>::new())
+    );
+    // A `)` inside a string doesn't fool the bracket matcher (still a List).
+    assert_eq!(
+        complete_input("#('a)b').ma", 11, &i),
+        (9, vec!["map:".to_string()])
     );
 }
 
