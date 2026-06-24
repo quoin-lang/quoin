@@ -280,8 +280,16 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
   completion / a future Quoin `Mirror` stay ignorant of internals. Exact: `globals` /
   `describe_class` / `describe_value` / `session_locals`; prefix finds: `find_globals` /
   `find_namespaces` / `find_selectors`. Consumed by the `$`-commands and tab completion above.
-  - [ ] `$`-introspection commands on top of it: `$globals`, `$class <Name>` (parent/mixins/ivars/
-    methods), `$inspect <expr>` (object fields). (`$type` already exists.)
+  - [ ] **`$`-introspection commands (in progress).** `$globals [prefix]` (→ `introspect::globals`,
+    classes/values), `$class <Name>` (→ `describe_class`: header `Name < Parent (mixins…) [flags]`,
+    ivars, methods rendered via `introspect::signature` — `signature()` is DONE/committed),
+    `$inspect <expr>` (→ eval then `describe_value`: value + `@field: Class` lines). `$type` already
+    exists. **REPL plan (`runner.rs handle_repl_command`):** refactor `eval_repl(show_class: bool)`
+    into `eval_value(arena, input, closure)` where the closure is `for<'gc> FnOnce(&mut VmState, &Mutation,
+    Value) -> Option<String>`; keep `eval_repl_input`/`eval_repl_type` as wrappers and add
+    `eval_repl_inspect`. `$globals`/`$class` are pure reads (`arena.mutate_root(|_,vm| introspect::…)`,
+    format the owned result outside); `$inspect` evals. Add `format_globals`/`format_class` helpers +
+    update `$help`. Import `crate::introspect::{self, GlobalInfo, GlobalKind, ClassInfo, ValueInfo}`.
   - [ ] Later: the Quoin `Mirror` wrapper (native reflection class converting the structs to Quoin
     objects) — a layer over this API, not part of it.
 - [ ] Startup file (`~/.quoinrc` run on REPL boot) + banner; configurable prompt.
