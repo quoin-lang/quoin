@@ -43,6 +43,16 @@ pub fn colorize(text: &str) -> String {
         .into_owned()
 }
 
+/// The ANSI SGR start sequence for a `colors_for`-style attribute spec (`#rrggbb` plus optional
+/// `;bw`/`;lw`/… attributes) — e.g. `#93c6a5` → `\x1b[38;2;147;198;165m`. Pairs with [`SGR_RESET`].
+/// Used by the value pretty-printer to color tokens with the same palette as input highlighting.
+pub(crate) fn sgr(spec: &str) -> String {
+    parse_attribute(spec)
+}
+
+/// The reset that ends an [`sgr`] span.
+pub(crate) const SGR_RESET: &str = RESET_ALL;
+
 fn parse_attribute(s: &str) -> String {
     let mut result = String::from(ANSI_PREFIX);
     for part in s.split(';').map(str::trim).filter(|p| !p.is_empty()) {

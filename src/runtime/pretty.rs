@@ -8,6 +8,7 @@
 //! Layout uses a Wadler/Leijen document algebra: each collection is a `Group` that prints flat
 //! when it fits the target width, else breaks onto indented lines.
 
+use crate::ansi_colorizer;
 use crate::introspect::{self, MethodVariant};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
@@ -17,6 +18,7 @@ use crate::runtime::set::NativeSetState;
 use crate::value::{Object, ObjectPayload, Value};
 
 use gc_arena::{Gc, lock::RefLock};
+use quoin_syntax::highlight::{HighlightType, colors_for};
 use std::collections::HashSet;
 
 /// The structural shape a native class contributes to a `.pp` dump: delimiters plus its child
@@ -52,6 +54,9 @@ enum Doc {
     Cat(Vec<Doc>),
     Nest(usize, Box<Doc>),
     Group(Box<Doc>),
+    /// A `Role`-colored span. Transparent to layout (the ANSI escapes are zero-width); the
+    /// codes are emitted only when `best` is asked to colorize.
+    Styled(Role, Box<Doc>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -60,16 +65,64 @@ enum Mode {
     Break,
 }
 
+/// A pretty-print token role, mapped to the same `HighlightType` palette as input highlighting
+/// so a value's `.pp` is colored like the source you'd type.
+#[derive(Clone, Copy)]
+enum Role {
+    Delim,     // collection sigils + structural braces/parens  -> CollectionBrace
+    ClassName, // class names                                   -> Global
+    Ivar,      // `@field` labels                               -> InstanceIdentifier
+    Selector,  // method signatures inside `Method(…)`          -> MethodSignature
+    Number,    // Int / Double                                  -> NumberLiteral
+    Str,       // strings                                       -> StringLiteral
+    Symbol,    // `#sym`                                        -> SymbolLiteral
+    Regex,     // `#/…/`                                       -> RegexLiteral
+}
+
+impl Role {
+    fn highlight(self) -> HighlightType {
+        match self {
+            Role::Delim => HighlightType::CollectionBrace,
+            Role::ClassName => HighlightType::Global,
+            Role::Ivar => HighlightType::InstanceIdentifier,
+            Role::Selector => HighlightType::MethodSignature,
+            Role::Number => HighlightType::NumberLiteral,
+            Role::Str => HighlightType::StringLiteral,
+            Role::Symbol => HighlightType::SymbolLiteral,
+            Role::Regex => HighlightType::RegexLiteral,
+        }
+    }
+
+    /// The ANSI SGR start sequence for this role (first color of its palette entry).
+    fn sgr(self) -> String {
+        ansi_colorizer::sgr(colors_for(self.highlight())[0])
+    }
+}
+
 fn text(s: impl Into<String>) -> Doc {
     Doc::Text(s.into())
+}
+
+fn styled(role: Role, doc: Doc) -> Doc {
+    Doc::Styled(role, Box::new(doc))
 }
 
 /// Wrap `items` between `open`/`close` (with a `prefix` like a class name) as a breakable
 /// group: flat `pre#(a b c)`; broken, one item per indented line with `pre#(` / `)` on their
 /// own lines.
 fn bracket(prefix: &str, open: &str, close: &str, items: Vec<Doc>) -> Doc {
+    // `prefix` (a class name) and the delimiters are colored; the items color themselves.
+    let opener = if prefix.is_empty() {
+        styled(Role::Delim, text(open))
+    } else {
+        Doc::Cat(vec![
+            styled(Role::ClassName, text(prefix)),
+            styled(Role::Delim, text(open)),
+        ])
+    };
+    let closer = styled(Role::Delim, text(close));
     if items.is_empty() {
-        return text(format!("{prefix}{open}{close}"));
+        return Doc::Cat(vec![opener, closer]);
     }
     let mut inner = Vec::with_capacity(items.len() * 2);
     for (i, it) in items.into_iter().enumerate() {
@@ -79,10 +132,10 @@ fn bracket(prefix: &str, open: &str, close: &str, items: Vec<Doc>) -> Doc {
         inner.push(it);
     }
     Doc::Group(Box::new(Doc::Cat(vec![
-        text(format!("{prefix}{open}")),
+        opener,
         Doc::Nest(2, Box::new(Doc::Cat(vec![Doc::Soft, Doc::Cat(inner)]))),
         Doc::Soft,
-        text(close),
+        closer,
     ])))
 }
 
@@ -111,17 +164,35 @@ fn fits(mut remaining: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
             }
             Doc::Nest(n, d) => stack.push((indent + n, mode, d.as_ref())),
             Doc::Group(d) => stack.push((indent, Mode::Flat, d.as_ref())),
+            // A style adds no width — measure its content only.
+            Doc::Styled(_, d) => stack.push((indent, mode, d.as_ref())),
         }
     }
     false
 }
 
-/// Lay `doc` out to a string, breaking each group that doesn't fit in `width` columns.
-fn best(width: usize, doc: &Doc) -> String {
+/// A layout work item: a doc to lay out, or a raw string to emit verbatim (an ANSI escape —
+/// written without advancing the column, since it has no visible width).
+enum Step<'a> {
+    Doc(usize, Mode, &'a Doc),
+    Emit(String),
+}
+
+/// Lay `doc` out to a string, breaking each group that doesn't fit in `width` columns. With
+/// `colorize`, `Styled` spans are wrapped in their role's ANSI escapes (zero-width, so the
+/// layout is identical to the uncolored output).
+fn best(width: usize, doc: &Doc, colorize: bool) -> String {
     let mut out = String::new();
     let mut col = 0usize;
-    let mut stack: Vec<(usize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
-    while let Some((indent, mode, doc)) = stack.pop() {
+    let mut stack: Vec<Step> = vec![Step::Doc(0, Mode::Break, doc)];
+    while let Some(step) = stack.pop() {
+        let (indent, mode, doc) = match step {
+            Step::Emit(s) => {
+                out.push_str(&s); // zero-width: do not touch `col`
+                continue;
+            }
+            Step::Doc(i, m, d) => (i, m, d),
+        };
         match doc {
             Doc::Text(s) => {
                 out.push_str(s);
@@ -142,17 +213,27 @@ fn best(width: usize, doc: &Doc) -> String {
             },
             Doc::Cat(ds) => {
                 for d in ds.iter().rev() {
-                    stack.push((indent, mode, d));
+                    stack.push(Step::Doc(indent, mode, d));
                 }
             }
-            Doc::Nest(n, d) => stack.push((indent + n, mode, d.as_ref())),
+            Doc::Nest(n, d) => stack.push(Step::Doc(indent + n, mode, d.as_ref())),
             Doc::Group(d) => {
                 let fit = fits(
                     width as isize - col as isize,
                     vec![(indent, Mode::Flat, d.as_ref())],
                 );
                 let m = if fit { Mode::Flat } else { Mode::Break };
-                stack.push((indent, m, d.as_ref()));
+                stack.push(Step::Doc(indent, m, d.as_ref()));
+            }
+            Doc::Styled(role, d) => {
+                if colorize {
+                    // start … inner … reset, in LIFO push order.
+                    stack.push(Step::Emit(ansi_colorizer::SGR_RESET.to_string()));
+                    stack.push(Step::Doc(indent, mode, d.as_ref()));
+                    stack.push(Step::Emit(role.sgr()));
+                } else {
+                    stack.push(Step::Doc(indent, mode, d.as_ref()));
+                }
             }
         }
     }
@@ -162,20 +243,28 @@ fn best(width: usize, doc: &Doc) -> String {
 // ---- value -> Doc walk ----
 
 /// Pretty-print `value` to a string laid out within `width` columns. The single canonical
-/// entrypoint: walks the whole graph here (no method dispatch), cycle-guarded.
-pub fn render<'gc>(value: Value<'gc>, width: usize) -> String {
+/// entrypoint: walks the whole graph here (no method dispatch), cycle-guarded. With `colorize`,
+/// tokens are ANSI-colored with the input-highlighting palette (for terminal display).
+pub fn render<'gc>(value: Value<'gc>, width: usize, colorize: bool) -> String {
     let mut visited = HashSet::new();
-    best(width, &value_to_doc(value, &mut visited))
+    best(width, &value_to_doc(value, &mut visited), colorize)
 }
 
 fn value_to_doc<'gc>(value: Value<'gc>, visited: &mut HashSet<usize>) -> Doc {
     match value {
-        Value::Int(i) => text(i.to_string()),
-        Value::Double(d) => text(format!("{d}")),
+        Value::Int(i) => styled(Role::Number, text(i.to_string())),
+        Value::Double(d) => styled(Role::Number, text(format!("{d}"))),
         Value::Bool(b) => text(if b { "true" } else { "false" }),
         Value::Nil => text("nil"),
-        Value::Class(c) => text(format!("class {}", c.borrow().name)),
-        Value::ClassMeta(c) => text(format!("class {} meta", c.borrow().name)),
+        Value::Class(c) => Doc::Cat(vec![
+            text("class "),
+            styled(Role::ClassName, text(c.borrow().name.to_string())),
+        ]),
+        Value::ClassMeta(c) => Doc::Cat(vec![
+            text("class "),
+            styled(Role::ClassName, text(c.borrow().name.to_string())),
+            text(" meta"),
+        ]),
         Value::Object(o) => {
             let id = Gc::as_ptr(o) as usize;
             let cname = value.class_name();
@@ -236,8 +325,8 @@ fn object_doc<'gc>(
         }
     };
     match payload {
-        Payload::Str(s) => text(quote(&s)),
-        Payload::Sym(s) => text(format!("#{s}")),
+        Payload::Str(s) => styled(Role::Str, text(quote(&s))),
+        Payload::Sym(s) => styled(Role::Symbol, text(format!("#{s}"))),
         Payload::Bytes(preview, len) => text(bytes_repr(&preview, len)),
         Payload::Block(name) => text(match name {
             Some(n) => format!("<block {n}>"),
@@ -246,7 +335,13 @@ fn object_doc<'gc>(
         Payload::Ivars(ivars) => {
             let items = ivars
                 .into_iter()
-                .map(|(n, v)| Doc::Cat(vec![text(format!("@{n}: ")), value_to_doc(v, visited)]))
+                .map(|(n, v)| {
+                    Doc::Cat(vec![
+                        styled(Role::Ivar, text(format!("@{n}"))),
+                        text(": "),
+                        value_to_doc(v, visited),
+                    ])
+                })
                 .collect();
             bracket(cname, "{", "}", items)
         }
@@ -303,7 +398,7 @@ fn non_collection_native_doc<'gc>(
         // A regex prints as its literal `#/pattern/`.
         "Regex" => value
             .with_native_state::<NativeRegexState, _, _>(|r| format!("#/{}/", r.regex.as_str()))
-            .map(text)
+            .map(|s| styled(Role::Regex, text(s)))
             .unwrap_or_else(|_| text("<Regex>")),
         // A key/value pair shows its two named fields.
         "KeyValuePair" => match value.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
@@ -350,10 +445,22 @@ fn method_doc<'gc>(value: Value<'gc>) -> Doc {
         }
     }
     if sigs.is_empty() {
-        text("<Method>")
-    } else {
-        text(format!("Method({})", sigs.join(" | ")))
+        return text("<Method>");
     }
+    // `Method(` <selector> ` | ` <selector> … `)` — the name and delimiters colored, each
+    // variant signature in the selector color.
+    let mut parts = vec![
+        styled(Role::ClassName, text("Method")),
+        styled(Role::Delim, text("(")),
+    ];
+    for (i, sig) in sigs.into_iter().enumerate() {
+        if i > 0 {
+            parts.push(text(" | "));
+        }
+        parts.push(styled(Role::Selector, text(sig)));
+    }
+    parts.push(styled(Role::Delim, text(")")));
+    Doc::Cat(parts)
 }
 
 /// One chain node's signature: param types from the user block (with its guard) or from the

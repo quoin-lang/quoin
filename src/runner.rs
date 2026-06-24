@@ -245,7 +245,10 @@ fn eval_repl_input(arena: &mut ReplArena, input: &str) -> Option<String> {
             None
         } else {
             let width = vm.options.console_width.map(|w| w as usize).unwrap_or(80);
-            Some(format!("=> {}", pretty::render(val, width)))
+            Some(format!(
+                "=> {}",
+                pretty::render(val, width, vm.options.supports_color)
+            ))
         }
     })
 }
