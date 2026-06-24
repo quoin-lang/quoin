@@ -1,11 +1,10 @@
 use crate::dispatch::{Callable, MethodCacheKey};
 use crate::error::QuoinError;
 use crate::fiber::{VMYielder, YieldReason};
-use crate::highlighter::{HighlightParser, HighlightSpan, format_ansi};
+use crate::highlighter::{HighlightSpan, format_ansi, highlight_resilient, highlight_to_ansi};
 use crate::instruction::{Constant, Instruction};
 use crate::io_backend::StreamId;
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
-use crate::parser::parse_quoin_string;
 use crate::runtime::fiber::NativeFiberState;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
@@ -2138,15 +2137,10 @@ impl<'gc> VmState<'gc> {
                         text.clone()
                     };
                     if supports_color {
-                        let parse_and_highlight = || -> Option<String> {
-                            let program = parse_quoin_string(&snippet_text);
-                            let mut parser = HighlightParser::new(&snippet_text);
-                            let spans = parser.highlight_program(&program);
-                            Some(format_ansi(&snippet_text, spans))
-                        };
-                        if let Some(hl) = parse_and_highlight() {
-                            return Some(hl);
-                        }
+                        // Resilient: `snippet_text` is `source_text` truncated to `w`, so it can
+                        // end mid-expression — `highlight_to_ansi` predictively completes it and
+                        // never panics (and returns the text verbatim when it can't parse).
+                        return Some(highlight_to_ansi(&snippet_text));
                     }
                     return Some(snippet_text);
                 }
@@ -2213,11 +2207,11 @@ impl<'gc> VmState<'gc> {
         let snippet_text = &content[win_start_byte..win_end_byte];
 
         if supports_color {
-            let parse_and_highlight = || -> Option<String> {
-                let program = parse_quoin_string(&content);
-                let mut parser = HighlightParser::new(&content);
-                let spans = parser.highlight_program(&program);
-
+            // Resilient highlight of the full file, then crop spans to the window. Guarded on
+            // non-empty so a file that can't be parsed/completed falls through to plain text
+            // rather than panicking (old behavior) or emitting an empty snippet.
+            let spans = highlight_resilient(&content);
+            if !spans.is_empty() {
                 let mut snippet_spans = Vec::new();
                 for span in spans {
                     let overlap_start = cmp::max(span.start, win_start_byte);
@@ -2231,11 +2225,9 @@ impl<'gc> VmState<'gc> {
                         });
                     }
                 }
-                Some(format_ansi(snippet_text, snippet_spans))
-            };
-
-            if let Some(highlighted) = parse_and_highlight() {
-                return Some(highlighted);
+                if !snippet_spans.is_empty() {
+                    return Some(format_ansi(snippet_text, snippet_spans));
+                }
             }
         }
 

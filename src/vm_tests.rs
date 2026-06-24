@@ -1828,6 +1828,32 @@ fn test_error_annotation_with_console_width() {
 }
 
 #[test]
+fn highlighted_snippet_does_not_panic_on_truncated_source() {
+    // Regression: the error annotator highlights a frame's source. When the frame's filename
+    // isn't a readable file (REPL/eval frames use synthetic names like `<repl>`), it falls
+    // back to `source_text` truncated to the available width `w`. A truncation that cuts an
+    // expression in half yields an unparseable fragment, and the old code fed it to the
+    // panicking `parse_quoin_string` — crashing the REPL the moment a long line errored
+    // (e.g. `([HTTP]Client.get:'https://…').pp.print;` cut to `([HTTP]Client`). The fix
+    // routes through the resilient highlighter, which never panics.
+    let mut options = VmOptions::default();
+    options.supports_color = true;
+    let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, options));
+
+    arena.mutate_root(|_mc, vm| {
+        let source = "([HTTP]Client.get:'https://quoinlang.dev/').pp.print;".to_string();
+        // `w = 13` slices the source to `([HTTP]Client` — exactly the mid-expression cut that
+        // used to panic. `<repl>` is not a real file, so the `source_text` branch is taken.
+        let out =
+            vm.get_highlighted_snippet("<repl>", 0, 0, 0, source.len(), Some(&source), 13);
+        let out = out.expect("snippet should be produced, not a panic");
+        // The highlighter preserves text exactly, so the colors strip back to the truncation.
+        let expected: String = source.chars().take(13).collect();
+        assert_eq!(crate::ansi_colorizer::decolorize(&out), expected);
+    });
+}
+
+#[test]
 fn test_vm_to_s() {
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc, VmOptions::default());
