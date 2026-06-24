@@ -286,6 +286,46 @@ fn method_info<'gc>(vm: &VmState<'gc>, selector: &str, head: Value<'gc>) -> Meth
     }
 }
 
+/// Render a variant's signature: the selector with its declared param types interleaved
+/// (`at:Integer put:`, `fetch:String`, `sound`), then ` {…}` for a guarded variant and
+/// ` (native)` for a Rust-backed one. Plain text — a caller may colorize separately. The
+/// canonical signature rendering, shared by the REPL, completion hints, and a future Mirror.
+pub fn signature(selector: &str, variant: &MethodVariant) -> String {
+    // Split the selector into keyword parts (each keeps its trailing `:`) or one unary part.
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in selector.chars() {
+        cur.push(c);
+        if c == ':' {
+            parts.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+
+    let mut out = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(part);
+        // A keyword part takes one argument; append its type if declared (untyped = nothing).
+        if part.ends_with(':')
+            && let Some(Some(ty)) = variant.param_types.get(i)
+        {
+            out.push_str(ty);
+        }
+    }
+    if variant.guarded {
+        out.push_str(" {…}");
+    }
+    if variant.native {
+        out.push_str(" (native)");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +444,52 @@ mod tests {
                 "{locals:?}"
             );
         });
+    }
+
+    #[test]
+    fn signature_formatting() {
+        let typed = |t: &str| MethodVariant {
+            param_types: vec![Some(t.to_string())],
+            guarded: false,
+            native: false,
+            source: None,
+        };
+        assert_eq!(
+            signature(
+                "sound",
+                &MethodVariant {
+                    param_types: vec![],
+                    guarded: false,
+                    native: false,
+                    source: None
+                }
+            ),
+            "sound"
+        );
+        assert_eq!(signature("fetch:", &typed("String")), "fetch:String");
+        assert_eq!(
+            signature(
+                "at:put:",
+                &MethodVariant {
+                    param_types: vec![Some("Integer".into()), None],
+                    guarded: false,
+                    native: false,
+                    source: None
+                }
+            ),
+            "at:Integer put:"
+        );
+        assert_eq!(
+            signature(
+                "g:",
+                &MethodVariant {
+                    param_types: vec![None],
+                    guarded: true,
+                    native: false,
+                    source: None
+                }
+            ),
+            "g: {…}"
+        );
     }
 }
