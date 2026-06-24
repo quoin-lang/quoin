@@ -294,9 +294,14 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
     as the three renders; `format_globals`/`format_class`/`format_inspect`/`flow_names` helpers.
   - [ ] Later: the Quoin `Mirror` wrapper (native reflection class converting the structs to Quoin
     objects) — a layer over this API, not part of it.
-- [ ] Startup file (`~/.quoinrc` run on REPL boot) + banner; configurable prompt.
-- [ ] One-shot eval `qn -e '<expr>'` and non-interactive `qn repl < script` (pipe mode). Related
-  but distinct from the interactive loop.
+- [x] Startup file: `~/.quoinrc` is run into the session on interactive REPL boot (shell-style:
+  not for piped scripts or `qn -e`); errors are reported but non-fatal. Banner suppressible with
+  `QN_NO_BANNER`; prompt overridable with `QN_PROMPT` (default `qn> `). (`QN_*` to match the binary
+  and the `tuning` stress knobs.) The shared arena setup is factored into `build_repl_arena`.
+- [x] One-shot eval `qn -e '<expr>'`: evaluates one expression in a fresh prelude-loaded session and
+  prints its `.s` result (a `nil` result prints nothing); parse/compile/runtime errors go to stderr
+  with a non-zero exit, so it composes in pipelines. Non-interactive `qn repl < script` (pipe mode)
+  already works via the promptless accumulation loop.
 
 **P3 — "REPL in Quoin" (the eventual goal):** migrate the loop into `qnlib` once its primitives
 exist — depends on [[eval-bindings]] (`eval:bindings:`, §8), the `Runtime.eval:` parse-panic fix

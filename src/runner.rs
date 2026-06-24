@@ -309,6 +309,70 @@ where
     })
 }
 
+/// Parse, compile, and run one complete input in `arena`'s session env, returning the rendered
+/// non-`nil` result (`Ok(Some)`), `Ok(None)` for a `nil` result, or an error message. Unlike
+/// `eval_value` — which folds errors into the printed string for the interactive loop — this
+/// keeps success and failure distinct, so `qn -e` / `~/.quoinrc` can act on a real error.
+fn eval_once(arena: &mut ReplArena, input: &str) -> Result<Option<String>, String> {
+    let node = try_parse_quoin_string_named(input, "<eval>").map_err(|pe| {
+        format!(
+            "Parse error at line {}, col {}: {}",
+            pe.line, pe.column, pe.message
+        )
+    })?;
+    arena.mutate_root(|mc, vm| {
+        let NodeValue::Program(p) = &node.value else {
+            return Ok(None);
+        };
+        let locals: HashSet<String> = vm
+            .repl_env
+            .map(|env| {
+                env.borrow()
+                    .vars
+                    .iter()
+                    .map(|(s, _)| s.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let sb = Compiler::new_with_locals(locals)
+            .compile_program(p)
+            .map_err(|e| format!("Compile error: {e}"))?;
+        let block = build_block(mc, &sb);
+        match vm.execute_repl_line(mc, block) {
+            Ok(val) if val.type_name() == "Nil" => Ok(None),
+            Ok(val) => Ok(Some(render_value(vm, mc, val))),
+            Err(e) => Err(format!("{e}")),
+        }
+    })
+}
+
+/// A `QN_*` boolean toggle, using the same convention as the internal `tuning` knobs: set and
+/// not `""`/`"0"`/`"false"` → on. These are user-facing REPL toggles, so they live here rather
+/// than in the (explicitly non-user-facing) `tuning` module.
+fn env_flag(name: &str) -> bool {
+    matches!(std::env::var(name), Ok(v) if !matches!(v.as_str(), "" | "0" | "false"))
+}
+
+/// Run `~/.quoinrc` into the session if it exists. Missing/unreadable/empty is fine (silent);
+/// a successful run is silent too (its definitions just persist); an error is reported but
+/// non-fatal — the prompt still opens.
+fn load_quoinrc(arena: &mut ReplArena) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let path = PathBuf::from(home).join(".quoinrc");
+    let src = match read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if src.trim().is_empty() {
+        return;
+    }
+    if let Err(msg) = eval_once(arena, &src) {
+        eprintln!("~/.quoinrc: {msg}");
+    }
+}
+
 /// `$globals` output: surface globals split into classes (flowed to `width` columns) and
 /// values (one `name: Class` per line), filtered by `prefix` (empty = all).
 fn format_globals(infos: &[GlobalInfo], prefix: &str, width: usize) -> String {
@@ -469,7 +533,13 @@ fn run_repl_interactive(arena: &mut ReplArena) {
         let _ = editor.load_history(p);
     }
 
-    println!("Quoin REPL — $help for commands, $quit (or Ctrl-D) to exit.");
+    // `QN_NO_BANNER` (matching the `QN_*` tuning knobs) suppresses the greeting; `QN_NO_BANNER=0`
+    // still shows it.
+    if !env_flag("QN_NO_BANNER") {
+        println!("Quoin REPL — $help for commands, $quit (or Ctrl-D) to exit.");
+    }
+    // `QN_PROMPT` overrides the prompt string (default `qn> `).
+    let prompt = std::env::var("QN_PROMPT").unwrap_or_else(|_| "qn> ".to_string());
 
     loop {
         // Refresh the completion snapshot from the VM as it stands before this line (it can't
@@ -478,7 +548,7 @@ fn run_repl_interactive(arena: &mut ReplArena) {
         if let Some(helper) = editor.helper_mut() {
             helper.index = index;
         }
-        match editor.readline("qn> ") {
+        match editor.readline(&prompt) {
             Ok(input) => {
                 if input.trim().is_empty() {
                     continue;
@@ -750,6 +820,9 @@ pub enum VmRunnerMode {
     Benchmark,
     Run,
     Repl,
+    /// `qn -e '<expr>'`: evaluate one expression and print its result. The expression source
+    /// is carried in `VmRunnerOptions::target_path`.
+    Eval,
 }
 
 impl VmRunnerOptions {
@@ -779,6 +852,14 @@ impl VmRunnerOptions {
                 mode = VmRunnerMode::Repl;
                 if args.len() > 2 {
                     vm_args = args[2..].to_vec();
+                }
+            } else if arg == "-e" {
+                // `qn -e '<expr>'`: the next arg is the expression source; anything after it
+                // is passed through as VM arguments.
+                mode = VmRunnerMode::Eval;
+                target_path = args.get(2).cloned();
+                if args.len() > 3 {
+                    vm_args = args[3..].to_vec();
                 }
             } else {
                 mode = VmRunnerMode::Run;
@@ -866,6 +947,14 @@ impl VmRunner {
                 self.run_repl();
                 Ok(())
             }
+            VmRunnerMode::Eval => {
+                let Some(ref expr) = self.options.target_path else {
+                    eprintln!("Usage: qn -e '<expr>'");
+                    exit(2);
+                };
+                self.run_eval(expr);
+                Ok(())
+            }
         }
     }
 
@@ -875,6 +964,26 @@ impl VmRunner {
     /// that env. Incomplete input re-prompts (`... `); parse/compile/runtime failures are
     /// shown and the loop continues. A line starting with `$` is a REPL command.
     fn run_repl(&self) {
+        let Some(mut arena) = self.build_repl_arena() else {
+            return;
+        };
+
+        // Interactive terminals get the line editor; piped/redirected stdin uses the
+        // promptless accumulation loop (rustyline's editor/validator only apply to a tty).
+        if stdin().is_terminal() {
+            // `~/.quoinrc` is interactive-only, like a shell rc file (a piped script or a
+            // one-shot `-e` doesn't run it).
+            load_quoinrc(&mut arena);
+            run_repl_interactive(&mut arena);
+        } else {
+            run_repl_piped(&mut arena);
+        }
+    }
+
+    /// Build a fresh session arena: a `VmState` with the native builtins registered, the core
+    /// stdlib prelude loaded, and an empty persistent `repl_env`. Returns `None` (after
+    /// printing the failure) if the prelude fails to load. Shared by `run_repl` and `run_eval`.
+    fn build_repl_arena(&self) -> Option<ReplArena> {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
             register_builtins(mc, &mut vm);
@@ -903,7 +1012,7 @@ impl VmRunner {
                 }
             });
             if failed {
-                return;
+                return None;
             }
         }
 
@@ -912,12 +1021,23 @@ impl VmRunner {
             vm.repl_env = Some(gcl!(mc, EnvFrame::new(None)));
         });
 
-        // Interactive terminals get the line editor; piped/redirected stdin uses the
-        // promptless accumulation loop (rustyline's editor/validator only apply to a tty).
-        if stdin().is_terminal() {
-            run_repl_interactive(&mut arena);
-        } else {
-            run_repl_piped(&mut arena);
+        Some(arena)
+    }
+
+    /// `qn -e '<expr>'`: evaluate one expression in a fresh prelude-loaded session and print
+    /// its result via `.s` (a `nil` result prints nothing). Parse/compile/runtime errors go to
+    /// stderr with a non-zero exit, so `-e` composes in pipelines.
+    fn run_eval(&self, expr: &str) {
+        let Some(mut arena) = self.build_repl_arena() else {
+            exit(1);
+        };
+        match eval_once(&mut arena, expr) {
+            Ok(Some(out)) => println!("{out}"),
+            Ok(None) => {}
+            Err(msg) => {
+                eprintln!("{msg}");
+                exit(1);
+            }
         }
     }
 
