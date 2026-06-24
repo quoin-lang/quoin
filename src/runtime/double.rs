@@ -29,13 +29,16 @@ macro_rules! double_binop {
 pub fn build_double_class() -> NativeClassBuilder {
     // Binary operators are the `:` keyword selectors (`a + b` -> `Send(a, "+:", [b])`).
     // Only `<:` is provided natively; `>:`/`<=:`/`>=:` derive from it as shared Quoin.
-    let b = NativeClassBuilder::new("Double", Some("Object")).instance_method(
-        "sqrt",
-        |vm, mc, receiver, _args| {
+    let b = NativeClassBuilder::new("Double", Some("Object"))
+        .instance_method("sqrt", |vm, mc, receiver, _args| {
             let val = recv!(receiver, Double);
             Ok(vm.new_double(mc, val.sqrt()))
-        },
-    );
+        })
+        // Human string form. Explicit so `.s` never routes through the Rust Display impl.
+        .instance_method("s", |vm, mc, receiver, _args| {
+            let val = recv!(receiver, Double);
+            Ok(vm.new_string(mc, format!("{val}")))
+        });
     let b = double_binop!(b, "+:", arith+);
     let b = double_binop!(b, "-:", arith -);
     let b = double_binop!(b, "*:", arith *);

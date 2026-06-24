@@ -1,10 +1,33 @@
 use crate::error::QuoinError;
+use crate::runtime::pretty;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
+        // The default `.s` for a value with no intrinsic human form: fall back to the
+        // structural `.pp`. The Rust Display impl is for Rust-level debugging only — no Quoin
+        // `.s` routes through it. (Types with an intrinsic form — Integer, String, Error, … —
+        // override this.)
         .instance_method("s", |vm, mc, receiver, _args| {
-            Ok(vm.new_string(mc, format!("{}", receiver)))
+            let width = vm.options.console_width.map(|w| w as usize).unwrap_or(80);
+            // Methods return plain text; color is a REPL display concern (the `=>` path).
+            Ok(vm.new_string(mc, pretty::render(receiver, width, false)))
+        })
+        // `pp` — a structural, canonical dump of the value graph for debugging/inspection
+        // (escaped strings, instance vars, intrinsic collections). Width-aware: defaults to the
+        // console width; `pp:` takes an explicit width. Never calls `.s`.
+        .instance_method("pp", |vm, mc, receiver, _args| {
+            let width = vm.options.console_width.map(|w| w as usize).unwrap_or(80);
+            // Methods return plain text; color is a REPL display concern (the `=>` path).
+            Ok(vm.new_string(mc, pretty::render(receiver, width, false)))
+        })
+        .instance_method("pp:", |vm, mc, receiver, args| {
+            let width = match args.first() {
+                Some(Value::Int(w)) if *w > 0 => *w as usize,
+                _ => 80,
+            };
+            // Methods return plain text; color is a REPL display concern (the `=>` path).
+            Ok(vm.new_string(mc, pretty::render(receiver, width, false)))
         })
         .instance_method("sealed!", |vm, mc, receiver, _args| {
             // Seal an instance: get-or-create its eigenclass and freeze it, so further

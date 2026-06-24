@@ -13,6 +13,7 @@ pub mod map;
 pub mod method;
 pub mod nil;
 pub mod object;
+pub mod pretty;
 pub mod regex;
 pub mod runtime;
 pub mod set;

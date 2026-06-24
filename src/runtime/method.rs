@@ -62,6 +62,11 @@ impl NativeMethodState {
         }
     }
 
+    /// The next variant in this selector's multimethod chain, or `None` at the end.
+    pub fn get_next<'gc>(&self) -> Option<Value<'gc>> {
+        self.next.map(|n| unsafe { transmute(n) })
+    }
+
     /// The native function, or `None` for a user block body.
     pub fn native_func(&self) -> Option<NativeFunc> {
         match &self.body {
