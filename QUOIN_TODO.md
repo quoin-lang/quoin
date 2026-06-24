@@ -254,6 +254,12 @@ input), `compile_and_run_asts` (execute + capture `VmStatus::Finished(val)`), `h
     step — the AST builder still `unreachable!`s on some pest-valid shapes (e.g. `Foo <-- 0`), so a
     `parse_or_none` wrapper `catch_unwind`s the parse. It recovers (no crash) but the caught panic
     prints its message; a clean fix needs the parser to return a `Result` through AST building.
+  - [ ] **Trailing `.` and `..` need their own heuristics.** The fixed placeholder set (`{}`/`0`)
+    doesn't complete a trailing postfix dot `a.` (a method-call start expecting a `call_sig`
+    selector, not an operand — so `a.`/`@x.`/`Foo.` currently fail to complete → uncolored) or a
+    trailing range `1..` (and `.` vs `..` vs a float like `1.` are ambiguous at end-of-input). Add
+    candidates: a placeholder selector after a postfix `.` (e.g. `a.x`), and a primary after `..`
+    (`1 .. 0`), keyed on the trailing-token shape.
 - [x] Result pretty-printing: render the result via its `.s` method (honors user `s` overrides;
   e.g. a custom `Point` prints `Point(3, 4)`), falling back to `Display` if `.s` errors. (`=>`
   prefix, nil suppression. Color/truncation still open.)
