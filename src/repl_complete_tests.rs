@@ -28,6 +28,18 @@ fn idx() -> CompletionIndex {
         "Animal".to_string(),
         vec!["legs".to_string(), "sound".to_string()],
     );
+    // Classes behind syntactically-typed literals.
+    instance_side.insert(
+        "String".to_string(),
+        vec![
+            "split:".to_string(),
+            "splitString:".to_string(),
+            "upcase".to_string(),
+        ],
+    );
+    instance_side.insert("Integer".to_string(), vec!["times:".to_string()]);
+    instance_side.insert("Boolean".to_string(), vec!["not".to_string()]);
+    instance_side.insert("Nil".to_string(), vec!["nil?".to_string()]);
 
     let mut local_class = HashMap::new();
     local_class.insert("spot".to_string(), "Animal".to_string());
@@ -90,6 +102,37 @@ fn local_receiver_completes_instance_side() {
     assert_eq!(
         complete_input("spot.", 5, &idx()),
         (5, vec!["legs".to_string(), "sound".to_string()])
+    );
+}
+
+#[test]
+fn literal_receivers_complete_instance_side() {
+    // A string literal receiver → String instance selectors (the reported `'abcd'.spl` case).
+    assert_eq!(
+        complete_input("'abcd'.sp", 9, &idx()),
+        (7, vec!["split:".to_string(), "splitString:".to_string()])
+    );
+    // Empty string literal, and a `#tag'…'` user string, both resolve to String.
+    assert_eq!(
+        complete_input("''.up", 5, &idx()),
+        (3, vec!["upcase".to_string()])
+    );
+    assert_eq!(
+        complete_input("#t'abc'.up", 10, &idx()),
+        (8, vec!["upcase".to_string()])
+    );
+    // Bare keyword / integer literals.
+    assert_eq!(
+        complete_input("123.t", 5, &idx()),
+        (4, vec!["times:".to_string()])
+    );
+    assert_eq!(
+        complete_input("true.n", 6, &idx()),
+        (5, vec!["not".to_string()])
+    );
+    assert_eq!(
+        complete_input("nil.n", 5, &idx()),
+        (4, vec!["nil?".to_string()])
     );
 }
 

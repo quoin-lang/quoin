@@ -6,10 +6,12 @@
 //! adapter over it. Design notes: `docs/INTROSPECTION.md` and the REPL section of QUOIN_TODO.
 //!
 //! v1 scope: bare-word completion (globals, session locals, a few keywords), namespace names
-//! inside `[ … ]`, and selectors after `recv.` when `recv` is a simple identifier — a class
-//! name (→ its class-side selectors) or a session local (→ its value's class instance
-//! selectors, inherited included). Complex receivers (literals, `@ivars`, `(expr)`, chained
-//! sends) and namespaced class names after `]` are out of scope and yield nothing.
+//! inside `[ … ]`, and selectors after `recv.` when the receiver's class is statically known
+//! — a class name (→ its class-side selectors), a session local (→ its value's class instance
+//! selectors, inherited included), or a syntactically-typed literal (string / integer /
+//! `true`/`false` / `nil` → that class's instance selectors). Receivers we'd have to evaluate
+//! (`@ivars`, `(expr)`, chained sends, and richer literals like lists/maps/sets/regex) and
+//! namespaced class names after `]` are out of scope and yield nothing.
 
 use crate::introspect::{self, GlobalKind};
 use crate::vm::VmState;
@@ -103,29 +105,70 @@ pub fn complete_input(line: &str, pos: usize, index: &CompletionIndex) -> (usize
     // range operator, not a send, so its RHS completes as a bare word instead).
     if fstart > 0 && bytes[fstart - 1] == b'.' && !(fstart >= 2 && bytes[fstart - 2] == b'.') {
         let dot = fstart - 1;
-        let rstart = ident_start(bytes, dot);
-        let recv = &line[rstart..dot];
-        // Only a simple identifier receiver resolves — not an `@ivar`, a chained send, or a
-        // bracketed/parenthesized expression (we don't evaluate the receiver in v1).
-        let complex = rstart > 0 && matches!(bytes[rstart - 1], b'@' | b'.' | b')' | b']' | b'}');
-        if !recv.is_empty() && !complex {
-            if let Some(sels) = index.class_side.get(recv) {
-                return (fstart, filter_prefix(sels, frag));
-            }
-            if let Some(sels) = index
-                .local_class
-                .get(recv)
-                .and_then(|c| index.instance_side.get(c))
-            {
-                return (fstart, filter_prefix(sels, frag));
-            }
-        }
-        // A send we can't resolve: offer nothing rather than bare words after a `.`.
-        return (fstart, Vec::new());
+        // A send: offer the receiver's selectors, or — when its class can't be known without
+        // evaluating it — nothing (never bare words after a `.`).
+        let cands = receiver_selectors(line, bytes, dot, index)
+            .map(|sels| filter_prefix(sels, frag))
+            .unwrap_or_default();
+        return (fstart, cands);
     }
 
     // Bare word.
     (fstart, filter_prefix(&index.words, frag))
+}
+
+/// Selectors to offer for the receiver expression ending at byte `dot` (the send `.`), or
+/// `None` when the receiver's class can't be known without evaluating it. Resolves: a class
+/// name used as a value → its class-side selectors; a syntactically-typed literal (string /
+/// integer / `true`/`false` / `nil`) → that class's instance selectors; and a session local
+/// → its value's instance selectors. Complex receivers (`@ivar`, chained sends, `(expr)`,
+/// and other literals like lists/maps/sets/regex) return `None`.
+fn receiver_selectors<'i>(
+    line: &str,
+    bytes: &[u8],
+    dot: usize,
+    index: &'i CompletionIndex,
+) -> Option<&'i Vec<String>> {
+    // Identifier / keyword / integer-literal receiver: the run of identifier bytes before `.`.
+    let rstart = ident_start(bytes, dot);
+    let recv = &line[rstart..dot];
+    if !recv.is_empty() {
+        // Preceded by `@`/`.`/`)`/`]`/`}` → a sub-expression we can't type without evaluating.
+        if rstart > 0 && matches!(bytes[rstart - 1], b'@' | b'.' | b')' | b']' | b'}') {
+            return None;
+        }
+        // A class name used as a value → class-side; a typed literal → instance-side; a
+        // session local → its value's instance-side.
+        if let Some(sels) = index.class_side.get(recv) {
+            return Some(sels);
+        }
+        if let Some(cls) = literal_class(recv) {
+            return index.instance_side.get(cls);
+        }
+        return index
+            .local_class
+            .get(recv)
+            .and_then(|c| index.instance_side.get(c));
+    }
+    // Non-identifier receiver: a string literal closes with `'` immediately before the `.`
+    // (`'abc'.`, `''.`, `#tag'abc'.`). Best-effort — completion is advisory.
+    if dot > 0 && bytes[dot - 1] == b'\'' {
+        return index.instance_side.get("String");
+    }
+    None
+}
+
+/// The class of a receiver written as a bare keyword/integer literal: all-digits → `Integer`,
+/// `true`/`false` → `Boolean`, `nil` → `Nil`. (`self`/`super` have no statically-known class.)
+fn literal_class(recv: &str) -> Option<&'static str> {
+    if recv.bytes().all(|b| b.is_ascii_digit()) {
+        return Some("Integer");
+    }
+    match recv {
+        "true" | "false" => Some("Boolean"),
+        "nil" => Some("Nil"),
+        _ => None,
+    }
 }
 
 /// Sorted, de-duplicated members of `items` that start with `prefix`.
