@@ -315,6 +315,19 @@ JetBrains/nvim-dap integration rides on the existing language server + VSCode pl
 
 ## Deferred / open
 
+- **Highlight pretty-printed debugger output (REPL parity)** — `debug_render` renders values with
+  `pretty::render(value, width, /*colorize=*/false)`, so the break-on-throw banner, `$print`, and
+  `$locals` print uncolored while the REPL syntax-highlights the same pretty output. Pass
+  `colorize` through from `options.supports_color` (already threaded for source windows) so e.g.
+  the `AmbiguousMethodError{ @message: … @payload: nil }` banner is highlighted like the REPL.
+  Pure-rendering change; `pretty::render` already takes the flag. Mind the banner is built in
+  `debug_check_throw` (one render) and the focus inspect paths in `debug_cli.rs` (the others).
+- **`$ex` — reference the thrown exception at a break-on-throw pause** — when stopped on an
+  exception, expose the thrown object as `$ex` so `$print $ex`, `$ex.payload`, `$ex.message`,
+  etc. resolve against it. The value is already materialized in `debug_check_throw`
+  (`active_exception`, or `quoinerror_to_value` for a structured error); stash it on `DebugState`
+  for the duration of the throw pause (alongside `at_throw`, cleared on resume) and resolve
+  `$ex`/`ex` in `print_expr` / the eval-in-frame path (as a binding, like the frame's locals).
 - **Break on *uncaught* exception (true last-chance)** — Slice 4 is type-filtered *first-chance*,
   which deliberately avoids predicting caught-vs-uncaught. A real "uncaught-only" mode is hard:
   whether a `catch:` keeps an exception is dynamic (a typed/declining handler, or a re-raise in
