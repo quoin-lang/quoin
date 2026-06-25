@@ -1,8 +1,12 @@
 use crate::arg;
 use crate::error::QuoinError;
 use crate::recv;
+use crate::runtime::compress;
 use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};
+use crate::vm::VmState;
+
+use gc_arena::Mutation;
 
 /// The `Bytes` class — immutable binary data (Stage 3a). The raw `Vec<u8>` lives in
 /// `ObjectPayload::Bytes`; this is the QN-facing surface. Text crosses at the edges
@@ -104,10 +108,44 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             let bytes = recv!(receiver, Bytes);
             Ok(vm.new_string(mc, String::from_utf8_lossy(bytes.as_slice()).into_owned()))
         })
+        // Content-Encoding (de)compression — gzip + deflate (flate2/miniz_oxide) and zstd
+        // decode (ruzstd), all pure Rust. Malformed input throws a catchable ParseError.
+        // zstd encode is intentionally absent (no pure-Rust compressor; see compress.rs).
+        .instance_method("decodeGz", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "decodeGz", compress::gzip_decode)
+        })
+        .instance_method("encodeGz", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "encodeGz", compress::gzip_encode)
+        })
+        .instance_method("decodeDeflate", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "decodeDeflate", compress::deflate_decode)
+        })
+        .instance_method("encodeDeflate", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "encodeDeflate", compress::deflate_encode)
+        })
+        .instance_method("decodeZstd", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "decodeZstd", compress::zstd_decode)
+        })
         // s -> the inspect string: length + a short hex preview.
         .instance_method("s", |vm, mc, receiver, _args| {
             Ok(vm.new_string(mc, format!("{}", receiver)))
         })
+}
+
+/// Run a `&[u8] -> Result<Vec<u8>, String>` codec over the receiver Bytes, returning a new
+/// Bytes; a codec error becomes a catchable `ParseError` tagged with the method name.
+fn run_codec<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+    label: &str,
+    f: impl Fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> Result<Value<'gc>, QuoinError> {
+    let bytes = recv!(receiver, Bytes).to_vec();
+    match f(&bytes) {
+        Ok(out) => Ok(vm.new_bytes(mc, out)),
+        Err(msg) => Err(QuoinError::ParseError(format!("Bytes.{label}: {msg}"))),
+    }
 }
 
 fn type_error(expected: &str, got: &Value) -> QuoinError {

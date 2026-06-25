@@ -177,18 +177,37 @@ streams, and `TcpListener` servers. These are the deferred refinements — none 
 core, and each fits the existing narrow-waist seam (a thin backend op + a QN class, or pure
 Quoin over the current sockets/streams).
 
-- [ ] **HTTP client refinements.** Keep-alive / connection pooling (a *stateful* client as
-  an instance of `[HTTP]Client` — the class-side facade was kept thin for exactly this),
-  redirects (3xx + `Location`), cookies, and `Content-Encoding` (gzip/deflate, e.g. via
-  `flate2`). All pure Quoin over the existing sockets/streams except the gzip decode (one
-  native helper or a `flate2` stream wrapper). See `qnlib/net/http.qn`.
-- [ ] **Streaming chunked HTTP responses (lazy generator).** `send` decodes
-  `Transfer-Encoding: chunked` by buffering the whole body into one `Bytes`. Offer an
-  alternative that exposes the body as a **lazy generator over each chunk** — yielding each
-  decoded chunk as it arrives instead of buffering all of it, with the response headers
-  attached (and any trailer headers after the terminating `0\r\n`). Lets a caller stream a
-  large or unbounded response without holding it all in memory. Built on the Stage 6 streams
-  + the `Generator`/`Iterator` machinery (`qnlib/core/02-iterate.qn`).
+- [ ] **HTTP client refinements.** Remaining: keep-alive / connection pooling (a *stateful*
+  client as an instance of `[HTTP]Client` — the class-side facade was kept thin for exactly
+  this), and cookies. All pure Quoin over the existing sockets/streams. See `qnlib/net/http.qn`.
+  - [x] **`Content-Encoding`** — transparent on responses (gzip / x-gzip / deflate / zstd),
+    with `Accept-Encoding: gzip, zstd` advertised by default and decode-on-drain. Backed by
+    new `Bytes` methods (`decodeGz`/`encodeGz`, `decodeDeflate`/`encodeDeflate`, `decodeZstd`)
+    over `src/runtime/compress.rs` (flate2 miniz_oxide + ruzstd; pure Rust, no C toolchain).
+  - [x] **Redirects** (3xx + `Location`) — followed by default, opt out with
+    `[HTTP]Request.followRedirects:false` (+ `maxRedirects:`). 307/308 preserve method+body;
+    303 and 301/302-from-POST downgrade to GET. Absolute / root-relative / path-relative
+    `Location` resolution. `resolveLocation:against:`, `[HTTP]Response.redirect?`/`location`.
+- [x] **Streaming chunked HTTP responses (lazy generator).** `send` returns a stream-backed
+  `[HTTP]Body` over a non-scoped `ByteStream` (the socket stays open, owned by the body).
+  Drain with `.text`/`.json`/`.bytes`, or stream with `.chunks`/`.each:` — a lazy `Generator`
+  yielding one `[HTTP]Body` chunk per pull (chunked / Content-Length / close framing), each
+  carrying its chunk-extension metadata on `chunk.meta`. The socket closes on drain / full
+  iteration / `.close` / GC. `qnlib/net/http.qn`.
+  - [x] **Content-decoded streaming.** A content-encoded body can't be decoded
+    chunk-by-chunk with the one-shot codecs (a transfer-chunk isn't a complete gzip/zstd
+    frame), so `.chunks`/`.each:` drain+decode the whole entity and yield a single decoded
+    chunk; a non-encoded body still streams its raw transfer-chunks with per-chunk metadata.
+    The internal wire-framing generator is `[HTTP]Body.rawChunks`.
+  - [ ] Expose **trailer headers** (after the terminating `0\r\n`) — currently read and
+    discarded.
+  - [ ] **True per-chunk streaming decode** — incremental content-decode as chunks arrive,
+    via a streaming (`ByteStream`) decompressor (see the `gzip / zstd` streaming follow-up
+    below); today an encoded streamed body buffers the whole entity before decoding.
+- [x] **Unified `[HTTP]Body` + JSON.** One value object (bytes- or stream-backed) backs both
+  request and response bodies: `.bytes`/`.text`/`.json`/`.mediaType`/`.meta`. The polymorphic
+  `[HTTP]Request.body:` auto-encodes a Map/List to JSON (`Content-Type: application/json`) and
+  a String to bytes; responses auto-decode via `resp.body.json`. `qnlib/net/http.qn`.
 - [ ] **TLS server-side.** Pair with `TcpListener`: accept a `TcpSocket`, then upgrade it
   with a *server* handshake (a rustls `ServerConfig` built from a cert/key) — the mirror of
   `TlsSocket.wrap:host:`. Needs a config-loading surface plus a backend op (e.g.
@@ -413,8 +432,11 @@ deferred `Mirror` in `## REPL`.
   signatures (Ed25519).
 
 **Compression & archives**
-- [ ] ⭐ **gzip / zlib / deflate** (`flate2`) — one-shot + streaming over `Bytes`/streams.
-- [ ] ⭐ **zstd** (`zstd`).
+- [x] ⭐ **gzip / zlib / deflate** — one-shot (de)compression as `Bytes` methods
+  (`decodeGz`/`encodeGz`, `decodeDeflate`/`encodeDeflate`) via flate2's miniz_oxide backend
+  (pure Rust). `src/runtime/compress.rs`. Remaining: streaming (incremental) over a `ByteStream`.
+- [x] ⭐ **zstd** — decode via `ruzstd` (pure Rust) as `Bytes.decodeZstd`. Encode deferred (no
+  pure-Rust zstd compressor — would need the C `zstd` crate). `src/runtime/compress.rs`.
 - [ ] **tar** (`tar`) and **zip** (`zip`) — archive read/write.
 
 **System & process**
