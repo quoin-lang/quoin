@@ -62,6 +62,27 @@ end_of_record
 }
 
 #[test]
+fn to_cobertura_emits_valid_structure() {
+    let mut report = CoverageReport::default();
+    let f = report.files.entry("foo.qn".to_string()).or_default();
+    f.funcs
+        .insert("Foo#bar".to_string(), FnReport { line: 2, hits: 3 });
+    f.lines.insert(2, 3);
+    f.lines.insert(3, 0);
+
+    let xml = to_cobertura(&report);
+    assert!(xml.starts_with("<?xml version=\"1.0\" ?>"));
+    // overall: 2 lines, 1 hit -> rate 0.5
+    assert!(xml.contains("lines-valid=\"2\" lines-covered=\"1\""));
+    assert!(xml.contains("line-rate=\"0.5000\""));
+    assert!(xml.contains("<class name=\"foo.qn\" filename=\"foo.qn\""));
+    assert!(xml.contains("<method name=\"Foo#bar\""));
+    assert!(xml.contains("<line number=\"2\" hits=\"3\" branch=\"false\"/>"));
+    assert!(xml.contains("<line number=\"3\" hits=\"0\" branch=\"false\"/>"));
+    assert!(xml.trim_end().ends_with("</coverage>"));
+}
+
+#[test]
 fn to_lcov_handles_multiple_files() {
     let mut report = CoverageReport::default();
     report

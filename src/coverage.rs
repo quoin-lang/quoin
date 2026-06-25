@@ -75,11 +75,11 @@ impl CoverageState {
     }
 }
 
-/// The output format requested on the CLI. Only LCOV today; Cobertura XML is a
-/// fast-follow (the [`CoverageReport`] model is already format-agnostic).
+/// The output format requested on the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageFormat {
     Lcov,
+    Cobertura,
 }
 
 /// How a run should emit coverage, parsed from `--coverage[=fmt]` / `--coverage-out=PATH`.
@@ -243,6 +243,72 @@ pub fn to_lcov(report: &CoverageReport) -> String {
         ));
         out.push_str("end_of_record\n");
     }
+    out
+}
+
+fn rate(hit: usize, found: usize) -> f64 {
+    if found == 0 {
+        1.0
+    } else {
+        hit as f64 / found as f64
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Serialize a [`CoverageReport`] to the Cobertura XML format (consumed by GitLab CI,
+/// Jenkins, Codecov). Each source file becomes a `<class>`; we carry no branch data, so
+/// branch rates are 0. `timestamp` is fixed at 0 to keep the output deterministic.
+pub fn to_cobertura(report: &CoverageReport) -> String {
+    let (found, hit) = report.line_totals();
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" ?>\n");
+    out.push_str(
+        "<!DOCTYPE coverage SYSTEM \"http://cobertura.sourceforge.net/xml/coverage-04.dtd\">\n",
+    );
+    out.push_str(&format!(
+        "<coverage lines-valid=\"{found}\" lines-covered=\"{hit}\" line-rate=\"{:.4}\" \
+         branches-valid=\"0\" branches-covered=\"0\" branch-rate=\"0\" complexity=\"0\" \
+         version=\"0\" timestamp=\"0\">\n",
+        rate(hit, found)
+    ));
+    out.push_str("  <sources>\n    <source>.</source>\n  </sources>\n");
+    out.push_str(&format!(
+        "  <packages>\n    <package name=\"qnlib\" line-rate=\"{:.4}\" branch-rate=\"0\" complexity=\"0\">\n      <classes>\n",
+        rate(hit, found)
+    ));
+    for (file, fr) in &report.files {
+        let cl_found = fr.lines.len();
+        let cl_hit = fr.lines.values().filter(|&&h| h > 0).count();
+        let f = xml_escape(file);
+        out.push_str(&format!(
+            "        <class name=\"{f}\" filename=\"{f}\" line-rate=\"{:.4}\" branch-rate=\"0\" complexity=\"0\">\n",
+            rate(cl_hit, cl_found)
+        ));
+        out.push_str("          <methods>\n");
+        for (name, fr_fn) in &fr.funcs {
+            out.push_str(&format!(
+                "            <method name=\"{}\" signature=\"\" line-rate=\"{:.1}\" branch-rate=\"0\">\n              <lines>\n                <line number=\"{}\" hits=\"{}\"/>\n              </lines>\n            </method>\n",
+                xml_escape(name),
+                if fr_fn.hits > 0 { 1.0 } else { 0.0 },
+                fr_fn.line,
+                fr_fn.hits
+            ));
+        }
+        out.push_str("          </methods>\n          <lines>\n");
+        for (line, count) in &fr.lines {
+            out.push_str(&format!(
+                "            <line number=\"{line}\" hits=\"{count}\" branch=\"false\"/>\n"
+            ));
+        }
+        out.push_str("          </lines>\n        </class>\n");
+    }
+    out.push_str("      </classes>\n    </package>\n  </packages>\n</coverage>\n");
     out
 }
 

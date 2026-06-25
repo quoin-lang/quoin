@@ -1133,14 +1133,18 @@ fn take_coverage_flags(
     vm_args: &mut Vec<String>,
     enabled: &mut bool,
     out: &mut Option<String>,
+    format: &mut crate::coverage::CoverageFormat,
 ) {
+    use crate::coverage::CoverageFormat;
     for a in args {
         if a == "--coverage" {
             *enabled = true;
         } else if let Some(fmt) = a.strip_prefix("--coverage=") {
             *enabled = true;
-            if fmt != "lcov" {
-                eprintln!("qn: unsupported coverage format '{fmt}', using lcov");
+            match fmt {
+                "lcov" => *format = CoverageFormat::Lcov,
+                "cobertura" => *format = CoverageFormat::Cobertura,
+                other => eprintln!("qn: unsupported coverage format '{other}', using lcov"),
             }
         } else if let Some(path) = a.strip_prefix("--coverage-out=") {
             *enabled = true;
@@ -1174,6 +1178,7 @@ impl VmRunnerOptions {
         let mut break_on_throw = Vec::new();
         let mut coverage_enabled = false;
         let mut coverage_out = None;
+        let mut coverage_format = crate::coverage::CoverageFormat::Lcov;
 
         if let Some(arg) = args.get(1) {
             if arg == "highlight" {
@@ -1189,6 +1194,7 @@ impl VmRunnerOptions {
                     &mut vm_args,
                     &mut coverage_enabled,
                     &mut coverage_out,
+                    &mut coverage_format,
                 );
             } else if arg == "benchmark" {
                 mode = VmRunnerMode::Benchmark;
@@ -1233,12 +1239,13 @@ impl VmRunnerOptions {
                     &mut vm_args,
                     &mut coverage_enabled,
                     &mut coverage_out,
+                    &mut coverage_format,
                 );
             }
         }
 
         let coverage = coverage_enabled.then(|| crate::coverage::CoverageConfig {
-            format: crate::coverage::CoverageFormat::Lcov,
+            format: coverage_format,
             out: coverage_out,
         });
 
@@ -1576,7 +1583,7 @@ impl VmRunner {
         // Emit coverage after the run (all classes are loaded, all hits recorded),
         // regardless of pass/fail — a failing suite still wants its coverage.
         if let Some(cfg) = self.options.coverage.clone() {
-            let lcov = arena.mutate_root(|_mc, vm| {
+            let output = arena.mutate_root(|_mc, vm| {
                 let report = vm.build_coverage_report();
                 let (found, hit) = report.line_totals();
                 eprintln!(
@@ -1587,17 +1594,22 @@ impl VmRunner {
                         100.0 * hit as f64 / found as f64
                     }
                 );
-                crate::coverage::to_lcov(&report)
+                match cfg.format {
+                    crate::coverage::CoverageFormat::Lcov => crate::coverage::to_lcov(&report),
+                    crate::coverage::CoverageFormat::Cobertura => {
+                        crate::coverage::to_cobertura(&report)
+                    }
+                }
             });
             match &cfg.out {
                 Some(path) => {
-                    if let Err(e) = std::fs::write(path, &lcov) {
+                    if let Err(e) = std::fs::write(path, &output) {
                         eprintln!("qn: failed to write coverage to {path}: {e}");
                     } else {
                         eprintln!("coverage written to {path}");
                     }
                 }
-                None => print!("{lcov}"),
+                None => print!("{output}"),
             }
         }
 
