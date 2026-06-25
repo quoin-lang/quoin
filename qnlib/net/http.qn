@@ -35,6 +35,17 @@
             };
             ^nil
         };
+
+        "* Decode a body per its Content-Encoding: gzip / x-gzip, deflate, or zstd.
+        "* Identity or an unrecognized coding returns the bytes unchanged. Picks the
+        "* first recognized coding mentioned (a comma-list of codings is rare).
+        decodeBody:encoding: -> { |bytes enc|
+            e = enc.lower;
+            (e.contains?:'gzip').if:{ ^^bytes.decodeGz };
+            (e.contains?:'zstd').if:{ ^^bytes.decodeZstd };
+            (e.contains?:'deflate').if:{ ^^bytes.decodeDeflate };
+            ^bytes
+        };
     };
 
     status -> { @status };
@@ -112,6 +123,10 @@
         head = @method + ' ' + path + ' HTTP/1.1\r\n';
         head = head + 'Host: ' + hostHeader + '\r\n';
         @headers.each:{ |pair| head = head + (pair.at:0) + ': ' + (pair.at:1) + '\r\n' };
+        "* Advertise the codings we can transparently decode, unless the caller set their own.
+        (@headers.any?:{ |p| (p.at:0).lower == 'accept-encoding' }).else:{
+            head = head + 'Accept-Encoding: gzip, zstd\r\n'
+        };
         @body.defined?.if:{ head = head + 'Content-Length: ' + (@body.count) + '\r\n' };
         head = head + 'Connection: close\r\n\r\n';
         bytes = head.asBytes;
@@ -159,6 +174,10 @@
                 cl = [HTTP]Response.find:headers named:'content-length';
                 cl.defined?.if:{ stream.readExactly:(cl.to_integer) } else:{ stream.readAll }
             };
+
+            "* Transparently decode a compressed body so `body`/`bodyText` present the entity.
+            ce = [HTTP]Response.find:headers named:'content-encoding';
+            body = ce.defined?.if:{ [HTTP]Response.decodeBody:body encoding:ce } else:{ body };
 
             [HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = body }
         }

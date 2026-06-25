@@ -51,6 +51,11 @@ webpki-roots = "0.26"
 # HTTP/1.1 response-head parsing for the (otherwise pure-Quoin) [HTTP] client. Same
 # runtime-independent parser hyper uses; operates on raw socket bytes, no stream layer.
 httparse = "1"
+# Content-Encoding (de)compression for the [HTTP] client, exposed as Bytes methods.
+# gzip + deflate via flate2's miniz_oxide backend (`rust_backend`); zstd *decode* via
+# ruzstd. Both pure Rust — no C toolchain dependency, matching the ring/jiff choices.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+ruzstd = "0.8"
 console = "0.15"
 mimalloc = { version = "0.1", optional = true }
 rustc-hash = "2"

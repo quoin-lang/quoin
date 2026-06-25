@@ -21,7 +21,28 @@ use std:net/http;
         r.method:'POST';
         r.body:'hi'.asBytes;
         .is:{ (r.requestBytes:'h' path:'/p').asStringLossy }
-            equalTo:'POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi';
+            equalTo:'POST /p HTTP/1.1\r\nHost: h\r\nAccept-Encoding: gzip, zstd\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi';
+    };
+
+    .test:
+    callerAcceptEncodingSuppressesDefault -> {
+        r = [HTTP]Request.new:{ url = 'http://h/p' };
+        r.header:'Accept-Encoding' value:'identity';
+        out = (r.requestBytes:'h' path:'/p').asStringLossy;
+        .isTrue:{ out.contains?:'Accept-Encoding: identity' };
+        .isFalse:{ out.contains?:'gzip' };
+    };
+
+    .test:
+    decodesContentEncoding -> {
+        "* decodeBody:encoding: inflates gzip/deflate; identity (or unknown) passes through.
+        "* zstd decode is covered by the Rust suite (no pure-Quoin zstd compressor to round-trip).
+        .is:{ ([HTTP]Response.decodeBody:('hello'.asBytes.encodeGz) encoding:'gzip').asString }
+            equalTo:'hello';
+        .is:{ ([HTTP]Response.decodeBody:('world'.asBytes.encodeDeflate) encoding:'deflate').asString }
+            equalTo:'world';
+        .is:{ ([HTTP]Response.decodeBody:('plain'.asBytes) encoding:'identity').asString }
+            equalTo:'plain';
     };
 
     .test:

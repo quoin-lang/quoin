@@ -71,6 +71,33 @@ fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
             "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".into(),
             b"closed-body".to_vec(),
         ),
+        "/gzip" => {
+            // Compress live with our own encoder so the client decodes what we produced.
+            let body = quoin::runtime::compress::gzip_encode(b"hello gzip world").unwrap();
+            (
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                ),
+                body,
+            )
+        }
+        "/zstd" => {
+            // A zstd frame of "hello zstd world" — no pure-Rust zstd compressor, so it is
+            // precomputed; the client decodes it via ruzstd.
+            let body = vec![
+                0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x58, 0x81, 0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f,
+                0x20, 0x7a, 0x73, 0x74, 0x64, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64, 0x7f, 0x81, 0x68,
+                0x60,
+            ];
+            (
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                ),
+                body,
+            )
+        }
         _ => (
             "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".into(),
             Vec::new(),
@@ -154,6 +181,14 @@ r3 = [HTTP]Client.get: base + '/close';
 r4 = [HTTP]Client.get: base + '/chunked';
 (r4.status == 200).else:{{ ok = false }};
 (r4.bodyText == 'Hello, world!').else:{{ ok = false }};
+
+"* gzip Content-Encoding (transparently decoded)
+r5 = [HTTP]Client.get: base + '/gzip';
+(r5.bodyText == 'hello gzip world').else:{{ ok = false }};
+
+"* zstd Content-Encoding (transparently decoded)
+r6 = [HTTP]Client.get: base + '/zstd';
+(r6.bodyText == 'hello zstd world').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
