@@ -179,12 +179,15 @@ Quoin over the current sockets/streams).
 
 - [ ] **HTTP client refinements.** Remaining: keep-alive / connection pooling (a *stateful*
   client as an instance of `[HTTP]Client` — the class-side facade was kept thin for exactly
-  this), redirects (3xx + `Location`), and cookies. All pure Quoin over the existing
-  sockets/streams. See `qnlib/net/http.qn`.
+  this), and cookies. All pure Quoin over the existing sockets/streams. See `qnlib/net/http.qn`.
   - [x] **`Content-Encoding`** — transparent on responses (gzip / x-gzip / deflate / zstd),
     with `Accept-Encoding: gzip, zstd` advertised by default and decode-on-drain. Backed by
     new `Bytes` methods (`decodeGz`/`encodeGz`, `decodeDeflate`/`encodeDeflate`, `decodeZstd`)
     over `src/runtime/compress.rs` (flate2 miniz_oxide + ruzstd; pure Rust, no C toolchain).
+  - [x] **Redirects** (3xx + `Location`) — followed by default, opt out with
+    `[HTTP]Request.followRedirects:false` (+ `maxRedirects:`). 307/308 preserve method+body;
+    303 and 301/302-from-POST downgrade to GET. Absolute / root-relative / path-relative
+    `Location` resolution. `resolveLocation:against:`, `[HTTP]Response.redirect?`/`location`.
 - [x] **Streaming chunked HTTP responses (lazy generator).** `send` returns a stream-backed
   `[HTTP]Body` over a non-scoped `ByteStream` (the socket stays open, owned by the body).
   Drain with `.text`/`.json`/`.bytes`, or stream with `.chunks`/`.each:` — a lazy `Generator`
