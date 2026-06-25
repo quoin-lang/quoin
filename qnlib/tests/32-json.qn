@@ -48,8 +48,8 @@
         .is:{ JSON.generate: true } equalTo:'true';
         .is:{ JSON.generate: nil } equalTo:'null';
         .is:{ JSON.generate: #(1 2 3) } equalTo:'[1,2,3]';
-        "* object keys emit in sorted order
-        .is:{ JSON.generate: #{'b': 2 'a': 1} } equalTo:'{"a":1,"b":2}';
+        "* object keys emit in insertion order (the Map preserves it)
+        .is:{ JSON.generate: #{'b': 2 'a': 1} } equalTo:'{"b":2,"a":1}';
         "* a non-serializable value errors rather than guessing
         .does:{ JSON.generate: 'x'.asBytes } throw:TypeError;
     };

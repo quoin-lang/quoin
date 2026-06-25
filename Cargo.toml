@@ -67,8 +67,11 @@ jiff = "0.2"
 base64 = "0.22"
 hex = "0.4"
 # JSON (and the structured Data formats), via serde. `arbitrary_precision` preserves a number's
-# raw text so out-of-range values fall back to BigInteger/BigDecimal losslessly.
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+# raw text so out-of-range values fall back to BigInteger/BigDecimal losslessly; `preserve_order`
+# keeps object key order (the Map type is insertion-ordered).
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+# Insertion-ordered map backing the Quoin `Map` type (so iteration/serialization preserve order).
+indexmap = "2"
 # serde core — the `DataValue` bridge hand-implements Serialize/Deserialize for the structured
 # formats (MessagePack/TOML/YAML) to share one tree. (Derive not needed.)
 serde = "1"

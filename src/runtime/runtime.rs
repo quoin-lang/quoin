@@ -9,7 +9,7 @@ use crate::value::{Block, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
 use gc_arena::{Gc, Mutation};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 pub fn build_runtime_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Runtime", Some("Object"))
@@ -32,7 +32,7 @@ pub fn build_runtime_class() -> NativeClassBuilder {
             Ok(vm.new_list(mc, args_list))
         })
         .class_method("options", |vm, mc, _receiver, _args| {
-            let mut map = HashMap::new();
+            let mut map = IndexMap::new();
             let args_list = vm
                 .options
                 .arguments

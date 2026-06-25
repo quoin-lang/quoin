@@ -318,10 +318,10 @@ Map <-- {
         fromPairs: -> { |pairs| pairs.reduce:{|m kvp| m.at:kvp.key put:kvp.value } into:#{} }
     }
 
-    "* Iterate in sorted key order for deterministic results."
+    "* Iterate in insertion order (the Map preserves it)."
     each: -> { |b|
         src = self;
-        .keys.sort.each:{ |k| b.valueWithSelfOrArg:(KeyValuePair.new:{ key = k; value = src.at:k }) }
+        .keys.each:{ |k| b.valueWithSelfOrArg:(KeyValuePair.new:{ key = k; value = src.at:k }) }
     }
 };
 

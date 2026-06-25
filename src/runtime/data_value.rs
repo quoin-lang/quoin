@@ -7,12 +7,12 @@ use crate::value::{ObjectPayload, Value};
 use crate::vm::VmState;
 
 use gc_arena::Mutation;
+use indexmap::IndexMap;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
-use std::collections::HashMap;
 use std::fmt;
 
 /// The neutral, GC-free data tree shared by the structured formats (MessagePack/TOML/YAML). It
@@ -47,7 +47,7 @@ fn unrepresentable(type_name: &str) -> QuoinError {
 
 /// Walk a Quoin value into a `DataValue` (the generate side). Errors on values with no data
 /// representation (Block, Symbol, a user instance, another native type like Duration/DateTime).
-/// Object pairs are sorted by key for deterministic output.
+/// Object pairs keep the Map's insertion order.
 pub fn value_to_data(v: Value) -> Result<DataValue, QuoinError> {
     match v {
         Value::Nil => Ok(DataValue::Null),
@@ -80,7 +80,6 @@ pub fn value_to_data(v: Value) -> Result<DataValue, QuoinError> {
                 for (k, val) in map {
                     pairs.push((k, value_to_data(val)?));
                 }
-                pairs.sort_by(|a, b| a.0.cmp(&b.0));
                 return Ok(DataValue::Object(pairs));
             }
             if let Ok(big) = v.with_native_state::<NativeBigInteger, _, _>(|d| d.0.clone()) {
@@ -119,7 +118,7 @@ pub fn data_to_value<'gc>(
             vm.new_list(mc, vals)
         }
         DataValue::Object(pairs) => {
-            let mut map = HashMap::with_capacity(pairs.len());
+            let mut map = IndexMap::with_capacity(pairs.len());
             for (k, val) in pairs {
                 map.insert(k.clone(), data_to_value(val, vm, mc)?);
             }

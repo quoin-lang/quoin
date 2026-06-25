@@ -7,39 +7,41 @@ use crate::vm::VmStatus;
 use gc_arena::Gc;
 use gc_arena::collect::{DynCollect, Trace};
 use gc_arena::lock::RefLock;
+use indexmap::IndexMap;
 use std::any::Any;
-use std::collections::HashMap;
 use std::mem::transmute;
 
+/// The `Map` store is an `IndexMap` — it preserves insertion order, so iteration, pretty-printing,
+/// and serialization (JSON/TOML/YAML/MessagePack) all keep the order keys were added in, and a
+/// parse → generate round-trip doesn't reshuffle a document.
 #[derive(Debug)]
 pub struct NativeMapState {
-    pub map: HashMap<String, Value<'static>>,
+    pub map: IndexMap<String, Value<'static>>,
 }
 
 impl NativeMapState {
-    pub fn new(map: HashMap<String, Value<'_>>) -> Self {
-        let map_static: HashMap<String, Value<'static>> = unsafe { transmute(map) };
+    pub fn new(map: IndexMap<String, Value<'_>>) -> Self {
+        let map_static: IndexMap<String, Value<'static>> = unsafe { transmute(map) };
         Self { map: map_static }
     }
 
-    pub fn get_map<'gc>(&self) -> &HashMap<String, Value<'gc>> {
+    pub fn get_map<'gc>(&self) -> &IndexMap<String, Value<'gc>> {
         unsafe { transmute(&self.map) }
     }
 
-    pub fn get_map_mut<'gc>(&mut self) -> &mut HashMap<String, Value<'gc>> {
+    pub fn get_map_mut<'gc>(&mut self) -> &mut IndexMap<String, Value<'gc>> {
         unsafe { transmute(&mut self.map) }
     }
 }
 
 impl PrettyPrint for NativeMapState {
     fn pp_shape<'gc>(&self) -> PpShape<'gc> {
-        // Sort by key so the dump is deterministic (the underlying map is unordered).
-        let mut entries: Vec<(String, Value<'gc>)> = self
+        // Insertion order (the map preserves it).
+        let entries: Vec<(String, Value<'gc>)> = self
             .get_map()
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
         PpShape::Entries {
             open: "#{",
             close: "}",

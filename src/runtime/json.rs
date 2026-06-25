@@ -8,10 +8,10 @@ use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
 
 use gc_arena::Mutation;
+use indexmap::IndexMap;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
 use serde_json::Value as Json;
-use std::collections::HashMap;
 
 /// A non-serializable Quoin value reached during `generate` — a clear TypeError naming the type.
 fn unserializable(type_name: &str) -> QuoinError {
@@ -114,7 +114,7 @@ fn json_to_value<'gc>(
             Ok(vm.new_list(mc, items))
         }
         Json::Object(obj) => {
-            let mut map = HashMap::with_capacity(obj.len());
+            let mut map = IndexMap::with_capacity(obj.len());
             for (k, val) in obj {
                 map.insert(k.clone(), json_to_value(val, vm, mc)?);
             }
