@@ -137,21 +137,22 @@ via `.pp` (the width-aware pretty-printer's `pp_shape` yields the DAP-style expa
 or `.s`, before serializing. References to the live `Value`s stay valid because **paused frames
 are GC roots**.
 
-## Evaluate-in-frame — two known blockers (both pre-existing TODOs)
+## Evaluate-in-frame — fully working (both prerequisites since fixed)
 
-"Evaluate this expression in frame N's scope" is the one capability not ready:
+"Evaluate this expression in frame N's scope" now resolves `self`, `@ivars`, *and* locals — so
+`$print @total + n` works. It rests on two fixes that the debugger forced, both since landed:
 
-- **`eval:bindings:` is unbuilt** (`QUOIN_TODO.md`). `Runtime.eval:` / `eval:self:` exist
-  (`src/runtime/runtime.rs:~14`) — so **instance-context eval (self + `@ivars`) works today** —
-  but neither injects the frame's *locals*. `eval:bindings:` (eval against a supplied
-  name→value map, seeded as locals) is the missing primitive; it's also a REPL-P3 dependency.
-- **The `Runtime.eval:` parse-panic** (`QUOIN_TODO.md`; `crates/quoin-syntax/src/pest/parser.rs:~88`).
-  `parse_quoin_string_named` panics on a syntax error; the fallible
-  `try_parse_quoin_string_named` exists but eval doesn't use it. A malformed watch expression
-  would crash the VM, so this must be fixed before exposing "evaluate."
+- ✅ **The `Runtime.eval:` parse-panic** — `compile_and_execute_source` uses the fallible
+  `try_parse_quoin_string_named` and maps to a catchable `ParseError`, so a malformed expression
+  can't crash the VM.
+- ✅ **`eval:self:` + `eval:bindings:`** — `eval:self:` now actually binds the receiver as the
+  eval'd code's `self` (the top-level `self = nil` init was clobbering it), and `eval:bindings:`
+  seeds a name→value map as locals (compiler told they're locals; values bound into a parent
+  env the eval'd frame walks into). `debug_eval` passes the focus frame's `self` *and* its locals
+  together, closing the gap.
 
-The debugger is a clean forcing function for both. Neither blocks the v0 stepping/inspection
-MVP — only watch expressions and conditional breakpoints.
+A bare local / `@ivar` still takes a side-effect-free **direct read** fast path; everything else
+evaluates with self + the frame's locals seeded.
 
 ## Async / scheduler interaction
 
@@ -169,7 +170,7 @@ MVP — only watch expressions and conditional breakpoints.
 
 ## Exception breakpoints — break on throw
 
-A flag to drop into the debugger when an exception is thrown: `qn --break-on-throw=Type[,Type…]`.
+A flag to drop into the debugger when an exception is thrown: `qn debug --break-on-throw=Type[,Type…]`.
 
 **The type filter is mandatory** — there is deliberately no bare "break on *every* throw" form.
 The suite throws constantly (every `does:throw:` assertion), so an unfiltered mode would be
@@ -191,9 +192,15 @@ There is no single *throw site* that sees both. But the VM's **lazy frame-poppin
 propagate without unwinding; `catch:` pops only when it actually catches — see the audit) gives
 two downstream chokepoints that see *both* kinds with **frames still live**:
 1. **`catch:`'s `Err` arm**, before its `while frames.len() > initial { pop }` — every *caught*
-   error (the throwing stack is intact; the innermost frame's `ip` still points at the throw);
+   error (the throwing stack is intact);
 2. **`run_vm_loop`'s uncaught-`Err` arm** (per task) — every *uncaught* error, frames intact
    because nothing popped them on the way up.
+
+At both, the innermost frame's `ip` has already advanced *past* the failing send (`exec_send`
+bumps the caller `ip` before dispatching), so the debugger displays the throw frame at `ip - 1` —
+the failing instruction — via `frame_display_ip`, matching `annotate_error`'s stack trace. A
+transient `DebugState.at_throw` flag (set in `debug_check_throw`, cleared on resume) selects this
+post-dispatch line for the throw pause; a normal breakpoint pause is pre-dispatch and uses `ip`.
 
 So the match runs at those two points, against the error's type — the value's class for a user
 throw, or the variant's mapped `Error` class for a structured one — and on a hit fires the
@@ -202,8 +209,10 @@ handling/propagation. This is effectively **first-chance** (we break at the near
 boundary or the top, an instant after the literal throw, but with the throw site still on the
 stack), and it is **uniform** across Rust- and Quoin-raised errors — exactly the requirement.
 
-A `DebugAction::ResumeThrow` distinguishes "continue from an exception pause" (re-raise and let
-the unwind proceed) from a breakpoint pause's plain "continue."
+No distinct "resume from a throw" action is needed: the pause sits *on* the in-flight `Err`
+(the checkpoint suspends without consuming it), so a plain `$continue` simply returns from the
+checkpoint and lets the error keep propagating/handling exactly as it would have. The transient
+`at_throw` flag is reset on resume so the next (non-throw) pause renders normally.
 
 **Not "uncaught-only."** This is type-filtered *first-chance*, which sidesteps caught-vs-uncaught
 prediction entirely. A true "break only on *uncaught*" mode is genuinely hard and deferred (see
@@ -256,9 +265,9 @@ self-contained. DAP itself commonly runs over stdio, sidestepping sockets entire
 - ✅ **Fix the `Runtime.eval:` parse-panic** — `compile_and_execute_source` now uses the fallible
   `try_parse_quoin_string_named` and maps to a catchable `ParseError` (Slice 0). Unblocks
   "evaluate" / watch expressions.
-- **Add `eval:bindings:`** — eval against a supplied name→value binding map, seeded as locals.
-  Unlocks evaluate-in-frame for *locals* (instance context already works via `eval:self:`). Still
-  pending — the remaining gap for full `$print`.
+- ✅ **`eval:self:` fix + `eval:bindings:`** — `eval:self:` now binds the receiver as the eval'd
+  code's `self`, and `eval:bindings:` seeds a name→value map as locals. `debug_eval` passes the
+  frame's self + locals, so `$print` over arbitrary frame state works.
 
 **v0 — CLI debugger, no wire protocol (the mechanism proof).** No socket, no DAP, no codec.
 - ✅ **Slice 1 — pause/step core.** `DebugState` (`Option`-gated on `VmState`) + the
@@ -282,16 +291,21 @@ self-contained. DAP itself commonly runs over stdio, sidestepping sockets entire
     and a marker on it — gdb/pdb-style — replacing the bare `→ paused at file:line`. Reuses the
     highlighted-snippet machinery (`get_highlighted_snippet`, already used by stack traces) shared
     with `$list`; a toggle (`$source on|off`, default on) for terse stepping.
-  - **3c — eval-in-frame.** Bare expr / `$print`/`$p` via `eval:self:` (self/`@ivars`/globals) +
-    a direct env lookup for bare locals; full locals once `eval:bindings:` lands. Plus the
-    inherited REPL `$`-commands (`$globals`/`$class`/`$inspect`).
-- **Slice 4 — exception breakpoints.** `qn --break-on-throw=Type[,…]` (mandatory type). Match the
-  propagating error's type at the two live-frame chokepoints (`catch:`'s `Err` arm and
-  `run_vm_loop`'s uncaught arm); on a hit, the same `DebugBreak` pause. `DebugAction::ResumeThrow`
-  for "continue from an exception pause". Uniform across user and structured errors. (See
-  *Exception breakpoints* above.)
+  - ✅ **3c — eval-in-frame.** Bare expr / `$print`/`$p`: a bare local / `@ivar` is read directly
+    (side-effect-free fast path); any other expression is evaluated with the frame's `self` bound
+    and its locals seeded as bindings, so `self`/`@ivars`/locals all resolve (`@total + n`). Needed
+    the `eval:self:` fix + `eval:bindings:` (both since landed; see *Evaluate-in-frame*).
+- ✅ **Slice 4 — exception breakpoints.** `qn debug --break-on-throw=Type[,…]` (mandatory type).
+  `debug_check_throw` matches the propagating error's type — hierarchy-aware, via the class chain
+  — at the two live-frame chokepoints (`catch:`/`catch:finally:`'s `Err` arm and `run_vm_loop`'s
+  uncaught arm); on a hit, the same `DebugBreak` pause (banner + full inspect/eval). Plain
+  `$continue` resumes the error's normal handling/propagation — no distinct resume action is
+  needed, since the pause sits *on* the in-flight `Err` and returning from the checkpoint lets it
+  keep flowing. Uniform across user throws (`active_exception`) and structured errors
+  (`quoinerror_to_value`). (See *Exception breakpoints* above.)
 - *Test:* `.qn` fixtures driven by scripted command sequences — breakpoints + stepping (done in
-  Slices 1–2), and an exception-break fixture.
+  Slices 1–2), and the exception-break path (`break_on_throw_pauses_at_the_throw_site` /
+  `_ignores_a_non_matching_type`, plus the `--break-on-throw` flag parse).
 
 **v1 — DAP adapter.** A Debug Adapter (in the language-server repo or as `qn debug --dap`)
 translating DAP ⟷ the v0 control API: `setBreakpoints`, `stackTrace`, `scopes`/`variables`
@@ -301,6 +315,19 @@ JetBrains/nvim-dap integration rides on the existing language server + VSCode pl
 
 ## Deferred / open
 
+- **Highlight pretty-printed debugger output (REPL parity)** — `debug_render` renders values with
+  `pretty::render(value, width, /*colorize=*/false)`, so the break-on-throw banner, `$print`, and
+  `$locals` print uncolored while the REPL syntax-highlights the same pretty output. Pass
+  `colorize` through from `options.supports_color` (already threaded for source windows) so e.g.
+  the `AmbiguousMethodError{ @message: … @payload: nil }` banner is highlighted like the REPL.
+  Pure-rendering change; `pretty::render` already takes the flag. Mind the banner is built in
+  `debug_check_throw` (one render) and the focus inspect paths in `debug_cli.rs` (the others).
+- **`$ex` — reference the thrown exception at a break-on-throw pause** — when stopped on an
+  exception, expose the thrown object as `$ex` so `$print $ex`, `$ex.payload`, `$ex.message`,
+  etc. resolve against it. The value is already materialized in `debug_check_throw`
+  (`active_exception`, or `quoinerror_to_value` for a structured error); stash it on `DebugState`
+  for the duration of the throw pause (alongside `at_throw`, cleared on resume) and resolve
+  `$ex`/`ex` in `print_expr` / the eval-in-frame path (as a binding, like the frame's locals).
 - **Break on *uncaught* exception (true last-chance)** — Slice 4 is type-filtered *first-chance*,
   which deliberately avoids predicting caught-vs-uncaught. A real "uncaught-only" mode is hard:
   whether a `catch:` keeps an exception is dynamic (a typed/declining handler, or a re-raise in

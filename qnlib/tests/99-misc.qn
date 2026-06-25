@@ -120,4 +120,34 @@
         "* ...but a nested ANSI argument is left alone, so its markup still renders.
         .is:{ (#ANSI'v=%' % #ANSI'$#bw[hi$]').string.contains?:'$#bw[hi$]' } equalTo:true;
     };
+
+    .test:
+    evalSelf -> {
+        "* `Runtime.eval:self:` binds the receiver as the eval'd code's `self`, so `self`,
+        "* `@ivars`, and `self.method` all resolve. Plain `eval:` keeps top-level `self` nil.
+        EvalSelfProbe <- { |@total|
+            init -> { @total = 7 }
+            double -> { @total * 2 }
+        };
+        b = EvalSelfProbe.new;
+        .is:{ Runtime.eval:'self' self:b } equalTo:b;
+        .is:{ Runtime.eval:'@total' self:b } equalTo:7;
+        .is:{ Runtime.eval:'@total + 1' self:b } equalTo:8;
+        .is:{ Runtime.eval:'self.double' self:b } equalTo:14;
+        "* no receiver → top-level `self` is nil (unchanged)
+        .is:{ Runtime.eval:'self' } equalTo:nil;
+    };
+
+    .test:
+    evalBindings -> {
+        "* `Runtime.eval:bindings:` seeds the map's entries as locals in the eval'd frame, so
+        "* the expression can reference them by name.
+        .is:{ Runtime.eval:'x + y' bindings:#{ 'x': 3 'y': 4 } } equalTo:7;
+        .is:{ Runtime.eval:'x * x' bindings:#{ 'x': 6 } } equalTo:36;
+        "* a binding shadows a same-named global
+        EvalBindShadow <- 99;
+        .is:{ Runtime.eval:'EvalBindShadow' bindings:#{ 'EvalBindShadow': 7 } } equalTo:7;
+        "* empty bindings still evaluates globals/literals
+        .is:{ Runtime.eval:'1 + 2' bindings:#{} } equalTo:3;
+    };
 }

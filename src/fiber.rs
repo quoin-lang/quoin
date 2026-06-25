@@ -112,7 +112,15 @@ pub fn run_vm_loop<'gc>(
             Ok(VmStatus::Yeeted(val)) => {
                 return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                // Break-on-throw: an exception is about to escape the task uncaught — its frames
+                // are still live (propagation doesn't pop them), so pause here if a debug session
+                // is watching its type, then let it propagate (the task ends).
+                if vm.has_break_on_throw() {
+                    vm.debug_check_throw(mc, &err);
+                }
+                return Err(err);
+            }
         }
     }
 }

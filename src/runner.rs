@@ -1119,6 +1119,8 @@ pub struct VmRunnerOptions {
     pub mode: VmRunnerMode,
     pub target_path: Option<String>,
     pub vm_options: VmOptions,
+    /// Exception types from `qn debug --break-on-throw=Type,…` (empty otherwise).
+    pub break_on_throw: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1141,6 +1143,7 @@ impl VmRunnerOptions {
         let mut mode = VmRunnerMode::Run;
         let mut target_path = None;
         let mut vm_args = Vec::new();
+        let mut break_on_throw = Vec::new();
 
         if let Some(arg) = args.get(1) {
             if arg == "highlight" {
@@ -1173,11 +1176,21 @@ impl VmRunnerOptions {
                     vm_args = args[3..].to_vec();
                 }
             } else if arg == "debug" {
-                // `qn debug <file>`: run the program under the interactive debugger.
+                // `qn debug [--break-on-throw=Type,…] <file> [vm-args…]`: run under the
+                // interactive debugger. The first non-flag arg is the file; the rest pass through.
                 mode = VmRunnerMode::Debug;
-                target_path = args.get(2).cloned();
-                if args.len() > 3 {
-                    vm_args = args[3..].to_vec();
+                for a in &args[2..] {
+                    if let Some(types) = a.strip_prefix("--break-on-throw=") {
+                        break_on_throw = types
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    } else if target_path.is_none() {
+                        target_path = Some(a.clone());
+                    } else {
+                        vm_args.push(a.clone());
+                    }
                 }
             } else {
                 mode = VmRunnerMode::Run;
@@ -1200,6 +1213,7 @@ impl VmRunnerOptions {
                 supports_color,
                 console_width: None,
             },
+            break_on_throw,
         }
     }
 }
@@ -1329,11 +1343,13 @@ impl VmRunner {
             };
             let block = build_block(mc, &sb);
             // Stop at entry: an armed `StepInto` halts at the first line start. Source is
-            // shown at each pause by default ($source off to silence).
+            // shown at each pause by default ($source off to silence). `--break-on-throw`
+            // types (if any) additionally pause at a matching throw.
             vm.debug = Some(DebugState {
                 interactive: true,
                 show_source: true,
                 step: Some(StepMode::Into),
+                break_on_throw: self.options.break_on_throw.iter().cloned().collect(),
                 ..Default::default()
             });
             vm.start_block(mc, block, Vec::new(), None, None);
@@ -1841,6 +1857,18 @@ mod tests {
         breakpoints: &[(&str, usize)],
         script: &[DebugAction],
     ) -> Vec<(String, usize)> {
+        run_debug_full(source, filename, breakpoints, &[], script)
+    }
+
+    /// Like [`run_debug`], but also arms break-on-throw for `break_on_throw` exception types.
+    /// Used to exercise the exception-breakpoint path end-to-end.
+    fn run_debug_full(
+        source: &str,
+        filename: &str,
+        breakpoints: &[(&str, usize)],
+        break_on_throw: &[&str],
+        script: &[DebugAction],
+    ) -> Vec<(String, usize)> {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, VmOptions::default());
             register_builtins(mc, &mut vm);
@@ -1873,6 +1901,7 @@ mod tests {
             }
             vm.debug = Some(DebugState {
                 breakpoints: bps,
+                break_on_throw: break_on_throw.iter().map(|s| s.to_string()).collect(),
                 script: VecDeque::from(script.to_vec()),
                 ..Default::default()
             });
@@ -1971,6 +2000,79 @@ y + 1
             &[DebugAction::StepOut, DebugAction::Continue],
         );
         assert_eq!(lines(&log), vec![2, 6]);
+    }
+
+    /// Break-on-throw pauses at the throw site with the throwing frame's stack still live.
+    /// The fixture throws `MessageNotUnderstood` on line 2 (inside a block run by `.catch:`),
+    /// caught on line 3. The pause must be logged at line 2 — the *failing* instruction — not
+    /// the block-epilogue line the throwing frame's already-advanced `ip` points at (the
+    /// `frame_display_ip` `ip - 1` adjustment). Hierarchy matching: `Error` matches the MNU
+    /// subclass. After `$continue`, the catch handler runs and the program completes.
+    #[test]
+    fn break_on_throw_pauses_at_the_throw_site() {
+        let source = "\
+r = {
+    nil.bogusMethod
+}.catch:{ |e| 0 };
+r
+";
+        let log = run_debug_full(
+            source,
+            "fixture.qn",
+            &[],
+            &["Error"],
+            &[DebugAction::Continue],
+        );
+        assert_eq!(log, vec![("fixture.qn".to_string(), 2)]);
+    }
+
+    /// A break-on-throw type that doesn't match the thrown exception's class (nor any ancestor)
+    /// never pauses — the throw propagates to its `catch:` untouched.
+    #[test]
+    fn break_on_throw_ignores_a_non_matching_type() {
+        let source = "\
+r = {
+    nil.bogusMethod
+}.catch:{ |e| 0 };
+r
+";
+        let log = run_debug_full(source, "fixture.qn", &[], &["TypeError"], &[]);
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn parse_debug_break_on_throw_flag() {
+        let args: Vec<String> = [
+            "qn",
+            "debug",
+            "--break-on-throw=TypeError, Error",
+            "file.qn",
+            "extra",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let opts = VmRunnerOptions::parse(&args);
+        assert!(matches!(opts.mode, VmRunnerMode::Debug));
+        assert_eq!(opts.target_path.as_deref(), Some("file.qn"));
+        // Comma-separated, whitespace-trimmed; the flag is consumed (not treated as the file).
+        assert_eq!(
+            opts.break_on_throw,
+            vec!["TypeError".to_string(), "Error".to_string()]
+        );
+        assert_eq!(opts.vm_options.arguments, vec!["extra".to_string()]);
+    }
+
+    #[test]
+    fn parse_debug_without_break_flag_has_no_break_on_throw() {
+        let args: Vec<String> = ["qn", "debug", "file.qn"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let opts = VmRunnerOptions::parse(&args);
+        assert!(matches!(opts.mode, VmRunnerMode::Debug));
+        assert_eq!(opts.target_path.as_deref(), Some("file.qn"));
+        assert!(opts.break_on_throw.is_empty());
     }
 
     #[test]

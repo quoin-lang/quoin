@@ -110,6 +110,11 @@ pub fn build_block_class() -> NativeClassBuilder {
                     Err(QuoinError::Cancelled)
                 }
                 Err(e) => {
+                    // Break-on-throw: pause here (throw-site frames still live) if a debug
+                    // session is watching for this error's type, before the frames are torn down.
+                    if vm.has_break_on_throw() {
+                        vm.debug_check_throw(mc, &e);
+                    }
                     let active_args = &vm.active_native_args.last().unwrap().args;
                     let catch_block = arg!(active_args, Block, 0);
                     while vm.frames.len() > initial_frame_count {
@@ -155,6 +160,10 @@ pub fn build_block_class() -> NativeClassBuilder {
                     Err(QuoinError::Cancelled)
                 }
                 Err(e) => {
+                    // Break-on-throw before the throw-site frames are torn down (see `catch:`).
+                    if vm.has_break_on_throw() {
+                        vm.debug_check_throw(mc, &e);
+                    }
                     while vm.frames.len() > initial_frame_count {
                         vm.frames.pop();
                     }

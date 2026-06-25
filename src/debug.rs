@@ -23,8 +23,9 @@
 
 use crate::error::QuoinError;
 use crate::fiber::YieldReason;
+use crate::highlighter::highlight_to_ansi;
 use crate::runtime::pretty;
-use crate::symbol::self_symbol;
+use crate::symbol::{Symbol, self_symbol};
 use crate::value::{SourceInfo, Value};
 use crate::vm::VmState;
 
@@ -89,6 +90,17 @@ pub struct DebugState {
     /// Whether to auto-print the source around the current line at each pause
     /// (`$source on|off`). `qn debug` sets it `true`; default `false`.
     pub show_source: bool,
+    /// Exception types to break on (`--break-on-throw=Type,…`). Empty ⇒ off. A thrown value
+    /// whose class is (a subclass of) any of these pauses the debugger at the throw site.
+    pub break_on_throw: HashSet<String>,
+    /// Set by `debug_check_throw` when a break-on-throw fires: a one-line description of the
+    /// exception, shown by `announce_pause` then cleared.
+    pub pause_throw: Option<String>,
+    /// Whether the current pause is a break-on-throw (post-dispatch): the throwing frame's `ip`
+    /// has already advanced past the failing send, so its displayed line uses `ip - 1` (the
+    /// failing instruction), matching `annotate_error`. Set in `debug_check_throw`, cleared on
+    /// resume by `apply_debug_action`. A normal breakpoint/step pause is pre-dispatch (`false`).
+    pub at_throw: bool,
     /// The non-interactive driver: actions applied at successive pauses (one popped per pause;
     /// empty ⇒ continue). The interactive frontend supplies actions from `$`-commands instead,
     /// but reuses the same [`VmState::apply_debug_action`] core.
@@ -233,6 +245,11 @@ impl<'gc> VmState<'gc> {
     /// single-steps from the current frame. Shared by the v0 script driver and Slice 3's
     /// interactive frontend.
     pub(crate) fn apply_debug_action(&mut self, action: DebugAction) {
+        // Leaving the pause: a throw pause (post-dispatch) is over, so the next pause is a
+        // normal pre-dispatch breakpoint/step until another break-on-throw fires.
+        if let Some(d) = self.debug.as_mut() {
+            d.at_throw = false;
+        }
         match action {
             DebugAction::Continue => {
                 if let Some(d) = self.debug.as_mut() {
@@ -257,14 +274,33 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    /// The source position of the instruction the top frame is about to execute (its
-    /// current `ip`), if mapped — used to label a pause.
+    /// The instruction index to *display* for frame `idx`. The innermost frame at a normal
+    /// (pre-dispatch) breakpoint/step pause is about to run `ip`, so its current line is
+    /// `source_map[ip]`. Every other case shows the *last-executed* instruction (`ip - 1`): a
+    /// caller frame sits at its live call site (`exec_send` bumps the caller's `ip` before
+    /// dispatching), and at a break-on-throw the innermost frame's `ip` has likewise advanced
+    /// past the failing send. This mirrors `annotate_error`'s `ip - 1` so a debugger location
+    /// at a throw matches the error trace.
+    fn frame_display_ip(&self, idx: usize) -> usize {
+        let ip = self.frames[idx].ip;
+        let is_innermost = idx + 1 == self.frames.len();
+        let at_throw = self.debug.as_ref().is_some_and(|d| d.at_throw);
+        if is_innermost && !at_throw {
+            ip
+        } else {
+            ip.saturating_sub(1)
+        }
+    }
+
+    /// The source position of the instruction the top frame is paused at, if mapped — used to
+    /// label a pause and as the default file for `$break LINE`. See [`Self::frame_display_ip`].
     pub(crate) fn debug_current_pos(&self) -> Option<(String, usize)> {
-        let frame = self.frames.last()?;
-        frame
+        let idx = self.frames.len().checked_sub(1)?;
+        let ip = self.frame_display_ip(idx);
+        self.frames[idx]
             .block
             .source_map
-            .get(frame.ip)
+            .get(ip)
             .and_then(|o| o.as_ref())
             .map(|si| (si.filename.clone(), si.line))
     }
@@ -305,7 +341,7 @@ impl<'gc> VmState<'gc> {
         let si = frame
             .block
             .source_map
-            .get(frame.ip)
+            .get(self.frame_display_ip(idx))
             .and_then(|o| o.as_ref())?;
         let label = frame
             .selector
@@ -401,9 +437,28 @@ impl<'gc> VmState<'gc> {
         borrowed.fields.get(slot).copied()
     }
 
+    /// The locals visible at frame `idx` as `(Symbol, Value)` bindings — its own bindings, then
+    /// up the lexical (closure) chain, inner shadowing outer, excluding `self`. Passed to
+    /// `debug_eval` so a `$print` expression can reference frame locals.
+    pub(crate) fn debug_frame_bindings(&self, idx: usize) -> Vec<(Symbol, Value<'gc>)> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut env = self.frames.get(idx).map(|f| f.env);
+        while let Some(e) = env {
+            let borrowed = e.borrow();
+            for (sym, val) in &borrowed.vars {
+                if *sym != self_symbol() && seen.insert(sym.as_str()) {
+                    out.push((*sym, *val));
+                }
+            }
+            env = borrowed.parent;
+        }
+        out
+    }
+
     /// Evaluate `expr` in the focus frame's context: a fresh compilation unit with `self_val`
-    /// bound as `self` (so `self`, `@ivars`, globals, and method calls resolve). Frame locals
-    /// are *not* visible (the `eval:bindings:` gap) — `$print` handles bare locals directly.
+    /// bound as `self` (so `self`/`@ivars`/`self.method` resolve) and `bindings` seeded as
+    /// locals (the frame's locals), so `$print` over arbitrary frame state works.
     ///
     /// Run isolated from the paused task: the debug session is suspended (so the eval's own
     /// execution doesn't re-trip the checkpoint) and the coroutine **yielder is cleared** so
@@ -417,23 +472,25 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         expr: &str,
         self_val: Option<Value<'gc>>,
+        bindings: &[(Symbol, Value<'gc>)],
     ) -> Result<Value<'gc>, String> {
         let saved_debug = self.debug.take();
         let saved_yielder = self.sched.yielder.take();
         let base_frames = self.frames.len();
         let base_stack = self.stack.len();
-        let outcome =
-            match crate::runtime::runtime::eval_string(self, mc, expr, "<debug>", self_val) {
-                Ok(v) => Ok(v),
-                // A `throw` in the expression: render the thrown value before it's cleared.
-                Err(QuoinError::Thrown) => {
-                    let thrown = self.active_exception;
-                    Err(thrown
-                        .map(|v| self.debug_render(v))
-                        .unwrap_or_else(|| "<thrown>".to_string()))
-                }
-                Err(e) => Err(format!("{e}")),
-            };
+        let outcome = match crate::runtime::runtime::eval_string(
+            self, mc, expr, "<debug>", self_val, bindings,
+        ) {
+            Ok(v) => Ok(v),
+            // A `throw` in the expression: render the thrown value before it's cleared.
+            Err(QuoinError::Thrown) => {
+                let thrown = self.active_exception;
+                Err(thrown
+                    .map(|v| self.debug_render(v))
+                    .unwrap_or_else(|| "<thrown>".to_string()))
+            }
+            Err(e) => Err(format!("{e}")),
+        };
         if outcome.is_err() {
             self.frames.truncate(base_frames);
             self.stack.truncate(base_stack);
@@ -442,6 +499,69 @@ impl<'gc> VmState<'gc> {
         self.sched.yielder = saved_yielder;
         self.debug = saved_debug;
         outcome
+    }
+
+    /// Whether an interactive session is watching for thrown exception types (`--break-on-throw`).
+    /// A cheap gate so the `catch:` / uncaught chokepoints cost ~nothing otherwise.
+    pub(crate) fn has_break_on_throw(&self) -> bool {
+        self.debug
+            .as_ref()
+            .is_some_and(|d| !d.break_on_throw.is_empty())
+    }
+
+    /// True if `val`'s class is (a subclass of) any of `names` — walking its class hierarchy.
+    fn debug_value_class_matches(&self, val: Value<'gc>, names: &HashSet<String>) -> bool {
+        let Some(mut class) = self.get_class_for_lookup(val) else {
+            // A primitive (a thrown String / Integer / …): match its class name directly.
+            return names.contains(&val.class_name());
+        };
+        loop {
+            let (cname, parent) = {
+                let cb = class.borrow();
+                (cb.name.name.clone(), cb.parent)
+            };
+            if names.contains(&cname) {
+                return true;
+            }
+            match parent {
+                Some(p) => class = p,
+                None => return false,
+            }
+        }
+    }
+
+    /// Break-on-throw checkpoint, called where an error is about to be caught (`catch:`) or to
+    /// escape uncaught (`run_vm_loop`) — both with the throw-site frames still live. If a debug
+    /// session is watching for the error's type, record a banner and pause via `DebugBreak`
+    /// (reusing the normal pause path); on `$continue` the throw resumes its normal course.
+    /// `Cancelled` / non-local-return are control flow, never exceptions — skipped.
+    pub(crate) fn debug_check_throw(&mut self, mc: &Mutation<'gc>, e: &QuoinError) {
+        if matches!(e, QuoinError::Cancelled | QuoinError::NonLocalReturn) {
+            return;
+        }
+        let names = match &self.debug {
+            Some(d) if !d.break_on_throw.is_empty() => d.break_on_throw.clone(),
+            _ => return,
+        };
+        // The thrown value: a user throw parks it in `active_exception`; a structured error is
+        // materialized to its typed `Error` object (so `TypeError` etc. match uniformly).
+        let val = match self.active_exception {
+            Some(v) => v,
+            None => self.quoinerror_to_value(mc, e),
+        };
+        if !self.debug_value_class_matches(val, &names) {
+            return;
+        }
+        let banner = format!("→ broke on throw: {}", self.debug_render(val));
+        if let Some(d) = self.debug.as_mut() {
+            d.pause_throw = Some(banner);
+            d.at_throw = true;
+        }
+        // Pause with frames intact (the same DebugBreak seam as a breakpoint). A clear of the
+        // checkpoint isn't needed — we don't re-enter here, and `$continue` resumes the throw.
+        if let Some(yielder) = unsafe { self.get_yielder() } {
+            yielder.suspend(YieldReason::DebugBreak);
+        }
     }
 
     /// Render a value the way the debugger displays it — structurally, via the pretty-printer
@@ -459,21 +579,34 @@ impl<'gc> VmState<'gc> {
         let si = frame
             .block
             .source_map
-            .get(frame.ip)
+            .get(self.frame_display_ip(idx))
             .and_then(|o| o.as_ref())?;
         let content = std::fs::read_to_string(&si.filename).ok()?;
-        let lines: Vec<&str> = content.lines().collect();
-        let cur = si.line; // 1-indexed
-        let lo = cur.saturating_sub(context).max(1);
-        let hi = (cur + context).min(lines.len());
-        let mut out = String::new();
-        for ln in lo..=hi {
-            let marker = if ln == cur { "→" } else { " " };
-            let text = lines.get(ln - 1).copied().unwrap_or("");
-            out.push_str(&format!("{marker} {ln:>4} │ {text}\n"));
-        }
-        Some(out)
+        Some(render_source_window(
+            &content,
+            si.line,
+            context,
+            self.options.supports_color,
+        ))
     }
+}
+
+/// Render the `context`-line window of `content` around 1-indexed line `cur`, with the current
+/// line marked. When `colorize`, the source is syntax-highlighted (the whole file is run through
+/// `highlight_to_ansi` once — ANSI codes carry no newlines, so the per-line split stays exact);
+/// the marker and line number stay uncolored. Pure, so it's unit-testable without a VM.
+fn render_source_window(content: &str, cur: usize, context: usize, colorize: bool) -> String {
+    let highlighted = colorize.then(|| highlight_to_ansi(content));
+    let lines: Vec<&str> = highlighted.as_deref().unwrap_or(content).lines().collect();
+    let lo = cur.saturating_sub(context).max(1);
+    let hi = (cur + context).min(lines.len());
+    let mut out = String::new();
+    for ln in lo..=hi {
+        let marker = if ln == cur { "→" } else { " " };
+        let text = lines.get(ln - 1).copied().unwrap_or("");
+        out.push_str(&format!("{marker} {ln:>4} │ {text}\n"));
+    }
+    out
 }
 
 #[cfg(test)]

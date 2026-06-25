@@ -312,13 +312,27 @@ impl Compiler {
     }
 
     pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, String> {
+        self.compile_program_with(program, true)
+    }
+
+    /// Compile a top-level program. `define_self` emits the default top-level `self = nil`;
+    /// pass `false` when the unit runs *as a method* with a receiver (`eval:self:`), where the
+    /// frame setup (`start_block_as_method`) binds `self` to the receiver — otherwise this
+    /// `self = nil` init would clobber it. `self` still compiles as a local either way
+    /// (`is_local` special-cases it), resolving through the env (receiver, or nil when unbound).
+    pub fn compile_program_with(
+        &mut self,
+        program: &ProgramNode,
+        define_self: bool,
+    ) -> Result<StaticBlock, String> {
         let mut cb = CodeBlock::new();
 
-        // Define default top-level self = nil
         cb.current_source = program.source_info.clone();
-        cb.push(Instruction::Push(Constant::Nil));
-        cb.push(Instruction::DefineLocal(Symbol::intern("self")));
-        self.scopes[0].locals.insert("self".to_string());
+        if define_self {
+            cb.push(Instruction::Push(Constant::Nil));
+            cb.push(Instruction::DefineLocal(Symbol::intern("self")));
+            self.scopes[0].locals.insert("self".to_string());
+        }
 
         let len = program.expressions.len();
         for (idx, expr) in program.expressions.iter().enumerate() {

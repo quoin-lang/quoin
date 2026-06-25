@@ -3,9 +3,33 @@
 //! the static line-start signal the checkpoint computes via `is_line_start`; here we pass it
 //! directly. The end-to-end pause/resume/step path is covered in `runner`'s tests.
 
-use super::{DebugState, StepMode, StepOrigin, is_line_start};
+use super::{DebugState, StepMode, StepOrigin, is_line_start, render_source_window};
 use crate::value::SourceInfo;
 use std::collections::{HashMap, HashSet};
+
+#[test]
+fn source_window_marks_current_line_and_colorizes_only_when_asked() {
+    let src = "a = 1;\nb = 2;\nc = 3;\nd = 4;\n";
+
+    // Plain: a ±1 window around line 2 → lines 1,2,3, line 2 marked, no ANSI.
+    let plain = render_source_window(src, 2, 1, false);
+    let lines: Vec<&str> = plain.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].starts_with(' ')); // line 1, not current
+    assert!(lines[1].starts_with('→')); // line 2, current
+    assert!(lines[2].starts_with(' ')); // line 3, not current
+    assert!(plain.contains("b = 2;"));
+    assert!(!plain.contains('\u{1b}')); // no escape codes when colorize = false
+
+    // Colorized: same marked structure, but with ANSI escapes from the highlighter.
+    let colored = render_source_window(src, 2, 1, true);
+    assert!(colored.contains('\u{1b}'));
+    assert!(colored.lines().nth(1).is_some_and(|l| l.starts_with('→')));
+    assert_eq!(colored.lines().count(), 3); // highlighting preserves the line split
+
+    // The window clamps at the file bounds.
+    assert_eq!(render_source_window(src, 1, 5, false).lines().count(), 4);
+}
 
 fn with_breakpoints(pairs: &[(&str, usize)]) -> DebugState {
     let mut breakpoints: HashMap<String, HashSet<usize>> = HashMap::new();
