@@ -648,13 +648,18 @@ deferred `Mirror` in `## REPL`.
 ## 10. Test Coverage
 - [ ] **Increase Code Coverage**:
   - Add more integration tests under `qnlib/tests/` to target uncovered parts of the compiler, runtime, and VM.
-- [ ] **Track Quoin-level (`.qn`) coverage, not just Rust-level.** `cargo cov` / `cargo cov-test`
-  (llvm-cov) only measure which *Rust* paths in the VM/runtime are exercised — they say nothing
-  about whether every method defined in the `qnlib` standard library actually gets called by the
-  suite. A pure-Quoin method (or an untaken branch inside one) can sit completely untested while
-  Rust coverage looks healthy, because the VM bytecode interpreter that runs it is itself well
-  covered. Need a way to measure coverage at the Quoin level — e.g. instrument method dispatch (or
-  the compiler) to record which selectors/methods and which source lines/branches in `.qn` files
-  are hit during a `qn test` run, then report the gaps. Would surface dead stdlib methods and
-  untested library branches that Rust coverage structurally can't see.
+- [x] **Track Quoin-level (`.qn`) coverage, not just Rust-level.** `cargo cov` / `cargo cov-test`
+  (llvm-cov) only measure which *Rust* paths in the VM/runtime are exercised, not whether every
+  `qnlib` method is actually called by the suite — a pure-Quoin method can sit untested while Rust
+  coverage looks healthy. Implemented in `src/coverage.rs`: `qn test --coverage[=lcov|cobertura]
+  [--coverage-out=PATH]` (also on `qn <file>`) records `.qn` line + function coverage by reusing
+  the debugger's line-map seam (one bool-load on the hot path when off), attributing hits per
+  executing block so defining a method doesn't count its body as run. Emits LCOV or Cobertura XML.
+  The first run flagged ~86 of 330 stdlib methods never exercised by the suite. Remaining:
+  - [ ] Branch coverage (taken/not-taken per conditional → LCOV `BRDA`); needs branch-site tagging
+    in the bytecode.
+  - [ ] The denominator is class methods only; file-level/top-level code and test-body blocks (not
+    reachable from the class registry) aren't enumerated. Walk loaded program blocks too.
+  - [ ] Per-tick filename hashing is fine for opt-in runs but could be interned if coverage ever
+    runs by default.
 
