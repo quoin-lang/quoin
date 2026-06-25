@@ -112,8 +112,11 @@ fn compile_and_execute_source<'gc>(
             ));
         }
     };
+    // When a `self` is supplied (`eval:self:`), don't emit the top-level `self = nil` default —
+    // the frame setup binds `self` to the receiver, so `self`/`@ivars`/`self.method` resolve in
+    // the eval'd code. Plain `eval:` / `use` (no receiver) keep `self == nil` at top level.
     let static_block = Compiler::new()
-        .compile_program(program_node)
+        .compile_program_with(program_node, self_val.is_none())
         .map_err(|e| QuoinError::ParseError(format!("Compilation error: {}", e)))?;
     let block = build_block(mc, &static_block);
     vm.execute_block(mc, block, Vec::new(), self_val)

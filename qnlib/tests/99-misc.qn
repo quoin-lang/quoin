@@ -120,4 +120,21 @@
         "* ...but a nested ANSI argument is left alone, so its markup still renders.
         .is:{ (#ANSI'v=%' % #ANSI'$#bw[hi$]').string.contains?:'$#bw[hi$]' } equalTo:true;
     };
+
+    .test:
+    evalSelf -> {
+        "* `Runtime.eval:self:` binds the receiver as the eval'd code's `self`, so `self`,
+        "* `@ivars`, and `self.method` all resolve. Plain `eval:` keeps top-level `self` nil.
+        EvalSelfProbe <- { |@total|
+            init -> { @total = 7 }
+            double -> { @total * 2 }
+        };
+        b = EvalSelfProbe.new;
+        .is:{ Runtime.eval:'self' self:b } equalTo:b;
+        .is:{ Runtime.eval:'@total' self:b } equalTo:7;
+        .is:{ Runtime.eval:'@total + 1' self:b } equalTo:8;
+        .is:{ Runtime.eval:'self.double' self:b } equalTo:14;
+        "* no receiver → top-level `self` is nil (unchanged)
+        .is:{ Runtime.eval:'self' } equalTo:nil;
+    };
 }
