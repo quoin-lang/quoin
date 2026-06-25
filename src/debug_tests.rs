@@ -1,9 +1,10 @@
-//! Unit tests for the pure pause-decision logic (`DebugState::should_pause`). No VM /
-//! arena needed — the whole point of keeping the decision pure. The `at_boundary` flag is
-//! the "just arrived at this line" signal the checkpoint computes; here we pass it
-//! directly. The end-to-end pause/resume path is covered in `runner`'s tests.
+//! Unit tests for the pure pause-decision logic (`should_pause` / `is_line_start`). No VM /
+//! arena needed — the whole point of keeping the decision pure. The `at_line_start` flag is
+//! the static line-start signal the checkpoint computes via `is_line_start`; here we pass it
+//! directly. The end-to-end pause/resume/step path is covered in `runner`'s tests.
 
-use super::{DebugState, StepMode, StepOrigin};
+use super::{DebugState, StepMode, StepOrigin, is_line_start};
+use crate::value::SourceInfo;
 use std::collections::{HashMap, HashSet};
 
 fn with_breakpoints(pairs: &[(&str, usize)]) -> DebugState {
@@ -89,15 +90,33 @@ fn a_breakpoint_wins_even_while_stepping_over_a_deeper_call() {
     assert!(d.should_pause(true, Some(("callee.qn", 5)), 7));
 }
 
+fn si(file: &str, line: usize) -> Option<SourceInfo> {
+    Some(SourceInfo {
+        filename: file.to_string(),
+        line,
+        column: 0,
+        start: 0,
+        end: 0,
+        source_text: None,
+    })
+}
+
 #[test]
-fn at_line_boundary_detects_line_file_and_frame_changes() {
-    let mut d = DebugState::default();
-    // No previous position: the first mapped instruction is always an arrival.
-    assert!(d.at_line_boundary(Some(("foo.qn", 3)), 1));
-    d.prev = Some(("foo.qn".to_string(), 3, 1));
-    assert!(!d.at_line_boundary(Some(("foo.qn", 3)), 1)); // same line, same frame
-    assert!(d.at_line_boundary(Some(("foo.qn", 4)), 1)); // line changed
-    assert!(d.at_line_boundary(Some(("bar.qn", 3)), 1)); // file changed
-    assert!(d.at_line_boundary(Some(("foo.qn", 3)), 2)); // same line, NEW frame (re-entry)
-    assert!(!d.at_line_boundary(None, 1)); // unmapped is never an arrival
+fn is_line_start_marks_the_first_instruction_of_each_line() {
+    // ip:  0          1          2          3      4          5
+    let map = vec![
+        si("f.qn", 1),
+        si("f.qn", 1),
+        si("f.qn", 2),
+        None,
+        si("f.qn", 2),
+        si("g.qn", 2),
+    ];
+    assert!(is_line_start(&map, 0)); // first instruction is always a line start
+    assert!(!is_line_start(&map, 1)); // same line as the previous instruction
+    assert!(is_line_start(&map, 2)); // line changed 1 → 2
+    assert!(!is_line_start(&map, 3)); // unmapped is never a line start
+    assert!(is_line_start(&map, 4)); // previous instruction unmapped ⇒ treat as a start
+    assert!(is_line_start(&map, 5)); // file changed (same line number, different file)
+    assert!(!is_line_start(&map, 99)); // out of range
 }

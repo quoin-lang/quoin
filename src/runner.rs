@@ -1692,17 +1692,20 @@ impl VmRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::debug::DebugState;
-    use std::collections::{HashMap, HashSet};
+    use crate::debug::{DebugAction, DebugState};
+    use std::collections::{HashMap, HashSet, VecDeque};
 
-    /// Run `source` to completion under the real scheduler with a debug session attached
-    /// (line `breakpoints` as `(file, line)`), returning the `pause_log` the v0 stub driver
-    /// recorded. Exercises the full mechanism end-to-end: the step-loop hook fires, suspends
-    /// via `DebugBreak`, the driver handles it, and the task resumes in place to completion.
-    fn run_with_breakpoints(
+    /// Run `source` to completion under the real scheduler with a debug session attached:
+    /// line `breakpoints` as `(file, line)`, and a `script` of actions applied at successive
+    /// pauses (one per pause; the run continues past any pause the script doesn't cover).
+    /// Returns the `pause_log`. Exercises the full mechanism end-to-end — the step-loop hook
+    /// fires, suspends via `DebugBreak`, the driver applies the action, and the task resumes
+    /// in place to completion.
+    fn run_debug(
         source: &str,
         filename: &str,
         breakpoints: &[(&str, usize)],
+        script: &[DebugAction],
     ) -> Vec<(String, usize)> {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, VmOptions::default());
@@ -1736,6 +1739,7 @@ mod tests {
             }
             vm.debug = Some(DebugState {
                 breakpoints: bps,
+                script: VecDeque::from(script.to_vec()),
                 ..Default::default()
             });
             vm.start_block(mc, block, Vec::new(), None, None);
@@ -1763,7 +1767,7 @@ a = dbl.value: 3;
 b = dbl.value: 4;
 a + b
 ";
-        let log = run_with_breakpoints(source, "fixture.qn", &[("fixture.qn", 2)]);
+        let log = run_debug(source, "fixture.qn", &[("fixture.qn", 2)], &[]);
         assert_eq!(
             log,
             vec![("fixture.qn".to_string(), 2), ("fixture.qn".to_string(), 2),],
@@ -1772,8 +1776,67 @@ a + b
 
     #[test]
     fn no_breakpoints_never_pauses() {
-        let log = run_with_breakpoints("x = 1;\ny = 2;\nx + y\n", "fixture.qn", &[]);
+        let log = run_debug("x = 1;\ny = 2;\nx + y\n", "fixture.qn", &[], &[]);
         assert!(log.is_empty());
+    }
+
+    /// A fixture with a helper called from the top level — exercises step-into / over / out.
+    /// Lines: 1 `f = { |n|`, 2 `a = n + 1;`, 3 `a * 2`, 4 `};`, 5 `x = 5;`,
+    /// 6 `y = f.value: x;`, 7 `y + 1`.
+    const STEP_FIXTURE: &str = "\
+f = { |n|
+    a = n + 1;
+    a * 2
+};
+x = 5;
+y = f.value: x;
+y + 1
+";
+
+    fn lines(log: &[(String, usize)]) -> Vec<usize> {
+        log.iter().map(|(_, l)| *l).collect()
+    }
+
+    #[test]
+    fn step_over_skips_the_call_and_advances_line_by_line() {
+        // Break at line 5; step-over to 6, then step-over the call on 6 (must NOT descend
+        // into f's body on lines 2-3) landing on 7; then continue.
+        let log = run_debug(
+            STEP_FIXTURE,
+            "fixture.qn",
+            &[("fixture.qn", 5)],
+            &[
+                DebugAction::StepOver,
+                DebugAction::StepOver,
+                DebugAction::Continue,
+            ],
+        );
+        assert_eq!(lines(&log), vec![5, 6, 7]);
+    }
+
+    #[test]
+    fn step_into_descends_into_the_called_block() {
+        // Break at the call site (line 6); step-into must stop at f's first body line (2).
+        let log = run_debug(
+            STEP_FIXTURE,
+            "fixture.qn",
+            &[("fixture.qn", 6)],
+            &[DebugAction::StepInto, DebugAction::Continue],
+        );
+        assert_eq!(lines(&log), vec![6, 2]);
+    }
+
+    #[test]
+    fn step_out_runs_to_the_caller() {
+        // Break inside f (line 2); step-out runs f to its return and stops back in the
+        // caller (the still-executing call site, line 6).
+        let log = run_debug(
+            STEP_FIXTURE,
+            "fixture.qn",
+            &[("fixture.qn", 2)],
+            &[DebugAction::StepOut, DebugAction::Continue],
+        );
+        assert_eq!(lines(&log), vec![2, 6]);
     }
 
     #[test]
