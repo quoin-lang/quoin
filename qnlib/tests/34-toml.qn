@@ -1,0 +1,40 @@
+"* TOML (src/runtime/toml_fmt.rs) over the DataValue bridge. TOML's top level must be a table, so
+"* generate: requires a Map; TOML has no null, so a nil errors.
+
+(TestSuite.new:{ name = 'TOML' }).add:{
+    .test:
+    parse -> {
+        d = TOML.parse:'name = "qn"\ncount = 3\nratio = 1.5\nok = true';
+        .is:{ d.at:'name' } equalTo:'qn';
+        .is:{ d.at:'count' } equalTo:3;
+        .is:{ d.at:'ratio' } equalTo:1.5;
+        .is:{ d.at:'ok' } equalTo:true;
+    };
+
+    .test:
+    nestedAndArrays -> {
+        d = TOML.parse:'[server]\nhost = "localhost"\nport = 8080\ntags = ["a", "b"]';
+        .is:{ (d.at:'server').at:'host' } equalTo:'localhost';
+        .is:{ (d.at:'server').at:'port' } equalTo:8080;
+        .is:{ (d.at:'server').at:'tags' } equalTo:#('a' 'b');
+    };
+
+    .test:
+    generate -> {
+        "* keys emit sorted; the result re-parses to the same data.
+        out = TOML.generate: #{'b': 2 'a': 1};
+        .is:{ (TOML.parse:out).at:'a' } equalTo:1;
+        .is:{ (TOML.parse:out).at:'b' } equalTo:2;
+    };
+
+    .test:
+    constraints -> {
+        "* the top-level value must be a table (Map)
+        .does:{ TOML.generate: 42 } throw:ValueError;
+        .does:{ TOML.generate: #(1 2 3) } throw:ValueError;
+        "* TOML has no null
+        .does:{ TOML.generate: #{'x': nil} } throw:ValueError;
+        "* malformed input
+        .does:{ TOML.parse:'= bad' } throw:ParseError;
+    };
+};

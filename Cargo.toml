@@ -74,6 +74,8 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 serde = "1"
 # MessagePack (binary) over the DataValue bridge.
 rmp-serde = "1"
+# TOML config files over the DataValue bridge.
+toml = "0.8"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to
