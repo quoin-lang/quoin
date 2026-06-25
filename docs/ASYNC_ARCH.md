@@ -1,10 +1,11 @@
 # Async I/O Architecture — bridging `async-io`/smol to Quoin Fibers
 
-Status: **Stages 0–7 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket` lands
+Status: **Stages 0–8 implemented** (`Bytes` + `TcpSocket` land Stage 3; `TlsSocket` lands
 Stage 4; `Async.timeout` is 5a; the `[HTTP]` client lands Stage 5; **Stage 6** is the lazy
 `ByteStream`/`StringStream` layers — which also unblocked chunked HTTP — and file streams;
-**Stage 7** is `TcpListener` — QN servers). The async-networking arc is feature-complete;
-remaining items are refinements. Companion to `USE_ARCH.md`. See the *Staged plan* below.
+**Stage 7** is `TcpListener` — QN servers; **Stage 8** is `Channel` — CSP message passing
+between tasks). The async-networking arc is feature-complete; remaining items are refinements.
+Companion to `USE_ARCH.md`. See the *Staged plan* below.
 
 ## Decision
 
@@ -638,6 +639,43 @@ straight through the native loop, closing the in-flight connection first), `port
 `qnlib/tests/24-server.qn` — a self-contained QN server + client on one scheduler (no
 external peer): `acceptOnce:` echo round-trip, and `acceptLoop:` handling two concurrent
 clients then breaking via `^^`; `Async.timeout:`-guarded so a regression can't hang the suite.
+
+**Stage 8 — channels (`Channel`). ✅ done.**
+CSP-style message passing between tasks (`src/runtime/channel.rs`): `Channel.new` is an
+unbuffered rendezvous, `Channel.buffered: n` queues up to `n` values; `send:`/`receive`/
+`each:`/`close`/`closed?`/`count`/`capacity`. The first stdlib concurrency primitive that is
+**pure in-VM coordination** — no I/O backend, no `IoRequest`/`SmolBackend` future — so it
+follows the `gather`/`join` park/wake model, *not* `await_io`:
+
+- **Park/wake.** A `send:`/`receive` with no ready counterpart registers the running task in
+  the channel's waiter queue and suspends with a new `YieldReason::ChannelPark` (the driver's
+  arm just parks the context, like `Join` — no backend op). A counterpart, or `close`, sets
+  that task's `Wake` and re-enqueues it to `ready`. Three new `Wake` variants carry the
+  outcome: `ChannelRecv { value }` (a receiver got a value), `ChannelSendOk` (a sender's value
+  was accepted), `ChannelClosed` (woken by `close`). Registration-then-suspend is atomic
+  (single-threaded, no yield between), exactly as `await_join` relies on.
+- **State lives in the channel object** — the buffer (`VecDeque<Value>`) and the sender/
+  receiver waiter queues — like `Map`/`Set`/`List`, *not* in the scheduler. So
+  `NativeChannelState::trace_gc` roots the buffered values and each parked sender's pending
+  value, and there is no reap/finalizer: when the channel object is collected, its queues go
+  with it. The store-before-park discipline keeps `no_gc_across_yield` clean (a value is moved
+  into native state before the suspend, never held on the native stack across it).
+- **Cancellation.** A channel-parked task matches none of `request_cancel`'s I/O/join branches,
+  so a new `Task.parked_on_channel` flag lets `cancel` make it runnable to observe the cancel.
+  Its entry in the channel's waiter queue can't be reached from `request_cancel` (no `mc`), so
+  it lingers as a **ghost** and is skipped when a counterpart next pops the queue (a waiter is
+  "live" only if `parked_on_channel && !cancel_requested`). Cancel wins over a pending delivery
+  — checked first on resume — consistent with `join`/`gather`.
+- **Semantics.** Receive on a closed *and* drained channel returns nil (and ends `each:`);
+  buffered values stay receivable after `close`; `send:` on a closed channel throws. `select`
+  over multiple channels, an `Iterate` mixin (draining is destructive), and deadlock detection
+  (a stuck main task exits silently, today's `break`-on-nothing-ready) are deferred.
+
+*Test:* `qnlib/tests/38-channels.qn` (rendezvous, buffered fill/drain, sender/receiver
+parking, fan-in, `close`+`each:`, cancellation, ghost recovery, `gather` producer/consumer,
+heap-churn GC) — green under normal, `QN_SCHED_STRESS`, and `QN_GC_STRESS`; a Rust `trace_gc`
+survival unit test in `vm_tests.rs`; and two soak phases (`channelPipeline`, `channelFanIn` in
+`qnlib/stress/async_soak.qn`) whose checksum is identical across every stress combination.
 
 ## Deferred / open
 
