@@ -23,6 +23,7 @@
 
 use crate::error::QuoinError;
 use crate::fiber::YieldReason;
+use crate::highlighter::highlight_to_ansi;
 use crate::runtime::pretty;
 use crate::symbol::self_symbol;
 use crate::value::{SourceInfo, Value};
@@ -462,18 +463,31 @@ impl<'gc> VmState<'gc> {
             .get(frame.ip)
             .and_then(|o| o.as_ref())?;
         let content = std::fs::read_to_string(&si.filename).ok()?;
-        let lines: Vec<&str> = content.lines().collect();
-        let cur = si.line; // 1-indexed
-        let lo = cur.saturating_sub(context).max(1);
-        let hi = (cur + context).min(lines.len());
-        let mut out = String::new();
-        for ln in lo..=hi {
-            let marker = if ln == cur { "→" } else { " " };
-            let text = lines.get(ln - 1).copied().unwrap_or("");
-            out.push_str(&format!("{marker} {ln:>4} │ {text}\n"));
-        }
-        Some(out)
+        Some(render_source_window(
+            &content,
+            si.line,
+            context,
+            self.options.supports_color,
+        ))
     }
+}
+
+/// Render the `context`-line window of `content` around 1-indexed line `cur`, with the current
+/// line marked. When `colorize`, the source is syntax-highlighted (the whole file is run through
+/// `highlight_to_ansi` once — ANSI codes carry no newlines, so the per-line split stays exact);
+/// the marker and line number stay uncolored. Pure, so it's unit-testable without a VM.
+fn render_source_window(content: &str, cur: usize, context: usize, colorize: bool) -> String {
+    let highlighted = colorize.then(|| highlight_to_ansi(content));
+    let lines: Vec<&str> = highlighted.as_deref().unwrap_or(content).lines().collect();
+    let lo = cur.saturating_sub(context).max(1);
+    let hi = (cur + context).min(lines.len());
+    let mut out = String::new();
+    for ln in lo..=hi {
+        let marker = if ln == cur { "→" } else { " " };
+        let text = lines.get(ln - 1).copied().unwrap_or("");
+        out.push_str(&format!("{marker} {ln:>4} │ {text}\n"));
+    }
+    out
 }
 
 #[cfg(test)]
