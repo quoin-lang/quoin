@@ -63,6 +63,26 @@ num-bigint = "0.4"
 num-traits = "0.2"
 # Date/time + durations backing the Time stdlib types (jiff: pure-Rust, IANA tzdb, RFC 3339).
 jiff = "0.2"
+# base64 / hex codecs for the Data formats stdlib.
+base64 = "0.22"
+hex = "0.4"
+# JSON (and the structured Data formats), via serde. `arbitrary_precision` preserves a number's
+# raw text so out-of-range values fall back to BigInteger/BigDecimal losslessly; `preserve_order`
+# keeps object key order (the Map type is insertion-ordered).
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+# Insertion-ordered map backing the Quoin `Map` type (so iteration/serialization preserve order).
+indexmap = "2"
+# serde core — the `DataValue` bridge hand-implements Serialize/Deserialize for the structured
+# formats (MessagePack/TOML/YAML) to share one tree. (Derive not needed.)
+serde = "1"
+# MessagePack (binary) over the DataValue bridge.
+rmp-serde = "1"
+# TOML config files over the DataValue bridge.
+toml = "0.8"
+# YAML over the DataValue bridge. serde_yaml is archived; serde_yaml_ng is the maintained fork.
+serde_yaml_ng = "0.10"
+# CSV (tabular text, RFC 4180). Not a DataValue format — rows of string fields.
+csv = "1"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

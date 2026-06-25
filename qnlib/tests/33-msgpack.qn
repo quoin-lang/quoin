@@ -1,0 +1,51 @@
+"* MessagePack (src/runtime/msgpack.rs) — binary serialization over the DataValue bridge. Unlike
+"* JSON it has a native bytes type, so Bytes round-trips. Big numbers beyond 64 bits fall back to a
+"* string (lossless as text).
+
+(TestSuite.new:{ name = 'MessagePack' }).add:{
+    .test:
+    roundTripScalars -> {
+        .is:{ MessagePack.unpack:(MessagePack.pack: 42) } equalTo:42;
+        .is:{ MessagePack.unpack:(MessagePack.pack: 3.5) } equalTo:3.5;
+        .is:{ MessagePack.unpack:(MessagePack.pack: 'hello') } equalTo:'hello';
+        .is:{ MessagePack.unpack:(MessagePack.pack: true) } equalTo:true;
+        .is:{ MessagePack.unpack:(MessagePack.pack: nil) } equalTo:nil;
+    };
+
+    .test:
+    roundTripStructures -> {
+        .is:{ MessagePack.unpack:(MessagePack.pack: #(1 2 3)) } equalTo:#(1 2 3);
+        m = MessagePack.unpack:(MessagePack.pack: #{'a': 1 'b': 2});
+        .is:{ m.at:'a' } equalTo:1;
+        .is:{ m.at:'b' } equalTo:2;
+        nested = MessagePack.unpack:(MessagePack.pack: #{'nums': #(1 2) 'ok': true});
+        .is:{ nested.at:'nums' } equalTo:#(1 2);
+        .is:{ nested.at:'ok' } equalTo:true;
+    };
+
+    .test:
+    bytesAreNative -> {
+        "* unlike JSON, MessagePack has a native bytes type, so Bytes round-trips.
+        packed = MessagePack.pack: 'binary data'.asBytes;
+        .is:{ packed } a:Bytes;
+        .is:{ MessagePack.unpack:packed } a:Bytes;
+        .is:{ (MessagePack.unpack:packed).asString } equalTo:'binary data';
+    };
+
+    .test:
+    bigNumbers -> {
+        "* a BigInteger within u64 round-trips as a BigInteger
+        .is:{ MessagePack.unpack:(MessagePack.pack:(BigInteger.of:'18000000000000000000')) }
+            equalTo:(BigInteger.of:'18000000000000000000');
+        "* beyond u64, the string fallback applies (lossless as text; comes back a String)
+        .is:{ MessagePack.unpack:(MessagePack.pack:(BigInteger.of:'99999999999999999999999999')) }
+            equalTo:'99999999999999999999999999';
+    };
+
+    .test:
+    output -> {
+        .is:{ MessagePack.pack: 42 } a:Bytes;
+        "* a Block has no data representation
+        .does:{ MessagePack.pack: { 1 } } throw:TypeError;
+    };
+};

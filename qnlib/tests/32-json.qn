@@ -1,0 +1,82 @@
+"* JSON parse/generate (src/runtime/json.rs). Numbers are classified into the narrowest *exact*
+"* Quoin type — Integer/BigInteger and Double/BigDecimal — so parsing never loses precision, and
+"* generate emits exact digits. Object keys emit in sorted order (Quoin Map iteration order).
+
+(TestSuite.new:{ name = 'JSON' }).add:{
+    .test:
+    parsePrimitives -> {
+        .is:{ JSON.parse:'42' } equalTo:42;
+        .is:{ JSON.parse:'42' } a:Integer;
+        .is:{ JSON.parse:'3.14' } equalTo:3.14;
+        .is:{ JSON.parse:'3.14' } a:Double;
+        .is:{ JSON.parse:'"hello"' } equalTo:'hello';
+        .is:{ JSON.parse:'true' } equalTo:true;
+        .is:{ JSON.parse:'false' } equalTo:false;
+        .is:{ JSON.parse:'null' } equalTo:nil;
+    };
+
+    .test:
+    parseStructures -> {
+        .is:{ JSON.parse:'[1, 2, 3]' } equalTo:#(1 2 3);
+        .is:{ (JSON.parse:'{"x": 42}').at:'x' } equalTo:42;
+        d = JSON.parse:'{"name": "qn", "nums": [1, 2], "ok": true}';
+        .is:{ d.at:'name' } equalTo:'qn';
+        .is:{ d.at:'nums' } equalTo:#(1 2);
+        .is:{ d.at:'ok' } equalTo:true;
+        "* empty containers round-trip
+        .is:{ JSON.generate:(JSON.parse:'{}') } equalTo:'{}';
+        .is:{ JSON.generate:(JSON.parse:'[]') } equalTo:'[]';
+    };
+
+    .test:
+    numberCorrectness -> {
+        "* integers beyond i64 -> BigInteger; the digits survive exactly.
+        big = JSON.parse:'99999999999999999999999999';
+        .is:{ big } a:BigInteger;
+        .is:{ big } equalTo:(BigInteger.of:'99999999999999999999999999');
+        "* a decimal beyond f64 precision -> BigDecimal.
+        .is:{ JSON.parse:'0.12345678901234567890123' } a:BigDecimal;
+        "* everyday decimals stay ordinary Doubles.
+        .is:{ JSON.parse:'0.1' } a:Double;
+        .is:{ JSON.parse:'2.5' } a:Double;
+    };
+
+    .test:
+    generate -> {
+        .is:{ JSON.generate: 42 } equalTo:'42';
+        .is:{ JSON.generate: 'hi' } equalTo:'"hi"';
+        .is:{ JSON.generate: true } equalTo:'true';
+        .is:{ JSON.generate: nil } equalTo:'null';
+        .is:{ JSON.generate: #(1 2 3) } equalTo:'[1,2,3]';
+        "* object keys emit in insertion order (the Map preserves it)
+        .is:{ JSON.generate: #{'b': 2 'a': 1} } equalTo:'{"b":2,"a":1}';
+        "* a non-serializable value errors rather than guessing
+        .does:{ JSON.generate: 'x'.asBytes } throw:TypeError;
+    };
+
+    .test:
+    roundTrip -> {
+        .is:{ JSON.generate:(JSON.parse:'{"a":1,"b":[2,3]}') } equalTo:'{"a":1,"b":[2,3]}';
+        "* the big-number fallbacks re-serialize losslessly
+        .is:{ JSON.generate:(JSON.parse:'99999999999999999999999999') }
+            equalTo:'99999999999999999999999999';
+        .is:{ JSON.generate:(BigInteger.of:'12345678901234567890') } equalTo:'12345678901234567890';
+    };
+
+    .test:
+    errors -> {
+        .does:{ JSON.parse:'{bad}' } throw:ParseError;
+        .does:{ JSON.parse:'[1, 2,' } throw:ParseError;
+        .does:{ JSON.parse:'not json' } throw:ParseError;
+    };
+
+    .test:
+    pretty -> {
+        v = #{'a': 1 'b': 2};
+        compact = JSON.generate: v;
+        pretty = JSON.generatePretty: v;
+        "* pretty output is valid JSON carrying the same data, just longer (indented).
+        .is:{ JSON.generate:(JSON.parse:pretty) } equalTo:compact;
+        .isTrue:{ pretty.length > compact.length };
+    };
+};

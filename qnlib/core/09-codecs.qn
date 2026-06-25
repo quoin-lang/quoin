@@ -1,0 +1,17 @@
+"* Convenience encode/decode methods over the native Base64/Hex codec classes
+"* (src/runtime/codecs.rs). Encoding is a really common operation, so the codecs are reachable
+"* directly off Bytes/String as well as via the static Base64/Hex classes.
+
+Bytes <-- {
+    "* This Bytes encoded as a base64 / hex String.
+    toBase64 -> { Base64.encode: self }
+    toHex -> { Hex.encode: self }
+};
+
+String <-- {
+    "* Decode this String, read as base64 / hex, back to Bytes.
+    fromBase64 -> { Base64.decode: self }
+    fromHex -> { Hex.decode: self }
+    "* Encode this String's UTF-8 bytes as a base64 String.
+    toBase64 -> { Base64.encode: self.asBytes }
+};

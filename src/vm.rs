@@ -20,6 +20,7 @@ use crate::value::{
 use crate::{ansi_colorizer, gc, gcl};
 
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use indexmap::IndexMap;
 use regex::Regex;
 use rustc_hash::FxHashMap;
 use std::collections::{HashMap, VecDeque};
@@ -437,7 +438,7 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
-    pub fn new_map(&self, mc: &Mutation<'gc>, map: HashMap<String, Value<'gc>>) -> Value<'gc> {
+    pub fn new_map(&self, mc: &Mutation<'gc>, map: IndexMap<String, Value<'gc>>) -> Value<'gc> {
         let class = self.builtin_cache.borrow().map_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Map"));
         let boxed_state: Box<dyn AnyCollect> = Box::new(NativeMapState::new(map));
@@ -2744,14 +2745,16 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::NewMap(n) => {
                 let n = *n;
-                let mut map = HashMap::new();
+                // Entries pop in reverse source order; collect, then insert reversed so the literal
+                // keeps its written key order (the Map is insertion-ordered).
+                let mut pairs: Vec<(String, Value)> = Vec::with_capacity(n);
                 for _ in 0..n {
                     let val = self.pop()?;
                     let key_val = self.pop()?;
                     if let Value::Object(obj) = key_val
                         && let ObjectPayload::String(s) = &obj.borrow().payload
                     {
-                        map.insert((**s).clone(), val);
+                        pairs.push(((**s).clone(), val));
                     } else {
                         return Err(QuoinError::TypeError {
                             expected: "String".to_string(),
@@ -2759,6 +2762,10 @@ impl<'gc> VmState<'gc> {
                             msg: format!("Map keys must be Strings, got: {:?}", key_val),
                         });
                     }
+                }
+                let mut map = IndexMap::with_capacity(n);
+                for (k, v) in pairs.into_iter().rev() {
+                    map.insert(k, v);
                 }
                 let map_val = self.new_map(mc, map);
                 self.push(map_val);

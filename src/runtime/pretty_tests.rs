@@ -128,9 +128,9 @@ fn pp_collections_quote_string_elements() {
 }
 
 #[test]
-fn pp_map_keys_quoted_and_sorted() {
-    // Keys sorted for determinism; entries render `'key': value`.
-    assert_eq!(pp("#{ 'b': 2 'a': 1 }.pp"), "#{'a': 1 'b': 2}");
+fn pp_map_keys_quoted_in_insertion_order() {
+    // The Map preserves insertion order; entries render `'key': value`.
+    assert_eq!(pp("#{ 'b': 2 'a': 1 }.pp"), "#{'b': 2 'a': 1}");
 }
 
 #[test]
