@@ -1,0 +1,117 @@
+"* Time Phase 2: zone-aware DateTime + the absolute Timestamp + TimeZone. Mostly deterministic
+"* via parse: with fixed strings (so no clock flakiness); `now` is checked loosely. DateTime
+"* comparison/equality are by instant (the underlying timestamp), regardless of zone.
+
+(TestSuite.new:{ name = 'TimeZone' }).add:{
+    .test:
+    lookup -> {
+        .is:{ (TimeZone.of:'America/New_York').name } equalTo:'America/New_York';
+        .is:{ TimeZone.utc.name } equalTo:'UTC';
+        .does:{ TimeZone.of:'Mars/Olympus' } throw:ValueError;
+    };
+
+    .test:
+    equality -> {
+        .isTrue:{ TimeZone.utc == TimeZone.utc };
+        .isFalse:{ TimeZone.utc == (TimeZone.of:'America/New_York') };
+        .isFalse:{ TimeZone.utc == 'UTC' };
+    };
+};
+
+(TestSuite.new:{ name = 'Timestamp' }).add:{
+    .test:
+    parseAndEpoch -> {
+        .is:{ (Timestamp.parse:'2024-01-01T00:00:00Z').asUnixSeconds } equalTo:1704067200;
+        .is:{ (Timestamp.fromUnixSeconds:1704067200).s } equalTo:'2024-01-01T00:00:00Z';
+        .does:{ Timestamp.parse:'not-a-time' } throw:ValueError;
+    };
+
+    .test:
+    arithmetic -> {
+        base = Timestamp.parse:'2024-01-01T00:00:00Z';
+        later = Timestamp.parse:'2024-01-01T01:00:00Z';
+        .is:{ (base + (Duration.hours:1)).asUnixSeconds } equalTo:1704070800;
+        .is:{ (later - base).asSeconds } closeTo:3600.0;   "* ts - ts -> Duration
+        .isTrue:{ base < later };
+        .is:{ (Timestamp.parse:'2024-01-01T00:00:00Z') == base } equalTo:true;
+    };
+
+    .test:
+    nowIsRecent -> {
+        .isTrue:{ Timestamp.now.asUnixSeconds > 1704067200 };
+    };
+
+    .test:
+    toZone -> {
+        "* midnight UTC is 19:00 the previous day in New York (EST).
+        .is:{ ((Timestamp.parse:'2024-01-01T00:00:00Z').inZone:(TimeZone.of:'America/New_York')).hour }
+            equalTo:19;
+    };
+};
+
+(TestSuite.new:{ name = 'DateTime' }).add:{
+    .test:
+    parseAndFormat -> {
+        "* RFC 9557 (RFC 3339 + [zone]) round-trips.
+        .is:{ (DateTime.parse:'2024-03-10T12:30:00-04:00[America/New_York]').s }
+            equalTo:'2024-03-10T12:30:00-04:00[America/New_York]';
+        .does:{ DateTime.parse:'nope' } throw:ValueError;
+    };
+
+    .test:
+    components -> {
+        d = DateTime.parse:'2024-03-10T12:30:45.123-04:00[America/New_York]';
+        .is:{ d.year } equalTo:2024;
+        .is:{ d.month } equalTo:3;
+        .is:{ d.day } equalTo:10;
+        .is:{ d.hour } equalTo:12;
+        .is:{ d.minute } equalTo:30;
+        .is:{ d.second } equalTo:45;
+        .is:{ d.nanosecond } equalTo:123000000;
+        .is:{ d.weekday } equalTo:'Sunday';
+        .is:{ d.timeZone.name } equalTo:'America/New_York';
+    };
+
+    .test:
+    absoluteArithmetic -> {
+        base = DateTime.parse:'2024-01-01T00:00:00Z[UTC]';
+        a = DateTime.parse:'2024-01-01T00:00:00Z[UTC]';
+        b = DateTime.parse:'2024-01-01T02:30:00Z[UTC]';
+        .is:{ (base + (Duration.hours:2)).hour } equalTo:2;
+        .is:{ (b - a).asMilliseconds } equalTo:9000000;   "* 2.5h
+        .isTrue:{ a < b };
+        "* the same instant in different zones compares equal (instant-based).
+        .isTrue:{ a == (a.inZone:(TimeZone.of:'Asia/Tokyo')) };
+        .isFalse:{ a == 5 };
+        "* arithmetic is Duration-only — a bare number is not understood.
+        .does:{ a + 1 } throw:MessageNotUnderstood;
+    };
+
+    .test:
+    calendarArithmetic -> {
+        "* +1 day across the US spring-forward keeps the 12:00 wall time (DST-aware).
+        .is:{ ((DateTime.parse:'2024-03-09T12:00:00-05:00[America/New_York]').plusDays:1).hour }
+            equalTo:12;
+        "* +1 month clamps Jan 31 -> Feb 29 (leap year).
+        .is:{ ((DateTime.parse:'2024-01-31T00:00:00Z[UTC]').plusMonths:1).day } equalTo:29;
+        "* +1 year clamps Feb 29 -> Feb 28.
+        .is:{ ((DateTime.parse:'2024-02-29T00:00:00Z[UTC]').plusYears:1).day } equalTo:28;
+        .is:{ ((DateTime.parse:'2024-06-15T00:00:00Z[UTC]').minusMonths:1).month } equalTo:5;
+        "* an absurd count errors rather than panicking jiff's Span.
+        .does:{ DateTime.nowUtc.plusYears:9999999 } throw:ArithmeticError;
+    };
+
+    .test:
+    zoneConversion -> {
+        "* midnight in New York (EST) is 14:00 the same day in Tokyo.
+        .is:{ ((DateTime.parse:'2024-01-01T00:00:00-05:00[America/New_York]')
+                .inZone:(TimeZone.of:'Asia/Tokyo')).hour }
+            equalTo:14;
+    };
+
+    .test:
+    nowWorks -> {
+        .isTrue:{ DateTime.nowUtc.year >= 2026 };
+        .is:{ DateTime.nowUtc.timeZone.name } equalTo:'UTC';
+    };
+};

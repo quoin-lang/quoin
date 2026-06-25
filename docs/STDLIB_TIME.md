@@ -1,8 +1,8 @@
 # Stdlib: Time — implementation outline
 
-Status: **Outline, not started.** Plan for the `## Standard Library → Time` bullets in
-`QUOIN_TODO.md`. Branch: `feat/stdlib-time`. **Phase 1 (Duration & monotonic clock) first**;
-Phase 2 (DateTime / Timestamp / TimeZone) is sketched for a follow-up. Crate: **jiff**. The value
+Status: **Phase 1 + Phase 2 done.** Plan for the `## Standard Library → Time` bullets in
+`QUOIN_TODO.md`. Branch: `feat/stdlib-time`. **Phase 1** (Duration & monotonic Instant) and
+**Phase 2** (DateTime / Timestamp / TimeZone) are both implemented. Crate: **jiff**. The value
 types follow the `BigDecimal`/`BigInteger` native-value-type pattern (`AnyCollect` +
 `new_native_state` + `with_native_state`; see `src/runtime/big_decimal.rs`).
 
@@ -71,17 +71,22 @@ Monotonic `Instant` is the one thing jiff doesn't cover (it's wall-clock by desi
 
 ---
 
-## Phase 2 — DateTime  (sketch; separate PR)
+## Phase 2 — DateTime  ✅ done
 
-- **`Timestamp`** (jiff `Timestamp`) — absolute UTC instant: `Timestamp.now`, epoch conversions,
-  RFC 3339, `± Duration`.
-- **`DateTime`** (jiff `Zoned`) — zone-aware, the primary calendar type: components
-  (`year`/`month`/`day`/`hour`/`minute`/`second`/`nanosecond`, `weekday`), RFC 3339 parse/format,
-  comparison, `± Duration` (absolute shift), and **calendar arithmetic via convenience methods**:
-  `plusDays:` / `plusWeeks:` / `plusMonths:` / `plusYears:` (+ `minus…`), backed by jiff `Span`
-  (end-of-month clamping, DST-correct "+1 day"), `.s`.
-- **`TimeZone`** — IANA lookup; `DateTime.now` (system zone), `.nowUtc`, convert between zones.
-- `dt2 - dt1` → `Duration` (absolute elapsed time).
+Three native value types (`src/runtime/{time_zone,timestamp,date_time}.rs`):
+
+- **`TimeZone`** (jiff `tz::TimeZone`) — `TimeZone.of: 'America/New_York'`, `.utc`, `.system`,
+  `.name`, `==:`, `.s`. IANA lookup via the system tzdb.
+- **`Timestamp`** (jiff `Timestamp`) — absolute UTC instant: `Timestamp.now`, `parse:` (RFC 3339),
+  `fromUnixSeconds:` / `fromUnixMilliseconds:`, `asUnixSeconds` / `asUnixMilliseconds`,
+  `± Duration`, `ts - ts → Duration`, `<:` / `==:`, `inZone:` / `utc` (→ DateTime), `.s` (RFC 3339).
+- **`DateTime`** (jiff `Zoned`) — zone-aware, the primary calendar type: `now` / `nowUtc` /
+  `nowIn:`, `parse:` (RFC 9557), components (`year`/`month`/`day`/`hour`/`minute`/`second`/
+  `nanosecond`, `weekday`, `timeZone`, `timestamp`), `.s`; `± Duration` (absolute), `dt - dt →
+  Duration`, `<:` / `==:` (by instant, zone-independent), `inZone:` (re-zone the same instant), and
+  **calendar arithmetic** `plusDays:`/`plusWeeks:`/`plusMonths:`/`plusYears:` (+ `minus…`) backed by
+  jiff `Span` — end-of-month clamping and DST-correct "+1 day" (counts guarded against jiff's `Span`
+  range so an absurd value errors rather than panicking). Tests: `qnlib/tests/30-datetime.qn`.
 
 **Deferred to its own TODO item:** civil `Date`/`Time` types, and a first-class `Span`/`Period`
 value type (ISO 8601 duration parsing like `P1Y2M`, mixed-unit arithmetic, calendar *diffs*). The
