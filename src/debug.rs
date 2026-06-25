@@ -25,7 +25,7 @@ use crate::error::QuoinError;
 use crate::fiber::YieldReason;
 use crate::highlighter::highlight_to_ansi;
 use crate::runtime::pretty;
-use crate::symbol::self_symbol;
+use crate::symbol::{Symbol, self_symbol};
 use crate::value::{SourceInfo, Value};
 use crate::vm::VmState;
 
@@ -402,9 +402,28 @@ impl<'gc> VmState<'gc> {
         borrowed.fields.get(slot).copied()
     }
 
+    /// The locals visible at frame `idx` as `(Symbol, Value)` bindings — its own bindings, then
+    /// up the lexical (closure) chain, inner shadowing outer, excluding `self`. Passed to
+    /// `debug_eval` so a `$print` expression can reference frame locals.
+    pub(crate) fn debug_frame_bindings(&self, idx: usize) -> Vec<(Symbol, Value<'gc>)> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut env = self.frames.get(idx).map(|f| f.env);
+        while let Some(e) = env {
+            let borrowed = e.borrow();
+            for (sym, val) in &borrowed.vars {
+                if *sym != self_symbol() && seen.insert(sym.as_str()) {
+                    out.push((*sym, *val));
+                }
+            }
+            env = borrowed.parent;
+        }
+        out
+    }
+
     /// Evaluate `expr` in the focus frame's context: a fresh compilation unit with `self_val`
-    /// bound as `self` (so `self`, `@ivars`, globals, and method calls resolve). Frame locals
-    /// are *not* visible (the `eval:bindings:` gap) — `$print` handles bare locals directly.
+    /// bound as `self` (so `self`/`@ivars`/`self.method` resolve) and `bindings` seeded as
+    /// locals (the frame's locals), so `$print` over arbitrary frame state works.
     ///
     /// Run isolated from the paused task: the debug session is suspended (so the eval's own
     /// execution doesn't re-trip the checkpoint) and the coroutine **yielder is cleared** so
@@ -418,23 +437,25 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         expr: &str,
         self_val: Option<Value<'gc>>,
+        bindings: &[(Symbol, Value<'gc>)],
     ) -> Result<Value<'gc>, String> {
         let saved_debug = self.debug.take();
         let saved_yielder = self.sched.yielder.take();
         let base_frames = self.frames.len();
         let base_stack = self.stack.len();
-        let outcome =
-            match crate::runtime::runtime::eval_string(self, mc, expr, "<debug>", self_val) {
-                Ok(v) => Ok(v),
-                // A `throw` in the expression: render the thrown value before it's cleared.
-                Err(QuoinError::Thrown) => {
-                    let thrown = self.active_exception;
-                    Err(thrown
-                        .map(|v| self.debug_render(v))
-                        .unwrap_or_else(|| "<thrown>".to_string()))
-                }
-                Err(e) => Err(format!("{e}")),
-            };
+        let outcome = match crate::runtime::runtime::eval_string(
+            self, mc, expr, "<debug>", self_val, bindings,
+        ) {
+            Ok(v) => Ok(v),
+            // A `throw` in the expression: render the thrown value before it's cleared.
+            Err(QuoinError::Thrown) => {
+                let thrown = self.active_exception;
+                Err(thrown
+                    .map(|v| self.debug_render(v))
+                    .unwrap_or_else(|| "<thrown>".to_string()))
+            }
+            Err(e) => Err(format!("{e}")),
+        };
         if outcome.is_err() {
             self.frames.truncate(base_frames);
             self.stack.truncate(base_stack);

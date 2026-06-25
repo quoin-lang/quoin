@@ -1,4 +1,4 @@
-//! Interactive `$`-command frontend for the debugger (`qn debug <file>`), Slice 3a.
+//! Interactive `$`-command frontend for the debugger (`qn debug <file>`).
 //!
 //! When a paused session is `interactive`, the driver (`drive_main_task`) bubbles a
 //! `DebugBreak` up as `RunStep::DebugPaused` and runs a command loop here: it reads a line
@@ -214,21 +214,21 @@ pub(crate) fn exec_command<'gc>(
     }
 }
 
-/// Show `expr` evaluated in the focus frame. A bare local, a bare `@ivar`, or `self` is read
-/// directly (the eval path can't see frame state); any other expression is evaluated against
-/// globals — so literals/globals work, but a compound expression referencing frame
-/// locals/`@ivars` resolves them to nil (the `eval:bindings:` / `eval:self:` gap).
+/// Show `expr` evaluated in the focus frame. A bare local / `@ivar` is read directly (a
+/// side-effect-free fast path); any other expression is evaluated with the frame's `self` bound
+/// and its locals seeded as bindings, so compound expressions over `self`/`@ivars`/locals (e.g.
+/// `@total + n`) resolve.
 fn print_expr<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, expr: &str) {
     let expr = expr.trim();
     let focus = vm.debug_focus();
-    // Bare local: `eval:self:` can't see frame locals, so look them up directly.
+    // Fast path for a bare local / `@ivar`: read it directly rather than re-entering the VM to
+    // eval (the eval path below would resolve these too, but a direct read has no side effects).
     if is_bare_ident(expr)
         && let Some(val) = focus.and_then(|f| vm.debug_lookup_local(f, expr))
     {
         println!("{}", vm.debug_render(val));
         return;
     }
-    // Bare instance variable: `eval:self:` doesn't expose `@ivars` either — read the field.
     if let Some(ivar) = expr.strip_prefix('@')
         && is_bare_ident(ivar)
         && let Some(val) = focus.and_then(|f| vm.debug_lookup_ivar(f, ivar))
@@ -236,8 +236,13 @@ fn print_expr<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, expr: &str) {
         println!("{}", vm.debug_render(val));
         return;
     }
+    // Any other expression: evaluate with the frame's `self` bound and its locals seeded as
+    // bindings, so `n + 1`, `@total + step`, `self.method`, etc. all resolve.
     let self_val = focus.and_then(|f| vm.frames.get(f).and_then(|fr| fr.receiver));
-    match vm.debug_eval(mc, expr, self_val) {
+    let bindings = focus
+        .map(|f| vm.debug_frame_bindings(f))
+        .unwrap_or_default();
+    match vm.debug_eval(mc, expr, self_val, &bindings) {
         Ok(val) => println!("{}", vm.debug_render(val)),
         Err(msg) => println!("error: {msg}"),
     }
@@ -315,10 +320,10 @@ debugger commands:
   $locals, $l         locals, self, and self's @ivars of the focus frame
   $list               source around the focus frame's current line
   $source on|off      auto-show source at each pause (default on)
-  $print EXPR, $p     show a value in the focus frame (or just type it)
+  $print EXPR, $p     evaluate EXPR in the focus frame (or just type it)
   $quit, $q           stop debugging and exit
   $help               this list
-$print resolves a bare local, a bare @ivar, or `self` directly; any other expression is
-evaluated against globals (compound expressions can't see frame locals/@ivars yet)."
+$print evaluates EXPR in the focus frame — `self`, `@ivars`, and locals all resolve
+(e.g. `@total + n`)."
     );
 }

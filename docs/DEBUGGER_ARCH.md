@@ -137,21 +137,22 @@ via `.pp` (the width-aware pretty-printer's `pp_shape` yields the DAP-style expa
 or `.s`, before serializing. References to the live `Value`s stay valid because **paused frames
 are GC roots**.
 
-## Evaluate-in-frame — two known blockers (both pre-existing TODOs)
+## Evaluate-in-frame — fully working (both prerequisites since fixed)
 
-"Evaluate this expression in frame N's scope" is the one capability not ready:
+"Evaluate this expression in frame N's scope" now resolves `self`, `@ivars`, *and* locals — so
+`$print @total + n` works. It rests on two fixes that the debugger forced, both since landed:
 
-- **`eval:bindings:` is unbuilt** (`QUOIN_TODO.md`). `Runtime.eval:` / `eval:self:` exist
-  (`src/runtime/runtime.rs:~14`) — so **instance-context eval (self + `@ivars`) works today** —
-  but neither injects the frame's *locals*. `eval:bindings:` (eval against a supplied
-  name→value map, seeded as locals) is the missing primitive; it's also a REPL-P3 dependency.
-- **The `Runtime.eval:` parse-panic** (`QUOIN_TODO.md`; `crates/quoin-syntax/src/pest/parser.rs:~88`).
-  `parse_quoin_string_named` panics on a syntax error; the fallible
-  `try_parse_quoin_string_named` exists but eval doesn't use it. A malformed watch expression
-  would crash the VM, so this must be fixed before exposing "evaluate."
+- ✅ **The `Runtime.eval:` parse-panic** — `compile_and_execute_source` uses the fallible
+  `try_parse_quoin_string_named` and maps to a catchable `ParseError`, so a malformed expression
+  can't crash the VM.
+- ✅ **`eval:self:` + `eval:bindings:`** — `eval:self:` now actually binds the receiver as the
+  eval'd code's `self` (the top-level `self = nil` init was clobbering it), and `eval:bindings:`
+  seeds a name→value map as locals (compiler told they're locals; values bound into a parent
+  env the eval'd frame walks into). `debug_eval` passes the focus frame's `self` *and* its locals
+  together, closing the gap.
 
-The debugger is a clean forcing function for both. Neither blocks the v0 stepping/inspection
-MVP — only watch expressions and conditional breakpoints.
+A bare local / `@ivar` still takes a side-effect-free **direct read** fast path; everything else
+evaluates with self + the frame's locals seeded.
 
 ## Async / scheduler interaction
 
@@ -256,9 +257,9 @@ self-contained. DAP itself commonly runs over stdio, sidestepping sockets entire
 - ✅ **Fix the `Runtime.eval:` parse-panic** — `compile_and_execute_source` now uses the fallible
   `try_parse_quoin_string_named` and maps to a catchable `ParseError` (Slice 0). Unblocks
   "evaluate" / watch expressions.
-- **Add `eval:bindings:`** — eval against a supplied name→value binding map, seeded as locals.
-  Unlocks evaluate-in-frame for *locals* (instance context already works via `eval:self:`). Still
-  pending — the remaining gap for full `$print`.
+- ✅ **`eval:self:` fix + `eval:bindings:`** — `eval:self:` now binds the receiver as the eval'd
+  code's `self`, and `eval:bindings:` seeds a name→value map as locals. `debug_eval` passes the
+  frame's self + locals, so `$print` over arbitrary frame state works.
 
 **v0 — CLI debugger, no wire protocol (the mechanism proof).** No socket, no DAP, no codec.
 - ✅ **Slice 1 — pause/step core.** `DebugState` (`Option`-gated on `VmState`) + the
@@ -282,9 +283,10 @@ self-contained. DAP itself commonly runs over stdio, sidestepping sockets entire
     and a marker on it — gdb/pdb-style — replacing the bare `→ paused at file:line`. Reuses the
     highlighted-snippet machinery (`get_highlighted_snippet`, already used by stack traces) shared
     with `$list`; a toggle (`$source on|off`, default on) for terse stepping.
-  - **3c — eval-in-frame.** Bare expr / `$print`/`$p` via `eval:self:` (self/`@ivars`/globals) +
-    a direct env lookup for bare locals; full locals once `eval:bindings:` lands. Plus the
-    inherited REPL `$`-commands (`$globals`/`$class`/`$inspect`).
+  - ✅ **3c — eval-in-frame.** Bare expr / `$print`/`$p`: a bare local / `@ivar` is read directly
+    (side-effect-free fast path); any other expression is evaluated with the frame's `self` bound
+    and its locals seeded as bindings, so `self`/`@ivars`/locals all resolve (`@total + n`). Needed
+    the `eval:self:` fix + `eval:bindings:` (both since landed; see *Evaluate-in-frame*).
 - **Slice 4 — exception breakpoints.** `qn --break-on-throw=Type[,…]` (mandatory type). Match the
   propagating error's type at the two live-frame chokepoints (`catch:`'s `Err` arm and
   `run_vm_loop`'s uncaught arm); on a hit, the same `DebugBreak` pause. `DebugAction::ResumeThrow`

@@ -532,15 +532,15 @@ deferred `Mirror` in `## REPL`.
   - `Timer.time: { ... }`: Computes elapsed time in milliseconds.
   - `Runtime.evalFile: filename`: Loads, compiles, and evaluates a file.
   - `Object.s` overrides: Overriding `s` string representation when converting objects to strings for printing.
-  - [ ] **`eval:bindings:` (eval with an explicit environment).** Today `eval:`/`eval:self:` run the
-    string as a self-contained compilation unit (`parent_env: None`): globals, plus — for `eval:self:` — the
-    receiver as `self` (so `self`/`@ivars`/`self.method` resolve, since the `eval:self:` binding bug is now
-    fixed), but no access to the caller's *locals*. To let eval reference the local environment, add a variant
-    taking a
-    `Map` of name→value bindings that are injected as pre-populated locals in the eval'd frame.
-    Deliberately *explicit* (not implicit lexical capture): the eval'd code still compiles its own
-    independent layout, so this stays compatible with the compile-time `(depth, slot)` local-variable
-    resolution — the bindings just arrive as seeded slot values, no cross-compilation-unit capture.
+  - [x] **`eval:bindings:` (eval with an explicit environment).** `Runtime.eval:'expr' bindings:#{…}`
+    seeds the map's entries as locals in the eval'd frame, so the expression can reference them by name.
+    Deliberately *explicit* (not implicit lexical capture). **Implemented:** the binding names are passed to
+    `Compiler::new_with_locals` so references compile to `LoadLocal` (not `LoadGlobal`), and the values are
+    bound into a parent `EnvFrame` attached to the eval block (`build_block_with_env`) that `LoadLocal` walks
+    into — names interned to the same `Symbol`s the compiler emits. Composes with the `eval:self:` fix: the
+    debugger's `debug_eval` passes the focus frame's `self` *and* its locals as bindings, so `$print @total + n`
+    (mixing an `@ivar` and a local) resolves. Test: `evalBindings` (`qnlib/tests/99-misc.qn`); the debugger
+    end-to-end. (`compile_and_execute_source` / `eval_string` now thread `bindings: &[(Symbol, Value)]`.)
 - [x] **Native State Support**:
   - Implement native classes holding arbitrary Rust state inside VM objects.
 
