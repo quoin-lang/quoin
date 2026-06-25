@@ -66,6 +66,9 @@ jiff = "0.2"
 # base64 / hex codecs for the Data formats stdlib.
 base64 = "0.22"
 hex = "0.4"
+# JSON (and the structured Data formats), via serde. `arbitrary_precision` preserves a number's
+# raw text so out-of-range values fall back to BigInteger/BigDecimal losslessly.
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

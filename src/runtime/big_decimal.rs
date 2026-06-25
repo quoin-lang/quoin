@@ -38,7 +38,7 @@ fn decimal_of(v: Value, who: &str) -> Result<Decimal, QuoinError> {
         })
 }
 
-fn make_decimal<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, d: Decimal) -> Value<'gc> {
+pub fn make_decimal<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, d: Decimal) -> Value<'gc> {
     let class = vm.get_or_create_builtin_class(mc, "BigDecimal");
     vm.new_native_state(mc, class, NativeBigDecimal(d))
 }

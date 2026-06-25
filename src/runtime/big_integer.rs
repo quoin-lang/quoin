@@ -37,7 +37,7 @@ fn bigint_of(v: Value, who: &str) -> Result<BigInt, QuoinError> {
         })
 }
 
-fn make_bigint<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, n: BigInt) -> Value<'gc> {
+pub fn make_bigint<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, n: BigInt) -> Value<'gc> {
     let class = vm.get_or_create_builtin_class(mc, "BigInteger");
     vm.new_native_state(mc, class, NativeBigInteger(n))
 }

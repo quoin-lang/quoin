@@ -1,9 +1,14 @@
 # Stdlib: Data formats — implementation outline
 
-Status: **Outline, not started.** Plan for the `## Standard Library → Data formats &
+Status: **Phase 1 done (base64/hex + JSON).** Plan for the `## Standard Library → Data formats &
 serialization` bullets in `QUOIN_TODO.md`. Branch: `feat/stdlib-data-formats`. **Phase 1
-(base64/hex + JSON) first**; Phase 2 (MessagePack / TOML / YAML) and Phase 3 (CSV) sketched.
+(base64/hex + JSON) done**; Phase 2 (MessagePack / TOML / YAML) and Phase 3 (CSV) sketched.
 Native classes follow the established pattern (`NativeClassBuilder`; see the number/time types).
+
+Phase-1 note on the bridge: JSON uses `serde_json::Value` (with `arbitrary_precision`) as the
+serde tree directly, with `Value ↔ serde_json::Value` converters in `src/runtime/json.rs` — clean
+and correct for one format. The generic `DataValue` enum below is the Phase-2 generalization, where
+MessagePack (which has a native bytes type) and TOML/YAML need a shared tree across formats.
 
 ## Three sub-families (the section isn't five equal items)
 
@@ -31,7 +36,7 @@ serde is the pivot for the whole structured family — one bridge, every format 
 
 ---
 
-## Phase 1a — base64 / hex  ⭐
+## Phase 1a — base64 / hex  ⭐  ✅ done
 
 Native namespace classes + qnlib helper methods (both, per the "really common use case" call).
 
@@ -45,7 +50,7 @@ Native namespace classes + qnlib helper methods (both, per the "really common us
 - Files: `src/runtime/base64.rs`, `src/runtime/hex.rs` (new) + registration; `qnlib/core/NN-codecs.qn`;
   `Cargo.toml`. Tests: `qnlib/tests/NN-codecs.qn`.
 
-## Phase 1b — JSON
+## Phase 1b — JSON  ✅ done
 
 - Native **`JSON`**: `JSON.parse: aString → value`; `JSON.generate: value → String` (compact);
   `JSON.generatePretty: value → String` (indented — a separate method, not a flag). Malformed JSON
