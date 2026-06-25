@@ -63,6 +63,9 @@ num-bigint = "0.4"
 num-traits = "0.2"
 # Date/time + durations backing the Time stdlib types (jiff: pure-Rust, IANA tzdb, RFC 3339).
 jiff = "0.2"
+# base64 / hex codecs for the Data formats stdlib.
+base64 = "0.22"
+hex = "0.4"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to
