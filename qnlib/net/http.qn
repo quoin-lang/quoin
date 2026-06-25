@@ -191,19 +191,24 @@
     ok? -> { (@status >= 200) && (@status < 300) };
     headers -> { @headers };
     header: -> { |name| [HTTP]Response.find:@headers named:name };
+    location -> { .header:'location' };
+    "* A redirect we could follow: a 3xx status carrying a Location header.
+    redirect? -> { (@status >= 300) && (@status < 400) && ((.header:'location').defined?) };
     body -> { @body };
 };
 
 "* The request Builder. Convenience methods on [HTTP]Client cover the common cases;
 "* a library reaches for this to set a custom verb, headers, body, or `insecure:`.
 "* The setters return self so calls can be threaded.
-[HTTP]Request <- { | @method @url @headers @body @insecure |
+[HTTP]Request <- { | @method @url @headers @body @insecure @followRedirects @maxRedirects |
     init: -> { |url|
         @method = 'GET';
         @url = url;
         @headers = #();
         @body = nil;
         @insecure = false;
+        @followRedirects = true;
+        @maxRedirects = 10;
     };
 
     .meta <-- {
@@ -220,12 +225,30 @@
             port = (hp.count > 1).if:{ hp.at:1 } else:{ (scheme == 'https').if:{ '443' } else:{ '80' } };
             ^#( scheme (hp.at:0) port path )
         };
+
+        "* Resolve a Location header against the request URL: an absolute URL is used as-is;
+        "* '/path' is root-relative to the base's scheme://host:port; anything else is relative
+        "* to the base path's directory.
+        resolveLocation:against: -> { |loc base|
+            ((loc.starts?:'http://') || (loc.starts?:'https://')).if:{ ^^loc };
+            parts = [HTTP]Request.parseUrl:base;
+            origin = (parts.at:0) + '://' + (parts.at:1) + ':' + (parts.at:2);
+            (loc.starts?:'/').if:{ ^^(origin + loc) };
+            "* relative to the base path's directory. '/a/b/c' splits to ['','a','b','c'];
+            "* drop the leading '' and the last segment to get the directory '/a/b/'.
+            comps = ((parts.at:3).splitString:'/').drop:1;
+            dirStr = (comps.take:(comps.count - 1)).join:'/';
+            dirPath = (dirStr.length > 0).if:{ '/' + dirStr + '/' } else:{ '/' };
+            ^(origin + dirPath + loc)
+        };
     };
 
     method: -> { |m| @method = m; self };
     header:value: -> { |name val| @headers.add:#(name val); self };
     headers: -> { |pairs| @headers = pairs; self };
     insecure: -> { |flag| @insecure = flag; self };
+    followRedirects: -> { |flag| @followRedirects = flag; self };
+    maxRedirects: -> { |n| @maxRedirects = n; self };
 
     "* Set the body, normalizing a shortcut into an [HTTP]Body: a Map/List is JSON-encoded
     "* (Content-Type application/json), a String is its UTF-8 bytes, Bytes is taken as-is,
@@ -267,12 +290,12 @@
         ^bytes
     };
 
-    "* Connect, send, read the response head, and return an [HTTP]Response whose body is a
-    "* stream-backed [HTTP]Body. The socket is NOT closed here — it stays open, owned by the
-    "* body, and closes when the body is drained (.text/.json/.bytes), fully iterated
-    "* (.chunks/.each:), explicitly .close'd, or GC-reaped. Throws (catchable) on connection
-    "* errors or a malformed head; the stream is closed before re-raising.
-    send -> {
+    "* One request/response cycle (no redirect following): connect, send, read the head, and
+    "* return an [HTTP]Response whose body is a stream-backed [HTTP]Body. The socket is NOT
+    "* closed here — it stays open, owned by the body, and closes when the body is drained
+    "* (.text/.json/.bytes), fully iterated (.chunks/.each:), .close'd, or GC-reaped. Throws
+    "* (catchable) on connection errors or a malformed head; the stream is closed before re-raising.
+    internalSend -> {
         url = [HTTP]Request.parseUrl:@url;
         scheme = url.at:0;
         host = url.at:1;
@@ -315,6 +338,53 @@
         ce = [HTTP]Response.find:headers named:'content-encoding';
         bodyObj = [HTTP]Body.over:stream framing:framing length:length contentType:ct encoding:ce;
         ^[HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = bodyObj }
+    };
+
+    "* Send the request, following redirects (3xx + Location) up to @maxRedirects when
+    "* @followRedirects is set (the default). Each redirect response's body is discarded;
+    "* exceeding the cap throws. With following off, the 3xx response is returned as-is.
+    send -> {
+        @followRedirects.else:{ ^^(.internalSend) };
+        current = self;
+        left = @maxRedirects;
+        result = nil;
+        looping = true;
+        { looping }.whileDo:{
+            resp = current.internalSend;
+            resp.redirect?.if:{
+                resp.body.close;
+                (left == 0).if:{ ValueError.throw:'HTTP: too many redirects' };
+                current = current.nextRequestFor:resp;
+                left = left - 1;
+            } else:{
+                result = resp;
+                looping = false;
+            };
+        };
+        ^result
+    };
+
+    "* Build the next request for a redirect response: resolve its Location against this
+    "* request's URL, carry over insecure/followRedirects/maxRedirects and the headers, and
+    "* adjust the method/body per status. 307/308 preserve method+body; 303 (and a 301/302
+    "* from a non-GET/HEAD method) become a bodyless GET.
+    nextRequestFor: -> { |resp|
+        next = [HTTP]Request.new:{ url = [HTTP]Request.resolveLocation:(resp.location) against:@url };
+        next.insecure:@insecure;
+        next.followRedirects:@followRedirects;
+        next.maxRedirects:@maxRedirects;
+        next.headers:@headers;
+        ((resp.status == 307) || (resp.status == 308)).if:{
+            next.method:@method;
+            @body.defined?.if:{ next.body:@body };
+        } else:{
+            ((resp.status == 303) || ((@method != 'GET') && (@method != 'HEAD'))).if:{
+                next.method:'GET'
+            } else:{
+                next.method:@method
+            };
+        };
+        ^next
     };
 };
 

@@ -99,4 +99,24 @@ use std:net/http;
         rb = ([HTTP]Request.new:{ url = 'http://h/p' }).body:pre;
         .is:{ rb.body.mediaType } equalTo:'text/plain';
     };
+
+    .test:
+    redirectHelpers -> {
+        "* redirect? / location on a response; Location resolution against the request URL.
+        "* Following itself (and the builder option) is exercised in tests/http.rs.
+        r302 = [HTTP]Response.new:{ status = 302; reason = 'Found';
+            headers = #( #('Location' '/next') ); body = [HTTP]Body.of:(Bytes.empty) };
+        .isTrue:{ r302.redirect? };
+        .is:{ r302.location } equalTo:'/next';
+        r200 = [HTTP]Response.new:{ status = 200; reason = 'OK';
+            headers = #(); body = [HTTP]Body.of:(Bytes.empty) };
+        .isFalse:{ r200.redirect? };
+
+        .is:{ [HTTP]Request.resolveLocation:'https://x/a' against:'http://h/p' }
+            equalTo:'https://x/a';
+        .is:{ [HTTP]Request.resolveLocation:'/n' against:'http://h:8/a/b' }
+            equalTo:'http://h:8/n';
+        .is:{ [HTTP]Request.resolveLocation:'n' against:'http://h/a/b/c' }
+            equalTo:'http://h:80/a/b/n';
+    };
 };

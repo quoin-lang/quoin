@@ -61,6 +61,19 @@ fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
                  7;sig=abc\r\nHello, \r\n6\r\nworld!\r\n0\r\n\r\n"
             .to_vec();
     }
+    if path == "/redirect" {
+        // 302 to a root-relative target on the same server.
+        return b"HTTP/1.1 302 Found\r\nLocation: /cl\r\nContent-Length: 0\r\n\r\n".to_vec();
+    }
+    if path == "/redirect-loop" {
+        return b"HTTP/1.1 302 Found\r\nLocation: /redirect-loop\r\nContent-Length: 0\r\n\r\n"
+            .to_vec();
+    }
+    if path == "/redirect-307" {
+        // 307 preserves method + body, re-POSTing to the echo endpoint.
+        return b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /post\r\nContent-Length: 0\r\n\r\n"
+            .to_vec();
+    }
     let (head, body): (String, Vec<u8>) = match path {
         "/cl" => (
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\n".into(),
@@ -227,6 +240,23 @@ r7 = [HTTP]Client.get: base + '/json';
 "* POST of a Map auto-encodes to JSON (the echo server returns the bytes we sent)
 r8 = [HTTP]Client.post: base + '/post' body: #{{ 'k':1 'v':2 }};
 (r8.body.text == '{{"k":1,"v":2}}').else:{{ ok = false }};
+
+"* redirects: a 302 is followed by default to its (root-relative) Location
+r9 = [HTTP]Client.get: base + '/redirect';
+((r9.status == 200) && (r9.body.text == 'hello world')).else:{{ ok = false }};
+
+"* following can be turned off in the builder — the 3xx comes back as-is
+r10 = (([HTTP]Client.request: base + '/redirect').followRedirects:false).send;
+((r10.status == 302) && r10.redirect?).else:{{ ok = false }};
+
+"* a 307 preserves the method and body (re-POSTed to the echo endpoint)
+r11 = [HTTP]Client.post: base + '/redirect-307' body: 'keepme'.asBytes;
+(r11.body.text == 'keepme').else:{{ ok = false }};
+
+"* a redirect loop trips the max-redirects cap and throws
+caught = false;
+{{ [HTTP]Client.get: base + '/redirect-loop' }}.catch:{{ |e| caught = true }};
+(caught).else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
