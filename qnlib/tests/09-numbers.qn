@@ -206,4 +206,13 @@
         .does:{ (0-4).sqrt } throw:ArithmeticError;
         .does:{ (0.0-4.0).sqrt } throw:ArithmeticError;
     };
+
+    .test:
+    absAndConversions -> {
+        .is:{ (0 - 5).abs } equalTo:5;
+        .is:{ 5.abs } equalTo:5;
+        .is:{ (0.0 - 2.5).abs } equalTo:2.5;
+        .is:{ 5.integer } equalTo:5;       "* Integer#integer is identity
+        .is:{ 5.0.double } equalTo:5.0;    "* Double#double is identity
+    };
 }

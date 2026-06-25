@@ -150,4 +150,15 @@
         "* empty bindings still evaluates globals/literals
         .is:{ Runtime.eval:'1 + 2' bindings:#{} } equalTo:3;
     };
+
+    .test:
+    classDefaults -> {
+        "* `default` is the class-side fallback a typed field gets when unset
+        .is:{ Integer.default } equalTo:0;
+        .is:{ Double.default } equalTo:0.0;
+        .is:{ String.default } equalTo:'';
+        .is:{ Map.default } equalTo:#{};
+        .is:{ List.default } equalTo:#();
+        .is:{ Set.default } equalTo:#<>;
+    };
 }
