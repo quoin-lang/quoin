@@ -167,6 +167,51 @@ MVP — only watch expressions and conditional breakpoints.
   The dense source map + per-instruction yield make the "did we reach the next line" test work
   across the suspension.
 
+## Exception breakpoints — break on throw
+
+A flag to drop into the debugger when an exception is thrown: `qn --break-on-throw=Type[,Type…]`.
+
+**The type filter is mandatory** — there is deliberately no bare "break on *every* throw" form.
+The suite throws constantly (every `does:throw:` assertion), so an unfiltered mode would be
+unusable; naming a type ("stop whenever a `TypeError` is thrown") is both well-defined and
+useful. (`--break-on-throw=Object` is the explicit, deliberately-typed "everything" escape
+hatch.) Matching is hierarchy-aware: `--break-on-throw=Error` catches every built-in structured
+error (all are `Error` subclasses) but not a bare `'x'.throw` (a `String`).
+
+**Source-agnostic by design.** The user names a *type*, never a *source* — `TypeError` (raised
+in Rust as a `QuoinError` variant) and `MyError` (a user `Error.throw:`) behave identically.
+This is the key requirement and it dictates *where* we match, because the two have different
+shapes mid-flight:
+- a **user throw** sets the thrown value in `active_exception` (a Quoin `Value`) at
+  `Object#throw`;
+- a **structured error** is an `Err(QuoinError::TypeError{…})` raised at one of hundreds of
+  scattered native sites — it only becomes a Quoin `Error` value lazily (`quoinerror_to_value`).
+
+There is no single *throw site* that sees both. But the VM's **lazy frame-popping** (errors
+propagate without unwinding; `catch:` pops only when it actually catches — see the audit) gives
+two downstream chokepoints that see *both* kinds with **frames still live**:
+1. **`catch:`'s `Err` arm**, before its `while frames.len() > initial { pop }` — every *caught*
+   error (the throwing stack is intact; the innermost frame's `ip` still points at the throw);
+2. **`run_vm_loop`'s uncaught-`Err` arm** (per task) — every *uncaught* error, frames intact
+   because nothing popped them on the way up.
+
+So the match runs at those two points, against the error's type — the value's class for a user
+throw, or the variant's mapped `Error` class for a structured one — and on a hit fires the
+existing `DebugBreak` pause (live frames, full inspect/eval). "Continue" resumes normal
+handling/propagation. This is effectively **first-chance** (we break at the nearest `catch`
+boundary or the top, an instant after the literal throw, but with the throw site still on the
+stack), and it is **uniform** across Rust- and Quoin-raised errors — exactly the requirement.
+
+A `DebugAction::ResumeThrow` distinguishes "continue from an exception pause" (re-raise and let
+the unwind proceed) from a breakpoint pause's plain "continue."
+
+**Not "uncaught-only."** This is type-filtered *first-chance*, which sidesteps caught-vs-uncaught
+prediction entirely. A true "break only on *uncaught*" mode is genuinely hard and deferred (see
+*Deferred / open*): you cannot reliably know at throw time whether a `catch:` will keep an
+exception — a typed/declining handler (or a re-raise in the handler body) passes it through, and
+the declining `catch:` pops the throw-site frames before re-raising, so by the time you *know*
+it is uncaught the frames are gone. Doing it right needs two-phase exception handling.
+
 ## Protocol & transport — and the extension-system question
 
 **Verdict: the debugger gets its own protocol (DAP) and its own transport. It does not ride the
@@ -208,30 +253,61 @@ self-contained. DAP itself commonly runs over stdio, sidestepping sockets entire
 ## Staged plan
 
 **Prerequisites (independent, also wanted by the REPL):**
-- **Fix the `Runtime.eval:` parse-panic** — thread `try_parse_quoin_string_named`'s `Result`
-  through the eval path to a catchable `ParseError`. Blocks "evaluate" / watch expressions.
+- ✅ **Fix the `Runtime.eval:` parse-panic** — `compile_and_execute_source` now uses the fallible
+  `try_parse_quoin_string_named` and maps to a catchable `ParseError` (Slice 0). Unblocks
+  "evaluate" / watch expressions.
 - **Add `eval:bindings:`** — eval against a supplied name→value binding map, seeded as locals.
-  Unlocks evaluate-in-frame for locals (instance context already works via `eval:self:`).
+  Unlocks evaluate-in-frame for *locals* (instance context already works via `eval:self:`). Still
+  pending — the remaining gap for full `$print`.
 
 **v0 — CLI debugger, no wire protocol (the mechanism proof).** No socket, no DAP, no codec.
-- `DebugState` (breakpoint side-table, step mode, current frame) on `VmState`, `Option`-gated.
-- The `step_internal` hook + `YieldReason::DebugBreak` + the driver's `DebugBreak` command loop.
-- The load-time block/line registry (line→PC reverse index + nested-block walk).
-- A `qn debug <file.qn>` REPL on the existing REPL infra (rustyline, highlighter,
-  `annotate_error`): `break <file:line>` / `delete`, `continue`, `step`/`next`/`finish`,
-  `frames` / `up` / `down`, `locals`, `print <expr>` (instance-context via `eval:self:` until
-  `eval:bindings:` lands), `list`.
-- *Test:* a `.qn` fixture driven by a scripted command sequence — set a breakpoint, hit it,
-  inspect locals/`self`/`@ivars`, step across lines and in/out of calls, continue to exit.
+- ✅ **Slice 1 — pause/step core.** `DebugState` (`Option`-gated on `VmState`) + the
+  `step_internal` hook + `YieldReason::DebugBreak` + the driver's `DebugBreak` handler (a stub in
+  Slice 1/2; the real command loop is Slice 3). The pause is a direct `yielder.suspend` deep in
+  the step loop, so it works at any call depth.
+- ✅ **Slice 2 — stepping.** `DebugAction` (continue / step into·over·out) + `apply_debug_action`,
+  driven by a `DebugState.script` queue in v0. Stops fire on a *line start* (`is_line_start`, a
+  static bytecode property), so a breakpoint fires once per arrival (each loop iteration) but not
+  on a mid-line call-return.
+- **Slice 3 — the `qn debug <file.qn>` CLI.** A `VmRunnerMode::Debug`; replace the stub
+  `debug_on_pause` with the interactive **`$`-command loop** on the REPL infra (rustyline,
+  highlighter, `annotate_error`), expression-first: bare expr → eval-in-frame; `$break`/`$b`,
+  `$delete`/`$d`, `$continue`/`$c`, `$step`/`$s`, `$next`/`$n`, `$finish`/`$fin`, `$up`, `$down`,
+  `$frames`/`$bt`, `$locals`/`$l`, `$list`, `$print`/`$p`, `$quit`/`$q` (no aliases for
+  `$up`/`$down`), plus the inherited REPL `$`-commands. Also the load-time block/line registry
+  (line→PC reverse index + nested-block walk) for breakpoint placement.
+- **Slice 4 — exception breakpoints.** `qn --break-on-throw=Type[,…]` (mandatory type). Match the
+  propagating error's type at the two live-frame chokepoints (`catch:`'s `Err` arm and
+  `run_vm_loop`'s uncaught arm); on a hit, the same `DebugBreak` pause. `DebugAction::ResumeThrow`
+  for "continue from an exception pause". Uniform across user and structured errors. (See
+  *Exception breakpoints* above.)
+- *Test:* `.qn` fixtures driven by scripted command sequences — breakpoints + stepping (done in
+  Slices 1–2), and an exception-break fixture.
 
 **v1 — DAP adapter.** A Debug Adapter (in the language-server repo or as `qn debug --dap`)
 translating DAP ⟷ the v0 control API: `setBreakpoints`, `stackTrace`, `scopes`/`variables`
 (over the inspection snapshots + `pp_shape` children), `evaluate` (over `eval:bindings:`),
-`continue`/`next`/`stepIn`/`stepOut`, exception breakpoints (break on throw). VSCode/JetBrains/
-nvim-dap integration rides on the existing language server + VSCode plugin.
+`continue`/`next`/`stepIn`/`stepOut`, exception breakpoints (the Slice 4 filter). VSCode/
+JetBrains/nvim-dap integration rides on the existing language server + VSCode plugin.
 
 ## Deferred / open
 
+- **Break on *uncaught* exception (true last-chance)** — Slice 4 is type-filtered *first-chance*,
+  which deliberately avoids predicting caught-vs-uncaught. A real "uncaught-only" mode is hard:
+  whether a `catch:` keeps an exception is dynamic (a typed/declining handler, or a re-raise in
+  the body, passes it through), and a declining `catch:` pops the throw-site frames before
+  re-raising — so by the time you *know* it is uncaught, the frames are gone. Doing it right
+  needs **two-phase exception handling**: a handler stack searched at throw time (match the
+  exception against each `catch:`'s *declared* type filter, without running handler bodies) to
+  decide caught-vs-uncaught *before* unwinding — then break with frames intact. That is a
+  language-level change, coupled to the item below.
+- **Typed `catch:` (and its coupling to the above)** — `catch:{|ex:SomeError| …}` should catch
+  selectively (an untyped param defaults to `:Object`, so it stays backward-compatible — no
+  migration). Implementable single-phase (check the type on `Err`, re-raise on mismatch). The
+  *declared* type filter is exactly what a two-phase search needs, so typed `catch:` is the
+  natural precursor to the uncaught mode. **Guard-block catch** (`catch:{|ex {ex.code==123}| …}`)
+  is intentionally *not* planned: a guard must run arbitrary code to decide, which a frames-intact
+  pre-unwind search can't do cleanly — types stay declarative, guards don't.
 - **Per-task / per-fiber debugging** — v1 pauses the world; debugging one task while others run
   is a later model (needs a per-task stop and a "threads" view).
 - **Data breakpoints / watchpoints** (break when a variable changes) — needs write interception,
