@@ -4,7 +4,7 @@
 "*   use std:net/http;
 "*   resp = [HTTP]Client.get: 'https://example.org/';
 "*   resp.status        "* 200
-"*   resp.bodyText      "* the body decoded as a String
+"*   resp.body.text     "* the body as a String  (also .json / .bytes / .mediaType)
 "*
 "* The only native piece is [HTTP]Parser.parseHead: (the `httparse` head parser);
 "* request building and body framing live here. HTTPS rides TlsSocket, so it falls
@@ -14,8 +14,43 @@
 "* gzip, and a streaming (per-chunk generator) body. See docs/ASYNC_ARCH.md.
 "* ===========================================================================
 
+"* A request or response body: the raw Bytes plus its parsed media type (Content-Type
+"* sans params, lowercased) and original Content-Encoding (gzip/identity/…, already
+"* decoded on responses). One object serves both sides — `send` builds one from the wire,
+"* and the polymorphic `[HTTP]Request.body:` builds one from a shortcut value.
+[HTTP]Body <- { | @bytes @mediaType @encoding |
+    init: -> { |bytes mediaType encoding|
+        @bytes = bytes;
+        @mediaType = mediaType;
+        @encoding = encoding;
+    };
+
+    .meta <-- {
+        "* Build a Body from raw bytes + optional Content-Type / Content-Encoding values.
+        of:contentType:encoding: -> { |bytes ct enc|
+            media = ct.defined?.if:{ ((ct.splitString:';').at:0).lower } else:{ nil };
+            ^[HTTP]Body.new:{ bytes = bytes; mediaType = media; encoding = enc }
+        };
+        of:contentType: -> { |bytes ct| ^[HTTP]Body.of:bytes contentType:ct encoding:nil };
+        of: -> { |bytes| ^[HTTP]Body.of:bytes contentType:nil encoding:nil };
+    };
+
+    bytes -> { @bytes };
+    text -> { @bytes.asStringLossy };          "* UTF-8; charset-aware decoding is a follow-up
+    json -> { JSON.parse:(.text) };            "* parse-regardless; throws a catchable ParseError
+    mediaType -> { @mediaType };
+    encoding -> { @encoding };
+    json? -> { @mediaType.defined? && (@mediaType.contains?:'json') };
+    size -> { @bytes.count };
+    empty? -> { @bytes.count == 0 };
+    s -> {
+        ext = @mediaType.defined?.if:{ ', ' + @mediaType } else:{ '' };
+        '[HTTP]Body(' + @bytes.count + ' bytes' + ext + ')'
+    };
+};
+
 "* An HTTP response: status line, headers (a list of #(name value) pairs, order- and
-"* duplicate-preserving), and the raw body Bytes.
+"* duplicate-preserving), and the body as an [HTTP]Body.
 [HTTP]Response <- { | @status @reason @headers @body |
     init: -> { |status reason headers body|
         @status = status;
@@ -54,7 +89,6 @@
     headers -> { @headers };
     header: -> { |name| [HTTP]Response.find:@headers named:name };
     body -> { @body };
-    bodyText -> { @body.asStringLossy };
 };
 
 "* The request Builder. Convenience methods on [HTTP]Client cover the common cases;
@@ -115,8 +149,25 @@
     method: -> { |m| @method = m; self };
     header:value: -> { |name val| @headers.add:#(name val); self };
     headers: -> { |pairs| @headers = pairs; self };
-    body: -> { |b| @body = b; self };
     insecure: -> { |flag| @insecure = flag; self };
+
+    "* Set the body, normalizing a shortcut into an [HTTP]Body: a Map/List is JSON-encoded
+    "* (Content-Type application/json), a String is its UTF-8 bytes, Bytes is taken as-is,
+    "* and an already-built [HTTP]Body is used directly. The convenience [HTTP]Client.post:
+    "* helpers flow through here, so `post:url body:aMap` auto-encodes.
+    body: -> { |b|
+        ([HTTP]Body ~ b).if:{ @body = b; ^^self };
+        ((Map ~ b) || (List ~ b)).if:{
+            @body = [HTTP]Body.of:((JSON.generate:b).asBytes) contentType:'application/json';
+            ^^self
+        };
+        (String ~ b).if:{ @body = [HTTP]Body.of:(b.asBytes); ^^self };
+        @body = [HTTP]Body.of:b;
+        self
+    };
+
+    "* The normalized request body as an [HTTP]Body (or nil if none was set).
+    body -> { @body };
 
     "* Serialize the request to Bytes for a given Host header value.
     requestBytes:path: -> { |hostHeader path|
@@ -127,10 +178,16 @@
         (@headers.any?:{ |p| (p.at:0).lower == 'accept-encoding' }).else:{
             head = head + 'Accept-Encoding: gzip, zstd\r\n'
         };
-        @body.defined?.if:{ head = head + 'Content-Length: ' + (@body.count) + '\r\n' };
+        "* The body carries its own media type; emit it as Content-Type unless the caller set one.
+        (@body.defined? && @body.mediaType.defined?).if:{
+            (@headers.any?:{ |p| (p.at:0).lower == 'content-type' }).else:{
+                head = head + 'Content-Type: ' + @body.mediaType + '\r\n'
+            }
+        };
+        @body.defined?.if:{ head = head + 'Content-Length: ' + (@body.bytes.count) + '\r\n' };
         head = head + 'Connection: close\r\n\r\n';
         bytes = head.asBytes;
-        @body.defined?.if:{ bytes = bytes + @body };
+        @body.defined?.if:{ bytes = bytes + @body.bytes };
         ^bytes
     };
 
@@ -175,11 +232,13 @@
                 cl.defined?.if:{ stream.readExactly:(cl.to_integer) } else:{ stream.readAll }
             };
 
-            "* Transparently decode a compressed body so `body`/`bodyText` present the entity.
+            "* Transparently decode a compressed body so the [HTTP]Body presents the entity.
             ce = [HTTP]Response.find:headers named:'content-encoding';
             body = ce.defined?.if:{ [HTTP]Response.decodeBody:body encoding:ce } else:{ body };
 
-            [HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = body }
+            ct = [HTTP]Response.find:headers named:'content-type';
+            bodyObj = [HTTP]Body.of:body contentType:ct encoding:ce;
+            [HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = bodyObj }
         }
     };
 };

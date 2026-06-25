@@ -48,10 +48,43 @@ use std:net/http;
     .test:
     responseHeaderLookupIsCaseInsensitive -> {
         resp = [HTTP]Response.new:{ status = 200; reason = 'OK';
-            headers = #( #('Content-Type' 'text/plain') ); body = 'x'.asBytes };
+            headers = #( #('Content-Type' 'text/plain') ); body = [HTTP]Body.of:('x'.asBytes) };
         .is:{ resp.header:'CONTENT-TYPE' } equalTo:'text/plain';
         .is:{ (resp.header:'missing').defined? } equalTo:false;
         .is:{ resp.ok? } equalTo:true;
-        .is:{ resp.bodyText } equalTo:'x';
+        .is:{ resp.body.text } equalTo:'x';
+    };
+
+    .test:
+    bodyViews -> {
+        "* One [HTTP]Body exposes bytes / text / json views + parsed media type.
+        b = [HTTP]Body.of:('{"x": 1}'.asBytes) contentType:'application/json; charset=utf-8' encoding:nil;
+        .is:{ b.text } equalTo:'{"x": 1}';
+        .is:{ b.mediaType } equalTo:'application/json';
+        .isTrue:{ b.json? };
+        .is:{ (b.json).at:'x' } equalTo:1;
+        .is:{ b.size } equalTo:8;
+    };
+
+    .test:
+    postMapAutoEncodesJson -> {
+        r = [HTTP]Request.new:{ url = 'http://h/p' };
+        r.method:'POST';
+        r.body:#{ 'name':'qn' 'n':2 };
+        .is:{ r.body.mediaType } equalTo:'application/json';
+        out = (r.requestBytes:'h' path:'/p').asStringLossy;
+        .isTrue:{ out.contains?:'Content-Type: application/json' };
+        .isTrue:{ out.contains?:'{"name":"qn","n":2}' };
+    };
+
+    .test:
+    bodyShortcutTypes -> {
+        "* String -> UTF-8 bytes (no media type); a pre-built [HTTP]Body is used directly.
+        rs = ([HTTP]Request.new:{ url = 'http://h/p' }).body:'raw';
+        .is:{ rs.body.text } equalTo:'raw';
+        .is:{ (rs.body.mediaType).defined? } equalTo:false;
+        pre = [HTTP]Body.of:('z'.asBytes) contentType:'text/plain' encoding:nil;
+        rb = ([HTTP]Request.new:{ url = 'http://h/p' }).body:pre;
+        .is:{ rb.body.mediaType } equalTo:'text/plain';
     };
 };

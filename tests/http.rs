@@ -71,6 +71,16 @@ fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
             "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".into(),
             b"closed-body".to_vec(),
         ),
+        "/json" => {
+            let body = br#"{"hello":"world","n":7}"#.to_vec();
+            (
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                ),
+                body,
+            )
+        }
         "/gzip" => {
             // Compress live with our own encoder so the client decodes what we produced.
             let body = quoin::runtime::compress::gzip_encode(b"hello gzip world").unwrap();
@@ -166,29 +176,39 @@ base = 'http://127.0.0.1:{port}';
 r1 = [HTTP]Client.get: base + '/cl';
 (r1.status == 200).else:{{ ok = false }};
 (r1.ok?).else:{{ ok = false }};
-(r1.bodyText == 'hello world').else:{{ ok = false }};
+(r1.body.text == 'hello world').else:{{ ok = false }};
 ((r1.header:'CONTENT-TYPE') == 'text/plain').else:{{ ok = false }};
 
 "* POST body echo
 r2 = [HTTP]Client.post: base + '/post' body: 'ping-pong'.asBytes;
-(r2.bodyText == 'ping-pong').else:{{ ok = false }};
+(r2.body.text == 'ping-pong').else:{{ ok = false }};
 
 "* connection-close-delimited body (no Content-Length)
 r3 = [HTTP]Client.get: base + '/close';
-(r3.bodyText == 'closed-body').else:{{ ok = false }};
+(r3.body.text == 'closed-body').else:{{ ok = false }};
 
 "* chunked transfer-encoding (two chunks reassembled)
 r4 = [HTTP]Client.get: base + '/chunked';
 (r4.status == 200).else:{{ ok = false }};
-(r4.bodyText == 'Hello, world!').else:{{ ok = false }};
+(r4.body.text == 'Hello, world!').else:{{ ok = false }};
 
 "* gzip Content-Encoding (transparently decoded)
 r5 = [HTTP]Client.get: base + '/gzip';
-(r5.bodyText == 'hello gzip world').else:{{ ok = false }};
+(r5.body.text == 'hello gzip world').else:{{ ok = false }};
 
 "* zstd Content-Encoding (transparently decoded)
 r6 = [HTTP]Client.get: base + '/zstd';
-(r6.bodyText == 'hello zstd world').else:{{ ok = false }};
+(r6.body.text == 'hello zstd world').else:{{ ok = false }};
+
+"* JSON response: .body.json parses, .json? reflects the Content-Type
+r7 = [HTTP]Client.get: base + '/json';
+(r7.body.json?).else:{{ ok = false }};
+((r7.body.json.at:'hello') == 'world').else:{{ ok = false }};
+((r7.body.json.at:'n') == 7).else:{{ ok = false }};
+
+"* POST of a Map auto-encodes to JSON (the echo server returns the bytes we sent)
+r8 = [HTTP]Client.post: base + '/post' body: #{{ 'k':1 'v':2 }};
+(r8.body.text == '{{"k":1,"v":2}}').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
@@ -230,7 +250,7 @@ req = [HTTP]Client.request: 'https://127.0.0.1:{port}/cl';
 req.insecure:true;
 r = req.send;
 (r.status == 200).else:{{ ok = false }};
-(r.bodyText == 'hello world').else:{{ ok = false }};
+(r.body.text == 'hello world').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
@@ -249,8 +269,8 @@ fn http_secure_real_host() {
     let script = r#"
 use std:net/http;
 r = [HTTP]Client.get: 'https://example.org/';
-ok = (r.status == 200) && (r.body.size > 0);
-ok.if:{ 'PASS'.print } else:{ ('FAIL status ' + r.status + ' size ' + r.body.size).print };
+ok = (r.status == 200) && (r.body.bytes.size > 0);
+ok.if:{ 'PASS'.print } else:{ ('FAIL status ' + r.status + ' size ' + r.body.bytes.size).print };
 "#;
     run_pass(script, "realhost");
 }
