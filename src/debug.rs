@@ -76,9 +76,13 @@ pub struct DebugState {
     /// Where the current step started (its frame depth is the reference for step
     /// over / out).
     pub origin: Option<StepOrigin>,
-    /// The v0 non-interactive driver: actions applied at successive pauses (one popped per
-    /// pause; empty ⇒ continue). Slice 3's interactive frontend supplies actions from
-    /// `$`-commands instead, but reuses the same [`VmState::apply_debug_action`] core.
+    /// `qn debug` sets this: a pause bubbles to the driver's interactive `$`-command loop
+    /// (`src/debug_cli.rs`). When `false` (tests, scripted runs), a pause is handled in place
+    /// from `script` (or just continues). Default `false`.
+    pub interactive: bool,
+    /// The non-interactive driver: actions applied at successive pauses (one popped per pause;
+    /// empty ⇒ continue). The interactive frontend supplies actions from `$`-commands instead,
+    /// but reuses the same [`VmState::apply_debug_action`] core.
     pub script: VecDeque<DebugAction>,
     /// Pause locations recorded by the driver — `(file, line)` — so a test (and, later, a
     /// session log) can see where execution stopped.
