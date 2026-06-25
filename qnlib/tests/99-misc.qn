@@ -2,7 +2,7 @@
     .test:
     humanizeDuration -> {
         "* Reporter renders elapsed µs in the largest unit >= 1, one decimal for ms/s."
-        r = PlainTestReporter.new:{ out = nil };
+        r = AnsiTestReporter.new:{ out = nil };
         .is:{ r.humanize:0 } equalTo:'0µs';
         .is:{ r.humanize:524 } equalTo:'524µs';
         .is:{ r.humanize:999 } equalTo:'999µs';
@@ -160,5 +160,14 @@
         .is:{ Map.default } equalTo:#{};
         .is:{ List.default } equalTo:#();
         .is:{ Set.default } equalTo:#<>;
+        .is:{ Nil.default } equalTo:nil;
+        .is:{ ANSI.default.length } equalTo:0;   "* the empty ANSI string
+    };
+
+    .test:
+    assertionMatchers -> {
+        "* exercise two test-DSL matchers that no other suite happens to use
+        .is:{ 5 } an:Integer;
+        .elementsOf:{ #( 3 1 2 ) } areEqualTo:#( 1 2 3 );
     };
 }
