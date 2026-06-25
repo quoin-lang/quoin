@@ -23,7 +23,9 @@
 
 use crate::error::QuoinError;
 use crate::fiber::YieldReason;
-use crate::value::SourceInfo;
+use crate::runtime::pretty;
+use crate::symbol::self_symbol;
+use crate::value::{SourceInfo, Value};
 use crate::vm::VmState;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -80,6 +82,12 @@ pub struct DebugState {
     /// (`src/debug_cli.rs`). When `false` (tests, scripted runs), a pause is handled in place
     /// from `script` (or just continues). Default `false`.
     pub interactive: bool,
+    /// The frame `$locals`/`$list`/`$print` act on (a `frames` index; the top frame is
+    /// `frames.len() - 1`). Reset to the top frame at each pause; moved by `$up`/`$down`.
+    pub focus: usize,
+    /// Whether to auto-print the source around the current line at each pause
+    /// (`$source on|off`). `qn debug` sets it `true`; default `false`.
+    pub show_source: bool,
     /// The non-interactive driver: actions applied at successive pauses (one popped per pause;
     /// empty ⇒ continue). The interactive frontend supplies actions from `$`-commands instead,
     /// but reuses the same [`VmState::apply_debug_action`] core.
@@ -258,6 +266,135 @@ impl<'gc> VmState<'gc> {
             .get(frame.ip)
             .and_then(|o| o.as_ref())
             .map(|si| (si.filename.clone(), si.line))
+    }
+
+    /// Begin a pause: reset the focus to the top (innermost) frame.
+    pub(crate) fn debug_enter_pause(&mut self) {
+        let top = self.frames.len().saturating_sub(1);
+        if let Some(d) = self.debug.as_mut() {
+            d.focus = top;
+        }
+    }
+
+    /// The current focus-frame index (clamped to a valid frame), or `None` with no frames.
+    pub(crate) fn debug_focus(&self) -> Option<usize> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        let top = self.frames.len() - 1;
+        Some(self.debug.as_ref().map_or(top, |d| d.focus.min(top)))
+    }
+
+    /// Move the focus toward the caller (`delta < 0`, `$up`) or the callee (`delta > 0`,
+    /// `$down`), clamped. Returns the new focus index (or `None` with no frames).
+    pub(crate) fn debug_move_focus(&mut self, delta: isize) -> Option<usize> {
+        let cur = self.debug_focus()?;
+        let top = self.frames.len() - 1;
+        let next = (cur as isize + delta).clamp(0, top as isize) as usize;
+        if let Some(d) = self.debug.as_mut() {
+            d.focus = next;
+        }
+        Some(next)
+    }
+
+    /// The `(file, line, label)` of frame `idx` — `label` is the method selector or block
+    /// name. `None` if the frame or its source mapping is missing.
+    pub(crate) fn debug_frame_location(&self, idx: usize) -> Option<(String, usize, String)> {
+        let frame = self.frames.get(idx)?;
+        let si = frame
+            .block
+            .source_map
+            .get(frame.ip)
+            .and_then(|o| o.as_ref())?;
+        let label = frame
+            .selector
+            .map(|s| s.as_str().to_string())
+            .or_else(|| frame.block.name.clone())
+            .unwrap_or_else(|| "<block>".to_string());
+        Some((si.filename.clone(), si.line, label))
+    }
+
+    /// The backtrace, innermost frame first: one `"#i  file:line  label"` line each, with
+    /// the focus frame marked. For `$frames`.
+    pub(crate) fn debug_backtrace(&self) -> Vec<String> {
+        let focus = self.debug_focus();
+        (0..self.frames.len())
+            .rev()
+            .map(|i| {
+                let marker = if Some(i) == focus { "→" } else { " " };
+                match self.debug_frame_location(i) {
+                    Some((file, line, label)) => {
+                        format!("{marker} #{i}  {file}:{line}  {label}")
+                    }
+                    None => format!("{marker} #{i}  <no source>"),
+                }
+            })
+            .collect()
+    }
+
+    /// The variables in scope at frame `idx`, each as `(name, rendered_value)`: the frame's
+    /// own locals, then `self`, then `self`'s instance variables (`@x`). Values are rendered
+    /// structurally via the pretty-printer — no `Value` method is invoked, so this never runs
+    /// user code or re-enters the suspended VM. For `$locals`.
+    pub(crate) fn debug_locals(&self, idx: usize) -> Vec<(String, String)> {
+        let Some(frame) = self.frames.get(idx) else {
+            return Vec::new();
+        };
+        // Collect (name, value) under the borrows, then render after dropping them.
+        let mut pairs: Vec<(String, Value<'gc>)> = Vec::new();
+        {
+            let env = frame.env.borrow();
+            for (sym, val) in &env.vars {
+                if *sym != self_symbol() {
+                    pairs.push((sym.as_str().to_string(), *val));
+                }
+            }
+        }
+        if let Some(receiver) = frame.receiver {
+            pairs.push(("self".to_string(), receiver));
+            if let Value::Object(obj) = receiver {
+                let borrowed = obj.borrow();
+                let class = borrowed.class.borrow();
+                // `field_slots` covers the full hierarchy; sort by slot for declaration order.
+                let mut ivars: Vec<(&String, usize)> =
+                    class.field_slots.iter().map(|(n, s)| (n, *s)).collect();
+                ivars.sort_by_key(|&(_, slot)| slot);
+                for (name, slot) in ivars {
+                    if let Some(val) = borrowed.fields.get(slot) {
+                        pairs.push((format!("@{name}"), *val));
+                    }
+                }
+            }
+        }
+        let width = self.options.console_width.map(|w| w as usize).unwrap_or(80);
+        pairs
+            .into_iter()
+            .map(|(name, val)| (name, pretty::render(val, width, false)))
+            .collect()
+    }
+
+    /// A source window around frame `idx`'s current line: `context` lines on each side, with
+    /// the current line marked. `None` if the source file can't be read. For `$list` and the
+    /// auto-display at each pause.
+    pub(crate) fn debug_source_window(&self, idx: usize, context: usize) -> Option<String> {
+        let frame = self.frames.get(idx)?;
+        let si = frame
+            .block
+            .source_map
+            .get(frame.ip)
+            .and_then(|o| o.as_ref())?;
+        let content = std::fs::read_to_string(&si.filename).ok()?;
+        let lines: Vec<&str> = content.lines().collect();
+        let cur = si.line; // 1-indexed
+        let lo = cur.saturating_sub(context).max(1);
+        let hi = (cur + context).min(lines.len());
+        let mut out = String::new();
+        for ln in lo..=hi {
+            let marker = if ln == cur { "→" } else { " " };
+            let text = lines.get(ln - 1).copied().unwrap_or("");
+            out.push_str(&format!("{marker} {ln:>4} │ {text}\n"));
+        }
+        Some(out)
     }
 }
 

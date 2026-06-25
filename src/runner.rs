@@ -1328,9 +1328,11 @@ impl VmRunner {
                 }
             };
             let block = build_block(mc, &sb);
-            // Stop at entry: an armed `StepInto` halts at the first line start.
+            // Stop at entry: an armed `StepInto` halts at the first line start. Source is
+            // shown at each pause by default ($source off to silence).
             vm.debug = Some(DebugState {
                 interactive: true,
+                show_source: true,
                 step: Some(StepMode::Into),
                 ..Default::default()
             });

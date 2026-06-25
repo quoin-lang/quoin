@@ -58,6 +58,21 @@ fn commands_map_to_breakpoints_step_modes_and_outcomes() {
         assert!(matches!(exec_command(vm, "$c"), CommandOutcome::Resume)); // alias
         assert_eq!(step(vm), None);
 
+        // Inspection verbs are queries (Stay) even with no frames; $source toggles the flag.
+        for q in ["$frames", "$bt", "$locals", "$l", "$list", "$up", "$down"] {
+            assert!(matches!(exec_command(vm, q), CommandOutcome::Stay), "{q}");
+        }
+        assert!(matches!(
+            exec_command(vm, "$source off"),
+            CommandOutcome::Stay
+        ));
+        assert!(!vm.debug.as_ref().unwrap().show_source);
+        assert!(matches!(
+            exec_command(vm, "$source on"),
+            CommandOutcome::Stay
+        ));
+        assert!(vm.debug.as_ref().unwrap().show_source);
+
         // $quit quits; help / unknown / a bare expression keep prompting.
         assert!(matches!(exec_command(vm, "$quit"), CommandOutcome::Quit));
         assert!(matches!(exec_command(vm, "$help"), CommandOutcome::Stay));

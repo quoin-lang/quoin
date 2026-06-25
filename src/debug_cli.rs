@@ -68,11 +68,31 @@ impl Drop for DebugFrontend {
     }
 }
 
-/// Print where execution paused (the instruction the top frame is about to run).
-pub(crate) fn announce_pause(vm: &VmState<'_>) {
-    match vm.debug_current_pos() {
-        Some((file, line)) => println!("→ paused at {file}:{line}"),
+/// Begin a pause: reset the focus to the top frame, print where we stopped, and (when
+/// `$source` is on) the surrounding source.
+pub(crate) fn announce_pause(vm: &mut VmState<'_>) {
+    vm.debug_enter_pause();
+    match vm.debug_focus().and_then(|f| vm.debug_frame_location(f)) {
+        Some((file, line, label)) => println!("→ paused at {file}:{line}  (in {label})"),
         None => println!("→ paused (no source location)"),
+    }
+    if vm.debug.as_ref().is_some_and(|d| d.show_source)
+        && let Some(win) = vm.debug_focus().and_then(|f| vm.debug_source_window(f, 2))
+    {
+        print!("{win}");
+    }
+}
+
+/// Print the focused frame's header (and source, if enabled) — after `$up`/`$down`.
+fn print_focus(vm: &VmState<'_>) {
+    let Some(f) = vm.debug_focus() else { return };
+    if let Some((file, line, label)) = vm.debug_frame_location(f) {
+        println!("#{f}  {file}:{line}  (in {label})");
+    }
+    if vm.debug.as_ref().is_some_and(|d| d.show_source)
+        && let Some(win) = vm.debug_source_window(f, 2)
+    {
+        print!("{win}");
     }
 }
 
@@ -114,6 +134,57 @@ pub(crate) fn exec_command<'gc>(vm: &mut VmState<'gc>, line: &str) -> CommandOut
         }
         "delete" | "d" => {
             set_breakpoint(vm, arg, false);
+            CommandOutcome::Stay
+        }
+        "frames" | "bt" => {
+            for line in vm.debug_backtrace() {
+                println!("{line}");
+            }
+            CommandOutcome::Stay
+        }
+        "up" => {
+            vm.debug_move_focus(-1);
+            print_focus(vm);
+            CommandOutcome::Stay
+        }
+        "down" => {
+            vm.debug_move_focus(1);
+            print_focus(vm);
+            CommandOutcome::Stay
+        }
+        "locals" | "l" => {
+            match vm.debug_focus() {
+                Some(f) => {
+                    let locals = vm.debug_locals(f);
+                    if locals.is_empty() {
+                        println!("(no locals)");
+                    }
+                    for (name, value) in locals {
+                        println!("  {name} = {value}");
+                    }
+                }
+                None => println!("(no frame)"),
+            }
+            CommandOutcome::Stay
+        }
+        "list" => {
+            match vm.debug_focus().and_then(|f| vm.debug_source_window(f, 5)) {
+                Some(win) => print!("{win}"),
+                None => println!("(source unavailable)"),
+            }
+            CommandOutcome::Stay
+        }
+        "source" => {
+            match arg {
+                Some("on") | Some("off") => {
+                    let on = arg == Some("on");
+                    if let Some(d) = vm.debug.as_mut() {
+                        d.show_source = on;
+                    }
+                    println!("source display {}", if on { "on" } else { "off" });
+                }
+                _ => println!("usage: $source on|off"),
+            }
             CommandOutcome::Stay
         }
         "quit" | "q" => CommandOutcome::Quit,
@@ -185,8 +256,13 @@ debugger commands:
   $finish, $fin       run until the current frame returns
   $break FILE:LINE    set a line breakpoint ($b; $break LINE = current file)
   $delete FILE:LINE   clear a breakpoint ($d)
+  $frames, $bt        backtrace (innermost first); the focus frame is marked
+  $up / $down         move the focus to the caller / callee frame
+  $locals, $l         locals, self, and self's @ivars of the focus frame
+  $list               source around the focus frame's current line
+  $source on|off      auto-show source at each pause (default on)
   $quit, $q           stop debugging and exit
   $help               this list
-inspection ($frames/$locals/$list) and expression eval arrive in later slices."
+expression eval-in-frame ($print) arrives in the next slice."
     );
 }
