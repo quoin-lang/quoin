@@ -18,7 +18,7 @@ fn commands_map_to_breakpoints_step_modes_and_outcomes() {
         vm
     });
 
-    arena.mutate_root(|_mc, vm| {
+    arena.mutate_root(|mc, vm| {
         let bps = |vm: &VmState<'_>, f: &str, l: usize| {
             vm.debug
                 .as_ref()
@@ -31,53 +31,74 @@ fn commands_map_to_breakpoints_step_modes_and_outcomes() {
 
         // $break adds a (file, line); $delete clears it.
         assert!(matches!(
-            exec_command(vm, "$break foo.qn:7"),
+            exec_command(vm, mc, "$break foo.qn:7"),
             CommandOutcome::Stay
         ));
         assert!(bps(vm, "foo.qn", 7));
         assert!(matches!(
-            exec_command(vm, "$b bar.qn:3"),
+            exec_command(vm, mc, "$b bar.qn:3"),
             CommandOutcome::Stay
         )); // alias
         assert!(bps(vm, "bar.qn", 3));
-        exec_command(vm, "$delete foo.qn:7");
+        exec_command(vm, mc, "$delete foo.qn:7");
         assert!(!bps(vm, "foo.qn", 7));
 
         // Step verbs arm the matching mode and signal Resume.
-        assert!(matches!(exec_command(vm, "$step"), CommandOutcome::Resume));
+        assert!(matches!(
+            exec_command(vm, mc, "$step"),
+            CommandOutcome::Resume
+        ));
         assert_eq!(step(vm), Some(StepMode::Into));
-        assert!(matches!(exec_command(vm, "$next"), CommandOutcome::Resume));
+        assert!(matches!(
+            exec_command(vm, mc, "$next"),
+            CommandOutcome::Resume
+        ));
         assert_eq!(step(vm), Some(StepMode::Over));
         assert!(matches!(
-            exec_command(vm, "$finish"),
+            exec_command(vm, mc, "$finish"),
             CommandOutcome::Resume
         ));
         assert_eq!(step(vm), Some(StepMode::Out));
 
         // $continue clears the armed step.
-        assert!(matches!(exec_command(vm, "$c"), CommandOutcome::Resume)); // alias
+        assert!(matches!(exec_command(vm, mc, "$c"), CommandOutcome::Resume)); // alias
         assert_eq!(step(vm), None);
 
         // Inspection verbs are queries (Stay) even with no frames; $source toggles the flag.
         for q in ["$frames", "$bt", "$locals", "$l", "$list", "$up", "$down"] {
-            assert!(matches!(exec_command(vm, q), CommandOutcome::Stay), "{q}");
+            assert!(
+                matches!(exec_command(vm, mc, q), CommandOutcome::Stay),
+                "{q}"
+            );
         }
         assert!(matches!(
-            exec_command(vm, "$source off"),
+            exec_command(vm, mc, "$source off"),
             CommandOutcome::Stay
         ));
         assert!(!vm.debug.as_ref().unwrap().show_source);
         assert!(matches!(
-            exec_command(vm, "$source on"),
+            exec_command(vm, mc, "$source on"),
             CommandOutcome::Stay
         ));
         assert!(vm.debug.as_ref().unwrap().show_source);
 
         // $quit quits; help / unknown / a bare expression keep prompting.
-        assert!(matches!(exec_command(vm, "$quit"), CommandOutcome::Quit));
-        assert!(matches!(exec_command(vm, "$help"), CommandOutcome::Stay));
-        assert!(matches!(exec_command(vm, "$nope"), CommandOutcome::Stay));
-        assert!(matches!(exec_command(vm, "1 + 1"), CommandOutcome::Stay));
-        assert!(matches!(exec_command(vm, ""), CommandOutcome::Stay));
+        assert!(matches!(
+            exec_command(vm, mc, "$quit"),
+            CommandOutcome::Quit
+        ));
+        assert!(matches!(
+            exec_command(vm, mc, "$help"),
+            CommandOutcome::Stay
+        ));
+        assert!(matches!(
+            exec_command(vm, mc, "$nope"),
+            CommandOutcome::Stay
+        ));
+        assert!(matches!(
+            exec_command(vm, mc, "1 + 1"),
+            CommandOutcome::Stay
+        ));
+        assert!(matches!(exec_command(vm, mc, ""), CommandOutcome::Stay));
     });
 }

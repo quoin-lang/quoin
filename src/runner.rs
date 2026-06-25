@@ -1089,7 +1089,7 @@ fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
                                 "$quit".to_string()
                             }
                         };
-                        match arena.mutate_root(|_mc, vm| exec_command(vm, &line)) {
+                        match arena.mutate_root(|mc, vm| exec_command(vm, mc, &line)) {
                             CommandOutcome::Stay => continue,
                             CommandOutcome::Resume => break,
                             CommandOutcome::Quit => return Ok(()),

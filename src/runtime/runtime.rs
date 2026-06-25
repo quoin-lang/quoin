@@ -119,7 +119,7 @@ fn compile_and_execute_source<'gc>(
     vm.execute_block(mc, block, Vec::new(), self_val)
 }
 
-fn eval_string<'gc>(
+pub(crate) fn eval_string<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     code: &str,

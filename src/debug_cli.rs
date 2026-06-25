@@ -6,13 +6,15 @@
 //! executes it against the live paused VM via [`exec_command`] (inside `mutate_root`). This
 //! mirrors the REPL's split — line I/O outside the arena, evaluation inside it.
 //!
-//! Slice 3a covers control + breakpoints (`$continue`/`$step`/`$next`/`$finish`/`$break`/
-//! `$delete`/`$quit`). Inspection (`$frames`/`$locals`/`$list`) and expression eval-in-frame
-//! land in 3b/3c. See `docs/DEBUGGER_ARCH.md`.
+//! Commands: control + breakpoints (`$continue`/`$step`/`$next`/`$finish`/`$break`/`$delete`/
+//! `$quit`, Slice 3a); inspection + source (`$frames`/`$up`/`$down`/`$locals`/`$list`/
+//! `$source`, 3b); and `$print` / bare-expression eval-in-frame (3c). See
+//! `docs/DEBUGGER_ARCH.md`.
 
 use crate::debug::DebugAction;
 use crate::vm::VmState;
 
+use gc_arena::Mutation;
 use std::path::PathBuf;
 
 /// What a command line at a pause asks the driver to do next.
@@ -97,20 +99,25 @@ fn print_focus(vm: &VmState<'_>) {
 }
 
 /// Execute one debugger command line against the paused VM, returning what the driver should
-/// do next. A leading `$` is a meta-command; anything else is (eventually) an expression to
-/// evaluate in the current frame — not yet wired in 3a.
-pub(crate) fn exec_command<'gc>(vm: &mut VmState<'gc>, line: &str) -> CommandOutcome {
+/// do next. A leading `$` is a meta-command; anything else is an expression to evaluate in the
+/// focus frame.
+pub(crate) fn exec_command<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    line: &str,
+) -> CommandOutcome {
     let line = line.trim();
     if line.is_empty() {
         return CommandOutcome::Stay;
     }
     let Some(rest) = line.strip_prefix('$') else {
-        println!("expression evaluation lands in a later slice — use $-commands ($help).");
+        print_expr(vm, mc, line);
         return CommandOutcome::Stay;
     };
-    let mut parts = rest.split_whitespace();
-    let verb = parts.next().unwrap_or("");
-    let arg = parts.next();
+    let verb = rest.split_whitespace().next().unwrap_or("");
+    let arg = rest.split_whitespace().nth(1);
+    // Everything after the verb, untrimmed of internal spaces — for `$print <expr>`.
+    let rest_args = rest[verb.len()..].trim();
     match verb {
         "continue" | "c" => {
             vm.apply_debug_action(DebugAction::Continue);
@@ -187,6 +194,14 @@ pub(crate) fn exec_command<'gc>(vm: &mut VmState<'gc>, line: &str) -> CommandOut
             }
             CommandOutcome::Stay
         }
+        "print" | "p" => {
+            if rest_args.is_empty() {
+                println!("usage: $print <expr>");
+            } else {
+                print_expr(vm, mc, rest_args);
+            }
+            CommandOutcome::Stay
+        }
         "quit" | "q" => CommandOutcome::Quit,
         "help" => {
             print_help();
@@ -197,6 +212,45 @@ pub(crate) fn exec_command<'gc>(vm: &mut VmState<'gc>, line: &str) -> CommandOut
             CommandOutcome::Stay
         }
     }
+}
+
+/// Show `expr` evaluated in the focus frame. A bare local, a bare `@ivar`, or `self` is read
+/// directly (the eval path can't see frame state); any other expression is evaluated against
+/// globals — so literals/globals work, but a compound expression referencing frame
+/// locals/`@ivars` resolves them to nil (the `eval:bindings:` / `eval:self:` gap).
+fn print_expr<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, expr: &str) {
+    let expr = expr.trim();
+    let focus = vm.debug_focus();
+    // Bare local: `eval:self:` can't see frame locals, so look them up directly.
+    if is_bare_ident(expr)
+        && let Some(val) = focus.and_then(|f| vm.debug_lookup_local(f, expr))
+    {
+        println!("{}", vm.debug_render(val));
+        return;
+    }
+    // Bare instance variable: `eval:self:` doesn't expose `@ivars` either — read the field.
+    if let Some(ivar) = expr.strip_prefix('@')
+        && is_bare_ident(ivar)
+        && let Some(val) = focus.and_then(|f| vm.debug_lookup_ivar(f, ivar))
+    {
+        println!("{}", vm.debug_render(val));
+        return;
+    }
+    let self_val = focus.and_then(|f| vm.frames.get(f).and_then(|fr| fr.receiver));
+    match vm.debug_eval(mc, expr, self_val) {
+        Ok(val) => println!("{}", vm.debug_render(val)),
+        Err(msg) => println!("error: {msg}"),
+    }
+}
+
+/// Whether `s` is a single bare identifier (so it can be looked up as a frame local).
+fn is_bare_ident(s: &str) -> bool {
+    let s = s.trim();
+    !s.is_empty()
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Add or remove a `(file, line)` breakpoint from `spec` — either `FILE:LINE`, or `LINE`
@@ -261,8 +315,10 @@ debugger commands:
   $locals, $l         locals, self, and self's @ivars of the focus frame
   $list               source around the focus frame's current line
   $source on|off      auto-show source at each pause (default on)
+  $print EXPR, $p     show a value in the focus frame (or just type it)
   $quit, $q           stop debugging and exit
   $help               this list
-expression eval-in-frame ($print) arrives in the next slice."
+$print resolves a bare local, a bare @ivar, or `self` directly; any other expression is
+evaluated against globals (compound expressions can't see frame locals/@ivars yet)."
     );
 }

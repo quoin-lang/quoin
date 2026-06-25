@@ -28,6 +28,7 @@ use crate::symbol::self_symbol;
 use crate::value::{SourceInfo, Value};
 use crate::vm::VmState;
 
+use gc_arena::Mutation;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// What to do when resuming from a pause. Produced by the frontend (the interactive
@@ -371,6 +372,83 @@ impl<'gc> VmState<'gc> {
             .into_iter()
             .map(|(name, val)| (name, pretty::render(val, width, false)))
             .collect()
+    }
+
+    /// Look up `name` as a local visible at frame `idx` — its own bindings, then up the
+    /// lexical (closure) chain. Used for `$print <bare-local>`, which `eval:self:` can't see
+    /// (it has no access to frame locals until `eval:bindings:` lands).
+    pub(crate) fn debug_lookup_local(&self, idx: usize, name: &str) -> Option<Value<'gc>> {
+        let mut env = Some(self.frames.get(idx)?.env);
+        while let Some(e) = env {
+            let borrowed = e.borrow();
+            if let Some((_, val)) = borrowed.vars.iter().find(|(sym, _)| sym.as_str() == name) {
+                return Some(*val);
+            }
+            env = borrowed.parent;
+        }
+        None
+    }
+
+    /// Look up `@name` (instance variable `name`, given without the `@`) on the receiver of
+    /// frame `idx`. A direct field read — `eval:self:` does not expose `@ivars` to eval'd code,
+    /// so `$print @x` resolves them here instead.
+    pub(crate) fn debug_lookup_ivar(&self, idx: usize, name: &str) -> Option<Value<'gc>> {
+        let Value::Object(obj) = self.frames.get(idx)?.receiver? else {
+            return None;
+        };
+        let borrowed = obj.borrow();
+        let slot = *borrowed.class.borrow().field_slots.get(name)?;
+        borrowed.fields.get(slot).copied()
+    }
+
+    /// Evaluate `expr` in the focus frame's context: a fresh compilation unit with `self_val`
+    /// bound as `self` (so `self`, `@ivars`, globals, and method calls resolve). Frame locals
+    /// are *not* visible (the `eval:bindings:` gap) — `$print` handles bare locals directly.
+    ///
+    /// Run isolated from the paused task: the debug session is suspended (so the eval's own
+    /// execution doesn't re-trip the checkpoint) and the coroutine **yielder is cleared** so
+    /// `execute_block` runs synchronously instead of cooperatively suspending the (already
+    /// suspended) paused coroutine. `execute_block` stops at the frame baseline, so it never
+    /// runs the paused frames; on error the frame/stack are truncated back and the stray
+    /// exception cleared — so a failed `$print` never corrupts the paused task. (A `$print`
+    /// expression that tries to `await` fails cleanly: there is no scheduler to park on.)
+    pub(crate) fn debug_eval(
+        &mut self,
+        mc: &Mutation<'gc>,
+        expr: &str,
+        self_val: Option<Value<'gc>>,
+    ) -> Result<Value<'gc>, String> {
+        let saved_debug = self.debug.take();
+        let saved_yielder = self.sched.yielder.take();
+        let base_frames = self.frames.len();
+        let base_stack = self.stack.len();
+        let outcome =
+            match crate::runtime::runtime::eval_string(self, mc, expr, "<debug>", self_val) {
+                Ok(v) => Ok(v),
+                // A `throw` in the expression: render the thrown value before it's cleared.
+                Err(QuoinError::Thrown) => {
+                    let thrown = self.active_exception;
+                    Err(thrown
+                        .map(|v| self.debug_render(v))
+                        .unwrap_or_else(|| "<thrown>".to_string()))
+                }
+                Err(e) => Err(format!("{e}")),
+            };
+        if outcome.is_err() {
+            self.frames.truncate(base_frames);
+            self.stack.truncate(base_stack);
+            self.active_exception = None;
+        }
+        self.sched.yielder = saved_yielder;
+        self.debug = saved_debug;
+        outcome
+    }
+
+    /// Render a value the way the debugger displays it — structurally, via the pretty-printer
+    /// (no `Value` method is invoked).
+    pub(crate) fn debug_render(&self, value: Value<'gc>) -> String {
+        let width = self.options.console_width.map(|w| w as usize).unwrap_or(80);
+        pretty::render(value, width, false)
     }
 
     /// A source window around frame `idx`'s current line: `context` lines on each side, with
