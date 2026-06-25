@@ -56,6 +56,11 @@ mimalloc = { version = "0.1", optional = true }
 rustc-hash = "2"
 # Line editing for `qn repl` (history, multiline via the Validator trait, key bindings).
 rustyline = "18"
+# Exact base-10 decimal arithmetic backing the BigDecimal stdlib type (money etc.).
+rust_decimal = "1"
+# Arbitrary-precision integers backing the BigInteger stdlib type.
+num-bigint = "0.4"
+num-traits = "0.2"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

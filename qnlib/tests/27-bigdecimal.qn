@@ -1,0 +1,55 @@
+"* BigDecimal: exact base-10 arithmetic (src/runtime/big_decimal.rs). Arithmetic is compared by
+"* value (== ignores trailing-zero scale differences); construction/format use .s. Mixing with
+"* Integer/Double requires an explicit BigDecimal.of: — there is no silent coercion.
+
+(TestSuite.new:{ name = 'BigDecimal' }).add:{
+    .test:
+    construct -> {
+        .is:{ (BigDecimal.of:'1.50').s } equalTo:'1.50';
+        .is:{ (BigDecimal.of:42).s } equalTo:'42';
+        .is:{ (BigDecimal.of:150 scale:2).s } equalTo:'1.50';
+        .does:{ BigDecimal.of:'1.2.3' } throw:ValueError;
+        .does:{ BigDecimal.of:5 scale:99 } throw:ValueError;
+    };
+
+    .test:
+    exactArithmetic -> {
+        "* the headline: 0.1 + 0.2 is exactly 0.3 (binary floats give 0.30000000000000004).
+        .is:{ (BigDecimal.of:'0.1') + (BigDecimal.of:'0.2') } equalTo:(BigDecimal.of:'0.3');
+        .is:{ (BigDecimal.of:'10') - (BigDecimal.of:'3') } equalTo:(BigDecimal.of:'7');
+        .is:{ (BigDecimal.of:'1.5') * (BigDecimal.of:'2') } equalTo:(BigDecimal.of:'3.0');
+        .is:{ (BigDecimal.of:'10') / (BigDecimal.of:'4') } equalTo:(BigDecimal.of:'2.5');
+        .does:{ (BigDecimal.of:'1') / (BigDecimal.of:'0') } throw:ArithmeticError;
+    };
+
+    .test:
+    comparison -> {
+        .isTrue:{ (BigDecimal.of:'2.5') < (BigDecimal.of:'3') };
+        .isTrue:{ (BigDecimal.of:'3') > (BigDecimal.of:'2.5') };
+        .isTrue:{ (BigDecimal.of:'3') >= (BigDecimal.of:'3') };
+        "* equal by value, ignoring scale
+        .isTrue:{ (BigDecimal.of:'1.50') == (BigDecimal.of:'1.5') };
+        .isFalse:{ (BigDecimal.of:'1') == (BigDecimal.of:'2') };
+        "* equality with a non-BigDecimal is false, never an error
+        .isFalse:{ (BigDecimal.of:'1') == 1 };
+        .isFalse:{ (BigDecimal.of:'1') == 'x' };
+    };
+
+    .test:
+    explicitConversionOnly -> {
+        "* mixing with an Integer requires an explicit conversion — the bare op is not understood
+        .does:{ (BigDecimal.of:'1') + 1 } throw:MessageNotUnderstood;
+        .does:{ (BigDecimal.of:'1') < 1 } throw:MessageNotUnderstood;
+    };
+
+    .test:
+    convertAndRound -> {
+        .is:{ ((BigDecimal.of:'0') - (BigDecimal.of:'1.5')).abs.s } equalTo:'1.5';
+        "* half-away-from-zero, matching Double.round
+        .is:{ ((BigDecimal.of:'2.5').round:0).s } equalTo:'3';
+        .is:{ ((BigDecimal.of:'3.14159').round:2).s } equalTo:'3.14';
+        .is:{ (BigDecimal.of:'1.50').scale } equalTo:2;
+        .is:{ (BigDecimal.of:'2.9').asInteger } equalTo:2;
+        .is:{ (BigDecimal.of:'2.5').asDouble } closeTo:2.5;
+    };
+};

@@ -1,4 +1,6 @@
 pub mod async_rt;
+pub mod big_decimal;
+pub mod big_integer;
 pub mod block;
 pub mod boolean;
 pub mod bytes;
@@ -10,6 +12,7 @@ pub mod integer;
 pub mod io;
 pub mod list;
 pub mod map;
+pub mod math;
 pub mod method;
 pub mod nil;
 pub mod object;

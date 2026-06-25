@@ -1,5 +1,20 @@
+use crate::error::QuoinError;
 use crate::recv;
 use crate::value::{NativeClassBuilder, Value};
+
+/// Convert an already-whole `f64` (the result of `floor`/`ceil`/`round`/`trunc`) to an `i64`,
+/// erroring if its magnitude falls outside the Integer range. There is no auto-promotion to
+/// BigInteger, so an unrepresentable result is an `ArithmeticError`, never a silent wrap.
+fn whole_to_i64(f: f64) -> Result<i64, QuoinError> {
+    // i64::MIN is exactly -2^63; i64::MAX rounds *up* to 2^63 as f64, so the upper bound is strict.
+    if f.is_finite() && f >= -(2f64.powi(63)) && f < 2f64.powi(63) {
+        Ok(f as i64)
+    } else {
+        Err(QuoinError::ArithmeticError(format!(
+            "{f} is out of Integer range"
+        )))
+    }
+}
 
 /// Generate `[Integer]` and `[Double]` typed variants for a binary operator on a
 /// `Double` receiver. Simpler than `int_binop!` (integer.rs): a Double receiver
@@ -32,7 +47,40 @@ pub fn build_double_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("Double", Some("Object"))
         .instance_method("sqrt", |vm, mc, receiver, _args| {
             let val = recv!(receiver, Double);
+            if val < 0.0 {
+                return Err(QuoinError::ArithmeticError(
+                    "sqrt of a negative Double".to_string(),
+                ));
+            }
             Ok(vm.new_double(mc, val.sqrt()))
+        })
+        // Rounding to a whole number yields an Integer (range-guarded). `round` is
+        // half-away-from-zero (`f64::round`); `truncate` drops the fraction toward zero.
+        .instance_method("floor", |vm, mc, receiver, _args| {
+            Ok(vm.new_int(mc, whole_to_i64(recv!(receiver, Double).floor())?))
+        })
+        .instance_method("ceil", |vm, mc, receiver, _args| {
+            Ok(vm.new_int(mc, whole_to_i64(recv!(receiver, Double).ceil())?))
+        })
+        .instance_method("round", |vm, mc, receiver, _args| {
+            Ok(vm.new_int(mc, whole_to_i64(recv!(receiver, Double).round())?))
+        })
+        .instance_method("truncate", |vm, mc, receiver, _args| {
+            Ok(vm.new_int(mc, whole_to_i64(recv!(receiver, Double).trunc())?))
+        })
+        // -1.0 / 0.0 / 1.0 by sign (NaN -> NaN; `f64::signum` would call +0.0 positive).
+        .instance_method("sign", |vm, mc, receiver, _args| {
+            let val = recv!(receiver, Double);
+            let s = if val.is_nan() {
+                f64::NAN
+            } else if val > 0.0 {
+                1.0
+            } else if val < 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
+            Ok(vm.new_double(mc, s))
         })
         // Human string form. Explicit so `.s` never routes through the Rust Display impl.
         .instance_method("s", |vm, mc, receiver, _args| {
@@ -45,6 +93,51 @@ pub fn build_double_class() -> NativeClassBuilder {
     let b = double_binop!(b, "/:", arith /);
     let b = double_binop!(b, "%:", arith %);
     let b = double_binop!(b, "<:", cmp <);
+    // pow: — a Double base always yields a Double (both arg types coerce via `as_f64`).
+    let b = b
+        .typed_instance_method("pow:", &["Integer"], |vm, mc, receiver, args| {
+            Ok(vm.new_double(
+                mc,
+                receiver.as_f64().unwrap().powf(args[0].as_f64().unwrap()),
+            ))
+        })
+        .typed_instance_method("pow:", &["Double"], |vm, mc, receiver, args| {
+            Ok(vm.new_double(
+                mc,
+                receiver.as_f64().unwrap().powf(args[0].as_f64().unwrap()),
+            ))
+        });
+    // min:/max: select the winning operand and return it in its own type (see integer.rs); a
+    // Double receiver compares on the f64 scale regardless of the argument's type.
+    let b = b
+        .typed_instance_method("min:", &["Integer"], |_vm, _mc, receiver, args| {
+            Ok(if receiver.as_f64().unwrap() <= args[0].as_f64().unwrap() {
+                receiver
+            } else {
+                args[0]
+            })
+        })
+        .typed_instance_method("min:", &["Double"], |_vm, _mc, receiver, args| {
+            Ok(if receiver.as_f64().unwrap() <= args[0].as_f64().unwrap() {
+                receiver
+            } else {
+                args[0]
+            })
+        })
+        .typed_instance_method("max:", &["Integer"], |_vm, _mc, receiver, args| {
+            Ok(if receiver.as_f64().unwrap() >= args[0].as_f64().unwrap() {
+                receiver
+            } else {
+                args[0]
+            })
+        })
+        .typed_instance_method("max:", &["Double"], |_vm, _mc, receiver, args| {
+            Ok(if receiver.as_f64().unwrap() >= args[0].as_f64().unwrap() {
+                receiver
+            } else {
+                args[0]
+            })
+        });
     b.instance_method("==:", |vm, mc, receiver, args| {
         Ok(vm.new_bool(mc, receiver == args[0]))
     })

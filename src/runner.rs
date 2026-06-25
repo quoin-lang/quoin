@@ -11,9 +11,9 @@ use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
 use crate::repl_complete::{CompletionIndex, build_completion_index, complete_input};
 use crate::runtime::runtime::build_block;
 use crate::runtime::{
-    async_rt, block, boolean, bytes, class, double, fiber as fiber_class, http, integer, io, list,
-    map, method, nil, object, pretty, regex, runtime, set, sockets, streams, string, symbol, task,
-    timer,
+    async_rt, big_decimal, big_integer, block, boolean, bytes, class, double, fiber as fiber_class,
+    http, integer, io, list, map, math, method, nil, object, pretty, regex, runtime, set, sockets,
+    streams, string, symbol, task, timer,
 };
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -68,6 +68,9 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, timer::build_timer_class());
     vm.register_native_class(mc, double::build_double_class());
     vm.register_native_class(mc, integer::build_integer_class());
+    vm.register_native_class(mc, math::build_math_class());
+    vm.register_native_class(mc, big_decimal::build_big_decimal_class());
+    vm.register_native_class(mc, big_integer::build_big_integer_class());
     vm.register_native_class(mc, string::build_string_class());
     vm.register_native_class(mc, symbol::build_symbol_class());
     vm.register_native_class(mc, nil::build_nil_class());
