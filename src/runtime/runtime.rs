@@ -6,6 +6,7 @@ use crate::io_backend::IoRequest;
 use crate::packages::{LoadStatus, LoadedUnit, canonical_package};
 use crate::parser::ast::NodeValue;
 use crate::parser::parse_quoin_string_named;
+use crate::runtime::duration::duration_to_millis;
 use crate::value::{Block, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -48,13 +49,17 @@ pub fn build_runtime_class() -> NativeClassBuilder {
         .class_method("supportsColor", |vm, mc, _receiver, _args| {
             Ok(vm.new_bool(mc, vm.options.supports_color))
         })
-        // Park the running fiber for `ms` milliseconds via the async IoBackend,
-        // without blocking other fibers (Stage 1 — see docs/ASYNC_ARCH.md). Returns nil.
-        .class_method("sleep:", |vm, mc, _receiver, args| {
-            let ms = arg!(args, Int, 0);
+        // Park the running fiber via the async IoBackend, without blocking other fibers
+        // (Stage 1 — see docs/ASYNC_ARCH.md). Accepts a bare ms count or a Duration. Returns nil.
+        .typed_class_method("sleep:", &["Integer"], |vm, mc, _receiver, args| {
             vm.await_io(IoRequest::Sleep {
-                ms: ms.max(0) as u64,
+                ms: arg!(args, Int, 0).max(0) as u64,
             })?;
+            Ok(vm.new_nil(mc))
+        })
+        .typed_class_method("sleep:", &["Duration"], |vm, mc, _receiver, args| {
+            let ms = duration_to_millis(args[0], "sleep:")? as u64;
+            vm.await_io(IoRequest::Sleep { ms })?;
             Ok(vm.new_nil(mc))
         })
 }
