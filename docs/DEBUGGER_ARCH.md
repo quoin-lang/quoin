@@ -170,7 +170,7 @@ evaluates with self + the frame's locals seeded.
 
 ## Exception breakpoints — break on throw
 
-A flag to drop into the debugger when an exception is thrown: `qn --break-on-throw=Type[,Type…]`.
+A flag to drop into the debugger when an exception is thrown: `qn debug --break-on-throw=Type[,Type…]`.
 
 **The type filter is mandatory** — there is deliberately no bare "break on *every* throw" form.
 The suite throws constantly (every `does:throw:` assertion), so an unfiltered mode would be
@@ -192,9 +192,15 @@ There is no single *throw site* that sees both. But the VM's **lazy frame-poppin
 propagate without unwinding; `catch:` pops only when it actually catches — see the audit) gives
 two downstream chokepoints that see *both* kinds with **frames still live**:
 1. **`catch:`'s `Err` arm**, before its `while frames.len() > initial { pop }` — every *caught*
-   error (the throwing stack is intact; the innermost frame's `ip` still points at the throw);
+   error (the throwing stack is intact);
 2. **`run_vm_loop`'s uncaught-`Err` arm** (per task) — every *uncaught* error, frames intact
    because nothing popped them on the way up.
+
+At both, the innermost frame's `ip` has already advanced *past* the failing send (`exec_send`
+bumps the caller `ip` before dispatching), so the debugger displays the throw frame at `ip - 1` —
+the failing instruction — via `frame_display_ip`, matching `annotate_error`'s stack trace. A
+transient `DebugState.at_throw` flag (set in `debug_check_throw`, cleared on resume) selects this
+post-dispatch line for the throw pause; a normal breakpoint pause is pre-dispatch and uses `ip`.
 
 So the match runs at those two points, against the error's type — the value's class for a user
 throw, or the variant's mapped `Error` class for a structured one — and on a hit fires the
@@ -203,8 +209,10 @@ handling/propagation. This is effectively **first-chance** (we break at the near
 boundary or the top, an instant after the literal throw, but with the throw site still on the
 stack), and it is **uniform** across Rust- and Quoin-raised errors — exactly the requirement.
 
-A `DebugAction::ResumeThrow` distinguishes "continue from an exception pause" (re-raise and let
-the unwind proceed) from a breakpoint pause's plain "continue."
+No distinct "resume from a throw" action is needed: the pause sits *on* the in-flight `Err`
+(the checkpoint suspends without consuming it), so a plain `$continue` simply returns from the
+checkpoint and lets the error keep propagating/handling exactly as it would have. The transient
+`at_throw` flag is reset on resume so the next (non-throw) pause renders normally.
 
 **Not "uncaught-only."** This is type-filtered *first-chance*, which sidesteps caught-vs-uncaught
 prediction entirely. A true "break only on *uncaught*" mode is genuinely hard and deferred (see
@@ -287,13 +295,17 @@ self-contained. DAP itself commonly runs over stdio, sidestepping sockets entire
     (side-effect-free fast path); any other expression is evaluated with the frame's `self` bound
     and its locals seeded as bindings, so `self`/`@ivars`/locals all resolve (`@total + n`). Needed
     the `eval:self:` fix + `eval:bindings:` (both since landed; see *Evaluate-in-frame*).
-- **Slice 4 — exception breakpoints.** `qn --break-on-throw=Type[,…]` (mandatory type). Match the
-  propagating error's type at the two live-frame chokepoints (`catch:`'s `Err` arm and
-  `run_vm_loop`'s uncaught arm); on a hit, the same `DebugBreak` pause. `DebugAction::ResumeThrow`
-  for "continue from an exception pause". Uniform across user and structured errors. (See
-  *Exception breakpoints* above.)
+- ✅ **Slice 4 — exception breakpoints.** `qn debug --break-on-throw=Type[,…]` (mandatory type).
+  `debug_check_throw` matches the propagating error's type — hierarchy-aware, via the class chain
+  — at the two live-frame chokepoints (`catch:`/`catch:finally:`'s `Err` arm and `run_vm_loop`'s
+  uncaught arm); on a hit, the same `DebugBreak` pause (banner + full inspect/eval). Plain
+  `$continue` resumes the error's normal handling/propagation — no distinct resume action is
+  needed, since the pause sits *on* the in-flight `Err` and returning from the checkpoint lets it
+  keep flowing. Uniform across user throws (`active_exception`) and structured errors
+  (`quoinerror_to_value`). (See *Exception breakpoints* above.)
 - *Test:* `.qn` fixtures driven by scripted command sequences — breakpoints + stepping (done in
-  Slices 1–2), and an exception-break fixture.
+  Slices 1–2), and the exception-break path (`break_on_throw_pauses_at_the_throw_site` /
+  `_ignores_a_non_matching_type`, plus the `--break-on-throw` flag parse).
 
 **v1 — DAP adapter.** A Debug Adapter (in the language-server repo or as `qn debug --dap`)
 translating DAP ⟷ the v0 control API: `setBreakpoints`, `stackTrace`, `scopes`/`variables`

@@ -74,6 +74,10 @@ impl Drop for DebugFrontend {
 /// `$source` is on) the surrounding source.
 pub(crate) fn announce_pause(vm: &mut VmState<'_>) {
     vm.debug_enter_pause();
+    // If a break-on-throw fired, say what was thrown.
+    if let Some(banner) = vm.debug.as_mut().and_then(|d| d.pause_throw.take()) {
+        println!("{banner}");
+    }
     match vm.debug_focus().and_then(|f| vm.debug_frame_location(f)) {
         Some((file, line, label)) => println!("→ paused at {file}:{line}  (in {label})"),
         None => println!("→ paused (no source location)"),
