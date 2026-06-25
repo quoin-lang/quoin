@@ -4,7 +4,7 @@ use crate::error::QuoinError;
 use crate::instruction::StaticBlock;
 use crate::packages::{LoadStatus, LoadedUnit, canonical_package};
 use crate::parser::ast::NodeValue;
-use crate::parser::parse_quoin_string_named;
+use crate::parser::try_parse_quoin_string_named;
 use crate::value::{Block, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -99,7 +99,11 @@ fn compile_and_execute_source<'gc>(
     display: &str,
     self_val: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
-    let ast = parse_quoin_string_named(source, display);
+    // Use the fallible parser so a syntax error in eval'd / `use`d source surfaces as a
+    // catchable `ParseError` rather than panicking the whole VM (the panicking
+    // `parse_quoin_string_named` is for the main-program entry, which fails the process).
+    let ast = try_parse_quoin_string_named(source, display)
+        .map_err(|e| QuoinError::ParseError(e.to_string()))?;
     let program_node = match &ast.value {
         NodeValue::Program(p) => p,
         _ => {
@@ -115,7 +119,7 @@ fn compile_and_execute_source<'gc>(
     vm.execute_block(mc, block, Vec::new(), self_val)
 }
 
-fn eval_string<'gc>(
+pub(crate) fn eval_string<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     code: &str,

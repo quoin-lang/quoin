@@ -104,6 +104,17 @@
         .does:{ (Bytes.of:#(255 254)).asString } throw:Error;
     };
 
+    "* A syntax error in `Runtime.eval:` / `eval:self:` surfaces a catchable ParseError
+    "* instead of panicking the VM (the eval path uses the fallible parser).
+    .test:
+    evalSyntaxErrorIsCatchable -> {
+        .does:{ Runtime.eval:'1 +' } throw:ParseError;
+        .does:{ Runtime.eval:'1 +' } throw:Error;
+        .does:{ Runtime.eval:'this is (not valid' self:nil } throw:ParseError;
+        "* a well-formed eval still returns its value
+        .is:{ Runtime.eval:'40 + 2' } equalTo:42;
+    };
+
     "* Methods that enforce an argument's type through the dispatcher (a typed
     "* variant) raise MessageNotUnderstood for a wrong-typed arg - no variant
     "* matches - rather than a hand-rolled TypeError. Correctly typed args dispatch.

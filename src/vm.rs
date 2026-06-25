@@ -184,6 +184,12 @@ pub struct VmState<'gc> {
     /// lifecycle. Shared `Rc` clone lives in each socket handle.
     #[collect(require_static)]
     pub socket_reap: std::rc::Rc<std::cell::RefCell<Vec<StreamId>>>,
+
+    /// Attached debugger session, or `None` for a normal run. When `Some`, the step loop
+    /// consults it once per instruction (see `src/debug.rs`); when `None`, the hook is a
+    /// single bool load. Plain data (no `Gc`), so `require_static`.
+    #[collect(require_static)]
+    pub debug: Option<crate::debug::DebugState>,
 }
 
 pub enum VmStatus<'gc> {
@@ -275,6 +281,7 @@ impl<'gc> VmState<'gc> {
             loaded: Vec::new(),
             options,
             socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            debug: None,
         }
     }
 
@@ -2494,6 +2501,14 @@ impl<'gc> VmState<'gc> {
                 return Ok(VmStatus::Running);
             }
         };
+
+        // Debugger checkpoint: only active while a session is attached (otherwise one bool
+        // load). May suspend with `DebugBreak` to hand control to the driver; transparent —
+        // execution continues here (then dispatches `inst`) on resume. `inst` borrows the
+        // local `bytecode` clone, not `self`, so `&mut self` here is fine.
+        if self.debug.is_some() {
+            self.debug_checkpoint(frame_idx, ip)?;
+        }
 
         match inst {
             Instruction::LoadLocal(name) => {

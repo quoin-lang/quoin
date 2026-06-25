@@ -748,6 +748,10 @@ enum RunStep {
     Done,
     /// The main task (#0) finished — the program is done; its result is on the stack.
     Finished,
+    /// An interactive debug session hit a breakpoint/step. The driver runs the `$`-command
+    /// loop (which reads commands outside the arena and applies them inside it), then
+    /// re-resumes this same task in place. Only produced when `debug.interactive` is set.
+    DebugPaused,
 }
 
 /// Resume the current task's coroutine once and classify what happened. The guest
@@ -827,6 +831,19 @@ fn resume_current_task<'gc>(
             // `close` sets its `wake` and re-enqueues it to `ready`.
             vm.save_task_context(vm.sched.current_task);
             Ok(RunStep::Parked)
+        }
+        CoroutineResult::Yield(YieldReason::DebugBreak) => {
+            // A breakpoint/step paused this task. Interactive sessions bubble up to the
+            // driver's `$`-command loop (where the line editor lives); non-interactive ones
+            // (tests / scripted runs) apply the next scripted action in place. Either way the
+            // VM stays stopped — no park — and the coroutine resumes past the suspend point in
+            // `debug_checkpoint` and dispatches the instruction.
+            if vm.debug.as_ref().is_some_and(|d| d.interactive) {
+                Ok(RunStep::DebugPaused)
+            } else {
+                vm.debug_on_pause();
+                Ok(RunStep::Running)
+            }
         }
         CoroutineResult::Yield(YieldReason::Return(val)) => complete_current_task(vm, mc, Ok(val)),
         CoroutineResult::Return(res) => {
@@ -926,6 +943,9 @@ fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
     // Task #0 starts current and already live; nothing to load on first resume.
     let mut current: Option<TaskId> = Some(TaskId(0));
     let mut needs_load = false;
+    // Interactive debugger frontend (line editor + history), built lazily on the first
+    // `DebugPaused`; `None` for every non-debug run, so it costs nothing there.
+    let mut debug_frontend: Option<crate::debug_cli::DebugFrontend> = None;
 
     block_on(async {
         let mut step_count = 0;
@@ -1038,6 +1058,45 @@ fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
                     current = None;
                 }
                 Ok(RunStep::Finished) => break,
+                Ok(RunStep::DebugPaused) => {
+                    // The whole VM is stopped. Run the `$`-command loop: read each line with
+                    // the editor (outside the arena, so history persists), then execute it
+                    // against the live paused VM inside `mutate_root`. Loop until a continue/
+                    // step verb (`Resume`) or `$quit`. Then re-resume this same task in place —
+                    // its context is still live (it parked nothing), so no reload.
+                    use crate::debug_cli::{
+                        CommandOutcome, DebugFrontend, announce_pause, exec_command,
+                    };
+                    use rustyline::error::ReadlineError;
+                    if debug_frontend.is_none() {
+                        debug_frontend = DebugFrontend::new();
+                    }
+                    let Some(frontend) = debug_frontend.as_mut() else {
+                        // No usable editor — degrade to "continue" so the run still completes.
+                        arena.mutate_root(|_mc, vm| {
+                            vm.apply_debug_action(crate::debug::DebugAction::Continue)
+                        });
+                        continue;
+                    };
+                    arena.mutate_root(|_mc, vm| announce_pause(vm));
+                    loop {
+                        let line = match frontend.readline() {
+                            Ok(l) => l,
+                            Err(ReadlineError::Interrupted) => continue, // Ctrl-C: re-prompt
+                            Err(ReadlineError::Eof) => "$quit".to_string(), // Ctrl-D: quit
+                            Err(e) => {
+                                eprintln!("debug: input error: {e}");
+                                "$quit".to_string()
+                            }
+                        };
+                        match arena.mutate_root(|mc, vm| exec_command(vm, mc, &line)) {
+                            CommandOutcome::Stay => continue,
+                            CommandOutcome::Resume => break,
+                            CommandOutcome::Quit => return Ok(()),
+                        }
+                    }
+                    // Re-resume the same task: context is live, nothing to load.
+                }
                 Err(e) => return Err(e),
             }
             step_count += 1;
@@ -1072,6 +1131,9 @@ pub enum VmRunnerMode {
     /// `qn -e '<expr>'`: evaluate one expression and print its result. The expression source
     /// is carried in `VmRunnerOptions::target_path`.
     Eval,
+    /// `qn debug <file>`: run a program under the interactive debugger. The path is carried in
+    /// `VmRunnerOptions::target_path`.
+    Debug,
 }
 
 impl VmRunnerOptions {
@@ -1110,6 +1172,13 @@ impl VmRunnerOptions {
                 if args.len() > 3 {
                     vm_args = args[3..].to_vec();
                 }
+            } else if arg == "debug" {
+                // `qn debug <file>`: run the program under the interactive debugger.
+                mode = VmRunnerMode::Debug;
+                target_path = args.get(2).cloned();
+                if args.len() > 3 {
+                    vm_args = args[3..].to_vec();
+                }
             } else {
                 mode = VmRunnerMode::Run;
                 target_path = Some(arg.clone());
@@ -1119,8 +1188,9 @@ impl VmRunnerOptions {
             }
         }
 
-        // The REPL is interactive: colorize errors/output when stdout is a terminal.
-        let supports_color = mode == VmRunnerMode::Repl && std::io::stdout().is_terminal();
+        // Interactive modes (REPL, debugger) colorize errors/output when stdout is a terminal.
+        let supports_color = matches!(mode, VmRunnerMode::Repl | VmRunnerMode::Debug)
+            && std::io::stdout().is_terminal();
 
         Self {
             mode,
@@ -1204,6 +1274,78 @@ impl VmRunner {
                 self.run_eval(expr);
                 Ok(())
             }
+            VmRunnerMode::Debug => {
+                let Some(ref path) = self.options.target_path else {
+                    eprintln!("Usage: qn debug FILE");
+                    exit(2);
+                };
+                self.run_debug(path);
+                Ok(())
+            }
+        }
+    }
+
+    /// `qn debug <file>`: run a program under the interactive debugger. The prelude loads
+    /// undebugged (via `build_repl_arena`); then the program is installed as task #0 with an
+    /// `interactive` debug session armed to stop at the first line ("stop at entry"), and
+    /// driven through `drive_main_task` — whose `DebugPaused` handler runs the `$`-command
+    /// loop. See `src/debug_cli.rs`.
+    fn run_debug(&self, path: &str) {
+        use crate::debug::{DebugState, StepMode};
+
+        let source = match read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading {path}: {e}");
+                exit(1);
+            }
+        };
+        let node = match try_parse_quoin_string_named(&source, path) {
+            Ok(n) => n,
+            Err(pe) => {
+                eprintln!(
+                    "Parse error at {}:{}:{}: {}",
+                    path,
+                    pe.line,
+                    pe.column + 1,
+                    pe.message
+                );
+                exit(1);
+            }
+        };
+        let Some(mut arena) = self.build_repl_arena() else {
+            exit(1);
+        };
+        let installed = arena.mutate_root(|mc, vm| {
+            let NodeValue::Program(p) = &node.value else {
+                return false;
+            };
+            let sb = match Compiler::new().compile_program(p) {
+                Ok(sb) => sb,
+                Err(e) => {
+                    eprintln!("Compile error: {e}");
+                    return false;
+                }
+            };
+            let block = build_block(mc, &sb);
+            // Stop at entry: an armed `StepInto` halts at the first line start. Source is
+            // shown at each pause by default ($source off to silence).
+            vm.debug = Some(DebugState {
+                interactive: true,
+                show_source: true,
+                step: Some(StepMode::Into),
+                ..Default::default()
+            });
+            vm.start_block(mc, block, Vec::new(), None, None);
+            install_main_task(mc, vm);
+            true
+        });
+        if !installed {
+            exit(1);
+        }
+        println!("Quoin debugger — $help for commands, $continue to run, $quit to exit.");
+        if let Err(e) = drive_main_task(&mut arena) {
+            eprintln!("VM execution error: {e}");
         }
     }
 
@@ -1461,7 +1603,8 @@ impl VmRunner {
                     | CoroutineResult::Yield(YieldReason::Gather { .. })
                     | CoroutineResult::Yield(YieldReason::Join { .. })
                     | CoroutineResult::Yield(YieldReason::JoinTimed { .. })
-                    | CoroutineResult::Yield(YieldReason::ChannelPark) => {
+                    | CoroutineResult::Yield(YieldReason::ChannelPark)
+                    | CoroutineResult::Yield(YieldReason::DebugBreak) => {
                         panic!("async I/O is not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
@@ -1683,6 +1826,152 @@ impl VmRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::debug::{DebugAction, DebugState};
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    /// Run `source` to completion under the real scheduler with a debug session attached:
+    /// line `breakpoints` as `(file, line)`, and a `script` of actions applied at successive
+    /// pauses (one per pause; the run continues past any pause the script doesn't cover).
+    /// Returns the `pause_log`. Exercises the full mechanism end-to-end — the step-loop hook
+    /// fires, suspends via `DebugBreak`, the driver applies the action, and the task resumes
+    /// in place to completion.
+    fn run_debug(
+        source: &str,
+        filename: &str,
+        breakpoints: &[(&str, usize)],
+        script: &[DebugAction],
+    ) -> Vec<(String, usize)> {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, VmOptions::default());
+            register_builtins(mc, &mut vm);
+            vm
+        });
+        // Load the prelude so the fixture can use the stdlib (blocks, ranges, …).
+        for ast in prelude_asts() {
+            arena.mutate_root(|mc, vm| {
+                if let NodeValue::Program(p) = &ast.value
+                    && let Ok(sb) = Compiler::new().compile_program(p)
+                {
+                    let block = build_block(mc, &sb);
+                    let _ = vm.execute_block(mc, block, Vec::new(), None);
+                }
+            });
+        }
+        // Compile the fixture, attach the debug session, install it as task #0.
+        let node = try_parse_quoin_string_named(source, filename).expect("fixture parses");
+        arena.mutate_root(|mc, vm| {
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a Program node");
+            };
+            let sb = Compiler::new()
+                .compile_program(p)
+                .expect("fixture compiles");
+            let block = build_block(mc, &sb);
+            let mut bps: HashMap<String, HashSet<usize>> = HashMap::new();
+            for (f, l) in breakpoints {
+                bps.entry((*f).to_string()).or_default().insert(*l);
+            }
+            vm.debug = Some(DebugState {
+                breakpoints: bps,
+                script: VecDeque::from(script.to_vec()),
+                ..Default::default()
+            });
+            vm.start_block(mc, block, Vec::new(), None, None);
+            install_main_task(mc, vm);
+        });
+        drive_main_task(&mut arena).expect("fixture runs to completion");
+        arena.mutate_root(|_mc, vm| {
+            vm.debug
+                .as_ref()
+                .map(|d| d.pause_log.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    #[test]
+    fn breakpoint_pauses_per_arrival_and_resumes_to_completion() {
+        // `dbl`'s body is on line 2 alone; it is invoked twice, so the line-2 breakpoint
+        // must fire once per invocation (a new frame each time) — proving the hook fires,
+        // suspends, and resumes, and that re-entry in a fresh frame re-triggers.
+        let source = "\
+dbl = { |n|
+    n * 2
+};
+a = dbl.value: 3;
+b = dbl.value: 4;
+a + b
+";
+        let log = run_debug(source, "fixture.qn", &[("fixture.qn", 2)], &[]);
+        assert_eq!(
+            log,
+            vec![("fixture.qn".to_string(), 2), ("fixture.qn".to_string(), 2),],
+        );
+    }
+
+    #[test]
+    fn no_breakpoints_never_pauses() {
+        let log = run_debug("x = 1;\ny = 2;\nx + y\n", "fixture.qn", &[], &[]);
+        assert!(log.is_empty());
+    }
+
+    /// A fixture with a helper called from the top level — exercises step-into / over / out.
+    /// Lines: 1 `f = { |n|`, 2 `a = n + 1;`, 3 `a * 2`, 4 `};`, 5 `x = 5;`,
+    /// 6 `y = f.value: x;`, 7 `y + 1`.
+    const STEP_FIXTURE: &str = "\
+f = { |n|
+    a = n + 1;
+    a * 2
+};
+x = 5;
+y = f.value: x;
+y + 1
+";
+
+    fn lines(log: &[(String, usize)]) -> Vec<usize> {
+        log.iter().map(|(_, l)| *l).collect()
+    }
+
+    #[test]
+    fn step_over_skips_the_call_and_advances_line_by_line() {
+        // Break at line 5; step-over to 6, then step-over the call on 6 (must NOT descend
+        // into f's body on lines 2-3) landing on 7; then continue.
+        let log = run_debug(
+            STEP_FIXTURE,
+            "fixture.qn",
+            &[("fixture.qn", 5)],
+            &[
+                DebugAction::StepOver,
+                DebugAction::StepOver,
+                DebugAction::Continue,
+            ],
+        );
+        assert_eq!(lines(&log), vec![5, 6, 7]);
+    }
+
+    #[test]
+    fn step_into_descends_into_the_called_block() {
+        // Break at the call site (line 6); step-into must stop at f's first body line (2).
+        let log = run_debug(
+            STEP_FIXTURE,
+            "fixture.qn",
+            &[("fixture.qn", 6)],
+            &[DebugAction::StepInto, DebugAction::Continue],
+        );
+        assert_eq!(lines(&log), vec![6, 2]);
+    }
+
+    #[test]
+    fn step_out_runs_to_the_caller() {
+        // Break inside f (line 2); step-out runs f to its return and stops back in the
+        // caller (the still-executing call site, line 6).
+        let log = run_debug(
+            STEP_FIXTURE,
+            "fixture.qn",
+            &[("fixture.qn", 2)],
+            &[DebugAction::StepOut, DebugAction::Continue],
+        );
+        assert_eq!(lines(&log), vec![2, 6]);
+    }
 
     #[test]
     fn flow_names_wraps_to_width() {
