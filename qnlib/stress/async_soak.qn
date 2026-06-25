@@ -130,6 +130,47 @@ timeoutRound = { |r|
     }
 };
 
+"* Channel pipeline (buffered): a producer task sends worker(r,k) for k in spawn order
+"* into a small buffered channel and closes; a consumer task drains it with `each:`. The
+"* capacity is < width, so the producer parks when the buffer is full and the consumer
+"* parks when it is empty — both park/wake directions, interleaved with a few real sleeps.
+"* A FIFO channel preserves send order, so the drained list equals the serial reference
+"* regardless of scheduling, and the buffered values must survive collection while they sit
+"* in the channel (trace_gc) — corruption or a lost value fails the check. `gather` returns
+"* #( producerResult consumerList ).
+channelPipeline = { |r|
+    ch = Channel.buffered: 4;
+    Async.gather:#(
+        {
+            (0..width).each:{ |k|
+                ch.send: (worker.valueWithArgs:#(r k));
+                ((k % 3) == 0).if:{ Async.sleep: 1 }
+            };
+            ch.close;
+            'done'
+        }
+        {
+            out = #();
+            ch.each:{ |v| out.add: v };
+            out
+        }
+    )
+};
+expectedPipeline = { |r| #( 'done' (expectedCompute.value:r) ) };
+
+"* Channel fan-in (unbuffered rendezvous): width sender tasks each send worker(r,k) on an
+"* unbuffered channel; this task receives width values and sums them. Many senders park on
+"* the rendezvous with one receiver; the sum is order-independent, so it is deterministic
+"* under any scheduling. Sender handles fall out of scope and their slots free on completion.
+channelFanIn = { |r|
+    ch = Channel.new;
+    (0..width).each:{ |k| Task.spawn:{ ch.send: (worker.valueWithArgs:#(r k)) } };
+    sum = 0;
+    (0..width).each:{ |_| sum = sum + ch.receive };
+    sum
+};
+expectedFanIn = { |r| (expectedCompute.value:r).sum };
+
 "* Compare, or fail loudly: print a greppable SOAK FAILED line to stdout (Run mode
 "* exits 0 even on an uncaught throw) and then throw to abort the loop and dump the
 "* detail to stderr.
@@ -173,7 +214,13 @@ checksum = 0;
     "* 6. timeout combinator (each element == worker(r,k), as in compute)
     check.valueWithArgs:#( 'timeout' round (timeoutRound.value:round) (expectedCompute.value:round) );
 
-    "* 6. allocation pressure (give the GC debt) folded into a running checksum
+    "* 7. channel pipeline: buffered producer -> consumer, FIFO so == #( 'done' compute )
+    check.valueWithArgs:#( 'chanpipe' round (channelPipeline.value:round) (expectedPipeline.value:round) );
+
+    "* 8. channel fan-in: unbuffered rendezvous, order-independent sum == compute.sum
+    check.valueWithArgs:#( 'chanfanin' round (channelFanIn.value:round) (expectedFanIn.value:round) );
+
+    "* 9. allocation pressure (give the GC debt) folded into a running checksum
     pressure = (0..width).collect:{ |k| (round + k) * (k + 1) };
     rsum = actual.sum + (pressure.select:{ |x| (x % 2) == 0 }).sum;
     checksum = (checksum + rsum) % 1000000007;
