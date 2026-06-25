@@ -1,0 +1,93 @@
+"* UUID + ULID (src/runtime/ids.rs) — 128-bit identifiers backed by the uuid/ulid crates.
+"* UUID: v4 (random) and v7 (time-ordered). ULID: sortable, Crockford base32, embeds a
+"* Unix-millisecond timestamp. Both compare via a native `<:` (the other orderings derive on
+"* Object) and stringify with `.s`. Time-ordering tests sleep between generations so the two
+"* values land in different milliseconds (within one ms the low bits are random, not ordered).
+
+(TestSuite.new:{ name = 'IDs' }).add:{
+    .test:
+    uuidV4 -> {
+        u = UUID.generateV4;
+        .is:{ u.version } equalTo:4;
+        .is:{ u.s.length } equalTo:36;            "* canonical hyphenated form
+        .is:{ u.asBytes.size } equalTo:16;
+        "* two fresh v4s are (astronomically) never equal
+        .is:{ u } notEqualTo:UUID.generateV4;
+    };
+
+    .test:
+    uuidV7 -> {
+        u = UUID.generateV7;
+        .is:{ u.version } equalTo:7;
+        .is:{ u.s.length } equalTo:36;
+        .is:{ u.asBytes.size } equalTo:16;
+    };
+
+    .test:
+    uuidParseRoundTrip -> {
+        u = UUID.generateV4;
+        .is:{ UUID.parse:(u.s) } equalTo:u;        "* parse ∘ render is identity
+        "* parsing is case-insensitive and the rendered form is canonical (lower-case)
+        .is:{ (UUID.parse:'550E8400-E29B-41D4-A716-446655440000').s }
+            equalTo:'550e8400-e29b-41d4-a716-446655440000';
+    };
+
+    .test:
+    uuidOrdering -> {
+        "* v7 is time-ordered; sleep so the two land in distinct milliseconds.
+        a = UUID.generateV7;
+        Async.sleep:2;
+        b = UUID.generateV7;
+        .isTrue:{ a < b };
+        .isTrue:{ b > a };
+        .isTrue:{ a <= b };
+        .isFalse:{ a == b };
+    };
+
+    .test:
+    uuidEquality -> {
+        u = UUID.generateV4;
+        .isTrue:{ u == (UUID.parse:(u.s)) };
+        "* `==` against a non-UUID is false, never an error
+        .isFalse:{ u == 'not a uuid' };
+        .isFalse:{ u == ULID.generate };
+    };
+
+    .test:
+    uuidParseErrors -> {
+        .does:{ UUID.parse:'not-a-uuid' } throw:ValueError;
+        .does:{ UUID.parse:'' } throw:ValueError;
+    };
+
+    .test:
+    ulidBasics -> {
+        l = ULID.generate;
+        .is:{ l.s.length } equalTo:26;             "* 26-char Crockford base32
+        .is:{ l.asBytes.size } equalTo:16;
+        .isTrue:{ l.timestampMillis > 0 };
+    };
+
+    .test:
+    ulidParseRoundTrip -> {
+        l = ULID.generate;
+        .is:{ ULID.parse:(l.s) } equalTo:l;
+        .isTrue:{ (ULID.parse:(l.s)) == l };
+    };
+
+    .test:
+    ulidOrdering -> {
+        "* ULID lexicographic order == chronological order (timestamp is the high bits).
+        a = ULID.generate;
+        Async.sleep:2;
+        b = ULID.generate;
+        .isTrue:{ a < b };
+        .isTrue:{ b > a };
+        .isTrue:{ a.timestampMillis < b.timestampMillis };
+    };
+
+    .test:
+    ulidParseErrors -> {
+        .does:{ ULID.parse:'nope' } throw:ValueError;
+        .does:{ ULID.parse:'' } throw:ValueError;
+    };
+};
