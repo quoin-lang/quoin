@@ -190,6 +190,12 @@ pub struct VmState<'gc> {
     /// single bool load. Plain data (no `Gc`), so `require_static`.
     #[collect(require_static)]
     pub debug: Option<crate::debug::DebugState>,
+
+    /// Active Quoin-level coverage collector, or `None` for a normal run. Consulted once
+    /// per instruction (a single bool load when `None`), the same hot-path cost model as
+    /// `debug`. Plain data (no `Gc`), so `require_static`. See `src/coverage.rs`.
+    #[collect(require_static)]
+    pub coverage: Option<crate::coverage::CoverageState>,
 }
 
 pub enum VmStatus<'gc> {
@@ -282,6 +288,7 @@ impl<'gc> VmState<'gc> {
             options,
             socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             debug: None,
+            coverage: None,
         }
     }
 
@@ -2508,6 +2515,9 @@ impl<'gc> VmState<'gc> {
         // local `bytecode` clone, not `self`, so `&mut self` here is fine.
         if self.debug.is_some() {
             self.debug_checkpoint(frame_idx, ip)?;
+        }
+        if self.coverage.is_some() {
+            self.coverage_tick(frame_idx, ip);
         }
 
         match inst {
