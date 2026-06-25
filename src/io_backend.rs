@@ -767,4 +767,209 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    fn mock_fulfills_every_request_kind() {
+        let mock = MockBackend::new();
+        assert!(matches!(
+            block_on(mock.perform(IoRequest::Sleep { ms: 0 })),
+            IoResult::Slept
+        ));
+        assert!(matches!(
+            block_on(mock.perform(IoRequest::Connect {
+                host: "h".to_string(),
+                port: 1,
+            })),
+            IoResult::Connected(_)
+        ));
+        assert!(matches!(
+            block_on(mock.perform(IoRequest::Close { id: StreamId(1) })),
+            IoResult::Closed
+        ));
+        assert!(matches!(
+            block_on(mock.perform(IoRequest::OpenFile {
+                path: OsString::from("f"),
+            })),
+            IoResult::Connected(_)
+        ));
+        assert!(matches!(
+            block_on(mock.perform(IoRequest::Listen {
+                host: "h".to_string(),
+                port: 0,
+            })),
+            IoResult::Listening { port: 0, .. }
+        ));
+        assert!(matches!(
+            block_on(mock.perform(IoRequest::Accept { id: StreamId(1) })),
+            IoResult::Connected(_)
+        ));
+        // The mock keeps the id on a TlsWrap (no real handshake), mirroring the native
+        // backend's in-place swap.
+        assert!(matches!(
+            block_on(mock.perform(IoRequest::TlsWrap {
+                id: StreamId(7),
+                domain: "h".to_string(),
+                insecure: true,
+            })),
+            IoResult::Connected(StreamId(7))
+        ));
+    }
+
+    #[test]
+    fn mock_connect_and_open_mint_distinct_ids() {
+        let mock = MockBackend::new();
+        let a = block_on(mock.perform(IoRequest::Connect {
+            host: "h".to_string(),
+            port: 1,
+        }));
+        let b = block_on(mock.perform(IoRequest::OpenFile {
+            path: OsString::from("f"),
+        }));
+        match (a, b) {
+            (IoResult::Connected(x), IoResult::Connected(y)) => assert_ne!(x, y),
+            other => panic!("expected two Connected ids, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smol_backend_default_constructs() {
+        // Exercise the `Default` impl (the rest of the suite builds via `new`).
+        let _backend = SmolBackend::default();
+    }
+
+    #[test]
+    fn secure_connector_loads_webpki_roots() {
+        // The validating connector is otherwise reached only by the network-gated
+        // real-host test; build it here so the webpki-roots load path is covered.
+        let _connector = secure_connector();
+    }
+
+    #[test]
+    fn smol_write_unknown_id_errors() {
+        let backend = SmolBackend::new();
+        let r = block_on(backend.perform(IoRequest::Write {
+            id: StreamId(999),
+            bytes: b"x".to_vec(),
+        }));
+        assert!(matches!(r, IoResult::Err(e) if e.kind == std::io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn smol_close_unknown_id_is_noop() {
+        let backend = SmolBackend::new();
+        assert!(matches!(
+            block_on(backend.perform(IoRequest::Close { id: StreamId(999) })),
+            IoResult::Closed
+        ));
+    }
+
+    #[test]
+    fn smol_tlswrap_unknown_id_errors() {
+        let backend = SmolBackend::new();
+        let r = block_on(backend.perform(IoRequest::TlsWrap {
+            id: StreamId(999),
+            domain: "localhost".to_string(),
+            insecure: true,
+        }));
+        assert!(matches!(r, IoResult::Err(e) if e.kind == std::io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn smol_accept_unknown_listener_errors() {
+        let backend = SmolBackend::new();
+        let r = block_on(backend.perform(IoRequest::Accept { id: StreamId(999) }));
+        assert!(matches!(r, IoResult::Err(e) if e.kind == std::io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn smol_open_missing_file_errors() {
+        let backend = SmolBackend::new();
+        let r = block_on(backend.perform(IoRequest::OpenFile {
+            path: OsString::from("/no/such/quoin/file/anywhere.xyz"),
+        }));
+        assert!(matches!(r, IoResult::Err(e) if e.kind == std::io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn smol_listen_unbindable_addr_errors() {
+        // 192.0.2.0/24 is TEST-NET-1 (RFC 5737): a literal IP (no DNS) that isn't a local
+        // address, so the bind fails fast rather than hanging on name resolution.
+        let backend = SmolBackend::new();
+        let r = block_on(backend.perform(IoRequest::Listen {
+            host: "192.0.2.1".to_string(),
+            port: 0,
+        }));
+        assert!(matches!(r, IoResult::Err(_)));
+    }
+
+    /// `TlsWrap` with a server name rustls rejects: the stream is taken out and dropped,
+    /// the id left vacant, and an `InvalidInput` error returned — before any handshake.
+    #[test]
+    fn smol_tlswrap_invalid_server_name_errors() {
+        // A registered stream is required first; stand up a loopback listener and connect.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let backend = SmolBackend::new();
+        block_on(async {
+            let id = match backend
+                .perform(IoRequest::Connect {
+                    host: "127.0.0.1".to_string(),
+                    port: addr.port(),
+                })
+                .await
+            {
+                IoResult::Connected(id) => id,
+                other => panic!("connect failed: {other:?}"),
+            };
+            // The empty string is not a valid TLS server name.
+            let r = backend
+                .perform(IoRequest::TlsWrap {
+                    id,
+                    domain: String::new(),
+                    insecure: true,
+                })
+                .await;
+            assert!(matches!(r, IoResult::Err(e) if e.kind == std::io::ErrorKind::InvalidInput));
+        });
+    }
+
+    /// `insecure: false` routes through the secure (webpki) connector. The peer here
+    /// speaks plaintext then drops, so the handshake fails — covering the secure-connector
+    /// dispatch and the handshake-error arm without needing a real certificate.
+    #[test]
+    fn smol_tlswrap_secure_against_plaintext_peer_errors() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                use std::io::Read;
+                let mut buf = [0u8; 64];
+                let _ = sock.read(&mut buf); // read the ClientHello, then drop -> EOF
+            }
+        });
+        let backend = SmolBackend::new();
+        block_on(async {
+            let id = match backend
+                .perform(IoRequest::Connect {
+                    host: "127.0.0.1".to_string(),
+                    port: addr.port(),
+                })
+                .await
+            {
+                IoResult::Connected(id) => id,
+                other => panic!("connect failed: {other:?}"),
+            };
+            let r = backend
+                .perform(IoRequest::TlsWrap {
+                    id,
+                    domain: "localhost".to_string(),
+                    insecure: false,
+                })
+                .await;
+            assert!(matches!(r, IoResult::Err(_)));
+        });
+    }
 }
