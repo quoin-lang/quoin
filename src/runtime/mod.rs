@@ -4,6 +4,7 @@ pub mod big_integer;
 pub mod block;
 pub mod boolean;
 pub mod bytes;
+pub mod channel;
 pub mod class;
 pub mod codecs;
 pub mod csv_fmt;

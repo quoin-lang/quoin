@@ -69,6 +69,12 @@ pub enum YieldReason<'gc> {
         #[collect(require_static)]
         ms: u64,
     },
+    /// The running task is parking on a `Channel` send/receive rendezvous. Pure in-VM
+    /// coordination (no I/O backend): the task already registered itself in the channel's
+    /// waiter queue, so this carries no payload — the driver just parks its context. A
+    /// counterpart (or `close`) sets this task's `wake` and enqueues it to `ready`. See
+    /// `src/runtime/channel.rs`.
+    ChannelPark,
 }
 
 /// The standard VM driver loop, shared by the main program and every guest

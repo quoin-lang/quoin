@@ -3,6 +3,7 @@ use crate::instruction::{Constant, SharedBytecode, SharedSourceMap, StaticBlock}
 use crate::parser::ast::NodeValue;
 use crate::runtime::block::build_block_class;
 use crate::runtime::boolean::build_boolean_class;
+use crate::runtime::channel::{NativeChannelState, build_channel_class};
 use crate::runtime::class::build_class_class;
 use crate::runtime::double::build_double_class;
 use crate::runtime::integer::build_integer_class;
@@ -362,6 +363,73 @@ fn test_deferred_call_values_survive_collection() {
                 _ => panic!("deferred value is not an Object — collected?"),
             }
         }
+    });
+}
+
+#[test]
+fn test_channel_buffered_values_survive_collection() {
+    // A `Channel` holds GC `Value`s in its native state: buffered (not-yet-received)
+    // values and each parked sender's pending value. Both are reachable only through
+    // the channel, so `NativeChannelState::trace_gc` must trace them or a collection
+    // while values sit in the channel (the run loop collects between steps) frees them.
+    use crate::vm_scheduler::TaskId;
+
+    let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+        let mut vm = VmState::new(mc, VmOptions::default());
+        vm.register_native_class(mc, build_object_class());
+        vm.register_native_class(mc, build_string_class());
+        vm.register_native_class(mc, build_channel_class());
+        vm
+    });
+
+    // Build a channel and root it on the VM stack (a GC root), then stash freshly
+    // allocated strings in its buffer and parked-sender queue — reachable ONLY through
+    // the channel's native state.
+    arena.mutate_root(|mc, vm| {
+        let class = vm.get_or_create_builtin_class(mc, "Channel");
+        let channel = vm.new_native_state(mc, class, NativeChannelState::new(4));
+        let buffered = vm.new_string(mc, "BUFFERED-VALUE".to_string());
+        let pending = vm.new_string(mc, "PARKED-SENDER-VALUE".to_string());
+        channel
+            .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {
+                ch.buffer_mut().push_back(buffered);
+                ch.send_waiters_mut().push_back((TaskId(7), pending));
+            })
+            .unwrap();
+        vm.push(channel); // root the channel
+    });
+
+    // Sweep real garbage through full cycles. Untraced channel values would go with it.
+    arena.mutate_root(|mc, vm| {
+        for i in 0..512 {
+            let _garbage = vm.new_string(mc, format!("garbage-{i}"));
+        }
+    });
+    arena.finish_cycle();
+    arena.finish_cycle();
+
+    // After collection both stashed strings must still be the exact originals.
+    arena.mutate_root(|_mc, vm| {
+        let channel = *vm.stack.last().expect("channel still rooted on the stack");
+        channel
+            .with_native_state::<NativeChannelState, _, _>(|ch| {
+                let assert_str = |val: &Value, expected: &str| match val {
+                    Value::Object(obj) => match &obj.borrow().payload {
+                        ObjectPayload::String(s) => assert_eq!(s.as_str(), expected),
+                        _ => panic!("channel value is no longer a String — collected?"),
+                    },
+                    _ => panic!("channel value is not an Object — collected?"),
+                };
+                assert_eq!(ch.buffer.len(), 1, "the buffered value must survive");
+                assert_str(&ch.buffer[0], "BUFFERED-VALUE");
+                assert_eq!(
+                    ch.send_waiters.len(),
+                    1,
+                    "the parked-sender value must survive"
+                );
+                assert_str(&ch.send_waiters[0].1, "PARKED-SENDER-VALUE");
+            })
+            .unwrap();
     });
 }
 

@@ -100,6 +100,13 @@ pub struct Task<'gc> {
     /// linger in the reactor. Set by the driver on park, taken on wake.
     #[collect(require_static)]
     pub deadline_abort: Option<AbortHandle>,
+    /// While parked on a `Channel` send/receive: set before the `ChannelPark` suspend so
+    /// `cancel` can make this task runnable (it matches none of the I/O/join branches),
+    /// and so a counterpart can tell a live waiter from a stale ("ghost") queue entry left
+    /// behind by a cancelled task. Cleared on becoming current and when a counterpart wakes
+    /// it. See `src/runtime/channel.rs`.
+    #[collect(require_static)]
+    pub parked_on_channel: bool,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -146,6 +153,16 @@ pub enum Wake<'gc> {
     /// A `JoinTimed` park hit its deadline before the joined task finished. Delivered
     /// by the driver when the deadline timer wins the race (see `Async.timeout:do:`).
     TimedOut,
+    /// A parked `Channel` receiver was handed `value` by a sender (`channel.rs`).
+    ChannelRecv {
+        value: Value<'gc>,
+    },
+    /// A parked `Channel` sender's value was accepted by a receiver — the send succeeds.
+    ChannelSendOk,
+    /// A parked `Channel` sender/receiver was woken by `close`. A receiver observes an
+    /// empty, closed channel (returns nil / ends `each:`); a sender raises "send on a
+    /// closed channel".
+    ChannelClosed,
 }
 
 /// Classification of a finished detached task's outcome, used by `complete_detached`
@@ -835,6 +852,7 @@ impl<'gc> VmState<'gc> {
                 .expect("load_task_context: task slot is empty");
             self.sched.cancel_current = t.cancel_requested;
             t.joining = None;
+            t.parked_on_channel = false;
             t.park_epoch = t.park_epoch.wrapping_add(1);
             t.deadline_abort = None;
         }
@@ -942,6 +960,7 @@ impl<'gc> VmState<'gc> {
             joining: None,
             park_epoch: 0,
             deadline_abort: None,
+            parked_on_channel: false,
         }
     }
 
@@ -1101,6 +1120,12 @@ impl<'gc> VmState<'gc> {
             if let Some(jt) = self.sched.tasks.get_mut(joined.0).and_then(|t| t.as_mut()) {
                 jt.waiters.retain(|w| *w != target);
             }
+            self.sched.ready.push_back(target);
+        } else if t.parked_on_channel {
+            // Parked on a channel send/receive: make it runnable so it sees the cancel.
+            // Its entry in the channel's waiter queue can't be reached from here (no `mc`),
+            // so it lingers as a ghost and is skipped when a counterpart next pops it.
+            t.parked_on_channel = false;
             self.sched.ready.push_back(target);
         }
         // Otherwise it is already ready (or parked on its own gather — see the v1 scope

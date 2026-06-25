@@ -11,10 +11,10 @@ use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
 use crate::repl_complete::{CompletionIndex, build_completion_index, complete_input};
 use crate::runtime::runtime::build_block;
 use crate::runtime::{
-    async_rt, big_decimal, big_integer, block, boolean, bytes, class, codecs, csv_fmt, date_time,
-    double, duration, fiber as fiber_class, http, ids, instant, integer, io, json, list, map, math,
-    method, msgpack, nil, object, pretty, regex, runtime, set, sockets, streams, string, symbol,
-    task, time_zone, timer, timestamp, toml_fmt, yaml,
+    async_rt, big_decimal, big_integer, block, boolean, bytes, channel, class, codecs, csv_fmt,
+    date_time, double, duration, fiber as fiber_class, http, ids, instant, integer, io, json, list,
+    map, math, method, msgpack, nil, object, pretty, regex, runtime, set, sockets, streams, string,
+    symbol, task, time_zone, timer, timestamp, toml_fmt, yaml,
 };
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -58,6 +58,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, csv_fmt::build_csv_class());
     vm.register_native_class(mc, ids::build_uuid_class());
     vm.register_native_class(mc, ids::build_ulid_class());
+    vm.register_native_class(mc, channel::build_channel_class());
     vm.register_native_class(mc, toml_fmt::build_toml_class());
     vm.register_native_class(mc, yaml::build_yaml_class());
     vm.register_native_class(mc, sockets::build_tcp_socket_class());
@@ -820,6 +821,13 @@ fn resume_current_task<'gc>(
             vm.save_task_context(vm.sched.current_task);
             Ok(RunStep::ParkedJoinTimed { target: task, ms })
         }
+        CoroutineResult::Yield(YieldReason::ChannelPark) => {
+            // The task already enqueued itself in the channel's waiter queue (in
+            // `channel_send`/`channel_recv`); park its context until a counterpart or
+            // `close` sets its `wake` and re-enqueues it to `ready`.
+            vm.save_task_context(vm.sched.current_task);
+            Ok(RunStep::Parked)
+        }
         CoroutineResult::Yield(YieldReason::Return(val)) => complete_current_task(vm, mc, Ok(val)),
         CoroutineResult::Return(res) => {
             if vm.sched.current_fiber.is_some() {
@@ -892,6 +900,7 @@ fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
         joining: None,
         park_epoch: 0,
         deadline_abort: None,
+        parked_on_channel: false,
     })];
     vm.sched.current_task = TaskId(0);
 }
@@ -1451,7 +1460,8 @@ impl VmRunner {
                     CoroutineResult::Yield(YieldReason::AwaitIo { .. })
                     | CoroutineResult::Yield(YieldReason::Gather { .. })
                     | CoroutineResult::Yield(YieldReason::Join { .. })
-                    | CoroutineResult::Yield(YieldReason::JoinTimed { .. }) => {
+                    | CoroutineResult::Yield(YieldReason::JoinTimed { .. })
+                    | CoroutineResult::Yield(YieldReason::ChannelPark) => {
                         panic!("async I/O is not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
