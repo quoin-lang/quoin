@@ -403,4 +403,224 @@ mod tests {
         };
         assert_eq!(format!("{}", err).lines().count(), 1);
     }
+
+    #[test]
+    fn io_error_kind_symbol_names() {
+        use IoErrorKind::*;
+        assert_eq!(Closed.symbol(), "closed");
+        assert_eq!(NotFound.symbol(), "notFound");
+        assert_eq!(PermissionDenied.symbol(), "permissionDenied");
+        assert_eq!(ConnectionRefused.symbol(), "connectionRefused");
+        assert_eq!(ConnectionReset.symbol(), "connectionReset");
+        assert_eq!(ConnectionAborted.symbol(), "connectionAborted");
+        assert_eq!(BrokenPipe.symbol(), "brokenPipe");
+        assert_eq!(AddrInUse.symbol(), "addrInUse");
+        assert_eq!(AddrNotAvailable.symbol(), "addrNotAvailable");
+        assert_eq!(TimedOut.symbol(), "timedOut");
+        assert_eq!(UnexpectedEof.symbol(), "unexpectedEof");
+        assert_eq!(InvalidInput.symbol(), "invalidInput");
+        assert_eq!(InvalidData.symbol(), "invalidData");
+        assert_eq!(Other.symbol(), "other");
+    }
+
+    #[test]
+    fn io_error_kind_from_std_error_kind() {
+        use std::io::ErrorKind as E;
+        assert_eq!(IoErrorKind::from(E::NotFound), IoErrorKind::NotFound);
+        assert_eq!(
+            IoErrorKind::from(E::PermissionDenied),
+            IoErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            IoErrorKind::from(E::ConnectionRefused),
+            IoErrorKind::ConnectionRefused
+        );
+        assert_eq!(
+            IoErrorKind::from(E::ConnectionReset),
+            IoErrorKind::ConnectionReset
+        );
+        assert_eq!(
+            IoErrorKind::from(E::ConnectionAborted),
+            IoErrorKind::ConnectionAborted
+        );
+        assert_eq!(IoErrorKind::from(E::BrokenPipe), IoErrorKind::BrokenPipe);
+        assert_eq!(IoErrorKind::from(E::AddrInUse), IoErrorKind::AddrInUse);
+        assert_eq!(
+            IoErrorKind::from(E::AddrNotAvailable),
+            IoErrorKind::AddrNotAvailable
+        );
+        assert_eq!(IoErrorKind::from(E::TimedOut), IoErrorKind::TimedOut);
+        assert_eq!(
+            IoErrorKind::from(E::UnexpectedEof),
+            IoErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            IoErrorKind::from(E::InvalidInput),
+            IoErrorKind::InvalidInput
+        );
+        assert_eq!(IoErrorKind::from(E::InvalidData), IoErrorKind::InvalidData);
+        // Kinds we don't name fold into Other.
+        assert_eq!(IoErrorKind::from(E::WouldBlock), IoErrorKind::Other);
+    }
+
+    #[test]
+    fn display_simple_variants() {
+        let cases: Vec<(QuoinError, &str)> = vec![
+            (
+                QuoinError::ArgumentCountMismatch {
+                    expected: 1,
+                    got: 2,
+                    msg: "too many".to_string(),
+                },
+                "Argument count mismatch: too many",
+            ),
+            (
+                QuoinError::TypeError {
+                    expected: "Integer".to_string(),
+                    got: "String".to_string(),
+                    msg: "nope".to_string(),
+                },
+                "Type error: nope",
+            ),
+            (
+                QuoinError::ArithmeticError("div by zero".to_string()),
+                "Arithmetic error: div by zero",
+            ),
+            (
+                QuoinError::NotCallable("nope".to_string()),
+                "Not callable: nope",
+            ),
+            (
+                QuoinError::StackUnderflow("empty".to_string()),
+                "Stack underflow: empty",
+            ),
+            (QuoinError::Other("plain".to_string()), "plain"),
+            (
+                QuoinError::Io {
+                    kind: IoErrorKind::NotFound,
+                    message: "missing".to_string(),
+                },
+                "missing",
+            ),
+            (
+                QuoinError::IndexError {
+                    index: 5,
+                    len: 3,
+                    msg: "out of range".to_string(),
+                },
+                "out of range",
+            ),
+            (
+                QuoinError::Timeout { ms: 250 },
+                "operation timed out after 250ms",
+            ),
+            (QuoinError::ValueError("bad".to_string()), "bad"),
+            (QuoinError::ParseError("malformed".to_string()), "malformed"),
+            (QuoinError::Thrown, "thrown exception"),
+            (QuoinError::NonLocalReturn, "Non-local return"),
+            (QuoinError::Cancelled, "task cancelled"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(format!("{}", err), expected, "variant {:?}", err);
+        }
+    }
+
+    #[test]
+    fn from_string_and_str_make_other() {
+        let a: QuoinError = "boom".into();
+        assert!(matches!(a, QuoinError::Other(ref s) if s == "boom"));
+        let b: QuoinError = String::from("bang").into();
+        assert!(matches!(b, QuoinError::Other(ref s) if s == "bang"));
+    }
+
+    fn src_info(filename: &str, source_text: Option<&str>, end: usize) -> SourceInfo {
+        SourceInfo {
+            filename: filename.to_string(),
+            line: 3,
+            column: 4,
+            start: 0,
+            end,
+            source_text: source_text.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn display_with_source_info_plain() {
+        let err = QuoinError::WithSourceInfo {
+            error: Box::new(QuoinError::TypeError {
+                expected: "Integer".to_string(),
+                got: "String".to_string(),
+                msg: "bad arg".to_string(),
+            }),
+            source_info: src_info("fixture.qn", None, 0),
+            trace: vec![],
+            supports_color: false,
+        };
+        let out = format!("{}", err);
+        assert!(out.contains("Type error: bad arg"), "got: {out:?}");
+        // column is rendered 1-based (column + 1).
+        assert!(out.contains("at fixture.qn:3:5"), "got: {out:?}");
+    }
+
+    #[test]
+    fn display_with_source_info_shows_source_block() {
+        let err = QuoinError::WithSourceInfo {
+            error: Box::new(QuoinError::Other("boom".to_string())),
+            source_info: src_info("fixture.qn", Some("nil.bogusMethod"), 5),
+            trace: vec![],
+            supports_color: false,
+        };
+        let out = format!("{}", err);
+        assert!(out.contains("boom"), "got: {out:?}");
+        assert!(out.contains('|'), "expected the source pipe block: {out:?}");
+        assert!(out.contains("nil.bogusMethod"), "got: {out:?}");
+    }
+
+    #[test]
+    fn display_with_source_info_shows_trace() {
+        let err = QuoinError::WithSourceInfo {
+            error: Box::new(QuoinError::Other("boom".to_string())),
+            source_info: src_info("f.qn", None, 0),
+            trace: vec!["at frame one".to_string(), "at frame two".to_string()],
+            supports_color: false,
+        };
+        let out = format!("{}", err);
+        assert!(out.contains("at frame one"), "got: {out:?}");
+        assert!(out.contains("at frame two"), "got: {out:?}");
+    }
+
+    #[test]
+    fn display_with_source_info_highlights_from_file() {
+        use std::io::Write as _;
+
+        // The colorized trace highlights the failing range read back from the source
+        // file, so this path needs supports_color = true and a real readable file.
+        let path = std::env::temp_dir().join(format!("quoin_err_hl_{}.qn", std::process::id()));
+        let src = "x = 42\n";
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(src.as_bytes())
+            .unwrap();
+
+        let err = QuoinError::WithSourceInfo {
+            error: Box::new(QuoinError::Other("boom".to_string())),
+            source_info: SourceInfo {
+                filename: path.to_string_lossy().into_owned(),
+                line: 1,
+                column: 0,
+                start: 0,
+                end: 6, // "x = 42"
+                source_text: Some(src[..6].to_string()),
+            },
+            trace: vec![],
+            supports_color: true,
+        };
+        let out = format!("{}", err);
+        std::fs::remove_file(&path).ok();
+        // Color-on output carries ANSI escapes (location + highlighted snippet).
+        assert!(
+            out.contains('\u{1b}'),
+            "expected ANSI escapes in colorized output: {out:?}"
+        );
+    }
 }

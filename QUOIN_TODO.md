@@ -648,4 +648,43 @@ deferred `Mirror` in `## REPL`.
 ## 10. Test Coverage
 - [ ] **Increase Code Coverage**:
   - Add more integration tests under `qnlib/tests/` to target uncovered parts of the compiler, runtime, and VM.
+- [x] **Track Quoin-level (`.qn`) coverage, not just Rust-level.** `cargo cov` / `cargo cov-test`
+  (llvm-cov) only measure which *Rust* paths in the VM/runtime are exercised, not whether every
+  `qnlib` method is actually called by the suite — a pure-Quoin method can sit untested while Rust
+  coverage looks healthy. Implemented in `src/coverage.rs`: `qn test --coverage[=lcov|cobertura]
+  [--coverage-out=PATH]` (also on `qn <file>`) records `.qn` line + function coverage by reusing
+  the debugger's line-map seam (one bool-load on the hot path when off), attributing hits per
+  executing block so defining a method doesn't count its body as run. Emits LCOV or Cobertura XML.
+  The first run flagged ~86 of 330 stdlib methods never exercised by the suite. Remaining:
+  - [ ] **Branch coverage** — harder than the usual "tag the conditional jumps." In Quoin only
+    `&&`/`||` lower to `IfJump`/`ElseJump` (`compiler.rs` `compile_binary_operator`); *every other*
+    conditional — `if:`, `if:else:`, `else:`, `whileTrue:`, `whileFalse:`, `ifNil:`, `ifNotNil:`,
+    `caseOf:` — is a **message send to a Boolean/nil receiver with block arguments** (the generic
+    keyword-send path, `Send(selector, n)`). The branch is the polymorphic dispatch to `True#if:`
+    vs `False#if:` deciding whether to run a block. So tagging jumps would catch almost nothing;
+    the right model is *a branch is a conditional send where the receiver decides which block-arm
+    runs.*
+    - **Leverage:** the arms are blocks and we already track per-block hit counts (block-span
+      keying), so "did each arm run?" is already measured — branch coverage largely reduces to
+      **arm-block coverage**, nearly free.
+    - **Gap:** the *implicit not-taken* side of one-armed / short-circuit forms is not a block
+      (a bare `cond.if:{a}` runs nothing on false; a loop may never enter; `&&`'s RHS may never
+      eval), so block hits alone can't see it. We tick line-starts, not every send, so there is no
+      exact per-site execution count to subtract.
+    - **(a) Arm coverage — cheap, recommended next:** at the denominator walk, recognize
+      branching-selector send sites (`Send` / `SendConst` / fused `SendLocalConst`) and pair them
+      with their arm blocks; report each arm covered or not. Also instrument the `&&`/`||`
+      `IfJump`/`ElseJump` the classic way. Honest and surfaces dead arms (the high-value finding),
+      but reports *arms taken*, not full two-way coverage (the implicit-else stays a blind spot).
+      Fiddly part: matching arm blocks through the fusion superinstructions.
+    - **(b) Condition-polarity coverage — accurate, later:** a gated send-site hook over a fixed
+      table of branching selectors that records the receiver's true/false/nil per site; a branch
+      is covered iff both polarities were seen there. Classic branch coverage, uniform across
+      one-armed/loops/short-circuit — at the cost of a second hot-path hook, a selector table, and
+      per-site identity.
+    - Emit as LCOV `BRDA` (and Cobertura `branch` attrs) once a model is chosen.
+  - [ ] The denominator is class methods only; file-level/top-level code and test-body blocks (not
+    reachable from the class registry) aren't enumerated. Walk loaded program blocks too.
+  - [ ] Per-tick filename hashing is fine for opt-in runs but could be interned if coverage ever
+    runs by default.
 

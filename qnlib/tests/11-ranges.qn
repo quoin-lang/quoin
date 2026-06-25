@@ -12,4 +12,10 @@
         .does:{ (5..1) } match:5;
         .does:{ (5..1) } notMatch:1;
     };
+
+    .test:
+    stringForm -> {
+        .is:{ (1..4).s } equalTo:'NumberRange(1..4)';
+        .is:{ (5..1).s } equalTo:'NumberRange(5..1)';
+    };
 }

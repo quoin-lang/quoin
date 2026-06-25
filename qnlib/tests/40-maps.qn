@@ -1,0 +1,75 @@
+"* Coverage for the Map and KeyValuePair native classes (src/runtime/map.rs). Maps are
+"* surfaced through the #{ key:value } literal; KeyValuePair through its block constructor
+"* (KeyValuePair.new:{ key=...; value=... }), the element type Map iteration yields.
+
+(TestSuite.new:{ name = 'Maps' }).add:{
+    "* ---- Map: access ---------------------------------------------------------
+    .test:
+    mapAccess -> {
+        m = #{ 'a':1 'b':2 'c':3 };
+        .is:{ m.count } equalTo:3;
+        .is:{ m.at:'b' } equalTo:2;
+        .is:{ m.at:'missing' } equalTo:nil;        "* absent key -> nil
+        .isTrue:{ m.containsKey?:'a' };
+        .isFalse:{ m.containsKey?:'missing' };
+    };
+
+    .test:
+    mapKeysAndValues -> {
+        m = #{ 'a':1 'b':2 };
+        "* IndexMap preserves insertion order, so keys/values come back in literal order
+        .is:{ m.keys } equalTo:#( 'a' 'b' );
+        .is:{ m.values } equalTo:#( 1 2 );
+    };
+
+    .test:
+    mapMutation -> {
+        m = #{ 'a':1 };
+        m.at:'b' put:2;
+        .is:{ m.count } equalTo:2;
+        .is:{ m.at:'b' } equalTo:2;
+        m.at:'a' put:99;                            "* overwrite an existing key
+        .is:{ m.at:'a' } equalTo:99;
+        .is:{ m.count } equalTo:2;
+    };
+
+    .test:
+    mapEquality -> {
+        .isTrue:{ #{ 'a':1 'b':2 } == #{ 'a':1 'b':2 } };
+        .isFalse:{ #{ 'a':1 } == #{ 'a':1 'b':2 } };  "* length mismatch
+        .isFalse:{ #{ 'a':1 } == #{ 'a':2 } };        "* same key, different value
+        .isFalse:{ #{ 'a':1 } == 5 };                 "* rhs is not a Map
+    };
+
+    "* ---- KeyValuePair --------------------------------------------------------
+    .test:
+    keyValuePairAccessors -> {
+        kvp = KeyValuePair.new:{ key = 'k'; value = 42 };
+        .is:{ kvp.key } equalTo:'k';
+        .is:{ kvp.value } equalTo:42;
+        .is:{ kvp.s } equalTo:'k:42';
+    };
+
+    .test:
+    keyValuePairEquality -> {
+        a = KeyValuePair.new:{ key = 'k'; value = 1 };
+        .isTrue:{ a == (KeyValuePair.new:{ key = 'k'; value = 1 }) };
+        .isFalse:{ a == (KeyValuePair.new:{ key = 'x'; value = 1 }) };  "* key differs
+        .isFalse:{ a == (KeyValuePair.new:{ key = 'k'; value = 2 }) };  "* value differs
+        .isFalse:{ a == 5 };                                           "* rhs is not a pair
+    };
+
+    .test:
+    keyValuePairNewRejectsNonBlock -> {
+        caught = nil;
+        { KeyValuePair.new:42 }.catch:{ |e| caught = e };
+        .isTrue:{ caught.defined? };
+    };
+
+    .test:
+    keyValuePairNewPropagatesBlockThrow -> {
+        caught = nil;
+        { KeyValuePair.new:{ Error.throw:'boom' } }.catch:{ |e| caught = e };
+        .isTrue:{ caught.defined? };
+    };
+};

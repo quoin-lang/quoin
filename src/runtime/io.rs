@@ -442,4 +442,62 @@ mod tests {
             assert!(s.contains("\x1b["));
         });
     }
+
+    #[test]
+    fn test_handle_write_to_file() {
+        use std::io::Read as _;
+
+        // A file-backed [IO]Handle is not constructible from Quoin (the class only mints
+        // stdout/stderr/stdin), so the File write/writeln arms are exercised here directly.
+        let path = std::env::temp_dir().join(format!("quoin_io_handle_{}.txt", std::process::id()));
+        let arena_path = path.clone();
+
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, VmOptions::default());
+            vm.register_native_class(mc, object::build_object_class());
+            vm.register_native_class(mc, class::build_class_class());
+            vm.register_native_class(mc, string::build_string_class());
+            vm.register_native_class(mc, build_io_handle_class());
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            let file = File::create(&arena_path).unwrap();
+            let handle =
+                new_native_io_handle_with_wrapper(vm, mc, NativeIoHandleWrapper::File(file));
+
+            // s and ==: also have File arms that Quoin can't reach (no file-backed ctor).
+            let s = vm.call_method(mc, handle, "s", vec![]).unwrap();
+            match s {
+                Value::Object(o) => match &o.borrow().payload {
+                    ObjectPayload::String(st) => assert_eq!(st.as_str(), "[IO]Handle.file"),
+                    _ => panic!("s did not return a string"),
+                },
+                _ => panic!("s did not return an object"),
+            }
+            // Two file-backed handles never compare equal (File -> None).
+            let eq = vm.call_method(mc, handle, "==:", vec![handle]).unwrap();
+            assert!(eq.is_false());
+
+            // write: and writeln: dispatch through call_method, which sets up
+            // active_native_args (the receiver the write arms read back).
+            let hello = vm.new_string(mc, "hello".to_string());
+            let r = vm.call_method(mc, handle, "write:", vec![hello]).unwrap();
+            assert!(r.is_nil());
+
+            let line = vm.new_string(mc, "line".to_string());
+            let r = vm.call_method(mc, handle, "writeln:", vec![line]).unwrap();
+            assert!(r.is_nil());
+        });
+
+        // The arena (and the File it owns) is still alive, but std::fs::File is unbuffered,
+        // so the bytes are already visible to a second handle on the same path.
+        let mut contents = String::new();
+        File::open(&path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(contents, "helloline\n");
+    }
 }

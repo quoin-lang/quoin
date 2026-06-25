@@ -54,4 +54,24 @@
         .is:{ #<1 2 3>.count } equalTo:3;
         .is:{ #<(2 > 1)  5>.count } equalTo:2;
     };
+
+    .test:
+    eachVisitsEveryElement -> {
+        seen = #();
+        #<1 2 3>.each:{ |x| seen.add:x };
+        .is:{ seen.count } equalTo:3;
+        .isTrue:{ seen.contains?:2 };
+    };
+
+    .test:
+    stringForm -> {
+        .is:{ #<1 2 3>.s } equalTo:'#<1 2 3>';
+        .is:{ #<>.s } equalTo:'#<>';
+    };
+
+    .test:
+    equalityEdges -> {
+        .isFalse:{ #<1 2> == 5 };          "* rhs is not a Set
+        .isFalse:{ #<1 2> == #<1 9> };     "* same size, differing element
+    };
 }

@@ -154,4 +154,12 @@
             }
         } equalTo:'inner';
     };
+
+    .test:
+    joinAll -> {
+        "* Async.joinAll: joins every task, returning their results in order
+        a = Task.spawn:{ 10 };
+        b = Task.spawn:{ 20 };
+        .is:{ Async.joinAll:#( a b ) } equalTo:#( 10 20 );
+    };
 }

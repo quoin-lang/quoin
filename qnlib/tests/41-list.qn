@@ -1,0 +1,51 @@
+"* Coverage for the List native class (src/runtime/list.rs), driven through the #(...)
+"* literal. Focuses on the arms the incidental list usage elsewhere doesn't reach:
+"* out-of-bounds at:, sliceFrom: past the end, ==: mismatches, bind:, and both sort:
+"* branches (a 1-arg key block and a 2-arg comparator block).
+
+(TestSuite.new:{ name = 'List' }).add:{
+    .test:
+    atOutOfBoundsIsNil -> {
+        .is:{ #(1 2 3).at:0 } equalTo:1;
+        .is:{ #(1 2 3).at:9 } equalTo:nil;          "* past the end -> nil
+        .is:{ #(1 2 3).at:-1 } equalTo:nil;         "* negative -> nil
+    };
+
+    .test:
+    sliceFrom -> {
+        .is:{ #(1 2 3 4).sliceFrom:2 } equalTo:#( 3 4 );
+        .is:{ #(1 2 3).sliceFrom:9 } equalTo:#( );   "* start past the end -> empty
+        .is:{ #(1 2 3).sliceFrom:0 } equalTo:#( 1 2 3 );
+    };
+
+    .test:
+    equality -> {
+        .isTrue:{ #(1 2 3) == #(1 2 3) };
+        .isFalse:{ #(1 2) == #(1 2 3) };             "* length mismatch
+        .isFalse:{ #(1 2 3) == #(1 9 3) };           "* element differs
+        .isFalse:{ #(1 2) == 5 };                    "* rhs is not a List
+    };
+
+    .test:
+    bind -> {
+        "* bind: feeds the first N elements (N = block arity) as the block's args
+        .is:{ #(10 20).bind:{ |a b| a + b } } equalTo:30;
+        .is:{ #(7 8 9).bind:{ |a| a } } equalTo:7;
+    };
+
+    .test:
+    sortWithKeyBlock -> {
+        "* sort: with a 1-arg block sorts by the key it returns
+        .is:{ #(3 1 2).sort:{ |x| x } } equalTo:#( 1 2 3 );
+        .is:{ #('bb' 'a' 'ccc').sort:{ |x| x.length } } equalTo:#( 'a' 'bb' 'ccc' );
+        "* nil keys are tolerated (sorted to the end) without calling >: on nil
+        .is:{ (#(2 nil 1).sort:{ |x| x }).count } equalTo:3;
+    };
+
+    .test:
+    sortWithComparatorBlock -> {
+        "* sort: with a 2-arg block uses it as a 'comes-before' comparator
+        .is:{ #(3 1 2).sort:{ |a b| a < b } } equalTo:#( 1 2 3 );
+        .is:{ #(1 2 3).sort:{ |a b| a > b } } equalTo:#( 3 2 1 );
+    };
+};

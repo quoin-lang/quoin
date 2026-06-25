@@ -44,6 +44,7 @@
         .is:{ (1..5).second } equalTo:2;
         .is:{ (1..5).third } equalTo:3;
         .is:{ (1..5).fourth } equalTo:4;
+        .is:{ (1..6).fifth } equalTo:5;
         .is:{ (1..5).last } equalTo:4;
     };
 
@@ -52,12 +53,13 @@
         .is:{ #(1 #(2 3) 4 #(5 #(6 7))).flatten } equalTo:#( 1 2 3 4 5 6 7 );
     };
 
-"
     .test:
     groupBy -> {
-        .elementsOf:{ (1..6).groupBy:{|n| n%2 == 0 } } areEqualTo:#{ true:#(2 4) false:#(1 3 5) };
+        "* groups into a Map keyed by the block's (string) result, preserving order
+        g = #(1 2 3 4 5 6).groupBy:{ |n| (n%2 == 0).if:{ 'even' } else:{ 'odd' } };
+        .is:{ g.at:'odd' } equalTo:#( 1 3 5 );
+        .is:{ g.at:'even' } equalTo:#( 2 4 6 );
     };
-"
 
     .test:
     contains? -> {
@@ -134,5 +136,21 @@
             KeyValuePair.new:{ key='a' value=42 }
             KeyValuePair.new:{ key='c' value=99 }
         );
+    };
+
+    .test:
+    iterateSortWrappers -> {
+        "* A Set has no native sort, so .sort / .sort: dispatch to the Iterate mixin
+        "* wrappers (which delegate to .list.sort).
+        .is:{ #<3 1 2>.sort } equalTo:#( 1 2 3 );
+        .is:{ #<30 10 20>.sort:{ |x| x } } equalTo:#( 10 20 30 );
+    };
+
+    .test:
+    fromPairs -> {
+        .is:{ Map.fromPairs:#(
+            (KeyValuePair.new:{ key='a' value=1 })
+            (KeyValuePair.new:{ key='b' value=2 })
+        ) } equalTo:#{ 'a':1 'b':2 };
     };
 }

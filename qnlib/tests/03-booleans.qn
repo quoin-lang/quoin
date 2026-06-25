@@ -17,6 +17,10 @@
         .isTrue:{ !false };
         .isFalse:{ true.not };
         .isTrue:{ false.not };
+        "* ! is defined on every type: nil is falsy, any other object is truthy
+        .isTrue:{ !nil };
+        .isFalse:{ !5 };
+        .isFalse:{ !'x' };
     };
 
     .test:
