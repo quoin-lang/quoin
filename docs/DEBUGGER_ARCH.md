@@ -1,0 +1,241 @@
+# Debugger Architecture — pausing, stepping, and inspecting the Quoin VM
+
+Status: **Design capture, grounded in a code audit (June 2026).** No debugger code exists
+yet; v0 (a CLI debugger, no wire protocol) is scoped at the end and about to begin. Companion
+to `ASYNC_ARCH.md` (the scheduler this rides on) and `INTROSPECTION.md` (the read-only metadata
+surface this extends). Like `FUTURE_EXT_ARCH.md`, treat the unbuilt parts as decisions to
+revisit with a fresh explain-then-pause.
+
+## The core insight
+
+**A breakpoint pause is just another `YieldReason`, and the VM's existing driver ↔ coroutine
+split *is* the debugger's controller ↔ target split.** The VM is single-threaded and
+cooperative: `step_internal()` runs exactly one instruction per call (`src/vm.rs`), the
+top-level `run_vm_loop` suspends with `YieldReason::CooperativeYield` after every instruction
+(`src/fiber.rs`), and the scheduler/driver drives the coroutine and services I/O, gather, and
+join *between* resumes. A debugger slots into that seam with almost no new concept:
+
+- Pausing = a new `YieldReason::DebugBreak` that bubbles to the driver, exactly as `AwaitIo`/
+  `Gather`/`Join` already do.
+- The **driver** becomes the controller: on `DebugBreak` it talks to the frontend (a CLI
+  prompt, later a DAP client), services inspect/evaluate/set-breakpoint requests via
+  `mutate_root` — full, clean arena access with **no borrow held across the pause** — and
+  resumes the coroutine on continue/step.
+- Inspection and evaluation run *between* resumes, which is precisely where arena access is
+  clean. Single-stepping is free: the program already yields after every instruction.
+
+This is why the mechanism is low-risk: the hard parts (suspend/resume, controller separation,
+per-instruction granularity) are machinery the async work already built and hardened.
+
+## Three layers (keep them separate)
+
+Most protocol confusion dissolves by separating:
+
+1. **Mechanism** — how the VM pauses, steps, and exposes frames/vars. In-VM, unavoidable, the
+   defining work. Covered below.
+2. **Protocol** — the schema the frontend speaks (breakpoints, stack trace, evaluate, continue).
+   v0 has none (a CLI command loop); v1 is **DAP** (Debug Adapter Protocol).
+3. **Transport** — how bytes move (none in v0; stdio or a socket for DAP).
+
+The layers are independent: the mechanism is fixed, the protocol/transport are pluggable. See
+*Protocol & transport* for why this matters to the extension-system question.
+
+## Mechanism — exact integration points
+
+All line references are snapshots from the June 2026 audit; treat them as anchors.
+
+### Pause / step hook
+
+`step_internal()` (`src/vm.rs:~2461`) opens with the cancellation checkpoint:
+
+```rust
+if self.sched.cancel_current {
+    return Err(self.take_cancellation());
+}
+```
+
+This fires once per instruction, before dispatch, and is the proven template for "inject an
+action at the next checkpoint" (`take_cancellation` clears its own flag so the ensuing unwind
+isn't re-triggered — `src/vm_scheduler.rs`). The debug hook is the same shape, gated behind an
+`Option` so it costs one well-predicted branch when disabled:
+
+```rust
+if let Some(dbg) = &self.debug {
+    if dbg.should_pause(frame.block_id(), frame.ip) {   // breakpoint hit, or single-step armed
+        return self.debug_break(mc);                    // suspend with YieldReason::DebugBreak
+    }
+}
+```
+
+`debug_break` suspends the coroutine with `YieldReason::DebugBreak` (no payload — the driver
+reads the paused state directly off `vm`), mirroring `await_io`. The driver's resume match
+gets a `DebugBreak` arm that hands control to the frontend command loop and resumes on the
+next continue/step.
+
+### PC and bytecode — breakpoints are a side-table
+
+The program counter is `Frame.ip: usize` (`src/vm.rs:~43`); the bytecode is
+`Frame.block.bytecode: SharedBytecode(Rc<Vec<Instruction>>)` (`src/instruction.rs`). The
+bytecode is **`Rc`-shared and immutable** — no interior mutability — so **breakpoints cannot be
+patched into the bytecode (no INT3-style opcode)**. They live in a **side-table** on
+`DebugState`, e.g. `HashMap<BlockId, HashSet<usize>>` (block identity + PC offset), checked at
+the hook. A `Break`-opcode optimization is possible later via copy-on-write per debugged block,
+but the side-table is the v0 design and is plenty fast (the hook is already `Option`-gated).
+
+### Source maps — PC↔line
+
+`SharedSourceMap(Rc<Vec<Option<SourceInfo>>>)` (`src/instruction.rs:~40`) is **dense and
+per-instruction**, parallel to the bytecode. `SourceInfo`
+(`crates/quoin-syntax/src/source_info.rs:~12`) carries `filename`, `line` (1-indexed), `column`,
+and byte `start..end` — a full span.
+
+- **PC → line ("where am I"): ready.** O(1) index with block-level fallback
+  (`src/vm.rs:~1737`).
+- **line → PC (breakpoint placement): build a reverse index at load.** No reverse map exists;
+  scan the dense source map to find PCs on a target line. The peephole-fusion pass keeps the
+  *semantically significant* entry (the `Send`/`Store`) and drops helper loads
+  (`src/compiler.rs`), so breakpoints land on meaningful instructions.
+- **Step granularity: detect line changes.** Statement boundaries aren't explicitly marked, but
+  the dense map lets step-over/into watch for `SourceInfo.line` changes between consecutive PCs.
+
+### Block / line registry
+
+Source maps are **per-block**; there is no global registry. To set "file X line 42" before
+knowing which block holds line 42, enumerate blocks via the introspection API
+(`get_block_from_method`, `src/dispatch.rs:~835`) over `globals()`/`describe_class()`, and walk
+nested blocks via `Block.decl_block`. Build this once at load into the same structure as the
+line→PC reverse index: `HashMap<(file, line), Vec<(BlockId, pc)>>`.
+
+### Stepping semantics
+
+All computable from `Frame.ip → SourceInfo.line` plus frame depth (`self.frames.len()`):
+
+- **step (instruction)** — resume one instruction (the program yields anyway).
+- **step-over / next** — resume until the source line changes *and* depth ≤ current (don't stop
+  inside deeper calls).
+- **step-into** — resume until the source line changes (stop in deeper frames too).
+- **step-out / finish** — resume until depth < current.
+
+Native (Rust) methods are opaque: they have no Quoin frame, so the debugger treats them as
+step-over only.
+
+## Inspection — ~95% ready today
+
+A paused frame exposes everything needed (`src/vm.rs:~43`, `src/value.rs:~553`):
+
+- **Locals** — `Frame.env` is an `EnvFrame.vars: Vec<(Symbol, Value)>` chain; iterate it.
+- **`self`** — bound in the env under `self_symbol()` (also on `Frame.receiver`).
+- **Instance vars (`@x`)** — via `self`'s `Object.fields` indexed by `Class.field_slots`
+  (`load_field`, `src/vm.rs:~2275`); enumerate from the class's `instance_vars`.
+- **Closure captures** — walk `EnvFrame.parent`.
+- **Globals** — `vm.globals`, surfaced by the introspection API.
+
+`src/introspect.rs` already returns **owned `'static` snapshots** (`GlobalInfo`/`ClassInfo`/
+`ValueInfo`/`BindingInfo` — no `'gc`), safe to hand to an out-of-process client. The one gap:
+it returns value *structure*, not rendered text — so the debugger renders each value in-arena
+via `.pp` (the width-aware pretty-printer's `pp_shape` yields the DAP-style expandable children)
+or `.s`, before serializing. References to the live `Value`s stay valid because **paused frames
+are GC roots**.
+
+## Evaluate-in-frame — two known blockers (both pre-existing TODOs)
+
+"Evaluate this expression in frame N's scope" is the one capability not ready:
+
+- **`eval:bindings:` is unbuilt** (`QUOIN_TODO.md`). `Runtime.eval:` / `eval:self:` exist
+  (`src/runtime/runtime.rs:~14`) — so **instance-context eval (self + `@ivars`) works today** —
+  but neither injects the frame's *locals*. `eval:bindings:` (eval against a supplied
+  name→value map, seeded as locals) is the missing primitive; it's also a REPL-P3 dependency.
+- **The `Runtime.eval:` parse-panic** (`QUOIN_TODO.md`; `crates/quoin-syntax/src/pest/parser.rs:~88`).
+  `parse_quoin_string_named` panics on a syntax error; the fallible
+  `try_parse_quoin_string_named` exists but eval doesn't use it. A malformed watch expression
+  would crash the VM, so this must be fixed before exposing "evaluate."
+
+The debugger is a clean forcing function for both. Neither blocks the v0 stepping/inspection
+MVP — only watch expressions and conditional breakpoints.
+
+## Async / scheduler interaction
+
+- **Pause the world (v1).** Stopping at a breakpoint stops the *whole scheduler*, not one task.
+  In a single-threaded cooperative VM this is trivial — the driver simply stops advancing any
+  task. Per-task / per-fiber debugging is a later luxury.
+- **The pause is *above* the scheduler, not an `AwaitIo` park.** A parked I/O op cooperatively
+  yields so other tasks run; a breakpoint must *not* let program tasks run. So the paused
+  command loop is a driver-level stop (a blocking read on the frontend), distinct from the
+  program's `IoRequest` reactor. (An "async-break" — interrupt a running program — *can* poll
+  the frontend cooperatively; that's the one place the reactor model applies.)
+- **Step-over an `await`** — let the task park, let the I/O complete, re-pause when it resumes.
+  The dense source map + per-instruction yield make the "did we reach the next line" test work
+  across the suspension.
+
+## Protocol & transport — and the extension-system question
+
+**Verdict: the debugger gets its own protocol (DAP) and its own transport. It does not ride the
+polyglot-extension interface.** Grounded in the audit of `FUTURE_EXT_ARCH.md`:
+
+- **The extension system is unbuilt** (pure design, zero code), so there is nothing to reuse
+  *from it* today. What *is* built and reusable is one level lower: the **async I/O waist** —
+  `IoBackend`/`AsyncStream` (`src/io_backend.rs`), fiber-parking via `AwaitIo`, the handle
+  reap-queue + GC rooting, and the cancellation/timeout machinery. Extensions would ride that
+  waist; a debugger could share its low-level socket/framing code — but that's a future
+  `quoin-ipc` library nicety, not a dependency.
+- **Codec: not shared.** The extension protocol commits to FlatBuffers/Cap'n Proto for control
+  + Arrow C Data Interface for bulk data — *not* the `DataValue` serde bridge. (DataValue
+  remains a fine *internal* value-tree for the debugger; it's just not common ground with
+  extensions.)
+- **Semantics: different.** Extensions are *Quoin-calls-out, request/response RPC* between
+  *trusted* peers (out-of-process there is for polyglot + crash-isolation + parallelism, not
+  sandboxing). A debugger is the inverse: an external *controller drives the VM*, event-driven.
+  Forcing that through the extension call model fits neither side.
+
+So the debugger is its own thing at the protocol and transport layers; the only legitimately
+shared substrate is the already-built async I/O waist (and, if it ever exists, a low-level IPC
+framing crate). The debugger must not couple to, or block on, the extension track — if
+anything it's the better first customer for extracting shared framing, being smaller and
+self-contained. DAP itself commonly runs over stdio, sidestepping sockets entirely for v1.
+
+## Hard constraints
+
+- **Zero hot-path cost when off.** The hook is `debug: Option<DebugState>` — one predictable
+  branch per step in normal runs. Profile if a `Break`-opcode COW is ever needed.
+- **No `Gc`/`Value` held across the pause.** The pause is a `YieldReason` suspension; like every
+  other await point, only plain data may cross it (the `no_gc_across_yield` lint enforces this).
+  Inspected values are re-fetched from the (rooted) frames in the driver, never carried on the
+  native stack across the suspend.
+- **Bytecode is immutable** — breakpoints are a side-table, not in-place patches (above).
+- **Determinism** — a debug build with no breakpoints set and the hook disabled must execute
+  identically to a normal run.
+
+## Staged plan
+
+**Prerequisites (independent, also wanted by the REPL):**
+- **Fix the `Runtime.eval:` parse-panic** — thread `try_parse_quoin_string_named`'s `Result`
+  through the eval path to a catchable `ParseError`. Blocks "evaluate" / watch expressions.
+- **Add `eval:bindings:`** — eval against a supplied name→value binding map, seeded as locals.
+  Unlocks evaluate-in-frame for locals (instance context already works via `eval:self:`).
+
+**v0 — CLI debugger, no wire protocol (the mechanism proof).** No socket, no DAP, no codec.
+- `DebugState` (breakpoint side-table, step mode, current frame) on `VmState`, `Option`-gated.
+- The `step_internal` hook + `YieldReason::DebugBreak` + the driver's `DebugBreak` command loop.
+- The load-time block/line registry (line→PC reverse index + nested-block walk).
+- A `qn debug <file.qn>` REPL on the existing REPL infra (rustyline, highlighter,
+  `annotate_error`): `break <file:line>` / `delete`, `continue`, `step`/`next`/`finish`,
+  `frames` / `up` / `down`, `locals`, `print <expr>` (instance-context via `eval:self:` until
+  `eval:bindings:` lands), `list`.
+- *Test:* a `.qn` fixture driven by a scripted command sequence — set a breakpoint, hit it,
+  inspect locals/`self`/`@ivars`, step across lines and in/out of calls, continue to exit.
+
+**v1 — DAP adapter.** A Debug Adapter (in the language-server repo or as `qn debug --dap`)
+translating DAP ⟷ the v0 control API: `setBreakpoints`, `stackTrace`, `scopes`/`variables`
+(over the inspection snapshots + `pp_shape` children), `evaluate` (over `eval:bindings:`),
+`continue`/`next`/`stepIn`/`stepOut`, exception breakpoints (break on throw). VSCode/JetBrains/
+nvim-dap integration rides on the existing language server + VSCode plugin.
+
+## Deferred / open
+
+- **Per-task / per-fiber debugging** — v1 pauses the world; debugging one task while others run
+  is a later model (needs a per-task stop and a "threads" view).
+- **Data breakpoints / watchpoints** (break when a variable changes) — needs write interception,
+  not just PC checks.
+- **Conditional & hit-count breakpoints** — fall out of `eval:bindings:` once it lands.
+- **Time-travel / reverse debugging** — out of scope.
+- **`Break`-opcode COW** — only if the side-table hook ever shows up in a profile.
