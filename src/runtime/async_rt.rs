@@ -1,5 +1,7 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::io_backend::IoRequest;
+use crate::runtime::duration::duration_to_millis;
 use crate::runtime::list::NativeListState;
 use crate::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 
@@ -37,24 +39,64 @@ pub fn build_async_class() -> NativeClassBuilder {
             }
             vm.await_gather(blocks)
         })
-        // `Async.timeout:ms do:{block}` — run `block` with a deadline of `ms` ms. Returns
-        // its value if it finishes in time; throws a catchable `'timeout'` if the deadline
-        // fires first (the block is cancelled, its `finally` runs, in-flight I/O aborts).
-        .class_method("timeout:do:", |vm, mc, _receiver, args| {
-            let ms = arg!(args, Int, 0).max(0) as u64;
-            let block = arg!(args, Block, 1);
-            vm.await_timeout(mc, block, ms, None)
+        // `Async.sleep:` — park the running fiber via the async IoBackend, without blocking other
+        // fibers (Stage 1 — see docs/ASYNC_ARCH.md). Accepts a bare ms count or a Duration; nil.
+        .typed_class_method("sleep:", &["Integer"], |vm, mc, _receiver, args| {
+            vm.await_io(IoRequest::Sleep {
+                ms: arg!(args, Int, 0).max(0) as u64,
+            })?;
+            Ok(vm.new_nil(mc))
         })
+        .typed_class_method("sleep:", &["Duration"], |vm, mc, _receiver, args| {
+            let ms = duration_to_millis(args[0], "sleep:")? as u64;
+            vm.await_io(IoRequest::Sleep { ms })?;
+            Ok(vm.new_nil(mc))
+        })
+        // `Async.timeout:ms do:{block}` — run `block` with a deadline of `ms` ms (or a Duration).
+        // Returns its value if it finishes in time; throws a catchable `'timeout'` if the deadline
+        // fires first (the block is cancelled, its `finally` runs, in-flight I/O aborts).
+        .typed_class_method(
+            "timeout:do:",
+            &["Integer", "Block"],
+            |vm, mc, _receiver, args| {
+                let ms = arg!(args, Int, 0).max(0) as u64;
+                let block = arg!(args, Block, 1);
+                vm.await_timeout(mc, block, ms, None)
+            },
+        )
+        .typed_class_method(
+            "timeout:do:",
+            &["Duration", "Block"],
+            |vm, mc, _receiver, args| {
+                let ms = duration_to_millis(args[0], "timeout:do:")? as u64;
+                let block = arg!(args, Block, 1);
+                vm.await_timeout(mc, block, ms, None)
+            },
+        )
         // `Async.timeout:ms do:{block} onCancel:{handler}` — as above, but on the deadline
         // run `handler` and return *its* value instead of throwing (`onCancel:{ nil }` is
         // the non-throwing form). `onCancel:` catches only *this* deadline; an outer
         // cancellation still propagates and the handler does not run.
-        .class_method("timeout:do:onCancel:", |vm, mc, _receiver, args| {
-            let ms = arg!(args, Int, 0).max(0) as u64;
-            let block = arg!(args, Block, 1);
-            let on_cancel = arg!(args, Block, 2);
-            vm.await_timeout(mc, block, ms, Some(on_cancel))
-        })
+        .typed_class_method(
+            "timeout:do:onCancel:",
+            &["Integer", "Block", "Block"],
+            |vm, mc, _receiver, args| {
+                let ms = arg!(args, Int, 0).max(0) as u64;
+                let block = arg!(args, Block, 1);
+                let on_cancel = arg!(args, Block, 2);
+                vm.await_timeout(mc, block, ms, Some(on_cancel))
+            },
+        )
+        .typed_class_method(
+            "timeout:do:onCancel:",
+            &["Duration", "Block", "Block"],
+            |vm, mc, _receiver, args| {
+                let ms = duration_to_millis(args[0], "timeout:do:onCancel:")? as u64;
+                let block = arg!(args, Block, 1);
+                let on_cancel = arg!(args, Block, 2);
+                vm.await_timeout(mc, block, ms, Some(on_cancel))
+            },
+        )
 }
 
 fn gather_elem_type_error(got: &Value) -> QuoinError {

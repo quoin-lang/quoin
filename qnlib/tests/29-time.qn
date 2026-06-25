@@ -1,0 +1,69 @@
+"* Time Phase 1: Duration (a fixed signed span) and Instant (the monotonic clock). Duration is
+"* pure and tested exactly; Instant is clock-based and tested with loose lower bounds to stay
+"* non-flaky. Also covers the Duration overloads of Async.sleep:/Async.timeout:.
+
+(TestSuite.new:{ name = 'Duration' }).add:{
+    .test:
+    construct -> {
+        .is:{ (Duration.seconds:90).asSeconds } closeTo:90.0;
+        .is:{ (Duration.minutes:2).asSeconds } closeTo:120.0;
+        .is:{ (Duration.hours:1).asSeconds } closeTo:3600.0;
+        .is:{ (Duration.milliseconds:500).asSeconds } closeTo:0.5;
+        .is:{ Duration.zero.asNanoseconds } equalTo:0;
+    };
+
+    .test:
+    conversions -> {
+        .is:{ (Duration.seconds:90).asMilliseconds } equalTo:90000;
+        .is:{ (Duration.milliseconds:1500).asMicroseconds } equalTo:1500000;
+        .is:{ (Duration.microseconds:5).asNanoseconds } equalTo:5000;
+        .is:{ (Duration.minutes:90).s } equalTo:'1h 30m';        "* human-friendly
+        .is:{ (Duration.seconds:90).iso8601 } equalTo:'PT1M30S'; "* canonical
+    };
+
+    .test:
+    arithmetic -> {
+        .is:{ ((Duration.minutes:1) + (Duration.seconds:30)).asSeconds } closeTo:90.0;
+        .is:{ ((Duration.minutes:2) - (Duration.seconds:30)).asSeconds } closeTo:90.0;
+        .is:{ ((Duration.seconds:3) * 4).asSeconds } closeTo:12.0;
+        .is:{ (Duration.seconds:5).negate.asSeconds } closeTo:(0.0-5.0);
+        .is:{ (Duration.seconds:5).negate.abs.asSeconds } closeTo:5.0;
+        "* arithmetic is Duration-only — no silent coercion from a bare number
+        .does:{ (Duration.seconds:1) + 1 } throw:MessageNotUnderstood;
+    };
+
+    .test:
+    comparison -> {
+        .isTrue:{ (Duration.seconds:30) < (Duration.minutes:1) };
+        .isTrue:{ (Duration.minutes:1) > (Duration.seconds:30) };
+        .isTrue:{ (Duration.seconds:60) == (Duration.minutes:1) };
+        .isFalse:{ (Duration.seconds:60) == (Duration.minutes:2) };
+        .isFalse:{ (Duration.seconds:1) == 1 };       "* non-Duration -> false, never an error
+    };
+};
+
+(TestSuite.new:{ name = 'Instant' }).add:{
+    .test:
+    elapsedNonNegative -> {
+        .isTrue:{ Instant.now.elapsed.asNanoseconds >= 0 };
+    };
+
+    .test:
+    measuresSleep -> {
+        "* loose lower bound: a ~20ms sleep should register at least ~15ms elapsed.
+        i = Instant.now;
+        Async.sleep:(Duration.milliseconds:20);
+        .isTrue:{ i.elapsed.asMilliseconds >= 15 };
+    };
+
+    .test:
+    orderingAndSubtraction -> {
+        a = Instant.now;
+        Async.sleep:5;
+        b = Instant.now;
+        .isTrue:{ a < b };
+        .isTrue:{ (b - a).asNanoseconds > 0 };   "* later - earlier > 0
+        .isTrue:{ (a - b).asNanoseconds < 0 };   "* earlier - later < 0 (signed)
+        .isFalse:{ Instant.now == 5 };
+    };
+};

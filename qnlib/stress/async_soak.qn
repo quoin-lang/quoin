@@ -55,7 +55,7 @@ gatherCompute = { |r|
     Async.gather:((0..width).collect:{ |k|
         {
             v = worker.valueWithArgs:#(r k);
-            ((k % 3) == 0).if:{ Runtime.sleep: 1 };
+            ((k % 3) == 0).if:{ Async.sleep: 1 };
             v
         }
     })
@@ -67,7 +67,7 @@ gatherNested = { |r|
     Async.gather:#(
         { Async.gather:#( { r + 1 } { r + 2 } ) }
         { worker.valueWithArgs:#(r 0) }
-        { Runtime.sleep: 1; r * 2 }
+        { Async.sleep: 1; r * 2 }
     )
 };
 expectedNested = { |r|
@@ -82,7 +82,7 @@ gatherFiber = { |r|
             f = Fiber.new:{ Fiber.yield: (r + 1); Fiber.yield: (r + 2); (r + 3) };
             #( f.resume f.resume f.resume )
         }
-        { Runtime.sleep: 1; r }
+        { Async.sleep: 1; r }
     )
 };
 expectedFiber = { |r| #( #( (r + 1) (r + 2) (r + 3) ) r ) };
@@ -95,7 +95,7 @@ spawnJoin = { |r|
     handles = (0..width).collect:{ |k|
         Task.spawn:{
             v = worker.valueWithArgs:#(r k);
-            ((k % 4) == 0).if:{ Runtime.sleep: 1 };
+            ((k % 4) == 0).if:{ Async.sleep: 1 };
             v
         }
     };
@@ -107,7 +107,7 @@ spawnJoin = { |r|
 "* the task is still ready or already parked on the sleep) — deterministic under the
 "* stress knobs. Every join must observe a (catchable) cancellation, mapped to -1.
 spawnCancel = { |r|
-    handles = (0..width).collect:{ |k| Task.spawn:{ Runtime.sleep: 100000; r + k } };
+    handles = (0..width).collect:{ |k| Task.spawn:{ Async.sleep: 100000; r + k } };
     handles.each:{ |h| h.cancel };
     handles.collect:{ |h| { h.join }.catch:{ |ex| 0 - 1 } }
 };
@@ -124,7 +124,7 @@ timeoutRound = { |r|
         ((k % 2) == 0).if:{
             Async.timeout: 1000000 do:{ worker.valueWithArgs:#(r k) }
         } else:{
-            Async.timeout: 1 do:{ Runtime.sleep: 100000; 0 }
+            Async.timeout: 1 do:{ Async.sleep: 100000; 0 }
                 onCancel:{ worker.valueWithArgs:#(r k) }
         }
     }

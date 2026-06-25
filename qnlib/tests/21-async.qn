@@ -3,20 +3,20 @@
 "* pick ready tasks at random — exercising the per-task state swap and a wide
 "* range of interleavings. See `docs/ASYNC_ARCH.md` and `src/tuning.rs`.
 (TestSuite.new:{ name = 'Async' }).add:{
-    "* Stage 1 async I/O: `Runtime.sleep:` parks the running fiber via an AwaitIo
+    "* Stage 1 async I/O: `Async.sleep:` parks the running fiber via an AwaitIo
     "* suspension and resumes with a value, all driven by the async IoBackend.
 
     "* The call round-trips out to the backend and back, returning nil.
     .test:
     sleepReturnsNil -> {
-        .is:{ Runtime.sleep: 1 } equalTo:nil;
+        .is:{ Async.sleep: 1 } equalTo:nil;
     };
 
     "* Lower-bound timing only (non-flaky): a 30ms sleep really parked, proving a
     "* genuine reactor round-trip rather than a no-op.
     .test:
     sleepParksForRequestedTime -> {
-        .is:{ Timer.time:{ Runtime.sleep: 30 } } greaterThanOrEqualTo:20000;
+        .is:{ Timer.time:{ Async.sleep: 30 } } greaterThanOrEqualTo:20000;
     };
 
     "* Stage 2a: `Async.gather:` runs each block as a concurrent task whose I/O
@@ -25,10 +25,10 @@
     .test:
     gatherRunsTasksConcurrently -> {
         .is:{ Timer.time:{ Async.gather:#(
-            { Runtime.sleep: 30 } { Runtime.sleep: 30 }
-            { Runtime.sleep: 30 } { Runtime.sleep: 30 }
-            { Runtime.sleep: 30 } { Runtime.sleep: 30 }
-            { Runtime.sleep: 30 } { Runtime.sleep: 30 }
+            { Async.sleep: 30 } { Async.sleep: 30 }
+            { Async.sleep: 30 } { Async.sleep: 30 }
+            { Async.sleep: 30 } { Async.sleep: 30 }
+            { Async.sleep: 30 } { Async.sleep: 30 }
         ) } } lessThan:150000;
     };
 
@@ -37,8 +37,8 @@
     .test:
     gatherReturnsResultsInSpawnOrder -> {
         .is:{ Async.gather:#(
-            { Runtime.sleep: 30; 1 }
-            { Runtime.sleep: 10; 2 }
+            { Async.sleep: 30; 1 }
+            { Async.sleep: 10; 2 }
             { 3 }
         ) } equalTo:#(1 2 3);
     };
@@ -47,7 +47,7 @@
     "* parks until it finishes and returns its result.
     .test:
     spawnAndJoinReturnsResult -> {
-        .is:{ (Task.spawn:{ Runtime.sleep: 10; 42 }).join } equalTo:42;
+        .is:{ (Task.spawn:{ Async.sleep: 10; 42 }).join } equalTo:42;
     };
 
     "* The result is re-readable: joining twice yields the same value (Promise-style).
@@ -63,7 +63,7 @@
     .test:
     spawnedTasksRunConcurrently -> {
         .is:{ Timer.time:{
-            hs = (0..8).collect:{ |k| Task.spawn:{ Runtime.sleep: 30; k } };
+            hs = (0..8).collect:{ |k| Task.spawn:{ Async.sleep: 30; k } };
             hs.each:{ |h| h.join }
         } } lessThan:150000;
     };
@@ -83,12 +83,12 @@
         trace = #();
         entered = #();
         h = Task.spawn:{
-            { entered.add:1; Runtime.sleep: 1000 }
+            { entered.add:1; Async.sleep: 1000 }
                 .catch:{ |e| trace.add:'caught' } finally:{ trace.add:'finally' }
         };
         "* Wait until the task is *inside* the protected block (non-flaky under stress),
         "* so cancel hits its sleep and `finally` is guaranteed to run.
-        { entered.count == 0 }.whileDo:{ Runtime.sleep: 1 };
+        { entered.count == 0 }.whileDo:{ Async.sleep: 1 };
         h.cancel;
         .is:{ { h.join }.catch:{ |ex| 'observed' } } equalTo:'observed';
         .is:{ h.status } equalTo:'cancelled';
@@ -100,7 +100,7 @@
     .test:
     timeoutReturnsValueWhenInTime -> {
         .is:{ Async.timeout: 1000 do:{ 40 + 2 } } equalTo:42;
-        .is:{ Async.timeout: 1000 do:{ Runtime.sleep: 2; 7 } } equalTo:7;
+        .is:{ Async.timeout: 1000 do:{ Async.sleep: 2; 7 } } equalTo:7;
     };
 
     "* On the deadline, the bare form throws a catchable typed `TimeoutError` carrying the
@@ -108,11 +108,11 @@
     "* does not hang).
     .test:
     timeoutThrowsOnDeadline -> {
-        .does:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } } throw:TimeoutError;
+        .does:{ Async.timeout: 5 do:{ Async.sleep: 100000 } } throw:TimeoutError;
         "* a TimeoutError is-an Error, and exposes the deadline it elapsed.
-        .does:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } } throw:Error;
+        .does:{ Async.timeout: 5 do:{ Async.sleep: 100000 } } throw:Error;
         caught = nil;
-        { Async.timeout: 5 do:{ Runtime.sleep: 100000 } }.catch:{ |e| caught = e };
+        { Async.timeout: 5 do:{ Async.sleep: 100000 } }.catch:{ |e| caught = e };
         .is:{ caught.ms } equalTo:5;
     };
 
@@ -120,9 +120,9 @@
     "* `onCancel:{ nil }` is the non-throwing form.
     .test:
     timeoutOnCancelReturnsHandlerValue -> {
-        .is:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ 'handled' } }
+        .is:{ Async.timeout: 5 do:{ Async.sleep: 100000 } onCancel:{ 'handled' } }
             equalTo:'handled';
-        .is:{ Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ nil } } equalTo:nil;
+        .is:{ Async.timeout: 5 do:{ Async.sleep: 100000 } onCancel:{ nil } } equalTo:nil;
     };
 
     "* `onCancel:` catches only the timeout: a *normal* error from the block propagates
@@ -139,7 +139,7 @@
     timeoutRunsFinallyOnDeadline -> {
         trace = #();
         Async.timeout: 5 do:{
-            { Runtime.sleep: 100000 }.catch:{ |e| nil } finally:{ trace.add:'finally' }
+            { Async.sleep: 100000 }.catch:{ |e| nil } finally:{ trace.add:'finally' }
         } onCancel:{ nil };
         .is:{ trace } equalTo:#('finally');
     };
@@ -150,7 +150,7 @@
     timeoutNests -> {
         .is:{
             Async.timeout: 1000 do:{
-                Async.timeout: 5 do:{ Runtime.sleep: 100000 } onCancel:{ 'inner' }
+                Async.timeout: 5 do:{ Async.sleep: 100000 } onCancel:{ 'inner' }
             }
         } equalTo:'inner';
     };

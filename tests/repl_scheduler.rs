@@ -1,10 +1,10 @@
 //! Regression tests for running REPL / `-e` / piped input **through the scheduler**.
 //!
 //! The REPL, `qn -e`, and piped stdin used to execute each line synchronously, with no task
-//! scheduler — so any async op (a fiber resume, `Runtime.sleep`, a spawned `Task`, even an
+//! scheduler — so any async op (a fiber resume, `Async.sleep`, a spawned `Task`, even an
 //! iterator, which is fiber-backed) failed with "… outside the VM scheduler". These drive the
 //! real `qn` binary to confirm those now work, and that top-level bindings still persist
-//! across lines. No network: fibers, `Runtime.sleep`, and `Task` are deterministic and local.
+//! across lines. No network: fibers, `Async.sleep`, and `Task` are deterministic and local.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -74,8 +74,8 @@ fn eval_runs_an_iterator() {
 
 #[test]
 fn eval_does_real_async_io() {
-    // `Runtime.sleep` parks on a real timer in the backend — only the scheduler can fulfill it.
-    let (stdout, stderr) = eval("Runtime.sleep: 1; 7");
+    // `Async.sleep` parks on a real timer in the backend — only the scheduler can fulfill it.
+    let (stdout, stderr) = eval("Async.sleep: 1; 7");
     assert!(
         !stderr.contains("outside the VM scheduler"),
         "sleep hit the no-scheduler path.\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -88,7 +88,7 @@ fn eval_does_real_async_io() {
 
 #[test]
 fn eval_spawns_and_joins_a_task() {
-    let (stdout, stderr) = eval("h = Task.spawn:{ Runtime.sleep: 1; 6 * 7 }; h.join");
+    let (stdout, stderr) = eval("h = Task.spawn:{ Async.sleep: 1; 6 * 7 }; h.join");
     assert!(
         !stderr.contains("outside the VM scheduler"),
         "task spawn/join hit the no-scheduler path.\nstdout:\n{stdout}\nstderr:\n{stderr}"

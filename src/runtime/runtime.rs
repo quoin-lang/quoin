@@ -2,7 +2,6 @@ use crate::arg;
 use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::instruction::StaticBlock;
-use crate::io_backend::IoRequest;
 use crate::packages::{LoadStatus, LoadedUnit, canonical_package};
 use crate::parser::ast::NodeValue;
 use crate::parser::parse_quoin_string_named;
@@ -47,15 +46,6 @@ pub fn build_runtime_class() -> NativeClassBuilder {
         })
         .class_method("supportsColor", |vm, mc, _receiver, _args| {
             Ok(vm.new_bool(mc, vm.options.supports_color))
-        })
-        // Park the running fiber for `ms` milliseconds via the async IoBackend,
-        // without blocking other fibers (Stage 1 — see docs/ASYNC_ARCH.md). Returns nil.
-        .class_method("sleep:", |vm, mc, _receiver, args| {
-            let ms = arg!(args, Int, 0);
-            vm.await_io(IoRequest::Sleep {
-                ms: ms.max(0) as u64,
-            })?;
-            Ok(vm.new_nil(mc))
         })
 }
 

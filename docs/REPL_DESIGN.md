@@ -68,7 +68,7 @@ then `end_repl_line` takes the result and restores the baseline. Because the fra
 `repl_env`, `DefineLocal`/`StoreLocal` bind into it and `LoadLocal` reads from it — locals persist
 line-to-line. `repl_env` lives on the GC root (`VmState`), so it survives between
 `arena.mutate_root` calls. Running under the scheduler is what lets a REPL line do async I/O,
-`Runtime.sleep`, spawn `Task`s, and resume fibers (iterators included).
+`Async.sleep`, spawn `Task`s, and resume fibers (iterators included).
 
 ### One iteration
 1. **Read** a logical input: read a physical line; if it doesn't yet parse (see multiline), keep
@@ -112,7 +112,7 @@ dimmed. Huge collections may be truncated (P1).
 ## Scope and limitations
 - **Async at the prompt: done.** Every REPL line (and `qn -e` / `~/.quoinrc`) runs through the
   same scheduler the file runner uses, so top-level I/O (`Async.gather:`, an HTTP call), a
-  `Runtime.sleep`, a spawned `Task`, or a fiber/iterator resume all work at the prompt. The
+  `Async.sleep`, a spawned `Task`, or a fiber/iterator resume all work at the prompt. The
   scheduler driver was extracted from `compile_and_run_asts` into the shared `install_main_task` +
   `drive_main_task`; the REPL seam is `run_scheduled_line` (replacing the old synchronous
   `execute_repl_line`). Each line is its own task #0, run to completion.
