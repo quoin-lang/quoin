@@ -269,13 +269,22 @@ self-contained. DAP itself commonly runs over stdio, sidestepping sockets entire
   driven by a `DebugState.script` queue in v0. Stops fire on a *line start* (`is_line_start`, a
   static bytecode property), so a breakpoint fires once per arrival (each loop iteration) but not
   on a mid-line call-return.
-- **Slice 3 — the `qn debug <file.qn>` CLI.** A `VmRunnerMode::Debug`; replace the stub
-  `debug_on_pause` with the interactive **`$`-command loop** on the REPL infra (rustyline,
-  highlighter, `annotate_error`), expression-first: bare expr → eval-in-frame; `$break`/`$b`,
-  `$delete`/`$d`, `$continue`/`$c`, `$step`/`$s`, `$next`/`$n`, `$finish`/`$fin`, `$up`, `$down`,
-  `$frames`/`$bt`, `$locals`/`$l`, `$list`, `$print`/`$p`, `$quit`/`$q` (no aliases for
-  `$up`/`$down`), plus the inherited REPL `$`-commands. Also the load-time block/line registry
-  (line→PC reverse index + nested-block walk) for breakpoint placement.
+- **Slice 3 — the `qn debug <file.qn>` CLI.** A `VmRunnerMode::Debug` + the interactive
+  **`$`-command loop**, expression-first (bare expr → eval-in-frame). Sub-sliced:
+  - ✅ **3a — wiring + control.** `RunStep::DebugPaused` bubbles the pause to the driver loop;
+    `DebugFrontend` (rustyline + history) reads outside the arena, `exec_command` runs inside it.
+    Control + breakpoints: `$continue`/`$c`, `$step`/`$s`, `$next`/`$n`, `$finish`/`$fin`,
+    `$break`/`$b`, `$delete`/`$d`, `$quit`/`$q`, `$help`. Stop-at-entry; `~/.quoin_debug_history`.
+  - **3b — inspection + source display.** `$frames`/`$bt`, `$up`, `$down`, `$locals`/`$l`,
+    `$list` (no aliases for `$up`/`$down`), plus the load-time block/line registry (line→PC
+    reverse index + nested-block walk) for breakpoint placement. **Display source as you step:**
+    at every pause (breakpoint or step), auto-print the current line with a few lines of context
+    and a marker on it — gdb/pdb-style — replacing the bare `→ paused at file:line`. Reuses the
+    highlighted-snippet machinery (`get_highlighted_snippet`, already used by stack traces) shared
+    with `$list`; a toggle (`$source on|off`, default on) for terse stepping.
+  - **3c — eval-in-frame.** Bare expr / `$print`/`$p` via `eval:self:` (self/`@ivars`/globals) +
+    a direct env lookup for bare locals; full locals once `eval:bindings:` lands. Plus the
+    inherited REPL `$`-commands (`$globals`/`$class`/`$inspect`).
 - **Slice 4 — exception breakpoints.** `qn --break-on-throw=Type[,…]` (mandatory type). Match the
   propagating error's type at the two live-frame chokepoints (`catch:`'s `Err` arm and
   `run_vm_loop`'s uncaught arm); on a hit, the same `DebugBreak` pause. `DebugAction::ResumeThrow`
