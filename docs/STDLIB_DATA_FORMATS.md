@@ -1,9 +1,9 @@
 # Stdlib: Data formats — implementation outline
 
-Status: **Phase 1 + 2 done.** Plan for the `## Standard Library → Data formats &
-serialization` bullets in `QUOIN_TODO.md`. Branch: `feat/stdlib-data-formats`. **Phase 1**
-(base64/hex + JSON) and **Phase 2** (`DataValue` bridge + MessagePack / TOML / YAML) done;
-Phase 3 (CSV) sketched.
+Status: **All phases done** (base64/hex + JSON + MessagePack + TOML + YAML + CSV). Plan for the
+`## Standard Library → Data formats & serialization` bullets in `QUOIN_TODO.md`. Branch:
+`feat/stdlib-data-formats`. **Phase 1** (base64/hex + JSON), **Phase 2** (`DataValue` bridge +
+MessagePack / TOML / YAML), and **Phase 3** (CSV) are all done.
 Native classes follow the established pattern (`NativeClassBuilder`; see the number/time types).
 
 Phase-1 note on the bridge: JSON uses `serde_json::Value` (with `arbitrary_precision`) as the
@@ -95,11 +95,18 @@ own `serde_json::Value` path (still the fully-lossless format for *numbers*).
 Tests: `qnlib/tests/33-msgpack.qn`, `34-toml.qn`, `35-yaml.qn`; Rust unit tests for `DataValue`'s
 serialize side in `src/runtime/data_value_tests.rs`.
 
-## Phase 3 — CSV  (sketch)
+## Phase 3 — CSV  ✅ done (`src/runtime/csv_fmt.rs`; `csv` crate)
 
-Tabular, not a tree. `CSV.parse: aString → List of rows`, `CSV.generate: rows → String`, RFC 4180
-quoting/escaping. Open: rows as `List` of `List` (positional) vs `List` of `Map` (header row) —
-likely offer both (`parse:` and `parseWithHeader:`). The `csv` crate.
+Tabular, not a tree (so it doesn't use `DataValue`). RFC 4180 quoting/escaping. CSV is untyped, so
+`parse` yields **strings**; `generate` stringifies each field via its `.s`. Both row shapes are
+offered:
+
+- `CSV.parse: str` → **List of List of String** (positional); `CSV.generate: rows` ← List of Lists.
+- `CSV.parseWithHeaders: str` → **List of Map** (first row = headers; column order preserved, since
+  Maps are insertion-ordered); `CSV.generateWithHeaders: rows` ← List of Maps (header from the
+  first row's keys; a missing key → an empty field).
+
+Tests: `qnlib/tests/36-csv.qn`.
 
 ---
 

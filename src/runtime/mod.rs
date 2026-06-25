@@ -6,6 +6,7 @@ pub mod boolean;
 pub mod bytes;
 pub mod class;
 pub mod codecs;
+pub mod csv_fmt;
 pub mod data_value;
 pub mod date_time;
 pub mod double;

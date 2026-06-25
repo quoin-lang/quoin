@@ -11,10 +11,10 @@ use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
 use crate::repl_complete::{CompletionIndex, build_completion_index, complete_input};
 use crate::runtime::runtime::build_block;
 use crate::runtime::{
-    async_rt, big_decimal, big_integer, block, boolean, bytes, class, codecs, date_time, double,
-    duration, fiber as fiber_class, http, instant, integer, io, json, list, map, math, method,
-    msgpack, nil, object, pretty, regex, runtime, set, sockets, streams, string, symbol, task,
-    time_zone, timer, timestamp, toml_fmt, yaml,
+    async_rt, big_decimal, big_integer, block, boolean, bytes, class, codecs, csv_fmt, date_time,
+    double, duration, fiber as fiber_class, http, instant, integer, io, json, list, map, math,
+    method, msgpack, nil, object, pretty, regex, runtime, set, sockets, streams, string, symbol,
+    task, time_zone, timer, timestamp, toml_fmt, yaml,
 };
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -55,6 +55,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, codecs::build_hex_class());
     vm.register_native_class(mc, json::build_json_class());
     vm.register_native_class(mc, msgpack::build_message_pack_class());
+    vm.register_native_class(mc, csv_fmt::build_csv_class());
     vm.register_native_class(mc, toml_fmt::build_toml_class());
     vm.register_native_class(mc, yaml::build_yaml_class());
     vm.register_native_class(mc, sockets::build_tcp_socket_class());

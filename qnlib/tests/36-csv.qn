@@ -1,0 +1,58 @@
+"* CSV (src/runtime/csv_fmt.rs) — tabular text, RFC 4180. Fields are strings (CSV is untyped);
+"* generate stringifies via .s. Both positional (List of Lists) and header-keyed (List of Maps).
+
+(TestSuite.new:{ name = 'CSV' }).add:{
+    .test:
+    parsePositional -> {
+        rows = CSV.parse:'a,b,c\n1,2,3';
+        .is:{ rows.at:0 } equalTo:#('a' 'b' 'c');
+        .is:{ rows.at:1 } equalTo:#('1' '2' '3');
+        .is:{ (rows.at:1).at:0 } a:String;        "* every field is a String
+    };
+
+    .test:
+    parseQuoting -> {
+        "* RFC 4180: a quoted field may contain commas and escaped (doubled) quotes.
+        rows = CSV.parse:'"Smith, Jr.","said ""hi"""';
+        .is:{ (rows.at:0).at:0 } equalTo:'Smith, Jr.';
+        .is:{ (rows.at:0).at:1 } equalTo:'said "hi"';
+    };
+
+    .test:
+    parseWithHeaders -> {
+        rows = CSV.parseWithHeaders:'name,age\nAlice,30\nBob,25';
+        .is:{ rows.count } equalTo:2;
+        .is:{ (rows.at:0).at:'name' } equalTo:'Alice';
+        .is:{ (rows.at:0).at:'age' } equalTo:'30';
+        .is:{ (rows.at:1).at:'name' } equalTo:'Bob';
+    };
+
+    .test:
+    generate -> {
+        "* fields stringify via .s (numbers become text); each row ends with a newline.
+        .is:{ CSV.generate: #( #('id' 'name') #(1 'Alice') ) } equalTo:'id,name\n1,Alice\n';
+        "* a field containing a comma is quoted.
+        .is:{ CSV.generate: #( #('Smith, Jr.' 'x') ) } equalTo:'"Smith, Jr.",x\n';
+    };
+
+    .test:
+    generateWithHeaders -> {
+        "* header from the first row's keys (insertion order); a missing key is an empty field.
+        .is:{ CSV.generateWithHeaders: #( #{'id': 1 'name': 'Alice'} #{'id': 2 'name': 'Bob'} ) }
+            equalTo:'id,name\n1,Alice\n2,Bob\n';
+        .is:{ CSV.generateWithHeaders: #( #{'a': 1 'b': 2} #{'a': 3} ) } equalTo:'a,b\n1,2\n3,\n';
+    };
+
+    .test:
+    roundTrip -> {
+        original = 'x,y\n1,2\n3,4\n';
+        .is:{ CSV.generate:(CSV.parse:original) } equalTo:original;
+    };
+
+    .test:
+    errors -> {
+        "* a row that isn't the expected shape
+        .does:{ CSV.generate: #( 42 ) } throw:TypeError;
+        .does:{ CSV.generateWithHeaders: #( 42 ) } throw:TypeError;
+    };
+};
