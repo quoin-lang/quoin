@@ -20,6 +20,7 @@ pub mod list;
 pub mod map;
 pub mod math;
 pub mod method;
+pub mod msgpack;
 pub mod nil;
 pub mod object;
 pub mod pretty;
