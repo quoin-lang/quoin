@@ -187,10 +187,15 @@ r2 = [HTTP]Client.post: base + '/post' body: 'ping-pong'.asBytes;
 r3 = [HTTP]Client.get: base + '/close';
 (r3.body.text == 'closed-body').else:{{ ok = false }};
 
-"* chunked transfer-encoding (two chunks reassembled)
+"* chunked transfer-encoding, drained to one String
 r4 = [HTTP]Client.get: base + '/chunked';
 (r4.status == 200).else:{{ ok = false }};
 (r4.body.text == 'Hello, world!').else:{{ ok = false }};
+
+"* the same response, streamed lazily: chunk boundaries are preserved per pull
+rs = [HTTP]Client.get: base + '/chunked';
+parts = rs.body.chunks.collect:{{ |c| c.asString }};
+(parts == #( 'Hello, ' 'world!' )).else:{{ ok = false }};
 
 "* gzip Content-Encoding (transparently decoded)
 r5 = [HTTP]Client.get: base + '/gzip';

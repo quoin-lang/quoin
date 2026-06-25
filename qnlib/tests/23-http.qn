@@ -67,6 +67,14 @@ use std:net/http;
     };
 
     .test:
+    bytesBodyChunksYieldOnce -> {
+        "* The uniform .chunks protocol: a bytes-backed body yields its bytes as one chunk
+        "* (an empty body yields none). Stream-backed chunking is covered in tests/http.rs.
+        .is:{ ([HTTP]Body.of:('abc'.asBytes)).chunks.collect:{ |c| c.asString } } equalTo:#( 'abc' );
+        .is:{ ([HTTP]Body.of:(Bytes.empty)).chunks.collect:{ |c| c.asString } } equalTo:#( );
+    };
+
+    .test:
     postMapAutoEncodesJson -> {
         r = [HTTP]Request.new:{ url = 'http://h/p' };
         r.method:'POST';

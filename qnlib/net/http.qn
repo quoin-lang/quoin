@@ -14,38 +14,115 @@
 "* gzip, and a streaming (per-chunk generator) body. See docs/ASYNC_ARCH.md.
 "* ===========================================================================
 
-"* A request or response body: the raw Bytes plus its parsed media type (Content-Type
-"* sans params, lowercased) and original Content-Encoding (gzip/identity/…, already
-"* decoded on responses). One object serves both sides — `send` builds one from the wire,
-"* and the polymorphic `[HTTP]Request.body:` builds one from a shortcut value.
-[HTTP]Body <- { | @bytes @mediaType @encoding |
-    init: -> { |bytes mediaType encoding|
+"* A request or response body — two backings, one interface:
+"*  - bytes-backed: the materialized Bytes (request bodies; an already-drained response).
+"*  - stream-backed: a live ByteStream + framing ('chunked' / 'length' / 'close'); `send`
+"*    builds these and the bytes are read lazily. Drain with .bytes/.text/.json (reads all,
+"*    decodes any Content-Encoding, closes, caches) or stream with .chunks/.each: (one
+"*    transfer-decoded chunk per pull). Content-Encoding is whole-entity, so it is decoded
+"*    only on drain; .chunks yields the raw (still content-encoded) chunks.
+[HTTP]Body <- { | @bytes @stream @framing @length @mediaType @encoding |
+    .mix:Iterate;
+
+    init: -> { |bytes stream framing length mediaType encoding|
         @bytes = bytes;
+        @stream = stream;
+        @framing = framing;
+        @length = length;
         @mediaType = mediaType;
         @encoding = encoding;
     };
 
     .meta <-- {
-        "* Build a Body from raw bytes + optional Content-Type / Content-Encoding values.
-        of:contentType:encoding: -> { |bytes ct enc|
-            media = ct.defined?.if:{ ((ct.splitString:';').at:0).lower } else:{ nil };
-            ^[HTTP]Body.new:{ bytes = bytes; mediaType = media; encoding = enc }
+        "* 'application/json; charset=utf-8' -> 'application/json'
+        mediaTypeOf: -> { |ct| ^ct.defined?.if:{ ((ct.splitString:';').at:0).lower } else:{ nil } };
+
+        "* bytes-backed (request bodies, already-materialized responses)
+        of:contentType:encoding: -> { |b ct enc|
+            ^[HTTP]Body.new:{ bytes = b; mediaType = [HTTP]Body.mediaTypeOf:ct; encoding = enc }
         };
         of:contentType: -> { |bytes ct| ^[HTTP]Body.of:bytes contentType:ct encoding:nil };
         of: -> { |bytes| ^[HTTP]Body.of:bytes contentType:nil encoding:nil };
+
+        "* stream-backed: a live stream framed as 'chunked' | 'length' (with len) | 'close'
+        over:framing:length:contentType:encoding: -> { |stream framing len ct enc|
+            ^[HTTP]Body.new:{
+                stream = stream; framing = framing; length = len;
+                mediaType = [HTTP]Body.mediaTypeOf:ct; encoding = enc
+            }
+        };
     };
 
-    bytes -> { @bytes };
-    text -> { @bytes.asStringLossy };          "* UTF-8; charset-aware decoding is a follow-up
-    json -> { JSON.parse:(.text) };            "* parse-regardless; throws a catchable ParseError
     mediaType -> { @mediaType };
     encoding -> { @encoding };
     json? -> { @mediaType.defined? && (@mediaType.contains?:'json') };
-    size -> { @bytes.count };
-    empty? -> { @bytes.count == 0 };
+
+    "* A lazy Generator of transfer-decoded body chunks (Bytes). Bytes-backed yields its
+    "* bytes once; stream-backed drives the framing, closing the stream when exhausted.
+    chunks -> {
+        @bytes.defined?.if:{ b = @bytes; ^^Generator.from:{ (b.count > 0).if:{ ^>b } } };
+        st = @stream; fr = @framing; len = @length;
+        ^Generator.from:{
+            (fr == 'chunked').if:{
+                reading = true;
+                { reading }.whileDo:{
+                    sizeLine = st.readUntil:'\r\n';
+                    size = Integer.fromHex:(((sizeLine.asString).splitString:';').first);
+                    (size == 0).if:{
+                        reading = false;
+                        trailing = true;
+                        { trailing }.whileDo:{
+                            line = st.readUntil:'\r\n';
+                            (line.count <= 2).if:{ trailing = false };
+                        };
+                    } else:{
+                        ^>(st.readExactly:size);
+                        st.readExactly:2;          "* the CRLF after the chunk data
+                    };
+                };
+            } else:{ (fr == 'length').if:{
+                remaining = len;
+                { remaining > 0 }.whileDo:{
+                    want = (remaining < 8192).if:{ remaining } else:{ 8192 };
+                    chunk = st.read:want;
+                    (chunk.count == 0).if:{ remaining = 0 } else:{ ^>chunk; remaining = remaining - chunk.count };
+                };
+            } else:{
+                "* close-delimited: read fills until EOF
+                reading = true;
+                { reading }.whileDo:{
+                    chunk = st.read;
+                    (chunk.count == 0).if:{ reading = false } else:{ ^>chunk };
+                };
+            } };
+            st.close;
+        }
+    };
+
+    each: -> { |consumer| (.chunks).each:consumer };
+
+    "* Drain the whole body: read every chunk, decode any Content-Encoding, close the
+    "* stream, and cache. Idempotent — a second call returns the cached bytes.
+    bytes -> {
+        @bytes.defined?.if:{ ^^@bytes };
+        raw = Bytes.empty;
+        (.chunks).each:{ |c| raw = raw + c };
+        @bytes = @encoding.defined?.if:{ [HTTP]Response.decodeBody:raw encoding:@encoding } else:{ raw };
+        @stream = nil;
+        ^@bytes
+    };
+    text -> { ^(.bytes).asStringLossy };       "* UTF-8; charset-aware decoding is a follow-up
+    json -> { ^JSON.parse:(.text) };           "* parse-regardless; throws a catchable ParseError
+    size -> { ^(.bytes).count };
+    empty? -> { ^((.bytes).count == 0) };
+
+    "* Close the underlying stream without draining (abandon a streamed response early).
+    close -> { @stream.defined?.if:{ @stream.close; @stream = nil }; self };
+
     s -> {
+        sz = @bytes.defined?.if:{ @bytes.count + ' bytes' } else:{ 'stream' };
         ext = @mediaType.defined?.if:{ ', ' + @mediaType } else:{ '' };
-        '[HTTP]Body(' + @bytes.count + ' bytes' + ext + ')'
+        '[HTTP]Body(' + sz + ext + ')'
     };
 };
 
@@ -117,33 +194,6 @@
             port = (hp.count > 1).if:{ hp.at:1 } else:{ (scheme == 'https').if:{ '443' } else:{ '80' } };
             ^#( scheme (hp.at:0) port path )
         };
-
-        "* Decode a chunked transfer-encoding body from a ByteStream, returning the
-        "* assembled Bytes. Each chunk is a hex size line ('<hex>[;ext]\r\n'), then that
-        "* many bytes, then CRLF; a 0-size chunk ends the body. Trailer headers (if any)
-        "* are not parsed — we read until the terminating empty line and discard them.
-        readChunkedBody: -> { |stream|
-            body = Bytes.empty;
-            reading = true;
-            { reading }.whileDo:{
-                sizeLine = stream.readUntil:'\r\n';
-                hexPart = ((sizeLine.asString).splitString:';').first;
-                size = Integer.fromHex:hexPart;
-                (size == 0).if:{
-                    reading = false;
-                    "* consume trailer lines up to (and including) the terminating "\r\n"
-                    trailing = true;
-                    { trailing }.whileDo:{
-                        line = stream.readUntil:'\r\n';
-                        (line.count <= 2).if:{ trailing = false };
-                    };
-                } else:{
-                    body = body + (stream.readExactly:size);
-                    stream.readExactly:2;   "* the CRLF after the chunk data
-                };
-            };
-            ^body
-        };
     };
 
     method: -> { |m| @method = m; self };
@@ -191,10 +241,11 @@
         ^bytes
     };
 
-    "* Connect, send, read the response, and return an [HTTP]Response. The response is read
-    "* over a ByteStream (Stage 6), whose `over:do:` scope always closes the socket — on
-    "* normal return, a throw, or cancel. Throws (catchable strings) on connection errors or
-    "* a malformed response. Bodies: chunked, Content-Length, and connection-close.
+    "* Connect, send, read the response head, and return an [HTTP]Response whose body is a
+    "* stream-backed [HTTP]Body. The socket is NOT closed here — it stays open, owned by the
+    "* body, and closes when the body is drained (.text/.json/.bytes), fully iterated
+    "* (.chunks/.each:), explicitly .close'd, or GC-reaped. Throws (catchable) on connection
+    "* errors or a malformed head; the stream is closed before re-raising.
     send -> {
         url = [HTTP]Request.parseUrl:@url;
         scheme = url.at:0;
@@ -210,36 +261,34 @@
 
         sock.writeAll:(.requestBytes:host path:path);
 
-        "* Read the whole response over a buffered stream; over:do: owns the fd and closes
-        "* it on every exit path. The block uses only the stream + class-sends (no @ivars).
-        ^ByteStream.over:sock do:{ |stream|
-            "* The head ends at the first CRLF CRLF; readUntil: returns exactly those bytes.
-            headBytes = stream.readUntil:'\r\n\r\n';
-            parsed = [HTTP]Parser.parseHead:headBytes;
-            (parsed == nil).if:{
-                IoError.throw:'HTTP: connection closed before response head' kind:#unexpectedEof
-            };
-            status = parsed.at:0;
-            reason = parsed.at:1;
-            headers = parsed.at:3;
+        "* Non-scoped stream (consumes the socket; no auto-close). Read the head; on any
+        "* error before we hand the stream to the body, close it and re-raise.
+        stream = ByteStream.over:sock;
+        parsed = nil;
+        { parsed = [HTTP]Parser.parseHead:(stream.readUntil:'\r\n\r\n') }.catch:{ |e|
+            stream.close; e.throw
+        };
+        (parsed == nil).if:{
+            stream.close;
+            IoError.throw:'HTTP: connection closed before response head' kind:#unexpectedEof
+        };
 
-            "* Frame the body: chunked, else Content-Length, else read-to-close.
-            te = [HTTP]Response.find:headers named:'transfer-encoding';
-            body = (te.defined? && (te.lower.contains?:'chunked')).if:{
-                [HTTP]Request.readChunkedBody:stream
-            } else:{
-                cl = [HTTP]Response.find:headers named:'content-length';
-                cl.defined?.if:{ stream.readExactly:(cl.to_integer) } else:{ stream.readAll }
-            };
+        status = parsed.at:0;
+        reason = parsed.at:1;
+        headers = parsed.at:3;
 
-            "* Transparently decode a compressed body so the [HTTP]Body presents the entity.
-            ce = [HTTP]Response.find:headers named:'content-encoding';
-            body = ce.defined?.if:{ [HTTP]Response.decodeBody:body encoding:ce } else:{ body };
+        "* How the body is framed on the wire: chunked transfer-encoding, else Content-Length,
+        "* else read-to-close. Content-Encoding is whole-entity and decoded by the body on drain.
+        te = [HTTP]Response.find:headers named:'transfer-encoding';
+        cl = [HTTP]Response.find:headers named:'content-length';
+        framing = (te.defined? && (te.lower.contains?:'chunked')).if:{ 'chunked' }
+            else:{ cl.defined?.if:{ 'length' } else:{ 'close' } };
+        length = (framing == 'length').if:{ cl.to_integer } else:{ nil };
 
-            ct = [HTTP]Response.find:headers named:'content-type';
-            bodyObj = [HTTP]Body.of:body contentType:ct encoding:ce;
-            [HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = bodyObj }
-        }
+        ct = [HTTP]Response.find:headers named:'content-type';
+        ce = [HTTP]Response.find:headers named:'content-encoding';
+        bodyObj = [HTTP]Body.over:stream framing:framing length:length contentType:ct encoding:ce;
+        ^[HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = bodyObj }
     };
 };
 
