@@ -828,6 +828,14 @@ fn resume_current_task<'gc>(
             vm.save_task_context(vm.sched.current_task);
             Ok(RunStep::Parked)
         }
+        CoroutineResult::Yield(YieldReason::DebugBreak) => {
+            // A breakpoint/step paused this task. Run the debugger command loop (v0: a stub
+            // that records the pause and continues), then resume the *same* task in place —
+            // no park, so the whole VM stays stopped while paused. The coroutine resumes
+            // past the suspend point in `debug_checkpoint` and dispatches the instruction.
+            vm.debug_on_pause();
+            Ok(RunStep::Running)
+        }
         CoroutineResult::Yield(YieldReason::Return(val)) => complete_current_task(vm, mc, Ok(val)),
         CoroutineResult::Return(res) => {
             if vm.sched.current_fiber.is_some() {
@@ -1461,7 +1469,8 @@ impl VmRunner {
                     | CoroutineResult::Yield(YieldReason::Gather { .. })
                     | CoroutineResult::Yield(YieldReason::Join { .. })
                     | CoroutineResult::Yield(YieldReason::JoinTimed { .. })
-                    | CoroutineResult::Yield(YieldReason::ChannelPark) => {
+                    | CoroutineResult::Yield(YieldReason::ChannelPark)
+                    | CoroutineResult::Yield(YieldReason::DebugBreak) => {
                         panic!("async I/O is not supported in benchmark mode")
                     }
                     CoroutineResult::Yield(YieldReason::Return(val)) => {
@@ -1683,6 +1692,89 @@ impl VmRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::debug::DebugState;
+    use std::collections::{HashMap, HashSet};
+
+    /// Run `source` to completion under the real scheduler with a debug session attached
+    /// (line `breakpoints` as `(file, line)`), returning the `pause_log` the v0 stub driver
+    /// recorded. Exercises the full mechanism end-to-end: the step-loop hook fires, suspends
+    /// via `DebugBreak`, the driver handles it, and the task resumes in place to completion.
+    fn run_with_breakpoints(
+        source: &str,
+        filename: &str,
+        breakpoints: &[(&str, usize)],
+    ) -> Vec<(String, usize)> {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, VmOptions::default());
+            register_builtins(mc, &mut vm);
+            vm
+        });
+        // Load the prelude so the fixture can use the stdlib (blocks, ranges, …).
+        for ast in prelude_asts() {
+            arena.mutate_root(|mc, vm| {
+                if let NodeValue::Program(p) = &ast.value
+                    && let Ok(sb) = Compiler::new().compile_program(p)
+                {
+                    let block = build_block(mc, &sb);
+                    let _ = vm.execute_block(mc, block, Vec::new(), None);
+                }
+            });
+        }
+        // Compile the fixture, attach the debug session, install it as task #0.
+        let node = try_parse_quoin_string_named(source, filename).expect("fixture parses");
+        arena.mutate_root(|mc, vm| {
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a Program node");
+            };
+            let sb = Compiler::new()
+                .compile_program(p)
+                .expect("fixture compiles");
+            let block = build_block(mc, &sb);
+            let mut bps: HashMap<String, HashSet<usize>> = HashMap::new();
+            for (f, l) in breakpoints {
+                bps.entry((*f).to_string()).or_default().insert(*l);
+            }
+            vm.debug = Some(DebugState {
+                breakpoints: bps,
+                ..Default::default()
+            });
+            vm.start_block(mc, block, Vec::new(), None, None);
+            install_main_task(mc, vm);
+        });
+        drive_main_task(&mut arena).expect("fixture runs to completion");
+        arena.mutate_root(|_mc, vm| {
+            vm.debug
+                .as_ref()
+                .map(|d| d.pause_log.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    #[test]
+    fn breakpoint_pauses_per_arrival_and_resumes_to_completion() {
+        // `dbl`'s body is on line 2 alone; it is invoked twice, so the line-2 breakpoint
+        // must fire once per invocation (a new frame each time) — proving the hook fires,
+        // suspends, and resumes, and that re-entry in a fresh frame re-triggers.
+        let source = "\
+dbl = { |n|
+    n * 2
+};
+a = dbl.value: 3;
+b = dbl.value: 4;
+a + b
+";
+        let log = run_with_breakpoints(source, "fixture.qn", &[("fixture.qn", 2)]);
+        assert_eq!(
+            log,
+            vec![("fixture.qn".to_string(), 2), ("fixture.qn".to_string(), 2),],
+        );
+    }
+
+    #[test]
+    fn no_breakpoints_never_pauses() {
+        let log = run_with_breakpoints("x = 1;\ny = 2;\nx + y\n", "fixture.qn", &[]);
+        assert!(log.is_empty());
+    }
 
     #[test]
     fn flow_names_wraps_to_width() {

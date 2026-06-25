@@ -75,6 +75,12 @@ pub enum YieldReason<'gc> {
     /// counterpart (or `close`) sets this task's `wake` and enqueues it to `ready`. See
     /// `src/runtime/channel.rs`.
     ChannelPark,
+    /// A debug session paused execution (a breakpoint hit, or a single-step landed). Carries
+    /// no payload — the driver reads the paused state directly off `VmState`, runs the
+    /// command loop, and resumes the task in place (no parking, so the VM stays stopped).
+    /// Suspended deep in the step loop, so it bubbles straight to the driver like `AwaitIo`.
+    /// See `src/debug.rs`.
+    DebugBreak,
 }
 
 /// The standard VM driver loop, shared by the main program and every guest
