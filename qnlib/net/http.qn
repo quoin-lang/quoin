@@ -14,23 +14,26 @@
 "* gzip, and a streaming (per-chunk generator) body. See docs/ASYNC_ARCH.md.
 "* ===========================================================================
 
-"* A request or response body — two backings, one interface:
-"*  - bytes-backed: the materialized Bytes (request bodies; an already-drained response).
+"* A request or response body — two backings, one interface. A *chunk* is just a
+"* bytes-backed body, so .chunks yields [HTTP]Body too (bytes + .text/.json/.meta views):
+"*  - bytes-backed: materialized Bytes + per-entity metadata (request bodies; a streamed
+"*    chunk; an already-drained response).
 "*  - stream-backed: a live ByteStream + framing ('chunked' / 'length' / 'close'); `send`
 "*    builds these and the bytes are read lazily. Drain with .bytes/.text/.json (reads all,
-"*    decodes any Content-Encoding, closes, caches) or stream with .chunks/.each: (one
-"*    transfer-decoded chunk per pull). Content-Encoding is whole-entity, so it is decoded
-"*    only on drain; .chunks yields the raw (still content-encoded) chunks.
-[HTTP]Body <- { | @bytes @stream @framing @length @mediaType @encoding |
+"*    decodes any Content-Encoding, closes, caches) or stream with .chunks/.each: (one body
+"*    per pull). Content-Encoding is whole-entity, decoded only on drain; a chunk's bytes
+"*    are raw and it carries its chunk extensions in .meta.
+[HTTP]Body <- { | @bytes @stream @framing @length @mediaType @encoding @meta |
     .mix:Iterate;
 
-    init: -> { |bytes stream framing length mediaType encoding|
+    init: -> { |bytes stream framing length mediaType encoding meta|
         @bytes = bytes;
         @stream = stream;
         @framing = framing;
         @length = length;
         @mediaType = mediaType;
         @encoding = encoding;
+        @meta = meta;
     };
 
     .meta <-- {
@@ -39,16 +42,22 @@
 
         "* bytes-backed (request bodies, already-materialized responses)
         of:contentType:encoding: -> { |b ct enc|
-            ^[HTTP]Body.new:{ bytes = b; mediaType = [HTTP]Body.mediaTypeOf:ct; encoding = enc }
+            ^[HTTP]Body.new:{ bytes = b; mediaType = [HTTP]Body.mediaTypeOf:ct; encoding = enc; meta = #{} }
         };
         of:contentType: -> { |bytes ct| ^[HTTP]Body.of:bytes contentType:ct encoding:nil };
         of: -> { |bytes| ^[HTTP]Body.of:bytes contentType:nil encoding:nil };
+
+        "* A single streamed chunk: bytes-backed, carrying its per-chunk metadata (chunk
+        "* extensions) and inheriting the response's media type.
+        chunk:meta:mediaType: -> { |b m mt|
+            ^[HTTP]Body.new:{ bytes = b; meta = m; mediaType = mt }
+        };
 
         "* stream-backed: a live stream framed as 'chunked' | 'length' (with len) | 'close'
         over:framing:length:contentType:encoding: -> { |stream framing len ct enc|
             ^[HTTP]Body.new:{
                 stream = stream; framing = framing; length = len;
-                mediaType = [HTTP]Body.mediaTypeOf:ct; encoding = enc
+                mediaType = [HTTP]Body.mediaTypeOf:ct; encoding = enc; meta = #{}
             }
         };
     };
@@ -56,43 +65,60 @@
     mediaType -> { @mediaType };
     encoding -> { @encoding };
     json? -> { @mediaType.defined? && (@mediaType.contains?:'json') };
+    "* Per-entity metadata: a Map of chunk extensions for a streamed chunk, empty otherwise.
+    meta -> { @meta };
+    meta: -> { |name| @meta.at:name };
 
-    "* A lazy Generator of transfer-decoded body chunks (Bytes). Bytes-backed yields its
-    "* bytes once; stream-backed drives the framing, closing the stream when exhausted.
+    "* A lazy Generator of body chunks — each yield is itself an [HTTP]Body (bytes-backed),
+    "* carrying its chunk extensions in .meta and the response's media type. A bytes-backed
+    "* body yields itself once; stream-backed drives the framing, closing the stream at EOF.
     chunks -> {
-        @bytes.defined?.if:{ b = @bytes; ^^Generator.from:{ (b.count > 0).if:{ ^>b } } };
-        st = @stream; fr = @framing; len = @length;
+        @bytes.defined?.if:{ me = self; n = @bytes.count; ^^Generator.from:{ (n > 0).if:{ ^>me } } };
+        st = @stream; fr = @framing; len = @length; mt = @mediaType;
         ^Generator.from:{
             (fr == 'chunked').if:{
                 reading = true;
                 { reading }.whileDo:{
-                    sizeLine = st.readUntil:'\r\n';
-                    size = Integer.fromHex:(((sizeLine.asString).splitString:';').first);
+                    line = (((st.readUntil:'\r\n').asString).splitString:'\r\n').at:0;
+                    parts = line.splitString:';';
+                    size = Integer.fromHex:(parts.at:0);
                     (size == 0).if:{
                         reading = false;
                         trailing = true;
                         { trailing }.whileDo:{
-                            line = st.readUntil:'\r\n';
-                            (line.count <= 2).if:{ trailing = false };
+                            tline = st.readUntil:'\r\n';
+                            (tline.count <= 2).if:{ trailing = false };
                         };
                     } else:{
-                        ^>(st.readExactly:size);
+                        "* parse chunk extensions ('name=value' or valueless 'flag') into a Map
+                        exts = #{};
+                        (parts.drop:1).each:{ |ext|
+                            kv = ext.splitString:'=';
+                            (kv.count > 1).if:{ exts.at:(kv.at:0) put:(kv.at:1) }
+                                          else:{ exts.at:(kv.at:0) put:true };
+                        };
+                        data = st.readExactly:size;
                         st.readExactly:2;          "* the CRLF after the chunk data
+                        ^>([HTTP]Body.chunk:data meta:exts mediaType:mt);
                     };
                 };
             } else:{ (fr == 'length').if:{
                 remaining = len;
                 { remaining > 0 }.whileDo:{
                     want = (remaining < 8192).if:{ remaining } else:{ 8192 };
-                    chunk = st.read:want;
-                    (chunk.count == 0).if:{ remaining = 0 } else:{ ^>chunk; remaining = remaining - chunk.count };
+                    data = st.read:want;
+                    (data.count == 0).if:{ remaining = 0 } else:{
+                        ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt);
+                        remaining = remaining - data.count;
+                    };
                 };
             } else:{
                 "* close-delimited: read fills until EOF
                 reading = true;
                 { reading }.whileDo:{
-                    chunk = st.read;
-                    (chunk.count == 0).if:{ reading = false } else:{ ^>chunk };
+                    data = st.read;
+                    (data.count == 0).if:{ reading = false }
+                                     else:{ ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt) };
                 };
             } };
             st.close;
@@ -106,7 +132,7 @@
     bytes -> {
         @bytes.defined?.if:{ ^^@bytes };
         raw = Bytes.empty;
-        (.chunks).each:{ |c| raw = raw + c };
+        (.chunks).each:{ |c| raw = raw + c.bytes };
         @bytes = @encoding.defined?.if:{ [HTTP]Response.decodeBody:raw encoding:@encoding } else:{ raw };
         @stream = nil;
         ^@bytes

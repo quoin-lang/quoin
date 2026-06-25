@@ -55,6 +55,12 @@ fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
                  7\r\nHello, \r\n6\r\nworld!\r\n0\r\n\r\n"
             .to_vec();
     }
+    if path == "/chunked-ext" {
+        // The first chunk carries a chunk extension (sig=abc); the second is plain.
+        return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 7;sig=abc\r\nHello, \r\n6\r\nworld!\r\n0\r\n\r\n"
+            .to_vec();
+    }
     let (head, body): (String, Vec<u8>) = match path {
         "/cl" => (
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\n".into(),
@@ -192,10 +198,17 @@ r4 = [HTTP]Client.get: base + '/chunked';
 (r4.status == 200).else:{{ ok = false }};
 (r4.body.text == 'Hello, world!').else:{{ ok = false }};
 
-"* the same response, streamed lazily: chunk boundaries are preserved per pull
+"* the same response, streamed lazily: each chunk is an [HTTP]Body; boundaries preserved
 rs = [HTTP]Client.get: base + '/chunked';
-parts = rs.body.chunks.collect:{{ |c| c.asString }};
+parts = rs.body.chunks.collect:{{ |c| c.text }};
 (parts == #( 'Hello, ' 'world!' )).else:{{ ok = false }};
+
+"* per-chunk metadata: a chunk extension surfaces on the chunk body's .meta
+rx = [HTTP]Client.get: base + '/chunked-ext';
+xs = rx.body.chunks.list;
+(((xs.at:0).meta:'sig') == 'abc').else:{{ ok = false }};
+((xs.at:0).text == 'Hello, ').else:{{ ok = false }};
+(((xs.at:1).meta) == #{{}}).else:{{ ok = false }};
 
 "* gzip Content-Encoding (transparently decoded)
 r5 = [HTTP]Client.get: base + '/gzip';

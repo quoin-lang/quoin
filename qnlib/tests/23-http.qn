@@ -68,10 +68,14 @@ use std:net/http;
 
     .test:
     bytesBodyChunksYieldOnce -> {
-        "* The uniform .chunks protocol: a bytes-backed body yields its bytes as one chunk
-        "* (an empty body yields none). Stream-backed chunking is covered in tests/http.rs.
-        .is:{ ([HTTP]Body.of:('abc'.asBytes)).chunks.collect:{ |c| c.asString } } equalTo:#( 'abc' );
-        .is:{ ([HTTP]Body.of:(Bytes.empty)).chunks.collect:{ |c| c.asString } } equalTo:#( );
+        "* The uniform .chunks protocol: a bytes-backed body yields *itself* as one chunk
+        "* (an empty body yields none). Each yield is an [HTTP]Body, so .text/.meta apply.
+        "* Stream-backed chunking + chunk extensions are covered in tests/http.rs.
+        one = ([HTTP]Body.of:('abc'.asBytes)).chunks.list;
+        .is:{ one.count } equalTo:1;
+        .is:{ (one.at:0).text } equalTo:'abc';
+        .is:{ (one.at:0).meta } equalTo:#{};          "* no per-chunk metadata
+        .is:{ ([HTTP]Body.of:(Bytes.empty)).chunks.collect:{ |c| c.text } } equalTo:#( );
     };
 
     .test:
