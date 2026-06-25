@@ -648,4 +648,13 @@ deferred `Mirror` in `## REPL`.
 ## 10. Test Coverage
 - [ ] **Increase Code Coverage**:
   - Add more integration tests under `qnlib/tests/` to target uncovered parts of the compiler, runtime, and VM.
+- [ ] **Track Quoin-level (`.qn`) coverage, not just Rust-level.** `cargo cov` / `cargo cov-test`
+  (llvm-cov) only measure which *Rust* paths in the VM/runtime are exercised — they say nothing
+  about whether every method defined in the `qnlib` standard library actually gets called by the
+  suite. A pure-Quoin method (or an untaken branch inside one) can sit completely untested while
+  Rust coverage looks healthy, because the VM bytecode interpreter that runs it is itself well
+  covered. Need a way to measure coverage at the Quoin level — e.g. instrument method dispatch (or
+  the compiler) to record which selectors/methods and which source lines/branches in `.qn` files
+  are hit during a `qn test` run, then report the gaps. Would surface dead stdlib methods and
+  untested library branches that Rust coverage structurally can't see.
 
