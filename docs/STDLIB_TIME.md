@@ -30,7 +30,7 @@ Monotonic `Instant` is the one thing jiff doesn't cover (it's wall-clock by desi
 
 - `Timer.time:{block}` — monotonic elapsed micros via `std::time::Instant` (`src/runtime/timer.rs`).
   Keep as sugar over `Instant`.
-- `Runtime.sleep:` — currently `arg!(Int)` ms → `IoRequest::Sleep { ms: u64 }` (`runtime.rs`).
+- `Async.sleep:` — parks the running fiber via `IoRequest::Sleep { ms: u64 }` (`async_rt.rs`).
 - `Async.timeout:do:` — `vm.await_timeout(mc, block, ms: i64, …)` (`async_rt.rs`).
 - No wall-clock source yet (`SystemTime`/`UNIX_EPOCH` unused).
 
@@ -58,7 +58,7 @@ Monotonic `Instant` is the one thing jiff doesn't cover (it's wall-clock by desi
 
 ### Scheduler integration  (approved)
 
-- `Runtime.sleep:` → typed variants: `sleep:&["Integer"]` (ms, existing) **+** `sleep:&["Duration"]`
+- `Async.sleep:` → typed variants: `sleep:&["Integer"]` (ms, existing) **+** `sleep:&["Duration"]`
   (Duration → total ms → `IoRequest::Sleep`).
 - `Async.timeout:do:` → `timeout:&["Integer"] do:` (ms) **+** `timeout:&["Duration"] do:`
   (Duration → ms → `await_timeout`). Keeps the ms forms.
@@ -66,8 +66,8 @@ Monotonic `Instant` is the one thing jiff doesn't cover (it's wall-clock by desi
 ### Files
 
 - `src/runtime/duration.rs` + `src/runtime/instant.rs` (new); `mod.rs` + `runner.rs` registration;
-  `Cargo.toml` (jiff). Edit `runtime.rs` (`sleep:`) and `async_rt.rs` (`timeout:do:`) for the
-  Duration overloads. Tests: `qnlib/tests/NN-duration.qn`.
+  `Cargo.toml` (jiff). Edit `async_rt.rs` (`sleep:` + `timeout:do:`) for the Duration overloads.
+  Tests: `qnlib/tests/NN-duration.qn`.
 
 ---
 

@@ -1,6 +1,6 @@
 "* Time Phase 1: Duration (a fixed signed span) and Instant (the monotonic clock). Duration is
 "* pure and tested exactly; Instant is clock-based and tested with loose lower bounds to stay
-"* non-flaky. Also covers the Duration overloads of Runtime.sleep:/Async.timeout:.
+"* non-flaky. Also covers the Duration overloads of Async.sleep:/Async.timeout:.
 
 (TestSuite.new:{ name = 'Duration' }).add:{
     .test:
@@ -52,14 +52,14 @@
     measuresSleep -> {
         "* loose lower bound: a ~20ms sleep should register at least ~15ms elapsed.
         i = Instant.now;
-        Runtime.sleep:(Duration.milliseconds:20);
+        Async.sleep:(Duration.milliseconds:20);
         .isTrue:{ i.elapsed.asMilliseconds >= 15 };
     };
 
     .test:
     orderingAndSubtraction -> {
         a = Instant.now;
-        Runtime.sleep:5;
+        Async.sleep:5;
         b = Instant.now;
         .isTrue:{ a < b };
         .isTrue:{ (b - a).asNanoseconds > 0 };   "* later - earlier > 0

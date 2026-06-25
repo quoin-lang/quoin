@@ -180,7 +180,7 @@ handle and the live resource.
   `select` over the `FuturesUnordered` of *all* parked fibers' ops. The backend is
   owned by the runner (outside the arena) and passed into the driver.
 - **`src/runtime/`** — new `net.rs` (Socket class over `StreamId` handles) and the
-  HTTP layer; `timer.rs` / a `Runtime sleep:` gains a non-blocking path via
+  HTTP layer; `timer.rs` / an `Async.sleep:` gains a non-blocking path via
   `IoRequest::Sleep`.
 - **`qnlib/`** — `std:net/*`, later `std:http/*`, exposed through the `use` system.
 
@@ -225,7 +225,7 @@ I/O-parking analogue of `save_/load_fiber_context`, and it runs entirely inside 
 `mutate_root`, so the swap is atomic with respect to collection and the task table
 roots every parked task's stashed `Gc` context.
 
-- **Stage 1 = Level 1.** `Runtime.sleep:` proves the round-trip; the whole VM parks.
+- **Stage 1 = Level 1.** `Async.sleep:` proves the round-trip; the whole VM parks.
 - **Stage 2a = Level 2.** The run/test driver is a real scheduler: a ready queue
   plus a `FuturesUnordered<(TaskId, IoResult)>` (from `futures-util`), whose
   `.next().await` is the one reactor wait. The Stage-1 `pending_io_*` slots are
@@ -291,7 +291,7 @@ to Stage 3.)
 
 **Stage 1 — the seam (`AwaitIo` + async driver, single op). ✅ done.**
 Added `YieldReason::AwaitIo`, `VmState::await_io`, the runner's `block_on` wrapper
-and `AwaitIo` arm. Wired `Runtime.sleep:` to `IoRequest::Sleep`. (Also extracted the
+and `AwaitIo` arm. Wired `Async.sleep:` to `IoRequest::Sleep`. (Also extracted the
 fiber/coroutine fields into a `Scheduler` sub-struct.) *Test:* a `.qn` program that
 sleeps and observes elapsed time — a value round-trips out to the backend and back.
 

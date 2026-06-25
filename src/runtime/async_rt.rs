@@ -1,5 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::io_backend::IoRequest;
 use crate::runtime::duration::duration_to_millis;
 use crate::runtime::list::NativeListState;
 use crate::value::{Block, NativeClassBuilder, ObjectPayload, Value};
@@ -37,6 +38,19 @@ pub fn build_async_class() -> NativeClassBuilder {
                 }
             }
             vm.await_gather(blocks)
+        })
+        // `Async.sleep:` — park the running fiber via the async IoBackend, without blocking other
+        // fibers (Stage 1 — see docs/ASYNC_ARCH.md). Accepts a bare ms count or a Duration; nil.
+        .typed_class_method("sleep:", &["Integer"], |vm, mc, _receiver, args| {
+            vm.await_io(IoRequest::Sleep {
+                ms: arg!(args, Int, 0).max(0) as u64,
+            })?;
+            Ok(vm.new_nil(mc))
+        })
+        .typed_class_method("sleep:", &["Duration"], |vm, mc, _receiver, args| {
+            let ms = duration_to_millis(args[0], "sleep:")? as u64;
+            vm.await_io(IoRequest::Sleep { ms })?;
+            Ok(vm.new_nil(mc))
         })
         // `Async.timeout:ms do:{block}` — run `block` with a deadline of `ms` ms (or a Duration).
         // Returns its value if it finishes in time; throws a catchable `'timeout'` if the deadline
