@@ -447,6 +447,17 @@ deferred `Mirror` in `## REPL`.
 - [x] **Operator precedence was inverted for arithmetic.** In the pest Pratt parser (`src/parser/pest/parser.rs`), `+`/`-` bound *tighter* than `*`/`/`/`%`, and `..` bound tighter than all arithmetic (`2 + 3 * 4 == 20`; `2 .. 3 + 1` errored as `(2..3) + 1`). Fixed by reordering the `.op(...)` levels to the conventional ordering — loosest→tightest: `||` · `&&` · `== !=` · comparison · `~` · `..` · `+ -` · `* / %`, with postfix `.method` tighter than any infix and prefix tightest. Now `2 + 3 * 4 == 14` and `2 .. n + 1` is `2 .. (n + 1)`. Full `qnlib` test suite passes (0 regressions); docs updated (`docs/language/01-foundations.md` §6 and appendices A/C).
 - [x] **`-->` / `->` didn't override a same-signature method.** Both appended a variant to the selector's multimethod chain; equal-specificity ties resolved to the *first-defined*, so a plain redefinition (`Foo <- { bar -> { 1 } }; Foo <-- { bar --> { 2 } }`) was dead code and `bar` returned `1`. The originally-planned fix (reverse the equal-specificity tie-break) turned out **wrong** — it breaks ordered guard dispatch (the `dispatchByBlock` test relies on first-defined guards winning over a later `.class==Object` catch-all). Fixed instead by **replace-at-definition**: a new *unguarded* variant whose `param_types` match an existing unguarded variant replaces that variant's block in place (`replace_or_append_method_in_chain`, `src/vm.rs`); guard- and type-differentiated variants still append and dispatch by specificity. `Foo.new.bar` now returns `2`; full suite passes; regression test `overridesSameSignature` added; docs updated (`docs/language/03-objects.md` §10/§13, appendix C). **Known limitation:** overriding a *guarded* variant with an identical guard does not replace (guards aren't compared for equality) — subsumed by the scoring overhaul below.
 - [x] **`Runtime.eval:` panics on a syntax error instead of throwing.** A syntactically-invalid source string panicked the whole VM in the pest parser (`parse_quoin_string_named` → `crates/quoin-syntax/src/pest/parser.rs`, which unwraps the `PestError`) rather than surfacing a catchable error, so `{ Runtime.eval:'1 +' }.catch:{…}` aborted the process instead of recovering. Found during the structured-error work (Tranche 4b): the typed `ParseError` raised by `compile_and_execute_source` (`runtime.rs`) only covered *semantic* compile failures of already-parseable source; the parse step upstream still panicked. **Fixed:** `compile_and_execute_source` now calls the already-existing fallible `try_parse_quoin_string_named` and maps its `ParseError` to `QuoinError::ParseError` — sidestepping the feared `quoin-syntax` signature ripple (the panicking entry stays for the main-program path, which fails the process by design). One call site changed; `eval:`/`eval:self:`/`use` all recover now. Test: `evalSyntaxErrorIsCatchable` (`qnlib/tests/07-errors.qn`). Done as the debugger-v0 prerequisite (evaluate-in-frame must not crash on a malformed watch expression).
+- [ ] **`Runtime.eval:self:` does not expose `self` (or `@ivars`) to the eval'd code.** Despite the name,
+  the `self_val` argument is *not* bound as the eval'd unit's `self`: `Runtime.eval:'self' self:obj` returns
+  `nil`, and `Runtime.eval:'@total' self:obj` returns `nil` (not the receiver's field). Found during the
+  debugger's eval-in-frame work (Slice 3c): `$print self` / `$print @total` could not go through `eval:self:`,
+  so the debugger reads bare locals, bare `@ivars`, and `self` *directly* from the focus frame (env / `Object.fields`)
+  and only falls back to eval for globals/literals — which is why a *compound* `$print @total + 1` still resolves
+  the `@ivar` to nil. The fix belongs with the eval-environment work: `eval:self:` should bind the receiver as the
+  eval'd frame's `self` (so `self`/`@x`/`self.method` resolve), and the locals gap is the separate
+  [[eval-bindings]] (`eval:bindings:`) item under `## Misc` / `## 8`. Once both land, the debugger's `$print` of
+  arbitrary expressions over frame state works with no debugger-side change. (Cross-ref `docs/DEBUGGER_ARCH.md` —
+  the "Evaluate-in-frame" and Slice 3c notes.)
 - [x] **A multibyte char in a string literal leaked a stray `'` into the value.** Any non-ASCII glyph in a
   string literal (e.g. `µ`, U+00B5) appended the closing quote to the parsed value — `'µ'.length` was 2,
   `'café'` became `café'`, and `#ANSI'…µs…'` rendered a spurious apostrophe. Root cause was *not* the
@@ -521,8 +532,10 @@ deferred `Mirror` in `## REPL`.
   - `Runtime.evalFile: filename`: Loads, compiles, and evaluates a file.
   - `Object.s` overrides: Overriding `s` string representation when converting objects to strings for printing.
   - [ ] **`eval:bindings:` (eval with an explicit environment).** Today `eval:`/`eval:self:` run the
-    string as a self-contained compilation unit (`parent_env: None`) — globals + an optional `self`, but no
-    access to the caller's locals. To let eval reference the local environment, add a variant taking a
+    string as a self-contained compilation unit (`parent_env: None`) — globals only; the `self` passed to
+    `eval:self:` is *not* actually bound in the eval'd code either (see the `eval:self:` bug under
+    `## Bugs/Odd Behavior`), so there's no access to the caller's `self`, `@ivars`, *or* locals. To let eval
+    reference the local environment, add a variant taking a
     `Map` of name→value bindings that are injected as pre-populated locals in the eval'd frame.
     Deliberately *explicit* (not implicit lexical capture): the eval'd code still compiles its own
     independent layout, so this stays compatible with the compile-time `(depth, slot)` local-variable
