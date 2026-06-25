@@ -61,6 +61,22 @@ fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
                  7;sig=abc\r\nHello, \r\n6\r\nworld!\r\n0\r\n\r\n"
             .to_vec();
     }
+    if path == "/gzip-chunked" {
+        // gzip body split across two transfer-chunks: chunked(gzip(entity)). The client must
+        // de-chunk first, reassemble the gzip stream, then content-decode it as a whole.
+        let body = quoin::runtime::compress::gzip_encode(b"hello gzip world").unwrap();
+        let mid = body.len() / 2;
+        let mut out =
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n"
+                .to_vec();
+        out.extend_from_slice(format!("{:x}\r\n", mid).as_bytes());
+        out.extend_from_slice(&body[..mid]);
+        out.extend_from_slice(b"\r\n");
+        out.extend_from_slice(format!("{:x}\r\n", body.len() - mid).as_bytes());
+        out.extend_from_slice(&body[mid..]);
+        out.extend_from_slice(b"\r\n0\r\n\r\n");
+        return out;
+    }
     if path == "/redirect" {
         // 302 to a root-relative target on the same server.
         return b"HTTP/1.1 302 Found\r\nLocation: /cl\r\nContent-Length: 0\r\n\r\n".to_vec();
@@ -226,6 +242,17 @@ xs = rx.body.chunks.list;
 "* gzip Content-Encoding (transparently decoded)
 r5 = [HTTP]Client.get: base + '/gzip';
 (r5.body.text == 'hello gzip world').else:{{ ok = false }};
+
+"* streaming a content-encoded body: .chunks can't decode a transfer-chunk in isolation,
+"* so it drains+decodes the whole entity and yields a single decoded chunk
+r5b = [HTTP]Client.get: base + '/gzip';
+((r5b.body.chunks.collect:{{ |c| c.text }}) == #( 'hello gzip world' )).else:{{ ok = false }};
+
+"* gzip delivered across multiple transfer-chunks: de-chunk, reassemble, then decode
+r5c = [HTTP]Client.get: base + '/gzip-chunked';
+(r5c.body.text == 'hello gzip world').else:{{ ok = false }};
+r5d = [HTTP]Client.get: base + '/gzip-chunked';
+((r5d.body.chunks.collect:{{ |c| c.text }}) == #( 'hello gzip world' )).else:{{ ok = false }};
 
 "* zstd Content-Encoding (transparently decoded)
 r6 = [HTTP]Client.get: base + '/zstd';

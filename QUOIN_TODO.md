@@ -194,9 +194,16 @@ Quoin over the current sockets/streams).
   yielding one `[HTTP]Body` chunk per pull (chunked / Content-Length / close framing), each
   carrying its chunk-extension metadata on `chunk.meta`. The socket closes on drain / full
   iteration / `.close` / GC. `qnlib/net/http.qn`.
+  - [x] **Content-decoded streaming.** A content-encoded body can't be decoded
+    chunk-by-chunk with the one-shot codecs (a transfer-chunk isn't a complete gzip/zstd
+    frame), so `.chunks`/`.each:` drain+decode the whole entity and yield a single decoded
+    chunk; a non-encoded body still streams its raw transfer-chunks with per-chunk metadata.
+    The internal wire-framing generator is `[HTTP]Body.rawChunks`.
   - [ ] Expose **trailer headers** (after the terminating `0\r\n`) — currently read and
-    discarded — and **per-chunk decoding** (content-encoding is whole-entity today; chunk
-    bytes are raw).
+    discarded.
+  - [ ] **True per-chunk streaming decode** — incremental content-decode as chunks arrive,
+    via a streaming (`ByteStream`) decompressor (see the `gzip / zstd` streaming follow-up
+    below); today an encoded streamed body buffers the whole entity before decoding.
 - [x] **Unified `[HTTP]Body` + JSON.** One value object (bytes- or stream-backed) backs both
   request and response bodies: `.bytes`/`.text`/`.json`/`.mediaType`/`.meta`. The polymorphic
   `[HTTP]Request.body:` auto-encodes a Map/List to JSON (`Content-Type: application/json`) and
