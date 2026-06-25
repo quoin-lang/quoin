@@ -173,16 +173,6 @@ impl NativeKeyValuePairState {
     pub fn get_value<'gc>(&self) -> Value<'gc> {
         unsafe { transmute(self.value) }
     }
-
-    pub fn set_key(&mut self, key: Value) {
-        let key_static: Value<'static> = unsafe { transmute(key) };
-        self.key = key_static;
-    }
-
-    pub fn set_value(&mut self, value: Value) {
-        let value_static: Value<'static> = unsafe { transmute(value) };
-        self.value = value_static;
-    }
 }
 
 impl AnyCollect for NativeKeyValuePairState {
@@ -283,15 +273,6 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
                 ObjectPayload::NativeState(crate::gc!(mc, RefLock::new(boxed_state)));
 
             Ok(Value::Object(obj))
-        })
-        .instance_method("init:", |_vm, mc, receiver, args| {
-            let key = args[0];
-            let value = args[1];
-            receiver.with_native_state_mut(mc, |kvp: &mut NativeKeyValuePairState| {
-                kvp.set_key(key);
-                kvp.set_value(value);
-            })?;
-            Ok(receiver)
         })
         .instance_method("key", |_vm, _mc, receiver, _args| {
             let key = receiver.with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_key())?;
