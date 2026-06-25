@@ -1613,6 +1613,7 @@ dependencies = [
  "rust_decimal",
  "rustc-hash",
  "rustyline",
+ "serde",
  "serde_json",
  "substring",
  "webpki-roots 0.26.11",
