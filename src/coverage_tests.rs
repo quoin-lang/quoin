@@ -1,18 +1,21 @@
 use super::*;
 
 #[test]
-fn record_line_accumulates_per_file_and_line() {
+fn record_line_accumulates_per_block_and_line() {
     let mut cov = CoverageState::new();
-    cov.record_line("a.qn", 1);
-    cov.record_line("a.qn", 1);
-    cov.record_line("a.qn", 2);
-    cov.record_line("b.qn", 5);
+    // Two blocks: A spans bytes 0..10, B spans 20..30, both in a.qn.
+    cov.record_line("a.qn", 0, 10, 1);
+    cov.record_line("a.qn", 0, 10, 1);
+    cov.record_line("a.qn", 0, 10, 2);
+    cov.record_line("a.qn", 20, 30, 5);
 
-    assert_eq!(cov.hit_count("a.qn", 1), 2);
-    assert_eq!(cov.hit_count("a.qn", 2), 1);
-    assert_eq!(cov.hit_count("b.qn", 5), 1);
-    assert_eq!(cov.hit_count("a.qn", 9), 0); // line never recorded
-    assert_eq!(cov.hit_count("c.qn", 1), 0); // file never recorded
+    assert_eq!(cov.hit_count("a.qn", 0, 10, 1), 2);
+    assert_eq!(cov.hit_count("a.qn", 0, 10, 2), 1);
+    assert_eq!(cov.hit_count("a.qn", 20, 30, 5), 1);
+    assert_eq!(cov.hit_count("a.qn", 0, 10, 9), 0); // line never recorded in this block
+    // Same file+line but a different block span is a distinct key (def-site vs body).
+    assert_eq!(cov.hit_count("a.qn", 99, 100, 1), 0);
+    assert_eq!(cov.hit_count("c.qn", 0, 10, 1), 0); // block never recorded
 }
 
 #[test]

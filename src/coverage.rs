@@ -7,9 +7,10 @@
 //! `source_map: [Option<SourceInfo>]` parallel to its bytecode, and
 //! [`is_line_start`](crate::debug::is_line_start) marks the first instruction of each
 //! source line. Coverage is "the debugger that never stops" — at each line-start crossing
-//! it ticks a counter for `(file, line)`.
+//! it ticks a counter, keyed by the *executing block* (so defining a method doesn't count
+//! its body as run — see [`block_key`]).
 //!
-//! - **Numerator** ([`CoverageState`]): a `(file, line) -> hit count` map, filled by
+//! - **Numerator** ([`CoverageState`]): a `block -> line -> hit count` map, filled by
 //!   [`VmState::coverage_tick`] from the per-instruction seam in `step_internal` (gated by
 //!   `VmState::coverage`, one bool load when off — same cost model as the debugger).
 //! - **Denominator** ([`VmState::build_coverage_report`]): after the run, walk every
@@ -24,15 +25,34 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::debug::is_line_start;
 use crate::instruction::{Constant, Instruction, StaticBlock};
-use crate::value::{ObjectPayload, SourceInfo, Value};
+use crate::value::{SourceInfo, Value};
 use crate::vm::VmState;
 
+/// A stable identifier for a *block* (method body or nested closure): a hash of its
+/// source span (`file`, byte `start`, byte `end`). The same logical block has the same
+/// span whether seen as a runtime `Block` (the tick) or a `StaticBlock` template (the
+/// denominator walk), so the two sides agree.
+///
+/// Why attribute hits per block rather than per `(file, line)`: *defining* a method runs
+/// the enclosing code mapped to the method's own source line, which would otherwise count
+/// the method's body as executed even when it is never called (acute for single-line
+/// methods). The definition runs in the *enclosing* block; the body runs in the method's
+/// block. Keying on the block keeps them apart — the enclosing block isn't in the
+/// denominator, so its def-site hits are ignored.
+fn block_key(file: &str, start: u32, end: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    file.hash(&mut h);
+    start.hash(&mut h);
+    end.hash(&mut h);
+    h.finish()
+}
+
 /// The runtime hit accumulator. Plain data (no `Gc`), so it is `require_static` on
-/// `VmState`. Keyed `file -> line -> count`; `get_mut` on the hot path means only the
-/// first hit per file allocates the filename.
+/// `VmState`. Keyed `block -> line -> count`.
 #[derive(Debug, Default)]
 pub struct CoverageState {
-    hits: HashMap<String, HashMap<u32, u64>>,
+    hits: HashMap<u64, HashMap<u32, u64>>,
 }
 
 impl CoverageState {
@@ -40,24 +60,34 @@ impl CoverageState {
         Self::default()
     }
 
-    /// Record one execution of `(file, line)`.
-    pub fn record_line(&mut self, file: &str, line: u32) {
-        if let Some(lines) = self.hits.get_mut(file) {
-            *lines.entry(line).or_insert(0) += 1;
-        } else {
-            let mut lines = HashMap::new();
-            lines.insert(line, 1);
-            self.hits.insert(file.to_string(), lines);
-        }
+    /// Record one execution of `line` within the block spanning `start..end` of `file`.
+    pub fn record_line(&mut self, file: &str, start: u32, end: u32, line: u32) {
+        let key = block_key(file, start, end);
+        *self.hits.entry(key).or_default().entry(line).or_insert(0) += 1;
     }
 
-    fn hit_count(&self, file: &str, line: u32) -> u64 {
+    fn hit_count(&self, file: &str, start: u32, end: u32, line: u32) -> u64 {
         self.hits
-            .get(file)
+            .get(&block_key(file, start, end))
             .and_then(|lines| lines.get(&line))
             .copied()
             .unwrap_or(0)
     }
+}
+
+/// The output format requested on the CLI. Only LCOV today; Cobertura XML is a
+/// fast-follow (the [`CoverageReport`] model is already format-agnostic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageFormat {
+    Lcov,
+}
+
+/// How a run should emit coverage, parsed from `--coverage[=fmt]` / `--coverage-out=PATH`.
+#[derive(Debug, Clone)]
+pub struct CoverageConfig {
+    pub format: CoverageFormat,
+    /// Output file, or `None` to write to stdout.
+    pub out: Option<String>,
 }
 
 /// A format-agnostic coverage result. `BTreeMap`s keep the output deterministic (stable
@@ -98,8 +128,16 @@ impl CoverageReport {
 /// wasn't recorded (every line then reports 0 hits — a pure structural report).
 type Hits<'a> = Option<&'a CoverageState>;
 
-fn hit_count(hits: Hits, file: &str, line: u32) -> u64 {
-    hits.map_or(0, |c| c.hit_count(file, line))
+/// A block's source span — `(file, byte start, byte end)` — the key under which its line
+/// hits are recorded. Threaded through the walk so each block looks up its *own* hits.
+type Span<'a> = (&'a str, u32, u32);
+
+fn span_of(si: &SourceInfo) -> Span<'_> {
+    (&si.filename, si.start as u32, si.end as u32)
+}
+
+fn hit_count(hits: Hits, span: Span, line: u32) -> u64 {
+    hits.map_or(0, |c| c.hit_count(span.0, span.1, span.2, line))
 }
 
 fn first_mapped(source_map: &[Option<SourceInfo>]) -> Option<&SourceInfo> {
@@ -118,13 +156,13 @@ fn block_constant(inst: &Instruction) -> Option<&StaticBlock> {
     }
 }
 
-/// Record every line-start in `source_map` into the report at its hit count, then recurse
-/// into the nested blocks the `bytecode` references (`Instruction::Block`). The same
-/// `(file, line)` reached from two blocks resolves to the same global hit count, so the
-/// per-line count is the total times that source line was crossed.
+/// Record every line-start in `source_map` into the report at its hit count (looked up
+/// under this block's `span`), then recurse into the nested closures the `bytecode`
+/// references, each keyed by its own span.
 fn walk_code(
     report: &mut CoverageReport,
     hits: Hits,
+    span: Span,
     source_map: &[Option<SourceInfo>],
     bytecode: &[Instruction],
 ) {
@@ -134,7 +172,7 @@ fn walk_code(
         }
         if let Some(Some(si)) = source_map.get(ip) {
             let line = si.line as u32;
-            let count = hit_count(hits, &si.filename, line);
+            let count = hit_count(hits, span, line);
             report
                 .files
                 .entry(si.filename.clone())
@@ -145,9 +183,12 @@ fn walk_code(
         }
     }
 
+    // Recurse into nested closures, each keyed by its own span.
     for inst in bytecode {
         if let Some(sb) = block_constant(inst) {
-            walk_code(report, hits, &sb.source_map, &sb.bytecode);
+            if let Some(child) = &sb.source_info {
+                walk_code(report, hits, span_of(child), &sb.source_map, &sb.bytecode);
+            }
         }
     }
 }
@@ -157,13 +198,14 @@ fn register_function(
     hits: Hits,
     class_name: &str,
     selector: &str,
+    span: Span,
     source_map: &[Option<SourceInfo>],
 ) {
     let Some(si) = first_mapped(source_map) else {
         return;
     };
     let line = si.line as u32;
-    let count = hit_count(hits, &si.filename, line);
+    let count = hit_count(hits, span, line);
     report
         .files
         .entry(si.filename.clone())
@@ -219,10 +261,13 @@ impl<'gc> VmState<'gc> {
         let Some(Some(si)) = map.get(ip) else {
             return;
         };
+        let Some(bsi) = &block.source_info else {
+            return; // no block span to attribute the hit to
+        };
         let line = si.line as u32;
-        let file = si.filename.as_str();
+        let (file, start, end) = (bsi.filename.as_str(), bsi.start as u32, bsi.end as u32);
         if let Some(cov) = self.coverage.as_mut() {
-            cov.record_line(file, line);
+            cov.record_line(file, start, end, line);
         }
     }
 
@@ -233,27 +278,50 @@ impl<'gc> VmState<'gc> {
     pub fn build_coverage_report(&self) -> CoverageReport {
         let hits = self.coverage.as_ref();
         let mut report = CoverageReport::default();
-        let globals = self.globals.borrow();
-        for val in globals.values() {
-            let Value::Class(class) = val else {
-                continue;
-            };
+
+        // Snapshot the class handles, then drop the globals borrow before walking.
+        let classes: Vec<_> = self
+            .globals
+            .borrow()
+            .values()
+            .filter_map(|v| match v {
+                Value::Class(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
+
+        for class in classes {
             let class_ref = class.borrow();
             let class_name = class_ref.name.name.clone();
-            for (selector, method) in class_ref
+            // Snapshot (selector, method) so the class borrow isn't held across the
+            // block lookup below.
+            let methods: Vec<(String, Value)> = class_ref
                 .instance_methods
                 .iter()
                 .chain(class_ref.class_methods.iter())
-            {
-                let Value::Object(obj) = method else {
+                .map(|(selector, method)| (selector.clone(), *method))
+                .collect();
+            drop(class_ref);
+
+            for (selector, method) in methods {
+                // A QN method is a block (directly, or wrapped in a NativeMethodState);
+                // a native (Rust) method has no block and is covered by cargo llvm-cov.
+                let Some(block) = self.get_block_from_method(method) else {
                     continue;
                 };
-                let obj_ref = obj.borrow();
-                let ObjectPayload::Block(block) = &obj_ref.payload else {
-                    continue; // native (Rust) method — covered by cargo llvm-cov instead
+                let Some(bsi) = &block.source_info else {
+                    continue; // no span to attribute hits to
                 };
-                register_function(&mut report, hits, &class_name, selector, &block.source_map);
-                walk_code(&mut report, hits, &block.source_map, &block.bytecode);
+                let span = span_of(bsi);
+                register_function(
+                    &mut report,
+                    hits,
+                    &class_name,
+                    &selector,
+                    span,
+                    &block.source_map,
+                );
+                walk_code(&mut report, hits, span, &block.source_map, &block.bytecode);
             }
         }
         report
