@@ -13,6 +13,7 @@ pub mod double;
 pub mod duration;
 pub mod fiber;
 pub mod http;
+pub mod ids;
 pub mod instant;
 pub mod integer;
 pub mod io;

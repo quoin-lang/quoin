@@ -83,6 +83,9 @@ toml = "0.8"
 serde_yaml_ng = "0.10"
 # CSV (tabular text, RFC 4180). Not a DataValue format — rows of string fields.
 csv = "1"
+# UUID (v4 random, v7 time-ordered) and ULID identifiers. Both use the OS CSPRNG.
+uuid = { version = "1", features = ["v4", "v7"] }
+ulid = "1"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to
