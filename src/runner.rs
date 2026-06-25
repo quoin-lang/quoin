@@ -14,7 +14,7 @@ use crate::runtime::{
     async_rt, big_decimal, big_integer, block, boolean, bytes, class, codecs, date_time, double,
     duration, fiber as fiber_class, http, instant, integer, io, json, list, map, math, method,
     msgpack, nil, object, pretty, regex, runtime, set, sockets, streams, string, symbol, task,
-    time_zone, timer, timestamp, toml_fmt,
+    time_zone, timer, timestamp, toml_fmt, yaml,
 };
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -56,6 +56,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, json::build_json_class());
     vm.register_native_class(mc, msgpack::build_message_pack_class());
     vm.register_native_class(mc, toml_fmt::build_toml_class());
+    vm.register_native_class(mc, yaml::build_yaml_class());
     vm.register_native_class(mc, sockets::build_tcp_socket_class());
     vm.register_native_class(mc, sockets::build_tls_socket_class());
     vm.register_native_class(mc, sockets::build_tcp_listener_class());

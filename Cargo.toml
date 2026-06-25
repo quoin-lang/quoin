@@ -76,6 +76,8 @@ serde = "1"
 rmp-serde = "1"
 # TOML config files over the DataValue bridge.
 toml = "0.8"
+# YAML over the DataValue bridge. serde_yaml is archived; serde_yaml_ng is the maintained fork.
+serde_yaml_ng = "0.10"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

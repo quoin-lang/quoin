@@ -1,8 +1,9 @@
 # Stdlib: Data formats — implementation outline
 
-Status: **Phase 1 done (base64/hex + JSON).** Plan for the `## Standard Library → Data formats &
-serialization` bullets in `QUOIN_TODO.md`. Branch: `feat/stdlib-data-formats`. **Phase 1
-(base64/hex + JSON) done**; Phase 2 (MessagePack / TOML / YAML) and Phase 3 (CSV) sketched.
+Status: **Phase 1 + 2 done.** Plan for the `## Standard Library → Data formats &
+serialization` bullets in `QUOIN_TODO.md`. Branch: `feat/stdlib-data-formats`. **Phase 1**
+(base64/hex + JSON) and **Phase 2** (`DataValue` bridge + MessagePack / TOML / YAML) done;
+Phase 3 (CSV) sketched.
 Native classes follow the established pattern (`NativeClassBuilder`; see the number/time types).
 
 Phase-1 note on the bridge: JSON uses `serde_json::Value` (with `arbitrary_precision`) as the
@@ -75,14 +76,24 @@ Native namespace classes + qnlib helper methods (both, per the "really common us
 
 ---
 
-## Phase 2 — MessagePack / TOML / YAML  (sketch)
+## Phase 2 — DataValue + MessagePack / TOML / YAML  ✅ done
 
-All reuse the `DataValue` bridge via serde — each is a thin native class:
+The `DataValue` bridge (`src/runtime/data_value.rs`) — a GC-free tree with `Value ↔ DataValue`
+conversions and hand-written serde `Serialize`/`Deserialize` — lets each format be a thin native
+class. Out-of-range `BigInt`/`Decimal` serialize as their exact digits in a **string** (serde's
+data model caps at i128/u128/f64); on the way back, that string stays a `String`. JSON keeps its
+own `serde_json::Value` path (still the fully-lossless format for *numbers*).
 
-- **`MessagePack`** (`rmp-serde`): `pack: value → Bytes`, `unpack: Bytes → value`. Binary; the one
-  format with a native `Bytes` type, so `DataValue::Bytes` round-trips here.
-- **`TOML`** (`toml`): `parse:`/`generate:`. (TOML's top level must be a table → `Map`.)
-- **`YAML`** (`serde_yaml_ng` or similar maintained fork): `parse:`/`generate:`.
+- **`MessagePack`** (`rmp-serde`, `src/runtime/msgpack.rs`): `pack: value → Bytes`,
+  `unpack: Bytes → value`. The one format with a native `Bytes` type, so `Bytes` round-trips.
+- **`TOML`** (`toml`, `src/runtime/toml_fmt.rs`): `parse:` / `generate:`. Top level must be a `Map`
+  (a TOML table) and TOML has no null, so `generate:` of a non-Map or of a value containing `nil`
+  errors clearly.
+- **`YAML`** (`serde_yaml_ng`, `src/runtime/yaml.rs`): `parse:` / `generate:`. Allows any top-level
+  value and has a native null (no extra constraints).
+
+Tests: `qnlib/tests/33-msgpack.qn`, `34-toml.qn`, `35-yaml.qn`; Rust unit tests for `DataValue`'s
+serialize side in `src/runtime/data_value_tests.rs`.
 
 ## Phase 3 — CSV  (sketch)
 
