@@ -17,6 +17,8 @@
 //! - `extension_array_data_plane` (Slice 6b): the `ext_arrays` fixture receives a bulk `Array` as a
 //!   call argument (copy-through), operates on the whole buffer, and returns a scalar or a new
 //!   `Array` — proving columnar data crosses the boundary without per-element exploding.
+//! - `extension_python_sdk` (Slice 7): the extension is a *Python* process (`sdk/python`) speaking
+//!   the same `ext.fbs` wire protocol — the polyglot proof. Gated on `python3` + `flatbuffers`.
 //!
 //! Each script decides pass/fail and prints PASS/FAIL.
 
@@ -207,4 +209,105 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_arrays_test.qn", &script);
+}
+
+/// True if `python3` can import the `flatbuffers` runtime — the Python SDK's only external
+/// dependency. When false, the polyglot tests skip cleanly (e.g. CI without Python set up).
+fn python_fixture_runnable() -> bool {
+    Command::new("python3")
+        .args(["-c", "import flatbuffers"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Ensure a Python fixture is executable, so `Extension.spawn:` can exec it via its shebang
+/// regardless of the checkout's recorded file mode.
+fn ensure_executable(path: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+}
+
+#[test]
+fn extension_python_sdk() {
+    if !python_fixture_runnable() {
+        eprintln!("skipping extension_python_sdk: python3 with `flatbuffers` runtime unavailable");
+        return;
+    }
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/sdk/python/examples/ext_echo.py"
+    );
+    ensure_executable(fixture);
+
+    // A Python extension, spoken to over the exact same protocol as the Rust fixtures.
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{fixture}';
+((e.call:'echo' with:'hi') == 'hi').else:{{ ok = false }};
+((e.call:'upper' with:'hello') == 'HELLO').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_python_test.qn", &script);
+}
+
+#[test]
+fn extension_python_parity() {
+    if !python_fixture_runnable() {
+        eprintln!(
+            "skipping extension_python_parity: python3 with `flatbuffers` runtime unavailable"
+        );
+        return;
+    }
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/sdk/python/examples/ext_full.py"
+    );
+    ensure_executable(fixture);
+
+    // The Python extension exercises the *full* host surface — the same ops/assertions the Rust
+    // fixtures get: host-ops (compute), batched callbacks (mapUpper), ext-resources (new/inc/live
+    // + reap), and the Array data plane (sum/scale).
+    let script = format!(
+        r#"
+ok = true;
+e = Extension.spawn:'{fixture}';
+
+"* host-ops: make_string + call_method ('ab' +: '!').upper -> 'AB!'
+((e.call:'compute' with:'ab') == 'AB!').else:{{ ok = false }};
+
+"* batched callback: invoke_block runs the passed block over a,b,c -> 'A,B,C'
+((e.call:'mapUpper' with:'' args:#( {{ |s| s.upper }} )) == 'A,B,C').else:{{ ok = false }};
+
+"* ext-resource handles: create a counter, mutate it across calls, then drop + reap
+c = e.call:'new' with:'';
+((e.call:'inc' with:'' args:#( c )) == '1').else:{{ ok = false }};
+((e.call:'inc' with:'' args:#( c )) == '2').else:{{ ok = false }};
+((e.call:'live' with:'') == '1').else:{{ ok = false }};
+c = nil;
+(1..5000).each:{{ |i| i.s }};
+e.call:'live' with:'';
+((e.call:'live' with:'') == '0').else:{{ ok = false }};
+
+"* Array data plane: sum the whole buffer, and scale -> a new Array
+a = Array.ofFloats:#( 1.0 2.0 3.0 );
+((e.call:'sum' with:'' args:#( a )) == '6.0').else:{{ ok = false }};
+r = e.call:'scale' with:'2' args:#( a );
+(r.toList == #( 2.0 4.0 6.0 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_python_parity_test.qn", &script);
 }
