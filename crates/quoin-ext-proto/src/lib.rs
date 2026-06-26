@@ -21,26 +21,41 @@ mod generated;
 use generated::quoin_ext_proto as g;
 use planus::{Builder, ReadAsRoot};
 
+pub use generated::quoin_ext_proto::ArrowDType;
+
+/// A bulk numeric column — the data plane (§6/§7). Owned mirror of the `ArrowArray` table: a dtype
+/// plus the contiguous little-endian value buffer (Arrow non-nullable primitive layout). `length`
+/// is the element count (the host sets it; derivable from `data` for these fixed-width types).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrowArray {
+    pub dtype: ArrowDType,
+    pub length: u64,
+    pub data: Vec<u8>,
+}
+
 /// A single control-plane frame, in either direction. Mirrors the `Message` union in
 /// `ext.fbs`. Encode with [`encode`]; decode a received frame with [`decode_envelope`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
-    /// host -> ext: invoke `op` with the scalar argument `arg`, plus typed handle arguments.
-    /// `handles` are host-value handle ids (a block is one of these); `resources` are ext-side
-    /// resource ids passed back as args; `releases` are ext-side resource ids the host dropped
-    /// and the extension should free at the top of the call (the batched reap).
+    /// host -> ext: invoke `op` with the scalar argument `arg`, plus typed arguments. `handles`
+    /// are host-value handle ids (a block is one of these); `resources` are ext-side resource ids
+    /// passed back as args; `releases` are ext-side resource ids the host dropped and the extension
+    /// should free at the top of the call (the batched reap); `arrays` are bulk columns (data plane).
     Call {
         op: String,
         arg: String,
         handles: Vec<u64>,
         resources: Vec<u64>,
         releases: Vec<u64>,
+        arrays: Vec<ArrowArray>,
     },
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
     /// ext -> host: the call returns an ext-side resource the host will hold as an opaque token
     /// (reaped on drop). `resource` is the extension-assigned id.
     CallReturnResource { resource: u64 },
+    /// ext -> host: the call returns a bulk `Array` (the data plane).
+    CallReturnArray { array: ArrowArray },
     /// ext -> host (re-entrant): make a host String, return a handle to it.
     MakeString { value: String },
     /// ext -> host (re-entrant): read a String-handle back into a scalar string.
@@ -83,12 +98,14 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             handles,
             resources,
             releases,
+            arrays,
         } => g::Message::Call(Box::new(g::Call {
             op: Some(op.clone()),
             arg: Some(arg.clone()),
             handles: Some(handles.clone()),
             resources: Some(resources.clone()),
             releases: Some(releases.clone()),
+            arrays: Some(arrays.iter().map(encode_arrow).collect()),
         })),
         Msg::CallReturn { result } => g::Message::CallReturn(Box::new(g::CallReturn {
             result: Some(result.clone()),
@@ -96,6 +113,11 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
         Msg::CallReturnResource { resource } => {
             g::Message::CallReturnResource(Box::new(g::CallReturnResource {
                 resource: *resource,
+            }))
+        }
+        Msg::CallReturnArray { array } => {
+            g::Message::CallReturnArray(Box::new(g::CallReturnArray {
+                array: Some(Box::new(encode_arrow(array))),
             }))
         }
         Msg::MakeString { value } => g::Message::MakeString(Box::new(g::MakeString {
@@ -161,6 +183,24 @@ fn read_u64_vec(v: Option<planus::Vector<'_, u64>>) -> Vec<u64> {
     v.map(|vec| vec.iter().collect()).unwrap_or_default()
 }
 
+/// Owned [`ArrowArray`] -> the generated builder struct.
+fn encode_arrow(a: &ArrowArray) -> g::ArrowArray {
+    g::ArrowArray {
+        dtype: a.dtype,
+        length: a.length,
+        data: Some(a.data.clone()),
+    }
+}
+
+/// A decoded `ArrowArrayRef` -> owned [`ArrowArray`].
+fn decode_arrow(a: g::ArrowArrayRef<'_>) -> Result<ArrowArray, planus::Error> {
+    Ok(ArrowArray {
+        dtype: a.dtype()?,
+        length: a.length()?,
+        data: a.data()?.unwrap_or_default().to_vec(),
+    })
+}
+
 /// The planus-fallible core of [`decode_envelope`]; `Ok(None)` means the `msg` union was
 /// absent (kept separate so the accessor `?`s stay on `planus::Error`).
 fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
@@ -175,12 +215,31 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
             handles: read_u64_vec(c.handles()?),
             resources: read_u64_vec(c.resources()?),
             releases: read_u64_vec(c.releases()?),
+            arrays: {
+                let mut arrays = Vec::new();
+                if let Some(v) = c.arrays()? {
+                    for a in v {
+                        arrays.push(decode_arrow(a?)?);
+                    }
+                }
+                arrays
+            },
         },
         g::MessageRef::CallReturn(c) => Msg::CallReturn {
             result: c.result()?.unwrap_or_default().to_string(),
         },
         g::MessageRef::CallReturnResource(c) => Msg::CallReturnResource {
             resource: c.resource()?,
+        },
+        g::MessageRef::CallReturnArray(c) => Msg::CallReturnArray {
+            array: match c.array()? {
+                Some(a) => decode_arrow(a)?,
+                None => ArrowArray {
+                    dtype: ArrowDType::Float64,
+                    length: 0,
+                    data: Vec::new(),
+                },
+            },
         },
         g::MessageRef::MakeString(m) => Msg::MakeString {
             value: m.value()?.unwrap_or_default().to_string(),

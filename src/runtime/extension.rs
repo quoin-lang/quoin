@@ -27,6 +27,11 @@
 //! (`CallReturnResource`) which the host holds as an opaque `ExtResource` token and reaps on drop
 //! (batched onto the next call's `Call.releases`, since a GC `Drop` can't send a frame).
 //!
+//! Slice 6b adds the **bulk data plane**: an `Array` arg routes into `Call.arrays` (copy-through, a
+//! 3rd arg kind) and a call can return a bulk column via `CallReturnArray`, reconstructed host-side
+//! as an `Array`. Whole columns cross the boundary as one buffer — never exploded into per-element
+//! Values.
+//!
 //! Slice 5a adds **crash isolation**: a call whose I/O fails because the child exited surfaces a
 //! typed `IoError` (not a hang), marks the extension dead so later calls fail fast, and `Drop`
 //! reaps the host-side fd via the shared reap queue. Per-peer handle bulk-release (§2), general
@@ -40,14 +45,32 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gc_arena::collect::Trace;
 
-use quoin_ext_proto::Msg;
+use quoin_ext_proto::{ArrowArray, ArrowDType, Msg};
 
 use crate::arg;
 use crate::error::QuoinError;
 use crate::io_backend::{IoRequest, IoResult, StreamId};
+use crate::runtime::array::{self, ArrayDType};
 use crate::runtime::list::NativeListState;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
+
+/// Bridge the host-side `Array` dtype to the wire `ArrowDType`.
+fn to_wire_dtype(d: ArrayDType) -> ArrowDType {
+    match d {
+        ArrayDType::Float64 => ArrowDType::Float64,
+        ArrayDType::Int64 => ArrowDType::Int64,
+    }
+}
+
+/// Bridge the wire `ArrowDType` back to the host-side `Array` dtype.
+fn from_wire_dtype(d: ArrowDType) -> ArrayDType {
+    match d {
+        ArrowDType::Int64 => ArrayDType::Int64,
+        // Unknown future dtypes fall back to Float64 (forward-compat; trusted peer, §4).
+        _ => ArrayDType::Float64,
+    }
+}
 
 /// Native state behind an `Extension` value: the registered stream id for the UDS, the child
 /// process, its socket path (for cleanup), the shared fd-reap queue, whether the extension has
@@ -370,14 +393,26 @@ fn extension_call<'gc>(
 ) -> Result<CallOutcome, QuoinError> {
     let epoch = vm.handle_table.begin_call();
 
-    // Route each arg by token space: an `ExtResource` value passes its (ext-side) resource id;
-    // any other value is minted a call-local host-value handle (a block is one of these).
+    // Route each arg by token space: an `ExtResource` passes its (ext-side) resource id; an
+    // `Array` is serialized into the bulk data plane; any other value is minted a call-local
+    // host-value handle (a block is one of these).
     let mut handles = Vec::new();
     let mut resources = Vec::new();
+    let mut arrays = Vec::new();
     for value in args {
-        match value.with_native_state::<NativeExtResource, _, _>(|r| r.resource_id) {
-            Ok(resource_id) => resources.push(resource_id),
-            Err(_) => handles.push(vm.handle_table.mint_local(value, epoch)),
+        if let Ok(resource_id) =
+            value.with_native_state::<NativeExtResource, _, _>(|r| r.resource_id)
+        {
+            resources.push(resource_id);
+        } else if let Some((dtype, data)) = array::array_parts(value) {
+            let length = (data.len() / 8) as u64;
+            arrays.push(ArrowArray {
+                dtype: to_wire_dtype(dtype),
+                length,
+                data,
+            });
+        } else {
+            handles.push(vm.handle_table.mint_local(value, epoch));
         }
     }
 
@@ -391,6 +426,7 @@ fn extension_call<'gc>(
                 handles,
                 resources,
                 releases,
+                arrays,
             },
         )?;
         loop {
@@ -400,6 +436,7 @@ fn extension_call<'gc>(
             match msg {
                 Msg::CallReturn { result } => return Ok(CallOutcome::Scalar(result)),
                 Msg::CallReturnResource { resource } => return Ok(CallOutcome::Resource(resource)),
+                Msg::CallReturnArray { array } => return Ok(CallOutcome::Array(array)),
                 host_op => service_host_op(vm, mc, id, epoch, host_op)?,
             }
         }
@@ -409,10 +446,12 @@ fn extension_call<'gc>(
     outcome
 }
 
-/// How a call finished: a scalar string, or an ext-side resource the host will wrap as a token.
+/// How a call finished: a scalar string, an ext-side resource the host will wrap as a token, or a
+/// bulk `Array` (the data plane).
 enum CallOutcome {
     Scalar(String),
     Resource(u64),
+    Array(ArrowArray),
 }
 
 /// Wrap an ext-assigned resource id in an `ExtResource` value, tied to `reap` so its `Drop`
@@ -455,6 +494,12 @@ fn run_extension_method<'gc>(
         Ok(CallOutcome::Resource(resource_id)) => {
             Ok(make_ext_resource(vm, mc, resource_id, resource_reap))
         }
+        Ok(CallOutcome::Array(array)) => Ok(array::new_array(
+            vm,
+            mc,
+            from_wire_dtype(array.dtype),
+            array.data,
+        )),
         Err(e) => {
             let exit = receiver
                 .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.note_if_exited())

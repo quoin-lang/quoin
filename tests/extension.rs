@@ -14,6 +14,9 @@
 //! - `extension_resource_handles` (Slice 5b): the `ext_resources` fixture returns an ext-side
 //!   resource the host holds as an `ExtResource` token, passed back via `args:` across calls and
 //!   reaped (freed extension-side) once the host drops it.
+//! - `extension_array_data_plane` (Slice 6b): the `ext_arrays` fixture receives a bulk `Array` as a
+//!   call argument (copy-through), operates on the whole buffer, and returns a scalar or a new
+//!   `Array` — proving columnar data crosses the boundary without per-element exploding.
 //!
 //! Each script decides pass/fail and prints PASS/FAIL.
 
@@ -179,4 +182,29 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_resources_test.qn", &script);
+}
+
+#[test]
+fn extension_array_data_plane() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_arrays");
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{ext_bin}';
+a = Array.ofFloats:#( 1.0 2.0 3.0 );
+
+"* the bulk column crosses the socket; the extension sums the whole buffer -> '6'
+((e.call:'sum' with:'' args:#( a )) == '6').else:{{ ok = false }};
+
+"* scale: returns a new Array (the column round-trips back as an Array, not a List)
+r = e.call:'scale' with:'2' args:#( a );
+(r.dtype == #float64).else:{{ ok = false }};
+(r.toList == #( 2.0 4.0 6.0 )).else:{{ ok = false }};
+(r.sum == 12.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_arrays_test.qn", &script);
 }

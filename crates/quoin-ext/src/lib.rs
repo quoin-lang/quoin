@@ -18,12 +18,14 @@
 //! round-trip the host services while parked on the reply. It returns a [`Reply`] — a scalar or
 //! an ext-side **resource** the host then holds as an opaque token (reaped via [`Host::releases`]
 //! on a later call). Host values the extension holds are opaque [`Handle`]s indexing a GC-rooted
-//! table on the host (`docs/FUTURE_EXT_ARCH.md` §2). Arrow arrives in a later slice.
+//! table on the host (`docs/FUTURE_EXT_ARCH.md` §2). Bulk columnar data crosses as [`ArrowArray`]s
+//! — call args via [`Host::arrays`], returns via [`Reply::Array`] (the data plane, copy-through).
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use quoin_ext_proto::Msg;
+pub use quoin_ext_proto::{ArrowArray, ArrowDType};
 
 /// An opaque reference to a host value, as seen by the extension. Default lifetime is
 /// call-local (auto-released when the originating call returns); promote it with
@@ -67,6 +69,8 @@ pub struct Host<'a> {
     /// Ext-side resource ids the host has dropped; the handler should free them from its own
     /// registry (typically at the top of the call). Empty unless this extension hands out resources.
     releases: Vec<u64>,
+    /// Bulk `Array` columns passed as args on this `Call`, in order (the data plane).
+    arrays: Vec<ArrowArray>,
 }
 
 impl<'a> Host<'a> {
@@ -83,6 +87,11 @@ impl<'a> Host<'a> {
     /// Ext-side resource ids the host has dropped — free these from your registry.
     pub fn releases(&self) -> &[u64] {
         &self.releases
+    }
+
+    /// The bulk `Array` columns passed as args on this call (read `dtype`/`data` and crunch them).
+    pub fn arrays(&self) -> &[ArrowArray] {
+        &self.arrays
     }
 
     /// Make a host `String` value and return a (call-local) handle to it.
@@ -182,12 +191,13 @@ fn invalid_data(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::E
     io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
-/// What a call handler returns: a scalar string, or an ext-side resource id the host will hold as
-/// an opaque token. A `String`/`&str` converts to `Reply::Scalar`, so scalar handlers need no
-/// ceremony (`"pong".into()` or returning a `String` both work).
+/// What a call handler returns: a scalar string, an ext-side resource id the host will hold as an
+/// opaque token, or a bulk `Array` (the data plane). A `String`/`&str` converts to `Reply::Scalar`,
+/// so scalar handlers need no ceremony (`"pong".into()` or returning a `String` both work).
 pub enum Reply {
     Scalar(String),
     Resource(u64),
+    Array(ArrowArray),
 }
 
 impl From<String> for Reply {
@@ -204,8 +214,9 @@ impl From<&str> for Reply {
 
 /// Bind a unix socket at `path`, accept one host connection, and serve requests until the host
 /// disconnects. Each `Call` frame invokes `handler(host, op, arg)`; the handler may use `host` to
-/// read the call's handle/resource args and issue re-entrant host-ops, then returns a [`Reply`]
-/// (scalar or resource) sent back as `CallReturn` / `CallReturnResource`.
+/// read the call's handle/resource/array args and issue re-entrant host-ops, then returns a
+/// [`Reply`] (scalar / resource / array) sent back as `CallReturn` / `CallReturnResource` /
+/// `CallReturnArray`.
 ///
 /// Blocking and single-connection by design: the extension is its own process, and the VM holds
 /// exactly one connection to it. Returns once the host disconnects.
@@ -223,6 +234,7 @@ pub fn serve<R: Into<Reply>>(
                 handles,
                 resources,
                 releases,
+                arrays,
             } => {
                 // `host` borrows the stream for the call's re-entrant host-ops; the borrow ends
                 // before we write the terminal reply on the same stream.
@@ -232,12 +244,14 @@ pub fn serve<R: Into<Reply>>(
                         handles,
                         resources,
                         releases,
+                        arrays,
                     };
                     handler(&mut host, &op, &arg).into()
                 };
                 let msg = match reply {
                     Reply::Scalar(result) => Msg::CallReturn { result },
                     Reply::Resource(resource) => Msg::CallReturnResource { resource },
+                    Reply::Array(array) => Msg::CallReturnArray { array },
                 };
                 write_frame(&mut stream, &quoin_ext_proto::encode(&msg))?;
             }

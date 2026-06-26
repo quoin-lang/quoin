@@ -13,6 +13,22 @@
 
 namespace quoin_ext_proto;
 
+// The element type of a bulk Array column (Slice 6). 8 bytes each, Apache Arrow primitive layout.
+enum ArrowDType : ubyte {
+    Float64,
+    Int64,
+}
+
+// A bulk numeric column copied over the socket (the data plane, §6/§7). `data` is the contiguous
+// little-endian value buffer (Arrow non-nullable primitive layout); `length` is the element count
+// (derivable from `data` for these fixed-width types, carried for Arrow-C-Data-Interface forward
+// compat). Validity bitmaps, var-width buffers, and in-place fd-sharing are later steps.
+table ArrowArray {
+    dtype: ArrowDType;
+    length: uint64;
+    data: [ubyte];
+}
+
 // host -> ext: invoke op `op` with scalar argument `arg`, plus typed handle arguments
 // (Slice 5b). Two distinct token spaces:
 //   - `handles`: host-value handle ids into the host's table (a block is one of these — the
@@ -27,6 +43,7 @@ table Call {
     handles: [uint64];
     resources: [uint64];
     releases: [uint64];
+    arrays: [ArrowArray];
 }
 
 // A tuple of handles — one invocation's argument list in a batched callback.
@@ -43,6 +60,11 @@ table CallReturn {
 // hold as an opaque token (and reap on drop). `resource` is the extension-assigned id.
 table CallReturnResource {
     resource: uint64;
+}
+
+// ext -> host: the originating call is finished, returning a bulk Array (the data plane).
+table CallReturnArray {
+    array: ArrowArray;
 }
 
 // ext -> host (re-entrant, mid-call): make a host String value, return a handle to it.
@@ -104,6 +126,7 @@ union Message {
     Call,
     CallReturn,
     CallReturnResource,
+    CallReturnArray,
     MakeString,
     HandleToString,
     Retain,

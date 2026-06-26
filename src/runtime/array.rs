@@ -23,9 +23,10 @@ use crate::runtime::list::NativeListState;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
-/// The element type of an `Array`. Both are 8 bytes (Arrow `Float64` / `Int64`).
+/// The element type of an `Array`. Both are 8 bytes (Arrow `Float64` / `Int64`). Public so the
+/// extension data plane (`runtime/extension.rs`) can bridge it to the wire `ArrowDType`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ArrayDType {
+pub enum ArrayDType {
     Float64,
     Int64,
 }
@@ -103,8 +104,9 @@ fn list_elems<'gc>(value: Value<'gc>, who: &str) -> Result<Vec<Value<'gc>>, Quoi
         })
 }
 
-/// Build an `Array` value from a dtype + packed buffer.
-fn make_array<'gc>(
+/// Build an `Array` value from a dtype + packed buffer. Public so the extension data plane can
+/// reconstruct an `Array` returned by an extension (`CallReturnArray`).
+pub fn new_array<'gc>(
     vm: &VmState<'gc>,
     mc: &Mutation<'gc>,
     dtype: ArrayDType,
@@ -112,6 +114,15 @@ fn make_array<'gc>(
 ) -> Value<'gc> {
     let class = vm.get_or_create_builtin_class(mc, "Array");
     vm.new_native_state(mc, class, NativeArray { dtype, data })
+}
+
+/// If `value` is an `Array`, return its dtype + a copy of its buffer (for transfer to an
+/// extension); otherwise `None`. Lets the data plane serialize an `Array` without touching
+/// `NativeArray` internals.
+pub fn array_parts(value: Value<'_>) -> Option<(ArrayDType, Vec<u8>)> {
+    value
+        .with_native_state::<NativeArray, _, _>(|a| (a.dtype, a.data.clone()))
+        .ok()
 }
 
 pub fn build_array_class() -> NativeClassBuilder {
@@ -133,7 +144,7 @@ pub fn build_array_class() -> NativeClassBuilder {
                 })?;
                 data.extend_from_slice(&x.to_le_bytes());
             }
-            Ok(make_array(vm, mc, ArrayDType::Float64, data))
+            Ok(new_array(vm, mc, ArrayDType::Float64, data))
         })
         // `Array ofInts: #( 1 2 … )` — pack a list of integers into an Int64 column.
         .class_method("ofInts:", |vm, mc, _receiver, args| {
@@ -152,7 +163,7 @@ pub fn build_array_class() -> NativeClassBuilder {
                 })?;
                 data.extend_from_slice(&x.to_le_bytes());
             }
-            Ok(make_array(vm, mc, ArrayDType::Int64, data))
+            Ok(new_array(vm, mc, ArrayDType::Int64, data))
         })
         // `array.length` — element count.
         .instance_method("length", |vm, mc, receiver, _args| {
@@ -229,7 +240,7 @@ pub fn build_array_class() -> NativeClassBuilder {
                         .map_err(QuoinError::Other)?
                 }
             };
-            Ok(make_array(vm, mc, dtype, data))
+            Ok(new_array(vm, mc, dtype, data))
         })
         // `array at: i` — one element (Double/Integer); does not explode the array.
         .instance_method("at:", |vm, mc, receiver, args| {
