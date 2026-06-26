@@ -1,0 +1,7 @@
+[package]
+name = "quoin-ext"
+version = "0.1.0"
+edition = "2024"
+description = "Extension-side SDK for writing out-of-process Quoin extensions (Tier 1, UDS transport)."
+
+[lib]

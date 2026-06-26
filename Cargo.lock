@@ -1678,6 +1678,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "once_cell",
+ "quoin-ext",
  "quoin-syntax",
  "rcgen",
  "regex",
@@ -1695,6 +1696,10 @@ dependencies = [
  "uuid",
  "webpki-roots 0.26.11",
 ]
+
+[[package]]
+name = "quoin-ext"
+version = "0.1.0"
 
 [[package]]
 name = "quoin-syntax"
