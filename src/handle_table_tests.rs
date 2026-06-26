@@ -112,3 +112,26 @@ fn released_global_frees_slot_and_stale_handle_fails() {
         );
     });
 }
+
+#[test]
+fn handle_zero_is_reserved_as_null() {
+    use crate::handle_table::NULL_HANDLE;
+    let mut arena = new_arena();
+    arena.mutate_root(|mc, vm| {
+        let epoch = vm.handle_table.begin_call();
+        // The very first handle (slot 0) must not be the null sentinel, or "no block" (0)
+        // would alias a real handle. Mint a few and free/re-mint slot 0 to exercise the wrap.
+        for _ in 0..3 {
+            let h = vm
+                .handle_table
+                .mint_local(vm.new_string(mc, "x".to_string()), epoch);
+            assert_ne!(
+                h, NULL_HANDLE,
+                "a minted handle must never be the null sentinel"
+            );
+            vm.handle_table.release(&[h]);
+        }
+        // And the null handle never resolves.
+        assert!(vm.handle_table.get(NULL_HANDLE).is_err());
+    });
+}

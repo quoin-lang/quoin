@@ -14,11 +14,13 @@
 //! the call are call-local and swept on return (`HandleTable::begin_call`/`end_call`); the
 //! extension `Retain`s any it wants to keep.
 //!
-//! The host-ops are `MakeString`/`HandleToString`/`Retain`/`Release` (Slice 3a) and
-//! `CallMethodOnHandle` (Slice 3b — send a Quoin message to a handle, with handle arguments,
-//! returning a handle to the result). Every frame is a FlatBuffers `Message` union (schema/codec
-//! in `quoin-ext-proto`) inside a u32 length-prefixed frame. Handle-typed call args/returns,
-//! batched callbacks, Arrow, and crash/timeout are later slices.
+//! The host-ops are `MakeString`/`HandleToString`/`Retain`/`Release` (Slice 3a),
+//! `CallMethodOnHandle` (Slice 3b — send a Quoin message to a handle), and `InvokeBlock`
+//! (Slice 4 — invoke a host *block* handle over a batch of argument tuples in one round-trip;
+//! the block reaches the extension via the `block` handle on `Call`, sent by `call:with:block:`).
+//! Every frame is a FlatBuffers `Message` union (schema/codec in `quoin-ext-proto`) inside a u32
+//! length-prefixed frame. General handle-typed call args/returns, Arrow, and crash/timeout are
+//! later slices.
 
 use std::any::Any;
 use std::process::{Child, Command};
@@ -209,6 +211,18 @@ fn service_host_op<'gc>(
             },
             Err(e) => host_op_error(e),
         },
+        Msg::InvokeBlock { block, batches } => {
+            match invoke_block_batches(vm, mc, epoch, block, &batches) {
+                Ok(results) => Msg::InvokeBlockReturn {
+                    results,
+                    error: None,
+                },
+                Err(e) => Msg::InvokeBlockReturn {
+                    results: Vec::new(),
+                    error: Some(e),
+                },
+            }
+        }
         other => {
             return Err(QuoinError::Other(format!(
                 "Extension call: unexpected message from extension: {other:?}"
@@ -216,6 +230,40 @@ fn service_host_op<'gc>(
         }
     };
     write_msg(vm, id, &reply)
+}
+
+/// Invoke the host block behind `block_handle` once per tuple in `batches`, minting a
+/// call-local handle for each result. The host runs the block N times locally — the batch is
+/// one re-entrant round-trip. Any bad handle or a raise during a block run fails the whole batch.
+#[allow(no_gc_across_yield)]
+fn invoke_block_batches<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    epoch: u32,
+    block_handle: u64,
+    batches: &[Vec<u64>],
+) -> Result<Vec<u64>, String> {
+    // Resolve the handle to a block value (rooted in the handle table, so safe to hold).
+    let block = match vm.handle_table.get(block_handle)? {
+        Value::Object(obj) => match &obj.borrow().payload {
+            ObjectPayload::Block(b) => *b,
+            _ => return Err(format!("handle {block_handle} does not refer to a block")),
+        },
+        _ => return Err(format!("handle {block_handle} does not refer to a block")),
+    };
+
+    let mut results = Vec::with_capacity(batches.len());
+    for tuple in batches {
+        let mut arg_vals = Vec::with_capacity(tuple.len());
+        for &handle in tuple {
+            arg_vals.push(vm.handle_table.get(handle)?);
+        }
+        let result = vm
+            .execute_block(mc, block, arg_vals, None)
+            .map_err(|e| format!("block invocation: {e}"))?;
+        results.push(vm.handle_table.mint_local(result, epoch));
+    }
+    Ok(results)
 }
 
 fn ack() -> Msg {
@@ -232,6 +280,49 @@ fn host_op_error(message: String) -> Msg {
         str: None,
         error: Some(message),
     }
+}
+
+/// Drive one extension call to completion: open a call epoch, optionally mint a call-local
+/// handle for a host `block` the extension may invoke, send the `Call`, then service the
+/// re-entrant host-op conversation until the terminal `CallReturn`. The epoch is closed out
+/// unconditionally so the call's transient handles (including the block) never leak.
+fn extension_call<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    id: StreamId,
+    op: String,
+    argv: String,
+    block: Option<Value<'gc>>,
+) -> Result<String, QuoinError> {
+    let epoch = vm.handle_table.begin_call();
+    let block_handle = match block {
+        Some(value) => vm.handle_table.mint_local(value, epoch),
+        None => crate::handle_table::NULL_HANDLE,
+    };
+
+    let outcome: Result<String, QuoinError> = (|| {
+        write_msg(
+            vm,
+            id,
+            &Msg::Call {
+                op,
+                arg: argv,
+                block: block_handle,
+            },
+        )?;
+        loop {
+            let frame = read_reply_frame(vm, id)?;
+            let msg = quoin_ext_proto::decode_envelope(&frame)
+                .map_err(|e| QuoinError::Other(format!("Extension call: malformed frame: {e}")))?;
+            match msg {
+                Msg::CallReturn { result } => return Ok(result),
+                host_op => service_host_op(vm, mc, id, epoch, host_op)?,
+            }
+        }
+    })();
+
+    vm.handle_table.end_call(epoch);
+    outcome
 }
 
 pub fn build_extension_class() -> NativeClassBuilder {
@@ -295,27 +386,22 @@ pub fn build_extension_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             let op = arg!(args, String, 0).to_string();
             let argv = arg!(args, String, 1).to_string();
-
-            // Open a call epoch so handles minted during it are call-local (swept on return).
-            let epoch = vm.handle_table.begin_call();
-
-            // The whole conversation must close out the epoch even on error, so the call's
-            // transient handles never leak. Run it in a closure and sweep unconditionally.
-            let outcome: Result<String, QuoinError> = (|| {
-                write_msg(vm, id, &Msg::Call { op, arg: argv })?;
-                loop {
-                    let frame = read_reply_frame(vm, id)?;
-                    let msg = quoin_ext_proto::decode_envelope(&frame).map_err(|e| {
-                        QuoinError::Other(format!("Extension call: malformed frame: {e}"))
-                    })?;
-                    match msg {
-                        Msg::CallReturn { result } => return Ok(result),
-                        host_op => service_host_op(vm, mc, id, epoch, host_op)?,
-                    }
-                }
-            })();
-
-            vm.handle_table.end_call(epoch);
-            Ok(vm.new_string(mc, outcome?))
+            let result = extension_call(vm, mc, id, op, argv, None)?;
+            Ok(vm.new_string(mc, result))
+        })
+        // `ext call: '<op>' with: '<arg>' block: { ... }` -> like `call:with:`, but also hands
+        // the block to the extension as a (call-local) handle it can invoke over a batch during
+        // the call (Slice 4). The block is any value; non-blocks simply won't be invocable.
+        .instance_method("call:with:block:", |vm, mc, receiver, args| {
+            let id = receiver
+                .with_native_state::<NativeExtension, _, _>(|e| e.id)
+                .map_err(QuoinError::Other)?;
+            let op = arg!(args, String, 0).to_string();
+            let argv = arg!(args, String, 1).to_string();
+            let block = *args
+                .get(2)
+                .ok_or_else(|| QuoinError::Other("call:with:block: missing block".to_string()))?;
+            let result = extension_call(vm, mc, id, op, argv, Some(block))?;
+            Ok(vm.new_string(mc, result))
         })
 }

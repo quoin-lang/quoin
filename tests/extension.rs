@@ -82,6 +82,10 @@ e.call:'release' with:'';
 "* ('ab' +: '!') uppercased, the '+:' arg itself passed as a handle. -> 'AB!'
 ((e.call:'compute' with:'ab') == 'AB!').else:{{ ok = false }};
 
+"* batched callback (Slice 4): the extension invokes a host block over a batch in one
+"* round-trip. mapUpper runs the passed block over 'a','b','c'. -> 'A,B,C'
+((e.call:'mapUpper' with:'' block:{{ |s| s.upper }}) == 'A,B,C').else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );

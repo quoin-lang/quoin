@@ -13,10 +13,17 @@
 
 namespace quoin_ext_proto;
 
-// host -> ext: invoke op `op` with scalar argument `arg`.
+// host -> ext: invoke op `op` with scalar argument `arg`. `block` is a handle to a host
+// block the extension may invoke during the call (Slice 4), or 0 (NULL_HANDLE) for none.
 table Call {
     op: string;
     arg: string;
+    block: uint64;
+}
+
+// A tuple of handles — one invocation's argument list in a batched callback.
+table HandleList {
+    handles: [uint64];
 }
 
 // ext -> host: the originating call is finished; `result` is the scalar return.
@@ -55,6 +62,21 @@ table CallMethodOnHandle {
     args: [uint64];
 }
 
+// ext -> host (re-entrant, mid-call): invoke the host block behind `block` once per tuple in
+// `batches`, in a single round-trip. The host runs the block N times locally; n=1 is a single
+// call. Answered with `InvokeBlockReturn`.
+table InvokeBlock {
+    block: uint64;
+    batches: [HandleList];
+}
+
+// host -> ext: the reply to `InvokeBlock` — one result handle per batch tuple (in order), or
+// `error` if the block handle is invalid or any invocation raises.
+table InvokeBlockReturn {
+    results: [uint64];
+    error: string;
+}
+
 // host -> ext: the reply to any re-entrant host-op. Carries whichever result applies —
 //   MakeString -> `handle`; HandleToString -> `str`; Retain/Release -> ack (no payload).
 // `error` is non-null iff the op failed (and the other fields are unset).
@@ -72,6 +94,8 @@ union Message {
     Retain,
     Release,
     CallMethodOnHandle,
+    InvokeBlock,
+    InvokeBlockReturn,
     HostOpReturn,
 }
 

@@ -25,8 +25,9 @@ use planus::{Builder, ReadAsRoot};
 /// `ext.fbs`. Encode with [`encode`]; decode a received frame with [`decode_envelope`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
-    /// host -> ext: invoke `op` with the scalar argument `arg`.
-    Call { op: String, arg: String },
+    /// host -> ext: invoke `op` with the scalar argument `arg`. `block` is a handle to a
+    /// host block the extension may invoke during the call, or 0 (`NULL_HANDLE`) for none.
+    Call { op: String, arg: String, block: u64 },
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
     /// ext -> host (re-entrant): make a host String, return a handle to it.
@@ -44,6 +45,14 @@ pub enum Msg {
         selector: String,
         args: Vec<u64>,
     },
+    /// ext -> host (re-entrant): invoke the host block behind `block` once per tuple in
+    /// `batches`, in one round-trip. Each tuple is one invocation's argument handles.
+    InvokeBlock { block: u64, batches: Vec<Vec<u64>> },
+    /// host -> ext: the reply to `InvokeBlock` — one result handle per tuple, or `error`.
+    InvokeBlockReturn {
+        results: Vec<u64>,
+        error: Option<String>,
+    },
     /// host -> ext: the reply to any re-entrant host-op. `handle` is set for `MakeString`,
     /// `str` for `HandleToString`, neither for an ack; `error` is `Some` iff the op failed.
     HostOpReturn {
@@ -57,9 +66,10 @@ pub enum Msg {
 /// the transport frames it).
 pub fn encode(msg: &Msg) -> Vec<u8> {
     let message = match msg {
-        Msg::Call { op, arg } => g::Message::Call(Box::new(g::Call {
+        Msg::Call { op, arg, block } => g::Message::Call(Box::new(g::Call {
             op: Some(op.clone()),
             arg: Some(arg.clone()),
+            block: *block,
         })),
         Msg::CallReturn { result } => g::Message::CallReturn(Box::new(g::CallReturn {
             result: Some(result.clone()),
@@ -83,6 +93,23 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             selector: Some(selector.clone()),
             args: Some(args.clone()),
         })),
+        Msg::InvokeBlock { block, batches } => g::Message::InvokeBlock(Box::new(g::InvokeBlock {
+            block: *block,
+            batches: Some(
+                batches
+                    .iter()
+                    .map(|tuple| g::HandleList {
+                        handles: Some(tuple.clone()),
+                    })
+                    .collect(),
+            ),
+        })),
+        Msg::InvokeBlockReturn { results, error } => {
+            g::Message::InvokeBlockReturn(Box::new(g::InvokeBlockReturn {
+                results: Some(results.clone()),
+                error: error.clone(),
+            }))
+        }
         Msg::HostOpReturn { handle, str, error } => {
             g::Message::HostOpReturn(Box::new(g::HostOpReturn {
                 handle: *handle,
@@ -116,6 +143,7 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         g::MessageRef::Call(c) => Msg::Call {
             op: c.op()?.unwrap_or_default().to_string(),
             arg: c.arg()?.unwrap_or_default().to_string(),
+            block: c.block()?,
         },
         g::MessageRef::CallReturn(c) => Msg::CallReturn {
             result: c.result()?.unwrap_or_default().to_string(),
@@ -142,6 +170,29 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
                 Some(v) => v.iter().collect(),
                 None => Vec::new(),
             },
+        },
+        g::MessageRef::InvokeBlock(b) => {
+            let mut batches = Vec::new();
+            if let Some(v) = b.batches()? {
+                for tuple in v {
+                    let tuple = tuple?;
+                    batches.push(match tuple.handles()? {
+                        Some(hs) => hs.iter().collect(),
+                        None => Vec::new(),
+                    });
+                }
+            }
+            Msg::InvokeBlock {
+                block: b.block()?,
+                batches,
+            }
+        }
+        g::MessageRef::InvokeBlockReturn(r) => Msg::InvokeBlockReturn {
+            results: match r.results()? {
+                Some(v) => v.iter().collect(),
+                None => Vec::new(),
+            },
+            error: r.error()?.map(str::to_string),
         },
         g::MessageRef::HostOpReturn(h) => Msg::HostOpReturn {
             handle: h.handle()?,

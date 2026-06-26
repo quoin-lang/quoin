@@ -12,11 +12,11 @@
 //! payload bytes. The payload is a FlatBuffers `Message` union (schema + codec in the shared
 //! `quoin-ext-proto` crate). A host->ext `Call` may be answered directly, or the handler may
 //! first issue **re-entrant host-ops** through the [`Host`] client — `make_string`,
-//! `handle_to_string`, `retain`, `release`, and `call_method` (send a Quoin message to a
-//! handle) — each a synchronous round-trip the host services while parked on the reply. Host
-//! values the extension holds are opaque [`Handle`]s indexing a GC-rooted table on the host
-//! (`docs/FUTURE_EXT_ARCH.md` §2). Handle-typed call args/returns, batched callbacks, and Arrow
-//! arrive in later slices.
+//! `handle_to_string`, `retain`, `release`, `call_method` (send a Quoin message to a handle),
+//! and `invoke_block` (run a host block over a batch in one round-trip) — each a synchronous
+//! round-trip the host services while parked on the reply. Host values the extension holds are
+//! opaque [`Handle`]s indexing a GC-rooted table on the host (`docs/FUTURE_EXT_ARCH.md` §2).
+//! General handle-typed call args/returns and Arrow arrive in later slices.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -58,9 +58,17 @@ pub fn write_frame(w: &mut impl Write, payload: &[u8]) -> io::Result<()> {
 /// service loop expects.
 pub struct Host<'a> {
     stream: &'a mut UnixStream,
+    /// The handle to the host block passed on this `Call`, if any (see [`Host::block`]).
+    block: Option<Handle>,
 }
 
 impl<'a> Host<'a> {
+    /// The host block handed to this call via `Extension call:with:block:`, or `None`. Invoke
+    /// it over a batch of argument tuples with [`Host::invoke_block`].
+    pub fn block(&self) -> Option<Handle> {
+        self.block
+    }
+
     /// Make a host `String` value and return a (call-local) handle to it.
     pub fn make_string(&mut self, s: &str) -> io::Result<Handle> {
         let (handle, _) = self.host_op(&Msg::MakeString {
@@ -106,6 +114,35 @@ impl<'a> Host<'a> {
         Ok(handle)
     }
 
+    /// Invoke the host block `block` once per tuple in `batches`, in a single round-trip, and
+    /// return one result handle per tuple (in order). The host runs the block N times locally;
+    /// `batches` of length 1 is a single call. A bad handle or a raise surfaces as an `io::Error`.
+    pub fn invoke_block(
+        &mut self,
+        block: Handle,
+        batches: &[Vec<Handle>],
+    ) -> io::Result<Vec<Handle>> {
+        write_frame(
+            self.stream,
+            &quoin_ext_proto::encode(&Msg::InvokeBlock {
+                block,
+                batches: batches.to_vec(),
+            }),
+        )?;
+        let frame = read_frame(self.stream)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
+        })?;
+        match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+            Msg::InvokeBlockReturn { results, error } => match error {
+                Some(e) => Err(io::Error::other(e)),
+                None => Ok(results),
+            },
+            other => Err(invalid_data(format!(
+                "expected InvokeBlockReturn, got {other:?}"
+            ))),
+        }
+    }
+
     /// Send one host-op and await its `HostOpReturn`, surfacing a host-reported error as an
     /// `io::Error`. Returns the reply's `(handle, str)` payload (either may be unset).
     fn host_op(&mut self, msg: &Msg) -> io::Result<(Handle, Option<String>)> {
@@ -131,8 +168,8 @@ fn invalid_data(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::E
 
 /// Bind a unix socket at `path`, accept one host connection, and serve requests until the
 /// host disconnects. Each `Call` frame invokes `handler(host, op, arg)`; the handler may use
-/// `host` to issue re-entrant host-ops, then returns the reply string sent back as a
-/// `CallReturn`.
+/// `host` to issue re-entrant host-ops (including [`Host::block`] / [`Host::invoke_block`] when
+/// the call carried a block), then returns the reply string sent back as a `CallReturn`.
 ///
 /// Blocking and single-connection by design: the extension is its own process, and the VM
 /// holds exactly one connection to it. Returns once the host disconnects.
@@ -144,12 +181,14 @@ pub fn serve(
     let (mut stream, _addr) = listener.accept()?;
     while let Some(frame) = read_frame(&mut stream)? {
         match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
-            Msg::Call { op, arg } => {
+            Msg::Call { op, arg, block } => {
                 // `host` borrows the stream for the call's re-entrant host-ops; the borrow
-                // ends before we write the terminal `CallReturn` on the same stream.
+                // ends before we write the terminal `CallReturn` on the same stream. A `block`
+                // of 0 (NULL_HANDLE) means none was passed.
                 let result = {
                     let mut host = Host {
                         stream: &mut stream,
+                        block: (block != 0).then_some(block),
                     };
                     handler(&mut host, &op, &arg)
                 };

@@ -31,6 +31,11 @@ use gc_arena::Collect;
 
 use crate::value::Value;
 
+/// The reserved null handle. No real handle is ever this value (slot generations start at 1
+/// and never wrap back to 0), so the protocol can use `0` to mean "no handle" — e.g. the
+/// optional block handle on a `Call`. This is JNI's null `jobject` / Lua's `LUA_NOREF`.
+pub const NULL_HANDLE: u64 = 0;
+
 /// Pack a slot index + generation into the opaque `u64` handle the extension holds.
 fn handle_of(index: u32, generation: u32) -> u64 {
     ((generation as u64) << 32) | (index as u64)
@@ -156,10 +161,11 @@ impl<'gc> HandleTable<'gc> {
             i
         } else {
             let i = self.slots.len() as u32;
+            // Generations start at 1, so slot 0's first handle isn't 0 (the null sentinel).
             self.slots.push(HandleSlot {
                 value: Some(value),
                 scope,
-                generation: 0,
+                generation: 1,
             });
             i
         };
@@ -170,7 +176,11 @@ impl<'gc> HandleTable<'gc> {
         let slot = &mut self.slots[index as usize];
         slot.value = None;
         slot.scope = HandleScope::Free;
-        slot.generation = slot.generation.wrapping_add(1);
+        // Skip generation 0 on wrap so a recycled slot 0 never yields the null handle.
+        slot.generation = match slot.generation.wrapping_add(1) {
+            0 => 1,
+            g => g,
+        };
         self.free.push(index);
     }
 }
