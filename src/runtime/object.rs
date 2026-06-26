@@ -103,18 +103,17 @@ pub fn build_object_class() -> NativeClassBuilder {
         .instance_method("init", |_vm, _mc, receiver, _args| Ok(receiver))
         .instance_method("print", |vm, mc, receiver, _args| {
             let s_result = vm.call_method(mc, receiver, "s", vec![])?;
-
-            println!(
-                "{}",
-                match s_result {
-                    Value::Object(obj) => match &obj.borrow().payload {
-                        ObjectPayload::String(string) => string.to_string(),
-                        _ => format!("{}", s_result),
-                    },
-                    x => format!("{}", x),
-                }
-            );
-
+            let text = match s_result {
+                Value::Object(obj) => match &obj.borrow().payload {
+                    ObjectPayload::String(string) => string.to_string(),
+                    _ => format!("{}", s_result),
+                },
+                x => format!("{}", x),
+            };
+            // Route through the VM's stdout sink (not `println!`) so the DAP adapter can capture
+            // program output as `output` events instead of it hitting fd 1/2 directly.
+            vm.write_std(crate::vm::StdStream::Out, format!("{text}\n").as_bytes())
+                .map_err(|e| QuoinError::Other(e.to_string()))?;
             Ok(vm.new_nil(mc))
         })
         .instance_method("throw", |vm, _mc, receiver, _args| {
