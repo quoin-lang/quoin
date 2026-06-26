@@ -55,26 +55,26 @@ pub fn build_http_parser_class() -> NativeClassBuilder {
         // parseHead: bytes -> nil if the response head is not complete yet, else
         // #( statusInt reasonStr headLenInt headers ), where `headers` is a list of
         // #( nameStr valueStr ) pairs. The body begins at `headLenInt` in `bytes`.
-        .typed_class_method("parseHead:", &["Bytes"], |vm, mc, _receiver, args| {
+        .sdk_typed_class_method("parseHead:", &["Bytes"], |host, _receiver, args| {
             let bytes = arg!(args, Bytes, 0);
             let buf: &[u8] = &bytes;
             match parse_head(buf) {
-                Ok(None) => Ok(vm.new_nil(mc)),
+                Ok(None) => Ok(host.new_nil()),
                 Ok(Some(head)) => {
                     let header_vals: Vec<Value> = head
                         .headers
                         .into_iter()
                         .map(|(name, value)| {
-                            let n = vm.new_string(mc, name);
-                            let v = vm.new_string(mc, value);
-                            vm.new_list(mc, vec![n, v])
+                            let n = host.new_string(name);
+                            let v = host.new_string(value);
+                            host.new_list(vec![n, v])
                         })
                         .collect();
-                    let headers_list = vm.new_list(mc, header_vals);
-                    let status = vm.new_int(mc, head.code as i64);
-                    let reason = vm.new_string(mc, head.reason);
-                    let head_len = vm.new_int(mc, head.head_len as i64);
-                    Ok(vm.new_list(mc, vec![status, reason, head_len, headers_list]))
+                    let headers_list = host.new_list(header_vals);
+                    let status = host.new_int(head.code as i64);
+                    let reason = host.new_string(head.reason);
+                    let head_len = host.new_int(head.head_len as i64);
+                    Ok(host.new_list(vec![status, reason, head_len, headers_list]))
                 }
                 Err(msg) => Err(QuoinError::ParseError(format!(
                     "[HTTP]Parser.parseHead:: {msg}"

@@ -1,5 +1,5 @@
 use crate::error::QuoinError;
-use crate::value::{AnyCollect, NativeClassBuilder, NativeFunc, ObjectPayload, Value};
+use crate::value::{AnyCollect, NativeClassBuilder, NativeFunc, Value};
 
 use gc_arena::collect::{DynCollect, Trace};
 use std::any::Any;
@@ -111,39 +111,37 @@ impl AnyCollect for NativeMethodState {
 
 pub fn build_method_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Method", Some("Object"))
-        .instance_method("selector", |vm, mc, receiver, _args| {
+        .sdk_instance_method("selector", |host, receiver, _args| {
             let selector =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
-            Ok(vm.new_symbol(mc, selector))
+            Ok(host.new_symbol(selector))
         })
-        .instance_method("name", |vm, mc, receiver, _args| {
+        .sdk_instance_method("name", |host, receiver, _args| {
             let selector =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;
-            Ok(vm.new_symbol(mc, selector))
+            Ok(host.new_symbol(selector))
         })
-        .instance_method("extension?", |vm, mc, receiver, _args| {
+        .sdk_instance_method("extension?", |host, receiver, _args| {
             let is_ext =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.is_extension)?;
-            Ok(vm.new_bool(mc, is_ext))
+            Ok(host.new_bool(is_ext))
         })
-        .instance_method("block", |vm, mc, receiver, _args| {
+        .sdk_instance_method("block", |host, receiver, _args| {
             // A native method has no user block; report it as nil.
             let block = receiver.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
-            Ok(block.unwrap_or_else(|| vm.new_nil(mc)))
+            Ok(block.unwrap_or_else(|| host.new_nil()))
         })
-        .instance_method("callOn:", |vm, mc, receiver, args| {
+        .sdk_instance_method("callOn:", |host, receiver, args| {
             let block_val =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?;
             let receiver = args[0];
-            if let Some(Value::Object(obj)) = block_val
-                && let ObjectPayload::Block(block) = &obj.borrow().payload
-            {
-                vm.execute_block(mc, block.clone(), Vec::new(), Some(receiver))
-            } else {
-                Err(QuoinError::Other("Method block is not a Block".to_string()))
+            match block_val {
+                // `execute_block` validates that the value is a block.
+                Some(block) => host.execute_block(block, Vec::new(), Some(receiver)),
+                None => Err(QuoinError::Other("Method block is not a Block".to_string())),
             }
         })
-        .instance_method("==:", |vm, mc, receiver, args| {
-            Ok(vm.new_bool(mc, receiver == args[0]))
+        .sdk_instance_method("==:", |host, receiver, args| {
+            Ok(host.new_bool(receiver == args[0]))
         })
 }
