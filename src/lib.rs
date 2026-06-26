@@ -3,6 +3,7 @@
 pub mod ansi_colorizer;
 pub mod compiler;
 pub mod coverage;
+pub mod dap;
 pub mod debug;
 pub mod debug_cli;
 pub mod dispatch;

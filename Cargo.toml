@@ -39,6 +39,8 @@ substring = "1.4.5"
 cargo-llvm-cov = "0.8.7"
 glob = "0.3.3"
 corosensei = "0.1.4"
+# Unix fd dup/dup2 for the DAP adapter's protocol-stdout redirect (stray prints -> stderr).
+libc = "0.2"
 async-io = "2"
 async-net = "2"
 async-fs = "2"
@@ -78,8 +80,8 @@ serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order
 # Insertion-ordered map backing the Quoin `Map` type (so iteration/serialization preserve order).
 indexmap = "2"
 # serde core — the `DataValue` bridge hand-implements Serialize/Deserialize for the structured
-# formats (MessagePack/TOML/YAML) to share one tree. (Derive not needed.)
-serde = "1"
+# formats (MessagePack/TOML/YAML); `derive` is enabled for the DAP message envelopes (`src/dap.rs`).
+serde = { version = "1", features = ["derive"] }
 # MessagePack (binary) over the DataValue bridge.
 rmp-serde = "1"
 # TOML config files over the DataValue bridge.
