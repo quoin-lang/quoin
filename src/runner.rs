@@ -1067,6 +1067,25 @@ fn dap_threads() -> serde_json::Value {
     serde_json::json!({ "threads": [{ "id": 1, "name": "main" }] })
 }
 
+/// The DAP `stackFrames` for the paused VM, innermost frame first. A frame's `id` is its stack
+/// index, which `scopes`/`evaluate` use to target it.
+fn dap_stack_frames(vm: &VmState<'_>) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    (0..vm.frames.len())
+        .rev()
+        .map(|i| match vm.debug_frame_location(i) {
+            Some((file, line, label)) => json!({
+                "id": i,
+                "name": label,
+                "line": line,
+                "column": 1,
+                "source": { "path": file, "name": file },
+            }),
+            None => json!({ "id": i, "name": "<no source>", "line": 0, "column": 0 }),
+        })
+        .collect()
+}
+
 /// The DAP adapter frontend: translates the driver's debug touchpoints to/from the Debug Adapter
 /// Protocol over its [`Connection`](crate::dap::Connection). `configure` runs the handshake +
 /// breakpoint setup through `configurationDone`; `on_output` flushes program output as `output`
@@ -1074,11 +1093,17 @@ fn dap_threads() -> serde_json::Value {
 /// Generic over the streams so tests can drive it over in-memory buffers.
 struct DapFrontend<R: std::io::BufRead, W: std::io::Write> {
     conn: crate::dap::Connection<R, W>,
+    /// Per-pause `variablesReference` table: handle (1-based) -> the frame whose `Locals` scope it
+    /// expands. Cleared at each pause (a DAP handle is valid only for the current stop).
+    handles: Vec<usize>,
 }
 
 impl<R: std::io::BufRead, W: std::io::Write> DapFrontend<R, W> {
     fn new(conn: crate::dap::Connection<R, W>) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            handles: Vec::new(),
+        }
     }
 }
 
@@ -1162,6 +1187,7 @@ impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W
 
     fn on_pause(&mut self, arena: &mut ReplArena) -> Result<DebugFlow, QuoinError> {
         use serde_json::json;
+        self.handles.clear(); // variablesReference handles are valid only for this stop
         self.on_output(arena)?; // flush output before the stop, so console ordering is right
         let reason = arena.mutate_root(|_mc, vm| dap_stop_reason(vm));
         self.conn
@@ -1190,19 +1216,92 @@ impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W
             }
             match req.command.as_str() {
                 "threads" => self.conn.ok(&req, Some(dap_threads())).map_err(dap_io)?,
-                // Inspection — minimal valid responses for the spine; filled out next phase.
-                "stackTrace" => self
-                    .conn
-                    .ok(&req, Some(json!({ "stackFrames": [], "totalFrames": 0 })))
-                    .map_err(dap_io)?,
-                "scopes" => self
-                    .conn
-                    .ok(&req, Some(json!({ "scopes": [] })))
-                    .map_err(dap_io)?,
-                "variables" => self
-                    .conn
-                    .ok(&req, Some(json!({ "variables": [] })))
-                    .map_err(dap_io)?,
+                "stackTrace" => {
+                    let frames = arena.mutate_root(|_mc, vm| dap_stack_frames(vm));
+                    let total = frames.len();
+                    self.conn
+                        .ok(
+                            &req,
+                            Some(json!({ "stackFrames": frames, "totalFrames": total })),
+                        )
+                        .map_err(dap_io)?;
+                }
+                "scopes" => {
+                    let frame = req
+                        .arguments
+                        .get("frameId")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    self.handles.push(frame);
+                    let var_ref = self.handles.len(); // 1-based handle
+                    self.conn
+                        .ok(
+                            &req,
+                            Some(json!({
+                                "scopes": [{
+                                    "name": "Locals",
+                                    "variablesReference": var_ref,
+                                    "expensive": false,
+                                }]
+                            })),
+                        )
+                        .map_err(dap_io)?;
+                }
+                "variables" => {
+                    let var_ref = req
+                        .arguments
+                        .get("variablesReference")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let vars = match self.handles.get(var_ref.wrapping_sub(1)).copied() {
+                        Some(frame) => arena.mutate_root(|_mc, vm| {
+                            vm.debug_frame_variables(frame)
+                                .into_iter()
+                                .map(|(name, val)| {
+                                    json!({
+                                        "name": name,
+                                        "value": vm.debug_render(val),
+                                        "variablesReference": 0,
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                        None => Vec::new(),
+                    };
+                    self.conn
+                        .ok(&req, Some(json!({ "variables": vars })))
+                        .map_err(dap_io)?;
+                }
+                "evaluate" => {
+                    let expr = req
+                        .arguments
+                        .get("expression")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let frame = req
+                        .arguments
+                        .get("frameId")
+                        .and_then(|v| v.as_u64())
+                        .map(|f| f as usize);
+                    let result = arena.mutate_root(|mc, vm| {
+                        let idx = frame.unwrap_or_else(|| vm.frames.len().saturating_sub(1));
+                        let self_val = vm.frames.get(idx).and_then(|f| f.receiver);
+                        let bindings = vm.debug_frame_bindings(idx);
+                        vm.debug_eval(mc, &expr, self_val, &bindings)
+                            .map(|v| vm.debug_render(v))
+                    });
+                    match result {
+                        Ok(rendered) => self
+                            .conn
+                            .ok(
+                                &req,
+                                Some(json!({ "result": rendered, "variablesReference": 0 })),
+                            )
+                            .map_err(dap_io)?,
+                        Err(msg) => self.conn.fail(&req, msg).map_err(dap_io)?,
+                    }
+                }
                 "disconnect" | "terminate" => {
                     self.conn.ok(&req, None).map_err(dap_io)?;
                     return Ok(DebugFlow::Quit);
@@ -2526,6 +2625,46 @@ mod tests {
             stopped < terminated,
             "stopped must precede terminated:\n{out}"
         );
+    }
+
+    /// At a breakpoint inside an invoked block, `stackTrace`/`scopes`/`variables`/`evaluate`
+    /// return real frame state: the call stack, the block parameter `n`, and an expression
+    /// evaluated in that frame.
+    #[test]
+    fn dap_inspection_stack_variables_and_evaluate() {
+        use serde_json::json;
+        // Breakpoint on line 2 (`n * 2`); the innermost frame at the stop is the invoked block.
+        let source = "double = { |n|\n    n * 2\n}\nresult = double.value: 21\nresult.print\n";
+        let out = run_dap_script(
+            source,
+            "fixture.qn",
+            &[("fixture.qn", 2)],
+            &[
+                json!({ "command": "initialize", "arguments": {} }),
+                json!({ "command": "launch", "arguments": {} }),
+                json!({ "command": "setBreakpoints", "arguments": {
+                    "source": { "path": "fixture.qn" },
+                    "breakpoints": [ { "line": 2 } ],
+                }}),
+                json!({ "command": "configurationDone", "arguments": {} }),
+                json!({ "command": "stackTrace", "arguments": { "threadId": 1 } }),
+                json!({ "command": "scopes", "arguments": { "frameId": 1 } }),
+                json!({ "command": "variables", "arguments": { "variablesReference": 1 } }),
+                json!({ "command": "evaluate", "arguments": { "expression": "n * 2", "frameId": 1 } }),
+                json!({ "command": "continue", "arguments": { "threadId": 1 } }),
+            ],
+        );
+        // stackTrace: two frames, the invoked block at line 2 innermost.
+        assert!(out.contains(r#""totalFrames":2"#), "{out}");
+        assert!(out.contains(r#""line":2"#), "{out}");
+        // scopes -> a Locals scope with a handle; variables -> the block parameter n = 21.
+        assert!(out.contains(r#""name":"Locals""#), "{out}");
+        assert!(
+            out.contains(r#"{"name":"n","value":"21","variablesReference":0}"#),
+            "{out}"
+        );
+        // evaluate `n * 2` in that frame -> 42.
+        assert!(out.contains(r#""result":"42""#), "{out}");
     }
 
     #[test]
