@@ -25,7 +25,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use quoin_ext_proto::Msg;
-pub use quoin_ext_proto::{ArrowArray, ArrowDType};
+pub use quoin_ext_proto::{ArrowArray, ArrowDType, DataValue};
 
 /// An opaque reference to a host value, as seen by the extension. Default lifetime is
 /// call-local (auto-released when the originating call returns); promote it with
@@ -71,6 +71,8 @@ pub struct Host<'a> {
     releases: Vec<u64>,
     /// Bulk `Array` columns passed as args on this `Call`, in order (the data plane).
     arrays: Vec<ArrowArray>,
+    /// The structured-value payload passed via `call:with:data:`, if any.
+    data: Option<DataValue>,
 }
 
 impl<'a> Host<'a> {
@@ -92,6 +94,11 @@ impl<'a> Host<'a> {
     /// The bulk `Array` columns passed as args on this call (read `dtype`/`data` and crunch them).
     pub fn arrays(&self) -> &[ArrowArray] {
         &self.arrays
+    }
+
+    /// The structured-value payload passed via `call:with:data:`, as a `DataValue` tree, if any.
+    pub fn data(&self) -> Option<&DataValue> {
+        self.data.as_ref()
     }
 
     /// Make a host `String` value and return a (call-local) handle to it.
@@ -191,13 +198,14 @@ fn invalid_data(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::E
     io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
-/// What a call handler returns: a scalar string, an ext-side resource id the host will hold as an
-/// opaque token, or a bulk `Array` (the data plane). A `String`/`&str` converts to `Reply::Scalar`,
-/// so scalar handlers need no ceremony (`"pong".into()` or returning a `String` both work).
+/// What a call handler returns: a scalar string, an ext-side resource id, a bulk `Array` (the data
+/// plane), or a structured value (materialized as a nested Quoin Value). A `String`/`&str` converts
+/// to `Reply::Scalar`, and a `DataValue` to `Reply::Data`, so handlers need little ceremony.
 pub enum Reply {
     Scalar(String),
     Resource(u64),
     Array(ArrowArray),
+    Data(DataValue),
 }
 
 impl From<String> for Reply {
@@ -209,6 +217,12 @@ impl From<String> for Reply {
 impl From<&str> for Reply {
     fn from(s: &str) -> Self {
         Reply::Scalar(s.to_string())
+    }
+}
+
+impl From<DataValue> for Reply {
+    fn from(d: DataValue) -> Self {
+        Reply::Data(d)
     }
 }
 
@@ -235,6 +249,7 @@ pub fn serve<R: Into<Reply>>(
                 resources,
                 releases,
                 arrays,
+                data,
             } => {
                 // `host` borrows the stream for the call's re-entrant host-ops; the borrow ends
                 // before we write the terminal reply on the same stream.
@@ -245,6 +260,7 @@ pub fn serve<R: Into<Reply>>(
                         resources,
                         releases,
                         arrays,
+                        data,
                     };
                     handler(&mut host, &op, &arg).into()
                 };
@@ -252,6 +268,7 @@ pub fn serve<R: Into<Reply>>(
                     Reply::Scalar(result) => Msg::CallReturn { result },
                     Reply::Resource(resource) => Msg::CallReturnResource { resource },
                     Reply::Array(array) => Msg::CallReturnArray { array },
+                    Reply::Data(value) => Msg::CallReturnData { value },
                 };
                 write_frame(&mut stream, &quoin_ext_proto::encode(&msg))?;
             }

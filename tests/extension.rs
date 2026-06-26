@@ -19,6 +19,8 @@
 //! - `extension_array_data_plane` (Slice 6b): the `ext_arrays` fixture receives a bulk `Array` as a
 //!   call argument (copy-through), operates on the whole buffer, and returns a scalar or a new
 //!   `Array` — proving columnar data crosses the boundary without per-element exploding.
+//! - `extension_structured_values` (Phase 1): the `ext_data` fixture round-trips a structured Quoin
+//!   value through `call:with:data:` and returns a structured value built extension-side.
 //! - `extension_python_sdk` (Slice 7): the extension is a *Python* process (`sdk/python`) speaking
 //!   the same `ext.fbs` wire protocol — the polyglot proof. Gated on `python3` + `flatbuffers`.
 //!
@@ -237,6 +239,28 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_ext_arrays_test.qn", &script);
 }
 
+#[test]
+fn extension_structured_values() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_data");
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{ext_bin}';
+
+"* a structured value round-trips: Quoin Map -> DataValue -> (ext) -> DataValue -> Quoin Map
+m = #{{ 'n': 42 'f': 1.5 's': 'hi' 'flag': true 'items': #( 1 2 3 ) }};
+((e.call:'echoData' with:'' data:m) == m).else:{{ ok = false }};
+
+"* a structured value built extension-side materializes as a real Quoin List
+((e.call:'mkList' with:'') == #( 1 2 3 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_data_test.qn", &script);
+}
+
 /// True if `python3` can import the `flatbuffers` runtime — the Python SDK's only external
 /// dependency. When false, the polyglot tests skip cleanly (e.g. CI without Python set up).
 fn python_fixture_runnable() -> bool {
@@ -331,6 +355,11 @@ a = Array.ofFloats:#( 1.0 2.0 3.0 );
 ((e.call:'sum' with:'' args:#( a )) == '6.0').else:{{ ok = false }};
 r = e.call:'scale' with:'2' args:#( a );
 (r.toList == #( 2.0 4.0 6.0 )).else:{{ ok = false }};
+
+"* structured values (Phase 1): a Map round-trips, and a record built in Python -> a Quoin Map
+m = #{{ 'a': 1 'b': #( 'x' 'y' ) 'c': true }};
+((e.call:'echoData' with:'' data:m) == m).else:{{ ok = false }};
+((e.call:'mkRecord' with:'') == #{{ 'name': 'quoin' 'items': #( 1 2 3 ) 'ok': true }}).else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#

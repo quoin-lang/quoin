@@ -11,20 +11,35 @@ class ArrowDType(object):
     Int64 = 1
 
 
+class DataValueKind(object):
+    NONE = 0
+    DvNull = 1
+    DvBool = 2
+    DvInt = 3
+    DvBigInt = 4
+    DvFloat = 5
+    DvDecimal = 6
+    DvStr = 7
+    DvBytes = 8
+    DvList = 9
+    DvMap = 10
+
+
 class Message(object):
     NONE = 0
     Call = 1
     CallReturn = 2
     CallReturnResource = 3
     CallReturnArray = 4
-    MakeString = 5
-    HandleToString = 6
-    Retain = 7
-    Release = 8
-    CallMethodOnHandle = 9
-    InvokeBlock = 10
-    InvokeBlockReturn = 11
-    HostOpReturn = 12
+    CallReturnData = 5
+    MakeString = 6
+    HandleToString = 7
+    Retain = 8
+    Release = 9
+    CallMethodOnHandle = 10
+    InvokeBlock = 11
+    InvokeBlockReturn = 12
+    HostOpReturn = 13
 
 
 class ArrowArray(object):
@@ -102,6 +117,517 @@ def ArrowArrayStartDataVector(builder, numElems):
     return builder.StartVector(1, numElems, 1)
 
 def ArrowArrayEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvNull(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvNull()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvNull(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvNull
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+def DvNullStart(builder):
+    builder.StartObject(0)
+
+def DvNullEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvBool(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvBool()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvBool(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvBool
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvBool
+    def V(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
+def DvBoolStart(builder):
+    builder.StartObject(1)
+
+def DvBoolAddV(builder, v):
+    builder.PrependBoolSlot(0, v, 0)
+
+def DvBoolEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvInt(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvInt()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvInt(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvInt
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvInt
+    def V(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Int64Flags, o + self._tab.Pos)
+        return 0
+
+def DvIntStart(builder):
+    builder.StartObject(1)
+
+def DvIntAddV(builder, v):
+    builder.PrependInt64Slot(0, v, 0)
+
+def DvIntEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvBigInt(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvBigInt()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvBigInt(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvBigInt
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvBigInt
+    def V(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def DvBigIntStart(builder):
+    builder.StartObject(1)
+
+def DvBigIntAddV(builder, v):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(v), 0)
+
+def DvBigIntEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvFloat(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvFloat()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvFloat(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvFloat
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvFloat
+    def V(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Float64Flags, o + self._tab.Pos)
+        return 0.0
+
+def DvFloatStart(builder):
+    builder.StartObject(1)
+
+def DvFloatAddV(builder, v):
+    builder.PrependFloat64Slot(0, v, 0.0)
+
+def DvFloatEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvDecimal(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvDecimal()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvDecimal(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvDecimal
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvDecimal
+    def V(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def DvDecimalStart(builder):
+    builder.StartObject(1)
+
+def DvDecimalAddV(builder, v):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(v), 0)
+
+def DvDecimalEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvStr(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvStr()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvStr(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvStr
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvStr
+    def V(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def DvStrStart(builder):
+    builder.StartObject(1)
+
+def DvStrAddV(builder, v):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(v), 0)
+
+def DvStrEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvBytes(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvBytes()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvBytes(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvBytes
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvBytes
+    def V(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 1))
+        return 0
+
+    # DvBytes
+    def VAsNumpy(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Uint8Flags, o)
+        return 0
+
+    # DvBytes
+    def VLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # DvBytes
+    def VIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        return o == 0
+
+def DvBytesStart(builder):
+    builder.StartObject(1)
+
+def DvBytesAddV(builder, v):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(v), 0)
+
+def DvBytesStartVVector(builder, numElems):
+    return builder.StartVector(1, numElems, 1)
+
+def DvBytesEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvList(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvList()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvList(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvList
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvList
+    def Items(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            x = self._tab.Vector(o)
+            x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
+            x = self._tab.Indirect(x)
+            obj = DataValueBox()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+    # DvList
+    def ItemsLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # DvList
+    def ItemsIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        return o == 0
+
+def DvListStart(builder):
+    builder.StartObject(1)
+
+def DvListAddItems(builder, items):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(items), 0)
+
+def DvListStartItemsVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def DvListEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvEntry(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvEntry()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvEntry(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvEntry
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvEntry
+    def Key(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # DvEntry
+    def Value(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            x = self._tab.Indirect(o + self._tab.Pos)
+            obj = DataValueBox()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+def DvEntryStart(builder):
+    builder.StartObject(2)
+
+def DvEntryAddKey(builder, key):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(key), 0)
+
+def DvEntryAddValue(builder, value):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(value), 0)
+
+def DvEntryEnd(builder):
+    return builder.EndObject()
+
+
+
+class DvMap(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DvMap()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDvMap(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DvMap
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DvMap
+    def Entries(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            x = self._tab.Vector(o)
+            x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
+            x = self._tab.Indirect(x)
+            obj = DvEntry()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+    # DvMap
+    def EntriesLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # DvMap
+    def EntriesIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        return o == 0
+
+def DvMapStart(builder):
+    builder.StartObject(1)
+
+def DvMapAddEntries(builder, entries):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(entries), 0)
+
+def DvMapStartEntriesVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def DvMapEnd(builder):
+    return builder.EndObject()
+
+
+
+class DataValueBox(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = DataValueBox()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsDataValueBox(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # DataValueBox
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # DataValueBox
+    def VType(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, o + self._tab.Pos)
+        return 0
+
+    # DataValueBox
+    def V(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            from flatbuffers.table import Table
+            obj = Table(bytearray(), 0)
+            self._tab.Union(obj, o)
+            return obj
+        return None
+
+def DataValueBoxStart(builder):
+    builder.StartObject(2)
+
+def DataValueBoxAddVType(builder, vType):
+    builder.PrependUint8Slot(0, vType, 0)
+
+def DataValueBoxAddV(builder, v):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(v), 0)
+
+def DataValueBoxEnd(builder):
     return builder.EndObject()
 
 
@@ -243,8 +769,18 @@ class Call(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(14))
         return o == 0
 
+    # Call
+    def Data(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(16))
+        if o != 0:
+            x = self._tab.Indirect(o + self._tab.Pos)
+            obj = DataValueBox()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
 def CallStart(builder):
-    builder.StartObject(6)
+    builder.StartObject(7)
 
 def CallAddOp(builder, op):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(op), 0)
@@ -275,6 +811,9 @@ def CallAddArrays(builder, arrays):
 
 def CallStartArraysVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def CallAddData(builder, data):
+    builder.PrependUOffsetTRelativeSlot(6, flatbuffers.number_types.UOffsetTFlags.py_type(data), 0)
 
 def CallEnd(builder):
     return builder.EndObject()
@@ -447,6 +986,45 @@ def CallReturnArrayAddArray(builder, array):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(array), 0)
 
 def CallReturnArrayEnd(builder):
+    return builder.EndObject()
+
+
+
+class CallReturnData(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = CallReturnData()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsCallReturnData(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # CallReturnData
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # CallReturnData
+    def Value(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            x = self._tab.Indirect(o + self._tab.Pos)
+            obj = DataValueBox()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+def CallReturnDataStart(builder):
+    builder.StartObject(1)
+
+def CallReturnDataAddValue(builder, value):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(value), 0)
+
+def CallReturnDataEnd(builder):
     return builder.EndObject()
 
 

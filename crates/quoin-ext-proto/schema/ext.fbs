@@ -29,6 +29,30 @@ table ArrowArray {
     data: [ubyte];
 }
 
+// A structured value tree (Phase 1): the wire mirror of the host `DataValue`, so an extension can
+// send/receive arbitrary nil/bool/int/float/str/bytes/list/map data that materializes as nested
+// Quoin Values. Arbitrary-precision BigInt/Decimal travel as their decimal-string form.
+// `DataValueBox` wraps the union so it can nest (lists/maps) and vectorize.
+table DvNull {}
+table DvBool { v: bool; }
+table DvInt { v: int64; }
+table DvBigInt { v: string; }
+table DvFloat { v: float64; }
+table DvDecimal { v: string; }
+table DvStr { v: string; }
+table DvBytes { v: [ubyte]; }
+table DvList { items: [DataValueBox]; }
+table DvEntry { key: string; value: DataValueBox; }
+table DvMap { entries: [DvEntry]; }
+
+union DataValueKind {
+    DvNull, DvBool, DvInt, DvBigInt, DvFloat, DvDecimal, DvStr, DvBytes, DvList, DvMap,
+}
+
+table DataValueBox {
+    v: DataValueKind;
+}
+
 // host -> ext: invoke op `op` with scalar argument `arg`, plus typed handle arguments
 // (Slice 5b). Two distinct token spaces:
 //   - `handles`: host-value handle ids into the host's table (a block is one of these — the
@@ -44,6 +68,9 @@ table Call {
     resources: [uint64];
     releases: [uint64];
     arrays: [ArrowArray];
+    // A structured value payload (Phase 1), sent by `call:with:data:` — materialized into a
+    // nested Quoin Value on the extension side (and vice versa).
+    data: DataValueBox;
 }
 
 // A tuple of handles — one invocation's argument list in a batched callback.
@@ -65,6 +92,11 @@ table CallReturnResource {
 // ext -> host: the originating call is finished, returning a bulk Array (the data plane).
 table CallReturnArray {
     array: ArrowArray;
+}
+
+// ext -> host: the call returns a structured value (Phase 1), materialized as a nested Quoin Value.
+table CallReturnData {
+    value: DataValueBox;
 }
 
 // ext -> host (re-entrant, mid-call): make a host String value, return a handle to it.
@@ -127,6 +159,7 @@ union Message {
     CallReturn,
     CallReturnResource,
     CallReturnArray,
+    CallReturnData,
     MakeString,
     HandleToString,
     Retain,

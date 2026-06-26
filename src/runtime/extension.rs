@@ -41,6 +41,11 @@
 //! read and raises a catchable `TimeoutError`); the only extension-specific part is that a
 //! cancelled (timed-out) call leaves the framed conversation desynced, so the extension is marked
 //! dead — its connection can't be safely reused.
+//!
+//! **Structured values** (Phase 1): `call:with:data:` passes a Quoin value serialized to a
+//! `DataValue` tree (`Call.data`), and a call may return one (`CallReturnData`), materialized back
+//! into a nested Quoin Value. Both directions reuse the existing `value_to_data` / `data_to_value`
+//! bridges (the latter via a `HostCtx` over the legacy `&mut VmState`).
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -50,15 +55,71 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gc_arena::collect::Trace;
 
-use quoin_ext_proto::{ArrowArray, ArrowDType, Msg};
+use quoin_ext_proto::{ArrowArray, ArrowDType, DataValue as WireData, Msg};
 
 use crate::arg;
 use crate::error::QuoinError;
+use crate::ext_sdk::HostCtx;
 use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
+use crate::runtime::data_value::{DataValue as RtData, data_to_value, value_to_data};
 use crate::runtime::list::NativeListState;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
+
+/// Convert the wire `DataValue` to the runtime `DataValue` (decimal-string BigInt/Decimal are
+/// parsed back to arbitrary precision), so the existing `data_to_value` bridge can materialize it.
+fn wire_to_runtime(dv: &WireData) -> Result<RtData, QuoinError> {
+    Ok(match dv {
+        WireData::Null => RtData::Null,
+        WireData::Bool(b) => RtData::Bool(*b),
+        WireData::Int(i) => RtData::Int(*i),
+        WireData::BigInt(s) => RtData::BigInt(
+            s.parse()
+                .map_err(|_| QuoinError::Other(format!("extension: invalid BigInt {s:?}")))?,
+        ),
+        WireData::Float(f) => RtData::Float(*f),
+        WireData::Decimal(s) => RtData::Decimal(
+            s.parse()
+                .map_err(|_| QuoinError::Other(format!("extension: invalid Decimal {s:?}")))?,
+        ),
+        WireData::Str(s) => RtData::Str(s.clone()),
+        WireData::Bytes(b) => RtData::Bytes(b.clone()),
+        WireData::List(items) => RtData::Array(
+            items
+                .iter()
+                .map(wire_to_runtime)
+                .collect::<Result<_, _>>()?,
+        ),
+        WireData::Map(entries) => RtData::Object(
+            entries
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), wire_to_runtime(v)?)))
+                .collect::<Result<_, QuoinError>>()?,
+        ),
+    })
+}
+
+/// Convert the runtime `DataValue` to the wire form (BigInt/Decimal as decimal strings).
+fn runtime_to_wire(dv: &RtData) -> WireData {
+    match dv {
+        RtData::Null => WireData::Null,
+        RtData::Bool(b) => WireData::Bool(*b),
+        RtData::Int(i) => WireData::Int(*i),
+        RtData::BigInt(n) => WireData::BigInt(n.to_string()),
+        RtData::Float(f) => WireData::Float(*f),
+        RtData::Decimal(d) => WireData::Decimal(d.to_string()),
+        RtData::Str(s) => WireData::Str(s.clone()),
+        RtData::Bytes(b) => WireData::Bytes(b.clone()),
+        RtData::Array(items) => WireData::List(items.iter().map(runtime_to_wire).collect()),
+        RtData::Object(entries) => WireData::Map(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), runtime_to_wire(v)))
+                .collect(),
+        ),
+    }
+}
 
 /// Bridge the host-side `Array` dtype to the wire `ArrowDType`.
 fn to_wire_dtype(d: ArrayDType) -> ArrowDType {
@@ -410,8 +471,15 @@ fn extension_call<'gc>(
     op: String,
     argv: String,
     args: Vec<Value<'gc>>,
+    data_arg: Option<Value<'gc>>,
     releases: Vec<u64>,
 ) -> Result<CallOutcome, QuoinError> {
+    // Serialize the optional structured-value payload before opening the call (no handles involved).
+    let data = match data_arg {
+        Some(value) => Some(runtime_to_wire(&value_to_data(value)?)),
+        None => None,
+    };
+
     let epoch = vm.handle_table.begin_call();
 
     // Route each arg by token space: an `ExtResource` passes its (ext-side) resource id; an
@@ -448,6 +516,7 @@ fn extension_call<'gc>(
                 resources,
                 releases,
                 arrays,
+                data,
             },
         )?;
         loop {
@@ -458,6 +527,7 @@ fn extension_call<'gc>(
                 Msg::CallReturn { result } => return Ok(CallOutcome::Scalar(result)),
                 Msg::CallReturnResource { resource } => return Ok(CallOutcome::Resource(resource)),
                 Msg::CallReturnArray { array } => return Ok(CallOutcome::Array(array)),
+                Msg::CallReturnData { value } => return Ok(CallOutcome::Data(value)),
                 host_op => service_host_op(vm, mc, id, epoch, ext_id, host_op)?,
             }
         }
@@ -467,12 +537,13 @@ fn extension_call<'gc>(
     outcome
 }
 
-/// How a call finished: a scalar string, an ext-side resource the host will wrap as a token, or a
-/// bulk `Array` (the data plane).
+/// How a call finished: a scalar string, an ext-side resource the host will wrap as a token, a
+/// bulk `Array` (the data plane), or a structured value (materialized as a nested Quoin Value).
 enum CallOutcome {
     Scalar(String),
     Resource(u64),
     Array(ArrowArray),
+    Data(WireData),
 }
 
 /// Wrap an ext-assigned resource id in an `ExtResource` value, tied to `reap` so its `Drop`
@@ -497,6 +568,7 @@ fn run_extension_method<'gc>(
     op: String,
     argv: String,
     args: Vec<Value<'gc>>,
+    data_arg: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
     // One peek at the native state: stream id, owning ext-id, liveness, the reap queue (for
     // releases + to clone into any returned resource), draining the pending releases to flush.
@@ -510,7 +582,7 @@ fn run_extension_method<'gc>(
         return Err(extension_dead_error("already exited"));
     }
 
-    match extension_call(vm, mc, id, ext_id, op, argv, args, releases) {
+    match extension_call(vm, mc, id, ext_id, op, argv, args, data_arg, releases) {
         Ok(CallOutcome::Scalar(result)) => Ok(vm.new_string(mc, result)),
         Ok(CallOutcome::Resource(resource_id)) => {
             Ok(make_ext_resource(vm, mc, resource_id, resource_reap))
@@ -521,6 +593,13 @@ fn run_extension_method<'gc>(
             from_wire_dtype(array.dtype),
             array.data,
         )),
+        // Materialize a returned structured value into a nested Quoin Value via the existing
+        // `data_to_value` bridge (`HostCtx` adapts the legacy `&mut VmState` to the `Host` surface).
+        Ok(CallOutcome::Data(wire)) => {
+            let rt = wire_to_runtime(&wire)?;
+            let host = HostCtx::new(vm, mc);
+            data_to_value(&rt, &host)
+        }
         // A cancellation (a timeout via `Async.timeout:do:`, or a task cancel) interrupted the
         // call mid-conversation: the host abandoned a read, so the connection is desynced (a slow
         // extension's reply would arrive later, unread, and corrupt the next call). Mark the
@@ -626,7 +705,7 @@ pub fn build_extension_class() -> NativeClassBuilder {
         .instance_method("call:with:", |vm, mc, receiver, args| {
             let op = arg!(args, String, 0).to_string();
             let argv = arg!(args, String, 1).to_string();
-            run_extension_method(vm, mc, receiver, op, argv, Vec::new())
+            run_extension_method(vm, mc, receiver, op, argv, Vec::new(), None)
         })
         // `ext call: '<op>' with: '<arg>' args: #( v1 v2 … )` -> like `call:with:`, but also
         // passes typed handle arguments: each `ExtResource` in the list passes its resource id;
@@ -638,6 +717,17 @@ pub fn build_extension_class() -> NativeClassBuilder {
                 QuoinError::Other("call:with:args: missing args list".to_string())
             })?;
             let call_args = extract_args(list)?;
-            run_extension_method(vm, mc, receiver, op, argv, call_args)
+            run_extension_method(vm, mc, receiver, op, argv, call_args, None)
+        })
+        // `ext call: '<op>' with: '<arg>' data: <value>` -> like `call:with:`, but also passes a
+        // structured-value payload (any Quoin value, serialized to a `DataValue` tree). The
+        // extension reads it as native structured data; the result may likewise be structured.
+        .instance_method("call:with:data:", |vm, mc, receiver, args| {
+            let op = arg!(args, String, 0).to_string();
+            let argv = arg!(args, String, 1).to_string();
+            let data = *args.get(2).ok_or_else(|| {
+                QuoinError::Other("call:with:data: missing data value".to_string())
+            })?;
+            run_extension_method(vm, mc, receiver, op, argv, Vec::new(), Some(data))
         })
 }

@@ -33,14 +33,33 @@ pub struct ArrowArray {
     pub data: Vec<u8>,
 }
 
+/// A structured value tree — the wire mirror of the host `DataValue` (Phase 1), so an extension
+/// can exchange arbitrary nil/bool/int/float/str/bytes/list/map data that materializes as nested
+/// Quoin Values. Arbitrary-precision `BigInt`/`Decimal` travel as their decimal-string form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    BigInt(String),
+    Float(f64),
+    Decimal(String),
+    Str(String),
+    Bytes(Vec<u8>),
+    List(Vec<DataValue>),
+    Map(Vec<(String, DataValue)>),
+}
+
 /// A single control-plane frame, in either direction. Mirrors the `Message` union in
 /// `ext.fbs`. Encode with [`encode`]; decode a received frame with [`decode_envelope`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// (No `Eq` — `DataValue`/`ArrowArray` carry `f64`.)
+#[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
     /// host -> ext: invoke `op` with the scalar argument `arg`, plus typed arguments. `handles`
     /// are host-value handle ids (a block is one of these); `resources` are ext-side resource ids
     /// passed back as args; `releases` are ext-side resource ids the host dropped and the extension
-    /// should free at the top of the call (the batched reap); `arrays` are bulk columns (data plane).
+    /// should free at the top of the call (the batched reap); `arrays` are bulk columns (data plane);
+    /// `data` is an optional structured-value payload (Phase 1).
     Call {
         op: String,
         arg: String,
@@ -48,6 +67,7 @@ pub enum Msg {
         resources: Vec<u64>,
         releases: Vec<u64>,
         arrays: Vec<ArrowArray>,
+        data: Option<DataValue>,
     },
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
@@ -56,6 +76,8 @@ pub enum Msg {
     CallReturnResource { resource: u64 },
     /// ext -> host: the call returns a bulk `Array` (the data plane).
     CallReturnArray { array: ArrowArray },
+    /// ext -> host: the call returns a structured value (materialized as a nested Quoin Value).
+    CallReturnData { value: DataValue },
     /// ext -> host (re-entrant): make a host String, return a handle to it.
     MakeString { value: String },
     /// ext -> host (re-entrant): read a String-handle back into a scalar string.
@@ -99,6 +121,7 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             resources,
             releases,
             arrays,
+            data,
         } => g::Message::Call(Box::new(g::Call {
             op: Some(op.clone()),
             arg: Some(arg.clone()),
@@ -106,6 +129,7 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             resources: Some(resources.clone()),
             releases: Some(releases.clone()),
             arrays: Some(arrays.iter().map(encode_arrow).collect()),
+            data: data.as_ref().map(|dv| Box::new(encode_dv(dv))),
         })),
         Msg::CallReturn { result } => g::Message::CallReturn(Box::new(g::CallReturn {
             result: Some(result.clone()),
@@ -120,6 +144,9 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
                 array: Some(Box::new(encode_arrow(array))),
             }))
         }
+        Msg::CallReturnData { value } => g::Message::CallReturnData(Box::new(g::CallReturnData {
+            value: Some(Box::new(encode_dv(value))),
+        })),
         Msg::MakeString { value } => g::Message::MakeString(Box::new(g::MakeString {
             value: Some(value.clone()),
         })),
@@ -201,6 +228,78 @@ fn decode_arrow(a: g::ArrowArrayRef<'_>) -> Result<ArrowArray, planus::Error> {
     })
 }
 
+/// Owned [`DataValue`] -> the generated `DataValueBox` (recursive).
+fn encode_dv(dv: &DataValue) -> g::DataValueBox {
+    use g::DataValueKind as K;
+    let kind = match dv {
+        DataValue::Null => K::DvNull(Box::new(g::DvNull {})),
+        DataValue::Bool(b) => K::DvBool(Box::new(g::DvBool { v: *b })),
+        DataValue::Int(i) => K::DvInt(Box::new(g::DvInt { v: *i })),
+        DataValue::BigInt(s) => K::DvBigInt(Box::new(g::DvBigInt { v: Some(s.clone()) })),
+        DataValue::Float(f) => K::DvFloat(Box::new(g::DvFloat { v: *f })),
+        DataValue::Decimal(s) => K::DvDecimal(Box::new(g::DvDecimal { v: Some(s.clone()) })),
+        DataValue::Str(s) => K::DvStr(Box::new(g::DvStr { v: Some(s.clone()) })),
+        DataValue::Bytes(b) => K::DvBytes(Box::new(g::DvBytes { v: Some(b.clone()) })),
+        DataValue::List(items) => K::DvList(Box::new(g::DvList {
+            items: Some(items.iter().map(encode_dv).collect()),
+        })),
+        DataValue::Map(entries) => K::DvMap(Box::new(g::DvMap {
+            entries: Some(
+                entries
+                    .iter()
+                    .map(|(k, v)| g::DvEntry {
+                        key: Some(k.clone()),
+                        value: Some(Box::new(encode_dv(v))),
+                    })
+                    .collect(),
+            ),
+        })),
+    };
+    g::DataValueBox { v: Some(kind) }
+}
+
+/// A decoded `DataValueBoxRef` -> owned [`DataValue`] (recursive). An absent union/field is `Null`
+/// (trusted peer, §4).
+fn decode_dv(b: g::DataValueBoxRef<'_>) -> Result<DataValue, planus::Error> {
+    use g::DataValueKindRef as K;
+    let Some(kind) = b.v()? else {
+        return Ok(DataValue::Null);
+    };
+    Ok(match kind {
+        K::DvNull(_) => DataValue::Null,
+        K::DvBool(x) => DataValue::Bool(x.v()?),
+        K::DvInt(x) => DataValue::Int(x.v()?),
+        K::DvBigInt(x) => DataValue::BigInt(x.v()?.unwrap_or_default().to_string()),
+        K::DvFloat(x) => DataValue::Float(x.v()?),
+        K::DvDecimal(x) => DataValue::Decimal(x.v()?.unwrap_or_default().to_string()),
+        K::DvStr(x) => DataValue::Str(x.v()?.unwrap_or_default().to_string()),
+        K::DvBytes(x) => DataValue::Bytes(x.v()?.unwrap_or_default().to_vec()),
+        K::DvList(x) => {
+            let mut items = Vec::new();
+            if let Some(v) = x.items()? {
+                for it in v {
+                    items.push(decode_dv(it?)?);
+                }
+            }
+            DataValue::List(items)
+        }
+        K::DvMap(x) => {
+            let mut entries = Vec::new();
+            if let Some(v) = x.entries()? {
+                for e in v {
+                    let e = e?;
+                    let value = match e.value()? {
+                        Some(b) => decode_dv(b)?,
+                        None => DataValue::Null,
+                    };
+                    entries.push((e.key()?.unwrap_or_default().to_string(), value));
+                }
+            }
+            DataValue::Map(entries)
+        }
+    })
+}
+
 /// The planus-fallible core of [`decode_envelope`]; `Ok(None)` means the `msg` union was
 /// absent (kept separate so the accessor `?`s stay on `planus::Error`).
 fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
@@ -224,6 +323,10 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
                 }
                 arrays
             },
+            data: match c.data()? {
+                Some(b) => Some(decode_dv(b)?),
+                None => None,
+            },
         },
         g::MessageRef::CallReturn(c) => Msg::CallReturn {
             result: c.result()?.unwrap_or_default().to_string(),
@@ -239,6 +342,12 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
                     length: 0,
                     data: Vec::new(),
                 },
+            },
+        },
+        g::MessageRef::CallReturnData(c) => Msg::CallReturnData {
+            value: match c.value()? {
+                Some(b) => decode_dv(b)?,
+                None => DataValue::Null,
             },
         },
         g::MessageRef::MakeString(m) => Msg::MakeString {

@@ -21,12 +21,132 @@ issues re-entrant host-ops (:meth:`Host.make_string`, :meth:`Host.call_method`,
 :class:`ArrowArray`.
 """
 
+import decimal
 import socket
 import struct
 
 import flatbuffers
 
 from . import ext_generated as g
+
+_I64_MIN, _I64_MAX = -(2**63), 2**63 - 1
+
+
+def _encode_dv(builder, obj):
+    """Encode a native Python value as a `DataValueBox`, returning its offset. Children are built
+    first (FlatBuffers is bottom-up). None/bool/int/float/Decimal/str/bytes/list/dict are supported;
+    `dict` keys are stringified."""
+    kind_type, kind_off = _encode_dv_kind(builder, obj)
+    g.DataValueBoxStart(builder)
+    g.DataValueBoxAddVType(builder, kind_type)
+    g.DataValueBoxAddV(builder, kind_off)
+    return g.DataValueBoxEnd(builder)
+
+
+def _encode_dv_kind(b, obj):
+    K = g.DataValueKind
+    if obj is None:
+        g.DvNullStart(b)
+        return (K.DvNull, g.DvNullEnd(b))
+    if isinstance(obj, bool):  # before int — bool is a subclass of int
+        g.DvBoolStart(b)
+        g.DvBoolAddV(b, obj)
+        return (K.DvBool, g.DvBoolEnd(b))
+    if isinstance(obj, int):
+        if _I64_MIN <= obj <= _I64_MAX:
+            g.DvIntStart(b)
+            g.DvIntAddV(b, obj)
+            return (K.DvInt, g.DvIntEnd(b))
+        s = b.CreateString(str(obj))
+        g.DvBigIntStart(b)
+        g.DvBigIntAddV(b, s)
+        return (K.DvBigInt, g.DvBigIntEnd(b))
+    if isinstance(obj, float):
+        g.DvFloatStart(b)
+        g.DvFloatAddV(b, obj)
+        return (K.DvFloat, g.DvFloatEnd(b))
+    if isinstance(obj, decimal.Decimal):
+        s = b.CreateString(str(obj))
+        g.DvDecimalStart(b)
+        g.DvDecimalAddV(b, s)
+        return (K.DvDecimal, g.DvDecimalEnd(b))
+    if isinstance(obj, str):
+        s = b.CreateString(obj)
+        g.DvStrStart(b)
+        g.DvStrAddV(b, s)
+        return (K.DvStr, g.DvStrEnd(b))
+    if isinstance(obj, (bytes, bytearray)):
+        v = b.CreateByteVector(bytes(obj))
+        g.DvBytesStart(b)
+        g.DvBytesAddV(b, v)
+        return (K.DvBytes, g.DvBytesEnd(b))
+    if isinstance(obj, (list, tuple)):
+        offs = [_encode_dv(b, it) for it in obj]
+        g.DvListStartItemsVector(b, len(offs))
+        for o in reversed(offs):
+            b.PrependUOffsetTRelative(o)
+        items = b.EndVector()
+        g.DvListStart(b)
+        g.DvListAddItems(b, items)
+        return (K.DvList, g.DvListEnd(b))
+    if isinstance(obj, dict):
+        entry_offs = []
+        for key, val in obj.items():
+            value_off = _encode_dv(b, val)  # build the value box first
+            key_off = b.CreateString(str(key))
+            g.DvEntryStart(b)
+            g.DvEntryAddKey(b, key_off)
+            g.DvEntryAddValue(b, value_off)
+            entry_offs.append(g.DvEntryEnd(b))
+        g.DvMapStartEntriesVector(b, len(entry_offs))
+        for o in reversed(entry_offs):
+            b.PrependUOffsetTRelative(o)
+        entries = b.EndVector()
+        g.DvMapStart(b)
+        g.DvMapAddEntries(b, entries)
+        return (K.DvMap, g.DvMapEnd(b))
+    raise TypeError(f"cannot serialize {type(obj).__name__} as a structured value")
+
+
+def _decode_dv(box):
+    """Decode a `DataValueBox` reader into a native Python value."""
+    K = g.DataValueKind
+    t = box.VType()
+    if t in (K.NONE, K.DvNull):
+        return None
+    tbl = box.V()
+
+    def as_table(cls):
+        x = cls()
+        x.Init(tbl.Bytes, tbl.Pos)
+        return x
+
+    if t == K.DvBool:
+        return as_table(g.DvBool).V()
+    if t == K.DvInt:
+        return as_table(g.DvInt).V()
+    if t == K.DvBigInt:
+        return int(_text(as_table(g.DvBigInt).V()))
+    if t == K.DvFloat:
+        return as_table(g.DvFloat).V()
+    if t == K.DvDecimal:
+        return decimal.Decimal(_text(as_table(g.DvDecimal).V()))
+    if t == K.DvStr:
+        return _text(as_table(g.DvStr).V())
+    if t == K.DvBytes:
+        x = as_table(g.DvBytes)
+        return bytes(x.V(i) for i in range(x.VLength()))
+    if t == K.DvList:
+        x = as_table(g.DvList)
+        return [_decode_dv(x.Items(i)) for i in range(x.ItemsLength())]
+    if t == K.DvMap:
+        x = as_table(g.DvMap)
+        out = {}
+        for i in range(x.EntriesLength()):
+            e = x.Entries(i)
+            out[_text(e.Key())] = _decode_dv(e.Value())
+        return out
+    raise ValueError(f"extension: unknown DataValue kind {t}")
 
 __all__ = ["serve", "read_frame", "write_frame", "Host", "Resource", "ArrowArray"]
 
@@ -236,12 +356,23 @@ def _encode_call_return_array(array):
     return _envelope(b, g.Message.CallReturnArray, g.CallReturnArrayEnd(b))
 
 
+def _encode_call_return_data(obj):
+    b = flatbuffers.Builder(64)
+    box = _encode_dv(b, obj)
+    g.CallReturnDataStart(b)
+    g.CallReturnDataAddValue(b, box)
+    return _envelope(b, g.Message.CallReturnData, g.CallReturnDataEnd(b))
+
+
 def _encode_reply(reply):
     if isinstance(reply, Resource):
         return _encode_call_return_resource(reply.id)
     if isinstance(reply, ArrowArray):
         return _encode_call_return_array(reply)
-    return _encode_call_return("" if reply is None else str(reply))
+    if isinstance(reply, str):
+        return _encode_call_return(reply)
+    # Anything else (None / bool / int / float / Decimal / bytes / list / dict) is a structured value.
+    return _encode_call_return_data(reply)
 
 
 # decoders -----------------------------------------------------------------------------------
@@ -266,7 +397,9 @@ def _decode_call(buf):
         a = call.Arrays(j)
         data = bytes(a.Data(k) for k in range(a.DataLength()))
         arrays.append(ArrowArray(a.Dtype(), data))
-    return (_text(call.Op()), _text(call.Arg()), handles, resources, releases, arrays)
+    box = call.Data()
+    data = _decode_dv(box) if box is not None else None
+    return (_text(call.Op()), _text(call.Arg()), handles, resources, releases, arrays, data)
 
 
 def _decode_host_op_return(buf):
@@ -294,12 +427,13 @@ class Host:
     issues re-entrant host-ops over the connection (each a synchronous round-trip the host
     services while parked on the reply). Mirrors the Rust `Host`."""
 
-    def __init__(self, conn, handles, resources, releases, arrays):
+    def __init__(self, conn, handles, resources, releases, arrays, data):
         self._conn = conn
         self._handles = handles
         self._resources = resources
         self._releases = releases
         self._arrays = arrays
+        self._data = data
 
     # --- the call's arguments ---
     def handles(self):
@@ -313,6 +447,11 @@ class Host:
 
     def arrays(self):
         return self._arrays
+
+    def data(self):
+        """The structured-value payload passed via `call:with:data:`, as a native Python value
+        (dict/list/str/int/float/bool/None/bytes), or `None` if absent."""
+        return self._data
 
     # --- re-entrant host-ops ---
     def make_string(self, value):
@@ -359,8 +498,10 @@ class Host:
 
 def serve(path, handler):
     """Bind a unix socket at ``path``, accept one host connection, and serve calls until the host
-    disconnects. Each ``Call`` invokes ``handler(host, op, arg)``; its return value — a ``str``
-    (scalar), a :class:`Resource`, or an :class:`ArrowArray` — is sent back as the call's result.
+    disconnects. Each ``Call`` invokes ``handler(host, op, arg)``; its return value is sent back as
+    the call's result: a ``str`` -> scalar, a :class:`Resource`, an :class:`ArrowArray`, or any other
+    value (``dict``/``list``/``int``/``float``/``bool``/``None``/``bytes``/``Decimal``) -> a
+    structured value that materializes as a nested Quoin Value.
 
     Blocking and single-connection by design: the extension is its own process and the VM holds
     exactly one connection to it. Returns once the host disconnects.
@@ -375,8 +516,8 @@ def serve(path, handler):
                 frame = read_frame(conn)
                 if frame is None:
                     break
-                op, arg, handles, resources, releases, arrays = _decode_call(frame)
-                host = Host(conn, handles, resources, releases, arrays)
+                op, arg, handles, resources, releases, arrays, data = _decode_call(frame)
+                host = Host(conn, handles, resources, releases, arrays, data)
                 write_frame(conn, _encode_reply(handler(host, op, arg)))
         finally:
             conn.close()
