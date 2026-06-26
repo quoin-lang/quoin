@@ -19,11 +19,17 @@
 //! (Slice 4 — invoke a host *block* handle over a batch of argument tuples in one round-trip;
 //! the block reaches the extension via the `block` handle on `Call`, sent by `call:with:block:`).
 //! Every frame is a FlatBuffers `Message` union (schema/codec in `quoin-ext-proto`) inside a u32
-//! length-prefixed frame. General handle-typed call args/returns, Arrow, and crash/timeout are
-//! later slices.
+//! length-prefixed frame.
+//!
+//! Slice 5a adds **crash isolation**: a call whose I/O fails because the child exited surfaces a
+//! typed `IoError` (not a hang), marks the extension dead so later calls fail fast, and `Drop`
+//! reaps the host-side fd via the shared reap queue. Per-peer handle bulk-release (§2), general
+//! handle-typed call args/returns, Arrow, and timeouts are later slices.
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::process::{Child, Command};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gc_arena::collect::Trace;
@@ -36,13 +42,37 @@ use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
 
-/// Native state behind an `Extension` value: the registered stream id for the UDS,
-/// the child process, and its socket path (for cleanup).
+/// Native state behind an `Extension` value: the registered stream id for the UDS, the child
+/// process, its socket path (for cleanup), the shared fd-reap queue, and whether the extension
+/// has been observed dead (its process exited).
 #[derive(Debug)]
 pub struct NativeExtension {
     id: StreamId,
     child: Child,
     sock_path: String,
+    /// Shared clone of `VmState::socket_reap`; `Drop` enqueues `id` so the driver closes the
+    /// host-side UDS fd (the reactor can't be touched from `Drop`). Mirrors `NativeSocket`.
+    reap: Rc<RefCell<Vec<StreamId>>>,
+    /// Set once the child has been observed exited, so further calls fail fast (crash isolation).
+    dead: bool,
+}
+
+impl NativeExtension {
+    /// If a call's I/O failed *because* the child exited, mark the extension dead and return a
+    /// short description of how it exited; otherwise `None` (the failure was something else).
+    /// `try_wait` is non-blocking, so this is cheap and only runs on the error path.
+    fn note_if_exited(&mut self) -> Option<String> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.dead = true;
+                Some(match status.code() {
+                    Some(code) => format!("exited with status {code}"),
+                    None => "terminated by signal".to_string(),
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl AnyCollect for NativeExtension {
@@ -58,13 +88,19 @@ impl AnyCollect for NativeExtension {
 
 impl Drop for NativeExtension {
     fn drop(&mut self) {
-        // Best-effort teardown: kill + reap the child, remove the socket file. The
-        // host-side stream fd is left registered until VM exit (Slice 1 leaks it; the
-        // reap-queue lifecycle is a later slice).
+        // Best-effort teardown: enqueue the host-side fd for the driver to reap, kill + reap the
+        // child, and remove the socket file.
+        self.reap.borrow_mut().push(self.id);
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.sock_path);
     }
+}
+
+/// The typed error raised when an extension's process has died (during or before a call). Surfaces
+/// to Quoin as an `IoError` of kind `#closed`, so it's catchable like any other I/O failure.
+fn extension_dead_error(detail: &str) -> QuoinError {
+    QuoinError::io_closed(format!("Extension process died ({detail})"))
 }
 
 /// A short, unique unix-socket path. `/tmp` (not `temp_dir()`) keeps it well under the
@@ -325,6 +361,39 @@ fn extension_call<'gc>(
     outcome
 }
 
+/// The shared body of `call:with:` and `call:with:block:`: fail fast if the extension is already
+/// known dead, run the call, and — if its I/O failed because the child exited — surface a typed
+/// "died" error and mark the extension dead so later calls fail fast (crash isolation).
+fn run_extension_method<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    op: String,
+    argv: String,
+    block: Option<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let (id, dead) = receiver
+        .with_native_state::<NativeExtension, _, _>(|e| (e.id, e.dead))
+        .map_err(QuoinError::Other)?;
+    if dead {
+        return Err(extension_dead_error("already exited"));
+    }
+
+    match extension_call(vm, mc, id, op, argv, block) {
+        Ok(result) => Ok(vm.new_string(mc, result)),
+        Err(e) => {
+            let exit = receiver
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.note_if_exited())
+                .ok()
+                .flatten();
+            match exit {
+                Some(detail) => Err(extension_dead_error(&detail)),
+                None => Err(e),
+            }
+        }
+    }
+}
+
 pub fn build_extension_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Extension", Some("Object"))
         // `Extension spawn: '<path-to-binary>'` -> spawn the extension subprocess and
@@ -374,6 +443,8 @@ pub fn build_extension_class() -> NativeClassBuilder {
                     id,
                     child,
                     sock_path,
+                    reap: vm.socket_reap.clone(),
+                    dead: false,
                 },
             ))
         })
@@ -381,27 +452,19 @@ pub fn build_extension_class() -> NativeClassBuilder {
         // a loop of re-entrant host-ops the extension may issue (each answered inline) until it
         // sends the terminal `CallReturn`. Op + arg are strings; the result is a string.
         .instance_method("call:with:", |vm, mc, receiver, args| {
-            let id = receiver
-                .with_native_state::<NativeExtension, _, _>(|e| e.id)
-                .map_err(QuoinError::Other)?;
             let op = arg!(args, String, 0).to_string();
             let argv = arg!(args, String, 1).to_string();
-            let result = extension_call(vm, mc, id, op, argv, None)?;
-            Ok(vm.new_string(mc, result))
+            run_extension_method(vm, mc, receiver, op, argv, None)
         })
         // `ext call: '<op>' with: '<arg>' block: { ... }` -> like `call:with:`, but also hands
         // the block to the extension as a (call-local) handle it can invoke over a batch during
         // the call (Slice 4). The block is any value; non-blocks simply won't be invocable.
         .instance_method("call:with:block:", |vm, mc, receiver, args| {
-            let id = receiver
-                .with_native_state::<NativeExtension, _, _>(|e| e.id)
-                .map_err(QuoinError::Other)?;
             let op = arg!(args, String, 0).to_string();
             let argv = arg!(args, String, 1).to_string();
             let block = *args
                 .get(2)
                 .ok_or_else(|| QuoinError::Other("call:with:block: missing block".to_string()))?;
-            let result = extension_call(vm, mc, id, op, argv, Some(block))?;
-            Ok(vm.new_string(mc, result))
+            run_extension_method(vm, mc, receiver, op, argv, Some(block))
         })
 }

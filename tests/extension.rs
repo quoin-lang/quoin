@@ -4,10 +4,13 @@
 //!   ops over the unix domain socket; the third case runs the call concurrently with an
 //!   independent task to show the calling fiber parks on the socket (via the reactor) rather
 //!   than blocking the VM.
-//! - `extension_handle_round_trip` (Slice 3a): the `ext_handles` fixture exercises the
+//! - `extension_handle_round_trip` (Slice 3a/3b/4): the `ext_handles` fixture exercises the
 //!   re-entrant host-op conversation and the handle table — the extension makes a host String
-//!   mid-call, retains its handle, and reads it back on a *later* call, proving the host keeps
-//!   the value alive (rooted by the handle) across calls.
+//!   mid-call, retains its handle and reads it back on a *later* call (proving the host keeps the
+//!   value alive across calls), drives host objects via `call_method`, and runs a host block over
+//!   a batch via `invoke_block`.
+//! - `extension_crash_isolation` (Slice 5a): the `ext_crash` fixture exits mid-call; the host must
+//!   surface a catchable error (not a hang), keep running, and fail fast on the next call.
 //!
 //! Each script decides pass/fail and prints PASS/FAIL.
 
@@ -90,4 +93,30 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_handles_test.qn", &script);
+}
+
+#[test]
+fn extension_crash_isolation() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{ext_bin}';
+
+"* a normal call works
+((e.call:'ping' with:'') == 'pong').else:{{ ok = false }};
+
+"* the extension exits mid-call: the host surfaces a catchable error (no hang), VM survives
+crashed = {{ e.call:'crash' with:'' }}.catch:{{ |ex| 'caught' }};
+(crashed == 'caught').else:{{ ok = false }};
+
+"* the extension is now dead: a follow-up call fails fast, also catchable
+again = {{ e.call:'ping' with:'' }}.catch:{{ |ex| 'dead' }};
+(again == 'dead').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_crash_test.qn", &script);
 }
