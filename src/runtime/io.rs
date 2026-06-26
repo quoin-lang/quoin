@@ -1,7 +1,7 @@
 use crate::error::QuoinError;
 use crate::io_backend::{IoRequest, IoResult};
 use crate::value::{NativeClassBuilder, ObjectPayload, OpaqueState, Value};
-use crate::vm::VmState;
+use crate::vm::{StdStream, VmState};
 use crate::{ansi_colorizer, arg};
 
 use gc_arena::{Gc, Mutation};
@@ -264,6 +264,61 @@ fn get_io_string<'gc>(
     })
 }
 
+/// Whether an `[IO]Handle` wraps stdout/stderr (the streams the color/decolor and DAP-capture
+/// rules apply to) — as opposed to a file or stdin.
+fn is_std_stream(handle: Value<'_>) -> Result<bool, QuoinError> {
+    handle
+        .with_native_state(|h: &NativeIoHandle| {
+            matches!(
+                h.wrapper,
+                NativeIoHandleWrapper::Stdout(_) | NativeIoHandleWrapper::Stderr(_)
+            )
+        })
+        .map_err(QuoinError::Other)
+}
+
+/// Write `bytes` to the handle's sink. Stdout/stderr go through `vm.write_std` (so the DAP
+/// adapter can capture them as `output` events instead of corrupting the protocol stream); a
+/// file-backed handle writes directly; stdin errors.
+fn handle_write<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    handle: Value<'gc>,
+    bytes: &[u8],
+) -> Result<(), QuoinError> {
+    enum Kind {
+        Out,
+        Err,
+        Stdin,
+        File,
+    }
+    let kind = handle
+        .with_native_state(|h: &NativeIoHandle| match &h.wrapper {
+            NativeIoHandleWrapper::Stdout(_) => Kind::Out,
+            NativeIoHandleWrapper::Stderr(_) => Kind::Err,
+            NativeIoHandleWrapper::Stdin(_) => Kind::Stdin,
+            NativeIoHandleWrapper::File(_) => Kind::File,
+        })
+        .map_err(QuoinError::Other)?;
+    match kind {
+        Kind::Out => vm
+            .write_std(StdStream::Out, bytes)
+            .map_err(|e| QuoinError::Other(e.to_string())),
+        Kind::Err => vm
+            .write_std(StdStream::Err, bytes)
+            .map_err(|e| QuoinError::Other(e.to_string())),
+        Kind::Stdin => Err(QuoinError::Other("can't write to stdin!".to_string())),
+        Kind::File => handle.with_native_state_mut(mc, |h: &mut NativeIoHandle| {
+            if let NativeIoHandleWrapper::File(f) = &mut h.wrapper {
+                f.write_all(bytes)
+                    .map_err(|e| QuoinError::Other(e.to_string()))
+            } else {
+                Ok(())
+            }
+        })?,
+    }
+}
+
 pub fn build_io_handle_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Handle", Some("Object"))
         .class_method("stdout", |vm, mc, _receiver, _args| {
@@ -299,85 +354,20 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
         .instance_method("write:", |vm, mc, _receiver, args| {
             let mut s = get_io_string(vm, mc, args[0])?;
             let active_receiver = vm.active_native_args.last().unwrap().receiver;
-
-            let is_stdout_or_stderr = active_receiver
-                .with_native_state(|h: &NativeIoHandle| match &h.wrapper {
-                    NativeIoHandleWrapper::Stdout(_) | NativeIoHandleWrapper::Stderr(_) => true,
-                    _ => false,
-                })
-                .map_err(|e| QuoinError::Other(e))?;
-
-            if is_stdout_or_stderr && !vm.options.supports_color {
+            if is_std_stream(active_receiver)? && !vm.options.supports_color {
                 s = ansi_colorizer::decolorize(&s);
             }
-
-            let bytes = s.into_bytes();
-
-            active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| match &mut h
-                .wrapper
-            {
-                NativeIoHandleWrapper::Stdout(out) => {
-                    out.write(&bytes)
-                        .map_err(|e| QuoinError::Other(e.to_string()))?;
-                    Ok(())
-                }
-                NativeIoHandleWrapper::Stderr(err) => {
-                    err.write(&bytes)
-                        .map_err(|e| QuoinError::Other(e.to_string()))?;
-                    Ok(())
-                }
-                NativeIoHandleWrapper::Stdin(_) => {
-                    Err(QuoinError::Other("can't write to stdin!".to_string()))
-                }
-                NativeIoHandleWrapper::File(f) => {
-                    f.write(&bytes)
-                        .map_err(|e| QuoinError::Other(e.to_string()))?;
-                    Ok(())
-                }
-            })??;
-
+            handle_write(vm, mc, active_receiver, s.as_bytes())?;
             Ok(vm.new_nil(mc))
         })
         .instance_method("writeln:", |vm, mc, _receiver, args| {
             let mut s = get_io_string(vm, mc, args[0])?;
             let active_receiver = vm.active_native_args.last().unwrap().receiver;
-
-            let is_stdout_or_stderr = active_receiver
-                .with_native_state(|h: &NativeIoHandle| match &h.wrapper {
-                    NativeIoHandleWrapper::Stdout(_) | NativeIoHandleWrapper::Stderr(_) => true,
-                    _ => false,
-                })
-                .map_err(|e| QuoinError::Other(e))?;
-
-            if is_stdout_or_stderr && !vm.options.supports_color {
+            if is_std_stream(active_receiver)? && !vm.options.supports_color {
                 s = ansi_colorizer::decolorize(&s);
             }
-
-            let bytes = format!("{}\n", s).into_bytes();
-
-            active_receiver.with_native_state_mut(mc, |h: &mut NativeIoHandle| match &mut h
-                .wrapper
-            {
-                NativeIoHandleWrapper::Stdout(out) => {
-                    out.write(&bytes)
-                        .map_err(|e| QuoinError::Other(e.to_string()))?;
-                    Ok(())
-                }
-                NativeIoHandleWrapper::Stderr(err) => {
-                    err.write(&bytes)
-                        .map_err(|e| QuoinError::Other(e.to_string()))?;
-                    Ok(())
-                }
-                NativeIoHandleWrapper::Stdin(_) => {
-                    Err(QuoinError::Other("can't write to stdin!".to_string()))
-                }
-                NativeIoHandleWrapper::File(f) => {
-                    f.write(&bytes)
-                        .map_err(|e| QuoinError::Other(e.to_string()))?;
-                    Ok(())
-                }
-            })??;
-
+            s.push('\n');
+            handle_write(vm, mc, active_receiver, s.as_bytes())?;
             Ok(vm.new_nil(mc))
         })
         .instance_method("==:", |vm, mc, receiver, args| {
@@ -499,5 +489,50 @@ mod tests {
             .unwrap();
         std::fs::remove_file(&path).ok();
         assert_eq!(contents, "helloline\n");
+    }
+
+    // With `capture_output` armed (the DAP mode), stdout/stderr `[IO]Handle` writes buffer into
+    // `program_output` (tagged by stream) instead of hitting the real fds, and drain cleanly.
+    #[test]
+    fn test_handle_capture_routes_std_writes_to_buffer() {
+        use crate::vm::StdStream;
+
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, VmOptions::default());
+            vm.register_native_class(mc, object::build_object_class());
+            vm.register_native_class(mc, class::build_class_class());
+            vm.register_native_class(mc, string::build_string_class());
+            vm.register_native_class(mc, build_io_handle_class());
+            vm
+        });
+
+        arena.mutate_root(|mc, vm| {
+            vm.capture_output = true;
+            let out_handle =
+                new_native_io_handle_with_wrapper(vm, mc, NativeIoHandleWrapper::Stdout(stdout()));
+            let err_handle =
+                new_native_io_handle_with_wrapper(vm, mc, NativeIoHandleWrapper::Stderr(stderr()));
+
+            let hello = vm.new_string(mc, "hello".to_string());
+            vm.call_method(mc, out_handle, "write:", vec![hello])
+                .unwrap();
+            let line = vm.new_string(mc, "line".to_string());
+            vm.call_method(mc, out_handle, "writeln:", vec![line])
+                .unwrap();
+            let warn = vm.new_string(mc, "warn".to_string());
+            vm.call_method(mc, err_handle, "write:", vec![warn])
+                .unwrap();
+
+            let chunks = vm.take_program_output();
+            assert_eq!(chunks.len(), 3);
+            assert_eq!(chunks[0].stream, StdStream::Out);
+            assert_eq!(chunks[0].bytes, b"hello".to_vec());
+            assert_eq!(chunks[1].stream, StdStream::Out);
+            assert_eq!(chunks[1].bytes, b"line\n".to_vec());
+            assert_eq!(chunks[2].stream, StdStream::Err);
+            assert_eq!(chunks[2].bytes, b"warn".to_vec());
+            // Draining empties the buffer.
+            assert!(vm.take_program_output().is_empty());
+        });
     }
 }

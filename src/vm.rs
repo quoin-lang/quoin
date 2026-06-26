@@ -110,6 +110,22 @@ pub struct VmOptions {
 // `use crate::vm::{Task, Wake, ...}` are unaffected by the move.
 pub use crate::vm_scheduler::{GatherState, Scheduler, Task, TaskId, Wake};
 
+/// Which standard stream a write targets. Lets the output sink tag captured output with the
+/// matching DAP `output`-event category and route it instead of touching fd 1/2.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StdStream {
+    Out,
+    Err,
+}
+
+/// A captured chunk of program output, buffered when `VmState.capture_output` is on and later
+/// drained (by the DAP driver) into `output` events. Plain `'static` data — no `Gc`.
+#[derive(Debug)]
+pub struct OutputChunk {
+    pub stream: StdStream,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct VmState<'gc> {
@@ -134,6 +150,13 @@ pub struct VmState<'gc> {
     /// every send.
     pub last_send_args: Vec<Value<'gc>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
+    /// When on (the DAP adapter sets it), `write_std` captures `[IO]Handle` stdout/stderr writes
+    /// into `program_output` instead of fd 1/2 — so the debuggee's output becomes DAP `output`
+    /// events rather than corrupting the protocol stream. Off by default (writes go to the real
+    /// fds, exactly as before).
+    pub capture_output: bool,
+    #[collect(require_static)]
+    pub program_output: Vec<OutputChunk>,
     /// Declared exception types of each enclosing `catch:` whose protected block is currently
     /// running (one `Vec` per active catch; `"Object"` marks a catch-all handler). The debugger's
     /// break-on-uncaught searches this at a throw to decide whether the value will be caught.
@@ -272,6 +295,8 @@ impl<'gc> VmState<'gc> {
             active_exception: None,
             last_send_args: Vec::new(),
             active_native_args: Vec::new(),
+            capture_output: false,
+            program_output: Vec::new(),
             handler_stack: Vec::new(),
             reraised: false,
             last_popped_env: None,
@@ -301,6 +326,32 @@ impl<'gc> VmState<'gc> {
             debug: None,
             coverage: None,
         }
+    }
+
+    /// Write `bytes` to a standard stream, honoring the output-capture redirect: when
+    /// `capture_output` is on (set by the DAP adapter), buffer the chunk for the driver to emit
+    /// as an `output` event; otherwise write straight to the real fd. The single chokepoint for
+    /// `[IO]Handle`'s stdout/stderr writes (see `src/runtime/io.rs`).
+    pub fn write_std(&mut self, stream: StdStream, bytes: &[u8]) -> std::io::Result<()> {
+        if self.capture_output {
+            self.program_output.push(OutputChunk {
+                stream,
+                bytes: bytes.to_vec(),
+            });
+            Ok(())
+        } else {
+            use std::io::Write;
+            match stream {
+                StdStream::Out => std::io::stdout().write_all(bytes),
+                StdStream::Err => std::io::stderr().write_all(bytes),
+            }
+        }
+    }
+
+    /// Drain the captured program output (the DAP driver calls this between resumes to emit
+    /// `output` events). Empty when nothing was captured.
+    pub fn take_program_output(&mut self) -> Vec<OutputChunk> {
+        std::mem::take(&mut self.program_output)
     }
 
     pub fn new_object(

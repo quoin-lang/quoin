@@ -374,15 +374,13 @@ impl<'gc> VmState<'gc> {
             .collect()
     }
 
-    /// The variables in scope at frame `idx`, each as `(name, rendered_value)`: the frame's
-    /// own locals, then `self`, then `self`'s instance variables (`@x`). Values are rendered
-    /// structurally via the pretty-printer — no `Value` method is invoked, so this never runs
-    /// user code or re-enters the suspended VM. For `$locals`.
-    pub(crate) fn debug_locals(&self, idx: usize) -> Vec<(String, String)> {
+    /// The variables in scope at frame `idx` as `(name, Value)`: the frame's own locals, then
+    /// `self`, then `self`'s instance variables (`@x`), in declaration order. The (name, Value)
+    /// source for both `debug_locals` (which renders them) and the DAP `variables` request.
+    pub(crate) fn debug_frame_variables(&self, idx: usize) -> Vec<(String, Value<'gc>)> {
         let Some(frame) = self.frames.get(idx) else {
             return Vec::new();
         };
-        // Collect (name, value) under the borrows, then render after dropping them.
         let mut pairs: Vec<(String, Value<'gc>)> = Vec::new();
         {
             let env = frame.env.borrow();
@@ -408,8 +406,15 @@ impl<'gc> VmState<'gc> {
                 }
             }
         }
-        let width = self.options.console_width.map(|w| w as usize).unwrap_or(80);
         pairs
+    }
+
+    /// The variables in scope at frame `idx`, each as `(name, rendered_value)`. Values are
+    /// rendered structurally via the pretty-printer — no `Value` method is invoked, so this never
+    /// runs user code or re-enters the suspended VM. For `$locals`.
+    pub(crate) fn debug_locals(&self, idx: usize) -> Vec<(String, String)> {
+        let width = self.options.console_width.map(|w| w as usize).unwrap_or(80);
+        self.debug_frame_variables(idx)
             .into_iter()
             .map(|(name, val)| (name, pretty::render(val, width, false)))
             .collect()

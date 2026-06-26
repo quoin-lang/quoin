@@ -930,7 +930,430 @@ fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
 /// finish the unit's result is on the VM stack (pushed by `complete_current_task`); a runtime
 /// error is returned (already source-annotated by `step`). Shared by the file runner, the
 /// REPL, `-e`, and `~/.quoinrc` so every top-level run gets async I/O, sleep, tasks, fibers.
+/// Outcome of servicing a debug pause: resume the paused task, or stop the session.
+enum DebugFlow {
+    Resume,
+    Quit,
+}
+
+/// The frontend the driver consults at debug touchpoints — the interactive CLI (`CliFrontend`)
+/// or the DAP adapter. One scheduler loop ([`drive_with_frontend`]) serves both; a non-debug run
+/// uses `CliFrontend` and simply never pauses.
+trait DriverFrontend {
+    /// Run once before the task starts. Return `false` to abort without running. (DAP: the
+    /// `initialize`/`setBreakpoints`/`configurationDone` handshake; CLI: nothing.)
+    fn configure(&mut self, _arena: &mut ReplArena) -> Result<bool, QuoinError> {
+        Ok(true)
+    }
+    /// Called after each step to surface program output captured since the last call (DAP:
+    /// `output` events). No-op when not capturing.
+    fn on_output(&mut self, _arena: &mut ReplArena) -> Result<(), QuoinError> {
+        Ok(())
+    }
+    /// A `DebugPaused`: service the frontend until the user resumes or quits.
+    fn on_pause(&mut self, arena: &mut ReplArena) -> Result<DebugFlow, QuoinError>;
+    /// The task finished (`err` = `None`) or escaped with an uncaught error.
+    fn on_finished(
+        &mut self,
+        _arena: &mut ReplArena,
+        _err: Option<&QuoinError>,
+    ) -> Result<(), QuoinError> {
+        Ok(())
+    }
+}
+
+/// The interactive `$`-command frontend (`qn debug`), and the default for every non-debug run
+/// (where it never pauses). The rustyline editor is built lazily on the first pause.
+#[derive(Default)]
+struct CliFrontend {
+    editor: Option<crate::debug_cli::DebugFrontend>,
+}
+
+impl DriverFrontend for CliFrontend {
+    fn on_pause(&mut self, arena: &mut ReplArena) -> Result<DebugFlow, QuoinError> {
+        // The whole VM is stopped. Run the `$`-command loop: read each line with the editor
+        // (outside the arena, so history persists), then execute it against the live paused VM
+        // inside `mutate_root`. Loop until a continue/step verb (`Resume`) or `$quit`.
+        use crate::debug_cli::{CommandOutcome, DebugFrontend, announce_pause, exec_command};
+        use rustyline::error::ReadlineError;
+        if self.editor.is_none() {
+            self.editor = DebugFrontend::new();
+        }
+        let Some(editor) = self.editor.as_mut() else {
+            // No usable editor — degrade to "continue" so the run still completes.
+            arena.mutate_root(|_mc, vm| vm.apply_debug_action(crate::debug::DebugAction::Continue));
+            return Ok(DebugFlow::Resume);
+        };
+        arena.mutate_root(|_mc, vm| announce_pause(vm));
+        loop {
+            let line = match editor.readline() {
+                Ok(l) => l,
+                Err(ReadlineError::Interrupted) => continue, // Ctrl-C: re-prompt
+                Err(ReadlineError::Eof) => "$quit".to_string(), // Ctrl-D: quit
+                Err(e) => {
+                    eprintln!("debug: input error: {e}");
+                    "$quit".to_string()
+                }
+            };
+            match arena.mutate_root(|mc, vm| exec_command(vm, mc, &line)) {
+                CommandOutcome::Stay => continue,
+                CommandOutcome::Resume => return Ok(DebugFlow::Resume),
+                CommandOutcome::Quit => return Ok(DebugFlow::Quit),
+            }
+        }
+    }
+}
+
+/// Map a DAP wire I/O error into the driver's error type.
+fn dap_io(e: std::io::Error) -> QuoinError {
+    QuoinError::Other(format!("DAP I/O: {e}"))
+}
+
+/// Best-effort `stopped` reason from the paused debug state.
+fn dap_stop_reason(vm: &VmState<'_>) -> &'static str {
+    let Some(d) = vm.debug.as_ref() else {
+        return "pause";
+    };
+    if d.at_throw {
+        return "exception";
+    }
+    if let Some((file, line)) = vm.debug_current_pos()
+        && d.breakpoints
+            .get(&file)
+            .is_some_and(|ls| ls.contains(&line))
+    {
+        return "breakpoint";
+    }
+    if d.step.is_some() {
+        return "step";
+    }
+    "entry"
+}
+
+/// Apply a `setBreakpoints` request to the debug state and build its response body. Breakpoints
+/// match by line at the step hook (no PC index), so every requested line is reported `verified`.
+/// DAP gives the full set for a source per call, so existing lines for that file are replaced.
+fn dap_set_breakpoints(arena: &mut ReplArena, args: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    let path = args
+        .get("source")
+        .and_then(|s| s.get("path"))
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    let lines: Vec<usize> = args
+        .get("breakpoints")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|bp| bp.get("line").and_then(|l| l.as_u64()).map(|l| l as usize))
+                .collect()
+        })
+        .unwrap_or_default();
+    arena.mutate_root(|_mc, vm| {
+        if let Some(d) = vm.debug.as_mut() {
+            let set = d.breakpoints.entry(path.clone()).or_default();
+            set.clear();
+            set.extend(lines.iter().copied());
+        }
+    });
+    json!({
+        "breakpoints": lines.iter().map(|&l| json!({ "verified": true, "line": l })).collect::<Vec<_>>(),
+    })
+}
+
+/// One synthetic DAP thread — the VM is "pause the world", so there is exactly one.
+fn dap_threads() -> serde_json::Value {
+    serde_json::json!({ "threads": [{ "id": 1, "name": "main" }] })
+}
+
+/// The DAP `stackFrames` for the paused VM, innermost frame first. A frame's `id` is its stack
+/// index, which `scopes`/`evaluate` use to target it.
+fn dap_stack_frames(vm: &VmState<'_>) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    (0..vm.frames.len())
+        .rev()
+        .map(|i| match vm.debug_frame_location(i) {
+            Some((file, line, label)) => json!({
+                "id": i,
+                "name": label,
+                "line": line,
+                "column": 1,
+                "source": { "path": file, "name": file },
+            }),
+            None => json!({ "id": i, "name": "<no source>", "line": 0, "column": 0 }),
+        })
+        .collect()
+}
+
+/// The DAP adapter frontend: translates the driver's debug touchpoints to/from the Debug Adapter
+/// Protocol over its [`Connection`](crate::dap::Connection). `configure` runs the handshake +
+/// breakpoint setup through `configurationDone`; `on_output` flushes program output as `output`
+/// events; `on_pause` emits `stopped` and services requests until the client resumes/disconnects.
+/// Generic over the streams so tests can drive it over in-memory buffers.
+struct DapFrontend<R: std::io::BufRead, W: std::io::Write> {
+    conn: crate::dap::Connection<R, W>,
+    /// Per-pause `variablesReference` table: handle (1-based) -> the frame whose `Locals` scope it
+    /// expands. Cleared at each pause (a DAP handle is valid only for the current stop).
+    handles: Vec<usize>,
+}
+
+impl<R: std::io::BufRead, W: std::io::Write> DapFrontend<R, W> {
+    fn new(conn: crate::dap::Connection<R, W>) -> Self {
+        Self {
+            conn,
+            handles: Vec::new(),
+        }
+    }
+}
+
+impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W> {
+    fn configure(&mut self, arena: &mut ReplArena) -> Result<bool, QuoinError> {
+        use serde_json::json;
+        loop {
+            let Some(req) = self.conn.read_request().map_err(dap_io)? else {
+                return Ok(false); // client disconnected before running
+            };
+            match req.command.as_str() {
+                "initialize" => {
+                    self.conn
+                        .ok(
+                            &req,
+                            Some(json!({ "supportsConfigurationDoneRequest": true })),
+                        )
+                        .map_err(dap_io)?;
+                    self.conn.event("initialized", None).map_err(dap_io)?;
+                }
+                "launch" => {
+                    let stop_on_entry = req
+                        .arguments
+                        .get("stopOnEntry")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if stop_on_entry {
+                        arena.mutate_root(|_mc, vm| {
+                            if let Some(d) = vm.debug.as_mut() {
+                                d.step = Some(crate::debug::StepMode::Into);
+                            }
+                        });
+                    }
+                    self.conn.ok(&req, None).map_err(dap_io)?;
+                }
+                "setBreakpoints" => {
+                    let body = dap_set_breakpoints(arena, &req.arguments);
+                    self.conn.ok(&req, Some(body)).map_err(dap_io)?;
+                }
+                "setExceptionBreakpoints" => {
+                    self.conn.ok(&req, None).map_err(dap_io)?;
+                }
+                "threads" => {
+                    self.conn.ok(&req, Some(dap_threads())).map_err(dap_io)?;
+                }
+                "configurationDone" => {
+                    self.conn.ok(&req, None).map_err(dap_io)?;
+                    return Ok(true); // begin running
+                }
+                "disconnect" | "terminate" => {
+                    self.conn.ok(&req, None).map_err(dap_io)?;
+                    return Ok(false);
+                }
+                other => {
+                    self.conn
+                        .fail(&req, format!("unsupported request: {other}"))
+                        .map_err(dap_io)?;
+                }
+            }
+        }
+    }
+
+    fn on_output(&mut self, arena: &mut ReplArena) -> Result<(), QuoinError> {
+        use serde_json::json;
+        let chunks = arena.mutate_root(|_mc, vm| vm.take_program_output());
+        for chunk in chunks {
+            let category = match chunk.stream {
+                crate::vm::StdStream::Out => "stdout",
+                crate::vm::StdStream::Err => "stderr",
+            };
+            let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
+            self.conn
+                .event(
+                    "output",
+                    Some(json!({ "category": category, "output": text })),
+                )
+                .map_err(dap_io)?;
+        }
+        Ok(())
+    }
+
+    fn on_pause(&mut self, arena: &mut ReplArena) -> Result<DebugFlow, QuoinError> {
+        use serde_json::json;
+        self.handles.clear(); // variablesReference handles are valid only for this stop
+        self.on_output(arena)?; // flush output before the stop, so console ordering is right
+        let reason = arena.mutate_root(|_mc, vm| dap_stop_reason(vm));
+        self.conn
+            .event(
+                "stopped",
+                Some(json!({ "reason": reason, "threadId": 1, "allThreadsStopped": true })),
+            )
+            .map_err(dap_io)?;
+        loop {
+            let Some(req) = self.conn.read_request().map_err(dap_io)? else {
+                return Ok(DebugFlow::Quit);
+            };
+            let action = match req.command.as_str() {
+                "continue" => Some(crate::debug::DebugAction::Continue),
+                "next" => Some(crate::debug::DebugAction::StepOver),
+                "stepIn" => Some(crate::debug::DebugAction::StepInto),
+                "stepOut" => Some(crate::debug::DebugAction::StepOut),
+                _ => None,
+            };
+            if let Some(act) = action {
+                arena.mutate_root(|_mc, vm| vm.apply_debug_action(act));
+                let body =
+                    (req.command == "continue").then(|| json!({ "allThreadsContinued": true }));
+                self.conn.ok(&req, body).map_err(dap_io)?;
+                return Ok(DebugFlow::Resume);
+            }
+            match req.command.as_str() {
+                "threads" => self.conn.ok(&req, Some(dap_threads())).map_err(dap_io)?,
+                "stackTrace" => {
+                    let frames = arena.mutate_root(|_mc, vm| dap_stack_frames(vm));
+                    let total = frames.len();
+                    self.conn
+                        .ok(
+                            &req,
+                            Some(json!({ "stackFrames": frames, "totalFrames": total })),
+                        )
+                        .map_err(dap_io)?;
+                }
+                "scopes" => {
+                    let frame = req
+                        .arguments
+                        .get("frameId")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    self.handles.push(frame);
+                    let var_ref = self.handles.len(); // 1-based handle
+                    self.conn
+                        .ok(
+                            &req,
+                            Some(json!({
+                                "scopes": [{
+                                    "name": "Locals",
+                                    "variablesReference": var_ref,
+                                    "expensive": false,
+                                }]
+                            })),
+                        )
+                        .map_err(dap_io)?;
+                }
+                "variables" => {
+                    let var_ref = req
+                        .arguments
+                        .get("variablesReference")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let vars = match self.handles.get(var_ref.wrapping_sub(1)).copied() {
+                        Some(frame) => arena.mutate_root(|_mc, vm| {
+                            vm.debug_frame_variables(frame)
+                                .into_iter()
+                                .map(|(name, val)| {
+                                    json!({
+                                        "name": name,
+                                        "value": vm.debug_render(val),
+                                        "variablesReference": 0,
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                        None => Vec::new(),
+                    };
+                    self.conn
+                        .ok(&req, Some(json!({ "variables": vars })))
+                        .map_err(dap_io)?;
+                }
+                "evaluate" => {
+                    let expr = req
+                        .arguments
+                        .get("expression")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let frame = req
+                        .arguments
+                        .get("frameId")
+                        .and_then(|v| v.as_u64())
+                        .map(|f| f as usize);
+                    let result = arena.mutate_root(|mc, vm| {
+                        let idx = frame.unwrap_or_else(|| vm.frames.len().saturating_sub(1));
+                        let self_val = vm.frames.get(idx).and_then(|f| f.receiver);
+                        let bindings = vm.debug_frame_bindings(idx);
+                        vm.debug_eval(mc, &expr, self_val, &bindings)
+                            .map(|v| vm.debug_render(v))
+                    });
+                    match result {
+                        Ok(rendered) => self
+                            .conn
+                            .ok(
+                                &req,
+                                Some(json!({ "result": rendered, "variablesReference": 0 })),
+                            )
+                            .map_err(dap_io)?,
+                        Err(msg) => self.conn.fail(&req, msg).map_err(dap_io)?,
+                    }
+                }
+                "disconnect" | "terminate" => {
+                    self.conn.ok(&req, None).map_err(dap_io)?;
+                    return Ok(DebugFlow::Quit);
+                }
+                other => self
+                    .conn
+                    .fail(&req, format!("unsupported request while paused: {other}"))
+                    .map_err(dap_io)?,
+            }
+        }
+    }
+
+    fn on_finished(
+        &mut self,
+        arena: &mut ReplArena,
+        err: Option<&QuoinError>,
+    ) -> Result<(), QuoinError> {
+        use serde_json::json;
+        self.on_output(arena)?;
+        if let Some(e) = err {
+            self.conn
+                .event(
+                    "output",
+                    Some(json!({ "category": "stderr", "output": format!("{e}\n") })),
+                )
+                .map_err(dap_io)?;
+        }
+        self.conn.event("terminated", None).map_err(dap_io)?;
+        self.conn
+            .event(
+                "exited",
+                Some(json!({ "exitCode": i32::from(err.is_some()) })),
+            )
+            .map_err(dap_io)?;
+        Ok(())
+    }
+}
+
+/// The interactive/normal driver: a [`CliFrontend`] over the shared scheduler loop. Used by
+/// `qn debug`, plain `qn <file>`, the REPL, and the debug fixtures.
 fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
+    drive_with_frontend(arena, &mut CliFrontend::default())
+}
+
+/// The cooperative scheduler loop, parameterized by a [`DriverFrontend`] for the debug
+/// touchpoints (configuration, program output, pause, completion). Resumes the current task,
+/// services background I/O / deadlines via the reactor, and hands a `DebugPaused` to the
+/// frontend. Shared by the CLI debugger, normal/REPL runs, and the DAP adapter.
+fn drive_with_frontend<F: DriverFrontend>(
+    arena: &mut ReplArena,
+    frontend: &mut F,
+) -> Result<(), QuoinError> {
     let backend = SmolBackend::new();
     let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
     let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
@@ -943,11 +1366,13 @@ fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
     // Task #0 starts current and already live; nothing to load on first resume.
     let mut current: Option<TaskId> = Some(TaskId(0));
     let mut needs_load = false;
-    // Interactive debugger frontend (line editor + history), built lazily on the first
-    // `DebugPaused`; `None` for every non-debug run, so it costs nothing there.
-    let mut debug_frontend: Option<crate::debug_cli::DebugFrontend> = None;
 
     block_on(async {
+        // Pre-run configuration (the DAP handshake + breakpoints; a no-op for the CLI). Abort
+        // cleanly if the frontend declines to run.
+        if !frontend.configure(arena)? {
+            return Ok(());
+        }
         let mut step_count = 0;
         loop {
             // Acquire a task to run after the previous one parked or finished: pick from
@@ -1007,6 +1432,8 @@ fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
             }
 
             let step = arena.mutate_root(|mc, vm| resume_current_task(vm, mc));
+            // Surface any program output this step produced before reacting to the step.
+            frontend.on_output(arena)?;
             match step {
                 Ok(RunStep::Yielded) => {
                     // A clean cooperative-yield boundary. Under stress, preempt: stash and
@@ -1057,47 +1484,19 @@ fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
                 Ok(RunStep::Parked) | Ok(RunStep::Done) => {
                     current = None;
                 }
-                Ok(RunStep::Finished) => break,
-                Ok(RunStep::DebugPaused) => {
-                    // The whole VM is stopped. Run the `$`-command loop: read each line with
-                    // the editor (outside the arena, so history persists), then execute it
-                    // against the live paused VM inside `mutate_root`. Loop until a continue/
-                    // step verb (`Resume`) or `$quit`. Then re-resume this same task in place —
-                    // its context is still live (it parked nothing), so no reload.
-                    use crate::debug_cli::{
-                        CommandOutcome, DebugFrontend, announce_pause, exec_command,
-                    };
-                    use rustyline::error::ReadlineError;
-                    if debug_frontend.is_none() {
-                        debug_frontend = DebugFrontend::new();
-                    }
-                    let Some(frontend) = debug_frontend.as_mut() else {
-                        // No usable editor — degrade to "continue" so the run still completes.
-                        arena.mutate_root(|_mc, vm| {
-                            vm.apply_debug_action(crate::debug::DebugAction::Continue)
-                        });
-                        continue;
-                    };
-                    arena.mutate_root(|_mc, vm| announce_pause(vm));
-                    loop {
-                        let line = match frontend.readline() {
-                            Ok(l) => l,
-                            Err(ReadlineError::Interrupted) => continue, // Ctrl-C: re-prompt
-                            Err(ReadlineError::Eof) => "$quit".to_string(), // Ctrl-D: quit
-                            Err(e) => {
-                                eprintln!("debug: input error: {e}");
-                                "$quit".to_string()
-                            }
-                        };
-                        match arena.mutate_root(|mc, vm| exec_command(vm, mc, &line)) {
-                            CommandOutcome::Stay => continue,
-                            CommandOutcome::Resume => break,
-                            CommandOutcome::Quit => return Ok(()),
-                        }
-                    }
-                    // Re-resume the same task: context is live, nothing to load.
+                Ok(RunStep::Finished) => {
+                    frontend.on_finished(arena, None)?;
+                    break;
                 }
-                Err(e) => return Err(e),
+                Ok(RunStep::DebugPaused) => match frontend.on_pause(arena)? {
+                    // Re-resume the same task: its context is live (it parked nothing).
+                    DebugFlow::Resume => {}
+                    DebugFlow::Quit => return Ok(()),
+                },
+                Err(e) => {
+                    frontend.on_finished(arena, Some(&e))?;
+                    return Err(e);
+                }
             }
             step_count += 1;
             if crate::tuning::gc_stress() || step_count % 10 == 0 {
@@ -1123,6 +1522,8 @@ pub struct VmRunnerOptions {
     pub break_on_throw: Vec<String>,
     /// Exception types from `qn debug --break-on-uncaught=Type,…` — break only when uncaught.
     pub break_on_uncaught: Vec<String>,
+    /// `qn debug --dap`: drive the program as a DAP adapter over stdio instead of the CLI loop.
+    pub dap: bool,
     /// Quoin-level coverage output, from `--coverage[=fmt]` / `--coverage-out=PATH`
     /// (on `qn test` or `qn <file>`). `None` when coverage wasn't requested.
     pub coverage: Option<crate::coverage::CoverageConfig>,
@@ -1179,6 +1580,7 @@ impl VmRunnerOptions {
         let mut vm_args = Vec::new();
         let mut break_on_throw = Vec::new();
         let mut break_on_uncaught = Vec::new();
+        let mut dap = false;
         let mut coverage_enabled = false;
         let mut coverage_out = None;
         let mut coverage_format = crate::coverage::CoverageFormat::Lcov;
@@ -1234,6 +1636,8 @@ impl VmRunnerOptions {
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
+                    } else if a == "--dap" {
+                        dap = true;
                     } else if target_path.is_none() {
                         target_path = Some(a.clone());
                     } else {
@@ -1259,7 +1663,9 @@ impl VmRunnerOptions {
         });
 
         // Interactive modes (REPL, debugger) colorize errors/output when stdout is a terminal.
-        let supports_color = matches!(mode, VmRunnerMode::Repl | VmRunnerMode::Debug)
+        // DAP owns stdout (program output is sent as plain-text `output` events), so never there.
+        let supports_color = !dap
+            && matches!(mode, VmRunnerMode::Repl | VmRunnerMode::Debug)
             && std::io::stdout().is_terminal();
 
         Self {
@@ -1272,6 +1678,7 @@ impl VmRunnerOptions {
             },
             break_on_throw,
             break_on_uncaught,
+            dap,
             coverage,
         }
     }
@@ -1352,7 +1759,11 @@ impl VmRunner {
                     eprintln!("Usage: qn debug FILE");
                     exit(2);
                 };
-                self.run_debug(path);
+                if self.options.dap {
+                    self.run_dap(path);
+                } else {
+                    self.run_debug(path);
+                }
                 Ok(())
             }
         }
@@ -1422,6 +1833,84 @@ impl VmRunner {
         println!("Quoin debugger — $help for commands, $continue to run, $quit to exit.");
         if let Err(e) = drive_main_task(&mut arena) {
             eprintln!("VM execution error: {e}");
+        }
+    }
+
+    /// `qn debug --dap <file>`: drive the program as a DAP adapter over stdio. Mirrors
+    /// [`run_debug`] but speaks the Debug Adapter Protocol instead of the `$`-command loop — the
+    /// debuggee's output is rerouted to DAP `output` events and stdout is reserved for the protocol
+    /// stream (a stray Rust print can't corrupt it; see `src/dap.rs`).
+    fn run_dap(&self, path: &str) {
+        use crate::debug::DebugState;
+
+        // Reserve stdout for the protocol BEFORE anything can print; stray prints go to stderr.
+        let protocol = match crate::dap::redirect_protocol_stdout() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("dap: could not redirect stdout: {e}");
+                exit(1);
+            }
+        };
+        let source = match read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("dap: error reading {path}: {e}");
+                exit(1);
+            }
+        };
+        let node = match try_parse_quoin_string_named(&source, path) {
+            Ok(n) => n,
+            Err(pe) => {
+                eprintln!(
+                    "dap: parse error at {}:{}:{}: {}",
+                    path,
+                    pe.line,
+                    pe.column + 1,
+                    pe.message
+                );
+                exit(1);
+            }
+        };
+        let Some(mut arena) = self.build_repl_arena() else {
+            exit(1);
+        };
+        let installed = arena.mutate_root(|mc, vm| {
+            let NodeValue::Program(p) = &node.value else {
+                return false;
+            };
+            let sb = match Compiler::new().compile_program(p) {
+                Ok(sb) => sb,
+                Err(e) => {
+                    eprintln!("dap: compile error: {e}");
+                    return false;
+                }
+            };
+            let block = build_block(mc, &sb);
+            // Run to a breakpoint (`stopOnEntry` is honored at `launch`). Program output is
+            // captured and re-emitted as DAP `output` events rather than written to fd 1/2.
+            vm.debug = Some(DebugState {
+                // `interactive` = "bubble a pause up to the driver frontend" (here, the DAP
+                // adapter's `on_pause`) rather than auto-applying the scripted action in place.
+                interactive: true,
+                show_source: false,
+                step: None,
+                break_on_throw: self.options.break_on_throw.iter().cloned().collect(),
+                break_on_uncaught: self.options.break_on_uncaught.iter().cloned().collect(),
+                ..Default::default()
+            });
+            vm.capture_output = true;
+            vm.start_block(mc, block, Vec::new(), None, None);
+            install_main_task(mc, vm);
+            true
+        });
+        if !installed {
+            exit(1);
+        }
+        let conn = crate::dap::Connection::new(std::io::BufReader::new(std::io::stdin()), protocol);
+        let mut frontend = DapFrontend::new(conn);
+        if let Err(e) = drive_with_frontend(&mut arena, &mut frontend) {
+            // stdout is the protocol channel — log to stderr.
+            eprintln!("dap: VM error: {e}");
         }
     }
 
@@ -2030,6 +2519,152 @@ mod tests {
         script: &[DebugAction],
     ) -> Vec<(String, usize)> {
         run_debug_full(source, "fixture.qn", &[], &[], break_on_uncaught, script)
+    }
+
+    /// Drive the DAP frontend over a scripted, in-memory request stream and return the raw
+    /// protocol output (framed responses + events). Mirrors `run_debug_full`'s setup, but speaks
+    /// DAP: each request's `seq`/`type` are filled in here, in order.
+    fn run_dap_script(
+        source: &str,
+        filename: &str,
+        breakpoints: &[(&str, usize)],
+        requests: &[serde_json::Value],
+    ) -> String {
+        let mut input = Vec::new();
+        for (i, req) in requests.iter().enumerate() {
+            let mut obj = req.clone();
+            obj["seq"] = serde_json::json!(i + 1);
+            obj["type"] = serde_json::json!("request");
+            let body = serde_json::to_string(&obj).unwrap();
+            input.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+            input.extend_from_slice(body.as_bytes());
+        }
+
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, VmOptions::default());
+            register_builtins(mc, &mut vm);
+            vm
+        });
+        for ast in prelude_asts() {
+            arena.mutate_root(|mc, vm| {
+                if let NodeValue::Program(p) = &ast.value
+                    && let Ok(sb) = Compiler::new().compile_program(p)
+                {
+                    let block = build_block(mc, &sb);
+                    let _ = vm.execute_block(mc, block, Vec::new(), None);
+                }
+            });
+        }
+        let node = try_parse_quoin_string_named(source, filename).expect("fixture parses");
+        arena.mutate_root(|mc, vm| {
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a Program node");
+            };
+            let sb = Compiler::new()
+                .compile_program(p)
+                .expect("fixture compiles");
+            let block = build_block(mc, &sb);
+            let mut bps: HashMap<String, HashSet<usize>> = HashMap::new();
+            for (f, l) in breakpoints {
+                bps.entry((*f).to_string()).or_default().insert(*l);
+            }
+            vm.debug = Some(DebugState {
+                breakpoints: bps,
+                interactive: true, // bubble pauses to the DAP frontend
+                ..Default::default()
+            });
+            vm.capture_output = true;
+            vm.start_block(mc, block, Vec::new(), None, None);
+            install_main_task(mc, vm);
+        });
+
+        let conn = crate::dap::Connection::new(std::io::Cursor::new(input), Vec::new());
+        let mut frontend = DapFrontend::new(conn);
+        let _ = drive_with_frontend(&mut arena, &mut frontend);
+        String::from_utf8_lossy(&frontend.conn.into_writer()).into_owned()
+    }
+
+    /// The DAP spine round-trip: `initialize`/`launch`/`setBreakpoints`/`configurationDone` →
+    /// run → `stopped`(breakpoint) → `continue` → `terminated`.
+    #[test]
+    fn dap_spine_launch_breakpoint_continue_terminate() {
+        use serde_json::json;
+        // Breakpoint on line 2 (`n * 2`, the block body), which fires when `f` is invoked.
+        let source = "f = { |n|\n    n * 2\n};\nf.value: 21\n";
+        let out = run_dap_script(
+            source,
+            "fixture.qn",
+            &[("fixture.qn", 2)],
+            &[
+                json!({ "command": "initialize", "arguments": { "adapterID": "quoin" } }),
+                json!({ "command": "launch", "arguments": {} }),
+                json!({ "command": "setBreakpoints", "arguments": {
+                    "source": { "path": "fixture.qn" },
+                    "breakpoints": [ { "line": 2 } ],
+                }}),
+                json!({ "command": "configurationDone", "arguments": {} }),
+                json!({ "command": "continue", "arguments": { "threadId": 1 } }),
+            ],
+        );
+        // Handshake: capabilities + the `initialized` event.
+        assert!(out.contains(r#""command":"initialize""#), "{out}");
+        assert!(
+            out.contains(r#""supportsConfigurationDoneRequest":true"#),
+            "{out}"
+        );
+        assert!(out.contains(r#""event":"initialized""#), "{out}");
+        // Breakpoint hit -> stopped(breakpoint), then continue -> terminated, in that order.
+        let stopped = out
+            .find(r#""event":"stopped""#)
+            .unwrap_or_else(|| panic!("no stopped event in:\n{out}"));
+        assert!(out[stopped..].contains(r#""reason":"breakpoint""#), "{out}");
+        let terminated = out
+            .find(r#""event":"terminated""#)
+            .expect("a terminated event");
+        assert!(
+            stopped < terminated,
+            "stopped must precede terminated:\n{out}"
+        );
+    }
+
+    /// At a breakpoint inside an invoked block, `stackTrace`/`scopes`/`variables`/`evaluate`
+    /// return real frame state: the call stack, the block parameter `n`, and an expression
+    /// evaluated in that frame.
+    #[test]
+    fn dap_inspection_stack_variables_and_evaluate() {
+        use serde_json::json;
+        // Breakpoint on line 2 (`n * 2`); the innermost frame at the stop is the invoked block.
+        let source = "double = { |n|\n    n * 2\n}\nresult = double.value: 21\nresult.print\n";
+        let out = run_dap_script(
+            source,
+            "fixture.qn",
+            &[("fixture.qn", 2)],
+            &[
+                json!({ "command": "initialize", "arguments": {} }),
+                json!({ "command": "launch", "arguments": {} }),
+                json!({ "command": "setBreakpoints", "arguments": {
+                    "source": { "path": "fixture.qn" },
+                    "breakpoints": [ { "line": 2 } ],
+                }}),
+                json!({ "command": "configurationDone", "arguments": {} }),
+                json!({ "command": "stackTrace", "arguments": { "threadId": 1 } }),
+                json!({ "command": "scopes", "arguments": { "frameId": 1 } }),
+                json!({ "command": "variables", "arguments": { "variablesReference": 1 } }),
+                json!({ "command": "evaluate", "arguments": { "expression": "n * 2", "frameId": 1 } }),
+                json!({ "command": "continue", "arguments": { "threadId": 1 } }),
+            ],
+        );
+        // stackTrace: two frames, the invoked block at line 2 innermost.
+        assert!(out.contains(r#""totalFrames":2"#), "{out}");
+        assert!(out.contains(r#""line":2"#), "{out}");
+        // scopes -> a Locals scope with a handle; variables -> the block parameter n = 21.
+        assert!(out.contains(r#""name":"Locals""#), "{out}");
+        assert!(
+            out.contains(r#"{"name":"n","value":"21","variablesReference":0}"#),
+            "{out}"
+        );
+        // evaluate `n * 2` in that frame -> 42.
+        assert!(out.contains(r#""result":"42""#), "{out}");
     }
 
     #[test]
