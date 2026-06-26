@@ -15,19 +15,19 @@ pub fn symbol_name(val: Value<'_>) -> Option<String> {
 pub fn build_symbol_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Symbol", Some("Object"))
         // The plain name, without the leading `#` (e.g. `#foo.s` -> 'foo').
-        .instance_method("s", |vm, mc, receiver, _args| {
+        .sdk_instance_method("s", |host, receiver, _args| {
             let name = symbol_name(receiver)
                 .ok_or_else(|| QuoinError::Other("Symbol#s on a non-symbol".to_string()))?;
-            Ok(vm.new_string(mc, name))
+            Ok(host.new_string(name))
         })
-        .instance_method("asString", |vm, mc, receiver, _args| {
+        .sdk_instance_method("asString", |host, receiver, _args| {
             let name = symbol_name(receiver)
                 .ok_or_else(|| QuoinError::Other("Symbol#asString on a non-symbol".to_string()))?;
-            Ok(vm.new_string(mc, name))
+            Ok(host.new_string(name))
         })
-        .instance_method("asSymbol", |_vm, _mc, receiver, _args| Ok(receiver))
+        .sdk_instance_method("asSymbol", |_host, receiver, _args| Ok(receiver))
         // Symbols are interned, so equality is identity (handled by Value::eq).
-        .instance_method("==:", |vm, mc, receiver, args| {
-            Ok(vm.new_bool(mc, receiver == args[0]))
+        .sdk_instance_method("==:", |host, receiver, args| {
+            Ok(host.new_bool(receiver == args[0]))
         })
 }

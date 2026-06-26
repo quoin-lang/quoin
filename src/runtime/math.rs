@@ -29,83 +29,81 @@ fn require_positive(x: f64, who: &str) -> Result<(), QuoinError> {
 pub fn build_math_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Math", Some("Object"))
         // Constants.
-        .class_method("pi", |vm, mc, _r, _a| {
-            Ok(vm.new_double(mc, std::f64::consts::PI))
+        .sdk_class_method("pi", |host, _r, _a| {
+            Ok(host.new_double(std::f64::consts::PI))
         })
-        .class_method("e", |vm, mc, _r, _a| {
-            Ok(vm.new_double(mc, std::f64::consts::E))
-        })
-        .class_method("tau", |vm, mc, _r, _a| {
-            Ok(vm.new_double(mc, std::f64::consts::TAU))
+        .sdk_class_method("e", |host, _r, _a| Ok(host.new_double(std::f64::consts::E)))
+        .sdk_class_method("tau", |host, _r, _a| {
+            Ok(host.new_double(std::f64::consts::TAU))
         })
         // Trigonometry.
-        .class_method("sin:", |vm, mc, _r, args| {
-            Ok(vm.new_double(mc, num(&args, 0, "Math.sin:")?.sin()))
+        .sdk_class_method("sin:", |host, _r, args| {
+            Ok(host.new_double(num(&args, 0, "Math.sin:")?.sin()))
         })
-        .class_method("cos:", |vm, mc, _r, args| {
-            Ok(vm.new_double(mc, num(&args, 0, "Math.cos:")?.cos()))
+        .sdk_class_method("cos:", |host, _r, args| {
+            Ok(host.new_double(num(&args, 0, "Math.cos:")?.cos()))
         })
-        .class_method("tan:", |vm, mc, _r, args| {
-            Ok(vm.new_double(mc, num(&args, 0, "Math.tan:")?.tan()))
+        .sdk_class_method("tan:", |host, _r, args| {
+            Ok(host.new_double(num(&args, 0, "Math.tan:")?.tan()))
         })
-        .class_method("asin:", |vm, mc, _r, args| {
-            Ok(vm.new_double(mc, num(&args, 0, "Math.asin:")?.asin()))
+        .sdk_class_method("asin:", |host, _r, args| {
+            Ok(host.new_double(num(&args, 0, "Math.asin:")?.asin()))
         })
-        .class_method("acos:", |vm, mc, _r, args| {
-            Ok(vm.new_double(mc, num(&args, 0, "Math.acos:")?.acos()))
+        .sdk_class_method("acos:", |host, _r, args| {
+            Ok(host.new_double(num(&args, 0, "Math.acos:")?.acos()))
         })
-        .class_method("atan:", |vm, mc, _r, args| {
-            Ok(vm.new_double(mc, num(&args, 0, "Math.atan:")?.atan()))
+        .sdk_class_method("atan:", |host, _r, args| {
+            Ok(host.new_double(num(&args, 0, "Math.atan:")?.atan()))
         })
         // atan2(y, x): the angle of the vector (x, y), reading `Math.atan: y over: x`.
-        .class_method("atan:over:", |vm, mc, _r, args| {
+        .sdk_class_method("atan:over:", |host, _r, args| {
             let y = num(&args, 0, "Math.atan:over:")?;
             let x = num(&args, 1, "Math.atan:over:")?;
-            Ok(vm.new_double(mc, y.atan2(x)))
+            Ok(host.new_double(y.atan2(x)))
         })
         // Exponential / logarithmic. ln/log domains are guarded to x > 0.
-        .class_method("exp:", |vm, mc, _r, args| {
-            Ok(vm.new_double(mc, num(&args, 0, "Math.exp:")?.exp()))
+        .sdk_class_method("exp:", |host, _r, args| {
+            Ok(host.new_double(num(&args, 0, "Math.exp:")?.exp()))
         })
-        .class_method("ln:", |vm, mc, _r, args| {
+        .sdk_class_method("ln:", |host, _r, args| {
             let x = num(&args, 0, "Math.ln:")?;
             require_positive(x, "Math.ln:")?;
-            Ok(vm.new_double(mc, x.ln()))
+            Ok(host.new_double(x.ln()))
         })
-        .class_method("log:", |vm, mc, _r, args| {
+        .sdk_class_method("log:", |host, _r, args| {
             let x = num(&args, 0, "Math.log:")?;
             require_positive(x, "Math.log:")?;
-            Ok(vm.new_double(mc, x.log10()))
+            Ok(host.new_double(x.log10()))
         })
-        .class_method("log2:", |vm, mc, _r, args| {
+        .sdk_class_method("log2:", |host, _r, args| {
             let x = num(&args, 0, "Math.log2:")?;
             require_positive(x, "Math.log2:")?;
-            Ok(vm.new_double(mc, x.log2()))
+            Ok(host.new_double(x.log2()))
         })
-        .class_method("log:base:", |vm, mc, _r, args| {
+        .sdk_class_method("log:base:", |host, _r, args| {
             let x = num(&args, 0, "Math.log:base:")?;
             let base = num(&args, 1, "Math.log:base:")?;
             require_positive(x, "Math.log:base:")?;
-            Ok(vm.new_double(mc, x.log(base)))
+            Ok(host.new_double(x.log(base)))
         })
         // Mirrors of number-instance operations, for a free-function style.
-        .class_method("sqrt:", |vm, mc, _r, args| {
+        .sdk_class_method("sqrt:", |host, _r, args| {
             let x = num(&args, 0, "Math.sqrt:")?;
             if x < 0.0 {
                 return Err(QuoinError::ArithmeticError(
                     "Math.sqrt: of a negative number".to_string(),
                 ));
             }
-            Ok(vm.new_double(mc, x.sqrt()))
+            Ok(host.new_double(x.sqrt()))
         })
-        .class_method("pow:to:", |vm, mc, _r, args| {
+        .sdk_class_method("pow:to:", |host, _r, args| {
             let base = num(&args, 0, "Math.pow:to:")?;
             let exp = num(&args, 1, "Math.pow:to:")?;
-            Ok(vm.new_double(mc, base.powf(exp)))
+            Ok(host.new_double(base.powf(exp)))
         })
-        .class_method("hypot:over:", |vm, mc, _r, args| {
+        .sdk_class_method("hypot:over:", |host, _r, args| {
             let a = num(&args, 0, "Math.hypot:over:")?;
             let b = num(&args, 1, "Math.hypot:over:")?;
-            Ok(vm.new_double(mc, a.hypot(b)))
+            Ok(host.new_double(a.hypot(b)))
         })
 }
