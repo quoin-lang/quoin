@@ -813,29 +813,49 @@ impl Compiler {
             bytecode.push(Instruction::LoadLocal(Symbol::intern("self")));
         }
 
-        // Evaluate args
-        for expr in &args.expressions {
-            self.compile_node(expr, bytecode)?;
-        }
-
-        // Reconstruct selector string
-        let is_w_args = !args.expressions.is_empty();
-        let selector = if is_w_args {
-            let mut s = String::new();
-            for ident in &args.signature.identifiers {
-                s.push_str(&ident.name);
-                s.push(':');
-            }
-            s
-        } else {
+        // No-argument selector (unary / bang / symbol): a single component, no args.
+        if args.expressions.is_empty() {
             if args.signature.identifiers.is_empty() {
                 return Err("No identifiers found in method call selector".to_string());
             }
-            args.signature.identifiers[0].name.clone()
-        };
+            let selector = args.signature.identifiers[0].name.clone();
+            bytecode.push(Instruction::Send(Symbol::intern(&selector), 0));
+            return Ok(());
+        }
 
-        let num_args = args.expressions.len();
-        bytecode.push(Instruction::Send(Symbol::intern(&selector), num_args));
+        // Keyword send. Keywords and argument expressions are 1:1 here (the parser builds them in
+        // lockstep). A run of the *same* consecutive keyword is a variadic group: its arguments
+        // fold into one `List` and the keyword interns as `name+:`, matching a `name+:` method
+        // definition. A lone keyword stays `name:`. This is resolved entirely at compile time, so
+        // dispatch only ever sees a canonical interned selector — no runtime collapse.
+        let idents = &args.signature.identifiers;
+        debug_assert_eq!(idents.len(), args.expressions.len());
+        let mut selector = String::new();
+        let mut num_components = 0usize;
+        let mut i = 0;
+        while i < idents.len() {
+            // Extent of the run of the keyword at `i`.
+            let mut run = 1;
+            while i + run < idents.len() && idents[i + run].name == idents[i].name {
+                run += 1;
+            }
+            // Evaluate this component's argument expression(s); a run folds into one list value.
+            for j in 0..run {
+                self.compile_node(&args.expressions[i + j], bytecode)?;
+            }
+            if run > 1 {
+                bytecode.push(Instruction::NewList(run));
+            }
+            selector.push_str(&idents[i].name);
+            if run > 1 {
+                selector.push('+');
+            }
+            selector.push(':');
+            num_components += 1;
+            i += run;
+        }
+
+        bytecode.push(Instruction::Send(Symbol::intern(&selector), num_components));
         Ok(())
     }
 
@@ -1023,6 +1043,21 @@ impl Compiler {
     fn reconstruct_selector(&self, sig: &MethodSelectorNode) -> Result<String, String> {
         if sig.identifiers.is_empty() {
             return Err("No identifiers found in method selector".to_string());
+        }
+        // The wildcard-selector rule: a definition may not write the same keyword twice in a row.
+        // Consecutive repetition is the call-site idiom for a variadic component, so a literal
+        // repeat (`foo:foo:`) is almost certainly a missing `+` — reject it so call-site folding
+        // stays unambiguous. `+` is the only way to declare a repeated keyword.
+        fn base(n: &str) -> &str {
+            n.trim_end_matches(':').trim_end_matches('+')
+        }
+        for pair in sig.identifiers.windows(2) {
+            if base(&pair[0].name) == base(&pair[1].name) {
+                let kw = base(&pair[0].name);
+                return Err(format!(
+                    "selector repeats keyword '{kw}:'; declare it variadic with '{kw}+:' instead"
+                ));
+            }
         }
         let mut s = String::new();
         for ident in &sig.identifiers {

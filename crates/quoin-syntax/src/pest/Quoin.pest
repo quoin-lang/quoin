@@ -186,7 +186,8 @@ selector = {
   | selector_no_args
   | selector_symbol
 }
-selector_w_args       = { (ident ~ "+"? ~ ":")+ }
+selector_w_args       = { (ident ~ kw_var? ~ ":")+ }
+kw_var                = { "+" }
 selector_no_args_bang = { ident ~ "!" ~ !"=" }
 selector_no_args      = { ident }
 selector_symbol       = { symbol }

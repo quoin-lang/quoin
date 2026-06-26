@@ -147,4 +147,36 @@
         TSMTC_CN <-- { late -> { 9 } };
         .is:{ TSMTC_CN.new.late } equalTo:9;
     };
+
+    "* A variadic keyword component (declared `name+:`) folds a run of that keyword at
+    "* the call site into a single List argument. `gather: 1 gather: 2 gather: 3` is one
+    "* send to `gather+:` with `items == #(1 2 3)`.
+    .test:
+    variadicSelectorFoldsRunIntoList -> {
+        TSMTC_V1 <- { gather+: -> { |items| items } };
+        .is:{ TSMTC_V1.new.gather: 1 gather: 2 gather: 3 } equalTo:#( 1 2 3 );
+    };
+
+    "* The variadic run folds; a following distinct keyword stays its own argument.
+    .test:
+    variadicSelectorWithTrailingKeyword -> {
+        TSMTC_V2 <- { gather+:into: -> { |items target| #( items target ) } };
+        .is:{ TSMTC_V2.new.gather: 1 gather: 2 into: 'x' } equalTo:#( #( 1 2 ) 'x' );
+    };
+
+    "* A single keyword has nothing to fold, so it routes to the non-variadic `gather:`,
+    "* not `gather+:` — the two are distinct selectors.
+    .test:
+    singleKeywordDoesNotFoldToVariadic -> {
+        TSMTC_V3 <- { gather: -> { |x| 'single' } gather+: -> { |items| 'variadic' } };
+        .is:{ TSMTC_V3.new.gather: 99 } equalTo:'single';
+        .is:{ TSMTC_V3.new.gather: 1 gather: 2 } equalTo:'variadic';
+    };
+
+    "* A definition may not repeat a keyword literally — `+` is the only way to declare a
+    "* variadic component, so `dup:dup:` is a compile error (surfaced as a ParseError by eval).
+    .test:
+    repeatedKeywordSelectorIsACompileError -> {
+        .does:{ Runtime.eval:'Bad <- { dup:dup: -> { |a b| a } }' } throw:ParseError;
+    };
 }
