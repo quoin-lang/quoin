@@ -1,3 +1,4 @@
+pub mod array;
 pub mod async_rt;
 pub mod big_decimal;
 pub mod big_integer;
