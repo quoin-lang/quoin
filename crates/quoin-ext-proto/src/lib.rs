@@ -78,6 +78,8 @@ pub enum Msg {
     CallReturnArray { array: ArrowArray },
     /// ext -> host: the call returns a structured value (materialized as a nested Quoin Value).
     CallReturnData { value: DataValue },
+    /// ext -> host: the call returns a live host value (the host resolves the handle to its value).
+    CallReturnHandle { handle: u64 },
     /// ext -> host (re-entrant): make a host String, return a handle to it.
     MakeString { value: String },
     /// ext -> host (re-entrant): read a String-handle back into a scalar string.
@@ -99,6 +101,18 @@ pub enum Msg {
     /// host -> ext: the reply to `InvokeBlock` — one result handle per tuple, or `error`.
     InvokeBlockReturn {
         results: Vec<u64>,
+        error: Option<String>,
+    },
+    /// ext -> host (re-entrant): resolve a name in the host's globals (Phase 2 — host reach),
+    /// returning a handle to its value (`HostOpReturn`).
+    GetGlobal { name: String },
+    /// ext -> host (re-entrant): construct any host value from a `DataValue`, returning a handle.
+    MakeValue { value: DataValue },
+    /// ext -> host (re-entrant): project the value behind `handle` to a `DataValue`.
+    ReadHandle { handle: u64 },
+    /// host -> ext: the reply to `ReadHandle` — the projected value, or `error`.
+    ReadHandleReturn {
+        value: DataValue,
         error: Option<String>,
     },
     /// host -> ext: the reply to any re-entrant host-op. `handle` is set for `MakeString`,
@@ -147,6 +161,9 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
         Msg::CallReturnData { value } => g::Message::CallReturnData(Box::new(g::CallReturnData {
             value: Some(Box::new(encode_dv(value))),
         })),
+        Msg::CallReturnHandle { handle } => {
+            g::Message::CallReturnHandle(Box::new(g::CallReturnHandle { handle: *handle }))
+        }
         Msg::MakeString { value } => g::Message::MakeString(Box::new(g::MakeString {
             value: Some(value.clone()),
         })),
@@ -180,6 +197,21 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
         Msg::InvokeBlockReturn { results, error } => {
             g::Message::InvokeBlockReturn(Box::new(g::InvokeBlockReturn {
                 results: Some(results.clone()),
+                error: error.clone(),
+            }))
+        }
+        Msg::GetGlobal { name } => g::Message::GetGlobal(Box::new(g::GetGlobal {
+            name: Some(name.clone()),
+        })),
+        Msg::MakeValue { value } => g::Message::MakeValue(Box::new(g::MakeValue {
+            value: Some(Box::new(encode_dv(value))),
+        })),
+        Msg::ReadHandle { handle } => {
+            g::Message::ReadHandle(Box::new(g::ReadHandle { handle: *handle }))
+        }
+        Msg::ReadHandleReturn { value, error } => {
+            g::Message::ReadHandleReturn(Box::new(g::ReadHandleReturn {
+                value: Some(Box::new(encode_dv(value))),
                 error: error.clone(),
             }))
         }
@@ -350,6 +382,9 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
                 None => DataValue::Null,
             },
         },
+        g::MessageRef::CallReturnHandle(c) => Msg::CallReturnHandle {
+            handle: c.handle()?,
+        },
         g::MessageRef::MakeString(m) => Msg::MakeString {
             value: m.value()?.unwrap_or_default().to_string(),
         },
@@ -393,6 +428,25 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
             results: match r.results()? {
                 Some(v) => v.iter().collect(),
                 None => Vec::new(),
+            },
+            error: r.error()?.map(str::to_string),
+        },
+        g::MessageRef::GetGlobal(g_) => Msg::GetGlobal {
+            name: g_.name()?.unwrap_or_default().to_string(),
+        },
+        g::MessageRef::MakeValue(m) => Msg::MakeValue {
+            value: match m.value()? {
+                Some(b) => decode_dv(b)?,
+                None => DataValue::Null,
+            },
+        },
+        g::MessageRef::ReadHandle(r) => Msg::ReadHandle {
+            handle: r.handle()?,
+        },
+        g::MessageRef::ReadHandleReturn(r) => Msg::ReadHandleReturn {
+            value: match r.value()? {
+                Some(b) => decode_dv(b)?,
+                None => DataValue::Null,
             },
             error: r.error()?.map(str::to_string),
         },

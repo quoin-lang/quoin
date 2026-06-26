@@ -32,14 +32,19 @@ class Message(object):
     CallReturnResource = 3
     CallReturnArray = 4
     CallReturnData = 5
-    MakeString = 6
-    HandleToString = 7
-    Retain = 8
-    Release = 9
-    CallMethodOnHandle = 10
-    InvokeBlock = 11
-    InvokeBlockReturn = 12
-    HostOpReturn = 13
+    CallReturnHandle = 6
+    MakeString = 7
+    HandleToString = 8
+    Retain = 9
+    Release = 10
+    CallMethodOnHandle = 11
+    InvokeBlock = 12
+    InvokeBlockReturn = 13
+    GetGlobal = 14
+    MakeValue = 15
+    ReadHandle = 16
+    ReadHandleReturn = 17
+    HostOpReturn = 18
 
 
 class ArrowArray(object):
@@ -1462,6 +1467,202 @@ def HostOpReturnAddError(builder, error):
     builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(error), 0)
 
 def HostOpReturnEnd(builder):
+    return builder.EndObject()
+
+
+
+class GetGlobal(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = GetGlobal()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsGetGlobal(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # GetGlobal
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # GetGlobal
+    def Name(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def GetGlobalStart(builder):
+    builder.StartObject(1)
+
+def GetGlobalAddName(builder, name):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(name), 0)
+
+def GetGlobalEnd(builder):
+    return builder.EndObject()
+
+
+
+class MakeValue(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = MakeValue()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsMakeValue(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # MakeValue
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # MakeValue
+    def Value(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            x = self._tab.Indirect(o + self._tab.Pos)
+            obj = DataValueBox()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+def MakeValueStart(builder):
+    builder.StartObject(1)
+
+def MakeValueAddValue(builder, value):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(value), 0)
+
+def MakeValueEnd(builder):
+    return builder.EndObject()
+
+
+
+class ReadHandle(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = ReadHandle()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsReadHandle(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # ReadHandle
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # ReadHandle
+    def Handle(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
+def ReadHandleStart(builder):
+    builder.StartObject(1)
+
+def ReadHandleAddHandle(builder, handle):
+    builder.PrependUint64Slot(0, handle, 0)
+
+def ReadHandleEnd(builder):
+    return builder.EndObject()
+
+
+
+class ReadHandleReturn(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = ReadHandleReturn()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsReadHandleReturn(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # ReadHandleReturn
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # ReadHandleReturn
+    def Value(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            x = self._tab.Indirect(o + self._tab.Pos)
+            obj = DataValueBox()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+    # ReadHandleReturn
+    def Error(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def ReadHandleReturnStart(builder):
+    builder.StartObject(2)
+
+def ReadHandleReturnAddValue(builder, value):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(value), 0)
+
+def ReadHandleReturnAddError(builder, error):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(error), 0)
+
+def ReadHandleReturnEnd(builder):
+    return builder.EndObject()
+
+
+
+class CallReturnHandle(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = CallReturnHandle()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsCallReturnHandle(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # CallReturnHandle
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # CallReturnHandle
+    def Handle(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
+def CallReturnHandleStart(builder):
+    builder.StartObject(1)
+
+def CallReturnHandleAddHandle(builder, handle):
+    builder.PrependUint64Slot(0, handle, 0)
+
+def CallReturnHandleEnd(builder):
     return builder.EndObject()
 
 

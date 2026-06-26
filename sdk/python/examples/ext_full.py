@@ -68,6 +68,17 @@ class FullHandler:
             # a structured value built extension-side -> materializes as a Quoin Map
             return {"name": "quoin", "items": [1, 2, 3], "ok": True}
 
+        if op == "buildArray":
+            # host reach (Phase 2): reach the Array class, build an arg, call it, return live
+            array_class = host.get_global("Array")
+            list_h = host.make_value([1.0, 2.0, 3.0])
+            arr = host.call_method(array_class, "ofFloats:", [list_h])
+            return quoin_ext.ReturnHandle(arr)
+
+        if op == "inspect":
+            # host reach: read a passed value back as native structured data
+            return host.read_handle(host.handles()[0])
+
         if op == "sum":
             return str(sum(host.arrays()[0].as_floats()))
 

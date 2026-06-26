@@ -148,7 +148,15 @@ def _decode_dv(box):
         return out
     raise ValueError(f"extension: unknown DataValue kind {t}")
 
-__all__ = ["serve", "read_frame", "write_frame", "Host", "Resource", "ArrowArray"]
+__all__ = [
+    "serve",
+    "read_frame",
+    "write_frame",
+    "Host",
+    "Resource",
+    "ReturnHandle",
+    "ArrowArray",
+]
 
 
 # --------------------------------------------------------------------------------------------
@@ -161,6 +169,14 @@ class Resource:
 
     def __init__(self, id):
         self.id = id
+
+
+class ReturnHandle:
+    """A handler return marking a host-value handle (from `get_global`/`make_value`/`call_method`)
+    to return as the call's live result — the host resolves it to the value."""
+
+    def __init__(self, handle):
+        self.handle = handle
 
 
 class ArrowArray:
@@ -286,6 +302,29 @@ def _encode_handle_to_string(handle):
     return _envelope(b, g.Message.HandleToString, g.HandleToStringEnd(b))
 
 
+def _encode_get_global(name):
+    b = flatbuffers.Builder(64)
+    s = b.CreateString(name)
+    g.GetGlobalStart(b)
+    g.GetGlobalAddName(b, s)
+    return _envelope(b, g.Message.GetGlobal, g.GetGlobalEnd(b))
+
+
+def _encode_make_value(obj):
+    b = flatbuffers.Builder(64)
+    box = _encode_dv(b, obj)
+    g.MakeValueStart(b)
+    g.MakeValueAddValue(b, box)
+    return _envelope(b, g.Message.MakeValue, g.MakeValueEnd(b))
+
+
+def _encode_read_handle(handle):
+    b = flatbuffers.Builder(64)
+    g.ReadHandleStart(b)
+    g.ReadHandleAddHandle(b, handle)
+    return _envelope(b, g.Message.ReadHandle, g.ReadHandleEnd(b))
+
+
 def _encode_retain(handle):
     b = flatbuffers.Builder(64)
     g.RetainStart(b)
@@ -364,9 +403,18 @@ def _encode_call_return_data(obj):
     return _envelope(b, g.Message.CallReturnData, g.CallReturnDataEnd(b))
 
 
+def _encode_call_return_handle(handle):
+    b = flatbuffers.Builder(64)
+    g.CallReturnHandleStart(b)
+    g.CallReturnHandleAddHandle(b, handle)
+    return _envelope(b, g.Message.CallReturnHandle, g.CallReturnHandleEnd(b))
+
+
 def _encode_reply(reply):
     if isinstance(reply, Resource):
         return _encode_call_return_resource(reply.id)
+    if isinstance(reply, ReturnHandle):
+        return _encode_call_return_handle(reply.handle)
     if isinstance(reply, ArrowArray):
         return _encode_call_return_array(reply)
     if isinstance(reply, str):
@@ -480,6 +528,35 @@ class Host:
         if error is not None:
             raise RuntimeError(error)
         return results
+
+    # --- host reach (Phase 2) ---
+    def get_global(self, name):
+        """Resolve a name in the host's globals (a class is a class-valued global), returning a
+        handle to its value — e.g. `call_method(host.get_global("Array"), "ofFloats:", [list])`."""
+        handle, _ = self._host_op(_encode_get_global(name))
+        return handle
+
+    def make_value(self, obj):
+        """Construct any host value from a native Python value, returning a handle to it (for
+        building non-string method arguments). The general form of `make_string`."""
+        handle, _ = self._host_op(_encode_make_value(obj))
+        return handle
+
+    def read_handle(self, handle):
+        """Project the value behind `handle` to a native Python value — inspect any handle as data
+        (the general form of `handle_to_string`)."""
+        reply = self._round_trip(_encode_read_handle(handle))
+        env = g.Envelope.GetRootAs(reply, 0)
+        if env.MsgType() != g.Message.ReadHandleReturn:
+            raise ValueError(f"extension: expected ReadHandleReturn, got {env.MsgType()}")
+        r = g.ReadHandleReturn()
+        t = env.Msg()
+        r.Init(t.Bytes, t.Pos)
+        err = _opt_text(r.Error())
+        if err is not None:
+            raise RuntimeError(err)
+        box = r.Value()
+        return _decode_dv(box) if box is not None else None
 
     # --- internals ---
     def _round_trip(self, frame_bytes):

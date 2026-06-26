@@ -255,6 +255,14 @@ m = #{{ 'n': 42 'f': 1.5 's': 'hi' 'flag': true 'items': #( 1 2 3 ) }};
 "* a structured value built extension-side materializes as a real Quoin List
 ((e.call:'mkList' with:'') == #( 1 2 3 )).else:{{ ok = false }};
 
+"* host reach (Phase 2): the ext reaches the Array class, builds it, and returns it live
+arr = e.call:'buildArray' with:'';
+(arr.dtype == #float64).else:{{ ok = false }};
+(arr.sum == 6.0).else:{{ ok = false }};
+
+"* host reach: the ext reads a passed value back as structured data (read_handle)
+((e.call:'inspect' with:'' args:#( #{{ 'k': 7 }} )) == #{{ 'k': 7 }}).else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
@@ -360,6 +368,12 @@ r = e.call:'scale' with:'2' args:#( a );
 m = #{{ 'a': 1 'b': #( 'x' 'y' ) 'c': true }};
 ((e.call:'echoData' with:'' data:m) == m).else:{{ ok = false }};
 ((e.call:'mkRecord' with:'') == #{{ 'name': 'quoin' 'items': #( 1 2 3 ) 'ok': true }}).else:{{ ok = false }};
+
+"* host reach (Phase 2): Python reaches the Array class, builds it, returns it live; and inspects
+arr = e.call:'buildArray' with:'';
+(arr.dtype == #float64).else:{{ ok = false }};
+(arr.sum == 6.0).else:{{ ok = false }};
+((e.call:'inspect' with:'' args:#( #{{ 'k': 7 }} )) == #{{ 'k': 7 }}).else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
