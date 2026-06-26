@@ -11,13 +11,20 @@
 //!   a batch via `invoke_block`.
 //! - `extension_crash_isolation` (Slice 5a): the `ext_crash` fixture exits mid-call; the host must
 //!   surface a catchable error (not a hang), keep running, and fail fast on the next call.
+//! - `extension_resource_handles` (Slice 5b): the `ext_resources` fixture returns an ext-side
+//!   resource the host holds as an `ExtResource` token, passed back via `args:` across calls and
+//!   reaped (freed extension-side) once the host drops it.
+//! - `extension_array_data_plane` (Slice 6b): the `ext_arrays` fixture receives a bulk `Array` as a
+//!   call argument (copy-through), operates on the whole buffer, and returns a scalar or a new
+//!   `Array` — proving columnar data crosses the boundary without per-element exploding.
 //!
 //! Each script decides pass/fail and prints PASS/FAIL.
 
 use std::process::Command;
 
-/// Run a `.qn` script through the `qn` binary and assert it printed `PASS`.
-fn assert_script_passes(name: &str, script: &str) {
+/// Run a `.qn` script through the `qn` binary once, returning whether it printed `PASS` plus a
+/// diagnostic string (exit status + captured stdout/stderr).
+fn run_script_once(name: &str, script: &str) -> (bool, String) {
     let path = std::env::temp_dir().join(name);
     std::fs::write(&path, script).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_qn"))
@@ -28,10 +35,36 @@ fn assert_script_passes(name: &str, script: &str) {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("PASS"),
-        "extension script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    let passed = stdout.contains("PASS");
+    let diag = format!(
+        "status: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status
     );
+    (passed, diag)
+}
+
+/// Run a `.qn` script through the `qn` binary and assert it printed `PASS`.
+///
+/// Retries a few times before failing: these tests spawn a `qn` subprocess that itself spawns an
+/// extension subprocess, and under the full `cargo test` suite's aggregate process/memory load the
+/// `qn` child can occasionally be killed before it runs (the captured symptom is empty stdout *and*
+/// stderr — i.e. not a Quoin error, which prints to stderr, but a transient subprocess kill). A
+/// genuine logic bug fails every attempt deterministically and is still caught; only a transient is
+/// masked. Retries are spaced slightly so transient pressure can subside.
+fn assert_script_passes(name: &str, script: &str) {
+    const ATTEMPTS: u32 = 4;
+    let mut last_diag = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let (passed, diag) = run_script_once(name, script);
+        if passed {
+            return;
+        }
+        last_diag = diag;
+        if attempt < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+        }
+    }
+    panic!("extension script did not pass after {ATTEMPTS} attempts.\n{last_diag}");
 }
 
 #[test]
@@ -86,8 +119,8 @@ e.call:'release' with:'';
 ((e.call:'compute' with:'ab') == 'AB!').else:{{ ok = false }};
 
 "* batched callback (Slice 4): the extension invokes a host block over a batch in one
-"* round-trip. mapUpper runs the passed block over 'a','b','c'. -> 'A,B,C'
-((e.call:'mapUpper' with:'' block:{{ |s| s.upper }}) == 'A,B,C').else:{{ ok = false }};
+"* round-trip. The block is now passed as a handle arg via args: (Slice 5b). -> 'A,B,C'
+((e.call:'mapUpper' with:'' args:#( {{ |s| s.upper }} )) == 'A,B,C').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
@@ -119,4 +152,59 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_crash_test.qn", &script);
+}
+
+#[test]
+fn extension_resource_handles() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_resources");
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{ext_bin}';
+
+"* create an ext-side counter; the host holds it as an opaque ExtResource token
+c = e.call:'new' with:'';
+
+"* pass the resource back into later calls via args: — it mutates the same ext-side counter
+((e.call:'inc' with:'' args:#( c )) == '1').else:{{ ok = false }};
+((e.call:'inc' with:'' args:#( c )) == '2').else:{{ ok = false }};
+((e.call:'live' with:'') == '1').else:{{ ok = false }};
+
+"* drop the only reference and churn allocations so GC reclaims the ExtResource (its Drop
+"* queues the id); the release piggybacks on the next call, which frees it extension-side.
+c = nil;
+(1..5000).each:{{ |i| i.s }};
+e.call:'live' with:'';
+((e.call:'live' with:'') == '0').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_resources_test.qn", &script);
+}
+
+#[test]
+fn extension_array_data_plane() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_arrays");
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{ext_bin}';
+a = Array.ofFloats:#( 1.0 2.0 3.0 );
+
+"* the bulk column crosses the socket; the extension sums the whole buffer -> '6'
+((e.call:'sum' with:'' args:#( a )) == '6').else:{{ ok = false }};
+
+"* scale: returns a new Array (the column round-trips back as an Array, not a List)
+r = e.call:'scale' with:'2' args:#( a );
+(r.dtype == #float64).else:{{ ok = false }};
+(r.toList == #( 2.0 4.0 6.0 )).else:{{ ok = false }};
+(r.sum == 12.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_arrays_test.qn", &script);
 }

@@ -1,0 +1,40 @@
+(TestSuite.new:{ name = 'Array' }).add:{
+    .test:
+    floats -> {
+        .is:{ (Array.ofFloats:#(1.0 2.0 3.0)).length } equalTo:3;
+        .is:{ (Array.ofFloats:#(1.0 2.0 3.0)).dtype } equalTo:#float64;
+        .is:{ (Array.ofFloats:#(1.0 2.0 3.5)).sum } closeTo:6.5;
+        .is:{ (Array.ofFloats:#(1.0 2.0 3.0)).at:1 } closeTo:2.0;
+        "* integers are accepted and widened to floats
+        .is:{ (Array.ofFloats:#(1 2 3)).sum } closeTo:6.0;
+    };
+
+    .test:
+    ints -> {
+        .is:{ (Array.ofInts:#(4 5 6)).length } equalTo:3;
+        .is:{ (Array.ofInts:#(4 5 6)).dtype } equalTo:#int64;
+        .is:{ (Array.ofInts:#(4 5 6)).sum } equalTo:15;
+        .is:{ (Array.ofInts:#(4 5 6)).at:0 } equalTo:4;
+    };
+
+    .test:
+    scale -> {
+        "* scale returns a new Array of the same dtype, never exploding to a List
+        .is:{ ((Array.ofInts:#(1 2 3)).scale:10).toList } equalTo:#(10 20 30);
+        .is:{ ((Array.ofInts:#(1 2 3)).scale:10).dtype } equalTo:#int64;
+        .is:{ ((Array.ofFloats:#(1.0 2.0)).scale:2).toList } equalTo:#(2.0 4.0);
+    };
+
+    .test:
+    roundTrip -> {
+        "* ofInts -> toList is the identity (leaving the bulk world)
+        .is:{ (Array.ofInts:#(7 8 9)).toList } equalTo:#(7 8 9);
+        .is:{ (Array.ofInts:#()).length } equalTo:0;
+        .is:{ (Array.ofInts:#()).toList } equalTo:#();
+    };
+
+    .test:
+    display -> {
+        .is:{ (Array.ofFloats:#(1.0 2.0 3.0)).s } equalTo:'Array[float64; 3]';
+    };
+}

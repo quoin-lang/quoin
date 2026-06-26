@@ -11,10 +11,10 @@ use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
 use crate::repl_complete::{CompletionIndex, build_completion_index, complete_input};
 use crate::runtime::runtime::build_block;
 use crate::runtime::{
-    async_rt, big_decimal, big_integer, block, boolean, bytes, channel, class, codecs, csv_fmt,
-    date_time, double, duration, extension, fiber as fiber_class, http, ids, instant, integer, io,
-    json, list, map, math, method, msgpack, nil, object, pretty, regex, runtime, set, sockets,
-    streams, string, symbol, task, time_zone, timer, timestamp, toml_fmt, yaml,
+    array, async_rt, big_decimal, big_integer, block, boolean, bytes, channel, class, codecs,
+    csv_fmt, date_time, double, duration, extension, fiber as fiber_class, http, ids, instant,
+    integer, io, json, list, map, math, method, msgpack, nil, object, pretty, regex, runtime, set,
+    sockets, streams, string, symbol, task, time_zone, timer, timestamp, toml_fmt, yaml,
 };
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -72,6 +72,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, io::build_io_handle_class());
     vm.register_native_class(mc, list::build_list_class());
     vm.register_native_class(mc, set::build_set_class());
+    vm.register_native_class(mc, array::build_array_class());
     vm.register_native_class(mc, runtime::build_runtime_class());
     vm.register_native_class(mc, async_rt::build_async_class());
     vm.register_native_class(mc, task::build_task_class());

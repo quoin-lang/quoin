@@ -13,12 +13,37 @@
 
 namespace quoin_ext_proto;
 
-// host -> ext: invoke op `op` with scalar argument `arg`. `block` is a handle to a host
-// block the extension may invoke during the call (Slice 4), or 0 (NULL_HANDLE) for none.
+// The element type of a bulk Array column (Slice 6). 8 bytes each, Apache Arrow primitive layout.
+enum ArrowDType : ubyte {
+    Float64,
+    Int64,
+}
+
+// A bulk numeric column copied over the socket (the data plane, §6/§7). `data` is the contiguous
+// little-endian value buffer (Arrow non-nullable primitive layout); `length` is the element count
+// (derivable from `data` for these fixed-width types, carried for Arrow-C-Data-Interface forward
+// compat). Validity bitmaps, var-width buffers, and in-place fd-sharing are later steps.
+table ArrowArray {
+    dtype: ArrowDType;
+    length: uint64;
+    data: [ubyte];
+}
+
+// host -> ext: invoke op `op` with scalar argument `arg`, plus typed handle arguments
+// (Slice 5b). Two distinct token spaces:
+//   - `handles`: host-value handle ids into the host's table (a block is one of these — the
+//     Slice-4 `block` field generalized away). Call-local; swept when the call returns.
+//   - `resources`: ext-side resource ids the host is passing back as args; the extension looks
+//     them up in its own registry.
+//   - `releases`: ext-side resource ids the host has dropped; the extension frees them at the
+//     top of the call (the batched reap). Host-managed, not a user-facing argument.
 table Call {
     op: string;
     arg: string;
-    block: uint64;
+    handles: [uint64];
+    resources: [uint64];
+    releases: [uint64];
+    arrays: [ArrowArray];
 }
 
 // A tuple of handles — one invocation's argument list in a batched callback.
@@ -29,6 +54,17 @@ table HandleList {
 // ext -> host: the originating call is finished; `result` is the scalar return.
 table CallReturn {
     result: string;
+}
+
+// ext -> host: the originating call is finished, returning an ext-side resource the host will
+// hold as an opaque token (and reap on drop). `resource` is the extension-assigned id.
+table CallReturnResource {
+    resource: uint64;
+}
+
+// ext -> host: the originating call is finished, returning a bulk Array (the data plane).
+table CallReturnArray {
+    array: ArrowArray;
 }
 
 // ext -> host (re-entrant, mid-call): make a host String value, return a handle to it.
@@ -89,6 +125,8 @@ table HostOpReturn {
 union Message {
     Call,
     CallReturn,
+    CallReturnResource,
+    CallReturnArray,
     MakeString,
     HandleToString,
     Retain,
