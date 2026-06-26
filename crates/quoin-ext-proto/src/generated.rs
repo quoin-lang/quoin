@@ -1654,10 +1654,396 @@ mod root {
             }
         }
 
+        /// The table `CallMethodOnHandle` in the namespace `quoin_ext_proto`
+        ///
+        /// Generated from these locations:
+        /// * Table `CallMethodOnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:52`
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            PartialOrd,
+            Eq,
+            Ord,
+            Hash,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+        )]
+        pub struct CallMethodOnHandle {
+            /// The field `receiver` in the table `CallMethodOnHandle`
+            pub receiver: u64,
+            /// The field `selector` in the table `CallMethodOnHandle`
+            pub selector: ::core::option::Option<::planus::alloc::string::String>,
+            /// The field `args` in the table `CallMethodOnHandle`
+            pub args: ::core::option::Option<::planus::alloc::vec::Vec<u64>>,
+        }
+
+        #[allow(clippy::derivable_impls)]
+        impl ::core::default::Default for CallMethodOnHandle {
+            fn default() -> Self {
+                Self {
+                    receiver: 0,
+                    selector: ::core::default::Default::default(),
+                    args: ::core::default::Default::default(),
+                }
+            }
+        }
+
+        impl CallMethodOnHandle {
+            /// Creates a [CallMethodOnHandleBuilder] for serializing an instance of this table.
+            #[inline]
+            pub fn builder() -> CallMethodOnHandleBuilder<()> {
+                CallMethodOnHandleBuilder(())
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            pub fn create(
+                builder: &mut ::planus::Builder,
+                field_receiver: impl ::planus::WriteAsDefault<u64, u64>,
+                field_selector: impl ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+                field_args: impl ::planus::WriteAsOptional<::planus::Offset<[u64]>>,
+            ) -> ::planus::Offset<Self> {
+                let prepared_receiver = field_receiver.prepare(builder, &0);
+                let prepared_selector = field_selector.prepare(builder);
+                let prepared_args = field_args.prepare(builder);
+
+                let mut table_writer: ::planus::table_writer::TableWriter<10> =
+                    ::core::default::Default::default();
+                if prepared_receiver.is_some() {
+                    table_writer.write_entry::<u64>(0);
+                }
+                if prepared_selector.is_some() {
+                    table_writer.write_entry::<::planus::Offset<str>>(1);
+                }
+                if prepared_args.is_some() {
+                    table_writer.write_entry::<::planus::Offset<[u64]>>(2);
+                }
+
+                unsafe {
+                    table_writer.finish(builder, |object_writer| {
+                        if let ::core::option::Option::Some(prepared_receiver) = prepared_receiver {
+                            object_writer.write::<_, _, 8>(&prepared_receiver);
+                        }
+                        if let ::core::option::Option::Some(prepared_selector) = prepared_selector {
+                            object_writer.write::<_, _, 4>(&prepared_selector);
+                        }
+                        if let ::core::option::Option::Some(prepared_args) = prepared_args {
+                            object_writer.write::<_, _, 4>(&prepared_args);
+                        }
+                    });
+                }
+                builder.current_offset()
+            }
+        }
+
+        impl ::planus::WriteAs<::planus::Offset<CallMethodOnHandle>> for CallMethodOnHandle {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<CallMethodOnHandle> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl ::planus::WriteAsOptional<::planus::Offset<CallMethodOnHandle>> for CallMethodOnHandle {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<CallMethodOnHandle>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl ::planus::WriteAsOffset<CallMethodOnHandle> for CallMethodOnHandle {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<CallMethodOnHandle> {
+                CallMethodOnHandle::create(builder, self.receiver, &self.selector, &self.args)
+            }
+        }
+
+        /// Builder for serializing an instance of the [CallMethodOnHandle] type.
+        ///
+        /// Can be created using the [CallMethodOnHandle::builder] method.
+        #[derive(Debug)]
+        #[must_use]
+        pub struct CallMethodOnHandleBuilder<State>(State);
+
+        impl CallMethodOnHandleBuilder<()> {
+            /// Setter for the [`receiver` field](CallMethodOnHandle#structfield.receiver).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn receiver<T0>(self, value: T0) -> CallMethodOnHandleBuilder<(T0,)>
+            where
+                T0: ::planus::WriteAsDefault<u64, u64>,
+            {
+                CallMethodOnHandleBuilder((value,))
+            }
+
+            /// Sets the [`receiver` field](CallMethodOnHandle#structfield.receiver) to the default value.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn receiver_as_default(
+                self,
+            ) -> CallMethodOnHandleBuilder<(::planus::DefaultValue,)> {
+                self.receiver(::planus::DefaultValue)
+            }
+        }
+
+        impl<T0> CallMethodOnHandleBuilder<(T0,)> {
+            /// Setter for the [`selector` field](CallMethodOnHandle#structfield.selector).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn selector<T1>(self, value: T1) -> CallMethodOnHandleBuilder<(T0, T1)>
+            where
+                T1: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            {
+                let (v0,) = self.0;
+                CallMethodOnHandleBuilder((v0, value))
+            }
+
+            /// Sets the [`selector` field](CallMethodOnHandle#structfield.selector) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn selector_as_null(self) -> CallMethodOnHandleBuilder<(T0, ())> {
+                self.selector(())
+            }
+        }
+
+        impl<T0, T1> CallMethodOnHandleBuilder<(T0, T1)> {
+            /// Setter for the [`args` field](CallMethodOnHandle#structfield.args).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn args<T2>(self, value: T2) -> CallMethodOnHandleBuilder<(T0, T1, T2)>
+            where
+                T2: ::planus::WriteAsOptional<::planus::Offset<[u64]>>,
+            {
+                let (v0, v1) = self.0;
+                CallMethodOnHandleBuilder((v0, v1, value))
+            }
+
+            /// Sets the [`args` field](CallMethodOnHandle#structfield.args) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn args_as_null(self) -> CallMethodOnHandleBuilder<(T0, T1, ())> {
+                self.args(())
+            }
+        }
+
+        impl<T0, T1, T2> CallMethodOnHandleBuilder<(T0, T1, T2)> {
+            /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [CallMethodOnHandle].
+            #[inline]
+            pub fn finish(
+                self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<CallMethodOnHandle>
+            where
+                Self: ::planus::WriteAsOffset<CallMethodOnHandle>,
+            {
+                ::planus::WriteAsOffset::prepare(&self, builder)
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsDefault<u64, u64>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T2: ::planus::WriteAsOptional<::planus::Offset<[u64]>>,
+        > ::planus::WriteAs<::planus::Offset<CallMethodOnHandle>>
+            for CallMethodOnHandleBuilder<(T0, T1, T2)>
+        {
+            type Prepared = ::planus::Offset<CallMethodOnHandle>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<CallMethodOnHandle> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsDefault<u64, u64>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T2: ::planus::WriteAsOptional<::planus::Offset<[u64]>>,
+        > ::planus::WriteAsOptional<::planus::Offset<CallMethodOnHandle>>
+            for CallMethodOnHandleBuilder<(T0, T1, T2)>
+        {
+            type Prepared = ::planus::Offset<CallMethodOnHandle>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<CallMethodOnHandle>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsDefault<u64, u64>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T2: ::planus::WriteAsOptional<::planus::Offset<[u64]>>,
+        > ::planus::WriteAsOffset<CallMethodOnHandle> for CallMethodOnHandleBuilder<(T0, T1, T2)>
+        {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<CallMethodOnHandle> {
+                let (v0, v1, v2) = &self.0;
+                CallMethodOnHandle::create(builder, v0, v1, v2)
+            }
+        }
+
+        /// Reference to a deserialized [CallMethodOnHandle].
+        #[derive(Copy, Clone)]
+        pub struct CallMethodOnHandleRef<'a>(#[allow(dead_code)] ::planus::table_reader::Table<'a>);
+
+        impl<'a> CallMethodOnHandleRef<'a> {
+            /// Getter for the [`receiver` field](CallMethodOnHandle#structfield.receiver).
+            #[inline]
+            pub fn receiver(&self) -> ::planus::Result<u64> {
+                ::core::result::Result::Ok(
+                    self.0
+                        .access(0, "CallMethodOnHandle", "receiver")?
+                        .unwrap_or(0),
+                )
+            }
+
+            /// Getter for the [`selector` field](CallMethodOnHandle#structfield.selector).
+            #[inline]
+            pub fn selector(
+                &self,
+            ) -> ::planus::Result<::core::option::Option<&'a ::core::primitive::str>> {
+                self.0.access(1, "CallMethodOnHandle", "selector")
+            }
+
+            /// Getter for the [`args` field](CallMethodOnHandle#structfield.args).
+            #[inline]
+            pub fn args(
+                &self,
+            ) -> ::planus::Result<::core::option::Option<::planus::Vector<'a, u64>>> {
+                self.0.access(2, "CallMethodOnHandle", "args")
+            }
+        }
+
+        impl<'a> ::core::fmt::Debug for CallMethodOnHandleRef<'a> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut f = f.debug_struct("CallMethodOnHandleRef");
+                f.field("receiver", &self.receiver());
+                if let ::core::option::Option::Some(field_selector) = self.selector().transpose() {
+                    f.field("selector", &field_selector);
+                }
+                if let ::core::option::Option::Some(field_args) = self.args().transpose() {
+                    f.field("args", &field_args);
+                }
+                f.finish()
+            }
+        }
+
+        impl<'a> ::core::convert::TryFrom<CallMethodOnHandleRef<'a>> for CallMethodOnHandle {
+            type Error = ::planus::Error;
+
+            #[allow(unreachable_code)]
+            fn try_from(value: CallMethodOnHandleRef<'a>) -> ::planus::Result<Self> {
+                ::core::result::Result::Ok(Self {
+                    receiver: ::core::convert::TryInto::try_into(value.receiver()?)?,
+                    selector: value.selector()?.map(::core::convert::Into::into),
+                    args: if let ::core::option::Option::Some(args) = value.args()? {
+                        ::core::option::Option::Some(args.to_vec()?)
+                    } else {
+                        ::core::option::Option::None
+                    },
+                })
+            }
+        }
+
+        impl<'a> ::planus::TableRead<'a> for CallMethodOnHandleRef<'a> {
+            #[inline]
+            fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::core::result::Result<Self, ::planus::errors::ErrorKind> {
+                ::core::result::Result::Ok(Self(::planus::table_reader::Table::from_buffer(
+                    buffer, offset,
+                )?))
+            }
+        }
+
+        impl<'a> ::planus::VectorReadInner<'a> for CallMethodOnHandleRef<'a> {
+            type Error = ::planus::Error;
+            const STRIDE: usize = 4;
+
+            unsafe fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(buffer, offset).map_err(|error_kind| {
+                    error_kind.with_error_location(
+                        "[CallMethodOnHandleRef]",
+                        "get",
+                        buffer.offset_from_start,
+                    )
+                })
+            }
+        }
+
+        /// # Safety
+        /// The planus compiler generates implementations that initialize
+        /// the bytes in `write_values`.
+        unsafe impl ::planus::VectorWrite<::planus::Offset<CallMethodOnHandle>> for CallMethodOnHandle {
+            type Value = ::planus::Offset<CallMethodOnHandle>;
+            const STRIDE: usize = 4;
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> Self::Value {
+                ::planus::WriteAs::prepare(self, builder)
+            }
+
+            #[inline]
+            unsafe fn write_values(
+                values: &[::planus::Offset<CallMethodOnHandle>],
+                bytes: *mut ::core::mem::MaybeUninit<u8>,
+                buffer_position: u32,
+            ) {
+                let bytes = bytes as *mut [::core::mem::MaybeUninit<u8>; 4];
+                for (i, v) in ::core::iter::Iterator::enumerate(values.iter()) {
+                    ::planus::WriteAsPrimitive::write(
+                        v,
+                        ::planus::Cursor::new(unsafe { &mut *bytes.add(i) }),
+                        buffer_position - (Self::STRIDE * i) as u32,
+                    );
+                }
+            }
+        }
+
+        impl<'a> ::planus::ReadAsRoot<'a> for CallMethodOnHandleRef<'a> {
+            fn read_as_root(slice: &'a [u8]) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(
+                    ::planus::SliceWithStartOffset {
+                        buffer: slice,
+                        offset_from_start: 0,
+                    },
+                    0,
+                )
+                .map_err(|error_kind| {
+                    error_kind.with_error_location("[CallMethodOnHandleRef]", "read_as_root", 0)
+                })
+            }
+        }
+
         /// The table `HostOpReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `HostOpReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:51`
+        /// * Table `HostOpReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:61`
         #[derive(
             Clone,
             Debug,
@@ -2017,7 +2403,7 @@ mod root {
         /// The union `Message` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Union `Message` in the file `crates/quoin-ext-proto/schema/ext.fbs:57`
+        /// * Union `Message` in the file `crates/quoin-ext-proto/schema/ext.fbs:67`
         #[derive(
             Clone,
             Debug,
@@ -2047,6 +2433,9 @@ mod root {
 
             /// The variant of type `Release` in the union `Message`
             Release(::planus::alloc::boxed::Box<self::Release>),
+
+            /// The variant of type `CallMethodOnHandle` in the union `Message`
+            CallMethodOnHandle(::planus::alloc::boxed::Box<self::CallMethodOnHandle>),
 
             /// The variant of type `HostOpReturn` in the union `Message`
             HostOpReturn(::planus::alloc::boxed::Box<self::HostOpReturn>),
@@ -2108,11 +2497,19 @@ mod root {
             }
 
             #[inline]
+            pub fn create_call_method_on_handle(
+                builder: &mut ::planus::Builder,
+                value: impl ::planus::WriteAsOffset<self::CallMethodOnHandle>,
+            ) -> ::planus::UnionOffset<Self> {
+                ::planus::UnionOffset::new(7, value.prepare(builder).downcast())
+            }
+
+            #[inline]
             pub fn create_host_op_return(
                 builder: &mut ::planus::Builder,
                 value: impl ::planus::WriteAsOffset<self::HostOpReturn>,
             ) -> ::planus::UnionOffset<Self> {
-                ::planus::UnionOffset::new(7, value.prepare(builder).downcast())
+                ::planus::UnionOffset::new(8, value.prepare(builder).downcast())
             }
         }
 
@@ -2126,6 +2523,9 @@ mod root {
                     Self::HandleToString(value) => Self::create_handle_to_string(builder, value),
                     Self::Retain(value) => Self::create_retain(builder, value),
                     Self::Release(value) => Self::create_release(builder, value),
+                    Self::CallMethodOnHandle(value) => {
+                        Self::create_call_method_on_handle(builder, value)
+                    }
                     Self::HostOpReturn(value) => Self::create_host_op_return(builder, value),
                 }
             }
@@ -2206,9 +2606,21 @@ mod root {
                 MessageBuilder(::planus::Initialized(value))
             }
 
+            /// Creates an instance of the [`CallMethodOnHandle` variant](Message#variant.CallMethodOnHandle).
+            #[inline]
+            pub fn call_method_on_handle<T>(
+                self,
+                value: T,
+            ) -> MessageBuilder<::planus::Initialized<7, T>>
+            where
+                T: ::planus::WriteAsOffset<self::CallMethodOnHandle>,
+            {
+                MessageBuilder(::planus::Initialized(value))
+            }
+
             /// Creates an instance of the [`HostOpReturn` variant](Message#variant.HostOpReturn).
             #[inline]
-            pub fn host_op_return<T>(self, value: T) -> MessageBuilder<::planus::Initialized<7, T>>
+            pub fn host_op_return<T>(self, value: T) -> MessageBuilder<::planus::Initialized<8, T>>
             where
                 T: ::planus::WriteAsOffset<self::HostOpReturn>,
             {
@@ -2361,7 +2773,7 @@ mod root {
         }
         impl<T> ::planus::WriteAsUnion<Message> for MessageBuilder<::planus::Initialized<7, T>>
         where
-            T: ::planus::WriteAsOffset<self::HostOpReturn>,
+            T: ::planus::WriteAsOffset<self::CallMethodOnHandle>,
         {
             #[inline]
             fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::UnionOffset<Message> {
@@ -2370,6 +2782,28 @@ mod root {
         }
 
         impl<T> ::planus::WriteAsOptionalUnion<Message> for MessageBuilder<::planus::Initialized<7, T>>
+        where
+            T: ::planus::WriteAsOffset<self::CallMethodOnHandle>,
+        {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::UnionOffset<Message>> {
+                ::core::option::Option::Some(::planus::WriteAsUnion::prepare(self, builder))
+            }
+        }
+        impl<T> ::planus::WriteAsUnion<Message> for MessageBuilder<::planus::Initialized<8, T>>
+        where
+            T: ::planus::WriteAsOffset<self::HostOpReturn>,
+        {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::UnionOffset<Message> {
+                ::planus::UnionOffset::new(8, (self.0).0.prepare(builder).downcast())
+            }
+        }
+
+        impl<T> ::planus::WriteAsOptionalUnion<Message> for MessageBuilder<::planus::Initialized<8, T>>
         where
             T: ::planus::WriteAsOffset<self::HostOpReturn>,
         {
@@ -2391,6 +2825,7 @@ mod root {
             HandleToString(self::HandleToStringRef<'a>),
             Retain(self::RetainRef<'a>),
             Release(self::ReleaseRef<'a>),
+            CallMethodOnHandle(self::CallMethodOnHandleRef<'a>),
             HostOpReturn(self::HostOpReturnRef<'a>),
         }
 
@@ -2429,6 +2864,12 @@ mod root {
                         ::core::convert::TryFrom::try_from(value)?,
                     )),
 
+                    MessageRef::CallMethodOnHandle(value) => {
+                        Self::CallMethodOnHandle(::planus::alloc::boxed::Box::new(
+                            ::core::convert::TryFrom::try_from(value)?,
+                        ))
+                    }
+
                     MessageRef::HostOpReturn(value) => {
                         Self::HostOpReturn(::planus::alloc::boxed::Box::new(
                             ::core::convert::TryFrom::try_from(value)?,
@@ -2464,7 +2905,10 @@ mod root {
                     6 => ::core::result::Result::Ok(Self::Release(
                         ::planus::TableRead::from_buffer(buffer, field_offset)?,
                     )),
-                    7 => ::core::result::Result::Ok(Self::HostOpReturn(
+                    7 => ::core::result::Result::Ok(Self::CallMethodOnHandle(
+                        ::planus::TableRead::from_buffer(buffer, field_offset)?,
+                    )),
+                    8 => ::core::result::Result::Ok(Self::HostOpReturn(
                         ::planus::TableRead::from_buffer(buffer, field_offset)?,
                     )),
                     _ => {
@@ -2483,7 +2927,7 @@ mod root {
         /// The table `Envelope` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `Envelope` in the file `crates/quoin-ext-proto/schema/ext.fbs:67`
+        /// * Table `Envelope` in the file `crates/quoin-ext-proto/schema/ext.fbs:78`
         #[derive(
             Clone,
             Debug,

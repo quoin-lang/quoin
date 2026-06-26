@@ -37,6 +37,13 @@ pub enum Msg {
     Retain { handle: u64 },
     /// ext -> host (re-entrant): release retained handles (batched).
     Release { handles: Vec<u64> },
+    /// ext -> host (re-entrant): send `selector` to the value behind `receiver` with the
+    /// values behind `args`, returning a handle to the result.
+    CallMethodOnHandle {
+        receiver: u64,
+        selector: String,
+        args: Vec<u64>,
+    },
     /// host -> ext: the reply to any re-entrant host-op. `handle` is set for `MakeString`,
     /// `str` for `HandleToString`, neither for an ack; `error` is `Some` iff the op failed.
     HostOpReturn {
@@ -66,6 +73,15 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
         Msg::Retain { handle } => g::Message::Retain(Box::new(g::Retain { handle: *handle })),
         Msg::Release { handles } => g::Message::Release(Box::new(g::Release {
             handles: Some(handles.clone()),
+        })),
+        Msg::CallMethodOnHandle {
+            receiver,
+            selector,
+            args,
+        } => g::Message::CallMethodOnHandle(Box::new(g::CallMethodOnHandle {
+            receiver: *receiver,
+            selector: Some(selector.clone()),
+            args: Some(args.clone()),
         })),
         Msg::HostOpReturn { handle, str, error } => {
             g::Message::HostOpReturn(Box::new(g::HostOpReturn {
@@ -115,6 +131,14 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         },
         g::MessageRef::Release(r) => Msg::Release {
             handles: match r.handles()? {
+                Some(v) => v.iter().collect(),
+                None => Vec::new(),
+            },
+        },
+        g::MessageRef::CallMethodOnHandle(c) => Msg::CallMethodOnHandle {
+            receiver: c.receiver()?,
+            selector: c.selector()?.unwrap_or_default().to_string(),
+            args: match c.args()? {
                 Some(v) => v.iter().collect(),
                 None => Vec::new(),
             },

@@ -45,6 +45,16 @@ table Release {
     handles: [uint64];
 }
 
+// ext -> host (re-entrant, mid-call): send the Quoin message `selector` to the value
+// behind `receiver`, with the values behind `args` as the arguments. The host performs
+// a real method dispatch and returns a handle to the result (`HostOpReturn.handle`), or
+// `HostOpReturn.error` if a handle is invalid, the arity is wrong, or the send raises.
+table CallMethodOnHandle {
+    receiver: uint64;
+    selector: string;
+    args: [uint64];
+}
+
 // host -> ext: the reply to any re-entrant host-op. Carries whichever result applies —
 //   MakeString -> `handle`; HandleToString -> `str`; Retain/Release -> ack (no payload).
 // `error` is non-null iff the op failed (and the other fields are unset).
@@ -61,6 +71,7 @@ union Message {
     HandleToString,
     Retain,
     Release,
+    CallMethodOnHandle,
     HostOpReturn,
 }
 

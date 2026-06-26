@@ -8,6 +8,9 @@
 //! - `fetch` — read the previously stashed handle back into a string. Returns that string,
 //!   proving the host kept the `Value` alive (rooted by the handle) across the two calls.
 //! - `release` — release the stashed handle.
+//! - `compute` — exercise `call_method` (Slice 3b): build two host Strings, concatenate them
+//!   via `+:` (passing the second as a *handle argument*), uppercase the result via `upper`,
+//!   and read it back. For `arg = "ab"` it returns `"AB!"` (`("ab" +: "!").upper`).
 //!
 //! It is a test/example fixture, not a shipped feature.
 
@@ -40,6 +43,15 @@ fn main() {
                 host.release(&[handle]).expect("release");
             }
             "ok".to_string()
+        }
+        "compute" => {
+            let base = host.make_string(arg).expect("make_string base");
+            let suffix = host.make_string("!").expect("make_string suffix");
+            // ("<arg>" +: "!") — `+:` takes the suffix handle as its argument.
+            let joined = host.call_method(base, "+:", &[suffix]).expect("concat");
+            // .upper — a unary send (no arguments).
+            let upper = host.call_method(joined, "upper", &[]).expect("upper");
+            host.handle_to_string(upper).expect("read result")
         }
         other => format!("unknown op: {other}"),
     })

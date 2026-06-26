@@ -78,6 +78,10 @@ e.call:'release' with:'';
 ((e.call:'stash' with:'second') == 'ok').else:{{ ok = false }};
 ((e.call:'fetch' with:'') == 'second').else:{{ ok = false }};
 
+"* call_method (Slice 3b): the extension drives host objects via handles —
+"* ('ab' +: '!') uppercased, the '+:' arg itself passed as a handle. -> 'AB!'
+((e.call:'compute' with:'ab') == 'AB!').else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );

@@ -12,10 +12,11 @@
 //! payload bytes. The payload is a FlatBuffers `Message` union (schema + codec in the shared
 //! `quoin-ext-proto` crate). A host->ext `Call` may be answered directly, or the handler may
 //! first issue **re-entrant host-ops** through the [`Host`] client — `make_string`,
-//! `handle_to_string`, `retain`, `release` — each a synchronous round-trip the host services
-//! while parked on the reply. Host values the extension holds are opaque [`Handle`]s indexing
-//! a GC-rooted table on the host (`docs/FUTURE_EXT_ARCH.md` §2). Handle-typed call args/returns,
-//! a richer host-op set, batched callbacks, and Arrow arrive in later slices.
+//! `handle_to_string`, `retain`, `release`, and `call_method` (send a Quoin message to a
+//! handle) — each a synchronous round-trip the host services while parked on the reply. Host
+//! values the extension holds are opaque [`Handle`]s indexing a GC-rooted table on the host
+//! (`docs/FUTURE_EXT_ARCH.md` §2). Handle-typed call args/returns, batched callbacks, and Arrow
+//! arrive in later slices.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -85,6 +86,24 @@ impl<'a> Host<'a> {
             handles: handles.to_vec(),
         })
         .map(|_| ())
+    }
+
+    /// Send the Quoin message `selector` to the value behind `receiver`, with the values
+    /// behind `args` as the arguments, and return a (call-local) handle to the result. The
+    /// host performs a real method dispatch; a host-reported error (bad handle, wrong arity,
+    /// or a raise during the send) surfaces as an `io::Error`.
+    pub fn call_method(
+        &mut self,
+        receiver: Handle,
+        selector: &str,
+        args: &[Handle],
+    ) -> io::Result<Handle> {
+        let (handle, _) = self.host_op(&Msg::CallMethodOnHandle {
+            receiver,
+            selector: selector.to_string(),
+            args: args.to_vec(),
+        })?;
+        Ok(handle)
     }
 
     /// Send one host-op and await its `HostOpReturn`, surfacing a host-reported error as an

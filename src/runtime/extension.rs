@@ -10,13 +10,15 @@
 //! Slice 3a adds the **handle table** (`docs/FUTURE_EXT_ARCH.md` §2): a `call:with:` is no
 //! longer a one-shot request/reply but a re-entrant *conversation*. After sending the `Call`,
 //! the host services a loop of frames — each is either a host-op request the extension issued
-//! mid-call (`MakeString`/`HandleToString`/`Retain`/`Release`, answered with `HostOpReturn`) or
-//! the terminal `CallReturn`. Handles minted during the call are call-local and swept on return
-//! (`HandleTable::begin_call`/`end_call`); the extension `Retain`s any it wants to keep.
+//! mid-call (answered with `HostOpReturn`) or the terminal `CallReturn`. Handles minted during
+//! the call are call-local and swept on return (`HandleTable::begin_call`/`end_call`); the
+//! extension `Retain`s any it wants to keep.
 //!
-//! Every frame is a FlatBuffers `Message` union (schema/codec in `quoin-ext-proto`) inside a
-//! u32 length-prefixed frame. Handle-typed call args/returns, `CallMethodOnHandle`, batched
-//! callbacks, Arrow, and crash/timeout are later slices.
+//! The host-ops are `MakeString`/`HandleToString`/`Retain`/`Release` (Slice 3a) and
+//! `CallMethodOnHandle` (Slice 3b — send a Quoin message to a handle, with handle arguments,
+//! returning a handle to the result). Every frame is a FlatBuffers `Message` union (schema/codec
+//! in `quoin-ext-proto`) inside a u32 length-prefixed frame. Handle-typed call args/returns,
+//! batched callbacks, Arrow, and crash/timeout are later slices.
 
 use std::any::Any;
 use std::process::{Child, Command};
@@ -122,6 +124,21 @@ fn write_msg<'gc>(vm: &mut VmState<'gc>, id: StreamId, msg: &Msg) -> Result<(), 
     }
 }
 
+/// Resolve a receiver handle and a list of argument handles to their host `Value`s
+/// (each `Copy`), so the table borrow is released before a `&mut self` method send.
+fn resolve_handles<'gc>(
+    vm: &VmState<'gc>,
+    receiver: u64,
+    args: &[u64],
+) -> Result<(Value<'gc>, Vec<Value<'gc>>), String> {
+    let recv = vm.handle_table.get(receiver)?;
+    let mut arg_vals = Vec::with_capacity(args.len());
+    for &handle in args {
+        arg_vals.push(vm.handle_table.get(handle)?);
+    }
+    Ok((recv, arg_vals))
+}
+
 /// Read the Rust string behind a host `String` value, or `None` if it isn't one.
 fn read_string_value(value: Value<'_>) -> Option<String> {
     match value {
@@ -171,6 +188,27 @@ fn service_host_op<'gc>(
             vm.handle_table.release(&handles);
             ack()
         }
+        Msg::CallMethodOnHandle {
+            receiver,
+            selector,
+            args,
+        } => match resolve_handles(vm, receiver, &args) {
+            // Resolve all handles first (dropping the table borrow), then perform a real
+            // host-side send; mint a call-local handle for the result. A Quoin-level raise
+            // surfaces to the extension as a host-op error, not a failed `call:with:`.
+            Ok((recv, arg_vals)) => match vm.call_method(mc, recv, &selector, arg_vals) {
+                Ok(result) => {
+                    let handle = vm.handle_table.mint_local(result, epoch);
+                    Msg::HostOpReturn {
+                        handle,
+                        str: None,
+                        error: None,
+                    }
+                }
+                Err(e) => host_op_error(format!("call '{selector}' on handle: {e}")),
+            },
+            Err(e) => host_op_error(e),
+        },
         other => {
             return Err(QuoinError::Other(format!(
                 "Extension call: unexpected message from extension: {other:?}"
