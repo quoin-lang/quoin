@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quoin_ext
 
 
-def handler(op, arg):
+def handler(host, op, arg):  # scalar-only: ignores `host`
     if op == "echo":
         return arg
     if op == "upper":
