@@ -34,8 +34,13 @@
 //!
 //! Slice 5a adds **crash isolation**: a call whose I/O fails because the child exited surfaces a
 //! typed `IoError` (not a hang), marks the extension dead so later calls fail fast, and `Drop`
-//! reaps the host-side fd via the shared reap queue. Per-peer handle bulk-release (§2), general
-//! handle-typed call args/returns, Arrow, and timeouts are later slices.
+//! reaps the host-side fd via the shared reap queue. A later slice adds **per-peer handle
+//! bulk-release** (a dead/dropped extension's retained handles are freed via `release_for_ext`).
+//!
+//! **Timeouts** reuse the general `Async.timeout:do:` combinator (it aborts the parked socket
+//! read and raises a catchable `TimeoutError`); the only extension-specific part is that a
+//! cancelled (timed-out) call leaves the framed conversation desynced, so the extension is marked
+//! dead — its connection can't be safely reused.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -516,6 +521,18 @@ fn run_extension_method<'gc>(
             from_wire_dtype(array.dtype),
             array.data,
         )),
+        // A cancellation (a timeout via `Async.timeout:do:`, or a task cancel) interrupted the
+        // call mid-conversation: the host abandoned a read, so the connection is desynced (a slow
+        // extension's reply would arrive later, unread, and corrupt the next call). Mark the
+        // extension dead + release its handles, then re-raise `Cancelled` unchanged so the timeout
+        // combinator still turns it into a catchable `TimeoutError`. The peer is now unusable; the
+        // program spawns a fresh `Extension` to retry.
+        Err(QuoinError::Cancelled) => {
+            let _ =
+                receiver.with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.dead = true);
+            vm.handle_table.release_for_ext(ext_id);
+            Err(QuoinError::Cancelled)
+        }
         Err(e) => {
             let exit = receiver
                 .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.note_if_exited())

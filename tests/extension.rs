@@ -11,6 +11,8 @@
 //!   a batch via `invoke_block`.
 //! - `extension_crash_isolation` (Slice 5a): the `ext_crash` fixture exits mid-call; the host must
 //!   surface a catchable error (not a hang), keep running, and fail fast on the next call.
+//! - `extension_timeout`: a hung `ext_crash` call times out via `Async.timeout:do:` (catchable);
+//!   the now-desynced extension is marked dead so the next call fails fast instead of blocking.
 //! - `extension_resource_handles` (Slice 5b): the `ext_resources` fixture returns an ext-side
 //!   resource the host holds as an `ExtResource` token, passed back via `args:` across calls and
 //!   reaped (freed extension-side) once the host drops it.
@@ -154,6 +156,30 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_crash_test.qn", &script);
+}
+
+#[test]
+fn extension_timeout() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{ext_bin}';
+
+"* a hung call is bounded by Async.timeout:do: — raises a catchable TimeoutError, VM survives
+r = {{ Async.timeout:300 do:{{ e.call:'hang' with:'' }} }}.catch:{{ |ex| 'timedout' }};
+(r == 'timedout').else:{{ ok = false }};
+
+"* the conversation is desynced -> the extension is dead; a follow-up fails fast (does NOT hang
+"* waiting on a child still stuck in `hang`)
+again = {{ e.call:'ping' with:'' }}.catch:{{ |ex| 'dead' }};
+(again == 'dead').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_timeout_test.qn", &script);
 }
 
 #[test]
