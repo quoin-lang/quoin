@@ -25,11 +25,22 @@ use planus::{Builder, ReadAsRoot};
 /// `ext.fbs`. Encode with [`encode`]; decode a received frame with [`decode_envelope`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
-    /// host -> ext: invoke `op` with the scalar argument `arg`. `block` is a handle to a
-    /// host block the extension may invoke during the call, or 0 (`NULL_HANDLE`) for none.
-    Call { op: String, arg: String, block: u64 },
+    /// host -> ext: invoke `op` with the scalar argument `arg`, plus typed handle arguments.
+    /// `handles` are host-value handle ids (a block is one of these); `resources` are ext-side
+    /// resource ids passed back as args; `releases` are ext-side resource ids the host dropped
+    /// and the extension should free at the top of the call (the batched reap).
+    Call {
+        op: String,
+        arg: String,
+        handles: Vec<u64>,
+        resources: Vec<u64>,
+        releases: Vec<u64>,
+    },
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
+    /// ext -> host: the call returns an ext-side resource the host will hold as an opaque token
+    /// (reaped on drop). `resource` is the extension-assigned id.
+    CallReturnResource { resource: u64 },
     /// ext -> host (re-entrant): make a host String, return a handle to it.
     MakeString { value: String },
     /// ext -> host (re-entrant): read a String-handle back into a scalar string.
@@ -66,14 +77,27 @@ pub enum Msg {
 /// the transport frames it).
 pub fn encode(msg: &Msg) -> Vec<u8> {
     let message = match msg {
-        Msg::Call { op, arg, block } => g::Message::Call(Box::new(g::Call {
+        Msg::Call {
+            op,
+            arg,
+            handles,
+            resources,
+            releases,
+        } => g::Message::Call(Box::new(g::Call {
             op: Some(op.clone()),
             arg: Some(arg.clone()),
-            block: *block,
+            handles: Some(handles.clone()),
+            resources: Some(resources.clone()),
+            releases: Some(releases.clone()),
         })),
         Msg::CallReturn { result } => g::Message::CallReturn(Box::new(g::CallReturn {
             result: Some(result.clone()),
         })),
+        Msg::CallReturnResource { resource } => {
+            g::Message::CallReturnResource(Box::new(g::CallReturnResource {
+                resource: *resource,
+            }))
+        }
         Msg::MakeString { value } => g::Message::MakeString(Box::new(g::MakeString {
             value: Some(value.clone()),
         })),
@@ -132,6 +156,11 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<Msg, String> {
         .ok_or_else(|| "extension protocol: Envelope had no `msg`".to_string())
 }
 
+/// Collect a planus `[uint64]` accessor result into an owned `Vec` (absent vector -> empty).
+fn read_u64_vec(v: Option<planus::Vector<'_, u64>>) -> Vec<u64> {
+    v.map(|vec| vec.iter().collect()).unwrap_or_default()
+}
+
 /// The planus-fallible core of [`decode_envelope`]; `Ok(None)` means the `msg` union was
 /// absent (kept separate so the accessor `?`s stay on `planus::Error`).
 fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
@@ -143,10 +172,15 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         g::MessageRef::Call(c) => Msg::Call {
             op: c.op()?.unwrap_or_default().to_string(),
             arg: c.arg()?.unwrap_or_default().to_string(),
-            block: c.block()?,
+            handles: read_u64_vec(c.handles()?),
+            resources: read_u64_vec(c.resources()?),
+            releases: read_u64_vec(c.releases()?),
         },
         g::MessageRef::CallReturn(c) => Msg::CallReturn {
             result: c.result()?.unwrap_or_default().to_string(),
+        },
+        g::MessageRef::CallReturnResource(c) => Msg::CallReturnResource {
+            resource: c.resource()?,
         },
         g::MessageRef::MakeString(m) => Msg::MakeString {
             value: m.value()?.unwrap_or_default().to_string(),

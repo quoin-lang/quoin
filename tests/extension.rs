@@ -11,6 +11,9 @@
 //!   a batch via `invoke_block`.
 //! - `extension_crash_isolation` (Slice 5a): the `ext_crash` fixture exits mid-call; the host must
 //!   surface a catchable error (not a hang), keep running, and fail fast on the next call.
+//! - `extension_resource_handles` (Slice 5b): the `ext_resources` fixture returns an ext-side
+//!   resource the host holds as an `ExtResource` token, passed back via `args:` across calls and
+//!   reaped (freed extension-side) once the host drops it.
 //!
 //! Each script decides pass/fail and prints PASS/FAIL.
 
@@ -86,8 +89,8 @@ e.call:'release' with:'';
 ((e.call:'compute' with:'ab') == 'AB!').else:{{ ok = false }};
 
 "* batched callback (Slice 4): the extension invokes a host block over a batch in one
-"* round-trip. mapUpper runs the passed block over 'a','b','c'. -> 'A,B,C'
-((e.call:'mapUpper' with:'' block:{{ |s| s.upper }}) == 'A,B,C').else:{{ ok = false }};
+"* round-trip. The block is now passed as a handle arg via args: (Slice 5b). -> 'A,B,C'
+((e.call:'mapUpper' with:'' args:#( {{ |s| s.upper }} )) == 'A,B,C').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
@@ -119,4 +122,34 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_crash_test.qn", &script);
+}
+
+#[test]
+fn extension_resource_handles() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_resources");
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{ext_bin}';
+
+"* create an ext-side counter; the host holds it as an opaque ExtResource token
+c = e.call:'new' with:'';
+
+"* pass the resource back into later calls via args: — it mutates the same ext-side counter
+((e.call:'inc' with:'' args:#( c )) == '1').else:{{ ok = false }};
+((e.call:'inc' with:'' args:#( c )) == '2').else:{{ ok = false }};
+((e.call:'live' with:'') == '1').else:{{ ok = false }};
+
+"* drop the only reference and churn allocations so GC reclaims the ExtResource (its Drop
+"* queues the id); the release piggybacks on the next call, which frees it extension-side.
+c = nil;
+(1..5000).each:{{ |i| i.s }};
+e.call:'live' with:'';
+((e.call:'live' with:'') == '0').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_resources_test.qn", &script);
 }

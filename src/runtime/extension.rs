@@ -16,10 +16,16 @@
 //!
 //! The host-ops are `MakeString`/`HandleToString`/`Retain`/`Release` (Slice 3a),
 //! `CallMethodOnHandle` (Slice 3b — send a Quoin message to a handle), and `InvokeBlock`
-//! (Slice 4 — invoke a host *block* handle over a batch of argument tuples in one round-trip;
-//! the block reaches the extension via the `block` handle on `Call`, sent by `call:with:block:`).
+//! (Slice 4 — invoke a host *block* handle over a batch of argument tuples in one round-trip).
 //! Every frame is a FlatBuffers `Message` union (schema/codec in `quoin-ext-proto`) inside a u32
 //! length-prefixed frame.
+//!
+//! Slice 5b makes handles general `Call` arguments: `call:with:args:` passes a list whose elements
+//! become either host-value handles (`Call.handles` — a block is one of these; the Slice-4 `block`
+//! field is gone) or, for an `ExtResource`, the ext-side resource id (`Call.resources`). The mirror
+//! direction — **ext-resource handles** — lets a call return an ext-owned resource
+//! (`CallReturnResource`) which the host holds as an opaque `ExtResource` token and reaps on drop
+//! (batched onto the next call's `Call.releases`, since a GC `Drop` can't send a frame).
 //!
 //! Slice 5a adds **crash isolation**: a call whose I/O fails because the child exited surfaces a
 //! typed `IoError` (not a hang), marks the extension dead so later calls fail fast, and `Drop`
@@ -39,12 +45,14 @@ use quoin_ext_proto::Msg;
 use crate::arg;
 use crate::error::QuoinError;
 use crate::io_backend::{IoRequest, IoResult, StreamId};
+use crate::runtime::list::NativeListState;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
 
 /// Native state behind an `Extension` value: the registered stream id for the UDS, the child
-/// process, its socket path (for cleanup), the shared fd-reap queue, and whether the extension
-/// has been observed dead (its process exited).
+/// process, its socket path (for cleanup), the shared fd-reap queue, whether the extension has
+/// been observed dead, and the queue of ext-side resource ids dropped by the host (flushed to
+/// the extension as `Call.releases`).
 #[derive(Debug)]
 pub struct NativeExtension {
     id: StreamId,
@@ -55,6 +63,35 @@ pub struct NativeExtension {
     reap: Rc<RefCell<Vec<StreamId>>>,
     /// Set once the child has been observed exited, so further calls fail fast (crash isolation).
     dead: bool,
+    /// Ext-side resource ids whose host `ExtResource` was dropped, awaiting flush to the
+    /// extension as `Call.releases`. Cloned into each `ExtResource` this extension hands out so
+    /// its `Drop` can enqueue here (a GC `Drop` can't send a frame; mirrors the fd-reap pattern).
+    resource_reap: Rc<RefCell<Vec<u64>>>,
+}
+
+/// Native state behind an `ExtResource` value: an opaque token for a resource that lives in the
+/// extension process. Holds the extension-assigned id and a clone of that extension's
+/// `resource_reap` queue; `Drop` enqueues the id so the next `Call` tells the extension to free it.
+#[derive(Debug)]
+pub struct NativeExtResource {
+    resource_id: u64,
+    reap: Rc<RefCell<Vec<u64>>>,
+}
+
+impl AnyCollect for NativeExtResource {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+impl Drop for NativeExtResource {
+    fn drop(&mut self) {
+        self.reap.borrow_mut().push(self.resource_id);
+    }
 }
 
 impl NativeExtension {
@@ -328,22 +365,32 @@ fn extension_call<'gc>(
     id: StreamId,
     op: String,
     argv: String,
-    block: Option<Value<'gc>>,
-) -> Result<String, QuoinError> {
+    args: Vec<Value<'gc>>,
+    releases: Vec<u64>,
+) -> Result<CallOutcome, QuoinError> {
     let epoch = vm.handle_table.begin_call();
-    let block_handle = match block {
-        Some(value) => vm.handle_table.mint_local(value, epoch),
-        None => crate::handle_table::NULL_HANDLE,
-    };
 
-    let outcome: Result<String, QuoinError> = (|| {
+    // Route each arg by token space: an `ExtResource` value passes its (ext-side) resource id;
+    // any other value is minted a call-local host-value handle (a block is one of these).
+    let mut handles = Vec::new();
+    let mut resources = Vec::new();
+    for value in args {
+        match value.with_native_state::<NativeExtResource, _, _>(|r| r.resource_id) {
+            Ok(resource_id) => resources.push(resource_id),
+            Err(_) => handles.push(vm.handle_table.mint_local(value, epoch)),
+        }
+    }
+
+    let outcome: Result<CallOutcome, QuoinError> = (|| {
         write_msg(
             vm,
             id,
             &Msg::Call {
                 op,
                 arg: argv,
-                block: block_handle,
+                handles,
+                resources,
+                releases,
             },
         )?;
         loop {
@@ -351,7 +398,8 @@ fn extension_call<'gc>(
             let msg = quoin_ext_proto::decode_envelope(&frame)
                 .map_err(|e| QuoinError::Other(format!("Extension call: malformed frame: {e}")))?;
             match msg {
-                Msg::CallReturn { result } => return Ok(result),
+                Msg::CallReturn { result } => return Ok(CallOutcome::Scalar(result)),
+                Msg::CallReturnResource { resource } => return Ok(CallOutcome::Resource(resource)),
                 host_op => service_host_op(vm, mc, id, epoch, host_op)?,
             }
         }
@@ -361,26 +409,52 @@ fn extension_call<'gc>(
     outcome
 }
 
-/// The shared body of `call:with:` and `call:with:block:`: fail fast if the extension is already
-/// known dead, run the call, and — if its I/O failed because the child exited — surface a typed
-/// "died" error and mark the extension dead so later calls fail fast (crash isolation).
+/// How a call finished: a scalar string, or an ext-side resource the host will wrap as a token.
+enum CallOutcome {
+    Scalar(String),
+    Resource(u64),
+}
+
+/// Wrap an ext-assigned resource id in an `ExtResource` value, tied to `reap` so its `Drop`
+/// enqueues the id for release on this extension's next call.
+fn make_ext_resource<'gc>(
+    vm: &VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    resource_id: u64,
+    reap: Rc<RefCell<Vec<u64>>>,
+) -> Value<'gc> {
+    let class = vm.get_or_create_builtin_class(mc, "ExtResource");
+    vm.new_native_state(mc, class, NativeExtResource { resource_id, reap })
+}
+
+/// The shared body of the `call:` selectors: fail fast if the extension is already known dead,
+/// flush dropped-resource releases, run the call, wrap the result (scalar or resource), and — if
+/// the I/O failed because the child exited — surface a typed "died" error and mark it dead.
 fn run_extension_method<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
     op: String,
     argv: String,
-    block: Option<Value<'gc>>,
+    args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
-    let (id, dead) = receiver
-        .with_native_state::<NativeExtension, _, _>(|e| (e.id, e.dead))
+    // One peek at the native state: stream id, liveness, the reap queue (for releases + to clone
+    // into any returned resource), draining the pending releases to flush on this call.
+    let (id, dead, resource_reap, releases) = receiver
+        .with_native_state::<NativeExtension, _, _>(|e| {
+            let releases: Vec<u64> = e.resource_reap.borrow_mut().drain(..).collect();
+            (e.id, e.dead, e.resource_reap.clone(), releases)
+        })
         .map_err(QuoinError::Other)?;
     if dead {
         return Err(extension_dead_error("already exited"));
     }
 
-    match extension_call(vm, mc, id, op, argv, block) {
-        Ok(result) => Ok(vm.new_string(mc, result)),
+    match extension_call(vm, mc, id, op, argv, args, releases) {
+        Ok(CallOutcome::Scalar(result)) => Ok(vm.new_string(mc, result)),
+        Ok(CallOutcome::Resource(resource_id)) => {
+            Ok(make_ext_resource(vm, mc, resource_id, resource_reap))
+        }
         Err(e) => {
             let exit = receiver
                 .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.note_if_exited())
@@ -392,6 +466,17 @@ fn run_extension_method<'gc>(
             }
         }
     }
+}
+
+/// Extract the elements of a Quoin list value passed as the `args:` argument.
+fn extract_args<'gc>(value: Value<'gc>) -> Result<Vec<Value<'gc>>, QuoinError> {
+    value
+        .with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
+        .map_err(|_| QuoinError::TypeError {
+            expected: "List".to_string(),
+            got: value.type_name().to_string(),
+            msg: "call:with:args: expects a list of arguments".to_string(),
+        })
 }
 
 pub fn build_extension_class() -> NativeClassBuilder {
@@ -445,26 +530,29 @@ pub fn build_extension_class() -> NativeClassBuilder {
                     sock_path,
                     reap: vm.socket_reap.clone(),
                     dead: false,
+                    resource_reap: Rc::new(RefCell::new(Vec::new())),
                 },
             ))
         })
         // `ext call: '<op>' with: '<arg>'` -> send the `Call`, then service the conversation:
         // a loop of re-entrant host-ops the extension may issue (each answered inline) until it
-        // sends the terminal `CallReturn`. Op + arg are strings; the result is a string.
+        // sends the terminal `CallReturn`. Op + arg are strings; the result is a string or a
+        // resource handle. No handle arguments.
         .instance_method("call:with:", |vm, mc, receiver, args| {
             let op = arg!(args, String, 0).to_string();
             let argv = arg!(args, String, 1).to_string();
-            run_extension_method(vm, mc, receiver, op, argv, None)
+            run_extension_method(vm, mc, receiver, op, argv, Vec::new())
         })
-        // `ext call: '<op>' with: '<arg>' block: { ... }` -> like `call:with:`, but also hands
-        // the block to the extension as a (call-local) handle it can invoke over a batch during
-        // the call (Slice 4). The block is any value; non-blocks simply won't be invocable.
-        .instance_method("call:with:block:", |vm, mc, receiver, args| {
+        // `ext call: '<op>' with: '<arg>' args: #( v1 v2 … )` -> like `call:with:`, but also
+        // passes typed handle arguments: each `ExtResource` in the list passes its resource id;
+        // every other value (a block, string, etc.) is minted a call-local host-value handle.
+        .instance_method("call:with:args:", |vm, mc, receiver, args| {
             let op = arg!(args, String, 0).to_string();
             let argv = arg!(args, String, 1).to_string();
-            let block = *args
-                .get(2)
-                .ok_or_else(|| QuoinError::Other("call:with:block: missing block".to_string()))?;
-            run_extension_method(vm, mc, receiver, op, argv, Some(block))
+            let list = *args.get(2).ok_or_else(|| {
+                QuoinError::Other("call:with:args: missing args list".to_string())
+            })?;
+            let call_args = extract_args(list)?;
+            run_extension_method(vm, mc, receiver, op, argv, call_args)
         })
 }

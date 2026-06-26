@@ -12,8 +12,8 @@
 //!   via `+:` (passing the second as a *handle argument*), uppercase the result via `upper`,
 //!   and read it back. For `arg = "ab"` it returns `"AB!"` (`("ab" +: "!").upper`).
 //! - `mapUpper` — exercise `invoke_block` (Slice 4): invoke the host block passed via
-//!   `call:with:block:` over the inputs `["a","b","c"]` in one batched round-trip, then join the
-//!   results. With the block `{ |s| s.upper }` it returns `"A,B,C"`.
+//!   `call:with:args:` (the first handle arg) over the inputs `["a","b","c"]` in one batched
+//!   round-trip, then join the results. With the block `{ |s| s.upper }` it returns `"A,B,C"`.
 //!
 //! It is a test/example fixture, not a shipped feature.
 
@@ -57,9 +57,13 @@ fn main() {
             host.handle_to_string(upper).expect("read result")
         }
         "mapUpper" => {
-            // Invoke the host block passed via `call:with:block:` over three host Strings in a
-            // single batched round-trip, then join the results. Block is `{ |s| s.upper }`.
-            let block = host.block().expect("mapUpper expects a block");
+            // Invoke the host block passed via `call:with:args:` (the first handle arg) over three
+            // host Strings in a single batched round-trip, then join the results. Block is
+            // `{ |s| s.upper }`.
+            let block = *host
+                .handles()
+                .first()
+                .expect("mapUpper expects a block handle");
             let batches: Vec<Vec<Handle>> = ["a", "b", "c"]
                 .iter()
                 .map(|s| vec![host.make_string(s).expect("make_string input")])

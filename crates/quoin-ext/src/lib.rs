@@ -10,13 +10,15 @@
 //!
 //! Messages are length-prefixed frames: a little-endian `u32` length followed by that many
 //! payload bytes. The payload is a FlatBuffers `Message` union (schema + codec in the shared
-//! `quoin-ext-proto` crate). A host->ext `Call` may be answered directly, or the handler may
-//! first issue **re-entrant host-ops** through the [`Host`] client — `make_string`,
+//! `quoin-ext-proto` crate). A `Call` carries typed handle args — host-value handles via
+//! [`Host::handles`] (a block is one of these) and ext-side resource ids via [`Host::resources`].
+//! The handler may issue **re-entrant host-ops** through the [`Host`] client — `make_string`,
 //! `handle_to_string`, `retain`, `release`, `call_method` (send a Quoin message to a handle),
 //! and `invoke_block` (run a host block over a batch in one round-trip) — each a synchronous
-//! round-trip the host services while parked on the reply. Host values the extension holds are
-//! opaque [`Handle`]s indexing a GC-rooted table on the host (`docs/FUTURE_EXT_ARCH.md` §2).
-//! General handle-typed call args/returns and Arrow arrive in later slices.
+//! round-trip the host services while parked on the reply. It returns a [`Reply`] — a scalar or
+//! an ext-side **resource** the host then holds as an opaque token (reaped via [`Host::releases`]
+//! on a later call). Host values the extension holds are opaque [`Handle`]s indexing a GC-rooted
+//! table on the host (`docs/FUTURE_EXT_ARCH.md` §2). Arrow arrives in a later slice.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -58,15 +60,29 @@ pub fn write_frame(w: &mut impl Write, payload: &[u8]) -> io::Result<()> {
 /// service loop expects.
 pub struct Host<'a> {
     stream: &'a mut UnixStream,
-    /// The handle to the host block passed on this `Call`, if any (see [`Host::block`]).
-    block: Option<Handle>,
+    /// Host-value handle args passed on this `Call` (a block is one of these), in order.
+    handles: Vec<Handle>,
+    /// Ext-side resource ids passed back as args on this `Call`, in order.
+    resources: Vec<u64>,
+    /// Ext-side resource ids the host has dropped; the handler should free them from its own
+    /// registry (typically at the top of the call). Empty unless this extension hands out resources.
+    releases: Vec<u64>,
 }
 
 impl<'a> Host<'a> {
-    /// The host block handed to this call via `Extension call:with:block:`, or `None`. Invoke
-    /// it over a batch of argument tuples with [`Host::invoke_block`].
-    pub fn block(&self) -> Option<Handle> {
-        self.block
+    /// The host-value handle args for this call (see [`Host::invoke_block`] to run a block one).
+    pub fn handles(&self) -> &[Handle] {
+        &self.handles
+    }
+
+    /// The ext-side resource ids passed back as args for this call (look them up in your registry).
+    pub fn resources(&self) -> &[u64] {
+        &self.resources
+    }
+
+    /// Ext-side resource ids the host has dropped — free these from your registry.
+    pub fn releases(&self) -> &[u64] {
+        &self.releases
     }
 
     /// Make a host `String` value and return a (call-local) handle to it.
@@ -166,36 +182,64 @@ fn invalid_data(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::E
     io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
-/// Bind a unix socket at `path`, accept one host connection, and serve requests until the
-/// host disconnects. Each `Call` frame invokes `handler(host, op, arg)`; the handler may use
-/// `host` to issue re-entrant host-ops (including [`Host::block`] / [`Host::invoke_block`] when
-/// the call carried a block), then returns the reply string sent back as a `CallReturn`.
+/// What a call handler returns: a scalar string, or an ext-side resource id the host will hold as
+/// an opaque token. A `String`/`&str` converts to `Reply::Scalar`, so scalar handlers need no
+/// ceremony (`"pong".into()` or returning a `String` both work).
+pub enum Reply {
+    Scalar(String),
+    Resource(u64),
+}
+
+impl From<String> for Reply {
+    fn from(s: String) -> Self {
+        Reply::Scalar(s)
+    }
+}
+
+impl From<&str> for Reply {
+    fn from(s: &str) -> Self {
+        Reply::Scalar(s.to_string())
+    }
+}
+
+/// Bind a unix socket at `path`, accept one host connection, and serve requests until the host
+/// disconnects. Each `Call` frame invokes `handler(host, op, arg)`; the handler may use `host` to
+/// read the call's handle/resource args and issue re-entrant host-ops, then returns a [`Reply`]
+/// (scalar or resource) sent back as `CallReturn` / `CallReturnResource`.
 ///
-/// Blocking and single-connection by design: the extension is its own process, and the VM
-/// holds exactly one connection to it. Returns once the host disconnects.
-pub fn serve(
+/// Blocking and single-connection by design: the extension is its own process, and the VM holds
+/// exactly one connection to it. Returns once the host disconnects.
+pub fn serve<R: Into<Reply>>(
     path: &str,
-    mut handler: impl FnMut(&mut Host, &str, &str) -> String,
+    mut handler: impl FnMut(&mut Host, &str, &str) -> R,
 ) -> io::Result<()> {
     let listener = UnixListener::bind(path)?;
     let (mut stream, _addr) = listener.accept()?;
     while let Some(frame) = read_frame(&mut stream)? {
         match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
-            Msg::Call { op, arg, block } => {
-                // `host` borrows the stream for the call's re-entrant host-ops; the borrow
-                // ends before we write the terminal `CallReturn` on the same stream. A `block`
-                // of 0 (NULL_HANDLE) means none was passed.
-                let result = {
+            Msg::Call {
+                op,
+                arg,
+                handles,
+                resources,
+                releases,
+            } => {
+                // `host` borrows the stream for the call's re-entrant host-ops; the borrow ends
+                // before we write the terminal reply on the same stream.
+                let reply: Reply = {
                     let mut host = Host {
                         stream: &mut stream,
-                        block: (block != 0).then_some(block),
+                        handles,
+                        resources,
+                        releases,
                     };
-                    handler(&mut host, &op, &arg)
+                    handler(&mut host, &op, &arg).into()
                 };
-                write_frame(
-                    &mut stream,
-                    &quoin_ext_proto::encode(&Msg::CallReturn { result }),
-                )?;
+                let msg = match reply {
+                    Reply::Scalar(result) => Msg::CallReturn { result },
+                    Reply::Resource(resource) => Msg::CallReturnResource { resource },
+                };
+                write_frame(&mut stream, &quoin_ext_proto::encode(&msg))?;
             }
             other => {
                 return Err(invalid_data(format!(
