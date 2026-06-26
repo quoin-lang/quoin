@@ -328,22 +328,21 @@ JetBrains/nvim-dap integration rides on the existing language server + VSCode pl
   (`active_exception`, or `quoinerror_to_value` for a structured error); stash it on `DebugState`
   for the duration of the throw pause (alongside `at_throw`, cleared on resume) and resolve
   `$ex`/`ex` in `print_expr` / the eval-in-frame path (as a binding, like the frame's locals).
-- **Break on *uncaught* exception (true last-chance)** — Slice 4 is type-filtered *first-chance*,
-  which deliberately avoids predicting caught-vs-uncaught. A real "uncaught-only" mode is hard:
-  whether a `catch:` keeps an exception is dynamic (a typed/declining handler, or a re-raise in
-  the body, passes it through), and a declining `catch:` pops the throw-site frames before
-  re-raising — so by the time you *know* it is uncaught, the frames are gone. Doing it right
-  needs **two-phase exception handling**: a handler stack searched at throw time (match the
-  exception against each `catch:`'s *declared* type filter, without running handler bodies) to
-  decide caught-vs-uncaught *before* unwinding — then break with frames intact. That is a
-  language-level change, coupled to the item below.
-- **Typed `catch:` (and its coupling to the above)** — `catch:{|ex:SomeError| …}` should catch
-  selectively (an untyped param defaults to `:Object`, so it stays backward-compatible — no
-  migration). Implementable single-phase (check the type on `Err`, re-raise on mismatch). The
-  *declared* type filter is exactly what a two-phase search needs, so typed `catch:` is the
-  natural precursor to the uncaught mode. **Guard-block catch** (`catch:{|ex {ex.code==123}| …}`)
-  is intentionally *not* planned: a guard must run arbitrary code to decide, which a frames-intact
-  pre-unwind search can't do cleanly — types stay declarative, guards don't.
+- ✅ **Break on *uncaught* exception** — `qn debug --break-on-uncaught=Type[,…]` pauses only when a
+  matching exception will escape uncaught. Implemented with a `VmState.handler_stack` — each active
+  `catch:`'s *declared* handler types, pushed/popped by the catch natives — that `debug_check_throw`
+  searches at the throw chokepoint, breaking only if no enclosing handler's type matches (the
+  two-phase "decide before unwinding"). A `VmState.reraised` flag makes it fire **once**, at the
+  innermost throw site with frames intact, rather than again at each catch the error re-raises past.
+  Builds on typed `catch:` below. Tests: `break_on_uncaught_*` (`src/runner.rs`).
+- ✅ **Typed `catch:`** — `catch:{|ex:SomeError| …}` catches only a matching (sub)type; a non-match
+  re-raises (untyped `|ex|` ≡ `:Object` = catch-all, so it's backward-compatible). Multi-catch via
+  the variadic `catch+:` / `catch+:finally:` (the folded `catch:{…} catch:{…}` run), tried
+  first-match in source order. Implemented in `src/runtime/block.rs` (`do_catch` /
+  `run_first_matching`), reusing the dispatch subtype check. **Guard-block catch**
+  (`catch:{|ex {ex.code==123}| …}`) is intentionally *not* planned: a guard must run arbitrary code
+  to decide, which a frames-intact pre-unwind search can't do cleanly — types stay declarative,
+  guards don't.
 - **Per-task / per-fiber debugging** — v1 pauses the world; debugging one task while others run
   is a later model (needs a per-task stop and a "threads" view).
 - **Data breakpoints / watchpoints** (break when a variable changes) — needs write interception,
