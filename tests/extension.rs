@@ -17,6 +17,8 @@
 //! - `extension_array_data_plane` (Slice 6b): the `ext_arrays` fixture receives a bulk `Array` as a
 //!   call argument (copy-through), operates on the whole buffer, and returns a scalar or a new
 //!   `Array` — proving columnar data crosses the boundary without per-element exploding.
+//! - `extension_python_sdk` (Slice 7): the extension is a *Python* process (`sdk/python`) speaking
+//!   the same `ext.fbs` wire protocol — the polyglot proof. Gated on `python3` + `flatbuffers`.
 //!
 //! Each script decides pass/fail and prints PASS/FAIL.
 
@@ -207,4 +209,52 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_arrays_test.qn", &script);
+}
+
+/// True if `python3` can import the `flatbuffers` runtime — the Python SDK's only external
+/// dependency. When false, the polyglot test skips cleanly (e.g. CI without Python set up).
+fn python_fixture_runnable() -> bool {
+    Command::new("python3")
+        .args(["-c", "import flatbuffers"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn extension_python_sdk() {
+    if !python_fixture_runnable() {
+        eprintln!("skipping extension_python_sdk: python3 with `flatbuffers` runtime unavailable");
+        return;
+    }
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/sdk/python/examples/ext_echo.py"
+    );
+
+    // Ensure the fixture is executable so `Extension.spawn:` can exec it via its shebang,
+    // regardless of the checkout's recorded file mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(fixture) {
+            let mut perms = meta.permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            let _ = std::fs::set_permissions(fixture, perms);
+        }
+    }
+
+    // A Python extension, spoken to over the exact same protocol as the Rust fixtures.
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{fixture}';
+((e.call:'echo' with:'hi') == 'hi').else:{{ ok = false }};
+((e.call:'upper' with:'hello') == 'HELLO').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_python_test.qn", &script);
 }
