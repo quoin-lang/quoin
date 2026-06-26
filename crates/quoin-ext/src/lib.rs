@@ -14,12 +14,14 @@
 //! [`Host::handles`] (a block is one of these) and ext-side resource ids via [`Host::resources`].
 //! The handler may issue **re-entrant host-ops** through the [`Host`] client — `make_string`,
 //! `handle_to_string`, `retain`, `release`, `call_method` (send a Quoin message to a handle),
-//! and `invoke_block` (run a host block over a batch in one round-trip) — each a synchronous
-//! round-trip the host services while parked on the reply. It returns a [`Reply`] — a scalar or
-//! an ext-side **resource** the host then holds as an opaque token (reaped via [`Host::releases`]
-//! on a later call). Host values the extension holds are opaque [`Handle`]s indexing a GC-rooted
-//! table on the host (`docs/FUTURE_EXT_ARCH.md` §2). Bulk columnar data crosses as [`ArrowArray`]s
-//! — call args via [`Host::arrays`], returns via [`Reply::Array`] (the data plane, copy-through).
+//! `invoke_block` (run a host block over a batch in one round-trip), and the host-reach ops
+//! `get_global` (reach a host class/global), `make_value` (build any host value from a
+//! [`DataValue`]), and `read_handle` (project a handle to a [`DataValue`]) — each a synchronous
+//! round-trip the host services while parked on the reply. It returns a [`Reply`]: a scalar string,
+//! an ext-side **resource** (reaped via [`Host::releases`] on a later call), an [`ArrowArray`] (the
+//! bulk data plane, copy-through), a structured [`DataValue`] tree, or a live host [`Handle`].
+//! Structured args arrive via [`Host::data`]; bulk columns via [`Host::arrays`]. Host values the
+//! extension holds are opaque [`Handle`]s indexing a GC-rooted table on the host (§2).
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -175,6 +177,44 @@ impl<'a> Host<'a> {
         }
     }
 
+    /// Resolve a name in the host's globals (a class is a class-valued global), returning a handle
+    /// to its value — so the extension can reach and drive host classes/globals (e.g.
+    /// `call_method(get_global("Array"), "ofFloats:", [list])`). Unbound name -> `io::Error`.
+    pub fn get_global(&mut self, name: &str) -> io::Result<Handle> {
+        let (handle, _) = self.host_op(&Msg::GetGlobal {
+            name: name.to_string(),
+        })?;
+        Ok(handle)
+    }
+
+    /// Construct any host value from a [`DataValue`] tree, returning a handle to it (for building
+    /// non-string method arguments). The general form of [`Host::make_string`].
+    pub fn make_value(&mut self, value: DataValue) -> io::Result<Handle> {
+        let (handle, _) = self.host_op(&Msg::MakeValue { value })?;
+        Ok(handle)
+    }
+
+    /// Project the value behind `handle` to a [`DataValue`] tree — inspect any handle as native
+    /// data (the general form of [`Host::handle_to_string`]).
+    pub fn read_handle(&mut self, handle: Handle) -> io::Result<DataValue> {
+        write_frame(
+            self.stream,
+            &quoin_ext_proto::encode(&Msg::ReadHandle { handle }),
+        )?;
+        let frame = read_frame(self.stream)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
+        })?;
+        match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+            Msg::ReadHandleReturn { value, error } => match error {
+                Some(e) => Err(io::Error::other(e)),
+                None => Ok(value),
+            },
+            other => Err(invalid_data(format!(
+                "expected ReadHandleReturn, got {other:?}"
+            ))),
+        }
+    }
+
     /// Send one host-op and await its `HostOpReturn`, surfacing a host-reported error as an
     /// `io::Error`. Returns the reply's `(handle, str)` payload (either may be unset).
     fn host_op(&mut self, msg: &Msg) -> io::Result<(Handle, Option<String>)> {
@@ -206,6 +246,9 @@ pub enum Reply {
     Resource(u64),
     Array(ArrowArray),
     Data(DataValue),
+    /// Return a live host value the extension holds (a handle from `get_global`/`make_value`/
+    /// `call_method`); the host resolves it to the value and returns it to the caller.
+    Handle(Handle),
 }
 
 impl From<String> for Reply {
@@ -269,6 +312,7 @@ pub fn serve<R: Into<Reply>>(
                     Reply::Resource(resource) => Msg::CallReturnResource { resource },
                     Reply::Array(array) => Msg::CallReturnArray { array },
                     Reply::Data(value) => Msg::CallReturnData { value },
+                    Reply::Handle(handle) => Msg::CallReturnHandle { handle },
                 };
                 write_frame(&mut stream, &quoin_ext_proto::encode(&msg))?;
             }

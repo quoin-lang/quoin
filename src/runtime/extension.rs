@@ -64,8 +64,15 @@ use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
 use crate::runtime::data_value::{DataValue as RtData, data_to_value, value_to_data};
 use crate::runtime::list::NativeListState;
-use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
+use crate::value::{AnyCollect, NamespacedName, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
+
+/// Resolve a bare name in the host's global table to its `Value` (a class is a class-valued
+/// global). `None` if unbound. (Namespaced `pkg:path` lookup is a later refinement.)
+fn resolve_global<'gc>(vm: &VmState<'gc>, name: &str) -> Option<Value<'gc>> {
+    let key = NamespacedName::new(Vec::new(), name.to_string());
+    vm.globals.borrow().get(&key).copied()
+}
 
 /// Convert the wire `DataValue` to the runtime `DataValue` (decimal-string BigInt/Decimal are
 /// parsed back to arbitrary precision), so the existing `data_to_value` bridge can materialize it.
@@ -399,6 +406,54 @@ fn service_host_op<'gc>(
                 },
             }
         }
+        // Phase 2 — host reach.
+        Msg::GetGlobal { name } => match resolve_global(vm, &name) {
+            Some(value) => {
+                let handle = vm.handle_table.mint_local(value, epoch, ext_id);
+                Msg::HostOpReturn {
+                    handle,
+                    str: None,
+                    error: None,
+                }
+            }
+            None => host_op_error(format!("get_global: no global named '{name}'")),
+        },
+        Msg::MakeValue { value } => match wire_to_runtime(&value) {
+            Ok(rt) => {
+                let built = {
+                    let host = HostCtx::new(vm, mc);
+                    data_to_value(&rt, &host)
+                };
+                match built {
+                    Ok(v) => {
+                        let handle = vm.handle_table.mint_local(v, epoch, ext_id);
+                        Msg::HostOpReturn {
+                            handle,
+                            str: None,
+                            error: None,
+                        }
+                    }
+                    Err(e) => host_op_error(format!("make_value: {e}")),
+                }
+            }
+            Err(e) => host_op_error(format!("make_value: {e}")),
+        },
+        Msg::ReadHandle { handle } => match vm.handle_table.get(handle) {
+            Ok(value) => match value_to_data(value) {
+                Ok(rt) => Msg::ReadHandleReturn {
+                    value: runtime_to_wire(&rt),
+                    error: None,
+                },
+                Err(e) => Msg::ReadHandleReturn {
+                    value: WireData::Null,
+                    error: Some(format!("read_handle: {e}")),
+                },
+            },
+            Err(e) => Msg::ReadHandleReturn {
+                value: WireData::Null,
+                error: Some(e),
+            },
+        },
         other => {
             return Err(QuoinError::Other(format!(
                 "Extension call: unexpected message from extension: {other:?}"
@@ -473,7 +528,7 @@ fn extension_call<'gc>(
     args: Vec<Value<'gc>>,
     data_arg: Option<Value<'gc>>,
     releases: Vec<u64>,
-) -> Result<CallOutcome, QuoinError> {
+) -> Result<CallOutcome<'gc>, QuoinError> {
     // Serialize the optional structured-value payload before opening the call (no handles involved).
     let data = match data_arg {
         Some(value) => Some(runtime_to_wire(&value_to_data(value)?)),
@@ -505,7 +560,7 @@ fn extension_call<'gc>(
         }
     }
 
-    let outcome: Result<CallOutcome, QuoinError> = (|| {
+    let outcome: Result<CallOutcome<'gc>, QuoinError> = (|| {
         write_msg(
             vm,
             id,
@@ -528,6 +583,12 @@ fn extension_call<'gc>(
                 Msg::CallReturnResource { resource } => return Ok(CallOutcome::Resource(resource)),
                 Msg::CallReturnArray { array } => return Ok(CallOutcome::Array(array)),
                 Msg::CallReturnData { value } => return Ok(CallOutcome::Data(value)),
+                // Resolve the returned handle to its `Value` *now*, before `end_call` sweeps the
+                // call-local handle; the Value is returned to the caller (rooted by being live).
+                Msg::CallReturnHandle { handle } => {
+                    let value = vm.handle_table.get(handle).map_err(QuoinError::Other)?;
+                    return Ok(CallOutcome::Value(value));
+                }
                 host_op => service_host_op(vm, mc, id, epoch, ext_id, host_op)?,
             }
         }
@@ -538,12 +599,13 @@ fn extension_call<'gc>(
 }
 
 /// How a call finished: a scalar string, an ext-side resource the host will wrap as a token, a
-/// bulk `Array` (the data plane), or a structured value (materialized as a nested Quoin Value).
-enum CallOutcome {
+/// bulk `Array`, a structured value, or a live host `Value` (a returned handle, already resolved).
+enum CallOutcome<'gc> {
     Scalar(String),
     Resource(u64),
     Array(ArrowArray),
     Data(WireData),
+    Value(Value<'gc>),
 }
 
 /// Wrap an ext-assigned resource id in an `ExtResource` value, tied to `reap` so its `Drop`
@@ -600,6 +662,8 @@ fn run_extension_method<'gc>(
             let host = HostCtx::new(vm, mc);
             data_to_value(&rt, &host)
         }
+        // A returned live host value (already resolved from its handle).
+        Ok(CallOutcome::Value(value)) => Ok(value),
         // A cancellation (a timeout via `Async.timeout:do:`, or a task cancel) interrupted the
         // call mid-conversation: the host abandoned a read, so the connection is desynced (a slow
         // extension's reply would arrive later, unread, and corrupt the next call). Mark the

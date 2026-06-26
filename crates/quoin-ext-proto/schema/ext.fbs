@@ -154,12 +154,44 @@ table HostOpReturn {
     error: string;
 }
 
+// ext -> host (re-entrant, mid-call; Phase 2 — host reach): resolve a name in the host's global
+// table (a class is a class-valued global), returning a handle to its value (or `error` if unbound).
+// Answered with `HostOpReturn`.
+table GetGlobal {
+    name: string;
+}
+
+// ext -> host (re-entrant, mid-call): construct any host value from a structured `DataValue`,
+// returning a handle to it. Answered with `HostOpReturn`.
+table MakeValue {
+    value: DataValueBox;
+}
+
+// ext -> host (re-entrant, mid-call): project the value behind `handle` to a `DataValue` tree.
+// Answered with `ReadHandleReturn`.
+table ReadHandle {
+    handle: uint64;
+}
+
+// host -> ext: the reply to `ReadHandle` — the projected value, or `error` if the handle is
+// invalid or its value isn't representable as data.
+table ReadHandleReturn {
+    value: DataValueBox;
+    error: string;
+}
+
+// ext -> host: the call returns a live host value (the host resolves the handle to its value).
+table CallReturnHandle {
+    handle: uint64;
+}
+
 union Message {
     Call,
     CallReturn,
     CallReturnResource,
     CallReturnArray,
     CallReturnData,
+    CallReturnHandle,
     MakeString,
     HandleToString,
     Retain,
@@ -167,6 +199,10 @@ union Message {
     CallMethodOnHandle,
     InvokeBlock,
     InvokeBlockReturn,
+    GetGlobal,
+    MakeValue,
+    ReadHandle,
+    ReadHandleReturn,
     HostOpReturn,
 }
 
