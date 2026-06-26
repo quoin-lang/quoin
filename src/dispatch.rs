@@ -832,6 +832,13 @@ impl<'gc> VmState<'gc> {
         None
     }
 
+    /// Whether `val`'s class is (or descends from) the type named `hint` — the same subtype
+    /// test method dispatch uses, as a bool. Used by typed `catch:`/`catch+:` to decide whether
+    /// a handler catches a thrown value.
+    pub(crate) fn value_matches_type(&self, val: Value<'gc>, hint: &str) -> bool {
+        self.type_distance(val, hint).is_some()
+    }
+
     pub(crate) fn get_block_from_method(
         &self,
         method_val: Value<'gc>,
