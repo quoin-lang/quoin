@@ -1,8 +1,8 @@
 # Extension Architecture — out-of-process, polyglot, unix-socket extensions
 
-Status: **Design capture, not started.** This records the reasoning and the decisions
-from a design discussion; no code exists yet and none should be written without a fresh
-explain-then-pause. Companion to `docs/ASYNC_ARCH.md` (the I/O waist, the scheduler, the
+Status: **Design capture — all §11 open questions resolved; not started.** This records the
+reasoning and the decisions from a design discussion; no code exists yet and none should be written
+without a fresh explain-then-pause. Next build per §11: **Tier 0 (`quoin-sdk`)**. Companion to `docs/ASYNC_ARCH.md` (the I/O waist, the scheduler, the
 reap queue, and cancellation — all of which this design reuses).
 
 ---
@@ -235,7 +235,7 @@ genuinely different needs:
 
 1. **Control / RPC messages** — "open connection", "run query with params", "here's an
    error", "call handle H". Small, heterogeneous, request/response, latency-sensitive.
-   → **Record format** (FlatBuffers / Cap'n Proto). *Not* Arrow — a one-row columnar table
+   → **Record format** (**FlatBuffers**, decided §11). *Not* Arrow — a one-row columnar table
    is all overhead. This is the bulk of category-(a) glue.
 2. **Opaque blobs** — an image, a gzip stream, a file chunk. Just `bytes`: a length-framed
    byte run the extension interprets itself. Arrow adds nothing for a single blob.
@@ -335,8 +335,8 @@ thrash. If an extension needs frequent re-entry, it belongs in-process (the stat
   (`NativeClassBuilder`, native-state + `trace_gc`, the I/O-request waist) as a semver crate,
   ship the dylint with it. Extensions compiled *into* a custom VM via Cargo. No ABI problem,
   full speed/safety. Real value: **forces stabilization of the host API surface** that the
-  out-of-process protocol then mirrors, while we control both sides. This is the natural
-  *first* build and the home for first-party / perf-critical / chatty extensions.
+  out-of-process protocol then mirrors, while we control both sides. **Decided (§11): this is the
+  first build** — and the home for first-party / perf-critical / chatty extensions.
 - **Primary public tier — out-of-process native over unix domain sockets** (this document).
   Polyglot, trusted, crash-isolated, native-speed. The flagship third-party story.
 - **Deferred — WASM** for untrusted drop-in plugins, only if that need ever materializes.
@@ -366,8 +366,8 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
 - **io_uring** — SQ/CQ rings in shared memory + eventfd wakeups. Considered as the transport
   and **dropped**: its edge needs busy-polling, which the async scheduler can't spend (§3). A
   reference for the submit/complete *shape*, not the mechanism.
-- **FlatBuffers / Cap'n Proto** — schema-driven, in-place access, verifier, schema evolution.
-  The control-plane record format (choice pending).
+- **FlatBuffers** — schema-driven, in-place access, verifier, schema evolution. The **decided**
+  control-plane record format (§11), chosen over Cap'n Proto for polyglot binding breadth.
 - **Apache Arrow** — the data-plane format; zero-copy columnar interchange across languages
   and processes. The **C Data Interface** (a tiny stable ABI) is the decided contract; **ADBC**
   (DB connectivity), **Plasma** (shared-memory object store), and **Flight** (RPC) are
@@ -402,24 +402,59 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
   (where the energy and hardest perf cases are; Go a distant third).
 - **Transport is format-agnostic** (framed socket messages + handles); **payload format is
   per-message**: records (control) + raw bytes (blobs) + **Arrow C Data Interface (columnar)**.
+- **Control-plane record format: FlatBuffers.** In-place access + schema evolution + a verifier
+  (debug-only against a trusted peer, §4), chosen for the **broadest, most-uniform polyglot
+  bindings** — the "protocol + per-language SDKs" strategy (§5) needs a low bar for community SDKs.
+  Cap'n Proto's built-in RPC/promise-pipelining is its main edge and we don't use it (we own the
+  transport, §7); its non-C++/Rust bindings are also less mature.
+- **Bulk data transfer: copy-through-the-socket baseline; `SCM_RIGHTS` fd-passing deferred.** One
+  `write`/`read` per bulk payload (noise next to the native work). True in-place sharing (a shared
+  buffer fd + `mmap`) is added only if a *measured* high-bandwidth workload (video, large-array
+  streaming) demands it — and it slots in over the socket **without changing the control protocol**
+  (§6). Start simple, measure.
 - **Handles are bidirectional** — host Values held by the extension, and extension-side
   resources (connection/statement/context) held by the host; both opaque, both reaped on drop.
+- **Handle rooting/lifetime: JNI-style local + global.** The handle table is a traced GC root set
+  (§2). Handles default to **call-scoped (local)** — auto-released when the originating call
+  completes, so the transients in a call generate no release traffic; an extension **promotes** a
+  handle to **retained (global)** to hold it across calls, then releases it explicitly (batched onto
+  a later call). Alloc is implicit (any host op returning a value mints a handle). Peer crash →
+  bulk-release the dead peer's handles (host Values drop their roots; ext resources reap via the
+  reap queue, §7). This is what enables the callback protocol (#3 — an ext retains a host block).
+- **Callback / re-entrancy protocol: batched.** An extension invokes a retained (global) host-block
+  handle via a request on the socket *during* an in-flight call — re-entrant request/response
+  interleaving the host services while parked on the reply (LSP-style). The hot-path primitive is
+  **invoke H over a batch `[a₁..aₙ] → [r₁..rₙ]`** in one round-trip (host runs the block N times
+  locally); a single call is n=1. This amortizes the boundary crossing so per-element callback
+  thrash (§8) can't bite; genuinely fine-grained / high-frequency callbacks stay a Tier-0 concern.
+- **Bulk array / dataframe Value type: a native-state (`AnyCollect`) handle type.** A native object
+  (like `List`/`Map`/`Socket`) holding one contiguous Arrow-layout buffer behind a handle —
+  GC-integrated via `trace_gc`, reaped via the reap queue, **no `Value`-enum change**. Copy-backed
+  at baseline (shared-buffer-backed only if #2's deferred fd-passing lands); whole-array ops keep it
+  resident extension-side (§8). The columnar data plane and the "array type for NumPy-in-QN" are the
+  same type (§7) — distinct from ordinary objects, never exploded into per-element `Value`s.
 - Reuse the **plain-data waist, the reactor (extension-call-as-parked-fiber on the socket fd),
   the reap queue, and 2b-ii cancellation/timeout**. Handle table = GC root set.
 - "Zero-copy" = **no serialize/deserialize step**, not zero-copy into a `Value`.
 - **Core vs extension:** TLS/crypto, regex, JSON, compression, hashing in core; DBs,
   ML/numeric, imaging, niche parsing, hardware as extensions (high bar for core; §9).
+- **Build order: Tier 0 (`quoin-sdk`) first.** Stabilize the static host API —
+  `NativeClassBuilder`, native-state + `trace_gc`, the I/O-request waist, the `no_gc_across_yield`
+  dylint — as a semver crate *before* the out-of-process protocol, since the wire protocol
+  re-expresses that operation surface (§2/§9). It is mostly **extract-and-harden** of the existing
+  internal surface, a permanent tier for chatty / first-party / perf-critical extensions (§8), and
+  lets the GC-object model settle in-process before any transport is added. **Guardrail:** design
+  the surface as *operations an extension requests of the host* (handle-*projectable*) so the
+  protocol mirrors it rather than diverging. Scope note: this settles the **foundation order
+  only** — the handle/rooting protocol (decided below) and the transport are inherently
+  protocol-tier and aren't exercised by the Tier-0 build itself.
 - **Non-goal:** standalone native tools (linters/formatters/build tools) are out of scope;
   the Rust toolchain + the extracted `quoin-syntax` crate cover that need separately.
 - **rkyv rejected** (Rust-only).
 
 **Open**
 
-- Control-plane record format: **FlatBuffers vs Cap'n Proto**.
-- Bulk data: stay **copy-through-the-socket**, or add **`SCM_RIGHTS` shared-buffer fd-passing**
-  for a measured large-array path (start simple, measure — the in-place case is unprofiled; §6).
-- **Re-entrancy / callback protocol** (how an extension invokes a Quoin block — batched?).
-- The Quoin-side **bulk array / dataframe Value type** (handle-based; shared-buffer-backed
-  only if the deferred §6 fd-passing path lands).
-- **Handle table / rooting protocol** specifics (alloc, release, lifetime on crash).
-- Whether **Tier 0 (`quoin-sdk`)** is built first to harden the host API before the protocol.
+The design questions captured in this document are now **all resolved** (this pass). What remains is
+**implementation-level** and will surface during the Tier-0 (`quoin-sdk`) build — e.g. the exact host
+operation / op-code list, the FlatBuffers control schema, and the wire shape of batched handle
+release and batched callbacks. Capture new questions here as they arise.
