@@ -1,5 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::runtime::pretty::{PpChild, PpRole, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -24,6 +25,25 @@ impl AnyCollect for NativeBigDecimal {
         self
     }
     fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+impl PrettyPrint for NativeBigDecimal {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        // value = mantissa × 10^-scale; mantissa is an i128 (too wide for an `Int`), so a leaf.
+        PpShape::Record {
+            name: "BigDecimal",
+            fields: vec![
+                (
+                    "mantissa".to_string(),
+                    PpChild::Text(self.0.mantissa().to_string(), PpRole::Number),
+                ),
+                (
+                    "scale".to_string(),
+                    PpChild::Val(Value::Int(self.0.scale() as i64)),
+                ),
+            ],
+        }
+    }
 }
 
 /// The `Decimal` behind a `BigDecimal` value (the receiver, or — for the typed operators — a

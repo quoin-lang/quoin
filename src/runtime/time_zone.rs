@@ -1,5 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::runtime::pretty::{PpChild, PpRole, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -39,10 +40,22 @@ pub fn make_time_zone<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, tz: TimeZone) 
 }
 
 /// The IANA name of a zone, or a sensible fallback for an unnamed (fixed-offset) one.
-fn zone_name(tz: &TimeZone) -> String {
+pub(crate) fn zone_name(tz: &TimeZone) -> String {
     tz.iana_name()
         .map(|s| s.to_string())
         .unwrap_or_else(|| "(fixed offset)".to_string())
+}
+
+impl PrettyPrint for NativeTimeZone {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        PpShape::Record {
+            name: "TimeZone",
+            fields: vec![(
+                "name".to_string(),
+                PpChild::Text(zone_name(&self.0), PpRole::Str),
+            )],
+        }
+    }
 }
 
 pub fn build_time_zone_class() -> NativeClassBuilder {

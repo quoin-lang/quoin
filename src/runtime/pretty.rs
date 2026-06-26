@@ -10,11 +10,18 @@
 
 use crate::ansi_colorizer;
 use crate::introspect::{self, MethodVariant};
+use crate::runtime::big_decimal::NativeBigDecimal;
+use crate::runtime::big_integer::NativeBigInteger;
+use crate::runtime::date_time::NativeDateTime;
+use crate::runtime::duration::NativeDuration;
+use crate::runtime::ids::{NativeUlid, NativeUuid};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
 use crate::runtime::method::NativeMethodState;
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
+use crate::runtime::time_zone::NativeTimeZone;
+use crate::runtime::timestamp::NativeTimestamp;
 use crate::value::{Object, ObjectPayload, Value};
 
 use gc_arena::{Gc, lock::RefLock};
@@ -37,6 +44,33 @@ pub enum PpShape<'gc> {
         close: &'static str,
         entries: Vec<(String, Value<'gc>)>,
     },
+    /// A named record `Name{ field: value … }` with *unquoted* struct-field labels (distinct
+    /// from `Entries`, whose keys are quoted as map literals). This is the structural form for
+    /// scalar natives (DateTime/UUID/Duration/…) and for `KeyValuePair` — a synthetic decomposition
+    /// of the value's own state, never its `.s` string.
+    Record {
+        name: &'static str,
+        fields: Vec<(String, PpChild<'gc>)>,
+    },
+}
+
+/// One field of a `Record`: either a live Quoin value the walker recurses into, or a text token
+/// the native type pre-rendered itself. The latter exists because `pp_shape` has no `Mutation`,
+/// so it cannot allocate a Quoin `String` for a synthetic field (a zone name, a UUID's hex, a
+/// `BigInt`'s magnitude) — it formats the text directly and the walker emits it as a styled leaf.
+pub enum PpChild<'gc> {
+    Val(Value<'gc>),
+    Text(String, PpRole),
+}
+
+/// The token role for a `PpChild::Text` leaf, so a native type can color a field it formatted
+/// itself without reaching into the (private) full render palette.
+#[derive(Clone, Copy)]
+pub enum PpRole {
+    /// A string-ish field — quoted like a string literal (`'America/New_York'`).
+    Str,
+    /// A numeric field too wide for an `Int` (a `BigInt` magnitude, a `Decimal` mantissa).
+    Number,
 }
 
 pub trait PrettyPrint {
@@ -363,6 +397,34 @@ fn native_doc<'gc>(value: Value<'gc>, cname: &str, visited: &mut HashSet<usize>)
         "Map" => value
             .with_native_state::<NativeMapState, _, _>(|s| s.pp_shape())
             .ok(),
+        "KeyValuePair" => value
+            .with_native_state::<NativeKeyValuePairState, _, _>(|s| s.pp_shape())
+            .ok(),
+        // Scalar value-like natives: each decomposes its own state into a structural `Record`.
+        "DateTime" => value
+            .with_native_state::<NativeDateTime, _, _>(|s| s.pp_shape())
+            .ok(),
+        "Timestamp" => value
+            .with_native_state::<NativeTimestamp, _, _>(|s| s.pp_shape())
+            .ok(),
+        "Duration" => value
+            .with_native_state::<NativeDuration, _, _>(|s| s.pp_shape())
+            .ok(),
+        "TimeZone" => value
+            .with_native_state::<NativeTimeZone, _, _>(|s| s.pp_shape())
+            .ok(),
+        "BigDecimal" => value
+            .with_native_state::<NativeBigDecimal, _, _>(|s| s.pp_shape())
+            .ok(),
+        "BigInteger" => value
+            .with_native_state::<NativeBigInteger, _, _>(|s| s.pp_shape())
+            .ok(),
+        "UUID" => value
+            .with_native_state::<NativeUuid, _, _>(|s| s.pp_shape())
+            .ok(),
+        "ULID" => value
+            .with_native_state::<NativeUlid, _, _>(|s| s.pp_shape())
+            .ok(),
         _ => None,
     };
     match shape {
@@ -384,44 +446,46 @@ fn native_doc<'gc>(value: Value<'gc>, cname: &str, visited: &mut HashSet<usize>)
                 .collect();
             bracket("", open, close, docs)
         }
-        None => non_collection_native_doc(value, cname, visited),
+        Some(PpShape::Record { name, fields }) => {
+            // `Name{ field: value … }` — unquoted struct-field labels (unlike `Entries`).
+            let docs = fields
+                .into_iter()
+                .map(|(label, child)| {
+                    Doc::Cat(vec![
+                        text(format!("{label}: ")),
+                        child_to_doc(child, visited),
+                    ])
+                })
+                .collect();
+            bracket(name, "{", "}", docs)
+        }
+        None => non_collection_native_doc(value, cname),
     }
 }
 
-/// A few non-collection native types have a canonical literal/structural `.pp` form; anything
-/// else is opaque (`<ClassName>`).
-fn non_collection_native_doc<'gc>(
-    value: Value<'gc>,
-    cname: &str,
-    visited: &mut HashSet<usize>,
-) -> Doc {
+/// Render one `Record` field: recurse into a live value, or emit a native-formatted text leaf
+/// in its role's color (string-ish leaves are quoted like string literals).
+fn child_to_doc<'gc>(child: PpChild<'gc>, visited: &mut HashSet<usize>) -> Doc {
+    match child {
+        PpChild::Val(v) => value_to_doc(v, visited),
+        PpChild::Text(s, PpRole::Str) => styled(Role::Str, text(quote(&s))),
+        PpChild::Text(s, PpRole::Number) => styled(Role::Number, text(s)),
+    }
+}
+
+/// A few non-collection native types have a canonical literal `.pp` form that isn't a `Record`
+/// (a regex literal, a method's signature chain); anything else is opaque (`<ClassName>`).
+fn non_collection_native_doc<'gc>(value: Value<'gc>, cname: &str) -> Doc {
     match cname {
         // A regex prints as its literal `#/pattern/`.
         "Regex" => value
             .with_native_state::<NativeRegexState, _, _>(|r| format!("#/{}/", r.regex.as_str()))
             .map(|s| styled(Role::Regex, text(s)))
             .unwrap_or_else(|_| text("<Regex>")),
-        // A key/value pair shows its two named fields.
-        "KeyValuePair" => match value.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| {
-            (kvp.get_key(), kvp.get_value())
-        }) {
-            Ok((k, v)) => bracket(
-                "KeyValuePair",
-                "{",
-                "}",
-                vec![field_doc("key", k, visited), field_doc("value", v, visited)],
-            ),
-            Err(_) => text("<KeyValuePair>"),
-        },
         // A method shows its selector + each multimethod variant's signature.
         "Method" => method_doc(value),
         _ => text(format!("<{cname}>")),
     }
-}
-
-/// A `label: <value>` doc with an unquoted label (named object / pair fields).
-fn field_doc<'gc>(label: &str, v: Value<'gc>, visited: &mut HashSet<usize>) -> Doc {
-    Doc::Cat(vec![text(format!("{label}: ")), value_to_doc(v, visited)])
 }
 
 /// `Method(<sig> | <sig> | …)` over the multimethod chain; each variant's signature via

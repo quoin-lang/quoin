@@ -1,5 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::runtime::pretty::{PpChild, PpRole, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -24,6 +25,30 @@ impl AnyCollect for NativeBigInteger {
         self
     }
     fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+impl PrettyPrint for NativeBigInteger {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        // sign ∈ {-1, 0, 1}; magnitude is the unsigned base-10 digits (arbitrary width → a leaf).
+        let n = &self.0;
+        let sign = if n.is_negative() {
+            -1
+        } else if n.is_positive() {
+            1
+        } else {
+            0
+        };
+        PpShape::Record {
+            name: "BigInteger",
+            fields: vec![
+                ("sign".to_string(), PpChild::Val(Value::Int(sign))),
+                (
+                    "magnitude".to_string(),
+                    PpChild::Text(n.magnitude().to_string(), PpRole::Number),
+                ),
+            ],
+        }
+    }
 }
 
 /// The `BigInt` behind a `BigInteger` value (cloned out). Errors clearly if `v` is not a

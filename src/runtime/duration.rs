@@ -1,5 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::runtime::pretty::{PpChild, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -23,6 +24,24 @@ impl AnyCollect for NativeDuration {
         self
     }
     fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+impl PrettyPrint for NativeDuration {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        // The faithful internal repr — whole seconds + subsecond nanos (same sign), mirroring
+        // `Timestamp`'s decomposition.
+        let d = self.0;
+        PpShape::Record {
+            name: "Duration",
+            fields: vec![
+                ("seconds".to_string(), PpChild::Val(Value::Int(d.as_secs()))),
+                (
+                    "nanoseconds".to_string(),
+                    PpChild::Val(Value::Int(d.subsec_nanos() as i64)),
+                ),
+            ],
+        }
+    }
 }
 
 /// The `SignedDuration` behind a `Duration` value (the receiver, or — for the typed operators — a

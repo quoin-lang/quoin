@@ -2,6 +2,7 @@ use crate::arg;
 use crate::error::QuoinError;
 use crate::runtime::date_time::make_date_time;
 use crate::runtime::duration::{duration_of, make_duration};
+use crate::runtime::pretty::{PpChild, PpShape, PrettyPrint};
 use crate::runtime::time_zone::tz_of;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
@@ -26,6 +27,25 @@ impl AnyCollect for NativeTimestamp {
         self
     }
     fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+impl PrettyPrint for NativeTimestamp {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        let t = self.0;
+        PpShape::Record {
+            name: "Timestamp",
+            fields: vec![
+                (
+                    "second".to_string(),
+                    PpChild::Val(Value::Int(t.as_second())),
+                ),
+                (
+                    "nanosecond".to_string(),
+                    PpChild::Val(Value::Int(t.subsec_nanosecond() as i64)),
+                ),
+            ],
+        }
+    }
 }
 
 pub fn ts_of(v: Value, who: &str) -> Result<Timestamp, QuoinError> {

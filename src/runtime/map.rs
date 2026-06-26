@@ -1,6 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
-use crate::runtime::pretty::{PpShape, PrettyPrint};
+use crate::runtime::pretty::{PpChild, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmStatus;
 
@@ -189,6 +189,18 @@ impl AnyCollect for NativeKeyValuePairState {
         key_gc.dyn_trace(cc);
         let value_gc: &Value<'gc> = unsafe { transmute(&self.value) };
         value_gc.dyn_trace(cc);
+    }
+}
+
+impl PrettyPrint for NativeKeyValuePairState {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        PpShape::Record {
+            name: "KeyValuePair",
+            fields: vec![
+                ("key".to_string(), PpChild::Val(self.get_key())),
+                ("value".to_string(), PpChild::Val(self.get_value())),
+            ],
+        }
     }
 }
 

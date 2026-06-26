@@ -1,7 +1,8 @@
 use crate::arg;
 use crate::error::QuoinError;
 use crate::runtime::duration::{duration_of, make_duration};
-use crate::runtime::time_zone::{make_time_zone, tz_of};
+use crate::runtime::pretty::{PpChild, PpRole, PpShape, PrettyPrint};
+use crate::runtime::time_zone::{make_time_zone, tz_of, zone_name};
 use crate::runtime::timestamp::{duration_between, make_timestamp};
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
@@ -27,6 +28,46 @@ impl AnyCollect for NativeDateTime {
         self
     }
     fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+impl PrettyPrint for NativeDateTime {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        let z = &self.0;
+        PpShape::Record {
+            name: "DateTime",
+            fields: vec![
+                (
+                    "year".to_string(),
+                    PpChild::Val(Value::Int(z.year() as i64)),
+                ),
+                (
+                    "month".to_string(),
+                    PpChild::Val(Value::Int(z.month() as i64)),
+                ),
+                ("day".to_string(), PpChild::Val(Value::Int(z.day() as i64))),
+                (
+                    "hour".to_string(),
+                    PpChild::Val(Value::Int(z.hour() as i64)),
+                ),
+                (
+                    "minute".to_string(),
+                    PpChild::Val(Value::Int(z.minute() as i64)),
+                ),
+                (
+                    "second".to_string(),
+                    PpChild::Val(Value::Int(z.second() as i64)),
+                ),
+                (
+                    "nanosecond".to_string(),
+                    PpChild::Val(Value::Int(z.subsec_nanosecond() as i64)),
+                ),
+                (
+                    "zone".to_string(),
+                    PpChild::Text(zone_name(z.time_zone()), PpRole::Str),
+                ),
+            ],
+        }
+    }
 }
 
 fn zoned_of(v: Value, who: &str) -> Result<Zoned, QuoinError> {

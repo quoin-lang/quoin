@@ -156,6 +156,48 @@ fn pp_value_like_native_types() {
 }
 
 #[test]
+fn pp_value_like_native_scalars() {
+    // Each scalar native decomposes its OWN state into a structural `Record` (synthetic fields —
+    // never its `.s` string). A wide width keeps each on one line for comparison.
+    assert_eq!(
+        pp("(DateTime.parse: '2026-06-25T12:30:00-04:00[America/New_York]').pp: 999"),
+        "DateTime{year: 2026 month: 6 day: 25 hour: 12 minute: 30 second: 0 \
+         nanosecond: 0 zone: 'America/New_York'}"
+    );
+    assert_eq!(
+        pp("(Timestamp.fromUnixSeconds: 1750000000).pp"),
+        "Timestamp{second: 1750000000 nanosecond: 0}"
+    );
+    assert_eq!(
+        pp("(Duration.seconds: 90).pp"),
+        "Duration{seconds: 90 nanoseconds: 0}"
+    );
+    assert_eq!(
+        pp("(TimeZone.of: 'America/New_York').pp"),
+        "TimeZone{name: 'America/New_York'}"
+    );
+    assert_eq!(
+        pp("(BigDecimal.of: 12345 scale: 2).pp"),
+        "BigDecimal{mantissa: 12345 scale: 2}"
+    );
+    // A negative big integer: sign and unsigned magnitude broken out.
+    assert_eq!(
+        pp("(BigInteger.of: '-42').pp"),
+        "BigInteger{sign: -1 magnitude: 42}"
+    );
+    // A parsed UUID exposes its version + 32-hex form (quoted as a string leaf).
+    assert_eq!(
+        pp("(UUID.parse: '550e8400-e29b-41d4-a716-446655440000').pp"),
+        "UUID{version: 4 hex: '550e8400e29b41d4a716446655440000'}"
+    );
+    // The all-zero ULID: timestamp 0 + 80 zero bits (20 hex digits).
+    assert_eq!(
+        pp("(ULID.parse: '00000000000000000000000000').pp"),
+        "ULID{timestampMillis: 0 random: '00000000000000000000'}"
+    );
+}
+
+#[test]
 fn s_is_decoupled_from_display() {
     // Phase 2: value types have an explicit human `.s`; no `.s` routes through Rust Display.
     assert_eq!(pp("5.s"), "5");

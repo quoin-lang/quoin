@@ -1,5 +1,6 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::runtime::pretty::{PpChild, PpRole, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
 use crate::vm::VmState;
 
@@ -23,6 +24,24 @@ impl AnyCollect for NativeUuid {
         self
     }
     fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+impl PrettyPrint for NativeUuid {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        PpShape::Record {
+            name: "UUID",
+            fields: vec![
+                (
+                    "version".to_string(),
+                    PpChild::Val(Value::Int(self.0.get_version_num() as i64)),
+                ),
+                (
+                    "hex".to_string(),
+                    PpChild::Text(self.0.as_simple().to_string(), PpRole::Str),
+                ),
+            ],
+        }
+    }
 }
 
 fn uuid_of(v: Value, who: &str) -> Result<Uuid, QuoinError> {
@@ -98,6 +117,25 @@ impl AnyCollect for NativeUlid {
         self
     }
     fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+impl PrettyPrint for NativeUlid {
+    fn pp_shape<'gc>(&self) -> PpShape<'gc> {
+        // ULID = 48-bit millisecond timestamp + 80-bit randomness (20 hex digits).
+        PpShape::Record {
+            name: "ULID",
+            fields: vec![
+                (
+                    "timestampMillis".to_string(),
+                    PpChild::Val(Value::Int(self.0.timestamp_ms() as i64)),
+                ),
+                (
+                    "random".to_string(),
+                    PpChild::Text(format!("{:020x}", self.0.random()), PpRole::Str),
+                ),
+            ],
+        }
+    }
 }
 
 fn ulid_of(v: Value, who: &str) -> Result<Ulid, QuoinError> {
