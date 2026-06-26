@@ -1,9 +1,8 @@
 use crate::error::QuoinError;
+use crate::ext_sdk::{Host, HostExt};
 use crate::runtime::duration::make_duration;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
-use crate::vm::VmState;
 
-use gc_arena::Mutation;
 use gc_arena::collect::Trace;
 use jiff::SignedDuration;
 use std::any::Any;
@@ -34,9 +33,9 @@ fn instant_of(v: Value, who: &str) -> Result<StdInstant, QuoinError> {
         })
 }
 
-fn make_instant<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, i: StdInstant) -> Value<'gc> {
-    let class = vm.get_or_create_builtin_class(mc, "Instant");
-    vm.new_native_state(mc, class, NativeInstant(i))
+fn make_instant<'gc>(host: &dyn Host<'gc>, i: StdInstant) -> Value<'gc> {
+    let class = host.get_or_create_builtin_class("Instant");
+    host.new_native_state(class, NativeInstant(i))
 }
 
 /// A std `Duration` (unsigned) as a jiff `SignedDuration`. `subsec_nanos` is always < 1e9 (fits
@@ -48,38 +47,37 @@ fn signed(d: std::time::Duration) -> SignedDuration {
 pub fn build_instant_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Instant", Some("Object"))
         // Instant.now -> the current monotonic instant.
-        .class_method("now", |vm, mc, _r, _a| {
-            Ok(make_instant(vm, mc, StdInstant::now()))
+        .sdk_class_method("now", |host, _r, _a| {
+            Ok(make_instant(host, StdInstant::now()))
         })
         // Time since this instant (now - self), as a Duration.
-        .instance_method("elapsed", |vm, mc, receiver, _args| {
+        .sdk_instance_method("elapsed", |host, receiver, _args| {
             Ok(make_duration(
-                vm,
-                mc,
+                host,
                 signed(instant_of(receiver, "elapsed")?.elapsed()),
             ))
         })
         // Instant - Instant -> a signed Duration (positive when the receiver is the later one).
-        .typed_instance_method("-:", &["Instant"], |vm, mc, receiver, args| {
+        .sdk_typed_instance_method("-:", &["Instant"], |host, receiver, args| {
             let a = instant_of(receiver, "-:")?;
             let b = instant_of(args[0], "-:")?;
             let sd = match a.checked_duration_since(b) {
                 Some(d) => signed(d),
                 None => -signed(b.checked_duration_since(a).unwrap_or_default()),
             };
-            Ok(make_duration(vm, mc, sd))
+            Ok(make_duration(host, sd))
         })
         // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
-        .typed_instance_method("<:", &["Instant"], |vm, mc, receiver, args| {
-            Ok(vm.new_bool(mc, instant_of(receiver, "<:")? < instant_of(args[0], "<:")?))
+        .sdk_typed_instance_method("<:", &["Instant"], |host, receiver, args| {
+            Ok(host.new_bool(instant_of(receiver, "<:")? < instant_of(args[0], "<:")?))
         })
         // `==:` accepts any argument: a non-Instant is simply unequal (never an error).
-        .instance_method("==:", |vm, mc, receiver, args| {
+        .sdk_instance_method("==:", |host, receiver, args| {
             let a = instant_of(receiver, "==:")?;
             let eq = match args[0].with_native_state::<NativeInstant, _, _>(|i| i.0) {
                 Ok(b) => a == b,
                 Err(_) => false,
             };
-            Ok(vm.new_bool(mc, eq))
+            Ok(host.new_bool(eq))
         })
 }
