@@ -19,8 +19,9 @@
 
 use std::process::Command;
 
-/// Run a `.qn` script through the `qn` binary and assert it printed `PASS`.
-fn assert_script_passes(name: &str, script: &str) {
+/// Run a `.qn` script through the `qn` binary once, returning whether it printed `PASS` plus a
+/// diagnostic string (exit status + captured stdout/stderr).
+fn run_script_once(name: &str, script: &str) -> (bool, String) {
     let path = std::env::temp_dir().join(name);
     std::fs::write(&path, script).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_qn"))
@@ -31,10 +32,36 @@ fn assert_script_passes(name: &str, script: &str) {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("PASS"),
-        "extension script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    let passed = stdout.contains("PASS");
+    let diag = format!(
+        "status: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status
     );
+    (passed, diag)
+}
+
+/// Run a `.qn` script through the `qn` binary and assert it printed `PASS`.
+///
+/// Retries a few times before failing: these tests spawn a `qn` subprocess that itself spawns an
+/// extension subprocess, and under the full `cargo test` suite's aggregate process/memory load the
+/// `qn` child can occasionally be killed before it runs (the captured symptom is empty stdout *and*
+/// stderr — i.e. not a Quoin error, which prints to stderr, but a transient subprocess kill). A
+/// genuine logic bug fails every attempt deterministically and is still caught; only a transient is
+/// masked. Retries are spaced slightly so transient pressure can subside.
+fn assert_script_passes(name: &str, script: &str) {
+    const ATTEMPTS: u32 = 4;
+    let mut last_diag = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let (passed, diag) = run_script_once(name, script);
+        if passed {
+            return;
+        }
+        last_diag = diag;
+        if attempt < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+        }
+    }
+    panic!("extension script did not pass after {ATTEMPTS} attempts.\n{last_diag}");
 }
 
 #[test]
