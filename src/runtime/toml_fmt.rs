@@ -8,14 +8,14 @@ use crate::value::{NativeClassBuilder, Value};
 pub fn build_toml_class() -> NativeClassBuilder {
     NativeClassBuilder::new("TOML", Some("Object"))
         // TOML.parse:'…' -> a Quoin value (a Map at the top level).
-        .typed_class_method("parse:", &["String"], |vm, mc, _r, args| {
+        .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);
             let data: DataValue = toml::from_str(s.as_str())
                 .map_err(|e| QuoinError::ParseError(format!("TOML.parse:: {e}")))?;
-            data_to_value(&data, vm, mc)
+            data_to_value(&data, host)
         })
         // TOML.generate:aMap -> a TOML document.
-        .class_method("generate:", |vm, mc, _r, args| {
+        .sdk_class_method("generate:", |host, _r, args| {
             let data = value_to_data(args[0])?;
             if !matches!(data, DataValue::Object(_)) {
                 return Err(QuoinError::ValueError(
@@ -29,7 +29,7 @@ pub fn build_toml_class() -> NativeClassBuilder {
             }
             let s = toml::to_string(&data)
                 .map_err(|e| QuoinError::ValueError(format!("TOML.generate:: {e}")))?;
-            Ok(vm.new_string(mc, s))
+            Ok(host.new_string(s))
         })
 }
 

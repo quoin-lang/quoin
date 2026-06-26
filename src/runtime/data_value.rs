@@ -1,12 +1,11 @@
 use crate::error::QuoinError;
+use crate::ext_sdk::Host;
 use crate::runtime::big_decimal::{NativeBigDecimal, make_decimal};
 use crate::runtime::big_integer::{NativeBigInteger, make_bigint};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::value::{ObjectPayload, Value};
-use crate::vm::VmState;
 
-use gc_arena::Mutation;
 use indexmap::IndexMap;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -96,33 +95,29 @@ pub fn value_to_data(v: Value) -> Result<DataValue, QuoinError> {
 
 /// Build a Quoin value from a `DataValue` (the parse side). `Object` → `Map`, `Array` → `List`,
 /// `BigInt` → `BigInteger`, `Decimal` → `BigDecimal`, `Bytes` → `Bytes`.
-pub fn data_to_value<'gc>(
-    dv: &DataValue,
-    vm: &VmState<'gc>,
-    mc: &Mutation<'gc>,
-) -> Result<Value<'gc>, QuoinError> {
+pub fn data_to_value<'gc>(dv: &DataValue, host: &dyn Host<'gc>) -> Result<Value<'gc>, QuoinError> {
     Ok(match dv {
-        DataValue::Null => vm.new_nil(mc),
-        DataValue::Bool(b) => vm.new_bool(mc, *b),
-        DataValue::Int(i) => vm.new_int(mc, *i),
-        DataValue::BigInt(b) => make_bigint(vm, mc, b.clone()),
-        DataValue::Float(f) => vm.new_double(mc, *f),
-        DataValue::Decimal(d) => make_decimal(vm, mc, *d),
-        DataValue::Str(s) => vm.new_string(mc, s.clone()),
-        DataValue::Bytes(b) => vm.new_bytes(mc, b.clone()),
+        DataValue::Null => host.new_nil(),
+        DataValue::Bool(b) => host.new_bool(*b),
+        DataValue::Int(i) => host.new_int(*i),
+        DataValue::BigInt(b) => make_bigint(host, b.clone()),
+        DataValue::Float(f) => host.new_double(*f),
+        DataValue::Decimal(d) => make_decimal(host, *d),
+        DataValue::Str(s) => host.new_string(s.clone()),
+        DataValue::Bytes(b) => host.new_bytes(b.clone()),
         DataValue::Array(items) => {
             let vals = items
                 .iter()
-                .map(|e| data_to_value(e, vm, mc))
+                .map(|e| data_to_value(e, host))
                 .collect::<Result<Vec<_>, _>>()?;
-            vm.new_list(mc, vals)
+            host.new_list(vals)
         }
         DataValue::Object(pairs) => {
             let mut map = IndexMap::with_capacity(pairs.len());
             for (k, val) in pairs {
-                map.insert(k.clone(), data_to_value(val, vm, mc)?);
+                map.insert(k.clone(), data_to_value(val, host)?);
             }
-            vm.new_map(mc, map)
+            host.new_map(map)
         }
     })
 }

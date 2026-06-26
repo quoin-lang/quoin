@@ -1,13 +1,12 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::ext_sdk::Host;
 use crate::runtime::big_decimal::{NativeBigDecimal, make_decimal};
 use crate::runtime::big_integer::{NativeBigInteger, make_bigint};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
-use crate::vm::VmState;
 
-use gc_arena::Mutation;
 use indexmap::IndexMap;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
@@ -96,29 +95,25 @@ fn value_to_json(v: Value) -> Result<Json, QuoinError> {
 
 /// serde_json tree → Quoin value. Object → `Map`, array → `List`; numbers classified for lossless
 /// representation (see `number_to_value`).
-fn json_to_value<'gc>(
-    j: &Json,
-    vm: &VmState<'gc>,
-    mc: &Mutation<'gc>,
-) -> Result<Value<'gc>, QuoinError> {
+fn json_to_value<'gc>(j: &Json, host: &dyn Host<'gc>) -> Result<Value<'gc>, QuoinError> {
     match j {
-        Json::Null => Ok(vm.new_nil(mc)),
-        Json::Bool(b) => Ok(vm.new_bool(mc, *b)),
-        Json::Number(n) => number_to_value(&n.to_string(), vm, mc),
-        Json::String(s) => Ok(vm.new_string(mc, s.clone())),
+        Json::Null => Ok(host.new_nil()),
+        Json::Bool(b) => Ok(host.new_bool(*b)),
+        Json::Number(n) => number_to_value(&n.to_string(), host),
+        Json::String(s) => Ok(host.new_string(s.clone())),
         Json::Array(arr) => {
             let items = arr
                 .iter()
-                .map(|e| json_to_value(e, vm, mc))
+                .map(|e| json_to_value(e, host))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(vm.new_list(mc, items))
+            Ok(host.new_list(items))
         }
         Json::Object(obj) => {
             let mut map = IndexMap::with_capacity(obj.len());
             for (k, val) in obj {
-                map.insert(k.clone(), json_to_value(val, vm, mc)?);
+                map.insert(k.clone(), json_to_value(val, host)?);
             }
-            Ok(vm.new_map(mc, map))
+            Ok(host.new_map(map))
         }
     }
 }
@@ -126,18 +121,14 @@ fn json_to_value<'gc>(
 /// Classify a JSON number (its raw text) into the narrowest *exact* Quoin type: an integer →
 /// `Integer` if it fits i64, else `BigInteger`; a decimal → `Double` iff it round-trips exactly
 /// through f64 (so `0.1`/`3.14` stay Double), else `BigDecimal`. Never lossy.
-fn number_to_value<'gc>(
-    raw: &str,
-    vm: &VmState<'gc>,
-    mc: &Mutation<'gc>,
-) -> Result<Value<'gc>, QuoinError> {
+fn number_to_value<'gc>(raw: &str, host: &dyn Host<'gc>) -> Result<Value<'gc>, QuoinError> {
     let is_integer = !raw.bytes().any(|b| b == b'.' || b == b'e' || b == b'E');
     if is_integer {
         if let Ok(i) = raw.parse::<i64>() {
-            return Ok(vm.new_int(mc, i));
+            return Ok(host.new_int(i));
         }
         if let Ok(big) = raw.parse::<BigInt>() {
-            return Ok(make_bigint(vm, mc, big));
+            return Ok(make_bigint(host, big));
         }
     }
     let f = raw
@@ -151,35 +142,35 @@ fn number_to_value<'gc>(
                 .map(|fd| fd == raw_dec)
                 .unwrap_or(false);
             if !f_is_exact {
-                return Ok(make_decimal(vm, mc, raw_dec));
+                return Ok(make_decimal(host, raw_dec));
             }
         }
     }
-    Ok(vm.new_double(mc, f))
+    Ok(host.new_double(f))
 }
 
 pub fn build_json_class() -> NativeClassBuilder {
     NativeClassBuilder::new("JSON", Some("Object"))
         // JSON.parse:'…' → a Quoin value (Map/List/String/Integer/Double/Bool/Nil, with
         // BigInteger/BigDecimal for out-of-range numbers). Malformed input → ParseError.
-        .typed_class_method("parse:", &["String"], |vm, mc, _r, args| {
+        .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);
             let json: Json = serde_json::from_str(s.as_str())
                 .map_err(|e| QuoinError::ParseError(format!("JSON.parse:: {e}")))?;
-            json_to_value(&json, vm, mc)
+            json_to_value(&json, host)
         })
         // JSON.generate:value → a compact JSON string.
-        .class_method("generate:", |vm, mc, _r, args| {
+        .sdk_class_method("generate:", |host, _r, args| {
             let json = value_to_json(args[0])?;
             let s = serde_json::to_string(&json)
                 .map_err(|e| QuoinError::Other(format!("JSON.generate:: {e}")))?;
-            Ok(vm.new_string(mc, s))
+            Ok(host.new_string(s))
         })
         // JSON.generatePretty:value → an indented JSON string.
-        .class_method("generatePretty:", |vm, mc, _r, args| {
+        .sdk_class_method("generatePretty:", |host, _r, args| {
             let json = value_to_json(args[0])?;
             let s = serde_json::to_string_pretty(&json)
                 .map_err(|e| QuoinError::Other(format!("JSON.generatePretty:: {e}")))?;
-            Ok(vm.new_string(mc, s))
+            Ok(host.new_string(s))
         })
 }
