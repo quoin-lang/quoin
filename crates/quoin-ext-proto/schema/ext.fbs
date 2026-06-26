@@ -1,0 +1,21 @@
+// Control-plane messages for the Quoin out-of-process extension protocol (Tier 1).
+// See docs/FUTURE_EXT_ARCH.md. Each message is one length-prefixed FlatBuffers buffer
+// on the unix-domain socket.
+//
+// Slice 2 scope: a scalar request/response. Later slices grow this schema — handles,
+// a message union for multiple op kinds, batched calls, and Arrow descriptors.
+
+namespace quoin_ext_proto;
+
+// A call from the host to the extension: invoke op `op` with scalar argument `arg`.
+table Request {
+    op: string;
+    arg: string;
+}
+
+// The extension's reply.
+table Response {
+    result: string;
+}
+
+root_type Request;

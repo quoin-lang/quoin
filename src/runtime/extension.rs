@@ -7,8 +7,9 @@
 //! This is a legacy (`&mut VmState`) native class, not an `ext_sdk` one: it is itself
 //! an async/IO primitive that needs `await_io`, which lives below the SDK surface.
 //!
-//! Scope (Slice 1): scalars only, hand-rolled length-framing. Handles, FlatBuffers,
-//! Arrow, batched callbacks, and crash/timeout handling are later slices.
+//! Scope: scalars only. The payload is a FlatBuffers `Request`/`Response` control
+//! message (schema/codec in `quoin-ext-proto`) inside a u32 length-prefixed frame.
+//! Handles, a message union, batched calls, Arrow, and crash/timeout are later slices.
 
 use std::any::Any;
 use std::process::{Child, Command};
@@ -159,10 +160,8 @@ pub fn build_extension_class() -> NativeClassBuilder {
             let op = arg!(args, String, 0).to_string();
             let argv = arg!(args, String, 1).to_string();
 
-            // Request frame: u32-LE length + `op \0 arg`.
-            let mut payload = op.into_bytes();
-            payload.push(0);
-            payload.extend_from_slice(argv.as_bytes());
+            // Request frame: u32-LE length + a FlatBuffers `Request`.
+            let payload = quoin_ext_proto::encode_request(&op, &argv);
             let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
             frame.extend_from_slice(&payload);
 
@@ -177,6 +176,8 @@ pub fn build_extension_class() -> NativeClassBuilder {
             }
 
             let reply = read_reply_frame(vm, id)?;
-            Ok(vm.new_string(mc, String::from_utf8_lossy(&reply).into_owned()))
+            let result = quoin_ext_proto::decode_response(&reply)
+                .map_err(|e| QuoinError::Other(format!("Extension call: malformed reply: {e}")))?;
+            Ok(vm.new_string(mc, result))
         })
 }

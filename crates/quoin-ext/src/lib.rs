@@ -6,12 +6,12 @@
 //! against — it is **not** linked into the VM. (The VM-side host API is the
 //! separate in-process `ext_sdk` surface.)
 //!
-//! ## Wire protocol (Slice 1 — transport keystone)
+//! ## Wire protocol
 //!
 //! Messages are length-prefixed frames: a little-endian `u32` length followed by
-//! that many payload bytes. The Slice-1 request payload is `op\0arg` (UTF-8 op
-//! name, NUL, UTF-8 scalar argument); the reply payload is the result string.
-//! Handles, FlatBuffers, Arrow, and batched callbacks arrive in later slices.
+//! that many payload bytes. The payload is a FlatBuffers `Request`/`Response`
+//! control message (schema + codec in the shared `quoin-ext-proto` crate). Handles,
+//! a message union, batched calls, and Arrow arrive in later slices.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixListener;
@@ -39,8 +39,8 @@ pub fn write_frame(w: &mut impl Write, payload: &[u8]) -> io::Result<()> {
 }
 
 /// Bind a unix socket at `path`, accept one host connection, and serve requests
-/// until the host disconnects. Each request frame is `op\0arg`; `handler(op, arg)`
-/// returns the reply string, sent back as one frame.
+/// until the host disconnects. Each request frame is a FlatBuffers `Request`;
+/// `handler(op, arg)` returns the reply string, sent back as a `Response` frame.
 ///
 /// Blocking and single-connection by design: the extension is its own process, and
 /// the VM holds exactly one connection to it. Returns once the host disconnects.
@@ -48,10 +48,10 @@ pub fn serve(path: &str, handler: impl Fn(&str, &str) -> String) -> io::Result<(
     let listener = UnixListener::bind(path)?;
     let (mut stream, _addr) = listener.accept()?;
     while let Some(frame) = read_frame(&mut stream)? {
-        let text = String::from_utf8_lossy(&frame);
-        let (op, arg) = text.split_once('\0').unwrap_or((text.as_ref(), ""));
-        let reply = handler(op, arg);
-        write_frame(&mut stream, reply.as_bytes())?;
+        let (op, arg) = quoin_ext_proto::decode_request(&frame)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let reply = handler(&op, &arg);
+        write_frame(&mut stream, &quoin_ext_proto::encode_response(&reply))?;
     }
     Ok(())
 }
