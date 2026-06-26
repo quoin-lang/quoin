@@ -404,7 +404,19 @@ impl<'gc> VmState<'gc> {
         class_obj: Gc<'gc, RefLock<Class<'gc>>>,
         state: T,
     ) -> Value<'gc> {
-        let payload = ObjectPayload::NativeState(gcl!(mc, Box::new(state) as Box<dyn AnyCollect>));
+        self.new_native_state_boxed(mc, class_obj, Box::new(state))
+    }
+
+    /// The dyn-safe core of [`new_native_state`](Self::new_native_state): takes an
+    /// already-boxed payload, so it can sit on the `ext_sdk::Host` trait (which can't
+    /// carry the generic form). The generic wrapper lives on `ext_sdk::HostExt`.
+    pub fn new_native_state_boxed(
+        &self,
+        mc: &Mutation<'gc>,
+        class_obj: Gc<'gc, RefLock<Class<'gc>>>,
+        state: Box<dyn AnyCollect>,
+    ) -> Value<'gc> {
+        let payload = ObjectPayload::NativeState(gcl!(mc, state));
         let obj = gcl!(
             mc,
             Object {

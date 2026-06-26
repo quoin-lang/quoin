@@ -119,26 +119,31 @@ impl fmt::Display for NamespacedName {
     }
 }
 
+/// A legacy native method: takes `&mut VmState` directly. Being migrated to
+/// [`SdkFn`](crate::ext_sdk::SdkFn), which takes `&mut dyn Host` and so can only
+/// touch the curated SDK surface. Both coexist during the migration.
+pub type LegacyNativeFn = for<'a> fn(
+    &mut VmState<'a>,
+    &Mutation<'a>,
+    Value<'a>,
+    Vec<Value<'a>>,
+) -> Result<Value<'a>, QuoinError>;
+
+/// A native method body. `Legacy` reaches into `VmState`; `Sdk` is written against
+/// the `ext_sdk::Host` surface. Dispatch (`Callable::call`) branches on the variant.
 #[derive(Clone, Copy, Debug)]
-pub struct NativeFunc(
-    pub  for<'a> fn(
-        &mut VmState<'a>,
-        &Mutation<'a>,
-        Value<'a>,
-        Vec<Value<'a>>,
-    ) -> Result<Value<'a>, QuoinError>,
-);
+pub enum NativeFunc {
+    Legacy(LegacyNativeFn),
+    Sdk(crate::ext_sdk::SdkFn),
+}
 
 impl NativeFunc {
-    pub fn new(
-        f: for<'a> fn(
-            &mut VmState<'a>,
-            &Mutation<'a>,
-            Value<'a>,
-            Vec<Value<'a>>,
-        ) -> Result<Value<'a>, QuoinError>,
-    ) -> Self {
-        Self(f)
+    pub fn new(f: LegacyNativeFn) -> Self {
+        Self::Legacy(f)
+    }
+
+    pub fn sdk(f: crate::ext_sdk::SdkFn) -> Self {
+        Self::Sdk(f)
     }
 }
 
@@ -729,7 +734,7 @@ impl NativeClassBuilder {
     pub fn class_method(mut self, selector: &str, f: NativeFn) -> Self {
         self.class_methods.push(NativeMethodDef {
             selector: selector.to_string(),
-            func: NativeFunc(f),
+            func: NativeFunc::Legacy(f),
             param_types: None,
         });
         self
@@ -739,7 +744,7 @@ impl NativeClassBuilder {
     pub fn typed_class_method(mut self, selector: &str, param_types: &[&str], f: NativeFn) -> Self {
         self.class_methods.push(NativeMethodDef {
             selector: selector.to_string(),
-            func: NativeFunc(f),
+            func: NativeFunc::Legacy(f),
             param_types: type_hints(param_types),
         });
         self
@@ -748,7 +753,7 @@ impl NativeClassBuilder {
     pub fn instance_method(mut self, selector: &str, f: NativeFn) -> Self {
         self.instance_methods.push(NativeMethodDef {
             selector: selector.to_string(),
-            func: NativeFunc(f),
+            func: NativeFunc::Legacy(f),
             param_types: None,
         });
         self
@@ -763,7 +768,59 @@ impl NativeClassBuilder {
     ) -> Self {
         self.instance_methods.push(NativeMethodDef {
             selector: selector.to_string(),
-            func: NativeFunc(f),
+            func: NativeFunc::Legacy(f),
+            param_types: type_hints(param_types),
+        });
+        self
+    }
+
+    // --- ext-sdk method registration ---------------------------------------
+    // The `sdk_*` builders mirror the four above but take an `ext_sdk::SdkFn`
+    // (`&mut dyn Host`) instead of a `NativeFn` (`&mut VmState`). Both coexist while
+    // builtins migrate class-by-class onto the SDK surface; once all are migrated the
+    // legacy `NativeFn` builders above are deleted.
+
+    pub fn sdk_class_method(mut self, selector: &str, f: crate::ext_sdk::SdkFn) -> Self {
+        self.class_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func: NativeFunc::Sdk(f),
+            param_types: None,
+        });
+        self
+    }
+
+    pub fn sdk_typed_class_method(
+        mut self,
+        selector: &str,
+        param_types: &[&str],
+        f: crate::ext_sdk::SdkFn,
+    ) -> Self {
+        self.class_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func: NativeFunc::Sdk(f),
+            param_types: type_hints(param_types),
+        });
+        self
+    }
+
+    pub fn sdk_instance_method(mut self, selector: &str, f: crate::ext_sdk::SdkFn) -> Self {
+        self.instance_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func: NativeFunc::Sdk(f),
+            param_types: None,
+        });
+        self
+    }
+
+    pub fn sdk_typed_instance_method(
+        mut self,
+        selector: &str,
+        param_types: &[&str],
+        f: crate::ext_sdk::SdkFn,
+    ) -> Self {
+        self.instance_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func: NativeFunc::Sdk(f),
             param_types: type_hints(param_types),
         });
         self

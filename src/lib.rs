@@ -8,6 +8,7 @@ pub mod debug;
 pub mod debug_cli;
 pub mod dispatch;
 pub mod error;
+pub mod ext_sdk;
 pub mod fiber;
 pub mod highlighter;
 pub mod instruction;

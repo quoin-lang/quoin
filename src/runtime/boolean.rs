@@ -4,18 +4,15 @@ use crate::value::{NativeClassBuilder, Value};
 pub fn build_boolean_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Boolean", Some("Object"))
         //
-        .instance_method("s", |vm, mc, receiver, _args| {
+        .sdk_instance_method("s", |host, receiver, _args| {
             let b = recv!(receiver, Bool);
-            Ok(vm.new_string(
-                mc,
-                if b {
-                    "true".to_string()
-                } else {
-                    "false".to_string()
-                },
-            ))
+            Ok(host.new_string(if b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }))
         })
-        .instance_method("==:", |vm, mc, receiver, args| {
-            Ok(vm.new_bool(mc, receiver == args[0]))
+        .sdk_instance_method("==:", |host, receiver, args| {
+            Ok(host.new_bool(receiver == args[0]))
         })
 }

@@ -2,6 +2,7 @@
 //! and candidate/error formatting. Extracted verbatim from `vm.rs` — behavior-neutral.
 
 use crate::error::QuoinError;
+use crate::ext_sdk::HostCtx;
 use crate::runtime::method::NativeMethodState;
 use crate::symbol::Symbol;
 use crate::value::{Block, Class, NamespacedName, NativeCall, NativeFunc, ObjectPayload, Value};
@@ -138,7 +139,16 @@ impl<'gc> Callable<'gc> {
                     receiver,
                     args: args.clone(),
                 });
-                let ret = func.0(vm, mc, receiver, args);
+                // `Legacy` fns take `&mut VmState` + `mc`; `Sdk` fns take `&mut dyn Host`
+                // — a `HostCtx` captures `(vm, mc)` for the call so the SDK never sees `mc`.
+                // (`vm` reborrows into the ctx, so it stays usable afterward.)
+                let ret = match func {
+                    NativeFunc::Legacy(f) => f(vm, mc, receiver, args),
+                    NativeFunc::Sdk(f) => {
+                        let mut ctx = HostCtx::new(vm, mc);
+                        f(&mut ctx, receiver, args)
+                    }
+                };
                 if ret.is_err() {
                     // Native error: the send failed in place (no callee frame), so the
                     // stack-trace formatter wants its args. Reuse the rooting snapshot
