@@ -7,9 +7,16 @@
 //! This is a legacy (`&mut VmState`) native class, not an `ext_sdk` one: it is itself
 //! an async/IO primitive that needs `await_io`, which lives below the SDK surface.
 //!
-//! Scope: scalars only. The payload is a FlatBuffers `Request`/`Response` control
-//! message (schema/codec in `quoin-ext-proto`) inside a u32 length-prefixed frame.
-//! Handles, a message union, batched calls, Arrow, and crash/timeout are later slices.
+//! Slice 3a adds the **handle table** (`docs/FUTURE_EXT_ARCH.md` §2): a `call:with:` is no
+//! longer a one-shot request/reply but a re-entrant *conversation*. After sending the `Call`,
+//! the host services a loop of frames — each is either a host-op request the extension issued
+//! mid-call (`MakeString`/`HandleToString`/`Retain`/`Release`, answered with `HostOpReturn`) or
+//! the terminal `CallReturn`. Handles minted during the call are call-local and swept on return
+//! (`HandleTable::begin_call`/`end_call`); the extension `Retain`s any it wants to keep.
+//!
+//! Every frame is a FlatBuffers `Message` union (schema/codec in `quoin-ext-proto`) inside a
+//! u32 length-prefixed frame. Handle-typed call args/returns, `CallMethodOnHandle`, batched
+//! callbacks, Arrow, and crash/timeout are later slices.
 
 use std::any::Any;
 use std::process::{Child, Command};
@@ -17,10 +24,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gc_arena::collect::Trace;
 
+use quoin_ext_proto::Msg;
+
 use crate::arg;
 use crate::error::QuoinError;
 use crate::io_backend::{IoRequest, IoResult, StreamId};
-use crate::value::{AnyCollect, NativeClassBuilder, Value};
+use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
 
 /// Native state behind an `Extension` value: the registered stream id for the UDS,
@@ -99,6 +108,94 @@ fn read_reply_frame<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>,
     Ok(buf[4..4 + len].to_vec())
 }
 
+/// Encode `msg` and write it as one length-prefixed frame, parking the fiber on the socket.
+fn write_msg<'gc>(vm: &mut VmState<'gc>, id: StreamId, msg: &Msg) -> Result<(), QuoinError> {
+    let payload = quoin_ext_proto::encode(msg);
+    let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(&payload);
+    match vm.await_io(IoRequest::Write { id, bytes: frame })? {
+        IoResult::Wrote(_) => Ok(()),
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+        other => Err(QuoinError::Other(format!(
+            "Extension: unexpected write result {other:?}"
+        ))),
+    }
+}
+
+/// Read the Rust string behind a host `String` value, or `None` if it isn't one.
+fn read_string_value(value: Value<'_>) -> Option<String> {
+    match value {
+        Value::Object(obj) => match &obj.borrow().payload {
+            ObjectPayload::String(s) => Some(s.as_str().to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Service one re-entrant host-op the extension issued mid-call, writing back its
+/// `HostOpReturn`. Returns `Ok(())` for every host-op; the caller's loop handles `CallReturn`.
+fn service_host_op<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    id: StreamId,
+    epoch: u32,
+    msg: Msg,
+) -> Result<(), QuoinError> {
+    let reply = match msg {
+        Msg::MakeString { value } => {
+            let v = vm.new_string(mc, value);
+            let handle = vm.handle_table.mint_local(v, epoch);
+            Msg::HostOpReturn {
+                handle,
+                str: None,
+                error: None,
+            }
+        }
+        Msg::HandleToString { handle } => match vm.handle_table.get(handle) {
+            Ok(v) => match read_string_value(v) {
+                Some(s) => Msg::HostOpReturn {
+                    handle: 0,
+                    str: Some(s),
+                    error: None,
+                },
+                None => host_op_error(format!("handle {handle} does not refer to a String")),
+            },
+            Err(e) => host_op_error(e),
+        },
+        Msg::Retain { handle } => match vm.handle_table.retain(handle) {
+            Ok(()) => ack(),
+            Err(e) => host_op_error(e),
+        },
+        Msg::Release { handles } => {
+            vm.handle_table.release(&handles);
+            ack()
+        }
+        other => {
+            return Err(QuoinError::Other(format!(
+                "Extension call: unexpected message from extension: {other:?}"
+            )));
+        }
+    };
+    write_msg(vm, id, &reply)
+}
+
+fn ack() -> Msg {
+    Msg::HostOpReturn {
+        handle: 0,
+        str: None,
+        error: None,
+    }
+}
+
+fn host_op_error(message: String) -> Msg {
+    Msg::HostOpReturn {
+        handle: 0,
+        str: None,
+        error: Some(message),
+    }
+}
+
 pub fn build_extension_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Extension", Some("Object"))
         // `Extension spawn: '<path-to-binary>'` -> spawn the extension subprocess and
@@ -151,8 +248,9 @@ pub fn build_extension_class() -> NativeClassBuilder {
                 },
             ))
         })
-        // `ext call: '<op>' with: '<arg>'` -> send one request, await the reply. Slice-1
-        // scalar protocol: op + arg are strings, result is a string.
+        // `ext call: '<op>' with: '<arg>'` -> send the `Call`, then service the conversation:
+        // a loop of re-entrant host-ops the extension may issue (each answered inline) until it
+        // sends the terminal `CallReturn`. Op + arg are strings; the result is a string.
         .instance_method("call:with:", |vm, mc, receiver, args| {
             let id = receiver
                 .with_native_state::<NativeExtension, _, _>(|e| e.id)
@@ -160,24 +258,26 @@ pub fn build_extension_class() -> NativeClassBuilder {
             let op = arg!(args, String, 0).to_string();
             let argv = arg!(args, String, 1).to_string();
 
-            // Request frame: u32-LE length + a FlatBuffers `Request`.
-            let payload = quoin_ext_proto::encode_request(&op, &argv);
-            let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
-            frame.extend_from_slice(&payload);
+            // Open a call epoch so handles minted during it are call-local (swept on return).
+            let epoch = vm.handle_table.begin_call();
 
-            match vm.await_io(IoRequest::Write { id, bytes: frame })? {
-                IoResult::Wrote(_) => {}
-                IoResult::Err(e) => return Err(QuoinError::from_io_error(&e)),
-                other => {
-                    return Err(QuoinError::Other(format!(
-                        "Extension call: unexpected write result {other:?}"
-                    )));
+            // The whole conversation must close out the epoch even on error, so the call's
+            // transient handles never leak. Run it in a closure and sweep unconditionally.
+            let outcome: Result<String, QuoinError> = (|| {
+                write_msg(vm, id, &Msg::Call { op, arg: argv })?;
+                loop {
+                    let frame = read_reply_frame(vm, id)?;
+                    let msg = quoin_ext_proto::decode_envelope(&frame).map_err(|e| {
+                        QuoinError::Other(format!("Extension call: malformed frame: {e}"))
+                    })?;
+                    match msg {
+                        Msg::CallReturn { result } => return Ok(result),
+                        host_op => service_host_op(vm, mc, id, epoch, host_op)?,
+                    }
                 }
-            }
+            })();
 
-            let reply = read_reply_frame(vm, id)?;
-            let result = quoin_ext_proto::decode_response(&reply)
-                .map_err(|e| QuoinError::Other(format!("Extension call: malformed reply: {e}")))?;
-            Ok(vm.new_string(mc, result))
+            vm.handle_table.end_call(epoch);
+            Ok(vm.new_string(mc, outcome?))
         })
 }

@@ -228,6 +228,13 @@ pub struct VmState<'gc> {
     /// `debug`. Plain data (no `Gc`), so `require_static`. See `src/coverage.rs`.
     #[collect(require_static)]
     pub coverage: Option<crate::coverage::CoverageState>,
+
+    /// Opaque `u64` handles for host values held by out-of-process extensions (Tier 1).
+    /// Inline by value so `#[derive(Collect)]` traces it: the table **is a GC root set**,
+    /// keeping a handle's `Value` alive as long as the extension holds it. Empty (and a
+    /// single bool load on the hot path) unless extensions are in use. See
+    /// `src/handle_table.rs` / `docs/FUTURE_EXT_ARCH.md` §2.
+    pub handle_table: crate::handle_table::HandleTable<'gc>,
 }
 
 pub enum VmStatus<'gc> {
@@ -325,6 +332,7 @@ impl<'gc> VmState<'gc> {
             socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             debug: None,
             coverage: None,
+            handle_table: crate::handle_table::HandleTable::new(),
         }
     }
 

@@ -7,7 +7,8 @@ fn main() {
     let path = std::env::args()
         .nth(1)
         .expect("usage: ext_echo <socket-path>");
-    quoin_ext::serve(&path, |op, arg| match op {
+    // Scalar-only: doesn't touch the host-callback client (`_host`).
+    quoin_ext::serve(&path, |_host, op, arg| match op {
         "echo" => arg.to_string(),
         "upper" => arg.to_uppercase(),
         other => format!("unknown op: {other}"),

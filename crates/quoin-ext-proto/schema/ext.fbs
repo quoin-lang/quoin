@@ -2,20 +2,70 @@
 // See docs/FUTURE_EXT_ARCH.md. Each message is one length-prefixed FlatBuffers buffer
 // on the unix-domain socket.
 //
-// Slice 2 scope: a scalar request/response. Later slices grow this schema — handles,
-// a message union for multiple op kinds, batched calls, and Arrow descriptors.
+// Slice 3a scope: the handle table (the §2 GC boundary). A single `Message` union
+// carries every frame in either direction; the direction is implicit in which side
+// reads it. A host->ext `Call` may be answered directly with `CallReturn`, OR the
+// extension may interleave re-entrant host-op requests (MakeString / HandleToString /
+// Retain / Release) — each answered by a `HostOpReturn` — before sending `CallReturn`.
+//
+// Later slices grow this: handles as `Call` arguments/returns, a richer host-op set
+// (CallMethodOnHandle), batched callbacks, and Arrow descriptors.
 
 namespace quoin_ext_proto;
 
-// A call from the host to the extension: invoke op `op` with scalar argument `arg`.
-table Request {
+// host -> ext: invoke op `op` with scalar argument `arg`.
+table Call {
     op: string;
     arg: string;
 }
 
-// The extension's reply.
-table Response {
+// ext -> host: the originating call is finished; `result` is the scalar return.
+table CallReturn {
     result: string;
 }
 
-root_type Request;
+// ext -> host (re-entrant, mid-call): make a host String value, return a handle to it.
+table MakeString {
+    value: string;
+}
+
+// ext -> host (re-entrant, mid-call): read a String-handle back into a scalar string.
+table HandleToString {
+    handle: uint64;
+}
+
+// ext -> host (re-entrant, mid-call): promote a call-local handle to retained (global),
+// so it survives past the originating call.
+table Retain {
+    handle: uint64;
+}
+
+// ext -> host (re-entrant, mid-call): release retained handles (batched).
+table Release {
+    handles: [uint64];
+}
+
+// host -> ext: the reply to any re-entrant host-op. Carries whichever result applies —
+//   MakeString -> `handle`; HandleToString -> `str`; Retain/Release -> ack (no payload).
+// `error` is non-null iff the op failed (and the other fields are unset).
+table HostOpReturn {
+    handle: uint64;
+    str: string;
+    error: string;
+}
+
+union Message {
+    Call,
+    CallReturn,
+    MakeString,
+    HandleToString,
+    Retain,
+    Release,
+    HostOpReturn,
+}
+
+table Envelope {
+    msg: Message;
+}
+
+root_type Envelope;

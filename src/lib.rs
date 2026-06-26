@@ -10,6 +10,7 @@ pub mod dispatch;
 pub mod error;
 pub mod ext_sdk;
 pub mod fiber;
+pub mod handle_table;
 pub mod highlighter;
 pub mod instruction;
 pub mod introspect;

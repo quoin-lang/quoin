@@ -8,13 +8,24 @@
 //!
 //! ## Wire protocol
 //!
-//! Messages are length-prefixed frames: a little-endian `u32` length followed by
-//! that many payload bytes. The payload is a FlatBuffers `Request`/`Response`
-//! control message (schema + codec in the shared `quoin-ext-proto` crate). Handles,
-//! a message union, batched calls, and Arrow arrive in later slices.
+//! Messages are length-prefixed frames: a little-endian `u32` length followed by that many
+//! payload bytes. The payload is a FlatBuffers `Message` union (schema + codec in the shared
+//! `quoin-ext-proto` crate). A host->ext `Call` may be answered directly, or the handler may
+//! first issue **re-entrant host-ops** through the [`Host`] client — `make_string`,
+//! `handle_to_string`, `retain`, `release` — each a synchronous round-trip the host services
+//! while parked on the reply. Host values the extension holds are opaque [`Handle`]s indexing
+//! a GC-rooted table on the host (`docs/FUTURE_EXT_ARCH.md` §2). Handle-typed call args/returns,
+//! a richer host-op set, batched callbacks, and Arrow arrive in later slices.
 
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
+
+use quoin_ext_proto::Msg;
+
+/// An opaque reference to a host value, as seen by the extension. Default lifetime is
+/// call-local (auto-released when the originating call returns); promote it with
+/// [`Host::retain`] to hold it across calls.
+pub type Handle = u64;
 
 /// Read one length-prefixed frame. `Ok(None)` on a clean EOF (peer closed between
 /// frames); `Err` on a truncated frame or other I/O error.
@@ -38,20 +49,102 @@ pub fn write_frame(w: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     w.flush()
 }
 
-/// Bind a unix socket at `path`, accept one host connection, and serve requests
-/// until the host disconnects. Each request frame is a FlatBuffers `Request`;
-/// `handler(op, arg)` returns the reply string, sent back as a `Response` frame.
+/// The host-callback client handed to a request handler for the duration of one `Call`.
 ///
-/// Blocking and single-connection by design: the extension is its own process, and
-/// the VM holds exactly one connection to it. Returns once the host disconnects.
-pub fn serve(path: &str, handler: impl Fn(&str, &str) -> String) -> io::Result<()> {
+/// Each method issues a re-entrant host-op (a `Msg` frame the host services mid-call) and
+/// blocks on the matching `HostOpReturn`. It borrows the connection mutably, so host-ops are
+/// strictly serialized within the call — exactly the request/response ping-pong the host's
+/// service loop expects.
+pub struct Host<'a> {
+    stream: &'a mut UnixStream,
+}
+
+impl<'a> Host<'a> {
+    /// Make a host `String` value and return a (call-local) handle to it.
+    pub fn make_string(&mut self, s: &str) -> io::Result<Handle> {
+        let (handle, _) = self.host_op(&Msg::MakeString {
+            value: s.to_string(),
+        })?;
+        Ok(handle)
+    }
+
+    /// Read a `String`-typed handle back into a Rust string.
+    pub fn handle_to_string(&mut self, handle: Handle) -> io::Result<String> {
+        let (_, str) = self.host_op(&Msg::HandleToString { handle })?;
+        str.ok_or_else(|| invalid_data("HandleToString reply carried no string"))
+    }
+
+    /// Promote a call-local handle to retained (global), so it survives past this call.
+    pub fn retain(&mut self, handle: Handle) -> io::Result<()> {
+        self.host_op(&Msg::Retain { handle }).map(|_| ())
+    }
+
+    /// Release retained handles (batched).
+    pub fn release(&mut self, handles: &[Handle]) -> io::Result<()> {
+        self.host_op(&Msg::Release {
+            handles: handles.to_vec(),
+        })
+        .map(|_| ())
+    }
+
+    /// Send one host-op and await its `HostOpReturn`, surfacing a host-reported error as an
+    /// `io::Error`. Returns the reply's `(handle, str)` payload (either may be unset).
+    fn host_op(&mut self, msg: &Msg) -> io::Result<(Handle, Option<String>)> {
+        write_frame(self.stream, &quoin_ext_proto::encode(msg))?;
+        let frame = read_frame(self.stream)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
+        })?;
+        match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+            Msg::HostOpReturn { handle, str, error } => match error {
+                Some(e) => Err(io::Error::other(e)),
+                None => Ok((handle, str)),
+            },
+            other => Err(invalid_data(format!(
+                "expected HostOpReturn, got {other:?}"
+            ))),
+        }
+    }
+}
+
+fn invalid_data(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, e)
+}
+
+/// Bind a unix socket at `path`, accept one host connection, and serve requests until the
+/// host disconnects. Each `Call` frame invokes `handler(host, op, arg)`; the handler may use
+/// `host` to issue re-entrant host-ops, then returns the reply string sent back as a
+/// `CallReturn`.
+///
+/// Blocking and single-connection by design: the extension is its own process, and the VM
+/// holds exactly one connection to it. Returns once the host disconnects.
+pub fn serve(
+    path: &str,
+    mut handler: impl FnMut(&mut Host, &str, &str) -> String,
+) -> io::Result<()> {
     let listener = UnixListener::bind(path)?;
     let (mut stream, _addr) = listener.accept()?;
     while let Some(frame) = read_frame(&mut stream)? {
-        let (op, arg) = quoin_ext_proto::decode_request(&frame)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let reply = handler(&op, &arg);
-        write_frame(&mut stream, &quoin_ext_proto::encode_response(&reply))?;
+        match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+            Msg::Call { op, arg } => {
+                // `host` borrows the stream for the call's re-entrant host-ops; the borrow
+                // ends before we write the terminal `CallReturn` on the same stream.
+                let result = {
+                    let mut host = Host {
+                        stream: &mut stream,
+                    };
+                    handler(&mut host, &op, &arg)
+                };
+                write_frame(
+                    &mut stream,
+                    &quoin_ext_proto::encode(&Msg::CallReturn { result }),
+                )?;
+            }
+            other => {
+                return Err(invalid_data(format!(
+                    "extension serve: expected a Call to begin a conversation, got {other:?}"
+                )));
+            }
+        }
     }
     Ok(())
 }
