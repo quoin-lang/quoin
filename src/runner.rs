@@ -1510,6 +1510,14 @@ fn drive_with_frontend<F: DriverFrontend>(
                 for id in reaped {
                     backend.close(id);
                 }
+                // Bulk-release the host-value handles of any dropped extension (its `Drop`
+                // enqueued its `ext_id`), so they stop rooting host Values.
+                arena.mutate_root(|_mc, vm| {
+                    let ext_ids: Vec<u64> = vm.ext_handle_reap.borrow_mut().drain(..).collect();
+                    for ext_id in ext_ids {
+                        vm.handle_table.release_for_ext(ext_id);
+                    }
+                });
             }
         }
         Ok(())

@@ -217,6 +217,13 @@ pub struct VmState<'gc> {
     #[collect(require_static)]
     pub socket_reap: std::rc::Rc<std::cell::RefCell<Vec<StreamId>>>,
 
+    /// Extension ids whose `Extension` handle was dropped (GC'd), awaiting bulk-release of the
+    /// host-value handles they held (`HandleTable::release_for_ext`) by the driver. A non-GC
+    /// queue (the handle's `Drop` can only push a plain id), mirroring `socket_reap`. Shared `Rc`
+    /// clone lives in each `Extension` handle.
+    #[collect(require_static)]
+    pub ext_handle_reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+
     /// Attached debugger session, or `None` for a normal run. When `Some`, the step loop
     /// consults it once per instruction (see `src/debug.rs`); when `None`, the hook is a
     /// single bool load. Plain data (no `Gc`), so `require_static`.
@@ -330,6 +337,7 @@ impl<'gc> VmState<'gc> {
             loaded: Vec::new(),
             options,
             socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             debug: None,
             coverage: None,
             handle_table: crate::handle_table::HandleTable::new(),

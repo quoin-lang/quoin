@@ -34,8 +34,13 @@
 //!
 //! Slice 5a adds **crash isolation**: a call whose I/O fails because the child exited surfaces a
 //! typed `IoError` (not a hang), marks the extension dead so later calls fail fast, and `Drop`
-//! reaps the host-side fd via the shared reap queue. Per-peer handle bulk-release (§2), general
-//! handle-typed call args/returns, Arrow, and timeouts are later slices.
+//! reaps the host-side fd via the shared reap queue. A later slice adds **per-peer handle
+//! bulk-release** (a dead/dropped extension's retained handles are freed via `release_for_ext`).
+//!
+//! **Timeouts** reuse the general `Async.timeout:do:` combinator (it aborts the parked socket
+//! read and raises a catchable `TimeoutError`); the only extension-specific part is that a
+//! cancelled (timed-out) call leaves the framed conversation desynced, so the extension is marked
+//! dead — its connection can't be safely reused.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -79,11 +84,17 @@ fn from_wire_dtype(d: ArrowDType) -> ArrayDType {
 #[derive(Debug)]
 pub struct NativeExtension {
     id: StreamId,
+    /// A process-unique, never-reused id for this extension; tags the host-value handles it mints
+    /// so they can be bulk-released when it dies or is dropped (`HandleTable::release_for_ext`).
+    ext_id: u64,
     child: Child,
     sock_path: String,
     /// Shared clone of `VmState::socket_reap`; `Drop` enqueues `id` so the driver closes the
     /// host-side UDS fd (the reactor can't be touched from `Drop`). Mirrors `NativeSocket`.
     reap: Rc<RefCell<Vec<StreamId>>>,
+    /// Shared clone of `VmState::ext_handle_reap`; `Drop` enqueues `ext_id` so the driver
+    /// bulk-releases this extension's host-value handles (a GC `Drop` can't touch the table).
+    handle_reap: Rc<RefCell<Vec<u64>>>,
     /// Set once the child has been observed exited, so further calls fail fast (crash isolation).
     dead: bool,
     /// Ext-side resource ids whose host `ExtResource` was dropped, awaiting flush to the
@@ -148,9 +159,10 @@ impl AnyCollect for NativeExtension {
 
 impl Drop for NativeExtension {
     fn drop(&mut self) {
-        // Best-effort teardown: enqueue the host-side fd for the driver to reap, kill + reap the
-        // child, and remove the socket file.
+        // Best-effort teardown: enqueue the host-side fd and this extension's handles for the
+        // driver to reap, kill + reap the child, and remove the socket file.
         self.reap.borrow_mut().push(self.id);
+        self.handle_reap.borrow_mut().push(self.ext_id);
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.sock_path);
@@ -161,6 +173,12 @@ impl Drop for NativeExtension {
 /// to Quoin as an `IoError` of kind `#closed`, so it's catchable like any other I/O failure.
 fn extension_dead_error(detail: &str) -> QuoinError {
     QuoinError::io_closed(format!("Extension process died ({detail})"))
+}
+
+/// A process-unique, never-reused extension id (used to tag and bulk-release handles).
+fn unique_ext_id() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// A short, unique unix-socket path. `/tmp` (not `temp_dir()`) keeps it well under the
@@ -255,12 +273,13 @@ fn service_host_op<'gc>(
     mc: &gc_arena::Mutation<'gc>,
     id: StreamId,
     epoch: u32,
+    ext_id: u64,
     msg: Msg,
 ) -> Result<(), QuoinError> {
     let reply = match msg {
         Msg::MakeString { value } => {
             let v = vm.new_string(mc, value);
-            let handle = vm.handle_table.mint_local(v, epoch);
+            let handle = vm.handle_table.mint_local(v, epoch, ext_id);
             Msg::HostOpReturn {
                 handle,
                 str: None,
@@ -296,7 +315,7 @@ fn service_host_op<'gc>(
             // surfaces to the extension as a host-op error, not a failed `call:with:`.
             Ok((recv, arg_vals)) => match vm.call_method(mc, recv, &selector, arg_vals) {
                 Ok(result) => {
-                    let handle = vm.handle_table.mint_local(result, epoch);
+                    let handle = vm.handle_table.mint_local(result, epoch, ext_id);
                     Msg::HostOpReturn {
                         handle,
                         str: None,
@@ -308,7 +327,7 @@ fn service_host_op<'gc>(
             Err(e) => host_op_error(e),
         },
         Msg::InvokeBlock { block, batches } => {
-            match invoke_block_batches(vm, mc, epoch, block, &batches) {
+            match invoke_block_batches(vm, mc, epoch, ext_id, block, &batches) {
                 Ok(results) => Msg::InvokeBlockReturn {
                     results,
                     error: None,
@@ -336,6 +355,7 @@ fn invoke_block_batches<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     epoch: u32,
+    ext_id: u64,
     block_handle: u64,
     batches: &[Vec<u64>],
 ) -> Result<Vec<u64>, String> {
@@ -357,7 +377,7 @@ fn invoke_block_batches<'gc>(
         let result = vm
             .execute_block(mc, block, arg_vals, None)
             .map_err(|e| format!("block invocation: {e}"))?;
-        results.push(vm.handle_table.mint_local(result, epoch));
+        results.push(vm.handle_table.mint_local(result, epoch, ext_id));
     }
     Ok(results)
 }
@@ -386,6 +406,7 @@ fn extension_call<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     id: StreamId,
+    ext_id: u64,
     op: String,
     argv: String,
     args: Vec<Value<'gc>>,
@@ -412,7 +433,7 @@ fn extension_call<'gc>(
                 data,
             });
         } else {
-            handles.push(vm.handle_table.mint_local(value, epoch));
+            handles.push(vm.handle_table.mint_local(value, epoch, ext_id));
         }
     }
 
@@ -437,7 +458,7 @@ fn extension_call<'gc>(
                 Msg::CallReturn { result } => return Ok(CallOutcome::Scalar(result)),
                 Msg::CallReturnResource { resource } => return Ok(CallOutcome::Resource(resource)),
                 Msg::CallReturnArray { array } => return Ok(CallOutcome::Array(array)),
-                host_op => service_host_op(vm, mc, id, epoch, host_op)?,
+                host_op => service_host_op(vm, mc, id, epoch, ext_id, host_op)?,
             }
         }
     })();
@@ -477,19 +498,19 @@ fn run_extension_method<'gc>(
     argv: String,
     args: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
-    // One peek at the native state: stream id, liveness, the reap queue (for releases + to clone
-    // into any returned resource), draining the pending releases to flush on this call.
-    let (id, dead, resource_reap, releases) = receiver
+    // One peek at the native state: stream id, owning ext-id, liveness, the reap queue (for
+    // releases + to clone into any returned resource), draining the pending releases to flush.
+    let (id, ext_id, dead, resource_reap, releases) = receiver
         .with_native_state::<NativeExtension, _, _>(|e| {
             let releases: Vec<u64> = e.resource_reap.borrow_mut().drain(..).collect();
-            (e.id, e.dead, e.resource_reap.clone(), releases)
+            (e.id, e.ext_id, e.dead, e.resource_reap.clone(), releases)
         })
         .map_err(QuoinError::Other)?;
     if dead {
         return Err(extension_dead_error("already exited"));
     }
 
-    match extension_call(vm, mc, id, op, argv, args, releases) {
+    match extension_call(vm, mc, id, ext_id, op, argv, args, releases) {
         Ok(CallOutcome::Scalar(result)) => Ok(vm.new_string(mc, result)),
         Ok(CallOutcome::Resource(resource_id)) => {
             Ok(make_ext_resource(vm, mc, resource_id, resource_reap))
@@ -500,13 +521,30 @@ fn run_extension_method<'gc>(
             from_wire_dtype(array.dtype),
             array.data,
         )),
+        // A cancellation (a timeout via `Async.timeout:do:`, or a task cancel) interrupted the
+        // call mid-conversation: the host abandoned a read, so the connection is desynced (a slow
+        // extension's reply would arrive later, unread, and corrupt the next call). Mark the
+        // extension dead + release its handles, then re-raise `Cancelled` unchanged so the timeout
+        // combinator still turns it into a catchable `TimeoutError`. The peer is now unusable; the
+        // program spawns a fresh `Extension` to retry.
+        Err(QuoinError::Cancelled) => {
+            let _ =
+                receiver.with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.dead = true);
+            vm.handle_table.release_for_ext(ext_id);
+            Err(QuoinError::Cancelled)
+        }
         Err(e) => {
             let exit = receiver
                 .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.note_if_exited())
                 .ok()
                 .flatten();
             match exit {
-                Some(detail) => Err(extension_dead_error(&detail)),
+                // The child died: release the host-value handles it still held (its retained
+                // globals) so they drop their GC roots instead of leaking until VM exit.
+                Some(detail) => {
+                    vm.handle_table.release_for_ext(ext_id);
+                    Err(extension_dead_error(&detail))
+                }
                 None => Err(e),
             }
         }
@@ -571,9 +609,11 @@ pub fn build_extension_class() -> NativeClassBuilder {
                 class,
                 NativeExtension {
                     id,
+                    ext_id: unique_ext_id(),
                     child,
                     sock_path,
                     reap: vm.socket_reap.clone(),
+                    handle_reap: vm.ext_handle_reap.clone(),
                     dead: false,
                     resource_reap: Rc::new(RefCell::new(Vec::new())),
                 },

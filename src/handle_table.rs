@@ -67,6 +67,10 @@ struct HandleSlot<'gc> {
     /// Bumped on every free, so a stale handle to this slot no longer resolves.
     #[collect(require_static)]
     generation: u32,
+    /// The extension that minted this handle, so a dead/dropped peer's handles can be
+    /// bulk-released (`release_for_ext`). Meaningful only while occupied.
+    #[collect(require_static)]
+    ext_id: u64,
 }
 
 /// The extension handle table. An inline, GC-traced field of [`VmState`](crate::vm::VmState).
@@ -106,8 +110,18 @@ impl<'gc> HandleTable<'gc> {
     }
 
     /// Mint a call-local handle for `value` under the given call `epoch`.
-    pub fn mint_local(&mut self, value: Value<'gc>, epoch: u32) -> u64 {
-        self.alloc(value, HandleScope::Local(epoch))
+    pub fn mint_local(&mut self, value: Value<'gc>, epoch: u32, ext_id: u64) -> u64 {
+        self.alloc(value, HandleScope::Local(epoch), ext_id)
+    }
+
+    /// Release every handle (local or global) owned by `ext_id` — for a dead or dropped
+    /// extension, so the host Values it held drop their GC roots instead of leaking until VM exit.
+    pub fn release_for_ext(&mut self, ext_id: u64) {
+        for i in 0..self.slots.len() {
+            if self.slots[i].value.is_some() && self.slots[i].ext_id == ext_id {
+                self.free_index(i as u32);
+            }
+        }
     }
 
     /// Resolve a handle to its host value, or `Err` if it is invalid, stale, or released.
@@ -153,11 +167,12 @@ impl<'gc> HandleTable<'gc> {
         self.slots.iter().filter(|s| s.value.is_some()).count()
     }
 
-    fn alloc(&mut self, value: Value<'gc>, scope: HandleScope) -> u64 {
+    fn alloc(&mut self, value: Value<'gc>, scope: HandleScope, ext_id: u64) -> u64 {
         let index = if let Some(i) = self.free.pop() {
             let slot = &mut self.slots[i as usize];
             slot.value = Some(value);
             slot.scope = scope;
+            slot.ext_id = ext_id;
             i
         } else {
             let i = self.slots.len() as u32;
@@ -166,6 +181,7 @@ impl<'gc> HandleTable<'gc> {
                 value: Some(value),
                 scope,
                 generation: 1,
+                ext_id,
             });
             i
         };
