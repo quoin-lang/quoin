@@ -297,6 +297,26 @@ impl<'gc> Value<'gc> {
         }
         Err("Not a native state of the requested type".to_string())
     }
+
+    /// Type-erased mutable access to the native-state payload: runs `f` with the
+    /// `&mut dyn Any` behind the `NativeState` cell (write-barriered via `mc`),
+    /// returning whether this value had a native-state payload at all. This is the
+    /// dyn-safe building block the `ext_sdk::Host` trait exposes; the generic,
+    /// downcasting `HostExt::with_native_state_mut` is layered on top.
+    pub fn with_native_any_mut<R>(
+        &self,
+        mc: &Mutation<'gc>,
+        f: impl FnOnce(&mut dyn Any) -> R,
+    ) -> Option<R> {
+        if let Value::Object(obj) = self {
+            let borrowed = obj.borrow();
+            if let ObjectPayload::NativeState(state_cell) = &borrowed.payload {
+                let mut state_ref = state_cell.borrow_mut(mc);
+                return Some(f((**state_ref).as_any_mut()));
+            }
+        }
+        None
+    }
 }
 
 impl<'gc> PartialEq for Value<'gc> {

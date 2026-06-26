@@ -32,6 +32,7 @@
 use gc_arena::lock::RefLock;
 use gc_arena::{Gc, Mutation};
 use indexmap::IndexMap;
+use std::any::Any;
 
 use crate::error::QuoinError;
 use crate::value::{AnyCollect, Class, NativeCall, ObjectPayload, Value};
@@ -133,6 +134,12 @@ pub trait Host<'gc> {
     ) -> Option<Value<'gc>>;
     fn class_of(&self, receiver: Value<'gc>) -> Option<ClassHandle<'gc>>;
     fn value_matches_type(&self, val: Value<'gc>, hint: &str) -> bool;
+
+    // --- native-state mutation ---------------------------------------------
+    /// Type-erased mutable access to `value`'s native-state payload (write-barriered
+    /// with the captured `mc`); returns whether it had one. Dyn-safe; prefer the
+    /// generic [`HostExt::with_native_state_mut`].
+    fn with_native_state_any(&self, value: Value<'gc>, f: &mut dyn FnMut(&mut dyn Any)) -> bool;
 }
 
 /// Generic conveniences over [`Host`] that can't be `dyn`-safe methods. Blanket-
@@ -146,6 +153,24 @@ pub trait HostExt<'gc>: Host<'gc> {
         state: T,
     ) -> Value<'gc> {
         self.new_native_state_boxed(class, Box::new(state))
+    }
+
+    /// Mutate `value`'s native state in place as a concrete `T`. Mirrors
+    /// `Value::with_native_state_mut` but without the `mc` (captured by the host);
+    /// errors if `value` isn't a native-state instance of `T`.
+    fn with_native_state_mut<T: 'static, R>(
+        &self,
+        value: Value<'gc>,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Result<R, String> {
+        let mut f = Some(f);
+        let mut out: Option<R> = None;
+        self.with_native_state_any(value, &mut |any| {
+            if let Some(t) = any.downcast_mut::<T>() {
+                out = Some((f.take().expect("with_native_state callback runs once"))(t));
+            }
+        });
+        out.ok_or_else(|| "Not a native state of the requested type".to_string())
     }
 }
 
@@ -281,6 +306,10 @@ impl<'gc> Host<'gc> for HostCtx<'_, 'gc> {
     }
     fn value_matches_type(&self, val: Value<'gc>, hint: &str) -> bool {
         self.vm.value_matches_type(val, hint)
+    }
+
+    fn with_native_state_any(&self, value: Value<'gc>, f: &mut dyn FnMut(&mut dyn Any)) -> bool {
+        value.with_native_any_mut(self.mc, f).is_some()
     }
 }
 
