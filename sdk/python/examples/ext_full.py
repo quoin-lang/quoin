@@ -60,6 +60,14 @@ class FullHandler:
         if op == "live":
             return str(len(self._counters))
 
+        if op == "echoData":
+            # round-trip the structured payload (a native Python value) back to Quoin
+            return host.data()
+
+        if op == "mkRecord":
+            # a structured value built extension-side -> materializes as a Quoin Map
+            return {"name": "quoin", "items": [1, 2, 3], "ok": True}
+
         if op == "sum":
             return str(sum(host.arrays()[0].as_floats()))
 
