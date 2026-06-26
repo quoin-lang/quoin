@@ -12,9 +12,9 @@ use crate::repl_complete::{CompletionIndex, build_completion_index, complete_inp
 use crate::runtime::runtime::build_block;
 use crate::runtime::{
     async_rt, big_decimal, big_integer, block, boolean, bytes, channel, class, codecs, csv_fmt,
-    date_time, double, duration, fiber as fiber_class, http, ids, instant, integer, io, json, list,
-    map, math, method, msgpack, nil, object, pretty, regex, runtime, set, sockets, streams, string,
-    symbol, task, time_zone, timer, timestamp, toml_fmt, yaml,
+    date_time, double, duration, extension, fiber as fiber_class, http, ids, instant, integer, io,
+    json, list, map, math, method, msgpack, nil, object, pretty, regex, runtime, set, sockets,
+    streams, string, symbol, task, time_zone, timer, timestamp, toml_fmt, yaml,
 };
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -94,6 +94,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, map::build_key_value_pair_class());
     vm.register_native_class(mc, regex::build_regex_class());
     vm.register_native_class(mc, fiber_class::build_fiber_class());
+    vm.register_native_class(mc, extension::build_extension_class());
 }
 
 /// The persistent REPL arena: one `VmState` kept alive across all lines.

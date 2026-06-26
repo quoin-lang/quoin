@@ -1,4 +1,5 @@
 use crate::error::QuoinError;
+use crate::ext_sdk::{Host, HostExt};
 use crate::runtime::pretty::{PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 
@@ -58,25 +59,25 @@ impl AnyCollect for NativeSetState {
 
 pub fn build_set_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Set", Some("Object"))
-        .instance_method("count", |vm, mc, receiver, _args| {
+        .sdk_instance_method("count", |host, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
-            Ok(vm.new_int(mc, len as i64))
+            Ok(host.new_int(len as i64))
         })
-        .instance_method("add:", |vm, mc, receiver, args| {
-            vm.set_add(mc, receiver, args[0])?;
+        .sdk_instance_method("add:", |host, receiver, args| {
+            set_add(host, receiver, args[0])?;
             Ok(receiver)
         })
-        .instance_method("remove:", |vm, mc, receiver, args| {
-            vm.set_remove(mc, receiver, args[0])?;
+        .sdk_instance_method("remove:", |host, receiver, args| {
+            set_remove(host, receiver, args[0])?;
             Ok(receiver)
         })
-        .instance_method("contains?:", |vm, mc, receiver, args| {
-            let found = vm.set_contains(mc, receiver, args[0])?;
-            Ok(vm.new_bool(mc, found))
+        .sdk_instance_method("contains?:", |host, receiver, args| {
+            let found = set_contains(host, receiver, args[0])?;
+            Ok(host.new_bool(found))
         })
-        .instance_method("each:", |vm, mc, receiver, args| {
+        .sdk_instance_method("each:", |host, receiver, args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
@@ -85,12 +86,12 @@ pub fn build_set_class() -> NativeClassBuilder {
                     .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().get(i).copied())
                     .map_err(|e| QuoinError::Other(e))?;
                 if let Some(elem) = elem {
-                    vm.call_method(mc, args[0], "valueWithSelfOrArg:", vec![elem])?;
+                    host.call_method(args[0], "valueWithSelfOrArg:", vec![elem])?;
                 }
             }
             Ok(receiver)
         })
-        .instance_method("s", |vm, mc, receiver, _args| {
+        .sdk_instance_method("s", |host, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
@@ -102,7 +103,7 @@ pub fn build_set_class() -> NativeClassBuilder {
                     .map_err(|e| QuoinError::Other(e))?
                     .ok_or_else(|| QuoinError::Other("Index out of bounds".to_string()))?;
 
-                let result = vm.call_method(mc, val, "s", vec![])?;
+                let result = host.call_method(val, "s", vec![])?;
                 let part = if let Value::Object(obj) = result {
                     if let ObjectPayload::String(s) = &obj.borrow().payload {
                         s.to_string()
@@ -115,31 +116,92 @@ pub fn build_set_class() -> NativeClassBuilder {
                 parts.push(part);
             }
 
-            Ok(vm.new_string(mc, format!("#<{}>", parts.join(" "))))
+            Ok(host.new_string(format!("#<{}>", parts.join(" "))))
         })
-        .instance_method("==:", |vm, mc, receiver, args| {
+        .sdk_instance_method("==:", |host, receiver, args| {
             let lhs_len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
                 .map_err(|e| QuoinError::Other(e))?;
             let rhs_len =
                 match args[0].with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len()) {
                     Ok(len) => len,
-                    Err(_) => return Ok(vm.new_bool(mc, false)),
+                    Err(_) => return Ok(host.new_bool(false)),
                 };
 
             if lhs_len != rhs_len {
-                return Ok(vm.new_bool(mc, false));
+                return Ok(host.new_bool(false));
             }
 
             for i in 0..lhs_len {
                 let elem = receiver
                     .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
                     .map_err(|e| QuoinError::Other(e))?;
-                if !vm.set_contains(mc, args[0], elem)? {
-                    return Ok(vm.new_bool(mc, false));
+                if !set_contains(host, args[0], elem)? {
+                    return Ok(host.new_bool(false));
                 }
             }
 
-            Ok(vm.new_bool(mc, true))
+            Ok(host.new_bool(true))
         })
+}
+
+/// Whether `set_val` already holds an element equal (by Quoin `==:`) to `value`.
+/// Membership is O(n) — `NativeSetState` is a simple reference impl, not hashed.
+fn set_contains<'gc>(
+    host: &mut dyn Host<'gc>,
+    set_val: Value<'gc>,
+    value: Value<'gc>,
+) -> Result<bool, QuoinError> {
+    let len = set_val
+        .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
+        .map_err(QuoinError::Other)?;
+    for i in 0..len {
+        let elem = set_val
+            .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
+            .map_err(QuoinError::Other)?;
+        if host.call_method(elem, "==:", vec![value])?.is_true() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Insert `value` unless an equal element is already present; returns whether a new
+/// element was added.
+fn set_add<'gc>(
+    host: &mut dyn Host<'gc>,
+    set_val: Value<'gc>,
+    value: Value<'gc>,
+) -> Result<bool, QuoinError> {
+    if set_contains(host, set_val, value)? {
+        Ok(false)
+    } else {
+        host.with_native_state_mut::<NativeSetState, _>(set_val, |s| s.get_vec_mut().push(value))
+            .map_err(QuoinError::Other)?;
+        Ok(true)
+    }
+}
+
+/// Remove the first element equal (by `==:`) to `value`; returns whether one was removed.
+fn set_remove<'gc>(
+    host: &mut dyn Host<'gc>,
+    set_val: Value<'gc>,
+    value: Value<'gc>,
+) -> Result<bool, QuoinError> {
+    let len = set_val
+        .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
+        .map_err(QuoinError::Other)?;
+    for i in 0..len {
+        let elem = set_val
+            .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
+            .map_err(QuoinError::Other)?;
+        if host.call_method(elem, "==:", vec![value])?.is_true() {
+            host.with_native_state_mut::<NativeSetState, _>(set_val, |s| {
+                s.get_vec_mut().remove(i);
+            })
+            .map_err(QuoinError::Other)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

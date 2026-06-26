@@ -30,19 +30,19 @@ impl AnyCollect for NativeRegexState {
 }
 pub fn build_regex_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Regex", Some("Object"))
-        .instance_method("==:", |vm, mc, receiver, args| {
+        .sdk_instance_method("==:", |host, receiver, args| {
             let lhs_pat =
                 receiver.with_native_state(|r: &NativeRegexState| r.regex.as_str().to_string())?;
             let rhs_pat =
                 args[0].with_native_state(|r: &NativeRegexState| r.regex.as_str().to_string());
             match rhs_pat {
-                Ok(rhs_pat) => Ok(vm.new_bool(mc, lhs_pat == rhs_pat)),
-                Err(_) => Ok(vm.new_bool(mc, false)),
+                Ok(rhs_pat) => Ok(host.new_bool(lhs_pat == rhs_pat)),
+                Err(_) => Ok(host.new_bool(false)),
             }
         })
         // `pattern ~ str` -> `Send(pattern, "~:", [str])`: true if the regex matches.
         // A non-String operand never matches (mirrors the old `native_match`).
-        .instance_method("~:", |vm, mc, receiver, args| {
+        .sdk_instance_method("~:", |host, receiver, args| {
             let matched = receiver.with_native_state(|r: &NativeRegexState| {
                 if let Value::Object(o) = args[0]
                     && let ObjectPayload::String(s) = &o.borrow().payload
@@ -52,16 +52,16 @@ pub fn build_regex_class() -> NativeClassBuilder {
                     false
                 }
             })?;
-            Ok(vm.new_bool(mc, matched))
+            Ok(host.new_bool(matched))
         })
-        .instance_method("split:", |vm, mc, receiver, args| {
+        .sdk_instance_method("split:", |host, receiver, args| {
             let s = crate::arg!(args, String, 0);
             let parts: Vec<Value> = receiver.with_native_state(|r: &NativeRegexState| {
                 r.regex
                     .split(&**s)
-                    .map(|part| vm.new_string(mc, part.to_string()))
+                    .map(|part| host.new_string(part.to_string()))
                     .collect()
             })?;
-            Ok(vm.new_list(mc, parts))
+            Ok(host.new_list(parts))
         })
 }

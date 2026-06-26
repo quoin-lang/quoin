@@ -9,17 +9,17 @@ use crate::value::{NativeClassBuilder, Value};
 pub fn build_yaml_class() -> NativeClassBuilder {
     NativeClassBuilder::new("YAML", Some("Object"))
         // YAML.parse:'…' -> a Quoin value.
-        .typed_class_method("parse:", &["String"], |vm, mc, _r, args| {
+        .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);
             let data: DataValue = serde_yaml_ng::from_str(s.as_str())
                 .map_err(|e| QuoinError::ParseError(format!("YAML.parse:: {e}")))?;
-            data_to_value(&data, vm, mc)
+            data_to_value(&data, host)
         })
         // YAML.generate:value -> a YAML document.
-        .class_method("generate:", |vm, mc, _r, args| {
+        .sdk_class_method("generate:", |host, _r, args| {
             let data = value_to_data(args[0])?;
             let s = serde_yaml_ng::to_string(&data)
                 .map_err(|e| QuoinError::ValueError(format!("YAML.generate:: {e}")))?;
-            Ok(vm.new_string(mc, s))
+            Ok(host.new_string(s))
         })
 }

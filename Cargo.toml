@@ -2,6 +2,9 @@
 name = "quoin"
 version = "0.1.0"
 edition = "2024"
+# `src/bin/ext_echo.rs` (a Tier-1 test-fixture extension) adds a second bin, so name
+# the default for a bare `cargo run`.
+default-run = "qn"
 
 [[bin]]
 name = "qn"
@@ -11,6 +14,8 @@ path = "src/main.rs"
 members = [
     ".",
     "crates/quoin-syntax",
+    "crates/quoin-ext",
+    "crates/quoin-ext-proto",
     "lint/no_gc_across_yield",
 ]
 
@@ -32,6 +37,12 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 quoin-syntax = { path = "crates/quoin-syntax", features = ["gc"] }
+# Extension-side SDK (Tier 1). A normal dep so the `ext_echo` test-fixture bin (src/bin/)
+# can link it; the VM itself does not use it.
+quoin-ext = { path = "crates/quoin-ext" }
+# Shared FlatBuffers control-plane schema/codec for the extension protocol — used by the
+# host (`Extension` class) to encode requests / decode responses.
+quoin-ext-proto = { path = "crates/quoin-ext-proto" }
 gc-arena = "0.6.0"
 regex = "1.10"
 once_cell = "1.21.4"

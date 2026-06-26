@@ -66,6 +66,11 @@ pub enum IoRequest {
     /// pre-resolved `SocketAddr`) folds resolution into the one op — manual DNS is a
     /// future class. See `docs/ASYNC_ARCH.md`.
     Connect { host: String, port: u16 },
+    /// Connect to a unix-domain socket at `path`, registering the stream and returning
+    /// its id. The host side of the out-of-process extension transport (Tier 1): an
+    /// extension call is then just `Write`+`Read` on this stream. Mirrors `Connect`;
+    /// the `UnixStream` drops into the same `AsyncStream` registry.
+    ConnectUnix { path: String },
     /// Read up to `max` bytes. An empty result means EOF.
     Read { id: StreamId, max: usize },
     /// Write all of `bytes`.
@@ -335,6 +340,13 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
+            IoRequest::ConnectUnix { path } => Box::pin(async move {
+                match async_net::unix::UnixStream::connect(&path).await {
+                    Ok(stream) => IoResult::Connected(inner.insert(Box::new(stream))),
+                    Err(e) => IoResult::Err(e.into()),
+                }
+            }),
+
             IoRequest::Read { id, max } => Box::pin(async move {
                 let mut stream = match take_stream(&inner, id) {
                     Ok(s) => s,
@@ -498,7 +510,7 @@ impl IoBackend for MockBackend {
     fn perform(&self, req: IoRequest) -> IoFuture {
         let result = match req {
             IoRequest::Sleep { .. } => IoResult::Slept,
-            IoRequest::Connect { .. } => {
+            IoRequest::Connect { .. } | IoRequest::ConnectUnix { .. } => {
                 let id = StreamId(self.next_id.get());
                 self.next_id.set(self.next_id.get() + 1);
                 IoResult::Connected(id)

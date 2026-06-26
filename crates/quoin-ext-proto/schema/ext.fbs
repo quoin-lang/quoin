@@ -1,0 +1,106 @@
+// Control-plane messages for the Quoin out-of-process extension protocol (Tier 1).
+// See docs/FUTURE_EXT_ARCH.md. Each message is one length-prefixed FlatBuffers buffer
+// on the unix-domain socket.
+//
+// Slice 3a scope: the handle table (the §2 GC boundary). A single `Message` union
+// carries every frame in either direction; the direction is implicit in which side
+// reads it. A host->ext `Call` may be answered directly with `CallReturn`, OR the
+// extension may interleave re-entrant host-op requests (MakeString / HandleToString /
+// Retain / Release) — each answered by a `HostOpReturn` — before sending `CallReturn`.
+//
+// Later slices grow this: handles as `Call` arguments/returns, a richer host-op set
+// (CallMethodOnHandle), batched callbacks, and Arrow descriptors.
+
+namespace quoin_ext_proto;
+
+// host -> ext: invoke op `op` with scalar argument `arg`. `block` is a handle to a host
+// block the extension may invoke during the call (Slice 4), or 0 (NULL_HANDLE) for none.
+table Call {
+    op: string;
+    arg: string;
+    block: uint64;
+}
+
+// A tuple of handles — one invocation's argument list in a batched callback.
+table HandleList {
+    handles: [uint64];
+}
+
+// ext -> host: the originating call is finished; `result` is the scalar return.
+table CallReturn {
+    result: string;
+}
+
+// ext -> host (re-entrant, mid-call): make a host String value, return a handle to it.
+table MakeString {
+    value: string;
+}
+
+// ext -> host (re-entrant, mid-call): read a String-handle back into a scalar string.
+table HandleToString {
+    handle: uint64;
+}
+
+// ext -> host (re-entrant, mid-call): promote a call-local handle to retained (global),
+// so it survives past the originating call.
+table Retain {
+    handle: uint64;
+}
+
+// ext -> host (re-entrant, mid-call): release retained handles (batched).
+table Release {
+    handles: [uint64];
+}
+
+// ext -> host (re-entrant, mid-call): send the Quoin message `selector` to the value
+// behind `receiver`, with the values behind `args` as the arguments. The host performs
+// a real method dispatch and returns a handle to the result (`HostOpReturn.handle`), or
+// `HostOpReturn.error` if a handle is invalid, the arity is wrong, or the send raises.
+table CallMethodOnHandle {
+    receiver: uint64;
+    selector: string;
+    args: [uint64];
+}
+
+// ext -> host (re-entrant, mid-call): invoke the host block behind `block` once per tuple in
+// `batches`, in a single round-trip. The host runs the block N times locally; n=1 is a single
+// call. Answered with `InvokeBlockReturn`.
+table InvokeBlock {
+    block: uint64;
+    batches: [HandleList];
+}
+
+// host -> ext: the reply to `InvokeBlock` — one result handle per batch tuple (in order), or
+// `error` if the block handle is invalid or any invocation raises.
+table InvokeBlockReturn {
+    results: [uint64];
+    error: string;
+}
+
+// host -> ext: the reply to any re-entrant host-op. Carries whichever result applies —
+//   MakeString -> `handle`; HandleToString -> `str`; Retain/Release -> ack (no payload).
+// `error` is non-null iff the op failed (and the other fields are unset).
+table HostOpReturn {
+    handle: uint64;
+    str: string;
+    error: string;
+}
+
+union Message {
+    Call,
+    CallReturn,
+    MakeString,
+    HandleToString,
+    Retain,
+    Release,
+    CallMethodOnHandle,
+    InvokeBlock,
+    InvokeBlockReturn,
+    HostOpReturn,
+}
+
+table Envelope {
+    msg: Message;
+}
+
+root_type Envelope;

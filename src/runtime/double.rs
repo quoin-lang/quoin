@@ -24,19 +24,19 @@ fn whole_to_i64(f: f64) -> Result<i64, QuoinError> {
 /// natives are demoted) falls through to the rekeyed global fallback in native.rs.
 macro_rules! double_binop {
     ($b:expr, $sel:literal, arith $op:tt) => {
-        $b.typed_instance_method($sel, &["Integer"], |vm, mc, receiver, args| {
-            Ok(vm.new_double(mc, receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
+        $b.sdk_typed_instance_method($sel, &["Integer"], |host, receiver, args| {
+            Ok(host.new_double(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
         })
-        .typed_instance_method($sel, &["Double"], |vm, mc, receiver, args| {
-            Ok(vm.new_double(mc, receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
+        .sdk_typed_instance_method($sel, &["Double"], |host, receiver, args| {
+            Ok(host.new_double(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
         })
     };
     ($b:expr, $sel:literal, cmp $op:tt) => {
-        $b.typed_instance_method($sel, &["Integer"], |vm, mc, receiver, args| {
-            Ok(vm.new_bool(mc, receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
+        $b.sdk_typed_instance_method($sel, &["Integer"], |host, receiver, args| {
+            Ok(host.new_bool(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
         })
-        .typed_instance_method($sel, &["Double"], |vm, mc, receiver, args| {
-            Ok(vm.new_bool(mc, receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
+        .sdk_typed_instance_method($sel, &["Double"], |host, receiver, args| {
+            Ok(host.new_bool(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
         })
     };
 }
@@ -45,31 +45,31 @@ pub fn build_double_class() -> NativeClassBuilder {
     // Binary operators are the `:` keyword selectors (`a + b` -> `Send(a, "+:", [b])`).
     // Only `<:` is provided natively; `>:`/`<=:`/`>=:` derive from it as shared Quoin.
     let b = NativeClassBuilder::new("Double", Some("Object"))
-        .instance_method("sqrt", |vm, mc, receiver, _args| {
+        .sdk_instance_method("sqrt", |host, receiver, _args| {
             let val = recv!(receiver, Double);
             if val < 0.0 {
                 return Err(QuoinError::ArithmeticError(
                     "sqrt of a negative Double".to_string(),
                 ));
             }
-            Ok(vm.new_double(mc, val.sqrt()))
+            Ok(host.new_double(val.sqrt()))
         })
         // Rounding to a whole number yields an Integer (range-guarded). `round` is
         // half-away-from-zero (`f64::round`); `truncate` drops the fraction toward zero.
-        .instance_method("floor", |vm, mc, receiver, _args| {
-            Ok(vm.new_int(mc, whole_to_i64(recv!(receiver, Double).floor())?))
+        .sdk_instance_method("floor", |host, receiver, _args| {
+            Ok(host.new_int(whole_to_i64(recv!(receiver, Double).floor())?))
         })
-        .instance_method("ceil", |vm, mc, receiver, _args| {
-            Ok(vm.new_int(mc, whole_to_i64(recv!(receiver, Double).ceil())?))
+        .sdk_instance_method("ceil", |host, receiver, _args| {
+            Ok(host.new_int(whole_to_i64(recv!(receiver, Double).ceil())?))
         })
-        .instance_method("round", |vm, mc, receiver, _args| {
-            Ok(vm.new_int(mc, whole_to_i64(recv!(receiver, Double).round())?))
+        .sdk_instance_method("round", |host, receiver, _args| {
+            Ok(host.new_int(whole_to_i64(recv!(receiver, Double).round())?))
         })
-        .instance_method("truncate", |vm, mc, receiver, _args| {
-            Ok(vm.new_int(mc, whole_to_i64(recv!(receiver, Double).trunc())?))
+        .sdk_instance_method("truncate", |host, receiver, _args| {
+            Ok(host.new_int(whole_to_i64(recv!(receiver, Double).trunc())?))
         })
         // -1.0 / 0.0 / 1.0 by sign (NaN -> NaN; `f64::signum` would call +0.0 positive).
-        .instance_method("sign", |vm, mc, receiver, _args| {
+        .sdk_instance_method("sign", |host, receiver, _args| {
             let val = recv!(receiver, Double);
             let s = if val.is_nan() {
                 f64::NAN
@@ -80,12 +80,12 @@ pub fn build_double_class() -> NativeClassBuilder {
             } else {
                 0.0
             };
-            Ok(vm.new_double(mc, s))
+            Ok(host.new_double(s))
         })
         // Human string form. Explicit so `.s` never routes through the Rust Display impl.
-        .instance_method("s", |vm, mc, receiver, _args| {
+        .sdk_instance_method("s", |host, receiver, _args| {
             let val = recv!(receiver, Double);
-            Ok(vm.new_string(mc, format!("{val}")))
+            Ok(host.new_string(format!("{val}")))
         });
     let b = double_binop!(b, "+:", arith+);
     let b = double_binop!(b, "-:", arith -);
@@ -95,50 +95,44 @@ pub fn build_double_class() -> NativeClassBuilder {
     let b = double_binop!(b, "<:", cmp <);
     // pow: — a Double base always yields a Double (both arg types coerce via `as_f64`).
     let b = b
-        .typed_instance_method("pow:", &["Integer"], |vm, mc, receiver, args| {
-            Ok(vm.new_double(
-                mc,
-                receiver.as_f64().unwrap().powf(args[0].as_f64().unwrap()),
-            ))
+        .sdk_typed_instance_method("pow:", &["Integer"], |host, receiver, args| {
+            Ok(host.new_double(receiver.as_f64().unwrap().powf(args[0].as_f64().unwrap())))
         })
-        .typed_instance_method("pow:", &["Double"], |vm, mc, receiver, args| {
-            Ok(vm.new_double(
-                mc,
-                receiver.as_f64().unwrap().powf(args[0].as_f64().unwrap()),
-            ))
+        .sdk_typed_instance_method("pow:", &["Double"], |host, receiver, args| {
+            Ok(host.new_double(receiver.as_f64().unwrap().powf(args[0].as_f64().unwrap())))
         });
     // min:/max: select the winning operand and return it in its own type (see integer.rs); a
     // Double receiver compares on the f64 scale regardless of the argument's type.
     let b = b
-        .typed_instance_method("min:", &["Integer"], |_vm, _mc, receiver, args| {
+        .sdk_typed_instance_method("min:", &["Integer"], |_host, receiver, args| {
             Ok(if receiver.as_f64().unwrap() <= args[0].as_f64().unwrap() {
                 receiver
             } else {
                 args[0]
             })
         })
-        .typed_instance_method("min:", &["Double"], |_vm, _mc, receiver, args| {
+        .sdk_typed_instance_method("min:", &["Double"], |_host, receiver, args| {
             Ok(if receiver.as_f64().unwrap() <= args[0].as_f64().unwrap() {
                 receiver
             } else {
                 args[0]
             })
         })
-        .typed_instance_method("max:", &["Integer"], |_vm, _mc, receiver, args| {
+        .sdk_typed_instance_method("max:", &["Integer"], |_host, receiver, args| {
             Ok(if receiver.as_f64().unwrap() >= args[0].as_f64().unwrap() {
                 receiver
             } else {
                 args[0]
             })
         })
-        .typed_instance_method("max:", &["Double"], |_vm, _mc, receiver, args| {
+        .sdk_typed_instance_method("max:", &["Double"], |_host, receiver, args| {
             Ok(if receiver.as_f64().unwrap() >= args[0].as_f64().unwrap() {
                 receiver
             } else {
                 args[0]
             })
         });
-    b.instance_method("==:", |vm, mc, receiver, args| {
-        Ok(vm.new_bool(mc, receiver == args[0]))
+    b.sdk_instance_method("==:", |host, receiver, args| {
+        Ok(host.new_bool(receiver == args[0]))
     })
 }

@@ -1,12 +1,10 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::ext_sdk::Host;
 use crate::recv;
 use crate::runtime::compress;
 use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};
-use crate::vm::VmState;
-
-use gc_arena::Mutation;
 
 /// The `Bytes` class — immutable binary data (Stage 3a). The raw `Vec<u8>` lives in
 /// `ObjectPayload::Bytes`; this is the QN-facing surface. Text crosses at the edges
@@ -14,7 +12,7 @@ use gc_arena::Mutation;
 pub fn build_bytes_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Bytes", Some("Object"))
         // Bytes of:#(72 101 ...) -> bytes from a list of integers (each 0-255).
-        .class_method("of:", |vm, mc, _receiver, args| {
+        .sdk_class_method("of:", |host, _receiver, args| {
             let list_val = *args
                 .first()
                 .ok_or_else(|| QuoinError::Other("Bytes of: expects a list".to_string()))?;
@@ -33,25 +31,25 @@ pub fn build_bytes_class() -> NativeClassBuilder {
                     other => return Err(type_error("Integer", other)),
                 }
             }
-            Ok(vm.new_bytes(mc, bytes))
+            Ok(host.new_bytes(bytes))
         })
         // Bytes empty -> a zero-length Bytes.
-        .class_method("empty", |vm, mc, _receiver, _args| {
-            Ok(vm.new_bytes(mc, Vec::new()))
+        .sdk_class_method("empty", |host, _receiver, _args| {
+            Ok(host.new_bytes(Vec::new()))
         })
         // size / count -> the number of bytes.
-        .instance_method("size", |vm, mc, receiver, _args| {
-            Ok(vm.new_int(mc, recv!(receiver, Bytes).len() as i64))
+        .sdk_instance_method("size", |host, receiver, _args| {
+            Ok(host.new_int(recv!(receiver, Bytes).len() as i64))
         })
-        .instance_method("count", |vm, mc, receiver, _args| {
-            Ok(vm.new_int(mc, recv!(receiver, Bytes).len() as i64))
+        .sdk_instance_method("count", |host, receiver, _args| {
+            Ok(host.new_int(recv!(receiver, Bytes).len() as i64))
         })
         // at:i -> the byte (0..=255) at index i; out of range throws.
-        .typed_instance_method("at:", &["Integer"], |vm, mc, receiver, args| {
+        .sdk_typed_instance_method("at:", &["Integer"], |host, receiver, args| {
             let b = recv!(receiver, Bytes);
             let i = arg!(args, Int, 0);
             match usize::try_from(i).ok().and_then(|i| b.get(i).copied()) {
-                Some(byte) => Ok(vm.new_int(mc, byte as i64)),
+                Some(byte) => Ok(host.new_int(byte as i64)),
                 None => Err(QuoinError::IndexError {
                     index: i,
                     len: b.len() as i64,
@@ -60,43 +58,43 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             }
         })
         // from:to: -> the slice [from, to), clamped to bounds.
-        .typed_instance_method(
+        .sdk_typed_instance_method(
             "from:to:",
             &["Integer", "Integer"],
-            |vm, mc, receiver, args| {
+            |host, receiver, args| {
                 let b = recv!(receiver, Bytes);
                 let len = b.len() as i64;
                 let from = arg!(args, Int, 0).clamp(0, len) as usize;
                 let to = arg!(args, Int, 1).clamp(from as i64, len) as usize;
-                Ok(vm.new_bytes(mc, b[from..to].to_vec()))
+                Ok(host.new_bytes(b[from..to].to_vec()))
             },
         )
         // Concatenation: `a + b` -> `Send(a, "+:", [b])`. Bytes + Bytes only.
-        .typed_instance_method("+:", &["Bytes"], |vm, mc, receiver, args| {
+        .sdk_typed_instance_method("+:", &["Bytes"], |host, receiver, args| {
             let a = recv!(receiver, Bytes);
             let b = arg!(args, Bytes, 0);
             let mut out = Vec::with_capacity(a.len() + b.len());
             out.extend_from_slice(a.as_slice());
             out.extend_from_slice(b.as_slice());
-            Ok(vm.new_bytes(mc, out))
+            Ok(host.new_bytes(out))
         })
         // each:block -> yield each byte (as an Integer) to the block; returns receiver.
-        .instance_method("each:", |vm, mc, receiver, args| {
+        .sdk_instance_method("each:", |host, receiver, args| {
             // Copy the bytes out first: plain data, so nothing is held across the block
             // calls (which may themselves step/park).
             let bytes = recv!(receiver, Bytes).to_vec();
-            let block = arg!(args, Block, 0);
             for byte in bytes {
-                let v = vm.new_int(mc, byte as i64);
-                vm.execute_block(mc, block, vec![v], None)?;
+                let v = host.new_int(byte as i64);
+                // `execute_block` validates that args[0] is a block (errors otherwise).
+                host.execute_block(args[0], vec![v], None)?;
             }
             Ok(receiver)
         })
         // asString -> UTF-8 decode; throws (catchable) on invalid UTF-8.
-        .instance_method("asString", |vm, mc, receiver, _args| {
+        .sdk_instance_method("asString", |host, receiver, _args| {
             let bytes = recv!(receiver, Bytes).to_vec();
             match String::from_utf8(bytes) {
-                Ok(s) => Ok(vm.new_string(mc, s)),
+                Ok(s) => Ok(host.new_string(s)),
                 Err(e) => Err(QuoinError::ParseError(format!(
                     "Bytes.asString: invalid UTF-8 (valid up to byte {})",
                     e.utf8_error().valid_up_to()
@@ -104,46 +102,45 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             }
         })
         // asStringLossy -> UTF-8 decode with replacement characters (never throws).
-        .instance_method("asStringLossy", |vm, mc, receiver, _args| {
+        .sdk_instance_method("asStringLossy", |host, receiver, _args| {
             let bytes = recv!(receiver, Bytes);
-            Ok(vm.new_string(mc, String::from_utf8_lossy(bytes.as_slice()).into_owned()))
+            Ok(host.new_string(String::from_utf8_lossy(bytes.as_slice()).into_owned()))
         })
         // Content-Encoding (de)compression — gzip + deflate (flate2/miniz_oxide) and zstd
         // decode (ruzstd), all pure Rust. Malformed input throws a catchable ParseError.
         // zstd encode is intentionally absent (no pure-Rust compressor; see compress.rs).
-        .instance_method("decodeGz", |vm, mc, receiver, _args| {
-            run_codec(vm, mc, receiver, "decodeGz", compress::gzip_decode)
+        .sdk_instance_method("decodeGz", |host, receiver, _args| {
+            run_codec(host, receiver, "decodeGz", compress::gzip_decode)
         })
-        .instance_method("encodeGz", |vm, mc, receiver, _args| {
-            run_codec(vm, mc, receiver, "encodeGz", compress::gzip_encode)
+        .sdk_instance_method("encodeGz", |host, receiver, _args| {
+            run_codec(host, receiver, "encodeGz", compress::gzip_encode)
         })
-        .instance_method("decodeDeflate", |vm, mc, receiver, _args| {
-            run_codec(vm, mc, receiver, "decodeDeflate", compress::deflate_decode)
+        .sdk_instance_method("decodeDeflate", |host, receiver, _args| {
+            run_codec(host, receiver, "decodeDeflate", compress::deflate_decode)
         })
-        .instance_method("encodeDeflate", |vm, mc, receiver, _args| {
-            run_codec(vm, mc, receiver, "encodeDeflate", compress::deflate_encode)
+        .sdk_instance_method("encodeDeflate", |host, receiver, _args| {
+            run_codec(host, receiver, "encodeDeflate", compress::deflate_encode)
         })
-        .instance_method("decodeZstd", |vm, mc, receiver, _args| {
-            run_codec(vm, mc, receiver, "decodeZstd", compress::zstd_decode)
+        .sdk_instance_method("decodeZstd", |host, receiver, _args| {
+            run_codec(host, receiver, "decodeZstd", compress::zstd_decode)
         })
         // s -> the inspect string: length + a short hex preview.
-        .instance_method("s", |vm, mc, receiver, _args| {
-            Ok(vm.new_string(mc, format!("{}", receiver)))
+        .sdk_instance_method("s", |host, receiver, _args| {
+            Ok(host.new_string(format!("{}", receiver)))
         })
 }
 
 /// Run a `&[u8] -> Result<Vec<u8>, String>` codec over the receiver Bytes, returning a new
 /// Bytes; a codec error becomes a catchable `ParseError` tagged with the method name.
 fn run_codec<'gc>(
-    vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
+    host: &mut dyn Host<'gc>,
     receiver: Value<'gc>,
     label: &str,
     f: impl Fn(&[u8]) -> Result<Vec<u8>, String>,
 ) -> Result<Value<'gc>, QuoinError> {
     let bytes = recv!(receiver, Bytes).to_vec();
     match f(&bytes) {
-        Ok(out) => Ok(vm.new_bytes(mc, out)),
+        Ok(out) => Ok(host.new_bytes(out)),
         Err(msg) => Err(QuoinError::ParseError(format!("Bytes.{label}: {msg}"))),
     }
 }

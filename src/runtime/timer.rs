@@ -1,16 +1,15 @@
-use crate::arg;
-use crate::value::{NativeClassBuilder, Value};
+use crate::value::NativeClassBuilder;
 
 use std::time::Instant;
 
 pub fn build_timer_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Timer", Some("Object"))
         //
-        .class_method("time:", |vm, mc, _receiver, args| {
-            let block = arg!(args, Block, 0);
+        .sdk_class_method("time:", |host, _receiver, args| {
             let start = Instant::now();
-            vm.execute_block(mc, block, Vec::new(), None)?;
+            // `execute_block` validates that args[0] is a block.
+            host.execute_block(args[0], Vec::new(), None)?;
             let elapsed = start.elapsed().as_micros() as i64;
-            Ok(vm.new_int(mc, elapsed))
+            Ok(host.new_int(elapsed))
         })
 }

@@ -1,0 +1,12 @@
+[package]
+name = "quoin-ext-proto"
+version = "0.1.0"
+edition = "2024"
+description = "Shared FlatBuffers control-plane schema + generated types for the Quoin out-of-process extension protocol (Tier 1)."
+
+[dependencies]
+# Pure-Rust FlatBuffers runtime (no `flatc`). Generated code in src/generated.rs is
+# produced by `planus rust` from schema/ext.fbs (see lib.rs for the regen command).
+planus = "1.3"
+# planus-generated code derives Serialize/Deserialize unconditionally.
+serde = { version = "1", features = ["derive"] }

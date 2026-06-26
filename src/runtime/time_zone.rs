@@ -1,10 +1,9 @@
 use crate::arg;
 use crate::error::QuoinError;
+use crate::ext_sdk::{Host, HostExt};
 use crate::runtime::pretty::{PpChild, PpRole, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
-use crate::vm::VmState;
 
-use gc_arena::Mutation;
 use gc_arena::collect::Trace;
 use jiff::tz::TimeZone;
 use std::any::Any;
@@ -34,9 +33,9 @@ pub fn tz_of(v: Value, who: &str) -> Result<TimeZone, QuoinError> {
         })
 }
 
-pub fn make_time_zone<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, tz: TimeZone) -> Value<'gc> {
-    let class = vm.get_or_create_builtin_class(mc, "TimeZone");
-    vm.new_native_state(mc, class, NativeTimeZone(tz))
+pub fn make_time_zone<'gc>(host: &dyn Host<'gc>, tz: TimeZone) -> Value<'gc> {
+    let class = host.get_or_create_builtin_class("TimeZone");
+    host.new_native_state(class, NativeTimeZone(tz))
 }
 
 /// The IANA name of a zone, or a sensible fallback for an unnamed (fixed-offset) one.
@@ -61,10 +60,10 @@ impl PrettyPrint for NativeTimeZone {
 pub fn build_time_zone_class() -> NativeClassBuilder {
     NativeClassBuilder::new("TimeZone", Some("Object"))
         // TimeZone.of:'America/New_York' — look up an IANA time zone (errors if unknown).
-        .typed_class_method("of:", &["String"], |vm, mc, _r, args| {
+        .sdk_typed_class_method("of:", &["String"], |host, _r, args| {
             let name = arg!(args, String, 0);
             match TimeZone::get(name.as_str()) {
-                Ok(tz) => Ok(make_time_zone(vm, mc, tz)),
+                Ok(tz) => Ok(make_time_zone(host, tz)),
                 Err(_) => Err(QuoinError::ValueError(format!(
                     "TimeZone.of:: unknown time zone: '{}'",
                     name.as_str()
@@ -72,27 +71,27 @@ pub fn build_time_zone_class() -> NativeClassBuilder {
             }
         })
         // TimeZone.utc — the UTC zone.
-        .class_method("utc", |vm, mc, _r, _a| {
-            Ok(make_time_zone(vm, mc, TimeZone::UTC))
+        .sdk_class_method("utc", |host, _r, _a| {
+            Ok(make_time_zone(host, TimeZone::UTC))
         })
         // TimeZone.system — the host's configured local zone (falls back to UTC).
-        .class_method("system", |vm, mc, _r, _a| {
-            Ok(make_time_zone(vm, mc, TimeZone::system()))
+        .sdk_class_method("system", |host, _r, _a| {
+            Ok(make_time_zone(host, TimeZone::system()))
         })
         // The IANA name (e.g. 'America/New_York', 'UTC').
-        .instance_method("name", |vm, mc, receiver, _args| {
-            Ok(vm.new_string(mc, zone_name(&tz_of(receiver, "name")?)))
+        .sdk_instance_method("name", |host, receiver, _args| {
+            Ok(host.new_string(zone_name(&tz_of(receiver, "name")?)))
         })
-        .instance_method("s", |vm, mc, receiver, _args| {
-            Ok(vm.new_string(mc, zone_name(&tz_of(receiver, "s")?)))
+        .sdk_instance_method("s", |host, receiver, _args| {
+            Ok(host.new_string(zone_name(&tz_of(receiver, "s")?)))
         })
         // `==:` accepts any argument: a non-TimeZone is simply unequal (never an error).
-        .instance_method("==:", |vm, mc, receiver, args| {
+        .sdk_instance_method("==:", |host, receiver, args| {
             let a = tz_of(receiver, "==:")?;
             let eq = match args[0].with_native_state::<NativeTimeZone, _, _>(|t| t.0.clone()) {
                 Ok(b) => a == b,
                 Err(_) => false,
             };
-            Ok(vm.new_bool(mc, eq))
+            Ok(host.new_bool(eq))
         })
 }

@@ -9,17 +9,17 @@ use crate::value::{NativeClassBuilder, Value};
 pub fn build_message_pack_class() -> NativeClassBuilder {
     NativeClassBuilder::new("MessagePack", Some("Object"))
         // MessagePack.pack:value -> Bytes.
-        .class_method("pack:", |vm, mc, _r, args| {
+        .sdk_class_method("pack:", |host, _r, args| {
             let data = value_to_data(args[0])?;
             let bytes = rmp_serde::to_vec(&data)
                 .map_err(|e| QuoinError::Other(format!("MessagePack.pack:: {e}")))?;
-            Ok(vm.new_bytes(mc, bytes))
+            Ok(host.new_bytes(bytes))
         })
         // MessagePack.unpack:bytes -> a Quoin value.
-        .typed_class_method("unpack:", &["Bytes"], |vm, mc, _r, args| {
+        .sdk_typed_class_method("unpack:", &["Bytes"], |host, _r, args| {
             let bytes = arg!(args, Bytes, 0).to_vec();
             let data: DataValue = rmp_serde::from_slice(&bytes)
                 .map_err(|e| QuoinError::ParseError(format!("MessagePack.unpack:: {e}")))?;
-            data_to_value(&data, vm, mc)
+            data_to_value(&data, host)
         })
 }
