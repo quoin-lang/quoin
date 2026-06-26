@@ -8,26 +8,34 @@ pub fn build_object_class() -> NativeClassBuilder {
         // structural `.pp`. The Rust Display impl is for Rust-level debugging only — no Quoin
         // `.s` routes through it. (Types with an intrinsic form — Integer, String, Error, … —
         // override this.)
-        .instance_method("s", |vm, mc, receiver, _args| {
-            let width = vm.options.console_width.map(|w| w as usize).unwrap_or(80);
+        .sdk_instance_method("s", |host, receiver, _args| {
+            let width = host
+                .options()
+                .console_width
+                .map(|w| w as usize)
+                .unwrap_or(80);
             // Methods return plain text; color is a REPL display concern (the `=>` path).
-            Ok(vm.new_string(mc, pretty::render(receiver, width, false)))
+            Ok(host.new_string(pretty::render(receiver, width, false)))
         })
         // `pp` — a structural, canonical dump of the value graph for debugging/inspection
         // (escaped strings, instance vars, intrinsic collections). Width-aware: defaults to the
         // console width; `pp:` takes an explicit width. Never calls `.s`.
-        .instance_method("pp", |vm, mc, receiver, _args| {
-            let width = vm.options.console_width.map(|w| w as usize).unwrap_or(80);
+        .sdk_instance_method("pp", |host, receiver, _args| {
+            let width = host
+                .options()
+                .console_width
+                .map(|w| w as usize)
+                .unwrap_or(80);
             // Methods return plain text; color is a REPL display concern (the `=>` path).
-            Ok(vm.new_string(mc, pretty::render(receiver, width, false)))
+            Ok(host.new_string(pretty::render(receiver, width, false)))
         })
-        .instance_method("pp:", |vm, mc, receiver, args| {
+        .sdk_instance_method("pp:", |host, receiver, args| {
             let width = match args.first() {
                 Some(Value::Int(w)) if *w > 0 => *w as usize,
                 _ => 80,
             };
             // Methods return plain text; color is a REPL display concern (the `=>` path).
-            Ok(vm.new_string(mc, pretty::render(receiver, width, false)))
+            Ok(host.new_string(pretty::render(receiver, width, false)))
         })
         .instance_method("sealed!", |vm, mc, receiver, _args| {
             // Seal an instance: get-or-create its eigenclass and freeze it, so further
@@ -84,25 +92,25 @@ pub fn build_object_class() -> NativeClassBuilder {
             };
             Ok(vm.new_bool(mc, responds))
         })
-        .instance_method("~:", |vm, mc, receiver, args| {
-            vm.call_method(mc, receiver, "==:", vec![args[0]])
+        .sdk_instance_method("~:", |host, receiver, args| {
+            host.call_method(receiver, "==:", vec![args[0]])
         })
-        .instance_method("==:", |vm, mc, receiver, args| {
+        .sdk_instance_method("==:", |host, receiver, args| {
             let lhs = receiver;
             let rhs = args[0];
-            Ok(vm.new_bool(mc, lhs == rhs))
+            Ok(host.new_bool(lhs == rhs))
         })
-        .instance_method("!=:", |vm, mc, receiver, args| {
+        .sdk_instance_method("!=:", |host, receiver, args| {
             let lhs = receiver;
             let rhs = args[0];
 
-            let eq_result = vm.call_method(mc, lhs, "==:", vec![rhs])?;
-            let false_val = vm.new_bool(mc, false);
-            Ok(vm.new_bool(mc, eq_result == false_val))
+            let eq_result = host.call_method(lhs, "==:", vec![rhs])?;
+            let false_val = host.new_bool(false);
+            Ok(host.new_bool(eq_result == false_val))
         })
-        .instance_method("init", |_vm, _mc, receiver, _args| Ok(receiver))
-        .instance_method("print", |vm, mc, receiver, _args| {
-            let s_result = vm.call_method(mc, receiver, "s", vec![])?;
+        .sdk_instance_method("init", |_host, receiver, _args| Ok(receiver))
+        .sdk_instance_method("print", |host, receiver, _args| {
+            let s_result = host.call_method(receiver, "s", vec![])?;
             let text = match s_result {
                 Value::Object(obj) => match &obj.borrow().payload {
                     ObjectPayload::String(string) => string.to_string(),
@@ -112,12 +120,12 @@ pub fn build_object_class() -> NativeClassBuilder {
             };
             // Route through the VM's stdout sink (not `println!`) so the DAP adapter can capture
             // program output as `output` events instead of it hitting fd 1/2 directly.
-            vm.write_std(crate::vm::StdStream::Out, format!("{text}\n").as_bytes())
+            host.write_std(crate::vm::StdStream::Out, format!("{text}\n").as_bytes())
                 .map_err(|e| QuoinError::Other(e.to_string()))?;
-            Ok(vm.new_nil(mc))
+            Ok(host.new_nil())
         })
-        .instance_method("throw", |vm, _mc, receiver, _args| {
-            vm.active_exception = Some(receiver);
+        .sdk_instance_method("throw", |host, receiver, _args| {
+            host.set_active_exception(receiver);
             Err(QuoinError::Thrown)
         })
 }

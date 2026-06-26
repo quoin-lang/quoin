@@ -140,6 +140,12 @@ pub trait Host<'gc> {
     /// with the captured `mc`); returns whether it had one. Dyn-safe; prefer the
     /// generic [`HostExt::with_native_state_mut`].
     fn with_native_state_any(&self, value: Value<'gc>, f: &mut dyn FnMut(&mut dyn Any)) -> bool;
+
+    // --- exceptions --------------------------------------------------------
+    /// Arm `exc` as the in-flight exception. The native method then returns
+    /// `Err(QuoinError::Thrown)` to unwind to the nearest handler (this is how
+    /// `Object#throw` raises).
+    fn set_active_exception(&mut self, exc: Value<'gc>);
 }
 
 /// Generic conveniences over [`Host`] that can't be `dyn`-safe methods. Blanket-
@@ -310,6 +316,10 @@ impl<'gc> Host<'gc> for HostCtx<'_, 'gc> {
 
     fn with_native_state_any(&self, value: Value<'gc>, f: &mut dyn FnMut(&mut dyn Any)) -> bool {
         value.with_native_any_mut(self.mc, f).is_some()
+    }
+
+    fn set_active_exception(&mut self, exc: Value<'gc>) {
+        self.vm.active_exception = Some(exc);
     }
 }
 
