@@ -134,6 +134,15 @@ pub struct VmState<'gc> {
     /// every send.
     pub last_send_args: Vec<Value<'gc>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
+    /// Declared exception types of each enclosing `catch:` whose protected block is currently
+    /// running (one `Vec` per active catch; `"Object"` marks a catch-all handler). The debugger's
+    /// break-on-uncaught searches this at a throw to decide whether the value will be caught.
+    /// Pushed/popped by the `catch` natives (`src/runtime/block.rs`). Plain strings — no `Gc`.
+    pub handler_stack: Vec<Vec<String>>,
+    /// Set when a typed `catch:` re-raises (no handler matched), so break-on-uncaught fires once
+    /// at the innermost throw site rather than again at every catch the error bubbles through.
+    /// Cleared when a catch begins and when a handler actually catches.
+    pub reraised: bool,
 
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
@@ -263,6 +272,8 @@ impl<'gc> VmState<'gc> {
             active_exception: None,
             last_send_args: Vec::new(),
             active_native_args: Vec::new(),
+            handler_stack: Vec::new(),
+            reraised: false,
             last_popped_env: None,
             repl_env: None,
             sched: Scheduler {

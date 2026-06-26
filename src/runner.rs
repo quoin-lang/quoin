@@ -1121,6 +1121,8 @@ pub struct VmRunnerOptions {
     pub vm_options: VmOptions,
     /// Exception types from `qn debug --break-on-throw=Type,…` (empty otherwise).
     pub break_on_throw: Vec<String>,
+    /// Exception types from `qn debug --break-on-uncaught=Type,…` — break only when uncaught.
+    pub break_on_uncaught: Vec<String>,
     /// Quoin-level coverage output, from `--coverage[=fmt]` / `--coverage-out=PATH`
     /// (on `qn test` or `qn <file>`). `None` when coverage wasn't requested.
     pub coverage: Option<crate::coverage::CoverageConfig>,
@@ -1176,6 +1178,7 @@ impl VmRunnerOptions {
         let mut target_path = None;
         let mut vm_args = Vec::new();
         let mut break_on_throw = Vec::new();
+        let mut break_on_uncaught = Vec::new();
         let mut coverage_enabled = false;
         let mut coverage_out = None;
         let mut coverage_format = crate::coverage::CoverageFormat::Lcov;
@@ -1225,6 +1228,12 @@ impl VmRunnerOptions {
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
+                    } else if let Some(types) = a.strip_prefix("--break-on-uncaught=") {
+                        break_on_uncaught = types
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     } else if target_path.is_none() {
                         target_path = Some(a.clone());
                     } else {
@@ -1262,6 +1271,7 @@ impl VmRunnerOptions {
                 console_width: None,
             },
             break_on_throw,
+            break_on_uncaught,
             coverage,
         }
     }
@@ -1392,13 +1402,14 @@ impl VmRunner {
             };
             let block = build_block(mc, &sb);
             // Stop at entry: an armed `StepInto` halts at the first line start. Source is
-            // shown at each pause by default ($source off to silence). `--break-on-throw`
-            // types (if any) additionally pause at a matching throw.
+            // shown at each pause by default ($source off to silence). `--break-on-throw` types
+            // additionally pause at a matching throw; `--break-on-uncaught` only when it escapes.
             vm.debug = Some(DebugState {
                 interactive: true,
                 show_source: true,
                 step: Some(StepMode::Into),
                 break_on_throw: self.options.break_on_throw.iter().cloned().collect(),
+                break_on_uncaught: self.options.break_on_uncaught.iter().cloned().collect(),
                 ..Default::default()
             });
             vm.start_block(mc, block, Vec::new(), None, None);
@@ -1944,16 +1955,18 @@ mod tests {
         breakpoints: &[(&str, usize)],
         script: &[DebugAction],
     ) -> Vec<(String, usize)> {
-        run_debug_full(source, filename, breakpoints, &[], script)
+        run_debug_full(source, filename, breakpoints, &[], &[], script)
     }
 
-    /// Like [`run_debug`], but also arms break-on-throw for `break_on_throw` exception types.
-    /// Used to exercise the exception-breakpoint path end-to-end.
+    /// Like [`run_debug`], but also arms break-on-throw / break-on-uncaught for the given exception
+    /// types. Used to exercise the exception-breakpoint paths end-to-end. A non-empty
+    /// `break_on_uncaught` lets the task end with its (uncaught) error rather than asserting success.
     fn run_debug_full(
         source: &str,
         filename: &str,
         breakpoints: &[(&str, usize)],
         break_on_throw: &[&str],
+        break_on_uncaught: &[&str],
         script: &[DebugAction],
     ) -> Vec<(String, usize)> {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
@@ -1989,19 +2002,34 @@ mod tests {
             vm.debug = Some(DebugState {
                 breakpoints: bps,
                 break_on_throw: break_on_throw.iter().map(|s| s.to_string()).collect(),
+                break_on_uncaught: break_on_uncaught.iter().map(|s| s.to_string()).collect(),
                 script: VecDeque::from(script.to_vec()),
                 ..Default::default()
             });
             vm.start_block(mc, block, Vec::new(), None, None);
             install_main_task(mc, vm);
         });
-        drive_main_task(&mut arena).expect("fixture runs to completion");
+        let drive = drive_main_task(&mut arena);
+        // A break-on-uncaught fixture deliberately lets the exception escape — the task ends with
+        // that (uncaught) error, which is expected; we still want the pause log.
+        if break_on_uncaught.is_empty() {
+            drive.expect("fixture runs to completion");
+        }
         arena.mutate_root(|_mc, vm| {
             vm.debug
                 .as_ref()
                 .map(|d| d.pause_log.clone())
                 .unwrap_or_default()
         })
+    }
+
+    /// Like [`run_debug_full`] but arms break-on-*uncaught* (fixture filename `fixture.qn`).
+    fn run_debug_uncaught(
+        source: &str,
+        break_on_uncaught: &[&str],
+        script: &[DebugAction],
+    ) -> Vec<(String, usize)> {
+        run_debug_full(source, "fixture.qn", &[], &[], break_on_uncaught, script)
     }
 
     #[test]
@@ -2108,6 +2136,7 @@ r
             "fixture.qn",
             &[],
             &["Error"],
+            &[],
             &[DebugAction::Continue],
         );
         assert_eq!(log, vec![("fixture.qn".to_string(), 2)]);
@@ -2123,7 +2152,7 @@ r = {
 }.catch:{ |e| 0 };
 r
 ";
-        let log = run_debug_full(source, "fixture.qn", &[], &["TypeError"], &[]);
+        let log = run_debug_full(source, "fixture.qn", &[], &["TypeError"], &[], &[]);
         assert!(log.is_empty());
     }
 
@@ -2159,6 +2188,82 @@ r
         let opts = VmRunnerOptions::parse(&args);
         assert!(matches!(opts.mode, VmRunnerMode::Debug));
         assert_eq!(opts.target_path.as_deref(), Some("file.qn"));
+        assert!(opts.break_on_throw.is_empty());
+    }
+
+    /// `--break-on-uncaught` pauses when a matching exception will NOT be caught: here the typed
+    /// `catch:{ |e:ValueError| … }` doesn't match the thrown `MessageNotUnderstood`, so it re-raises.
+    #[test]
+    fn break_on_uncaught_pauses_when_no_handler_matches() {
+        let source = "\
+r = {
+    nil.bogusMethod
+}.catch:{ |e:ValueError| 0 };
+r
+";
+        let log = run_debug_uncaught(source, &["MessageNotUnderstood"], &[DebugAction::Continue]);
+        assert_eq!(log, vec![("fixture.qn".to_string(), 2)]);
+    }
+
+    /// A matching enclosing handler means the exception is caught, so `--break-on-uncaught` stays
+    /// silent — `catch:{ |e:Error| … }` catches the `MessageNotUnderstood`.
+    #[test]
+    fn break_on_uncaught_skips_a_caught_exception() {
+        let source = "\
+r = {
+    nil.bogusMethod
+}.catch:{ |e:Error| 0 };
+r
+";
+        let log = run_debug_uncaught(source, &["MessageNotUnderstood"], &[DebugAction::Continue]);
+        assert!(log.is_empty(), "caught exception must not pause: {log:?}");
+    }
+
+    /// An uncaught exception that bubbles through several non-matching `catch:`es pauses exactly
+    /// once — at the innermost throw site — not again at each catch it re-raises past.
+    #[test]
+    fn break_on_uncaught_fires_once_for_a_bubbling_throw() {
+        let source = "\
+r = {
+    { nil.bogusMethod }.catch:{ |e:ValueError| 1 }
+}.catch:{ |e:ArgumentError| 2 };
+r
+";
+        let log = run_debug_uncaught(source, &["MessageNotUnderstood"], &[DebugAction::Continue]);
+        assert_eq!(log, vec![("fixture.qn".to_string(), 2)]);
+    }
+
+    /// The uncaught search spans the whole enclosing-catch stack: an outer `catch:{ |e:Error| … }`
+    /// catches the `MessageNotUnderstood` the inner `ValueError` handler missed, so no pause.
+    #[test]
+    fn break_on_uncaught_sees_an_outer_matching_handler() {
+        let source = "\
+r = {
+    { nil.bogusMethod }.catch:{ |e:ValueError| 1 }
+}.catch:{ |e:Error| 2 };
+r
+";
+        let log = run_debug_uncaught(source, &["MessageNotUnderstood"], &[]);
+        assert!(log.is_empty(), "outer handler catches it: {log:?}");
+    }
+
+    #[test]
+    fn parse_debug_break_on_uncaught_flag() {
+        let args: Vec<String> = [
+            "qn",
+            "debug",
+            "--break-on-uncaught=TypeError, ValueError",
+            "f.qn",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let opts = VmRunnerOptions::parse(&args);
+        assert!(matches!(opts.mode, VmRunnerMode::Debug));
+        assert_eq!(
+            opts.break_on_uncaught,
+            vec!["TypeError".to_string(), "ValueError".to_string()]
+        );
         assert!(opts.break_on_throw.is_empty());
     }
 

@@ -955,13 +955,26 @@ fn parse_selector(pair: Pair<Rule>, filename: &str, source_text: &str) -> Method
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::selector_w_args => {
+            // A keyword component may be marked variadic with `+` (`catch+:`). Bake the `+` into
+            // the canonical name so a `catch+:finally:` definition interns the same selector that a
+            // folded `catch:…catch:…finally:` call produces (see `compile_method_call`).
             let mut identifiers = Vec::new();
-            for id_pair in inner.into_inner() {
+            let mut pairs = inner.into_inner().peekable();
+            while let Some(id_pair) = pairs.next() {
                 let id = parse_ident(id_pair, filename, source_text);
+                let variadic = matches!(pairs.peek().map(|p| p.as_rule()), Some(Rule::kw_var));
+                if variadic {
+                    pairs.next(); // consume the `+`
+                }
+                let name = if variadic {
+                    format!("{}+:", id.name)
+                } else {
+                    format!("{}:", id.name)
+                };
                 identifiers.push(Arc::new(IdentifierNode {
                     source_info: id.source_info.clone(),
                     namespace: id.namespace.clone(),
-                    name: format!("{}:", id.name),
+                    name,
                     identifier_type: id.identifier_type,
                 }));
             }

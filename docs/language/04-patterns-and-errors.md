@@ -44,7 +44,8 @@ The same `~` operator works standalone, with the matcher on the left:
 > **Rules**
 > - `value.throw` throws **any value**. The `Error` classes add class-side convenience constructors: `Error.throw:'msg'` and `Error.throw:'msg' payload:p` build an instance and throw it.
 > - `{ … }.catch:{ |e| … }` runs the receiver block; if it throws, the thrown value is passed to the catch block, whose result becomes the value. `{ … }.catch:{ |e| … } finally:{ … }` additionally runs `finally:` **always** (on success or failure).
-> - **Catch by type** with `case`/`~` inside the handler: `e.case:{ .when:TypeError do:… }`.
+> - **Typed catch.** A typed handler param — `catch:{ |e:IoError| … }` — only catches when the thrown value is (a subtype of) that type; a non-match **re-raises** to an enclosing `catch:`. An untyped `|e|` (≡ `|e:Object|`) is a catch-all.
+> - **Multiple handlers by type.** Chain `catch:` keywords: `{ … }.catch:{ |e:IoError| … } catch:{ |e:Error| … } finally:{ … }`. Handlers are tried in **source order, first match wins** — so write them most-specific → least-specific, with any untyped catch-all **last** (a broad handler placed first shadows the narrower ones below it). This first-match ordering is a deliberate exception to Quoin's otherwise order-independent multimethod dispatch: a handler's type lives on a runtime block, not a scored method chain, so there is no specificity order to fall back on. (Inside a single handler you can still branch with `case`/`~`: `e.case:{ .when:TypeError do:… }`.)
 > - **Built-in hierarchy** (`core/00-bootstrap.qn`): `Error` with `@message @payload`, accessors `message`/`payload`, and `s` (→ `'ClassName: message'`); subclasses `TypeError`, `ArgumentError`, `MessageNotUnderstood`, `AmbiguousMethodError`, `ArithmeticError`, `IndexError`, `FiberError`.
 > - **Runtime errors are structured**: the VM maps its internal errors to these Quoin `Error` objects at the `catch:` boundary, so you can catch and inspect them.
 
@@ -52,14 +53,11 @@ The same `~` operator works standalone, with the matcher on the left:
 result = {
     (amount < 0).if:{ ArgumentError.throw:'amount must be >= 0' }
     process:amount
-}.catch:{ |e|
-    e.case:{
-        .when:ArgumentError do:{ ('bad input: ' + e.message).print; 0 }
-        .default:{ e.throw }                  "* re-throw what we don't handle
-    }
-} finally:{
-    'done'.print
-}
+}.catch:{ |e:ArgumentError| ('bad input: ' + e.message).print; 0 }
+ catch:{ |e:IoError|        ('io failed: ' + e.message).print; -1 }
+ finally:{ 'done'.print }
+"* anything that isn't an ArgumentError or IoError re-raises automatically —
+"* most-specific handler first, no explicit re-throw needed.
 ```
 
 Internal failures surface as the matching Quoin error type — e.g. an out-of-range
@@ -67,10 +65,11 @@ index or a type mismatch becomes a catchable `TypeError`/`IndexError`, and sendi
 an unknown selector becomes a `MessageNotUnderstood` — each with a `message` you
 can read.
 
-> **⚠ Gotcha — `throw` accepts any value, but typed catching expects `Error`s.**
-> You *can* `42.throw`, but catch-by-type (`TypeError ~ e`) only works when the
-> thrown value is an `Error` instance. Throw `Error` subclasses (or use the
-> `Error.throw:` constructors) if handlers will dispatch on type.
+> **⚠ Gotcha — `throw` accepts any value; it types by its actual class.**
+> `42.throw` is caught by `catch:{ |e:Integer| … }` (a thrown value matches by its
+> class), but **not** by `catch:{ |e:Error| … }` — `42` isn't an `Error`. Throw
+> `Error` subclasses (or use the `Error.throw:` constructors) when handlers should
+> dispatch on the error hierarchy.
 
 > Stack traces: uncaught errors print a highlighted trace (with source snippets).
 > The mechanics are an implementation detail; nothing in the language surface

@@ -91,8 +91,13 @@ pub struct DebugState {
     /// (`$source on|off`). `qn debug` sets it `true`; default `false`.
     pub show_source: bool,
     /// Exception types to break on (`--break-on-throw=Type,…`). Empty ⇒ off. A thrown value
-    /// whose class is (a subclass of) any of these pauses the debugger at the throw site.
+    /// whose class is (a subclass of) any of these pauses the debugger at the throw site
+    /// (first-chance: fires whether or not the throw is ultimately caught).
     pub break_on_throw: HashSet<String>,
+    /// Exception types to break on only when *uncaught* (`--break-on-uncaught=Type,…`). Like
+    /// `break_on_throw`, but pauses solely when no enclosing `catch:` has a handler whose declared
+    /// type matches — decided at the innermost throw site via `VmState.handler_stack`.
+    pub break_on_uncaught: HashSet<String>,
     /// Set by `debug_check_throw` when a break-on-throw fires: a one-line description of the
     /// exception, shown by `announce_pause` then cleared.
     pub pause_throw: Option<String>,
@@ -502,11 +507,23 @@ impl<'gc> VmState<'gc> {
     }
 
     /// Whether an interactive session is watching for thrown exception types (`--break-on-throw`).
-    /// A cheap gate so the `catch:` / uncaught chokepoints cost ~nothing otherwise.
+    /// A cheap gate so the `catch:` / uncaught chokepoints cost ~nothing unless a throw or an
+    /// uncaught break is armed.
     pub(crate) fn has_break_on_throw(&self) -> bool {
         self.debug
             .as_ref()
-            .is_some_and(|d| !d.break_on_throw.is_empty())
+            .is_some_and(|d| !d.break_on_throw.is_empty() || !d.break_on_uncaught.is_empty())
+    }
+
+    /// Whether some enclosing `catch:` (per `handler_stack`) has a handler whose declared type
+    /// catches `val` — i.e. the thrown value will be caught rather than escape uncaught. A
+    /// `"Object"`/untyped handler catches everything.
+    fn exception_has_handler(&self, val: Value<'gc>) -> bool {
+        self.handler_stack.iter().any(|types| {
+            types
+                .iter()
+                .any(|t| t == "Object" || self.value_matches_type(val, t))
+        })
     }
 
     /// True if `val`'s class is (a subclass of) any of `names` — walking its class hierarchy.
@@ -539,20 +556,38 @@ impl<'gc> VmState<'gc> {
         if matches!(e, QuoinError::Cancelled | QuoinError::NonLocalReturn) {
             return;
         }
-        let names = match &self.debug {
-            Some(d) if !d.break_on_throw.is_empty() => d.break_on_throw.clone(),
-            _ => return,
+        let (throw_names, uncaught_names) = match &self.debug {
+            Some(d) => (d.break_on_throw.clone(), d.break_on_uncaught.clone()),
+            None => return,
         };
+        if throw_names.is_empty() && uncaught_names.is_empty() {
+            return;
+        }
         // The thrown value: a user throw parks it in `active_exception`; a structured error is
         // materialized to its typed `Error` object (so `TypeError` etc. match uniformly).
         let val = match self.active_exception {
             Some(v) => v,
             None => self.quoinerror_to_value(mc, e),
         };
-        if !self.debug_value_class_matches(val, &names) {
+        // First-chance: break at any matching throw, caught or not.
+        let throw_hit =
+            !throw_names.is_empty() && self.debug_value_class_matches(val, &throw_names);
+        // Uncaught: break only when the type matches AND no enclosing `catch:` will take it. The
+        // `reraised` guard fires this once — at the innermost throw site, before re-raises bubble
+        // the error through outer catches — where the throw-site frames are still live.
+        let uncaught_hit = !uncaught_names.is_empty()
+            && !self.reraised
+            && self.debug_value_class_matches(val, &uncaught_names)
+            && !self.exception_has_handler(val);
+        if !throw_hit && !uncaught_hit {
             return;
         }
-        let banner = format!("→ broke on throw: {}", self.debug_render(val));
+        let label = if throw_hit {
+            "broke on throw"
+        } else {
+            "broke on uncaught"
+        };
+        let banner = format!("→ {label}: {}", self.debug_render(val));
         if let Some(d) = self.debug.as_mut() {
             d.pause_throw = Some(banner);
             d.at_throw = true;

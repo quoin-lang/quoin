@@ -155,4 +155,59 @@
         .is:{ caught.index } equalTo:9;
         .is:{ caught.length } equalTo:3;
     };
+
+    "* Typed `catch:` only catches when the thrown value's type matches the handler's declared
+    "* exception param; a non-match re-raises (to an enclosing catch, or out). An untyped `|e|`
+    "* handler is a catch-all, and a subtype matches a base-typed handler.
+    .test:
+    typedCatchMatchesByType -> {
+        .is:{ { TypeError.throw:'x' }.catch:{ |e:TypeError| 'caught' } } equalTo:'caught';
+        .is:{ { TypeError.throw:'x' }.catch:{ |e:Error| 'base' } } equalTo:'base';
+        .is:{ { TypeError.throw:'x' }.catch:{ |e| 'all' } } equalTo:'all';
+        "* a non-matching typed catch re-raises rather than swallowing
+        .does:{ { TypeError.throw:'x' }.catch:{ |e:ValueError| 'no' } } throw:TypeError;
+        "* ...which an enclosing catch can take
+        .is:{ { { TypeError.throw:'x' }.catch:{ |e:ValueError| 'in' } }.catch:{ |e:Error| 'out' } }
+            equalTo:'out';
+    };
+
+    "* `catch:{...} catch:{...} …` (the variadic fold) tries handlers in source order; the first
+    "* type match wins, an untyped catch-all goes last, and no match re-raises past the chain.
+    .test:
+    multiCatchFirstMatchWins -> {
+        .is:{
+            { TypeError.throw:'x' }
+                .catch:{ |e:ValueError| 'v' }
+                catch:{ |e:TypeError| 't' }
+                catch:{ |e:Error|     'all' }
+        } equalTo:'t';
+        .is:{
+            { TypeError.throw:'x' }.catch:{ |e:ValueError| 'v' } catch:{ |e| 'all' }
+        } equalTo:'all';
+        .does:{
+            { TypeError.throw:'x' }.catch:{ |e:ValueError| 'v' } catch:{ |e:ArgumentError| 'a' }
+        } throw:TypeError;
+    };
+
+    "* `finally` always runs: after a matched handler, and even when no handler matched and the
+    "* error re-raises.
+    .test:
+    typedCatchFinallyAlwaysRuns -> {
+        log = '';
+        .is:{ { TypeError.throw:'x' }.catch:{ |e:TypeError| 'c' } finally:{ log = 'F' } }
+            equalTo:'c';
+        .is:{ log } equalTo:'F';
+        ran = nil;
+        .does:{ { TypeError.throw:'x' }.catch:{ |e:ValueError| 'no' } finally:{ ran = true } }
+            throw:TypeError;
+        .isTrue:{ ran };
+    };
+
+    "* A thrown primitive types by its class (`42` is an Integer); a class handler that doesn't
+    "* match falls through to the catch-all.
+    .test:
+    primitiveThrowTypesByClass -> {
+        .is:{ { 42.throw }.catch:{ |e:Integer| 'int' } catch:{ |e| 'other' } } equalTo:'int';
+        .is:{ { 42.throw }.catch:{ |e:TypeError| 'te' } catch:{ |e| 'fell' } } equalTo:'fell';
+    };
 }

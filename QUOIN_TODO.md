@@ -165,7 +165,18 @@ both under `## Misc`.)
 - [ ] **User-facing `defer` form.** Expose the frame-level defer mechanism — today internal, used by
   `mix:`'s deferred `assertMeetsRequirements:` — to Quoin source as a `defer` form (see the `mix:`
   item in `## Misc`).
-- [ ] **Wildcard selector dispatch.** Grab examples from the old repo.
+- [x] **Wildcard selector dispatch.** Variadic keyword selectors: a definition marks a repeatable
+  keyword component with `+` (`catch+:finally:`; grammar `selector_w_args = (ident ~ kw_var? ~ ":")+`,
+  `parse_selector` bakes the marker into the canonical name). At a call site there is no marker — a run
+  of the **same consecutive keyword** folds into one `List` argument, resolved entirely at **compile
+  time** in `compile_method_call` (emits `NewList(k)` + a normal `Send` to the canonical `name+:`
+  selector), so dispatch/inline-caching is unchanged. `n=1` stays non-variadic (a lone `catch:` routes
+  to a separate `catch:`, not `catch+:`). A definition may **not** repeat a keyword without `+`
+  (`dup:dup:` → compile error in `reconstruct_selector`, surfaced as a catchable `ParseError` via
+  `Runtime.eval:`). Tests: `variadicSelector*` / `singleKeywordDoesNotFoldToVariadic` /
+  `repeatedKeywordSelectorIsACompileError` (`qnlib/tests/06-methods.qn`). Done as the foundation for
+  type-based multi-catch (`{x}.catch:{|e:IoError| …} catch:{|e:Error| …} finally:{…}`); the native
+  `catch+:`/`catch+:finally:` handlers + break-on-uncaught are the follow-on (see exception-handling).
 - [ ] Implement `...` / `???` / `!!!`.
 
 ## Networking & Async I/O
