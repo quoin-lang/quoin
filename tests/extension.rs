@@ -581,3 +581,126 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_ext_vector_python_test.qn", &script);
 }
+
+/// Slice 1 of extension packaging (`docs/EXT_PACKAGING.md`): `Extension loadPackage:` loads a
+/// *folder* — an `extension.toml` (launch spec + namespace) plus an optional `init.qn` of Quoin
+/// glue. The `ext_vector` fixture is packaged here with namespace `Vec` and an `init.qn` that
+/// reopens the installed class to add a convenience method. Proves: classes install **namespaced**
+/// (`[Vec]Vector` — the binary only declares a simple `Vector`, never a bare global), `init.qn` runs
+/// after install and its Quoin method composes a socket-backed primitive (`scale:` then `sum`), and
+/// a repeat `loadPackage:` of the same folder is idempotent (no re-spawn, classes still work).
+#[test]
+fn extension_load_package() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let pkg_dir = std::env::temp_dir().join(format!("qn_ext_pkg_{}", std::process::id()));
+    std::fs::create_dir_all(&pkg_dir).expect("create package dir");
+    std::fs::write(
+        pkg_dir.join("extension.toml"),
+        format!(
+            "[package]\nname = \"vectors\"\n\n[extension]\ncommand = \"{ext_bin}\"\nnamespace = \"Vec\"\n"
+        ),
+    )
+    .expect("write extension.toml");
+    // init.qn reopens the (namespaced) class to add a Quoin method composing a socket primitive:
+    // `tripledSum` scales the vector by 3 (a socket `scale:` -> new instance) and sums it.
+    std::fs::write(
+        pkg_dir.join("init.qn"),
+        "[Vec]Vector <-- {\n    tripledSum -> { (self.scale:3.0).sum }\n}\n",
+    )
+    .expect("write init.qn");
+
+    let dir = pkg_dir.to_string_lossy().to_string();
+    let script = format!(
+        r#"
+ok = true;
+
+"* load the package folder: spawns the extension, installs its classes under the [Vec] namespace,
+"* then runs init.qn
+Extension.loadPackage:'{dir}';
+
+"* the class is reachable *namespaced* — the binary declares a simple `Vector`, installed as
+"* `[Vec]Vector` (so a package can never register a bare global)
+v = [Vec]Vector.ofFloats:#( 1.0 2.0 3.0 );
+(v.sum == 6.0).else:{{ ok = false }};
+
+"* init.qn's Quoin method ran after install and composes a socket-backed primitive (scale: then sum)
+(v.tripledSum == 18.0).else:{{ ok = false }};
+
+"* idempotent: re-loading the same folder returns the cached extension (no re-spawn); classes work
+Extension.loadPackage:'{dir}';
+(([Vec]Vector.ofFloats:#( 2.0 2.0 )).tripledSum == 12.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_load_package_test.qn", &script);
+
+    let _ = std::fs::remove_dir_all(&pkg_dir);
+}
+
+/// Slice 2 of extension packaging (`docs/EXT_PACKAGING.md` §5): `use <pkg>:*` resolves a named
+/// extension package on the search path to synthesized `Extension.loadPackage:` glue. The
+/// `ext_vector` fixture is dropped as `vectors/` under a temp `$QUOIN_PATH` root; `use vectors:*`
+/// then spawns it, installs `[Vec]Vector`, and runs the package's init.qn — all driven by the `use`
+/// statement (the whole-package `*` glob is the grammar addition this slice makes).
+#[test]
+fn extension_use_package() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let root = std::env::temp_dir().join(format!("qn_usepkg_{}", std::process::id()));
+    let pkg = root.join("vectors");
+    std::fs::create_dir_all(&pkg).expect("create package dir");
+    std::fs::write(
+        pkg.join("extension.toml"),
+        format!(
+            "[package]\nname = \"vectors\"\n\n[extension]\ncommand = \"{ext_bin}\"\nnamespace = \"Vec\"\n"
+        ),
+    )
+    .expect("write extension.toml");
+    std::fs::write(
+        pkg.join("init.qn"),
+        "[Vec]Vector <-- {\n    tripledSum -> { (self.scale:3.0).sum }\n}\n",
+    )
+    .expect("write init.qn");
+
+    let script = r#"
+ok = true;
+
+"* `use vectors:*` finds vectors/ on $QUOIN_PATH, synthesizes Extension.loadPackage:, spawns +
+"* installs [Vec]Vector (namespaced), and runs init.qn — all via the use statement
+use vectors:*;
+
+v = [Vec]Vector.ofFloats:#( 1.0 2.0 3.0 );
+(v.sum == 6.0).else:{ ok = false };
+(v.tripledSum == 18.0).else:{ ok = false };
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let script_path = root.join("main.qn");
+    std::fs::write(&script_path, script).expect("write script");
+
+    // Retry a few times like `assert_script_passes` (transient subprocess pressure under the full
+    // suite); the package dir is on `$QUOIN_PATH` for the `qn` child, found from the repo-root CWD.
+    let mut last = String::new();
+    for attempt in 1..=4u32 {
+        let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+            .arg(&script_path)
+            .env("QUOIN_PATH", &root)
+            .output()
+            .expect("run qn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.contains("PASS") {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        last = format!(
+            "status: {:?}\nstdout:\n{stdout}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if attempt < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    panic!("use-package script did not pass after 4 attempts.\n{last}");
+}

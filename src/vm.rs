@@ -132,6 +132,12 @@ pub struct VmState<'gc> {
     pub stack: Vec<Value<'gc>>,
     pub frames: Vec<Frame<'gc>>,
     pub globals: Gc<'gc, RefLock<HashMap<NamespacedName, Value<'gc>>>>,
+    /// Loaded extension *packages* (`Extension loadPackage:`), keyed by canonical package directory
+    /// → the live `Extension` value, so a repeat `loadPackage:` of the same folder is idempotent
+    /// (returns the cached extension rather than re-spawning). GC-traced — the installed classes also
+    /// root the extension, but this is its canonical owner for the session. See
+    /// `src/runtime/extension.rs` / `docs/EXT_PACKAGING.md`.
+    pub loaded_packages: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
     /// Intern pool for symbols: one canonical `Symbol` value per name, so symbols
     /// compare by identity. Rooted here and traced as part of `VmState`.
     pub symbol_table: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
@@ -310,6 +316,7 @@ impl<'gc> VmState<'gc> {
             stack: Vec::new(),
             frames: Vec::new(),
             globals: gcl!(mc, HashMap::new()),
+            loaded_packages: gcl!(mc, HashMap::new()),
             symbol_table: gcl!(mc, HashMap::new()),
             pending_class_def: None,
             next_frame_id: 1,

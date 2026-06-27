@@ -1,0 +1,22 @@
+"* ADBC package glue — Quoin-side code loaded by `Extension loadPackage:` right after the
+"* extension's classes (`[ADBC]Database`/`Connection`/`ResultSet`/`Statement`) are installed.
+"*
+"* `transaction:` wraps a block in one explicit transaction on this connection: save the current
+"* autocommit mode, turn autocommit off, run the block (passed the connection), and commit on success;
+"* on a throw, roll back and re-raise the original error; either way, restore the *saved* mode (so a
+"* transaction composes / nests correctly rather than forcing autocommit back on). The block runs in
+"* the VM, so each `execute:` inside it is an ordinary send — it never re-enters its connection mid-call.
+"*
+"*   c.transaction:{ |tx|
+"*       tx.execute:'insert into t values(1)';
+"*       tx.execute:'insert into t values(2)';
+"*   };
+[ADBC]Connection <-- {
+    transaction: -> { |work|
+        wasAuto = self.autocommit;
+        self.autocommit: false;
+        { r = work.value: self; self.commit; r }
+            .catch:{ |e| self.rollback; e.throw }
+            finally:{ self.autocommit: wasAuto }
+    }
+}

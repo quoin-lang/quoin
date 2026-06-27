@@ -49,6 +49,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,6 +66,7 @@ use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
 use crate::runtime::data_value::{DataValue as RtData, data_to_value, value_to_data};
 use crate::runtime::list::NativeListState;
+use crate::runtime::runtime::eval_string;
 use crate::symbol::Symbol;
 use crate::value::{AnyCollect, Class, NamespacedName, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
@@ -173,6 +175,12 @@ pub struct NativeExtension {
     /// extension as `Call.releases`. Cloned into each `ExtResource` this extension hands out so
     /// its `Drop` can enqueue here (a GC `Drop` can't send a frame; mirrors the fd-reap pattern).
     resource_reap: Rc<RefCell<Vec<u64>>>,
+    /// The package namespace this extension's classes were installed under (`loadPackage:`), or
+    /// `None` for the raw `spawn:` escape hatch (verbatim names). The extension itself only ever
+    /// speaks *simple* class names (`EXT_PACKAGING.md` §4); the host translates — stripping the
+    /// namespace on outbound dispatch and re-applying it to resolve a returned instance's class
+    /// (cross-class returns).
+    namespace: Option<String>,
 }
 
 /// Native state behind an `ExtResource` value: an opaque token for a resource that lives in the
@@ -674,11 +682,18 @@ fn wrap_resource<'gc>(
 fn resolve_ext_class<'gc>(
     vm: &VmState<'gc>,
     class_name: &str,
+    namespace: Option<&str>,
 ) -> Option<Gc<'gc, RefLock<Class<'gc>>>> {
     if class_name.is_empty() {
         return None;
     }
-    match resolve_global(vm, class_name) {
+    // The extension names a *simple* class (§4); re-apply the package namespace to find the
+    // installed global (`[Ns]Name`), or resolve the bare name for the `spawn:` escape hatch.
+    let full = match namespace {
+        Some(ns) => format!("[{ns}]{class_name}"),
+        None => class_name.to_string(),
+    };
+    match resolve_global(vm, &full) {
         Some(Value::Class(c)) => Some(c),
         _ => None,
     }
@@ -702,7 +717,13 @@ fn finish_outcome<'gc>(
             resource_id,
             class_name,
         }) => {
-            let class = resolve_ext_class(vm, &class_name);
+            // A cross-class return names a simple class; wrap it under this extension's package
+            // namespace (the receiver's), so the returned instance is the right installed class.
+            let namespace = ext_receiver
+                .with_native_state::<NativeExtension, _, _>(|e| e.namespace.clone())
+                .ok()
+                .flatten();
+            let class = resolve_ext_class(vm, &class_name, namespace.as_deref());
             Ok(wrap_resource(vm, mc, resource_id, resource_reap, class))
         }
         Ok(CallOutcome::Array(array)) => Ok(array::new_array(
@@ -850,7 +871,10 @@ pub fn dispatch_ext_method<'gc>(
             )));
         }
     };
-    let class_name = class_obj.borrow().name.to_string();
+    // The extension routes on the *simple* class name it registered; the host-applied package
+    // namespace (`EXT_PACKAGING.md` §4) is stripped here — `name.name` is the bare class name for
+    // both `[Ns]Name` (loadPackage) and a verbatim bare name (spawn:).
+    let class_name = class_obj.borrow().name.name.clone();
 
     let ctx = ext_prelude(ext)?;
     if ctx.dead {
@@ -901,68 +925,265 @@ fn extract_args<'gc>(value: Value<'gc>) -> Result<Vec<Value<'gc>>, QuoinError> {
         })
 }
 
+/// Spawn an extension subprocess and bring it up: exec `command` with `args` (with the unix-socket
+/// path appended as the final argv, as the transport requires), optionally in `cwd`; connect the
+/// UDS (retrying until the child binds it, each attempt parking the fiber); fetch the class
+/// manifest; and build the `Extension` value. Returns the value plus its manifest — the caller
+/// installs the classes, deciding the naming (verbatim for `spawn:`, namespaced for `loadPackage:`).
+/// The manifest is fetched *before* the value exists, so no GC value is held across the parking I/O.
+fn spawn_and_connect<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    command: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    namespace: Option<String>,
+) -> Result<(Value<'gc>, Vec<ClassDecl>), QuoinError> {
+    let sock_path = unique_sock_path();
+    let mut cmd = Command::new(command);
+    cmd.args(args).arg(&sock_path);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| QuoinError::Other(format!("Extension: failed to start '{command}': {e}")))?;
+
+    // The child binds the socket asynchronously after exec, so retry the connect briefly until it's
+    // listening (each attempt parks the fiber).
+    let mut attempts = 0u32;
+    let id = loop {
+        match vm.await_io(IoRequest::ConnectUnix {
+            path: sock_path.clone(),
+        })? {
+            IoResult::Connected(id) => break id,
+            IoResult::Err(_) if attempts < 100 => {
+                attempts += 1;
+                vm.await_io(IoRequest::Sleep { ms: 5 })?;
+            }
+            IoResult::Err(e) => {
+                let _ = child.kill();
+                return Err(QuoinError::from_io_error(&e));
+            }
+            other => {
+                let _ = child.kill();
+                return Err(QuoinError::Other(format!(
+                    "Extension: unexpected connect result {other:?}"
+                )));
+            }
+        }
+    };
+
+    // Fetch the class manifest (Phase 3) before creating the value: the fetch parks the fiber (a GC
+    // point), so no GC value may be held across it. A generic extension returns an empty manifest.
+    let manifest = fetch_manifest(vm, id)?;
+
+    let class = vm.get_or_create_builtin_class(mc, "Extension");
+    let ext_val = vm.new_native_state(
+        mc,
+        class,
+        NativeExtension {
+            id,
+            ext_id: unique_ext_id(),
+            child,
+            sock_path,
+            reap: vm.socket_reap.clone(),
+            handle_reap: vm.ext_handle_reap.clone(),
+            dead: false,
+            resource_reap: Rc::new(RefCell::new(Vec::new())),
+            namespace,
+        },
+    );
+    Ok((ext_val, manifest))
+}
+
+/// The launch + identity spec parsed from a package's `extension.toml` (`EXT_PACKAGING.md` §3).
+struct PackageSpec {
+    /// `[package].name` — canonical metadata (the directory name is what `use` resolves).
+    name: String,
+    /// `[extension].command` — how to launch the subprocess.
+    command: String,
+    /// `[extension].args` — its arguments (the socket path is appended after these).
+    args: Vec<String>,
+    /// `[extension].namespace`, or PascalCase of the directory name — the namespace every provided
+    /// class is installed under (§4).
+    namespace: String,
+}
+
+/// Read and parse `<dir>/extension.toml` into a [`PackageSpec`] (v1: `[package].name` + the
+/// `[extension]` launch spec). The namespace defaults to PascalCase of the directory name (§4).
+fn read_package_manifest(dir: &Path) -> Result<PackageSpec, QuoinError> {
+    let manifest_path = dir.join("extension.toml");
+    let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        QuoinError::Other(format!(
+            "Extension loadPackage: cannot read {}: {e}",
+            manifest_path.display()
+        ))
+    })?;
+    let value: toml::Value = text.parse().map_err(|e| {
+        QuoinError::Other(format!(
+            "Extension loadPackage: invalid {}: {e}",
+            manifest_path.display()
+        ))
+    })?;
+
+    let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("ext");
+    let name = value
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(dir_name)
+        .to_string();
+
+    let ext = value.get("extension").ok_or_else(|| {
+        QuoinError::Other(format!(
+            "Extension loadPackage: {} has no [extension] table",
+            manifest_path.display()
+        ))
+    })?;
+    let command = ext
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            QuoinError::Other(format!(
+                "Extension loadPackage: {} [extension] is missing 'command'",
+                manifest_path.display()
+            ))
+        })?
+        .to_string();
+    let args = ext
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let namespace = ext
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| pascal_case(dir_name));
+
+    Ok(PackageSpec {
+        name,
+        command,
+        args,
+        namespace,
+    })
+}
+
+/// PascalCase a directory name for the default package namespace (`my-vectors` -> `MyVectors`).
+fn pascal_case(s: &str) -> String {
+    s.split(['-', '_', ' '])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut cs = w.chars();
+            match cs.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + cs.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Resolve a manifest `command` against the package dir: an absolute path is used as-is; a relative
+/// path *with a separator* (`bin/ext`, `../target/release/adbc`) is taken relative to the package
+/// dir so it finds the bundled binary; a bare command (`python3`) is left for a `PATH` lookup.
+fn resolve_command(dir: &Path, command: &str) -> PathBuf {
+    let p = Path::new(command);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else if command.contains('/') {
+        dir.join(p)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// Load an extension *package* (a `use`-able folder; `docs/EXT_PACKAGING.md`): read its
+/// `extension.toml`, spawn the subprocess, install the provided classes **under the package
+/// namespace** (so a package can never register a bare global — §4; an already-namespaced
+/// `ClassDecl` name is rejected), run the package's optional `init.qn` Quoin glue now that its
+/// classes exist, and cache the live `Extension` keyed by the canonical folder (idempotent: a
+/// repeat load returns the cached extension rather than re-spawning).
+fn load_package<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    dir: &str,
+) -> Result<Value<'gc>, QuoinError> {
+    let dir_path = std::fs::canonicalize(dir).map_err(|e| {
+        QuoinError::Other(format!(
+            "Extension loadPackage: cannot resolve package dir '{dir}': {e}"
+        ))
+    })?;
+    let key = dir_path.to_string_lossy().to_string();
+
+    // Idempotent: a folder already loaded this session returns its live extension (no re-spawn).
+    if let Some(existing) = vm.loaded_packages.borrow().get(&key).copied() {
+        return Ok(existing);
+    }
+
+    let spec = read_package_manifest(&dir_path)?;
+    let command = resolve_command(&dir_path, &spec.command);
+    let command = command.to_string_lossy().to_string();
+    let (ext_val, classes) = spawn_and_connect(
+        vm,
+        mc,
+        &command,
+        &spec.args,
+        Some(&dir_path),
+        Some(spec.namespace.clone()),
+    )?;
+
+    // Namespacing (§4): the host prefixes the package namespace onto each simple `ClassDecl` name;
+    // a package that ships an already-namespaced name doesn't get to choose its namespace.
+    for decl in &classes {
+        if decl.name.contains('[') {
+            return Err(QuoinError::Other(format!(
+                "Extension loadPackage: package '{}' class '{}' must declare a simple name \
+                 (the package namespace is applied by the host)",
+                spec.name, decl.name
+            )));
+        }
+        let full = format!("[{}]{}", spec.namespace, decl.name);
+        vm.install_ext_class(
+            mc,
+            ext_val,
+            &full,
+            &decl.instance_selectors,
+            &decl.class_selectors,
+        );
+    }
+
+    // Run the package's Quoin-side glue (convenience methods / class reopenings) now that its
+    // classes are installed. `init.qn` is optional; the loader holds the absolute dir, so it just
+    // reads its own sibling — no "where am I on disk?" problem. No `await_io` (class defs), so
+    // `ext_val` — already rooted by the installed classes — is not held across a collection point.
+    let init_path = dir_path.join("init.qn");
+    if let Ok(src) = std::fs::read_to_string(&init_path) {
+        eval_string(vm, mc, &src, &init_path.to_string_lossy(), None, &[]).map_err(|e| {
+            QuoinError::Other(format!(
+                "Extension loadPackage: package '{}' init.qn failed: {e}",
+                spec.name
+            ))
+        })?;
+    }
+
+    vm.loaded_packages.borrow_mut(mc).insert(key, ext_val);
+    Ok(ext_val)
+}
+
 pub fn build_extension_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Extension", Some("Object"))
-        // `Extension spawn: '<path-to-binary>'` -> spawn the extension subprocess and
-        // connect to it, returning an Extension handle.
+        // `Extension spawn: '<path-to-binary>'` -> spawn the extension subprocess and connect to
+        // it, returning an Extension handle. The unmanaged escape hatch (`EXT_PACKAGING.md` §4):
+        // it installs the manifest's `ClassDecl` names *verbatim* (possibly bare globals), unlike
+        // the namespace-enforcing `loadPackage:`. Dev/testing; the managed path is `loadPackage:`.
         .class_method("spawn:", |vm, mc, _receiver, args| {
             let bin_path = arg!(args, String, 0).to_string();
-            let sock_path = unique_sock_path();
-            let mut child = Command::new(&bin_path)
-                .arg(&sock_path)
-                .spawn()
-                .map_err(|e| {
-                    QuoinError::Other(format!(
-                        "Extension spawn: failed to start '{bin_path}': {e}"
-                    ))
-                })?;
-
-            // The child binds the socket asynchronously after exec, so retry the
-            // connect briefly until it's listening (each attempt parks the fiber).
-            let mut attempts = 0u32;
-            let id = loop {
-                match vm.await_io(IoRequest::ConnectUnix {
-                    path: sock_path.clone(),
-                })? {
-                    IoResult::Connected(id) => break id,
-                    IoResult::Err(_) if attempts < 100 => {
-                        attempts += 1;
-                        vm.await_io(IoRequest::Sleep { ms: 5 })?;
-                    }
-                    IoResult::Err(e) => {
-                        let _ = child.kill();
-                        return Err(QuoinError::from_io_error(&e));
-                    }
-                    other => {
-                        let _ = child.kill();
-                        return Err(QuoinError::Other(format!(
-                            "Extension spawn: unexpected connect result {other:?}"
-                        )));
-                    }
-                }
-            };
-
-            // Fetch the extension's class manifest (Phase 3) *before* creating the `Extension`
-            // value: the fetch parks the fiber (a GC point), so no GC value may be held across it.
-            // A legacy extension that provides no classes returns an empty manifest.
-            let manifest = fetch_manifest(vm, id)?;
-
-            let class = vm.get_or_create_builtin_class(mc, "Extension");
-            let ext_val = vm.new_native_state(
-                mc,
-                class,
-                NativeExtension {
-                    id,
-                    ext_id: unique_ext_id(),
-                    child,
-                    sock_path,
-                    reap: vm.socket_reap.clone(),
-                    handle_reap: vm.ext_handle_reap.clone(),
-                    dead: false,
-                    resource_reap: Rc::new(RefCell::new(Vec::new())),
-                },
-            );
-
+            let (ext_val, manifest) = spawn_and_connect(vm, mc, &bin_path, &[], None, None)?;
             // Install each provided class as a host global whose selectors dispatch back to this
             // extension. No `await_io` here, so `ext_val` is never held across a collection point.
             for decl in &manifest {
@@ -975,6 +1196,15 @@ pub fn build_extension_class() -> NativeClassBuilder {
                 );
             }
             Ok(ext_val)
+        })
+        // `Extension loadPackage: '<dir>'` -> load an extension *package* (a folder with an
+        // `extension.toml` launch/identity spec + an optional `init.qn` of Quoin-side glue;
+        // `EXT_PACKAGING.md`). Spawns the subprocess per the manifest, installs the provided classes
+        // **under the package namespace** (no bare-global pollution), runs `init.qn`, and caches the
+        // live extension (idempotent per folder). The managed counterpart to `spawn:`.
+        .class_method("loadPackage:", |vm, mc, _receiver, args| {
+            let dir = arg!(args, String, 0).to_string();
+            load_package(vm, mc, &dir)
         })
         // `ext call: '<op>' with: '<arg>'` -> send the `Call`, then service the conversation:
         // a loop of re-entrant host-ops the extension may issue (each answered inline) until it
