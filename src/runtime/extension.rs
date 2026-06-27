@@ -69,10 +69,12 @@ use crate::symbol::Symbol;
 use crate::value::{AnyCollect, Class, NamespacedName, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
 
-/// Resolve a bare name in the host's global table to its `Value` (a class is a class-valued
-/// global). `None` if unbound. (Namespaced `pkg:path` lookup is a later refinement.)
+/// Resolve a name in the host's global table to its `Value` (a class is a class-valued global).
+/// The name is parsed as a `NamespacedName`, so a namespaced class such as `[ADBC]Database` resolves
+/// the same way it was installed (not as a bare name). `None` if unbound. Used by the `get_global`
+/// host-op (Phase 2) and to resolve a returned resource's class (Phase 3 cross-class returns).
 fn resolve_global<'gc>(vm: &VmState<'gc>, name: &str) -> Option<Value<'gc>> {
-    let key = NamespacedName::new(Vec::new(), name.to_string());
+    let key = NamespacedName::parse(name);
     vm.globals.borrow().get(&key).copied()
 }
 
