@@ -204,7 +204,7 @@ impl<'gc> VmState<'gc> {
             .map(|si| (si.filename.as_str(), si.line));
         let at_line_start = is_line_start(map, ip);
 
-        let pause = match &self.debug {
+        let pause = match &self.instrumentation.debug {
             Some(d) => d.should_pause(at_line_start, pos, depth),
             None => false,
         };
@@ -234,7 +234,7 @@ impl<'gc> VmState<'gc> {
     /// [`apply_debug_action`]: VmState::apply_debug_action
     pub(crate) fn debug_on_pause(&mut self) {
         let pos = self.debug_current_pos();
-        let action = match self.debug.as_mut() {
+        let action = match self.instrumentation.debug.as_mut() {
             Some(d) => {
                 if let Some((file, line)) = &pos {
                     d.pause_log.push((file.clone(), *line));
@@ -252,12 +252,12 @@ impl<'gc> VmState<'gc> {
     pub(crate) fn apply_debug_action(&mut self, action: DebugAction) {
         // Leaving the pause: a throw pause (post-dispatch) is over, so the next pause is a
         // normal pre-dispatch breakpoint/step until another break-on-throw fires.
-        if let Some(d) = self.debug.as_mut() {
+        if let Some(d) = self.instrumentation.debug.as_mut() {
             d.at_throw = false;
         }
         match action {
             DebugAction::Continue => {
-                if let Some(d) = self.debug.as_mut() {
+                if let Some(d) = self.instrumentation.debug.as_mut() {
                     d.step = None;
                     d.origin = None;
                 }
@@ -273,7 +273,7 @@ impl<'gc> VmState<'gc> {
     fn arm_step(&mut self, mode: StepMode) {
         let depth = self.frames.len();
         let pos = self.debug_current_pos();
-        if let Some(d) = self.debug.as_mut() {
+        if let Some(d) = self.instrumentation.debug.as_mut() {
             d.step = Some(mode);
             d.origin = pos.map(|(file, line)| StepOrigin { file, line, depth });
         }
@@ -289,7 +289,11 @@ impl<'gc> VmState<'gc> {
     fn frame_display_ip(&self, idx: usize) -> usize {
         let ip = self.frames[idx].ip;
         let is_innermost = idx + 1 == self.frames.len();
-        let at_throw = self.debug.as_ref().is_some_and(|d| d.at_throw);
+        let at_throw = self
+            .instrumentation
+            .debug
+            .as_ref()
+            .is_some_and(|d| d.at_throw);
         if is_innermost && !at_throw {
             ip
         } else {
@@ -313,7 +317,7 @@ impl<'gc> VmState<'gc> {
     /// Begin a pause: reset the focus to the top (innermost) frame.
     pub(crate) fn debug_enter_pause(&mut self) {
         let top = self.frames.len().saturating_sub(1);
-        if let Some(d) = self.debug.as_mut() {
+        if let Some(d) = self.instrumentation.debug.as_mut() {
             d.focus = top;
         }
     }
@@ -324,7 +328,12 @@ impl<'gc> VmState<'gc> {
             return None;
         }
         let top = self.frames.len() - 1;
-        Some(self.debug.as_ref().map_or(top, |d| d.focus.min(top)))
+        Some(
+            self.instrumentation
+                .debug
+                .as_ref()
+                .map_or(top, |d| d.focus.min(top)),
+        )
     }
 
     /// Move the focus toward the caller (`delta < 0`, `$up`) or the callee (`delta > 0`,
@@ -333,7 +342,7 @@ impl<'gc> VmState<'gc> {
         let cur = self.debug_focus()?;
         let top = self.frames.len() - 1;
         let next = (cur as isize + delta).clamp(0, top as isize) as usize;
-        if let Some(d) = self.debug.as_mut() {
+        if let Some(d) = self.instrumentation.debug.as_mut() {
             d.focus = next;
         }
         Some(next)
@@ -484,7 +493,7 @@ impl<'gc> VmState<'gc> {
         self_val: Option<Value<'gc>>,
         bindings: &[(Symbol, Value<'gc>)],
     ) -> Result<Value<'gc>, String> {
-        let saved_debug = self.debug.take();
+        let saved_debug = self.instrumentation.debug.take();
         let saved_yielder = self.sched.yielder.take();
         let base_frames = self.frames.len();
         let base_stack = self.stack.len();
@@ -494,7 +503,7 @@ impl<'gc> VmState<'gc> {
             Ok(v) => Ok(v),
             // A `throw` in the expression: render the thrown value before it's cleared.
             Err(QuoinError::Thrown) => {
-                let thrown = self.active_exception;
+                let thrown = self.exceptions.active;
                 Err(thrown
                     .map(|v| self.debug_render(v))
                     .unwrap_or_else(|| "<thrown>".to_string()))
@@ -504,10 +513,10 @@ impl<'gc> VmState<'gc> {
         if outcome.is_err() {
             self.frames.truncate(base_frames);
             self.stack.truncate(base_stack);
-            self.active_exception = None;
+            self.exceptions.active = None;
         }
         self.sched.yielder = saved_yielder;
-        self.debug = saved_debug;
+        self.instrumentation.debug = saved_debug;
         outcome
     }
 
@@ -515,7 +524,8 @@ impl<'gc> VmState<'gc> {
     /// A cheap gate so the `catch:` / uncaught chokepoints cost ~nothing unless a throw or an
     /// uncaught break is armed.
     pub(crate) fn has_break_on_throw(&self) -> bool {
-        self.debug
+        self.instrumentation
+            .debug
             .as_ref()
             .is_some_and(|d| !d.break_on_throw.is_empty() || !d.break_on_uncaught.is_empty())
     }
@@ -524,7 +534,7 @@ impl<'gc> VmState<'gc> {
     /// catches `val` — i.e. the thrown value will be caught rather than escape uncaught. A
     /// `"Object"`/untyped handler catches everything.
     fn exception_has_handler(&self, val: Value<'gc>) -> bool {
-        self.handler_stack.iter().any(|types| {
+        self.exceptions.handler_stack.iter().any(|types| {
             types
                 .iter()
                 .any(|t| t == "Object" || self.value_matches_type(val, t))
@@ -561,7 +571,7 @@ impl<'gc> VmState<'gc> {
         if matches!(e, QuoinError::Cancelled | QuoinError::NonLocalReturn) {
             return;
         }
-        let (throw_names, uncaught_names) = match &self.debug {
+        let (throw_names, uncaught_names) = match &self.instrumentation.debug {
             Some(d) => (d.break_on_throw.clone(), d.break_on_uncaught.clone()),
             None => return,
         };
@@ -570,7 +580,7 @@ impl<'gc> VmState<'gc> {
         }
         // The thrown value: a user throw parks it in `active_exception`; a structured error is
         // materialized to its typed `Error` object (so `TypeError` etc. match uniformly).
-        let val = match self.active_exception {
+        let val = match self.exceptions.active {
             Some(v) => v,
             None => self.quoinerror_to_value(mc, e),
         };
@@ -581,7 +591,7 @@ impl<'gc> VmState<'gc> {
         // `reraised` guard fires this once — at the innermost throw site, before re-raises bubble
         // the error through outer catches — where the throw-site frames are still live.
         let uncaught_hit = !uncaught_names.is_empty()
-            && !self.reraised
+            && !self.exceptions.reraised
             && self.debug_value_class_matches(val, &uncaught_names)
             && !self.exception_has_handler(val);
         if !throw_hit && !uncaught_hit {
@@ -593,7 +603,7 @@ impl<'gc> VmState<'gc> {
             "broke on uncaught"
         };
         let banner = format!("→ {label}: {}", self.debug_render(val));
-        if let Some(d) = self.debug.as_mut() {
+        if let Some(d) = self.instrumentation.debug.as_mut() {
             d.pause_throw = Some(banner);
             d.at_throw = true;
         }

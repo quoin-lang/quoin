@@ -162,7 +162,7 @@ pub fn build_task_class() -> NativeClassBuilder {
                     let e = receiver
                         .with_native_state::<NativeTaskHandle, _, _>(|h| h.error())
                         .map_err(QuoinError::Other)?;
-                    vm.active_exception = e;
+                    vm.exceptions.active = e;
                     Err(QuoinError::Thrown)
                 }
                 TaskStatus::Cancelled => {

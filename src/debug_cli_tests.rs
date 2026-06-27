@@ -11,7 +11,7 @@ use gc_arena::{Arena, Rootable};
 fn commands_map_to_breakpoints_step_modes_and_outcomes() {
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc, VmOptions::default());
-        vm.debug = Some(DebugState {
+        vm.instrumentation.debug = Some(DebugState {
             interactive: true,
             ..Default::default()
         });
@@ -20,14 +20,15 @@ fn commands_map_to_breakpoints_step_modes_and_outcomes() {
 
     arena.mutate_root(|mc, vm| {
         let bps = |vm: &VmState<'_>, f: &str, l: usize| {
-            vm.debug
+            vm.instrumentation
+                .debug
                 .as_ref()
                 .unwrap()
                 .breakpoints
                 .get(f)
                 .is_some_and(|s| s.contains(&l))
         };
-        let step = |vm: &VmState<'_>| vm.debug.as_ref().unwrap().step;
+        let step = |vm: &VmState<'_>| vm.instrumentation.debug.as_ref().unwrap().step;
 
         // $break adds a (file, line); $delete clears it.
         assert!(matches!(
@@ -75,12 +76,12 @@ fn commands_map_to_breakpoints_step_modes_and_outcomes() {
             exec_command(vm, mc, "$source off"),
             CommandOutcome::Stay
         ));
-        assert!(!vm.debug.as_ref().unwrap().show_source);
+        assert!(!vm.instrumentation.debug.as_ref().unwrap().show_source);
         assert!(matches!(
             exec_command(vm, mc, "$source on"),
             CommandOutcome::Stay
         ));
-        assert!(vm.debug.as_ref().unwrap().show_source);
+        assert!(vm.instrumentation.debug.as_ref().unwrap().show_source);
 
         // $quit quits; help / unknown / a bare expression keep prompting.
         assert!(matches!(

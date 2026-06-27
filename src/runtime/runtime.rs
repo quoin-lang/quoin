@@ -209,13 +209,14 @@ pub fn load_unit<'gc>(
     // key instead of double-loading the same file.
     let package = canonical_package(package);
     if vm
+        .modules
         .loaded
         .iter()
         .any(|u| u.package.as_deref() == package && u.path == path)
     {
         return Ok(());
     }
-    let source = match vm.resolver.resolve(package, path) {
+    let source = match vm.modules.resolver.resolve(package, path) {
         Some(s) => s,
         None => {
             let q = package.map(|p| format!("{p}:")).unwrap_or_default();
@@ -224,7 +225,7 @@ pub fn load_unit<'gc>(
             )));
         }
     };
-    vm.loaded.push(LoadedUnit {
+    vm.modules.loaded.push(LoadedUnit {
         package: package.map(|s| s.to_string()),
         path: path.to_string(),
         status: LoadStatus::InProgress,
@@ -233,6 +234,7 @@ pub fn load_unit<'gc>(
     let display = format!("{q}{path}.qn");
     compile_and_execute_source(vm, mc, &source, &display, None, &[])?;
     if let Some(u) = vm
+        .modules
         .loaded
         .iter_mut()
         .find(|u| u.package.as_deref() == package && u.path == path)
@@ -251,7 +253,7 @@ pub fn load_glob<'gc>(
     dir: &str,
 ) -> Result<(), QuoinError> {
     let package = canonical_package(package);
-    let units = match vm.resolver.list(package, dir) {
+    let units = match vm.modules.resolver.list(package, dir) {
         Some(u) => u,
         None => {
             let q = package.map(|p| format!("{p}:")).unwrap_or_default();

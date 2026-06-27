@@ -454,7 +454,7 @@ impl<'gc> VmState<'gc> {
         match self.sched.wake.take() {
             Some(Wake::Joined { value }) => Ok(value),
             Some(Wake::Failed { error }) => {
-                self.active_exception = Some(error);
+                self.exceptions.active = Some(error);
                 Err(QuoinError::Thrown)
             }
             // The joined task was cancelled — a *catchable* observation, not the
@@ -500,7 +500,7 @@ impl<'gc> VmState<'gc> {
         match self.sched.wake.take() {
             Some(Wake::Joined { value }) => Ok(TimedJoin::Completed(value)),
             Some(Wake::Failed { error }) => {
-                self.active_exception = Some(error);
+                self.exceptions.active = Some(error);
                 Err(QuoinError::Thrown)
             }
             Some(Wake::JoinedCancelled) => {
@@ -617,7 +617,7 @@ impl<'gc> VmState<'gc> {
     /// `Thrown` signal, so fiber misuse is catchable by type in Quoin code.
     fn raise_fiber_error(&mut self, mc: &Mutation<'gc>, msg: &str) -> QuoinError {
         let err = self.make_error(mc, "FiberError", msg, None);
-        self.active_exception = Some(err);
+        self.exceptions.active = Some(err);
         QuoinError::Thrown
     }
 
@@ -758,7 +758,7 @@ impl<'gc> VmState<'gc> {
                 Err(e) => {
                     // The error value is the parked Quoin exception, or a converted
                     // internal error. Peek (don't take) so the resumer still sees it.
-                    let err_val = match self.active_exception {
+                    let err_val = match self.exceptions.active {
                         Some(v) => v,
                         None => self.quoinerror_to_value(mc, e),
                     };
@@ -1062,7 +1062,7 @@ impl<'gc> VmState<'gc> {
         let outcome = match result {
             Ok(val) => DetachedOutcome::Done(val),
             Err(QuoinError::Cancelled) => DetachedOutcome::Cancelled,
-            Err(ref e) => DetachedOutcome::Failed(match self.active_exception {
+            Err(ref e) => DetachedOutcome::Failed(match self.exceptions.active {
                 Some(v) => v,
                 None => self.quoinerror_to_value(mc, e),
             }),

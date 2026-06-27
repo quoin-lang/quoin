@@ -987,8 +987,8 @@ fn spawn_and_connect<'gc>(
             ext_id: unique_ext_id(),
             child,
             sock_path,
-            reap: vm.socket_reap.clone(),
-            handle_reap: vm.ext_handle_reap.clone(),
+            reap: vm.io.socket_reap.clone(),
+            handle_reap: vm.io.ext_handle_reap.clone(),
             dead: false,
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,
@@ -1121,7 +1121,7 @@ fn load_package<'gc>(
     let key = dir_path.to_string_lossy().to_string();
 
     // Idempotent: a folder already loaded this session returns its live extension (no re-spawn).
-    if let Some(existing) = vm.loaded_packages.borrow().get(&key).copied() {
+    if let Some(existing) = vm.modules.packages.borrow().get(&key).copied() {
         return Ok(existing);
     }
 
@@ -1171,7 +1171,7 @@ fn load_package<'gc>(
         })?;
     }
 
-    vm.loaded_packages.borrow_mut(mc).insert(key, ext_val);
+    vm.modules.packages.borrow_mut(mc).insert(key, ext_val);
     Ok(ext_val)
 }
 

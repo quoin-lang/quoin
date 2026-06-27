@@ -840,7 +840,12 @@ fn resume_current_task<'gc>(
             // (tests / scripted runs) apply the next scripted action in place. Either way the
             // VM stays stopped — no park — and the coroutine resumes past the suspend point in
             // `debug_checkpoint` and dispatches the instruction.
-            if vm.debug.as_ref().is_some_and(|d| d.interactive) {
+            if vm
+                .instrumentation
+                .debug
+                .as_ref()
+                .is_some_and(|d| d.interactive)
+            {
                 Ok(RunStep::DebugPaused)
             } else {
                 vm.debug_on_pause();
@@ -1013,7 +1018,7 @@ fn dap_io(e: std::io::Error) -> QuoinError {
 
 /// Best-effort `stopped` reason from the paused debug state.
 fn dap_stop_reason(vm: &VmState<'_>) -> &'static str {
-    let Some(d) = vm.debug.as_ref() else {
+    let Some(d) = vm.instrumentation.debug.as_ref() else {
         return "pause";
     };
     if d.at_throw {
@@ -1053,7 +1058,7 @@ fn dap_set_breakpoints(arena: &mut ReplArena, args: &serde_json::Value) -> serde
         })
         .unwrap_or_default();
     arena.mutate_root(|_mc, vm| {
-        if let Some(d) = vm.debug.as_mut() {
+        if let Some(d) = vm.instrumentation.debug.as_mut() {
             let set = d.breakpoints.entry(path.clone()).or_default();
             set.clear();
             set.extend(lines.iter().copied());
@@ -1134,7 +1139,7 @@ impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W
                         .unwrap_or(false);
                     if stop_on_entry {
                         arena.mutate_root(|_mc, vm| {
-                            if let Some(d) = vm.debug.as_mut() {
+                            if let Some(d) = vm.instrumentation.debug.as_mut() {
                                 d.step = Some(crate::debug::StepMode::Into);
                             }
                         });
@@ -1361,7 +1366,7 @@ fn drive_with_frontend<F: DriverFrontend>(
     // for the REPL, which drives each line through its own `drive_with_frontend`: an extension
     // socket spawned on one line, or a file/connection opened on it, must still be reachable on the
     // next. (A single file/`-e` run drives once, so this is equivalent to a fresh backend there.)
-    let backend = arena.mutate_root(|_mc, vm| vm.io_backend.clone());
+    let backend = arena.mutate_root(|_mc, vm| vm.io.backend.clone());
     let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
     let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
     // Announce the seed once per process so a failing run is reproducible with the same
@@ -1511,14 +1516,14 @@ fn drive_with_frontend<F: DriverFrontend>(
                 // Reap fds whose handle was closed or collected — both enqueue on
                 // `socket_reap`; close them now, outside the arena borrow.
                 let reaped: Vec<StreamId> =
-                    arena.mutate_root(|_mc, vm| vm.socket_reap.borrow_mut().drain(..).collect());
+                    arena.mutate_root(|_mc, vm| vm.io.socket_reap.borrow_mut().drain(..).collect());
                 for id in reaped {
                     backend.close(id);
                 }
                 // Bulk-release the host-value handles of any dropped extension (its `Drop`
                 // enqueued its `ext_id`), so they stop rooting host Values.
                 arena.mutate_root(|_mc, vm| {
-                    let ext_ids: Vec<u64> = vm.ext_handle_reap.borrow_mut().drain(..).collect();
+                    let ext_ids: Vec<u64> = vm.io.ext_handle_reap.borrow_mut().drain(..).collect();
                     for ext_id in ext_ids {
                         vm.handle_table.release_for_ext(ext_id);
                     }
@@ -1830,7 +1835,7 @@ impl VmRunner {
             // Stop at entry: an armed `StepInto` halts at the first line start. Source is
             // shown at each pause by default ($source off to silence). `--break-on-throw` types
             // additionally pause at a matching throw; `--break-on-uncaught` only when it escapes.
-            vm.debug = Some(DebugState {
+            vm.instrumentation.debug = Some(DebugState {
                 interactive: true,
                 show_source: true,
                 step: Some(StepMode::Into),
@@ -1903,7 +1908,7 @@ impl VmRunner {
             let block = build_block(mc, &sb);
             // Run to a breakpoint (`stopOnEntry` is honored at `launch`). Program output is
             // captured and re-emitted as DAP `output` events rather than written to fd 1/2.
-            vm.debug = Some(DebugState {
+            vm.instrumentation.debug = Some(DebugState {
                 // `interactive` = "bubble a pause up to the driver frontend" (here, the DAP
                 // adapter's `on_pause`) rather than auto-applying the scripted action in place.
                 interactive: true,
@@ -1913,7 +1918,7 @@ impl VmRunner {
                 break_on_uncaught: self.options.break_on_uncaught.iter().cloned().collect(),
                 ..Default::default()
             });
-            vm.capture_output = true;
+            vm.output.capture = true;
             vm.start_block(mc, block, Vec::new(), None, None);
             install_main_task(mc, vm);
             true
@@ -2023,7 +2028,7 @@ impl VmRunner {
             // Attach the coverage collector before any user code runs, so every
             // line-start crossing from here on is recorded.
             if self.options.coverage.is_some() {
-                vm.coverage = Some(crate::coverage::CoverageState::new());
+                vm.instrumentation.coverage = Some(crate::coverage::CoverageState::new());
             }
             vm
         });
@@ -2503,7 +2508,7 @@ mod tests {
             for (f, l) in breakpoints {
                 bps.entry((*f).to_string()).or_default().insert(*l);
             }
-            vm.debug = Some(DebugState {
+            vm.instrumentation.debug = Some(DebugState {
                 breakpoints: bps,
                 break_on_throw: break_on_throw.iter().map(|s| s.to_string()).collect(),
                 break_on_uncaught: break_on_uncaught.iter().map(|s| s.to_string()).collect(),
@@ -2520,7 +2525,8 @@ mod tests {
             drive.expect("fixture runs to completion");
         }
         arena.mutate_root(|_mc, vm| {
-            vm.debug
+            vm.instrumentation
+                .debug
                 .as_ref()
                 .map(|d| d.pause_log.clone())
                 .unwrap_or_default()
@@ -2583,12 +2589,12 @@ mod tests {
             for (f, l) in breakpoints {
                 bps.entry((*f).to_string()).or_default().insert(*l);
             }
-            vm.debug = Some(DebugState {
+            vm.instrumentation.debug = Some(DebugState {
                 breakpoints: bps,
                 interactive: true, // bubble pauses to the DAP frontend
                 ..Default::default()
             });
-            vm.capture_output = true;
+            vm.output.capture = true;
             vm.start_block(mc, block, Vec::new(), None, None);
             install_main_task(mc, vm);
         });

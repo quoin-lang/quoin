@@ -319,7 +319,7 @@ impl<'gc> Host<'gc> for HostCtx<'_, 'gc> {
     }
 
     fn set_active_exception(&mut self, exc: Value<'gc>) {
-        self.vm.active_exception = Some(exc);
+        self.vm.exceptions.active = Some(exc);
     }
 }
 

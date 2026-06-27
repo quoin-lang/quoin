@@ -138,7 +138,7 @@ fn unwind(vm: &mut VmState<'_>, initial: usize) {
 /// `active_exception`; a structured (Rust-raised) error is materialized to its typed `Error`
 /// object. Does NOT clear `active_exception`, so a non-matching typed catch can re-raise it intact.
 fn exception_value<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, e: &QuoinError) -> Value<'gc> {
-    match vm.active_exception {
+    match vm.exceptions.active {
         Some(v) => v,
         None => vm.quoinerror_to_value(mc, e),
     }
@@ -180,10 +180,10 @@ fn run_first_matching<'gc>(
             Some(t) => vm.value_matches_type(exc, t),
         };
         if catches {
-            vm.active_exception = None;
+            vm.exceptions.active = None;
             // The propagation is resolved here, so the next throw is a fresh one (re-arms
             // break-on-uncaught — see `reraised`).
-            vm.reraised = false;
+            vm.exceptions.reraised = false;
             return Some(vm.execute_block(mc, block, vec![exc], None));
         }
     }
@@ -212,8 +212,10 @@ fn do_catch<'gc>(
     handlers: &[Value<'gc>],
 ) -> Result<Value<'gc>, QuoinError> {
     let initial = vm.frames.len();
-    vm.reraised = false;
-    vm.handler_stack.push(handler_type_names(handlers));
+    vm.exceptions.reraised = false;
+    vm.exceptions
+        .handler_stack
+        .push(handler_type_names(handlers));
     let res = vm.execute_block(mc, protected, Vec::new(), None);
     // Break-on-throw / -uncaught: pause while this catch is still on `handler_stack` (so the
     // uncaught search sees it) and the throw-site frames are still live, before unwinding.
@@ -222,7 +224,7 @@ fn do_catch<'gc>(
     {
         vm.debug_check_throw(mc, e);
     }
-    vm.handler_stack.pop();
+    vm.exceptions.handler_stack.pop();
     match res {
         Ok(val) => Ok(val),
         Err(QuoinError::Cancelled) => {
@@ -235,7 +237,7 @@ fn do_catch<'gc>(
             let res = match run_first_matching(vm, mc, exc, handlers) {
                 Some(r) => r,
                 None => {
-                    vm.reraised = true; // re-raise: outer catch / top must not re-break
+                    vm.exceptions.reraised = true; // re-raise: outer catch / top must not re-break
                     Err(e)
                 }
             };
@@ -256,15 +258,17 @@ fn do_catch_finally<'gc>(
     finally: Gc<'gc, Block<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
     let initial = vm.frames.len();
-    vm.reraised = false;
-    vm.handler_stack.push(handler_type_names(handlers));
+    vm.exceptions.reraised = false;
+    vm.exceptions
+        .handler_stack
+        .push(handler_type_names(handlers));
     let res = vm.execute_block(mc, protected, Vec::new(), None);
     if vm.has_break_on_throw()
         && let Err(e) = &res
     {
         vm.debug_check_throw(mc, e);
     }
-    vm.handler_stack.pop();
+    vm.exceptions.handler_stack.pop();
     match res {
         Ok(val) => {
             vm.push(val);
@@ -285,7 +289,7 @@ fn do_catch_finally<'gc>(
             let catch_res = match run_first_matching(vm, mc, exc, handlers) {
                 Some(r) => r,
                 None => {
-                    vm.reraised = true;
+                    vm.exceptions.reraised = true;
                     Err(e)
                 }
             };

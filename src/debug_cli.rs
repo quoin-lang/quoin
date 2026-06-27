@@ -75,14 +75,23 @@ impl Drop for DebugFrontend {
 pub(crate) fn announce_pause(vm: &mut VmState<'_>) {
     vm.debug_enter_pause();
     // If a break-on-throw fired, say what was thrown.
-    if let Some(banner) = vm.debug.as_mut().and_then(|d| d.pause_throw.take()) {
+    if let Some(banner) = vm
+        .instrumentation
+        .debug
+        .as_mut()
+        .and_then(|d| d.pause_throw.take())
+    {
         println!("{banner}");
     }
     match vm.debug_focus().and_then(|f| vm.debug_frame_location(f)) {
         Some((file, line, label)) => println!("→ paused at {file}:{line}  (in {label})"),
         None => println!("→ paused (no source location)"),
     }
-    if vm.debug.as_ref().is_some_and(|d| d.show_source)
+    if vm
+        .instrumentation
+        .debug
+        .as_ref()
+        .is_some_and(|d| d.show_source)
         && let Some(win) = vm.debug_focus().and_then(|f| vm.debug_source_window(f, 2))
     {
         print!("{win}");
@@ -95,7 +104,11 @@ fn print_focus(vm: &VmState<'_>) {
     if let Some((file, line, label)) = vm.debug_frame_location(f) {
         println!("#{f}  {file}:{line}  (in {label})");
     }
-    if vm.debug.as_ref().is_some_and(|d| d.show_source)
+    if vm
+        .instrumentation
+        .debug
+        .as_ref()
+        .is_some_and(|d| d.show_source)
         && let Some(win) = vm.debug_source_window(f, 2)
     {
         print!("{win}");
@@ -189,7 +202,7 @@ pub(crate) fn exec_command<'gc>(
             match arg {
                 Some("on") | Some("off") => {
                     let on = arg == Some("on");
-                    if let Some(d) = vm.debug.as_mut() {
+                    if let Some(d) = vm.instrumentation.debug.as_mut() {
                         d.show_source = on;
                     }
                     println!("source display {}", if on { "on" } else { "off" });
@@ -284,7 +297,7 @@ fn set_breakpoint(vm: &mut VmState<'_>, spec: Option<&str>, add: bool) {
         println!("no current file — give $break FILE:LINE");
         return;
     }
-    if let Some(d) = vm.debug.as_mut() {
+    if let Some(d) = vm.instrumentation.debug.as_mut() {
         if add {
             d.breakpoints.entry(file.clone()).or_default().insert(line);
             println!("breakpoint set at {file}:{line}");
