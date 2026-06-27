@@ -5,7 +5,7 @@ use crate::gc;
 use crate::gcl;
 use crate::highlighter::highlight_to_ansi;
 use crate::introspect::{self, ClassInfo, GlobalInfo, GlobalKind, ValueInfo};
-use crate::io_backend::{IoBackend, IoRequest, IoResult, SmolBackend, StreamId};
+use crate::io_backend::{IoBackend, IoRequest, IoResult, StreamId};
 use crate::parser::ast::Node;
 use crate::parser::{NodeValue, parse_quoin_file, try_parse_quoin_string_named};
 use crate::repl_complete::{CompletionIndex, build_completion_index, complete_input};
@@ -1356,7 +1356,12 @@ fn drive_with_frontend<F: DriverFrontend>(
     arena: &mut ReplArena,
     frontend: &mut F,
 ) -> Result<(), QuoinError> {
-    let backend = SmolBackend::new();
+    // The session's persistent I/O backend (an `Rc` to the shared `StreamId -> fd` registry), not a
+    // fresh one — so a long-lived resource opened on a previous driver run survives. This matters
+    // for the REPL, which drives each line through its own `drive_with_frontend`: an extension
+    // socket spawned on one line, or a file/connection opened on it, must still be reachable on the
+    // next. (A single file/`-e` run drives once, so this is equivalent to a fresh backend there.)
+    let backend = arena.mutate_root(|_mc, vm| vm.io_backend.clone());
     let mut futures: FuturesUnordered<IoTaskFuture> = FuturesUnordered::new();
     let mut rng = crate::tuning::sched_stress().map(SplitMix64::new);
     // Announce the seed once per process so a failing run is reproducible with the same

@@ -79,6 +79,64 @@ fn assert_script_passes(name: &str, script: &str) {
     panic!("extension script did not pass after {ATTEMPTS} attempts.\n{last_diag}");
 }
 
+/// Drive `qn repl` with `lines` piped to stdin (one REPL input each), returning stdout+stderr.
+/// Each REPL line runs in its own driver pass, so this exercises whether a long-lived resource
+/// survives across evaluations.
+fn run_repl_lines(lines: &[String]) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg("repl")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn qn repl");
+    {
+        let mut stdin = child.stdin.take().expect("repl stdin");
+        for line in lines {
+            writeln!(stdin, "{line}").expect("write repl line");
+        }
+        // Dropping stdin closes it -> EOF, so the piped REPL finishes and exits.
+    }
+    let out = child.wait_with_output().expect("wait qn repl");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[test]
+fn extension_survives_across_repl_lines() {
+    // Regression: spawning an extension on one REPL line and calling it on the next used to fail
+    // ("unknown stream id" / "Extension process died") because the REPL recreated its I/O backend
+    // per line, closing the extension's socket. The backend now persists for the session.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_echo");
+    const ATTEMPTS: u32 = 4;
+    let mut last = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let out = run_repl_lines(&[
+            format!("e = Extension.spawn:'{ext_bin}'"),
+            "(e.call:'echo' with:'hi') == 'hi'".to_string(),
+        ]);
+        // The call on the *second* line must reach the extension spawned on the first.
+        if out.contains("=> true") {
+            assert!(
+                !out.contains("unknown stream") && !out.contains("process died"),
+                "extension errored across REPL lines.\n{out}"
+            );
+            return;
+        }
+        last = out;
+        if attempt < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+        }
+    }
+    panic!("extension call across REPL lines did not succeed after {ATTEMPTS} attempts.\n{last}");
+}
+
 #[test]
 fn extension_transport_round_trip() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_echo");
