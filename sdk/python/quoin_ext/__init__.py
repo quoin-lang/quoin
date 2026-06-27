@@ -381,6 +381,16 @@ def _encode_call_return(result):
     return _envelope(b, g.Message.CallReturn, g.CallReturnEnd(b))
 
 
+def _encode_call_return_error(message):
+    """A call failed recoverably: the host raises a catchable Quoin error and the extension keeps
+    running. A terminal frame, like the other ``CallReturn*`` replies."""
+    b = flatbuffers.Builder(64)
+    m = b.CreateString(message)
+    g.CallReturnErrorStart(b)
+    g.CallReturnErrorAddMessage(b, m)
+    return _envelope(b, g.Message.CallReturnError, g.CallReturnErrorEnd(b))
+
+
 def _encode_call_return_resource(resource_id, class_name=""):
     b = flatbuffers.Builder(64)
     # `class_name` (Phase 3) names the registered class the resource is an instance of, so a method
@@ -671,7 +681,12 @@ def serve(path, handler):
                     continue
                 op, arg, handles, resources, releases, arrays, data = _decode_call(frame)
                 host = Host(conn, handles, resources, releases, arrays, data)
-                write_frame(conn, _encode_reply(handler(host, op, arg)))
+                # A handler exception becomes a catchable Quoin error; the extension keeps serving.
+                try:
+                    reply = _encode_reply(handler(host, op, arg))
+                except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
+                    reply = _encode_call_return_error(str(exc))
+                write_frame(conn, reply)
         finally:
             conn.close()
     finally:
@@ -821,7 +836,13 @@ class Extension:
             ctor = reg.constructors.get(op)
             if ctor is None:
                 raise ValueError(f"no constructor '{op}' on class '{class_name}'")
-            obj = ctor(*args)
+            # A handler exception is a *recoverable* error: send it as a `CallReturnError` so the
+            # host raises a catchable Quoin error and this extension keeps serving (unlike the
+            # routing failures above, which are protocol bugs and propagate).
+            try:
+                obj = ctor(*args)
+            except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
+                return _encode_call_return_error(str(exc))
             return _encode_call_return_resource(table.insert(obj), self._class_name_of(obj))
         method = reg.methods.get(op)
         if method is None:
@@ -829,7 +850,10 @@ class Extension:
         instance = table.get(recv)
         if instance is None:
             raise ValueError(f"no live instance {recv}")
-        result = method(instance, *args)
+        try:
+            result = method(instance, *args)
+        except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
+            return _encode_call_return_error(str(exc))
         # A returned registered instance becomes a new ext-side object; anything else is data.
         if isinstance(result, registered_types):
             return _encode_call_return_resource(table.insert(result), self._class_name_of(result))

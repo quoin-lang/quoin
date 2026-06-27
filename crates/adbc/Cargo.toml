@@ -1,0 +1,23 @@
+# Standalone workspace: `adbc` is out-of-core (only links `quoin-ext`, never the VM) and pulls in
+# heavy deps (arrow/adbc), so it is deliberately NOT a member of the main VM workspace — it builds
+# on its own (`cargo build --manifest-path crates/adbc/Cargo.toml`) and never slows `cargo build`.
+[workspace]
+
+[package]
+name = "adbc"
+version = "0.1.0"
+edition = "2024"
+description = "Quoin's ADBC database extension (out-of-process, out-of-core; SQLite + PostgreSQL)."
+
+[[bin]]
+name = "adbc"
+path = "src/main.rs"
+
+[dependencies]
+adbc_core = "0.23.0"
+adbc_driver_manager = "0.23.0"
+# `chrono-tz` lets arrow render timezone-aware timestamps (e.g. PostgreSQL `timestamptz`) to ISO-8601.
+arrow-array = { version = "58", features = ["chrono-tz"] }
+arrow-cast = "58"
+arrow-schema = "58"
+quoin-ext = { path = "../quoin-ext" }

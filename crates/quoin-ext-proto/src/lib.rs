@@ -98,6 +98,9 @@ pub enum Msg {
     },
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
+    /// ext -> host: the call failed with a recoverable error (`message`) — the host raises a
+    /// catchable Quoin error and the extension stays alive.
+    CallReturnError { message: String },
     /// ext -> host: the call returns an ext-side resource the host will hold as an opaque token
     /// (reaped on drop). `resource` is the extension-assigned id; `class_name` names the registered
     /// extension-backed class it's an instance of (Phase 3; empty = the opaque `ExtResource`).
@@ -183,6 +186,11 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             recv: *recv,
             method_args: Some(method_args.iter().map(encode_arg).collect()),
         })),
+        Msg::CallReturnError { message } => {
+            g::Message::CallReturnError(Box::new(g::CallReturnError {
+                message: Some(message.clone()),
+            }))
+        }
         Msg::CallReturn { result } => g::Message::CallReturn(Box::new(g::CallReturn {
             result: Some(result.clone()),
         })),
@@ -474,6 +482,9 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         },
         g::MessageRef::CallReturn(c) => Msg::CallReturn {
             result: c.result()?.unwrap_or_default().to_string(),
+        },
+        g::MessageRef::CallReturnError(c) => Msg::CallReturnError {
+            message: c.message()?.unwrap_or_default().to_string(),
         },
         g::MessageRef::CallReturnResource(c) => Msg::CallReturnResource {
             resource: c.resource()?,
