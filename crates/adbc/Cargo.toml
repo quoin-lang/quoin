@@ -16,6 +16,8 @@ path = "src/main.rs"
 [dependencies]
 adbc_core = "0.23.0"
 adbc_driver_manager = "0.23.0"
-arrow-array = "58"
+# `chrono-tz` lets arrow render timezone-aware timestamps (e.g. PostgreSQL `timestamptz`) to ISO-8601.
+arrow-array = { version = "58", features = ["chrono-tz"] }
+arrow-cast = "58"
 arrow-schema = "58"
 quoin-ext = { path = "../quoin-ext" }
