@@ -410,6 +410,15 @@ def _encode_call_return_handle(handle):
     return _envelope(b, g.Message.CallReturnHandle, g.CallReturnHandleEnd(b))
 
 
+def _encode_manifest_return():
+    """The reply to the host's spawn-time ``GetManifest`` (Phase 3). A generic-handler extension
+    provides no classes, so this sends an empty manifest — an absent ``classes`` vector, which the
+    host reads as "no provided classes", keeping the generic ``serve`` backward-compatible."""
+    b = flatbuffers.Builder(32)
+    g.ManifestReturnStart(b)
+    return _envelope(b, g.Message.ManifestReturn, g.ManifestReturnEnd(b))
+
+
 def _encode_reply(reply):
     if isinstance(reply, Resource):
         return _encode_call_return_resource(reply.id)
@@ -593,6 +602,11 @@ def serve(path, handler):
                 frame = read_frame(conn)
                 if frame is None:
                     break
+                # Phase 3: the host asks for a class manifest once, right after connect. A
+                # generic-handler extension provides none; everything else is a Call.
+                if g.Envelope.GetRootAs(frame, 0).MsgType() == g.Message.GetManifest:
+                    write_frame(conn, _encode_manifest_return())
+                    continue
                 op, arg, handles, resources, releases, arrays, data = _decode_call(frame)
                 host = Host(conn, handles, resources, releases, arrays, data)
                 write_frame(conn, _encode_reply(handler(host, op, arg)))

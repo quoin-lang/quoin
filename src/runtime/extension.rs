@@ -54,8 +54,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gc_arena::collect::Trace;
+use gc_arena::{Gc, lock::RefLock};
 
-use quoin_ext_proto::{ArrowArray, ArrowDType, DataValue as WireData, Msg};
+use quoin_ext_proto::{ArrowArray, ArrowDType, ClassDecl, DataValue as WireData, Msg};
 
 use crate::arg;
 use crate::error::QuoinError;
@@ -64,7 +65,8 @@ use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
 use crate::runtime::data_value::{DataValue as RtData, data_to_value, value_to_data};
 use crate::runtime::list::NativeListState;
-use crate::value::{AnyCollect, NamespacedName, NativeClassBuilder, ObjectPayload, Value};
+use crate::symbol::Symbol;
+use crate::value::{AnyCollect, Class, NamespacedName, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
 
 /// Resolve a bare name in the host's global table to its `Value` (a class is a class-valued
@@ -526,15 +528,11 @@ fn extension_call<'gc>(
     op: String,
     argv: String,
     args: Vec<Value<'gc>>,
-    data_arg: Option<Value<'gc>>,
+    data: Option<WireData>,
+    class_name: String,
+    recv: u64,
     releases: Vec<u64>,
 ) -> Result<CallOutcome<'gc>, QuoinError> {
-    // Serialize the optional structured-value payload before opening the call (no handles involved).
-    let data = match data_arg {
-        Some(value) => Some(runtime_to_wire(&value_to_data(value)?)),
-        None => None,
-    };
-
     let epoch = vm.handle_table.begin_call();
 
     // Route each arg by token space: an `ExtResource` passes its (ext-side) resource id; an
@@ -572,6 +570,8 @@ fn extension_call<'gc>(
                 releases,
                 arrays,
                 data,
+                class_name,
+                recv,
             },
         )?;
         loop {
@@ -608,47 +608,42 @@ enum CallOutcome<'gc> {
     Value(Value<'gc>),
 }
 
-/// Wrap an ext-assigned resource id in an `ExtResource` value, tied to `reap` so its `Drop`
-/// enqueues the id for release on this extension's next call.
-fn make_ext_resource<'gc>(
+/// Wrap an ext-assigned resource id in a host value tied to `reap` so its `Drop` enqueues the id
+/// for release on this extension's next call. `instance_class` is `Some(class)` for an
+/// extension-backed-class method (Phase 3) — the resource is an instance of that class — and
+/// `None` for the generic `call:with:` path, which wraps it as the opaque `ExtResource` token.
+fn wrap_resource<'gc>(
     vm: &VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     resource_id: u64,
     reap: Rc<RefCell<Vec<u64>>>,
+    instance_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
 ) -> Value<'gc> {
-    let class = vm.get_or_create_builtin_class(mc, "ExtResource");
+    let class = instance_class.unwrap_or_else(|| vm.get_or_create_builtin_class(mc, "ExtResource"));
     vm.new_native_state(mc, class, NativeExtResource { resource_id, reap })
 }
 
-/// The shared body of the `call:` selectors: fail fast if the extension is already known dead,
-/// flush dropped-resource releases, run the call, wrap the result (scalar or resource), and — if
-/// the I/O failed because the child exited — surface a typed "died" error and mark it dead.
-fn run_extension_method<'gc>(
+/// Materialize a finished call's outcome into a Quoin Value, and handle the error/death cases —
+/// shared by the generic `call:with:` path and extension-backed-class dispatch (Phase 3). A
+/// returned resource wraps as `instance_class` (an instance of the dispatching class) when set.
+fn finish_outcome<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
-    receiver: Value<'gc>,
-    op: String,
-    argv: String,
-    args: Vec<Value<'gc>>,
-    data_arg: Option<Value<'gc>>,
+    ext_receiver: Value<'gc>,
+    ext_id: u64,
+    resource_reap: Rc<RefCell<Vec<u64>>>,
+    instance_class: Option<Gc<'gc, RefLock<Class<'gc>>>>,
+    outcome: Result<CallOutcome<'gc>, QuoinError>,
 ) -> Result<Value<'gc>, QuoinError> {
-    // One peek at the native state: stream id, owning ext-id, liveness, the reap queue (for
-    // releases + to clone into any returned resource), draining the pending releases to flush.
-    let (id, ext_id, dead, resource_reap, releases) = receiver
-        .with_native_state::<NativeExtension, _, _>(|e| {
-            let releases: Vec<u64> = e.resource_reap.borrow_mut().drain(..).collect();
-            (e.id, e.ext_id, e.dead, e.resource_reap.clone(), releases)
-        })
-        .map_err(QuoinError::Other)?;
-    if dead {
-        return Err(extension_dead_error("already exited"));
-    }
-
-    match extension_call(vm, mc, id, ext_id, op, argv, args, data_arg, releases) {
+    match outcome {
         Ok(CallOutcome::Scalar(result)) => Ok(vm.new_string(mc, result)),
-        Ok(CallOutcome::Resource(resource_id)) => {
-            Ok(make_ext_resource(vm, mc, resource_id, resource_reap))
-        }
+        Ok(CallOutcome::Resource(resource_id)) => Ok(wrap_resource(
+            vm,
+            mc,
+            resource_id,
+            resource_reap,
+            instance_class,
+        )),
         Ok(CallOutcome::Array(array)) => Ok(array::new_array(
             vm,
             mc,
@@ -671,13 +666,13 @@ fn run_extension_method<'gc>(
         // combinator still turns it into a catchable `TimeoutError`. The peer is now unusable; the
         // program spawns a fresh `Extension` to retry.
         Err(QuoinError::Cancelled) => {
-            let _ =
-                receiver.with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.dead = true);
+            let _ = ext_receiver
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.dead = true);
             vm.handle_table.release_for_ext(ext_id);
             Err(QuoinError::Cancelled)
         }
         Err(e) => {
-            let exit = receiver
+            let exit = ext_receiver
                 .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.note_if_exited())
                 .ok()
                 .flatten();
@@ -691,6 +686,168 @@ fn run_extension_method<'gc>(
                 None => Err(e),
             }
         }
+    }
+}
+
+/// The per-call context peeked from an `Extension`'s native state.
+struct ExtCall {
+    id: StreamId,
+    ext_id: u64,
+    dead: bool,
+    /// Shared reap queue — to flush dropped-resource releases and to clone into a returned resource.
+    resource_reap: Rc<RefCell<Vec<u64>>>,
+    /// The dropped-resource ids drained from the reap queue, flushed to the extension as this
+    /// call's `releases`.
+    releases: Vec<u64>,
+}
+
+/// Peek at the extension's native state and drain its pending dropped-resource releases (one peek
+/// per call), shared by the generic `call:with:` path and extension-backed-class dispatch.
+fn ext_prelude<'gc>(receiver: Value<'gc>) -> Result<ExtCall, QuoinError> {
+    receiver
+        .with_native_state::<NativeExtension, _, _>(|e| ExtCall {
+            id: e.id,
+            ext_id: e.ext_id,
+            dead: e.dead,
+            resource_reap: e.resource_reap.clone(),
+            releases: e.resource_reap.borrow_mut().drain(..).collect(),
+        })
+        .map_err(QuoinError::Other)
+}
+
+/// The shared body of the `call:` selectors: fail fast if the extension is already known dead,
+/// flush dropped-resource releases, run the call, and materialize the result (or surface a typed
+/// "died"/cancelled error). The generic path passes no `class_name`/`recv` and wraps a returned
+/// resource as the opaque `ExtResource` token.
+fn run_extension_method<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    op: String,
+    argv: String,
+    args: Vec<Value<'gc>>,
+    data_arg: Option<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    let ctx = ext_prelude(receiver)?;
+    if ctx.dead {
+        return Err(extension_dead_error("already exited"));
+    }
+    // Serialize the optional structured-value payload before opening the call (no handles involved).
+    let data = match data_arg {
+        Some(value) => Some(runtime_to_wire(&value_to_data(value)?)),
+        None => None,
+    };
+    let outcome = extension_call(
+        vm,
+        mc,
+        ctx.id,
+        ctx.ext_id,
+        op,
+        argv,
+        args,
+        data,
+        String::new(),
+        0,
+        ctx.releases,
+    );
+    finish_outcome(
+        vm,
+        mc,
+        receiver,
+        ctx.ext_id,
+        ctx.resource_reap,
+        None,
+        outcome,
+    )
+}
+
+/// Dispatch a method send on an extension-backed class (Phase 3) over the socket. `ext` is the
+/// owning `Extension` value; `receiver` is the class itself (class-side — a constructor) or an
+/// instance (instance-side). The selector is forwarded as the `Call.op`, the class name routes it
+/// on the extension side, and `recv` is the receiver instance's resource id (0 for class-side).
+/// The method arguments travel as a structured `DvList` (Phase 1), so for MVP they must be
+/// data-representable; a returned resource wraps as an instance of the receiver's class.
+pub fn dispatch_ext_method<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    ext: Value<'gc>,
+    receiver: Value<'gc>,
+    selector: Symbol,
+    args: Vec<Value<'gc>>,
+) -> Result<Value<'gc>, QuoinError> {
+    // The receiver determines the class, the dispatch side, and (for an instance) the resource id.
+    let (class_obj, recv) = match receiver {
+        Value::Class(c) => (c, 0u64),
+        Value::Object(o) => {
+            let class = o.borrow().class;
+            let resource_id = receiver
+                .with_native_state::<NativeExtResource, _, _>(|r| r.resource_id)
+                .map_err(|_| {
+                    QuoinError::Other(format!(
+                        "'{}' is not an extension-backed instance",
+                        selector.as_str()
+                    ))
+                })?;
+            (class, resource_id)
+        }
+        _ => {
+            return Err(QuoinError::Other(format!(
+                "extension method '{}' has an unexpected receiver",
+                selector.as_str()
+            )));
+        }
+    };
+    let class_name = class_obj.borrow().name.to_string();
+
+    // The method arguments cross as a structured `DvList` (Phase 1). MVP limitation: each argument
+    // must be data-representable (passing another ext-object or a block is a later slice).
+    let arg_data: Vec<WireData> = args
+        .iter()
+        .map(|v| Ok(runtime_to_wire(&value_to_data(*v)?)))
+        .collect::<Result<_, QuoinError>>()?;
+    let data = Some(WireData::List(arg_data));
+
+    let ctx = ext_prelude(ext)?;
+    if ctx.dead {
+        return Err(extension_dead_error("already exited"));
+    }
+    let outcome = extension_call(
+        vm,
+        mc,
+        ctx.id,
+        ctx.ext_id,
+        selector.as_str().to_string(),
+        String::new(),
+        Vec::new(),
+        data,
+        class_name,
+        recv,
+        ctx.releases,
+    );
+    finish_outcome(
+        vm,
+        mc,
+        ext,
+        ctx.ext_id,
+        ctx.resource_reap,
+        Some(class_obj),
+        outcome,
+    )
+}
+
+/// Fetch an extension's class manifest right after connect (Phase 3): send `GetManifest` and read
+/// the single `ManifestReturn`. An extension that provides no classes returns an empty list, so the
+/// generic `call:with:` extensions stay backward-compatible.
+fn fetch_manifest<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<ClassDecl>, QuoinError> {
+    write_msg(vm, id, &Msg::GetManifest)?;
+    let frame = read_reply_frame(vm, id)?;
+    match quoin_ext_proto::decode_envelope(&frame)
+        .map_err(|e| QuoinError::Other(format!("Extension manifest: malformed frame: {e}")))?
+    {
+        Msg::ManifestReturn { classes } => Ok(classes),
+        other => Err(QuoinError::Other(format!(
+            "Extension manifest: expected ManifestReturn, got {other:?}"
+        ))),
     }
 }
 
@@ -746,8 +903,13 @@ pub fn build_extension_class() -> NativeClassBuilder {
                 }
             };
 
+            // Fetch the extension's class manifest (Phase 3) *before* creating the `Extension`
+            // value: the fetch parks the fiber (a GC point), so no GC value may be held across it.
+            // A legacy extension that provides no classes returns an empty manifest.
+            let manifest = fetch_manifest(vm, id)?;
+
             let class = vm.get_or_create_builtin_class(mc, "Extension");
-            Ok(vm.new_native_state(
+            let ext_val = vm.new_native_state(
                 mc,
                 class,
                 NativeExtension {
@@ -760,7 +922,20 @@ pub fn build_extension_class() -> NativeClassBuilder {
                     dead: false,
                     resource_reap: Rc::new(RefCell::new(Vec::new())),
                 },
-            ))
+            );
+
+            // Install each provided class as a host global whose selectors dispatch back to this
+            // extension. No `await_io` here, so `ext_val` is never held across a collection point.
+            for decl in &manifest {
+                vm.install_ext_class(
+                    mc,
+                    ext_val,
+                    &decl.name,
+                    &decl.instance_selectors,
+                    &decl.class_selectors,
+                );
+            }
+            Ok(ext_val)
         })
         // `ext call: '<op>' with: '<arg>'` -> send the `Call`, then service the conversation:
         // a loop of re-entrant host-ops the extension may issue (each answered inline) until it

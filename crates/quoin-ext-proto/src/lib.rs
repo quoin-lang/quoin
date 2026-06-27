@@ -50,6 +50,16 @@ pub enum DataValue {
     Map(Vec<(String, DataValue)>),
 }
 
+/// One extension-provided class (Phase 3), as declared in a [`Msg::ManifestReturn`]. The host
+/// installs a real Quoin class named `name`; each selector becomes a method that dispatches over
+/// the socket — `instance_selectors` on instances, `class_selectors` on the class itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassDecl {
+    pub name: String,
+    pub instance_selectors: Vec<String>,
+    pub class_selectors: Vec<String>,
+}
+
 /// A single control-plane frame, in either direction. Mirrors the `Message` union in
 /// `ext.fbs`. Encode with [`encode`]; decode a received frame with [`decode_envelope`].
 /// (No `Eq` — `DataValue`/`ArrowArray` carry `f64`.)
@@ -68,6 +78,11 @@ pub enum Msg {
         releases: Vec<u64>,
         arrays: Vec<ArrowArray>,
         data: Option<DataValue>,
+        /// Extension-backed classes (Phase 3): names the class a method send dispatches to (empty
+        /// for the legacy generic path); `recv` is the instance's ext-side resource id (0 =
+        /// class-side). The method args travel as a `DataValue::List` in `data`.
+        class_name: String,
+        recv: u64,
     },
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
@@ -80,6 +95,10 @@ pub enum Msg {
     CallReturnData { value: DataValue },
     /// ext -> host: the call returns a live host value (the host resolves the handle to its value).
     CallReturnHandle { handle: u64 },
+    /// host -> ext: sent once right after connect — asks the extension which classes it provides.
+    GetManifest,
+    /// ext -> host: the reply to `GetManifest`; the extension's provided classes (empty if none).
+    ManifestReturn { classes: Vec<ClassDecl> },
     /// ext -> host (re-entrant): make a host String, return a handle to it.
     MakeString { value: String },
     /// ext -> host (re-entrant): read a String-handle back into a scalar string.
@@ -136,6 +155,8 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             releases,
             arrays,
             data,
+            class_name,
+            recv,
         } => g::Message::Call(Box::new(g::Call {
             op: Some(op.clone()),
             arg: Some(arg.clone()),
@@ -144,6 +165,8 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             releases: Some(releases.clone()),
             arrays: Some(arrays.iter().map(encode_arrow).collect()),
             data: data.as_ref().map(|dv| Box::new(encode_dv(dv))),
+            class_name: Some(class_name.clone()),
+            recv: *recv,
         })),
         Msg::CallReturn { result } => g::Message::CallReturn(Box::new(g::CallReturn {
             result: Some(result.clone()),
@@ -163,6 +186,12 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
         })),
         Msg::CallReturnHandle { handle } => {
             g::Message::CallReturnHandle(Box::new(g::CallReturnHandle { handle: *handle }))
+        }
+        Msg::GetManifest => g::Message::GetManifest(Box::new(g::GetManifest {})),
+        Msg::ManifestReturn { classes } => {
+            g::Message::ManifestReturn(Box::new(g::ManifestReturn {
+                classes: Some(classes.iter().map(encode_class_decl).collect()),
+            }))
         }
         Msg::MakeString { value } => g::Message::MakeString(Box::new(g::MakeString {
             value: Some(value.clone()),
@@ -240,6 +269,28 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<Msg, String> {
 /// Collect a planus `[uint64]` accessor result into an owned `Vec` (absent vector -> empty).
 fn read_u64_vec(v: Option<planus::Vector<'_, u64>>) -> Vec<u64> {
     v.map(|vec| vec.iter().collect()).unwrap_or_default()
+}
+
+/// Owned [`ClassDecl`] -> the generated builder struct.
+fn encode_class_decl(c: &ClassDecl) -> g::ClassDecl {
+    g::ClassDecl {
+        name: Some(c.name.clone()),
+        instance_selectors: Some(c.instance_selectors.clone()),
+        class_selectors: Some(c.class_selectors.clone()),
+    }
+}
+
+/// A decoded `ClassDeclRef` -> owned [`ClassDecl`].
+fn decode_class_decl(c: g::ClassDeclRef<'_>) -> Result<ClassDecl, planus::Error> {
+    let read_strs = |v: Option<planus::Vector<'_, Result<&str, planus::Error>>>| {
+        v.map(|vec| vec.iter().map(|s| s.map(str::to_string)).collect())
+            .unwrap_or_else(|| Ok(Vec::new()))
+    };
+    Ok(ClassDecl {
+        name: c.name()?.unwrap_or_default().to_string(),
+        instance_selectors: read_strs(c.instance_selectors()?)?,
+        class_selectors: read_strs(c.class_selectors()?)?,
+    })
 }
 
 /// Owned [`ArrowArray`] -> the generated builder struct.
@@ -359,6 +410,8 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
                 Some(b) => Some(decode_dv(b)?),
                 None => None,
             },
+            class_name: c.class_name()?.unwrap_or_default().to_string(),
+            recv: c.recv()?,
         },
         g::MessageRef::CallReturn(c) => Msg::CallReturn {
             result: c.result()?.unwrap_or_default().to_string(),
@@ -384,6 +437,18 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         },
         g::MessageRef::CallReturnHandle(c) => Msg::CallReturnHandle {
             handle: c.handle()?,
+        },
+        g::MessageRef::GetManifest(_) => Msg::GetManifest,
+        g::MessageRef::ManifestReturn(m) => Msg::ManifestReturn {
+            classes: {
+                let mut classes = Vec::new();
+                if let Some(v) = m.classes()? {
+                    for c in v {
+                        classes.push(decode_class_decl(c?)?);
+                    }
+                }
+                classes
+            },
         },
         g::MessageRef::MakeString(m) => Msg::MakeString {
             value: m.value()?.unwrap_or_default().to_string(),

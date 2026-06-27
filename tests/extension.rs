@@ -21,6 +21,9 @@
 //!   `Array` — proving columnar data crosses the boundary without per-element exploding.
 //! - `extension_structured_values` (Phase 1): the `ext_data` fixture round-trips a structured Quoin
 //!   value through `call:with:data:` and returns a structured value built extension-side.
+//! - `extension_backed_classes` (Phase 3): the `ext_vector` fixture *provides* a Quoin class
+//!   `Vector` — the host installs it as a global from the spawn-time manifest, and `Vector ofFloats:`
+//!   / `v sum` / `v scale:` dispatch over the socket as ordinary method sends (SDK-owned instances).
 //! - `extension_python_sdk` (Slice 7): the extension is a *Python* process (`sdk/python`) speaking
 //!   the same `ext.fbs` wire protocol — the polyglot proof. Gated on `python3` + `flatbuffers`.
 //!
@@ -267,6 +270,35 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_data_test.qn", &script);
+}
+
+#[test]
+fn extension_backed_classes() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{ext_bin}';
+
+"* an extension-backed class (Phase 3): the class-side constructor builds a live instance, and an
+"* ordinary method send dispatches over the socket — `Vector` is a real global, `v` a real instance
+v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+(v.sum == 6.0).else:{{ ok = false }};
+(v.length == 3).else:{{ ok = false }};
+
+"* an instance method that *makes* a new instance returns another (socket-backed) `Vector`
+w = v.scale:2.0;
+(w.sum == 12.0).else:{{ ok = false }};
+(w.length == 3).else:{{ ok = false }};
+
+"* the receiver is unchanged — distinct instances, each its own ext-side object
+(v.sum == 6.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_vector_test.qn", &script);
 }
 
 /// True if `python3` can import the `flatbuffers` runtime — the Python SDK's only external

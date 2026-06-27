@@ -45,6 +45,8 @@ class Message(object):
     ReadHandle = 16
     ReadHandleReturn = 17
     HostOpReturn = 18
+    GetManifest = 19
+    ManifestReturn = 20
 
 
 class ArrowArray(object):
@@ -784,8 +786,22 @@ class Call(object):
             return obj
         return None
 
+    # Call
+    def ClassName(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(18))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # Call
+    def Recv(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(20))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
 def CallStart(builder):
-    builder.StartObject(7)
+    builder.StartObject(9)
 
 def CallAddOp(builder, op):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(op), 0)
@@ -819,6 +835,12 @@ def CallStartArraysVector(builder, numElems):
 
 def CallAddData(builder, data):
     builder.PrependUOffsetTRelativeSlot(6, flatbuffers.number_types.UOffsetTFlags.py_type(data), 0)
+
+def CallAddClassName(builder, className):
+    builder.PrependUOffsetTRelativeSlot(7, flatbuffers.number_types.UOffsetTFlags.py_type(className), 0)
+
+def CallAddRecv(builder, recv):
+    builder.PrependUint64Slot(8, recv, 0)
 
 def CallEnd(builder):
     return builder.EndObject()
@@ -1663,6 +1685,176 @@ def CallReturnHandleAddHandle(builder, handle):
     builder.PrependUint64Slot(0, handle, 0)
 
 def CallReturnHandleEnd(builder):
+    return builder.EndObject()
+
+
+
+class ClassDecl(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = ClassDecl()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsClassDecl(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # ClassDecl
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # ClassDecl
+    def Name(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+    # ClassDecl
+    def InstanceSelectors(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.String(a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
+        return ""
+
+    # ClassDecl
+    def InstanceSelectorsLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # ClassDecl
+    def InstanceSelectorsIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        return o == 0
+
+    # ClassDecl
+    def ClassSelectors(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.String(a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 4))
+        return ""
+
+    # ClassDecl
+    def ClassSelectorsLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # ClassDecl
+    def ClassSelectorsIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        return o == 0
+
+def ClassDeclStart(builder):
+    builder.StartObject(3)
+
+def ClassDeclAddName(builder, name):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(name), 0)
+
+def ClassDeclAddInstanceSelectors(builder, instanceSelectors):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(instanceSelectors), 0)
+
+def ClassDeclStartInstanceSelectorsVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def ClassDeclAddClassSelectors(builder, classSelectors):
+    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(classSelectors), 0)
+
+def ClassDeclStartClassSelectorsVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def ClassDeclEnd(builder):
+    return builder.EndObject()
+
+
+
+class GetManifest(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = GetManifest()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsGetManifest(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # GetManifest
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+def GetManifestStart(builder):
+    builder.StartObject(0)
+
+def GetManifestEnd(builder):
+    return builder.EndObject()
+
+
+
+class ManifestReturn(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = ManifestReturn()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsManifestReturn(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # ManifestReturn
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # ManifestReturn
+    def Classes(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            x = self._tab.Vector(o)
+            x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
+            x = self._tab.Indirect(x)
+            obj = ClassDecl()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+    # ManifestReturn
+    def ClassesLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # ManifestReturn
+    def ClassesIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        return o == 0
+
+def ManifestReturnStart(builder):
+    builder.StartObject(1)
+
+def ManifestReturnAddClasses(builder, classes):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(classes), 0)
+
+def ManifestReturnStartClassesVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
+
+def ManifestReturnEnd(builder):
     return builder.EndObject()
 
 

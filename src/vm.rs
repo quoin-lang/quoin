@@ -704,6 +704,72 @@ impl<'gc> VmState<'gc> {
         ))
     }
 
+    /// Wrap an extension-backed selector as a `Method` chain node (Phase 3): the method dispatches
+    /// over the socket to `ext` (the owning `Extension` value, kept GC-rooted via the method table).
+    pub fn new_ext_method(
+        &self,
+        mc: &Mutation<'gc>,
+        selector: String,
+        ext: Value<'gc>,
+    ) -> Value<'gc> {
+        let class = self.get_or_create_builtin_class(mc, "Method");
+        let state = NativeMethodState::new_ext(selector, ext);
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
+        Value::Object(gcl!(
+            mc,
+            Object {
+                class,
+                fields: Box::default(),
+                payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
+            }
+        ))
+    }
+
+    /// Install an extension-provided class (Phase 3) as a host global: a real Quoin class whose
+    /// selectors dispatch over the socket to `ext`. Class-side selectors become class methods,
+    /// instance-side become instance methods; each is an `ExtDispatch` node carrying `ext`. A
+    /// re-declared name is overwritten (last spawn wins).
+    pub fn install_ext_class(
+        &mut self,
+        mc: &Mutation<'gc>,
+        ext: Value<'gc>,
+        name: &str,
+        instance_selectors: &[String],
+        class_selectors: &[String],
+    ) {
+        let mut instance_methods: HashMap<String, Value<'gc>> = HashMap::new();
+        for sel in instance_selectors {
+            let node = self.new_ext_method(mc, sel.clone(), ext);
+            instance_methods.insert(sel.clone(), node);
+        }
+        let mut class_methods: HashMap<String, Value<'gc>> = HashMap::new();
+        for sel in class_selectors {
+            let node = self.new_ext_method(mc, sel.clone(), ext);
+            class_methods.insert(sel.clone(), node);
+        }
+        let parent = self.get_or_create_builtin_class(mc, "Object");
+        let ns_name = NamespacedName::parse(name);
+        let class_obj = gcl!(
+            mc,
+            Class {
+                name: ns_name.clone(),
+                parent: Some(parent),
+                instance_vars: Vec::new(),
+                instance_methods,
+                class_methods,
+                mixin_classes: Vec::new(),
+                field_slots: HashMap::new(),
+                is_eigenclass: false,
+                is_sealed: false,
+                is_abstract: false,
+            }
+        );
+        self.globals
+            .borrow_mut(mc)
+            .insert(ns_name, Value::Class(class_obj));
+        self.invalidate_method_cache();
+    }
+
     #[allow(no_gc_across_yield)]
     fn finalize_instantiation(
         &mut self,
@@ -1016,7 +1082,12 @@ impl<'gc> VmState<'gc> {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
                     if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
-                        if let Some(func) = method_state.native_func() {
+                        if let Some(ext) = method_state.ext_dispatch() {
+                            Some(Callable::ExtMethod {
+                                ext,
+                                selector: Symbol::intern(selector),
+                            })
+                        } else if let Some(func) = method_state.native_func() {
                             Some(Callable::Native(func))
                         } else if let Some(Value::Object(block_obj)) = method_state.get_block()
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload

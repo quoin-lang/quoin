@@ -23,11 +23,14 @@
 //! Structured args arrive via [`Host::data`]; bulk columns via [`Host::arrays`]. Host values the
 //! extension holds are opaque [`Handle`]s indexing a GC-rooted table on the host (§2).
 
+use std::any::Any;
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::marker::PhantomData;
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use quoin_ext_proto::Msg;
 pub use quoin_ext_proto::{ArrowArray, ArrowDType, DataValue};
+use quoin_ext_proto::{ClassDecl, Msg};
 
 /// An opaque reference to a host value, as seen by the extension. Default lifetime is
 /// call-local (auto-released when the originating call returns); promote it with
@@ -285,6 +288,16 @@ pub fn serve<R: Into<Reply>>(
     let (mut stream, _addr) = listener.accept()?;
     while let Some(frame) = read_frame(&mut stream)? {
         match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+            // A generic-handler extension provides no classes (Phase 3): reply with an empty
+            // manifest so it stays backward-compatible under the host's spawn-time `GetManifest`.
+            Msg::GetManifest => {
+                write_frame(
+                    &mut stream,
+                    &quoin_ext_proto::encode(&Msg::ManifestReturn {
+                        classes: Vec::new(),
+                    }),
+                )?;
+            }
             Msg::Call {
                 op,
                 arg,
@@ -293,6 +306,9 @@ pub fn serve<R: Into<Reply>>(
                 releases,
                 arrays,
                 data,
+                // The generic `call:with:` handler doesn't use the extension-backed-class fields.
+                class_name: _,
+                recv: _,
             } => {
                 // `host` borrows the stream for the call's re-entrant host-ops; the borrow ends
                 // before we write the terminal reply on the same stream.
@@ -307,14 +323,7 @@ pub fn serve<R: Into<Reply>>(
                     };
                     handler(&mut host, &op, &arg).into()
                 };
-                let msg = match reply {
-                    Reply::Scalar(result) => Msg::CallReturn { result },
-                    Reply::Resource(resource) => Msg::CallReturnResource { resource },
-                    Reply::Array(array) => Msg::CallReturnArray { array },
-                    Reply::Data(value) => Msg::CallReturnData { value },
-                    Reply::Handle(handle) => Msg::CallReturnHandle { handle },
-                };
-                write_frame(&mut stream, &quoin_ext_proto::encode(&msg))?;
+                write_frame(&mut stream, &quoin_ext_proto::encode(&reply_to_msg(reply)))?;
             }
             other => {
                 return Err(invalid_data(format!(
@@ -324,4 +333,286 @@ pub fn serve<R: Into<Reply>>(
         }
     }
     Ok(())
+}
+
+/// Encode a handler's [`Reply`] as the matching terminal `CallReturn*` frame.
+fn reply_to_msg(reply: Reply) -> Msg {
+    match reply {
+        Reply::Scalar(result) => Msg::CallReturn { result },
+        Reply::Resource(resource) => Msg::CallReturnResource { resource },
+        Reply::Array(array) => Msg::CallReturnArray { array },
+        Reply::Data(value) => Msg::CallReturnData { value },
+        Reply::Handle(handle) => Msg::CallReturnHandle { handle },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extension-backed classes (Phase 3): the SDK owns the object table.
+//
+// An extension provides one or more Quoin classes by registering plain Rust types. The host
+// installs a real Quoin class whose method sends dispatch over the socket; the SDK keeps the
+// instances in its own table keyed by an opaque id (the resource id the host holds), so writing
+// an extension-backed class feels like writing an ordinary type — no handle plumbing in the
+// method bodies, and instances are freed automatically when the host drops them.
+// ---------------------------------------------------------------------------
+
+/// Erased per-selector handlers (the concrete `T` is captured at registration and downcast here).
+type CtorFn = Box<dyn Fn(&mut Host, &[DataValue]) -> io::Result<Box<dyn Any>>>;
+type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[DataValue]) -> io::Result<Reply>>;
+type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[DataValue]) -> io::Result<Box<dyn Any>>>;
+
+/// One registered class's erased handler tables, keyed by selector.
+struct ClassReg {
+    name: String,
+    constructors: HashMap<String, CtorFn>,
+    methods: HashMap<String, MethodFn>,
+    makes: HashMap<String, MakesFn>,
+}
+
+/// Downcast a table entry to the concrete type the handler was registered with.
+fn downcast<T: 'static>(obj: &mut dyn Any) -> io::Result<&mut T> {
+    obj.downcast_mut::<T>()
+        .ok_or_else(|| invalid_data("extension instance is not of the expected type"))
+}
+
+/// Configures one extension-backed class, backed by the Rust type `T`. Class-side `constructor`s
+/// build a `T`; instance-side `method`s read/mutate it and return a [`Reply`]; `makes` produce a
+/// new `T` (a transform like `scale:` or `clone`). Method arguments arrive as already-decoded
+/// [`DataValue`]s — for MVP they must be data-representable (passing another instance or a host
+/// block is a later slice).
+pub struct ClassBuilder<T> {
+    name: String,
+    constructors: HashMap<String, CtorFn>,
+    methods: HashMap<String, MethodFn>,
+    makes: HashMap<String, MakesFn>,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T: 'static> ClassBuilder<T> {
+    /// A class-side constructor: `Class sel: …` builds a new `T` (stored in the object table); the
+    /// Quoin caller receives an instance.
+    pub fn constructor(
+        &mut self,
+        selector: &str,
+        f: impl Fn(&mut Host, &[DataValue]) -> T + 'static,
+    ) -> &mut Self {
+        self.constructors.insert(
+            selector.to_string(),
+            Box::new(move |host, args| Ok(Box::new(f(host, args)) as Box<dyn Any>)),
+        );
+        self
+    }
+
+    /// An instance-side method returning a value (a scalar string or structured [`DataValue`]).
+    pub fn method<R: Into<Reply>>(
+        &mut self,
+        selector: &str,
+        f: impl Fn(&mut T, &mut Host, &[DataValue]) -> R + 'static,
+    ) -> &mut Self {
+        self.methods.insert(
+            selector.to_string(),
+            Box::new(move |obj, host, args| Ok(f(downcast::<T>(obj)?, host, args).into())),
+        );
+        self
+    }
+
+    /// An instance-side method that yields a new instance of this class (e.g. `scale:` / `clone`).
+    pub fn makes(
+        &mut self,
+        selector: &str,
+        f: impl Fn(&mut T, &mut Host, &[DataValue]) -> T + 'static,
+    ) -> &mut Self {
+        self.makes.insert(
+            selector.to_string(),
+            Box::new(move |obj, host, args| {
+                Ok(Box::new(f(downcast::<T>(obj)?, host, args)) as Box<dyn Any>)
+            }),
+        );
+        self
+    }
+
+    fn into_reg(self) -> ClassReg {
+        ClassReg {
+            name: self.name,
+            constructors: self.constructors,
+            methods: self.methods,
+            makes: self.makes,
+        }
+    }
+}
+
+/// A class-providing extension (Phase 3). Register classes with [`Extension::class`], then
+/// [`Extension::serve`]. The SDK owns the instances (a `u64 -> Box<dyn Any>` table); the host holds
+/// only opaque ids, and dropped instances are reaped from the table automatically.
+#[derive(Default)]
+pub struct Extension {
+    classes: Vec<ClassReg>,
+}
+
+impl Extension {
+    pub fn new() -> Self {
+        Self {
+            classes: Vec::new(),
+        }
+    }
+
+    /// Register a class named `name` backed by the Rust type `T`; `build` configures its
+    /// constructors and methods.
+    pub fn class<T: 'static>(
+        &mut self,
+        name: &str,
+        build: impl FnOnce(&mut ClassBuilder<T>),
+    ) -> &mut Self {
+        let mut cb = ClassBuilder {
+            name: name.to_string(),
+            constructors: HashMap::new(),
+            methods: HashMap::new(),
+            makes: HashMap::new(),
+            _marker: PhantomData,
+        };
+        build(&mut cb);
+        self.classes.push(cb.into_reg());
+        self
+    }
+
+    /// Bind a unix socket at `path`, accept the host connection, and serve until it disconnects:
+    /// answer the spawn-time `GetManifest` from the registered classes, and route each method
+    /// `Call` to its handler — materializing returned instances into the object table.
+    pub fn serve(&self, path: &str) -> io::Result<()> {
+        let listener = UnixListener::bind(path)?;
+        let (mut stream, _addr) = listener.accept()?;
+        let mut table = ObjectTable::default();
+        while let Some(frame) = read_frame(&mut stream)? {
+            match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+                Msg::GetManifest => {
+                    write_frame(&mut stream, &quoin_ext_proto::encode(&self.manifest()))?;
+                }
+                Msg::Call {
+                    op,
+                    class_name,
+                    recv,
+                    data,
+                    releases,
+                    ..
+                } => {
+                    // The host batches dropped instances onto `releases`; free them from the table.
+                    for rid in &releases {
+                        table.remove(*rid);
+                    }
+                    let reply =
+                        self.dispatch(&mut stream, &mut table, &class_name, &op, recv, data)?;
+                    write_frame(&mut stream, &quoin_ext_proto::encode(&reply))?;
+                }
+                other => {
+                    return Err(invalid_data(format!(
+                        "extension serve: expected a Call or GetManifest, got {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The `ManifestReturn` describing every registered class.
+    fn manifest(&self) -> Msg {
+        let classes = self
+            .classes
+            .iter()
+            .map(|c| ClassDecl {
+                name: c.name.clone(),
+                instance_selectors: c.methods.keys().chain(c.makes.keys()).cloned().collect(),
+                class_selectors: c.constructors.keys().cloned().collect(),
+            })
+            .collect();
+        Msg::ManifestReturn { classes }
+    }
+
+    /// Route one method `Call` to its handler and produce the terminal reply frame.
+    fn dispatch(
+        &self,
+        stream: &mut UnixStream,
+        table: &mut ObjectTable,
+        class_name: &str,
+        op: &str,
+        recv: u64,
+        data: Option<DataValue>,
+    ) -> io::Result<Msg> {
+        let class = self
+            .classes
+            .iter()
+            .find(|c| c.name == class_name)
+            .ok_or_else(|| invalid_data(format!("no extension-backed class '{class_name}'")))?;
+        // The host packs the method arguments as a `DvList` (Phase 1); unwrap to the arg slice.
+        let args: Vec<DataValue> = match data {
+            Some(DataValue::List(items)) => items,
+            Some(other) => vec![other],
+            None => Vec::new(),
+        };
+        let mut host = Host {
+            stream,
+            handles: Vec::new(),
+            resources: Vec::new(),
+            releases: Vec::new(),
+            arrays: Vec::new(),
+            data: None,
+        };
+        if recv == 0 {
+            // Class-side: a constructor builds a new instance.
+            let ctor = class.constructors.get(op).ok_or_else(|| {
+                invalid_data(format!("no constructor '{op}' on class '{class_name}'"))
+            })?;
+            let obj = ctor(&mut host, &args)?;
+            Ok(Msg::CallReturnResource {
+                resource: table.insert(obj),
+            })
+        } else if let Some(method) = class.methods.get(op) {
+            let obj = table
+                .get_mut(recv)
+                .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
+            let reply = method(obj.as_mut(), &mut host, &args)?;
+            Ok(reply_to_msg(reply))
+        } else if let Some(makes) = class.makes.get(op) {
+            // Build the new instance under a scoped borrow, then store it under a fresh id.
+            let new_obj = {
+                let obj = table
+                    .get_mut(recv)
+                    .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
+                makes(obj.as_mut(), &mut host, &args)?
+            };
+            Ok(Msg::CallReturnResource {
+                resource: table.insert(new_obj),
+            })
+        } else {
+            Err(invalid_data(format!(
+                "no method '{op}' on class '{class_name}'"
+            )))
+        }
+    }
+}
+
+/// The SDK-owned instance table (Phase 3): live instances keyed by an opaque id — the resource id
+/// the host holds for each. Ids start at 1, so `recv == 0` unambiguously means a class-side send.
+#[derive(Default)]
+struct ObjectTable {
+    objects: HashMap<u64, Box<dyn Any>>,
+    next_id: u64,
+}
+
+impl ObjectTable {
+    /// Store an instance under a fresh id and return it.
+    fn insert(&mut self, obj: Box<dyn Any>) -> u64 {
+        self.next_id += 1;
+        self.objects.insert(self.next_id, obj);
+        self.next_id
+    }
+
+    /// The live instance for `id`, or `None` if it was never created or has been dropped.
+    fn get_mut(&mut self, id: u64) -> Option<&mut Box<dyn Any>> {
+        self.objects.get_mut(&id)
+    }
+
+    /// Free an instance the host has dropped.
+    fn remove(&mut self, id: u64) {
+        self.objects.remove(&id);
+    }
 }

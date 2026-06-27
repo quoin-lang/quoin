@@ -4371,6 +4371,10 @@ mod root {
             pub arrays: ::core::option::Option<::planus::alloc::vec::Vec<self::ArrowArray>>,
             /// The field `data` in the table `Call`
             pub data: ::core::option::Option<::planus::alloc::boxed::Box<self::DataValueBox>>,
+            /// The field `class_name` in the table `Call`
+            pub class_name: ::core::option::Option<::planus::alloc::string::String>,
+            /// The field `recv` in the table `Call`
+            pub recv: u64,
         }
 
         #[allow(clippy::derivable_impls)]
@@ -4384,6 +4388,8 @@ mod root {
                     releases: ::core::default::Default::default(),
                     arrays: ::core::default::Default::default(),
                     data: ::core::default::Default::default(),
+                    class_name: ::core::default::Default::default(),
+                    recv: 0,
                 }
             }
         }
@@ -4407,6 +4413,10 @@ mod root {
                     ::planus::Offset<[::planus::Offset<self::ArrowArray>]>,
                 >,
                 field_data: impl ::planus::WriteAsOptional<::planus::Offset<self::DataValueBox>>,
+                field_class_name: impl ::planus::WriteAsOptional<
+                    ::planus::Offset<::core::primitive::str>,
+                >,
+                field_recv: impl ::planus::WriteAsDefault<u64, u64>,
             ) -> ::planus::Offset<Self> {
                 let prepared_op = field_op.prepare(builder);
                 let prepared_arg = field_arg.prepare(builder);
@@ -4415,9 +4425,14 @@ mod root {
                 let prepared_releases = field_releases.prepare(builder);
                 let prepared_arrays = field_arrays.prepare(builder);
                 let prepared_data = field_data.prepare(builder);
+                let prepared_class_name = field_class_name.prepare(builder);
+                let prepared_recv = field_recv.prepare(builder, &0);
 
-                let mut table_writer: ::planus::table_writer::TableWriter<18> =
+                let mut table_writer: ::planus::table_writer::TableWriter<22> =
                     ::core::default::Default::default();
+                if prepared_recv.is_some() {
+                    table_writer.write_entry::<u64>(8);
+                }
                 if prepared_op.is_some() {
                     table_writer.write_entry::<::planus::Offset<str>>(0);
                 }
@@ -4440,9 +4455,15 @@ mod root {
                 if prepared_data.is_some() {
                     table_writer.write_entry::<::planus::Offset<self::DataValueBox>>(6);
                 }
+                if prepared_class_name.is_some() {
+                    table_writer.write_entry::<::planus::Offset<str>>(7);
+                }
 
                 unsafe {
                     table_writer.finish(builder, |object_writer| {
+                        if let ::core::option::Option::Some(prepared_recv) = prepared_recv {
+                            object_writer.write::<_, _, 8>(&prepared_recv);
+                        }
                         if let ::core::option::Option::Some(prepared_op) = prepared_op {
                             object_writer.write::<_, _, 4>(&prepared_op);
                         }
@@ -4464,6 +4485,11 @@ mod root {
                         }
                         if let ::core::option::Option::Some(prepared_data) = prepared_data {
                             object_writer.write::<_, _, 4>(&prepared_data);
+                        }
+                        if let ::core::option::Option::Some(prepared_class_name) =
+                            prepared_class_name
+                        {
+                            object_writer.write::<_, _, 4>(&prepared_class_name);
                         }
                     });
                 }
@@ -4504,6 +4530,8 @@ mod root {
                     &self.releases,
                     &self.arrays,
                     &self.data,
+                    &self.class_name,
+                    self.recv,
                 )
             }
         }
@@ -4657,6 +4685,48 @@ mod root {
         }
 
         impl<T0, T1, T2, T3, T4, T5, T6> CallBuilder<(T0, T1, T2, T3, T4, T5, T6)> {
+            /// Setter for the [`class_name` field](Call#structfield.class_name).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn class_name<T7>(self, value: T7) -> CallBuilder<(T0, T1, T2, T3, T4, T5, T6, T7)>
+            where
+                T7: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            {
+                let (v0, v1, v2, v3, v4, v5, v6) = self.0;
+                CallBuilder((v0, v1, v2, v3, v4, v5, v6, value))
+            }
+
+            /// Sets the [`class_name` field](Call#structfield.class_name) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn class_name_as_null(self) -> CallBuilder<(T0, T1, T2, T3, T4, T5, T6, ())> {
+                self.class_name(())
+            }
+        }
+
+        impl<T0, T1, T2, T3, T4, T5, T6, T7> CallBuilder<(T0, T1, T2, T3, T4, T5, T6, T7)> {
+            /// Setter for the [`recv` field](Call#structfield.recv).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn recv<T8>(self, value: T8) -> CallBuilder<(T0, T1, T2, T3, T4, T5, T6, T7, T8)>
+            where
+                T8: ::planus::WriteAsDefault<u64, u64>,
+            {
+                let (v0, v1, v2, v3, v4, v5, v6, v7) = self.0;
+                CallBuilder((v0, v1, v2, v3, v4, v5, v6, v7, value))
+            }
+
+            /// Sets the [`recv` field](Call#structfield.recv) to the default value.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn recv_as_default(
+                self,
+            ) -> CallBuilder<(T0, T1, T2, T3, T4, T5, T6, T7, ::planus::DefaultValue)> {
+                self.recv(::planus::DefaultValue)
+            }
+        }
+
+        impl<T0, T1, T2, T3, T4, T5, T6, T7, T8> CallBuilder<(T0, T1, T2, T3, T4, T5, T6, T7, T8)> {
             /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [Call].
             #[inline]
             pub fn finish(self, builder: &mut ::planus::Builder) -> ::planus::Offset<Call>
@@ -4675,7 +4745,10 @@ mod root {
             T4: ::planus::WriteAsOptional<::planus::Offset<[u64]>>,
             T5: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::ArrowArray>]>>,
             T6: ::planus::WriteAsOptional<::planus::Offset<self::DataValueBox>>,
-        > ::planus::WriteAs<::planus::Offset<Call>> for CallBuilder<(T0, T1, T2, T3, T4, T5, T6)>
+            T7: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T8: ::planus::WriteAsDefault<u64, u64>,
+        > ::planus::WriteAs<::planus::Offset<Call>>
+            for CallBuilder<(T0, T1, T2, T3, T4, T5, T6, T7, T8)>
         {
             type Prepared = ::planus::Offset<Call>;
 
@@ -4693,8 +4766,10 @@ mod root {
             T4: ::planus::WriteAsOptional<::planus::Offset<[u64]>>,
             T5: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::ArrowArray>]>>,
             T6: ::planus::WriteAsOptional<::planus::Offset<self::DataValueBox>>,
+            T7: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T8: ::planus::WriteAsDefault<u64, u64>,
         > ::planus::WriteAsOptional<::planus::Offset<Call>>
-            for CallBuilder<(T0, T1, T2, T3, T4, T5, T6)>
+            for CallBuilder<(T0, T1, T2, T3, T4, T5, T6, T7, T8)>
         {
             type Prepared = ::planus::Offset<Call>;
 
@@ -4715,12 +4790,14 @@ mod root {
             T4: ::planus::WriteAsOptional<::planus::Offset<[u64]>>,
             T5: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::ArrowArray>]>>,
             T6: ::planus::WriteAsOptional<::planus::Offset<self::DataValueBox>>,
-        > ::planus::WriteAsOffset<Call> for CallBuilder<(T0, T1, T2, T3, T4, T5, T6)>
+            T7: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T8: ::planus::WriteAsDefault<u64, u64>,
+        > ::planus::WriteAsOffset<Call> for CallBuilder<(T0, T1, T2, T3, T4, T5, T6, T7, T8)>
         {
             #[inline]
             fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<Call> {
-                let (v0, v1, v2, v3, v4, v5, v6) = &self.0;
-                Call::create(builder, v0, v1, v2, v3, v4, v5, v6)
+                let (v0, v1, v2, v3, v4, v5, v6, v7, v8) = &self.0;
+                Call::create(builder, v0, v1, v2, v3, v4, v5, v6, v7, v8)
             }
         }
 
@@ -4788,6 +4865,20 @@ mod root {
             ) -> ::planus::Result<::core::option::Option<self::DataValueBoxRef<'a>>> {
                 self.0.access(6, "Call", "data")
             }
+
+            /// Getter for the [`class_name` field](Call#structfield.class_name).
+            #[inline]
+            pub fn class_name(
+                &self,
+            ) -> ::planus::Result<::core::option::Option<&'a ::core::primitive::str>> {
+                self.0.access(7, "Call", "class_name")
+            }
+
+            /// Getter for the [`recv` field](Call#structfield.recv).
+            #[inline]
+            pub fn recv(&self) -> ::planus::Result<u64> {
+                ::core::result::Result::Ok(self.0.access(8, "Call", "recv")?.unwrap_or(0))
+            }
         }
 
         impl<'a> ::core::fmt::Debug for CallRef<'a> {
@@ -4815,6 +4906,12 @@ mod root {
                 if let ::core::option::Option::Some(field_data) = self.data().transpose() {
                     f.field("data", &field_data);
                 }
+                if let ::core::option::Option::Some(field_class_name) =
+                    self.class_name().transpose()
+                {
+                    f.field("class_name", &field_class_name);
+                }
+                f.field("recv", &self.recv());
                 f.finish()
             }
         }
@@ -4854,6 +4951,8 @@ mod root {
                     } else {
                         ::core::option::Option::None
                     },
+                    class_name: value.class_name()?.map(::core::convert::Into::into),
+                    recv: ::core::convert::TryInto::try_into(value.recv()?)?,
                 })
             }
         }
@@ -4930,7 +5029,7 @@ mod root {
         /// The table `HandleList` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `HandleList` in the file `crates/quoin-ext-proto/schema/ext.fbs:77`
+        /// * Table `HandleList` in the file `crates/quoin-ext-proto/schema/ext.fbs:84`
         #[derive(
             Clone,
             Debug,
@@ -5202,7 +5301,7 @@ mod root {
         /// The table `CallReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:82`
+        /// * Table `CallReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:89`
         #[derive(
             Clone,
             Debug,
@@ -5470,7 +5569,7 @@ mod root {
         /// The table `CallReturnResource` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturnResource` in the file `crates/quoin-ext-proto/schema/ext.fbs:88`
+        /// * Table `CallReturnResource` in the file `crates/quoin-ext-proto/schema/ext.fbs:95`
         #[derive(
             Clone,
             Debug,
@@ -5755,7 +5854,7 @@ mod root {
         /// The table `CallReturnArray` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturnArray` in the file `crates/quoin-ext-proto/schema/ext.fbs:93`
+        /// * Table `CallReturnArray` in the file `crates/quoin-ext-proto/schema/ext.fbs:100`
         #[derive(
             Clone,
             Debug,
@@ -6045,7 +6144,7 @@ mod root {
         /// The table `CallReturnData` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturnData` in the file `crates/quoin-ext-proto/schema/ext.fbs:98`
+        /// * Table `CallReturnData` in the file `crates/quoin-ext-proto/schema/ext.fbs:105`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct CallReturnData {
             /// The field `value` in the table `CallReturnData`
@@ -6310,7 +6409,7 @@ mod root {
         /// The table `MakeString` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `MakeString` in the file `crates/quoin-ext-proto/schema/ext.fbs:103`
+        /// * Table `MakeString` in the file `crates/quoin-ext-proto/schema/ext.fbs:110`
         #[derive(
             Clone,
             Debug,
@@ -6578,7 +6677,7 @@ mod root {
         /// The table `HandleToString` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `HandleToString` in the file `crates/quoin-ext-proto/schema/ext.fbs:108`
+        /// * Table `HandleToString` in the file `crates/quoin-ext-proto/schema/ext.fbs:115`
         #[derive(
             Clone,
             Debug,
@@ -6843,7 +6942,7 @@ mod root {
         /// The table `Retain` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `Retain` in the file `crates/quoin-ext-proto/schema/ext.fbs:114`
+        /// * Table `Retain` in the file `crates/quoin-ext-proto/schema/ext.fbs:121`
         #[derive(
             Clone,
             Debug,
@@ -7101,7 +7200,7 @@ mod root {
         /// The table `Release` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `Release` in the file `crates/quoin-ext-proto/schema/ext.fbs:119`
+        /// * Table `Release` in the file `crates/quoin-ext-proto/schema/ext.fbs:126`
         #[derive(
             Clone,
             Debug,
@@ -7369,7 +7468,7 @@ mod root {
         /// The table `CallMethodOnHandle` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallMethodOnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:127`
+        /// * Table `CallMethodOnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:134`
         #[derive(
             Clone,
             Debug,
@@ -7755,7 +7854,7 @@ mod root {
         /// The table `InvokeBlock` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `InvokeBlock` in the file `crates/quoin-ext-proto/schema/ext.fbs:136`
+        /// * Table `InvokeBlock` in the file `crates/quoin-ext-proto/schema/ext.fbs:143`
         #[derive(
             Clone,
             Debug,
@@ -8082,7 +8181,7 @@ mod root {
         /// The table `InvokeBlockReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `InvokeBlockReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:143`
+        /// * Table `InvokeBlockReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:150`
         #[derive(
             Clone,
             Debug,
@@ -8420,7 +8519,7 @@ mod root {
         /// The table `HostOpReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `HostOpReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:151`
+        /// * Table `HostOpReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:158`
         #[derive(
             Clone,
             Debug,
@@ -8780,7 +8879,7 @@ mod root {
         /// The table `GetGlobal` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `GetGlobal` in the file `crates/quoin-ext-proto/schema/ext.fbs:160`
+        /// * Table `GetGlobal` in the file `crates/quoin-ext-proto/schema/ext.fbs:167`
         #[derive(
             Clone,
             Debug,
@@ -9048,7 +9147,7 @@ mod root {
         /// The table `MakeValue` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `MakeValue` in the file `crates/quoin-ext-proto/schema/ext.fbs:166`
+        /// * Table `MakeValue` in the file `crates/quoin-ext-proto/schema/ext.fbs:173`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct MakeValue {
             /// The field `value` in the table `MakeValue`
@@ -9312,7 +9411,7 @@ mod root {
         /// The table `ReadHandle` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `ReadHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:172`
+        /// * Table `ReadHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:179`
         #[derive(
             Clone,
             Debug,
@@ -9574,7 +9673,7 @@ mod root {
         /// The table `ReadHandleReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `ReadHandleReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:178`
+        /// * Table `ReadHandleReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:185`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ReadHandleReturn {
             /// The field `value` in the table `ReadHandleReturn`
@@ -9904,7 +10003,7 @@ mod root {
         /// The table `CallReturnHandle` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:184`
+        /// * Table `CallReturnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:191`
         #[derive(
             Clone,
             Debug,
@@ -10182,10 +10281,904 @@ mod root {
             }
         }
 
+        /// The table `ClassDecl` in the namespace `quoin_ext_proto`
+        ///
+        /// Generated from these locations:
+        /// * Table `ClassDecl` in the file `crates/quoin-ext-proto/schema/ext.fbs:198`
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            PartialOrd,
+            Eq,
+            Ord,
+            Hash,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+        )]
+        pub struct ClassDecl {
+            /// The field `name` in the table `ClassDecl`
+            pub name: ::core::option::Option<::planus::alloc::string::String>,
+            /// The field `instance_selectors` in the table `ClassDecl`
+            pub instance_selectors:
+                ::core::option::Option<::planus::alloc::vec::Vec<::planus::alloc::string::String>>,
+            /// The field `class_selectors` in the table `ClassDecl`
+            pub class_selectors:
+                ::core::option::Option<::planus::alloc::vec::Vec<::planus::alloc::string::String>>,
+        }
+
+        #[allow(clippy::derivable_impls)]
+        impl ::core::default::Default for ClassDecl {
+            fn default() -> Self {
+                Self {
+                    name: ::core::default::Default::default(),
+                    instance_selectors: ::core::default::Default::default(),
+                    class_selectors: ::core::default::Default::default(),
+                }
+            }
+        }
+
+        impl ClassDecl {
+            /// Creates a [ClassDeclBuilder] for serializing an instance of this table.
+            #[inline]
+            pub fn builder() -> ClassDeclBuilder<()> {
+                ClassDeclBuilder(())
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            pub fn create(
+                builder: &mut ::planus::Builder,
+                field_name: impl ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+                field_instance_selectors: impl ::planus::WriteAsOptional<
+                    ::planus::Offset<[::planus::Offset<str>]>,
+                >,
+                field_class_selectors: impl ::planus::WriteAsOptional<
+                    ::planus::Offset<[::planus::Offset<str>]>,
+                >,
+            ) -> ::planus::Offset<Self> {
+                let prepared_name = field_name.prepare(builder);
+                let prepared_instance_selectors = field_instance_selectors.prepare(builder);
+                let prepared_class_selectors = field_class_selectors.prepare(builder);
+
+                let mut table_writer: ::planus::table_writer::TableWriter<10> =
+                    ::core::default::Default::default();
+                if prepared_name.is_some() {
+                    table_writer.write_entry::<::planus::Offset<str>>(0);
+                }
+                if prepared_instance_selectors.is_some() {
+                    table_writer.write_entry::<::planus::Offset<[::planus::Offset<str>]>>(1);
+                }
+                if prepared_class_selectors.is_some() {
+                    table_writer.write_entry::<::planus::Offset<[::planus::Offset<str>]>>(2);
+                }
+
+                unsafe {
+                    table_writer.finish(builder, |object_writer| {
+                        if let ::core::option::Option::Some(prepared_name) = prepared_name {
+                            object_writer.write::<_, _, 4>(&prepared_name);
+                        }
+                        if let ::core::option::Option::Some(prepared_instance_selectors) =
+                            prepared_instance_selectors
+                        {
+                            object_writer.write::<_, _, 4>(&prepared_instance_selectors);
+                        }
+                        if let ::core::option::Option::Some(prepared_class_selectors) =
+                            prepared_class_selectors
+                        {
+                            object_writer.write::<_, _, 4>(&prepared_class_selectors);
+                        }
+                    });
+                }
+                builder.current_offset()
+            }
+        }
+
+        impl ::planus::WriteAs<::planus::Offset<ClassDecl>> for ClassDecl {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ClassDecl> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl ::planus::WriteAsOptional<::planus::Offset<ClassDecl>> for ClassDecl {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<ClassDecl>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl ::planus::WriteAsOffset<ClassDecl> for ClassDecl {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ClassDecl> {
+                ClassDecl::create(
+                    builder,
+                    &self.name,
+                    &self.instance_selectors,
+                    &self.class_selectors,
+                )
+            }
+        }
+
+        /// Builder for serializing an instance of the [ClassDecl] type.
+        ///
+        /// Can be created using the [ClassDecl::builder] method.
+        #[derive(Debug)]
+        #[must_use]
+        pub struct ClassDeclBuilder<State>(State);
+
+        impl ClassDeclBuilder<()> {
+            /// Setter for the [`name` field](ClassDecl#structfield.name).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn name<T0>(self, value: T0) -> ClassDeclBuilder<(T0,)>
+            where
+                T0: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            {
+                ClassDeclBuilder((value,))
+            }
+
+            /// Sets the [`name` field](ClassDecl#structfield.name) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn name_as_null(self) -> ClassDeclBuilder<((),)> {
+                self.name(())
+            }
+        }
+
+        impl<T0> ClassDeclBuilder<(T0,)> {
+            /// Setter for the [`instance_selectors` field](ClassDecl#structfield.instance_selectors).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn instance_selectors<T1>(self, value: T1) -> ClassDeclBuilder<(T0, T1)>
+            where
+                T1: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<str>]>>,
+            {
+                let (v0,) = self.0;
+                ClassDeclBuilder((v0, value))
+            }
+
+            /// Sets the [`instance_selectors` field](ClassDecl#structfield.instance_selectors) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn instance_selectors_as_null(self) -> ClassDeclBuilder<(T0, ())> {
+                self.instance_selectors(())
+            }
+        }
+
+        impl<T0, T1> ClassDeclBuilder<(T0, T1)> {
+            /// Setter for the [`class_selectors` field](ClassDecl#structfield.class_selectors).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn class_selectors<T2>(self, value: T2) -> ClassDeclBuilder<(T0, T1, T2)>
+            where
+                T2: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<str>]>>,
+            {
+                let (v0, v1) = self.0;
+                ClassDeclBuilder((v0, v1, value))
+            }
+
+            /// Sets the [`class_selectors` field](ClassDecl#structfield.class_selectors) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn class_selectors_as_null(self) -> ClassDeclBuilder<(T0, T1, ())> {
+                self.class_selectors(())
+            }
+        }
+
+        impl<T0, T1, T2> ClassDeclBuilder<(T0, T1, T2)> {
+            /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [ClassDecl].
+            #[inline]
+            pub fn finish(self, builder: &mut ::planus::Builder) -> ::planus::Offset<ClassDecl>
+            where
+                Self: ::planus::WriteAsOffset<ClassDecl>,
+            {
+                ::planus::WriteAsOffset::prepare(&self, builder)
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<str>]>>,
+            T2: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<str>]>>,
+        > ::planus::WriteAs<::planus::Offset<ClassDecl>> for ClassDeclBuilder<(T0, T1, T2)>
+        {
+            type Prepared = ::planus::Offset<ClassDecl>;
+
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ClassDecl> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<str>]>>,
+            T2: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<str>]>>,
+        > ::planus::WriteAsOptional<::planus::Offset<ClassDecl>>
+            for ClassDeclBuilder<(T0, T1, T2)>
+        {
+            type Prepared = ::planus::Offset<ClassDecl>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<ClassDecl>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<str>]>>,
+            T2: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<str>]>>,
+        > ::planus::WriteAsOffset<ClassDecl> for ClassDeclBuilder<(T0, T1, T2)>
+        {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ClassDecl> {
+                let (v0, v1, v2) = &self.0;
+                ClassDecl::create(builder, v0, v1, v2)
+            }
+        }
+
+        /// Reference to a deserialized [ClassDecl].
+        #[derive(Copy, Clone)]
+        pub struct ClassDeclRef<'a>(#[allow(dead_code)] ::planus::table_reader::Table<'a>);
+
+        impl<'a> ClassDeclRef<'a> {
+            /// Getter for the [`name` field](ClassDecl#structfield.name).
+            #[inline]
+            pub fn name(
+                &self,
+            ) -> ::planus::Result<::core::option::Option<&'a ::core::primitive::str>> {
+                self.0.access(0, "ClassDecl", "name")
+            }
+
+            /// Getter for the [`instance_selectors` field](ClassDecl#structfield.instance_selectors).
+            #[inline]
+            pub fn instance_selectors(
+                &self,
+            ) -> ::planus::Result<
+                ::core::option::Option<
+                    ::planus::Vector<'a, ::planus::Result<&'a ::core::primitive::str>>,
+                >,
+            > {
+                self.0.access(1, "ClassDecl", "instance_selectors")
+            }
+
+            /// Getter for the [`class_selectors` field](ClassDecl#structfield.class_selectors).
+            #[inline]
+            pub fn class_selectors(
+                &self,
+            ) -> ::planus::Result<
+                ::core::option::Option<
+                    ::planus::Vector<'a, ::planus::Result<&'a ::core::primitive::str>>,
+                >,
+            > {
+                self.0.access(2, "ClassDecl", "class_selectors")
+            }
+        }
+
+        impl<'a> ::core::fmt::Debug for ClassDeclRef<'a> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut f = f.debug_struct("ClassDeclRef");
+                if let ::core::option::Option::Some(field_name) = self.name().transpose() {
+                    f.field("name", &field_name);
+                }
+                if let ::core::option::Option::Some(field_instance_selectors) =
+                    self.instance_selectors().transpose()
+                {
+                    f.field("instance_selectors", &field_instance_selectors);
+                }
+                if let ::core::option::Option::Some(field_class_selectors) =
+                    self.class_selectors().transpose()
+                {
+                    f.field("class_selectors", &field_class_selectors);
+                }
+                f.finish()
+            }
+        }
+
+        impl<'a> ::core::convert::TryFrom<ClassDeclRef<'a>> for ClassDecl {
+            type Error = ::planus::Error;
+
+            #[allow(unreachable_code)]
+            fn try_from(value: ClassDeclRef<'a>) -> ::planus::Result<Self> {
+                ::core::result::Result::Ok(Self {
+                    name: value.name()?.map(::core::convert::Into::into),
+                    instance_selectors: if let ::core::option::Option::Some(instance_selectors) =
+                        value.instance_selectors()?
+                    {
+                        ::core::option::Option::Some(instance_selectors.to_vec_result()?)
+                    } else {
+                        ::core::option::Option::None
+                    },
+                    class_selectors: if let ::core::option::Option::Some(class_selectors) =
+                        value.class_selectors()?
+                    {
+                        ::core::option::Option::Some(class_selectors.to_vec_result()?)
+                    } else {
+                        ::core::option::Option::None
+                    },
+                })
+            }
+        }
+
+        impl<'a> ::planus::TableRead<'a> for ClassDeclRef<'a> {
+            #[inline]
+            fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::core::result::Result<Self, ::planus::errors::ErrorKind> {
+                ::core::result::Result::Ok(Self(::planus::table_reader::Table::from_buffer(
+                    buffer, offset,
+                )?))
+            }
+        }
+
+        impl<'a> ::planus::VectorReadInner<'a> for ClassDeclRef<'a> {
+            type Error = ::planus::Error;
+            const STRIDE: usize = 4;
+
+            unsafe fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(buffer, offset).map_err(|error_kind| {
+                    error_kind.with_error_location(
+                        "[ClassDeclRef]",
+                        "get",
+                        buffer.offset_from_start,
+                    )
+                })
+            }
+        }
+
+        /// # Safety
+        /// The planus compiler generates implementations that initialize
+        /// the bytes in `write_values`.
+        unsafe impl ::planus::VectorWrite<::planus::Offset<ClassDecl>> for ClassDecl {
+            type Value = ::planus::Offset<ClassDecl>;
+            const STRIDE: usize = 4;
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> Self::Value {
+                ::planus::WriteAs::prepare(self, builder)
+            }
+
+            #[inline]
+            unsafe fn write_values(
+                values: &[::planus::Offset<ClassDecl>],
+                bytes: *mut ::core::mem::MaybeUninit<u8>,
+                buffer_position: u32,
+            ) {
+                let bytes = bytes as *mut [::core::mem::MaybeUninit<u8>; 4];
+                for (i, v) in ::core::iter::Iterator::enumerate(values.iter()) {
+                    ::planus::WriteAsPrimitive::write(
+                        v,
+                        ::planus::Cursor::new(unsafe { &mut *bytes.add(i) }),
+                        buffer_position - (Self::STRIDE * i) as u32,
+                    );
+                }
+            }
+        }
+
+        impl<'a> ::planus::ReadAsRoot<'a> for ClassDeclRef<'a> {
+            fn read_as_root(slice: &'a [u8]) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(
+                    ::planus::SliceWithStartOffset {
+                        buffer: slice,
+                        offset_from_start: 0,
+                    },
+                    0,
+                )
+                .map_err(|error_kind| {
+                    error_kind.with_error_location("[ClassDeclRef]", "read_as_root", 0)
+                })
+            }
+        }
+
+        /// The table `GetManifest` in the namespace `quoin_ext_proto`
+        ///
+        /// Generated from these locations:
+        /// * Table `GetManifest` in the file `crates/quoin-ext-proto/schema/ext.fbs:205`
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            PartialOrd,
+            Eq,
+            Ord,
+            Hash,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+        )]
+        pub struct GetManifest {}
+
+        #[allow(clippy::derivable_impls)]
+        impl ::core::default::Default for GetManifest {
+            fn default() -> Self {
+                Self {}
+            }
+        }
+
+        impl GetManifest {
+            /// Creates a [GetManifestBuilder] for serializing an instance of this table.
+            #[inline]
+            pub fn builder() -> GetManifestBuilder<()> {
+                GetManifestBuilder(())
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            pub fn create(builder: &mut ::planus::Builder) -> ::planus::Offset<Self> {
+                let table_writer: ::planus::table_writer::TableWriter<4> =
+                    ::core::default::Default::default();
+                unsafe {
+                    table_writer.finish(builder, |_table_writer| {});
+                }
+                builder.current_offset()
+            }
+        }
+
+        impl ::planus::WriteAs<::planus::Offset<GetManifest>> for GetManifest {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<GetManifest> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl ::planus::WriteAsOptional<::planus::Offset<GetManifest>> for GetManifest {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<GetManifest>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl ::planus::WriteAsOffset<GetManifest> for GetManifest {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<GetManifest> {
+                GetManifest::create(builder)
+            }
+        }
+
+        /// Builder for serializing an instance of the [GetManifest] type.
+        ///
+        /// Can be created using the [GetManifest::builder] method.
+        #[derive(Debug)]
+        #[must_use]
+        pub struct GetManifestBuilder<State>(State);
+
+        impl GetManifestBuilder<()> {
+            /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [GetManifest].
+            #[inline]
+            pub fn finish(self, builder: &mut ::planus::Builder) -> ::planus::Offset<GetManifest>
+            where
+                Self: ::planus::WriteAsOffset<GetManifest>,
+            {
+                ::planus::WriteAsOffset::prepare(&self, builder)
+            }
+        }
+
+        impl ::planus::WriteAs<::planus::Offset<GetManifest>> for GetManifestBuilder<()> {
+            type Prepared = ::planus::Offset<GetManifest>;
+
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<GetManifest> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl ::planus::WriteAsOptional<::planus::Offset<GetManifest>> for GetManifestBuilder<()> {
+            type Prepared = ::planus::Offset<GetManifest>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<GetManifest>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl ::planus::WriteAsOffset<GetManifest> for GetManifestBuilder<()> {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<GetManifest> {
+                GetManifest::create(builder)
+            }
+        }
+
+        /// Reference to a deserialized [GetManifest].
+        #[derive(Copy, Clone)]
+        pub struct GetManifestRef<'a>(#[allow(dead_code)] ::planus::table_reader::Table<'a>);
+
+        impl<'a> GetManifestRef<'a> {}
+
+        impl<'a> ::core::fmt::Debug for GetManifestRef<'a> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut f = f.debug_struct("GetManifestRef");
+
+                f.finish()
+            }
+        }
+
+        impl<'a> ::core::convert::TryFrom<GetManifestRef<'a>> for GetManifest {
+            type Error = ::planus::Error;
+
+            fn try_from(_value: GetManifestRef<'a>) -> ::planus::Result<Self> {
+                ::core::result::Result::Ok(Self {})
+            }
+        }
+
+        impl<'a> ::planus::TableRead<'a> for GetManifestRef<'a> {
+            #[inline]
+            fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::core::result::Result<Self, ::planus::errors::ErrorKind> {
+                ::core::result::Result::Ok(Self(::planus::table_reader::Table::from_buffer(
+                    buffer, offset,
+                )?))
+            }
+        }
+
+        impl<'a> ::planus::VectorReadInner<'a> for GetManifestRef<'a> {
+            type Error = ::planus::Error;
+            const STRIDE: usize = 4;
+
+            unsafe fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(buffer, offset).map_err(|error_kind| {
+                    error_kind.with_error_location(
+                        "[GetManifestRef]",
+                        "get",
+                        buffer.offset_from_start,
+                    )
+                })
+            }
+        }
+
+        /// # Safety
+        /// The planus compiler generates implementations that initialize
+        /// the bytes in `write_values`.
+        unsafe impl ::planus::VectorWrite<::planus::Offset<GetManifest>> for GetManifest {
+            type Value = ::planus::Offset<GetManifest>;
+            const STRIDE: usize = 4;
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> Self::Value {
+                ::planus::WriteAs::prepare(self, builder)
+            }
+
+            #[inline]
+            unsafe fn write_values(
+                values: &[::planus::Offset<GetManifest>],
+                bytes: *mut ::core::mem::MaybeUninit<u8>,
+                buffer_position: u32,
+            ) {
+                let bytes = bytes as *mut [::core::mem::MaybeUninit<u8>; 4];
+                for (i, v) in ::core::iter::Iterator::enumerate(values.iter()) {
+                    ::planus::WriteAsPrimitive::write(
+                        v,
+                        ::planus::Cursor::new(unsafe { &mut *bytes.add(i) }),
+                        buffer_position - (Self::STRIDE * i) as u32,
+                    );
+                }
+            }
+        }
+
+        impl<'a> ::planus::ReadAsRoot<'a> for GetManifestRef<'a> {
+            fn read_as_root(slice: &'a [u8]) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(
+                    ::planus::SliceWithStartOffset {
+                        buffer: slice,
+                        offset_from_start: 0,
+                    },
+                    0,
+                )
+                .map_err(|error_kind| {
+                    error_kind.with_error_location("[GetManifestRef]", "read_as_root", 0)
+                })
+            }
+        }
+
+        /// The table `ManifestReturn` in the namespace `quoin_ext_proto`
+        ///
+        /// Generated from these locations:
+        /// * Table `ManifestReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:209`
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            PartialOrd,
+            Eq,
+            Ord,
+            Hash,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+        )]
+        pub struct ManifestReturn {
+            /// The field `classes` in the table `ManifestReturn`
+            pub classes: ::core::option::Option<::planus::alloc::vec::Vec<self::ClassDecl>>,
+        }
+
+        #[allow(clippy::derivable_impls)]
+        impl ::core::default::Default for ManifestReturn {
+            fn default() -> Self {
+                Self {
+                    classes: ::core::default::Default::default(),
+                }
+            }
+        }
+
+        impl ManifestReturn {
+            /// Creates a [ManifestReturnBuilder] for serializing an instance of this table.
+            #[inline]
+            pub fn builder() -> ManifestReturnBuilder<()> {
+                ManifestReturnBuilder(())
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            pub fn create(
+                builder: &mut ::planus::Builder,
+                field_classes: impl ::planus::WriteAsOptional<
+                    ::planus::Offset<[::planus::Offset<self::ClassDecl>]>,
+                >,
+            ) -> ::planus::Offset<Self> {
+                let prepared_classes = field_classes.prepare(builder);
+
+                let mut table_writer: ::planus::table_writer::TableWriter<6> =
+                    ::core::default::Default::default();
+                if prepared_classes.is_some() {
+                    table_writer
+                        .write_entry::<::planus::Offset<[::planus::Offset<self::ClassDecl>]>>(0);
+                }
+
+                unsafe {
+                    table_writer.finish(builder, |object_writer| {
+                        if let ::core::option::Option::Some(prepared_classes) = prepared_classes {
+                            object_writer.write::<_, _, 4>(&prepared_classes);
+                        }
+                    });
+                }
+                builder.current_offset()
+            }
+        }
+
+        impl ::planus::WriteAs<::planus::Offset<ManifestReturn>> for ManifestReturn {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ManifestReturn> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl ::planus::WriteAsOptional<::planus::Offset<ManifestReturn>> for ManifestReturn {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<ManifestReturn>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl ::planus::WriteAsOffset<ManifestReturn> for ManifestReturn {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ManifestReturn> {
+                ManifestReturn::create(builder, &self.classes)
+            }
+        }
+
+        /// Builder for serializing an instance of the [ManifestReturn] type.
+        ///
+        /// Can be created using the [ManifestReturn::builder] method.
+        #[derive(Debug)]
+        #[must_use]
+        pub struct ManifestReturnBuilder<State>(State);
+
+        impl ManifestReturnBuilder<()> {
+            /// Setter for the [`classes` field](ManifestReturn#structfield.classes).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn classes<T0>(self, value: T0) -> ManifestReturnBuilder<(T0,)>
+            where
+                T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::ClassDecl>]>>,
+            {
+                ManifestReturnBuilder((value,))
+            }
+
+            /// Sets the [`classes` field](ManifestReturn#structfield.classes) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn classes_as_null(self) -> ManifestReturnBuilder<((),)> {
+                self.classes(())
+            }
+        }
+
+        impl<T0> ManifestReturnBuilder<(T0,)> {
+            /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [ManifestReturn].
+            #[inline]
+            pub fn finish(self, builder: &mut ::planus::Builder) -> ::planus::Offset<ManifestReturn>
+            where
+                Self: ::planus::WriteAsOffset<ManifestReturn>,
+            {
+                ::planus::WriteAsOffset::prepare(&self, builder)
+            }
+        }
+
+        impl<T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::ClassDecl>]>>>
+            ::planus::WriteAs<::planus::Offset<ManifestReturn>> for ManifestReturnBuilder<(T0,)>
+        {
+            type Prepared = ::planus::Offset<ManifestReturn>;
+
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ManifestReturn> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl<T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::ClassDecl>]>>>
+            ::planus::WriteAsOptional<::planus::Offset<ManifestReturn>>
+            for ManifestReturnBuilder<(T0,)>
+        {
+            type Prepared = ::planus::Offset<ManifestReturn>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<ManifestReturn>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl<T0: ::planus::WriteAsOptional<::planus::Offset<[::planus::Offset<self::ClassDecl>]>>>
+            ::planus::WriteAsOffset<ManifestReturn> for ManifestReturnBuilder<(T0,)>
+        {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ManifestReturn> {
+                let (v0,) = &self.0;
+                ManifestReturn::create(builder, v0)
+            }
+        }
+
+        /// Reference to a deserialized [ManifestReturn].
+        #[derive(Copy, Clone)]
+        pub struct ManifestReturnRef<'a>(#[allow(dead_code)] ::planus::table_reader::Table<'a>);
+
+        impl<'a> ManifestReturnRef<'a> {
+            /// Getter for the [`classes` field](ManifestReturn#structfield.classes).
+            #[inline]
+            pub fn classes(
+                &self,
+            ) -> ::planus::Result<
+                ::core::option::Option<
+                    ::planus::Vector<'a, ::planus::Result<self::ClassDeclRef<'a>>>,
+                >,
+            > {
+                self.0.access(0, "ManifestReturn", "classes")
+            }
+        }
+
+        impl<'a> ::core::fmt::Debug for ManifestReturnRef<'a> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut f = f.debug_struct("ManifestReturnRef");
+                if let ::core::option::Option::Some(field_classes) = self.classes().transpose() {
+                    f.field("classes", &field_classes);
+                }
+                f.finish()
+            }
+        }
+
+        impl<'a> ::core::convert::TryFrom<ManifestReturnRef<'a>> for ManifestReturn {
+            type Error = ::planus::Error;
+
+            #[allow(unreachable_code)]
+            fn try_from(value: ManifestReturnRef<'a>) -> ::planus::Result<Self> {
+                ::core::result::Result::Ok(Self {
+                    classes: if let ::core::option::Option::Some(classes) = value.classes()? {
+                        ::core::option::Option::Some(classes.to_vec_result()?)
+                    } else {
+                        ::core::option::Option::None
+                    },
+                })
+            }
+        }
+
+        impl<'a> ::planus::TableRead<'a> for ManifestReturnRef<'a> {
+            #[inline]
+            fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::core::result::Result<Self, ::planus::errors::ErrorKind> {
+                ::core::result::Result::Ok(Self(::planus::table_reader::Table::from_buffer(
+                    buffer, offset,
+                )?))
+            }
+        }
+
+        impl<'a> ::planus::VectorReadInner<'a> for ManifestReturnRef<'a> {
+            type Error = ::planus::Error;
+            const STRIDE: usize = 4;
+
+            unsafe fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(buffer, offset).map_err(|error_kind| {
+                    error_kind.with_error_location(
+                        "[ManifestReturnRef]",
+                        "get",
+                        buffer.offset_from_start,
+                    )
+                })
+            }
+        }
+
+        /// # Safety
+        /// The planus compiler generates implementations that initialize
+        /// the bytes in `write_values`.
+        unsafe impl ::planus::VectorWrite<::planus::Offset<ManifestReturn>> for ManifestReturn {
+            type Value = ::planus::Offset<ManifestReturn>;
+            const STRIDE: usize = 4;
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> Self::Value {
+                ::planus::WriteAs::prepare(self, builder)
+            }
+
+            #[inline]
+            unsafe fn write_values(
+                values: &[::planus::Offset<ManifestReturn>],
+                bytes: *mut ::core::mem::MaybeUninit<u8>,
+                buffer_position: u32,
+            ) {
+                let bytes = bytes as *mut [::core::mem::MaybeUninit<u8>; 4];
+                for (i, v) in ::core::iter::Iterator::enumerate(values.iter()) {
+                    ::planus::WriteAsPrimitive::write(
+                        v,
+                        ::planus::Cursor::new(unsafe { &mut *bytes.add(i) }),
+                        buffer_position - (Self::STRIDE * i) as u32,
+                    );
+                }
+            }
+        }
+
+        impl<'a> ::planus::ReadAsRoot<'a> for ManifestReturnRef<'a> {
+            fn read_as_root(slice: &'a [u8]) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(
+                    ::planus::SliceWithStartOffset {
+                        buffer: slice,
+                        offset_from_start: 0,
+                    },
+                    0,
+                )
+                .map_err(|error_kind| {
+                    error_kind.with_error_location("[ManifestReturnRef]", "read_as_root", 0)
+                })
+            }
+        }
+
         /// The union `Message` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Union `Message` in the file `crates/quoin-ext-proto/schema/ext.fbs:188`
+        /// * Union `Message` in the file `crates/quoin-ext-proto/schema/ext.fbs:213`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum Message {
             /// The variant of type `Call` in the union `Message`
@@ -10241,6 +11234,12 @@ mod root {
 
             /// The variant of type `HostOpReturn` in the union `Message`
             HostOpReturn(::planus::alloc::boxed::Box<self::HostOpReturn>),
+
+            /// The variant of type `GetManifest` in the union `Message`
+            GetManifest(::planus::alloc::boxed::Box<self::GetManifest>),
+
+            /// The variant of type `ManifestReturn` in the union `Message`
+            ManifestReturn(::planus::alloc::boxed::Box<self::ManifestReturn>),
         }
 
         impl Message {
@@ -10393,6 +11392,22 @@ mod root {
             ) -> ::planus::UnionOffset<Self> {
                 ::planus::UnionOffset::new(18, value.prepare(builder).downcast())
             }
+
+            #[inline]
+            pub fn create_get_manifest(
+                builder: &mut ::planus::Builder,
+                value: impl ::planus::WriteAsOffset<self::GetManifest>,
+            ) -> ::planus::UnionOffset<Self> {
+                ::planus::UnionOffset::new(19, value.prepare(builder).downcast())
+            }
+
+            #[inline]
+            pub fn create_manifest_return(
+                builder: &mut ::planus::Builder,
+                value: impl ::planus::WriteAsOffset<self::ManifestReturn>,
+            ) -> ::planus::UnionOffset<Self> {
+                ::planus::UnionOffset::new(20, value.prepare(builder).downcast())
+            }
         }
 
         impl ::planus::WriteAsUnion<Message> for Message {
@@ -10427,6 +11442,8 @@ mod root {
                         Self::create_read_handle_return(builder, value)
                     }
                     Self::HostOpReturn(value) => Self::create_host_op_return(builder, value),
+                    Self::GetManifest(value) => Self::create_get_manifest(builder, value),
+                    Self::ManifestReturn(value) => Self::create_manifest_return(builder, value),
                 }
             }
         }
@@ -10631,6 +11648,27 @@ mod root {
             pub fn host_op_return<T>(self, value: T) -> MessageBuilder<::planus::Initialized<18, T>>
             where
                 T: ::planus::WriteAsOffset<self::HostOpReturn>,
+            {
+                MessageBuilder(::planus::Initialized(value))
+            }
+
+            /// Creates an instance of the [`GetManifest` variant](Message#variant.GetManifest).
+            #[inline]
+            pub fn get_manifest<T>(self, value: T) -> MessageBuilder<::planus::Initialized<19, T>>
+            where
+                T: ::planus::WriteAsOffset<self::GetManifest>,
+            {
+                MessageBuilder(::planus::Initialized(value))
+            }
+
+            /// Creates an instance of the [`ManifestReturn` variant](Message#variant.ManifestReturn).
+            #[inline]
+            pub fn manifest_return<T>(
+                self,
+                value: T,
+            ) -> MessageBuilder<::planus::Initialized<20, T>>
+            where
+                T: ::planus::WriteAsOffset<self::ManifestReturn>,
             {
                 MessageBuilder(::planus::Initialized(value))
             }
@@ -11043,6 +12081,50 @@ mod root {
                 ::core::option::Option::Some(::planus::WriteAsUnion::prepare(self, builder))
             }
         }
+        impl<T> ::planus::WriteAsUnion<Message> for MessageBuilder<::planus::Initialized<19, T>>
+        where
+            T: ::planus::WriteAsOffset<self::GetManifest>,
+        {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::UnionOffset<Message> {
+                ::planus::UnionOffset::new(19, (self.0).0.prepare(builder).downcast())
+            }
+        }
+
+        impl<T> ::planus::WriteAsOptionalUnion<Message> for MessageBuilder<::planus::Initialized<19, T>>
+        where
+            T: ::planus::WriteAsOffset<self::GetManifest>,
+        {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::UnionOffset<Message>> {
+                ::core::option::Option::Some(::planus::WriteAsUnion::prepare(self, builder))
+            }
+        }
+        impl<T> ::planus::WriteAsUnion<Message> for MessageBuilder<::planus::Initialized<20, T>>
+        where
+            T: ::planus::WriteAsOffset<self::ManifestReturn>,
+        {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::UnionOffset<Message> {
+                ::planus::UnionOffset::new(20, (self.0).0.prepare(builder).downcast())
+            }
+        }
+
+        impl<T> ::planus::WriteAsOptionalUnion<Message> for MessageBuilder<::planus::Initialized<20, T>>
+        where
+            T: ::planus::WriteAsOffset<self::ManifestReturn>,
+        {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::UnionOffset<Message>> {
+                ::core::option::Option::Some(::planus::WriteAsUnion::prepare(self, builder))
+            }
+        }
 
         /// Reference to a deserialized [Message].
         #[derive(Copy, Clone, Debug)]
@@ -11065,6 +12147,8 @@ mod root {
             ReadHandle(self::ReadHandleRef<'a>),
             ReadHandleReturn(self::ReadHandleReturnRef<'a>),
             HostOpReturn(self::HostOpReturnRef<'a>),
+            GetManifest(self::GetManifestRef<'a>),
+            ManifestReturn(self::ManifestReturnRef<'a>),
         }
 
         impl<'a> ::core::convert::TryFrom<MessageRef<'a>> for Message {
@@ -11173,6 +12257,18 @@ mod root {
                             ::core::convert::TryFrom::try_from(value)?,
                         ))
                     }
+
+                    MessageRef::GetManifest(value) => {
+                        Self::GetManifest(::planus::alloc::boxed::Box::new(
+                            ::core::convert::TryFrom::try_from(value)?,
+                        ))
+                    }
+
+                    MessageRef::ManifestReturn(value) => {
+                        Self::ManifestReturn(::planus::alloc::boxed::Box::new(
+                            ::core::convert::TryFrom::try_from(value)?,
+                        ))
+                    }
                 })
             }
         }
@@ -11239,6 +12335,12 @@ mod root {
                     18 => ::core::result::Result::Ok(Self::HostOpReturn(
                         ::planus::TableRead::from_buffer(buffer, field_offset)?,
                     )),
+                    19 => ::core::result::Result::Ok(Self::GetManifest(
+                        ::planus::TableRead::from_buffer(buffer, field_offset)?,
+                    )),
+                    20 => ::core::result::Result::Ok(Self::ManifestReturn(
+                        ::planus::TableRead::from_buffer(buffer, field_offset)?,
+                    )),
                     _ => {
                         ::core::result::Result::Err(::planus::errors::ErrorKind::UnknownUnionTag {
                             tag,
@@ -11255,7 +12357,7 @@ mod root {
         /// The table `Envelope` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `Envelope` in the file `crates/quoin-ext-proto/schema/ext.fbs:209`
+        /// * Table `Envelope` in the file `crates/quoin-ext-proto/schema/ext.fbs:236`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct Envelope {
             /// The field `msg` in the table `Envelope`

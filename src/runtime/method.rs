@@ -18,6 +18,12 @@ pub enum MethodBody {
         /// scored by these declared parameter types like a user method.
         param_types: Option<Vec<String>>,
     },
+    /// An extension-backed method (Phase 3): the selector dispatches over the socket to `ext`
+    /// (the owning `Extension` instance, kept GC-rooted via the method table). Whether the send
+    /// is class-side (a constructor) or instance-side is derived from the receiver at dispatch.
+    ExtDispatch {
+        ext: Value<'static>,
+    },
 }
 
 #[derive(Debug)]
@@ -54,11 +60,31 @@ impl NativeMethodState {
         }
     }
 
-    /// The wrapped user `Block` value, or `None` for a native method body.
+    /// An extension-backed method variant (Phase 3): `selector` dispatches over the socket to the
+    /// owning `Extension` instance `ext`.
+    pub fn new_ext(selector: String, ext: Value<'_>) -> Self {
+        let ext_static: Value<'static> = unsafe { transmute(ext) };
+        Self {
+            selector,
+            body: MethodBody::ExtDispatch { ext: ext_static },
+            is_extension: true,
+            next: None,
+        }
+    }
+
+    /// The owning `Extension` instance for an extension-backed method, or `None` otherwise.
+    pub fn ext_dispatch<'gc>(&self) -> Option<Value<'gc>> {
+        match &self.body {
+            MethodBody::ExtDispatch { ext } => Some(unsafe { transmute(*ext) }),
+            _ => None,
+        }
+    }
+
+    /// The wrapped user `Block` value, or `None` for a native or extension-backed method body.
     pub fn get_block<'gc>(&self) -> Option<Value<'gc>> {
         match &self.body {
             MethodBody::UserBlock(block) => Some(unsafe { transmute(*block) }),
-            MethodBody::Native { .. } => None,
+            MethodBody::Native { .. } | MethodBody::ExtDispatch { .. } => None,
         }
     }
 
@@ -67,11 +93,11 @@ impl NativeMethodState {
         self.next.map(|n| unsafe { transmute(n) })
     }
 
-    /// The native function, or `None` for a user block body.
+    /// The native function, or `None` for a user block or extension-backed body.
     pub fn native_func(&self) -> Option<NativeFunc> {
         match &self.body {
             MethodBody::Native { func, .. } => Some(*func),
-            MethodBody::UserBlock(_) => None,
+            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
         }
     }
 
@@ -82,7 +108,7 @@ impl NativeMethodState {
     pub fn native_param_types(&self) -> Option<Vec<String>> {
         match &self.body {
             MethodBody::Native { param_types, .. } => param_types.clone(),
-            MethodBody::UserBlock(_) => None,
+            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
         }
     }
 }
@@ -97,11 +123,20 @@ impl AnyCollect for NativeMethodState {
     }
 
     fn trace_gc<'gc>(&self, cc: &mut dyn Trace<'gc>) {
-        if let MethodBody::UserBlock(block) = &self.body {
-            let block_gc: &Value<'gc> = unsafe { transmute(block) };
-            block_gc.dyn_trace(cc);
+        // Trace whichever `Value` the body holds: a user block, or the `Extension` instance an
+        // extension-backed method dispatches to (its GC root lives here, in the class method table).
+        match &self.body {
+            MethodBody::UserBlock(block) => {
+                let block_gc: &Value<'gc> = unsafe { transmute(block) };
+                block_gc.dyn_trace(cc);
+            }
+            MethodBody::ExtDispatch { ext } => {
+                let ext_gc: &Value<'gc> = unsafe { transmute(ext) };
+                ext_gc.dyn_trace(cc);
+            }
+            // MethodBody::Native holds only a fn pointer — nothing to trace.
+            MethodBody::Native { .. } => {}
         }
-        // MethodBody::Native holds only a fn pointer — nothing to trace.
         if let Some(next) = &self.next {
             let next_gc: &Value<'gc> = unsafe { transmute(next) };
             next_gc.dyn_trace(cc);
