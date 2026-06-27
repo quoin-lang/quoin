@@ -2274,6 +2274,7 @@ impl<'gc> VmState<'gc> {
             }
             QuoinError::ValueError(msg) => self.make_error(mc, "ValueError", msg, None),
             QuoinError::ParseError(msg) => self.make_error(mc, "ParseError", msg, None),
+            QuoinError::ExtensionError(msg) => self.make_error(mc, "Error", msg, None),
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)
             | QuoinError::StackUnderflow(_)

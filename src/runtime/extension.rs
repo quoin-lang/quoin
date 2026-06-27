@@ -623,6 +623,13 @@ fn extension_call<'gc>(
                     let value = vm.handle_table.get(handle).map_err(QuoinError::Other)?;
                     return Ok(CallOutcome::Value(value));
                 }
+                // ext -> host: the call failed recoverably. Raise a catchable Quoin error; the
+                // extension stays alive (a normal terminal frame, not a crash) — `finish_outcome`'s
+                // error path runs `note_if_exited`, which finds the child still running and so
+                // propagates the error without marking the extension dead.
+                Msg::CallReturnError { message } => {
+                    return Err(QuoinError::ExtensionError(message));
+                }
                 host_op => service_host_op(vm, mc, id, epoch, ext_id, host_op)?,
             }
         }

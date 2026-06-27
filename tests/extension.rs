@@ -382,6 +382,35 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_ext_vector_test.qn", &script);
 }
 
+/// A *recoverable* error from an extension-backed class method: the SDK sends `CallReturnError`, the
+/// host raises a *catchable* Quoin error, and — unlike a crash (see `extension_crash_isolation`) —
+/// the extension stays alive and the same instance keeps answering.
+#[test]
+fn extension_class_error_is_catchable() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let script = format!(
+        r#"
+ok = true;
+e = Extension.spawn:'{ext_bin}';
+v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+
+"* a valid index returns normally
+((v.at:0) == 1.0).else:{{ ok = false }};
+
+"* an out-of-range index raises a CATCHABLE error carrying the handler's message
+caught = {{ v.at:9 }}.catch:{{ |ex| ex.message }};
+(caught == 'index 9 out of range (length 3)').else:{{ ok = false }};
+
+"* ...and the extension SURVIVED — the same instance still answers the next sends
+((v.at:1) == 2.0).else:{{ ok = false }};
+(v.sum == 6.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_class_error_test.qn", &script);
+}
+
 /// True if `python3` can import the `flatbuffers` runtime — the Python SDK's only external
 /// dependency. When false, the polyglot tests skip cleanly (e.g. CI without Python set up).
 fn python_fixture_runnable() -> bool {
@@ -540,6 +569,12 @@ vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
 ((va.dot:vb) == 32.0).else:{{ ok = false }};
 mapped = va.map:{{ |x| x * 10.0 }};
 (mapped.sum == 60.0).else:{{ ok = false }};
+
+"* a Python handler that raises -> a CATCHABLE Quoin error (the SDK's CallReturnError), and the
+"* extension stays alive: the same instance still answers the next send
+caught = {{ va.at:9 }}.catch:{{ |ex| ex.message }};
+(caught == 'index 9 out of range (length 3)').else:{{ ok = false }};
+((va.at:1) == 2.0).else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#

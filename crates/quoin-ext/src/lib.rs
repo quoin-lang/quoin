@@ -414,10 +414,18 @@ impl<'a> Arg<'a> {
     }
 }
 
+/// What a class handler (constructor / method / makes) returns. `Ok` is the value; an `Err` is a
+/// *recoverable* error — the SDK sends it as a `CallReturnError` and the host raises a catchable
+/// Quoin error while the extension keeps running (so a SQL error never tears down a connection).
+/// The boxed error accepts anything (`adbc` SQL errors, `io::Error`, …) via `?`.
+pub type HandlerResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
+
 /// Erased per-selector handlers (the concrete `T` is captured at registration and downcast here).
-type CtorFn = Box<dyn Fn(&mut Host, &[Arg]) -> io::Result<Box<dyn Any>>>;
-type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> io::Result<Reply>>;
-type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> io::Result<Box<dyn Any>>>;
+/// `Err(String)` is the recoverable error message → `CallReturnError`; transport/protocol failures
+/// (bad frame, dead instance id) stay `io::Error` at the dispatch/serve level.
+type CtorFn = Box<dyn Fn(&mut Host, &[Arg]) -> Result<Box<dyn Any>, String>>;
+type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Reply, String>>;
+type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> Result<Box<dyn Any>, String>>;
 
 /// One registered class's erased handler tables, keyed by selector.
 struct ClassReg {
@@ -427,10 +435,11 @@ struct ClassReg {
     makes: HashMap<String, MakesFn>,
 }
 
-/// Downcast a table entry to the concrete type the handler was registered with.
-fn downcast<T: 'static>(obj: &mut dyn Any) -> io::Result<&mut T> {
+/// Downcast a table entry to the concrete type the handler was registered with. A mismatch can only
+/// be a host/protocol bug; surfaced as a recoverable handler error rather than crashing the loop.
+fn downcast<T: 'static>(obj: &mut dyn Any) -> Result<&mut T, String> {
     obj.downcast_mut::<T>()
-        .ok_or_else(|| invalid_data("extension instance is not of the expected type"))
+        .ok_or_else(|| "extension instance is not of the expected type".to_string())
 }
 
 /// Configures one extension-backed class, backed by the Rust type `T`. Class-side `constructor`s
@@ -451,11 +460,15 @@ impl<T: 'static> ClassBuilder<T> {
     pub fn constructor(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut Host, &[Arg]) -> T + 'static,
+        f: impl Fn(&mut Host, &[Arg]) -> HandlerResult<T> + 'static,
     ) -> &mut Self {
         self.constructors.insert(
             selector.to_string(),
-            Box::new(move |host, args| Ok(Box::new(f(host, args)) as Box<dyn Any>)),
+            Box::new(move |host, args| {
+                f(host, args)
+                    .map(|t| Box::new(t) as Box<dyn Any>)
+                    .map_err(|e| e.to_string())
+            }),
         );
         self
     }
@@ -464,11 +477,15 @@ impl<T: 'static> ClassBuilder<T> {
     pub fn method<R: Into<Reply>>(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut T, &mut Host, &[Arg]) -> R + 'static,
+        f: impl Fn(&mut T, &mut Host, &[Arg]) -> HandlerResult<R> + 'static,
     ) -> &mut Self {
         self.methods.insert(
             selector.to_string(),
-            Box::new(move |obj, host, args| Ok(f(downcast::<T>(obj)?, host, args).into())),
+            Box::new(move |obj, host, args| {
+                f(downcast::<T>(obj)?, host, args)
+                    .map(Into::into)
+                    .map_err(|e| e.to_string())
+            }),
         );
         self
     }
@@ -479,12 +496,14 @@ impl<T: 'static> ClassBuilder<T> {
     pub fn makes<U: 'static>(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut T, &mut Host, &[Arg]) -> U + 'static,
+        f: impl Fn(&mut T, &mut Host, &[Arg]) -> HandlerResult<U> + 'static,
     ) -> &mut Self {
         self.makes.insert(
             selector.to_string(),
             Box::new(move |obj, host, args| {
-                Ok(Box::new(f(downcast::<T>(obj)?, host, args)) as Box<dyn Any>)
+                f(downcast::<T>(obj)?, host, args)
+                    .map(|u| Box::new(u) as Box<dyn Any>)
+                    .map_err(|e| e.to_string())
             }),
         );
         self
@@ -637,7 +656,10 @@ impl Extension {
             })?;
             let obj = {
                 let args = resolve_args(method_args, table)?;
-                ctor(&mut host, &args)?
+                match ctor(&mut host, &args) {
+                    Ok(o) => o,
+                    Err(message) => return Ok(Msg::CallReturnError { message }),
+                }
             };
             let class_name = self.class_name_of(&*obj);
             Ok(Msg::CallReturnResource {
@@ -646,25 +668,33 @@ impl Extension {
             })
         } else if let Some(method) = class.methods.get(op) {
             // Take the receiver out of the table so its `&mut` can't alias an ext-instance argument
-            // resolved from the same table, then put it back under its id.
+            // resolved from the same table, then put it back under its id — even if the handler
+            // errors, so a recoverable error (e.g. a SQL error) leaves the instance usable.
             let mut recv_box = table
                 .take(recv)
                 .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
-            let reply = {
+            let result = {
                 let args = resolve_args(method_args, table)?;
-                method(recv_box.as_mut(), &mut host, &args)?
+                method(recv_box.as_mut(), &mut host, &args)
             };
             table.reinsert(recv, recv_box);
-            Ok(reply_to_msg(reply))
+            match result {
+                Ok(reply) => Ok(reply_to_msg(reply)),
+                Err(message) => Ok(Msg::CallReturnError { message }),
+            }
         } else if let Some(makes) = class.makes.get(op) {
             let mut recv_box = table
                 .take(recv)
                 .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
-            let new_obj = {
+            let result = {
                 let args = resolve_args(method_args, table)?;
-                makes(recv_box.as_mut(), &mut host, &args)?
+                makes(recv_box.as_mut(), &mut host, &args)
             };
             table.reinsert(recv, recv_box);
+            let new_obj = match result {
+                Ok(o) => o,
+                Err(message) => return Ok(Msg::CallReturnError { message }),
+            };
             let class_name = self.class_name_of(&*new_obj);
             Ok(Msg::CallReturnResource {
                 resource: table.insert(new_obj),

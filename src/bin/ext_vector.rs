@@ -91,38 +91,53 @@ fn main() {
 
     let mut ext = Extension::new();
     ext.class::<Vector>("Vector", |c| {
-        c.constructor("ofFloats:", |_host, args| Vector {
-            data: float_list(args),
+        c.constructor("ofFloats:", |_host, args| {
+            Ok(Vector {
+                data: float_list(args),
+            })
         });
-        c.method("sum", |v, _host, _args| DataValue::Float(v.sum()));
+        c.method("sum", |v, _host, _args| Ok(DataValue::Float(v.sum())));
         c.method("length", |v, _host, _args| {
-            DataValue::Int(v.data.len() as i64)
+            Ok(DataValue::Int(v.data.len() as i64))
         });
-        c.makes("scale:", |v, _host, args| v.scaled(arg_f64(&args[0])));
+        // A *fallible* method: an out-of-range index returns `Err`, which the SDK turns into a
+        // `CallReturnError` — the host raises a catchable Quoin error and the extension stays alive.
+        c.method("at:", |v, _host, args| {
+            let i = arg_f64(&args[0]) as usize;
+            v.data
+                .get(i)
+                .map(|x| DataValue::Float(*x))
+                .ok_or_else(|| format!("index {i} out of range (length {})", v.data.len()).into())
+        });
+        c.makes("scale:", |v, _host, args| Ok(v.scaled(arg_f64(&args[0]))));
         // An ext-instance argument: the other `Vector` is resolved to a live instance.
         c.method("dot:", |v, _host, args| {
             let other = args[0].object::<Vector>().expect("dot: expects a Vector");
-            DataValue::Float(v.dot(other))
+            Ok(DataValue::Float(v.dot(other)))
         });
         // A host-block argument: apply the block to each element, building a new `Vector`.
         c.makes("map:", |v, host, args| {
             let block = args[0].handle().expect("map: expects a block");
             let inputs: Vec<DataValue> = v.data.iter().map(|x| DataValue::Float(*x)).collect();
-            let results = host.apply_block(block, &inputs).expect("apply block");
-            Vector {
+            let results = host.apply_block(block, &inputs)?;
+            Ok(Vector {
                 data: results.iter().map(as_f64).collect(),
-            }
+            })
         });
     });
     ext.class::<Matrix>("Matrix", |c| {
-        c.constructor("ofRows:", |_host, args| Matrix {
-            rows: float_rows(args),
+        c.constructor("ofRows:", |_host, args| {
+            Ok(Matrix {
+                rows: float_rows(args),
+            })
         });
         c.method("rowCount", |m, _host, _args| {
-            DataValue::Int(m.rows.len() as i64)
+            Ok(DataValue::Int(m.rows.len() as i64))
         });
         // Returns a `Vector` — a different registered class (cross-class return).
-        c.makes("row:", |m, _host, args| m.row(arg_f64(&args[0]) as usize));
+        c.makes("row:", |m, _host, args| {
+            Ok(m.row(arg_f64(&args[0]) as usize))
+        });
     });
     ext.serve(&path).expect("ext_vector serve loop");
 }

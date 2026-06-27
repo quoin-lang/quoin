@@ -53,6 +53,7 @@ class Message(object):
     HostOpReturn = 18
     GetManifest = 19
     ManifestReturn = 20
+    CallReturnError = 21
 
 
 class ArrowArray(object):
@@ -1033,6 +1034,42 @@ def CallReturnAddResult(builder, result):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(result), 0)
 
 def CallReturnEnd(builder):
+    return builder.EndObject()
+
+
+
+class CallReturnError(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = CallReturnError()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsCallReturnError(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # CallReturnError
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # CallReturnError
+    def Message(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
+def CallReturnErrorStart(builder):
+    builder.StartObject(1)
+
+def CallReturnErrorAddMessage(builder, message):
+    builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(message), 0)
+
+def CallReturnErrorEnd(builder):
     return builder.EndObject()
 
 

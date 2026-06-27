@@ -30,6 +30,14 @@ class Vector:
     def length(self):
         return len(self.data)
 
+    def at(self, i):
+        # A *fallible* method: out-of-range raises, which the SDK turns into a `CallReturnError` so
+        # the host raises a catchable Quoin error and the extension stays alive.
+        i = int(i)
+        if i < 0 or i >= len(self.data):
+            raise IndexError(f"index {i} out of range (length {len(self.data)})")
+        return self.data[i]
+
     def scale(self, factor):
         return Vector([x * factor for x in self.data])
 
@@ -65,6 +73,7 @@ if __name__ == "__main__":
         methods={
             "sum": Vector.sum,
             "length": Vector.length,
+            "at:": Vector.at,
             "scale:": Vector.scale,
             "dot:": Vector.dot,
             "map:": Vector.map,

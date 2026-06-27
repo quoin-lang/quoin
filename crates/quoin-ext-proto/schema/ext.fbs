@@ -105,6 +105,13 @@ table CallReturn {
     result: string;
 }
 
+// ext -> host: the call failed with a recoverable error (e.g. a SQL error). The host raises a
+// catchable Quoin error carrying `message`; the extension stays alive (unlike a crash). A
+// terminal, like the other `CallReturn*` frames.
+table CallReturnError {
+    message: string;
+}
+
 // ext -> host: the originating call is finished, returning an ext-side resource the host will
 // hold as an opaque token (and reap on drop). `resource` is the extension-assigned id. For an
 // extension-backed-class method (Phase 3), `class_name` names the registered class the resource is
@@ -250,6 +257,7 @@ union Message {
     HostOpReturn,
     GetManifest,
     ManifestReturn,
+    CallReturnError,
 }
 
 table Envelope {
