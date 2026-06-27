@@ -34,6 +34,20 @@ class Vector:
         return Vector([x * factor for x in self.data])
 
 
+class Matrix:
+    """A second class — ``row`` returns a ``Vector``, exercising cross-class returns (the SDK detects
+    the returned ``Vector`` with ``isinstance`` and names it so the host wraps it correctly)."""
+
+    def __init__(self, rows):
+        self.rows = [[float(x) for x in row] for row in rows]
+
+    def rowCount(self):
+        return len(self.rows)
+
+    def row(self, i):
+        return Vector(self.rows[int(i)])
+
+
 if __name__ == "__main__":
     ext = quoin_ext.Extension()
     ext.register(
@@ -41,5 +55,11 @@ if __name__ == "__main__":
         Vector,
         constructors={"ofFloats:": Vector},
         methods={"sum": Vector.sum, "length": Vector.length, "scale:": Vector.scale},
+    )
+    ext.register(
+        "Matrix",
+        Matrix,
+        constructors={"ofRows:": Matrix},
+        methods={"rowCount": Matrix.rowCount, "row:": Matrix.row},
     )
     ext.serve(sys.argv[1])

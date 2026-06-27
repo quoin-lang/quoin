@@ -1,11 +1,10 @@
-//! An out-of-process Quoin extension that *provides a real Quoin class* — `Vector` (Phase 3,
-//! extension-backed classes; see `tests/extension.rs`). The SDK owns the instances, so writing the
+//! An out-of-process Quoin extension that *provides* the classes `Vector` and `Matrix` (Phase 3,
+//! extension-backed classes; see `tests/extension.rs`). The SDK owns the instances, so writing each
 //! class is just writing a Rust type and registering its selectors:
 //!
-//! - `Vector ofFloats: aList` (class-side constructor) -> a new `Vector` instance.
-//! - `v sum`      (instance method)            -> the element sum, as a Double.
-//! - `v length`   (instance method)            -> the element count, as an Integer.
-//! - `v scale: f` (instance method that *makes*) -> a new, scaled `Vector` instance.
+//! - `Vector ofFloats: aList` (constructor) -> a new `Vector`; `v sum` / `v length` / `v scale: f`.
+//! - `Matrix ofRows: aListOfLists` (constructor); `m rowCount`; `m row: i` -> a **`Vector`** — a
+//!   *cross-class* return (a method on `Matrix` returning an instance of a different class).
 //!
 //! A test/example fixture, not a shipped feature.
 
@@ -29,6 +28,19 @@ impl Vector {
     }
 }
 
+/// A second class — `row:` returns a `Vector`, exercising cross-class returns.
+struct Matrix {
+    rows: Vec<Vec<f64>>,
+}
+
+impl Matrix {
+    fn row(&self, i: usize) -> Vector {
+        Vector {
+            data: self.rows.get(i).cloned().unwrap_or_default(),
+        }
+    }
+}
+
 /// Read a numeric `DataValue` as an `f64` (a Quoin Double or Integer).
 fn as_f64(d: &DataValue) -> f64 {
     match d {
@@ -38,10 +50,33 @@ fn as_f64(d: &DataValue) -> f64 {
     }
 }
 
+/// Read a numeric `DataValue` as a `usize` index.
+fn as_usize(d: &DataValue) -> usize {
+    match d {
+        DataValue::Int(i) => *i as usize,
+        DataValue::Float(f) => *f as usize,
+        _ => 0,
+    }
+}
+
 /// Read the constructor's list argument (`args[0]` is a `DvList` of numbers) into a `Vec<f64>`.
 fn float_list(args: &[DataValue]) -> Vec<f64> {
     match args.first() {
         Some(DataValue::List(items)) => items.iter().map(as_f64).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Read the constructor's list-of-lists argument (`args[0]` is a `DvList` of `DvList`s) into rows.
+fn float_rows(args: &[DataValue]) -> Vec<Vec<f64>> {
+    match args.first() {
+        Some(DataValue::List(rows)) => rows
+            .iter()
+            .map(|r| match r {
+                DataValue::List(items) => items.iter().map(as_f64).collect(),
+                _ => Vec::new(),
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -61,6 +96,16 @@ fn main() {
             DataValue::Int(v.data.len() as i64)
         });
         c.makes("scale:", |v, _host, args| v.scaled(as_f64(&args[0])));
+    });
+    ext.class::<Matrix>("Matrix", |c| {
+        c.constructor("ofRows:", |_host, args| Matrix {
+            rows: float_rows(args),
+        });
+        c.method("rowCount", |m, _host, _args| {
+            DataValue::Int(m.rows.len() as i64)
+        });
+        // Returns a `Vector` — a different registered class (cross-class return).
+        c.makes("row:", |m, _host, args| m.row(as_usize(&args[0])));
     });
     ext.serve(&path).expect("ext_vector serve loop");
 }

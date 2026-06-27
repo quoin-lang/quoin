@@ -87,8 +87,9 @@ pub enum Msg {
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
     /// ext -> host: the call returns an ext-side resource the host will hold as an opaque token
-    /// (reaped on drop). `resource` is the extension-assigned id.
-    CallReturnResource { resource: u64 },
+    /// (reaped on drop). `resource` is the extension-assigned id; `class_name` names the registered
+    /// extension-backed class it's an instance of (Phase 3; empty = the opaque `ExtResource`).
+    CallReturnResource { resource: u64, class_name: String },
     /// ext -> host: the call returns a bulk `Array` (the data plane).
     CallReturnArray { array: ArrowArray },
     /// ext -> host: the call returns a structured value (materialized as a nested Quoin Value).
@@ -171,11 +172,13 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
         Msg::CallReturn { result } => g::Message::CallReturn(Box::new(g::CallReturn {
             result: Some(result.clone()),
         })),
-        Msg::CallReturnResource { resource } => {
-            g::Message::CallReturnResource(Box::new(g::CallReturnResource {
-                resource: *resource,
-            }))
-        }
+        Msg::CallReturnResource {
+            resource,
+            class_name,
+        } => g::Message::CallReturnResource(Box::new(g::CallReturnResource {
+            resource: *resource,
+            class_name: Some(class_name.clone()),
+        })),
         Msg::CallReturnArray { array } => {
             g::Message::CallReturnArray(Box::new(g::CallReturnArray {
                 array: Some(Box::new(encode_arrow(array))),
@@ -418,6 +421,7 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         },
         g::MessageRef::CallReturnResource(c) => Msg::CallReturnResource {
             resource: c.resource()?,
+            class_name: c.class_name()?.unwrap_or_default().to_string(),
         },
         g::MessageRef::CallReturnArray(c) => Msg::CallReturnArray {
             array: match c.array()? {

@@ -5569,7 +5569,7 @@ mod root {
         /// The table `CallReturnResource` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturnResource` in the file `crates/quoin-ext-proto/schema/ext.fbs:95`
+        /// * Table `CallReturnResource` in the file `crates/quoin-ext-proto/schema/ext.fbs:98`
         #[derive(
             Clone,
             Debug,
@@ -5584,12 +5584,17 @@ mod root {
         pub struct CallReturnResource {
             /// The field `resource` in the table `CallReturnResource`
             pub resource: u64,
+            /// The field `class_name` in the table `CallReturnResource`
+            pub class_name: ::core::option::Option<::planus::alloc::string::String>,
         }
 
         #[allow(clippy::derivable_impls)]
         impl ::core::default::Default for CallReturnResource {
             fn default() -> Self {
-                Self { resource: 0 }
+                Self {
+                    resource: 0,
+                    class_name: ::core::default::Default::default(),
+                }
             }
         }
 
@@ -5604,19 +5609,31 @@ mod root {
             pub fn create(
                 builder: &mut ::planus::Builder,
                 field_resource: impl ::planus::WriteAsDefault<u64, u64>,
+                field_class_name: impl ::planus::WriteAsOptional<
+                    ::planus::Offset<::core::primitive::str>,
+                >,
             ) -> ::planus::Offset<Self> {
                 let prepared_resource = field_resource.prepare(builder, &0);
+                let prepared_class_name = field_class_name.prepare(builder);
 
-                let mut table_writer: ::planus::table_writer::TableWriter<6> =
+                let mut table_writer: ::planus::table_writer::TableWriter<8> =
                     ::core::default::Default::default();
                 if prepared_resource.is_some() {
                     table_writer.write_entry::<u64>(0);
+                }
+                if prepared_class_name.is_some() {
+                    table_writer.write_entry::<::planus::Offset<str>>(1);
                 }
 
                 unsafe {
                     table_writer.finish(builder, |object_writer| {
                         if let ::core::option::Option::Some(prepared_resource) = prepared_resource {
                             object_writer.write::<_, _, 8>(&prepared_resource);
+                        }
+                        if let ::core::option::Option::Some(prepared_class_name) =
+                            prepared_class_name
+                        {
+                            object_writer.write::<_, _, 4>(&prepared_class_name);
                         }
                     });
                 }
@@ -5654,7 +5671,7 @@ mod root {
                 &self,
                 builder: &mut ::planus::Builder,
             ) -> ::planus::Offset<CallReturnResource> {
-                CallReturnResource::create(builder, self.resource)
+                CallReturnResource::create(builder, self.resource, &self.class_name)
             }
         }
 
@@ -5687,6 +5704,26 @@ mod root {
         }
 
         impl<T0> CallReturnResourceBuilder<(T0,)> {
+            /// Setter for the [`class_name` field](CallReturnResource#structfield.class_name).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn class_name<T1>(self, value: T1) -> CallReturnResourceBuilder<(T0, T1)>
+            where
+                T1: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+            {
+                let (v0,) = self.0;
+                CallReturnResourceBuilder((v0, value))
+            }
+
+            /// Sets the [`class_name` field](CallReturnResource#structfield.class_name) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn class_name_as_null(self) -> CallReturnResourceBuilder<(T0, ())> {
+                self.class_name(())
+            }
+        }
+
+        impl<T0, T1> CallReturnResourceBuilder<(T0, T1)> {
             /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [CallReturnResource].
             #[inline]
             pub fn finish(
@@ -5700,9 +5737,11 @@ mod root {
             }
         }
 
-        impl<T0: ::planus::WriteAsDefault<u64, u64>>
-            ::planus::WriteAs<::planus::Offset<CallReturnResource>>
-            for CallReturnResourceBuilder<(T0,)>
+        impl<
+            T0: ::planus::WriteAsDefault<u64, u64>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+        > ::planus::WriteAs<::planus::Offset<CallReturnResource>>
+            for CallReturnResourceBuilder<(T0, T1)>
         {
             type Prepared = ::planus::Offset<CallReturnResource>;
 
@@ -5715,9 +5754,11 @@ mod root {
             }
         }
 
-        impl<T0: ::planus::WriteAsDefault<u64, u64>>
-            ::planus::WriteAsOptional<::planus::Offset<CallReturnResource>>
-            for CallReturnResourceBuilder<(T0,)>
+        impl<
+            T0: ::planus::WriteAsDefault<u64, u64>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+        > ::planus::WriteAsOptional<::planus::Offset<CallReturnResource>>
+            for CallReturnResourceBuilder<(T0, T1)>
         {
             type Prepared = ::planus::Offset<CallReturnResource>;
 
@@ -5730,16 +5771,18 @@ mod root {
             }
         }
 
-        impl<T0: ::planus::WriteAsDefault<u64, u64>> ::planus::WriteAsOffset<CallReturnResource>
-            for CallReturnResourceBuilder<(T0,)>
+        impl<
+            T0: ::planus::WriteAsDefault<u64, u64>,
+            T1: ::planus::WriteAsOptional<::planus::Offset<::core::primitive::str>>,
+        > ::planus::WriteAsOffset<CallReturnResource> for CallReturnResourceBuilder<(T0, T1)>
         {
             #[inline]
             fn prepare(
                 &self,
                 builder: &mut ::planus::Builder,
             ) -> ::planus::Offset<CallReturnResource> {
-                let (v0,) = &self.0;
-                CallReturnResource::create(builder, v0)
+                let (v0, v1) = &self.0;
+                CallReturnResource::create(builder, v0, v1)
             }
         }
 
@@ -5757,12 +5800,25 @@ mod root {
                         .unwrap_or(0),
                 )
             }
+
+            /// Getter for the [`class_name` field](CallReturnResource#structfield.class_name).
+            #[inline]
+            pub fn class_name(
+                &self,
+            ) -> ::planus::Result<::core::option::Option<&'a ::core::primitive::str>> {
+                self.0.access(1, "CallReturnResource", "class_name")
+            }
         }
 
         impl<'a> ::core::fmt::Debug for CallReturnResourceRef<'a> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 let mut f = f.debug_struct("CallReturnResourceRef");
                 f.field("resource", &self.resource());
+                if let ::core::option::Option::Some(field_class_name) =
+                    self.class_name().transpose()
+                {
+                    f.field("class_name", &field_class_name);
+                }
                 f.finish()
             }
         }
@@ -5774,6 +5830,7 @@ mod root {
             fn try_from(value: CallReturnResourceRef<'a>) -> ::planus::Result<Self> {
                 ::core::result::Result::Ok(Self {
                     resource: ::core::convert::TryInto::try_into(value.resource()?)?,
+                    class_name: value.class_name()?.map(::core::convert::Into::into),
                 })
             }
         }
@@ -5854,7 +5911,7 @@ mod root {
         /// The table `CallReturnArray` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturnArray` in the file `crates/quoin-ext-proto/schema/ext.fbs:100`
+        /// * Table `CallReturnArray` in the file `crates/quoin-ext-proto/schema/ext.fbs:104`
         #[derive(
             Clone,
             Debug,
@@ -6144,7 +6201,7 @@ mod root {
         /// The table `CallReturnData` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturnData` in the file `crates/quoin-ext-proto/schema/ext.fbs:105`
+        /// * Table `CallReturnData` in the file `crates/quoin-ext-proto/schema/ext.fbs:109`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct CallReturnData {
             /// The field `value` in the table `CallReturnData`
@@ -6409,7 +6466,7 @@ mod root {
         /// The table `MakeString` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `MakeString` in the file `crates/quoin-ext-proto/schema/ext.fbs:110`
+        /// * Table `MakeString` in the file `crates/quoin-ext-proto/schema/ext.fbs:114`
         #[derive(
             Clone,
             Debug,
@@ -6677,7 +6734,7 @@ mod root {
         /// The table `HandleToString` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `HandleToString` in the file `crates/quoin-ext-proto/schema/ext.fbs:115`
+        /// * Table `HandleToString` in the file `crates/quoin-ext-proto/schema/ext.fbs:119`
         #[derive(
             Clone,
             Debug,
@@ -6942,7 +6999,7 @@ mod root {
         /// The table `Retain` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `Retain` in the file `crates/quoin-ext-proto/schema/ext.fbs:121`
+        /// * Table `Retain` in the file `crates/quoin-ext-proto/schema/ext.fbs:125`
         #[derive(
             Clone,
             Debug,
@@ -7200,7 +7257,7 @@ mod root {
         /// The table `Release` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `Release` in the file `crates/quoin-ext-proto/schema/ext.fbs:126`
+        /// * Table `Release` in the file `crates/quoin-ext-proto/schema/ext.fbs:130`
         #[derive(
             Clone,
             Debug,
@@ -7468,7 +7525,7 @@ mod root {
         /// The table `CallMethodOnHandle` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallMethodOnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:134`
+        /// * Table `CallMethodOnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:138`
         #[derive(
             Clone,
             Debug,
@@ -7854,7 +7911,7 @@ mod root {
         /// The table `InvokeBlock` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `InvokeBlock` in the file `crates/quoin-ext-proto/schema/ext.fbs:143`
+        /// * Table `InvokeBlock` in the file `crates/quoin-ext-proto/schema/ext.fbs:147`
         #[derive(
             Clone,
             Debug,
@@ -8181,7 +8238,7 @@ mod root {
         /// The table `InvokeBlockReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `InvokeBlockReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:150`
+        /// * Table `InvokeBlockReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:154`
         #[derive(
             Clone,
             Debug,
@@ -8519,7 +8576,7 @@ mod root {
         /// The table `HostOpReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `HostOpReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:158`
+        /// * Table `HostOpReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:162`
         #[derive(
             Clone,
             Debug,
@@ -8879,7 +8936,7 @@ mod root {
         /// The table `GetGlobal` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `GetGlobal` in the file `crates/quoin-ext-proto/schema/ext.fbs:167`
+        /// * Table `GetGlobal` in the file `crates/quoin-ext-proto/schema/ext.fbs:171`
         #[derive(
             Clone,
             Debug,
@@ -9147,7 +9204,7 @@ mod root {
         /// The table `MakeValue` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `MakeValue` in the file `crates/quoin-ext-proto/schema/ext.fbs:173`
+        /// * Table `MakeValue` in the file `crates/quoin-ext-proto/schema/ext.fbs:177`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct MakeValue {
             /// The field `value` in the table `MakeValue`
@@ -9411,7 +9468,7 @@ mod root {
         /// The table `ReadHandle` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `ReadHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:179`
+        /// * Table `ReadHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:183`
         #[derive(
             Clone,
             Debug,
@@ -9673,7 +9730,7 @@ mod root {
         /// The table `ReadHandleReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `ReadHandleReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:185`
+        /// * Table `ReadHandleReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:189`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ReadHandleReturn {
             /// The field `value` in the table `ReadHandleReturn`
@@ -10003,7 +10060,7 @@ mod root {
         /// The table `CallReturnHandle` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `CallReturnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:191`
+        /// * Table `CallReturnHandle` in the file `crates/quoin-ext-proto/schema/ext.fbs:195`
         #[derive(
             Clone,
             Debug,
@@ -10284,7 +10341,7 @@ mod root {
         /// The table `ClassDecl` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `ClassDecl` in the file `crates/quoin-ext-proto/schema/ext.fbs:198`
+        /// * Table `ClassDecl` in the file `crates/quoin-ext-proto/schema/ext.fbs:202`
         #[derive(
             Clone,
             Debug,
@@ -10687,7 +10744,7 @@ mod root {
         /// The table `GetManifest` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `GetManifest` in the file `crates/quoin-ext-proto/schema/ext.fbs:205`
+        /// * Table `GetManifest` in the file `crates/quoin-ext-proto/schema/ext.fbs:209`
         #[derive(
             Clone,
             Debug,
@@ -10898,7 +10955,7 @@ mod root {
         /// The table `ManifestReturn` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `ManifestReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:209`
+        /// * Table `ManifestReturn` in the file `crates/quoin-ext-proto/schema/ext.fbs:213`
         #[derive(
             Clone,
             Debug,
@@ -11178,7 +11235,7 @@ mod root {
         /// The union `Message` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Union `Message` in the file `crates/quoin-ext-proto/schema/ext.fbs:213`
+        /// * Union `Message` in the file `crates/quoin-ext-proto/schema/ext.fbs:217`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum Message {
             /// The variant of type `Call` in the union `Message`
@@ -12357,7 +12414,7 @@ mod root {
         /// The table `Envelope` in the namespace `quoin_ext_proto`
         ///
         /// Generated from these locations:
-        /// * Table `Envelope` in the file `crates/quoin-ext-proto/schema/ext.fbs:236`
+        /// * Table `Envelope` in the file `crates/quoin-ext-proto/schema/ext.fbs:240`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct Envelope {
             /// The field `msg` in the table `Envelope`

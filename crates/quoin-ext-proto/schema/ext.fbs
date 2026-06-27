@@ -91,9 +91,13 @@ table CallReturn {
 }
 
 // ext -> host: the originating call is finished, returning an ext-side resource the host will
-// hold as an opaque token (and reap on drop). `resource` is the extension-assigned id.
+// hold as an opaque token (and reap on drop). `resource` is the extension-assigned id. For an
+// extension-backed-class method (Phase 3), `class_name` names the registered class the resource is
+// an instance of — so a method can return an instance of *any* of the extension's classes, not just
+// the one it was dispatched on (cross-class returns). Empty = the opaque `ExtResource` token.
 table CallReturnResource {
     resource: uint64;
+    class_name: string;
 }
 
 // ext -> host: the originating call is finished, returning a bulk Array (the data plane).

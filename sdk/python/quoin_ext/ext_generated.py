@@ -967,11 +967,21 @@ class CallReturnResource(object):
             return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
         return 0
 
+    # CallReturnResource
+    def ClassName(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
 def CallReturnResourceStart(builder):
-    builder.StartObject(1)
+    builder.StartObject(2)
 
 def CallReturnResourceAddResource(builder, resource):
     builder.PrependUint64Slot(0, resource, 0)
+
+def CallReturnResourceAddClassName(builder, className):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(className), 0)
 
 def CallReturnResourceEnd(builder):
     return builder.EndObject()

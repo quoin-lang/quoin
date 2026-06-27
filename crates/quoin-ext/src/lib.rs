@@ -23,7 +23,7 @@
 //! Structured args arrive via [`Host::data`]; bulk columns via [`Host::arrays`]. Host values the
 //! extension holds are opaque [`Handle`]s indexing a GC-rooted table on the host (§2).
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -339,7 +339,10 @@ pub fn serve<R: Into<Reply>>(
 fn reply_to_msg(reply: Reply) -> Msg {
     match reply {
         Reply::Scalar(result) => Msg::CallReturn { result },
-        Reply::Resource(resource) => Msg::CallReturnResource { resource },
+        Reply::Resource(resource) => Msg::CallReturnResource {
+            resource,
+            class_name: String::new(),
+        },
         Reply::Array(array) => Msg::CallReturnArray { array },
         Reply::Data(value) => Msg::CallReturnData { value },
         Reply::Handle(handle) => Msg::CallReturnHandle { handle },
@@ -416,11 +419,13 @@ impl<T: 'static> ClassBuilder<T> {
         self
     }
 
-    /// An instance-side method that yields a new instance of this class (e.g. `scale:` / `clone`).
-    pub fn makes(
+    /// An instance-side method that yields a new instance — of this class (`scale:` / `clone`) or
+    /// of *any* registered class (`Matrix.row:` -> `Vector`, a cross-class return). The returned
+    /// type's registered class is recovered by `TypeId` at dispatch, so the host wraps it correctly.
+    pub fn makes<U: 'static>(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut T, &mut Host, &[DataValue]) -> T + 'static,
+        f: impl Fn(&mut T, &mut Host, &[DataValue]) -> U + 'static,
     ) -> &mut Self {
         self.makes.insert(
             selector.to_string(),
@@ -447,12 +452,16 @@ impl<T: 'static> ClassBuilder<T> {
 #[derive(Default)]
 pub struct Extension {
     classes: Vec<ClassReg>,
+    /// Maps each registered Rust type to its Quoin class name, so an instance returned by a method
+    /// (of this class or another) is wrapped as the right class on the host — cross-class returns.
+    type_names: HashMap<TypeId, String>,
 }
 
 impl Extension {
     pub fn new() -> Self {
         Self {
             classes: Vec::new(),
+            type_names: HashMap::new(),
         }
     }
 
@@ -463,6 +472,7 @@ impl Extension {
         name: &str,
         build: impl FnOnce(&mut ClassBuilder<T>),
     ) -> &mut Self {
+        self.type_names.insert(TypeId::of::<T>(), name.to_string());
         let mut cb = ClassBuilder {
             name: name.to_string(),
             constructors: HashMap::new(),
@@ -511,6 +521,16 @@ impl Extension {
             }
         }
         Ok(())
+    }
+
+    /// The registered Quoin class name for a freshly built instance, recovered from its concrete
+    /// type — so a method returning an instance of *any* registered class is wrapped correctly
+    /// (cross-class returns). Empty if the type isn't registered (defensively, an `ExtResource`).
+    fn class_name_of(&self, obj: &dyn Any) -> String {
+        self.type_names
+            .get(&obj.type_id())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The `ManifestReturn` describing every registered class.
@@ -562,8 +582,10 @@ impl Extension {
                 invalid_data(format!("no constructor '{op}' on class '{class_name}'"))
             })?;
             let obj = ctor(&mut host, &args)?;
+            let class_name = self.class_name_of(&*obj);
             Ok(Msg::CallReturnResource {
                 resource: table.insert(obj),
+                class_name,
             })
         } else if let Some(method) = class.methods.get(op) {
             let obj = table
@@ -579,8 +601,10 @@ impl Extension {
                     .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
                 makes(obj.as_mut(), &mut host, &args)?
             };
+            let class_name = self.class_name_of(&*new_obj);
             Ok(Msg::CallReturnResource {
                 resource: table.insert(new_obj),
+                class_name,
             })
         } else {
             Err(invalid_data(format!(

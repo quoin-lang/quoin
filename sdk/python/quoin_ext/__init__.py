@@ -381,10 +381,15 @@ def _encode_call_return(result):
     return _envelope(b, g.Message.CallReturn, g.CallReturnEnd(b))
 
 
-def _encode_call_return_resource(resource_id):
+def _encode_call_return_resource(resource_id, class_name=""):
     b = flatbuffers.Builder(64)
+    # `class_name` (Phase 3) names the registered class the resource is an instance of, so a method
+    # can return an instance of any of the extension's classes (cross-class returns); "" = ExtResource.
+    name_off = b.CreateString(class_name) if class_name else None
     g.CallReturnResourceStart(b)
     g.CallReturnResourceAddResource(b, resource_id)
+    if name_off is not None:
+        g.CallReturnResourceAddClassName(b, name_off)
     return _envelope(b, g.Message.CallReturnResource, g.CallReturnResourceEnd(b))
 
 
@@ -747,6 +752,14 @@ class Extension:
             for reg in self._classes.values()
         ]
 
+    def _class_name_of(self, obj):
+        """The registered Quoin class name for an instance (so a method returning an instance of any
+        registered class is wrapped correctly — cross-class returns), or '' if it isn't registered."""
+        for reg in self._classes.values():
+            if isinstance(obj, reg.cls):
+                return reg.name
+        return ""
+
     def _dispatch(self, frame, table, registered_types):
         """Route one method ``Call`` to its handler and return the terminal reply frame."""
         op, class_name, recv, releases, data = _decode_class_call(frame)
@@ -763,7 +776,8 @@ class Extension:
             ctor = reg.constructors.get(op)
             if ctor is None:
                 raise ValueError(f"no constructor '{op}' on class '{class_name}'")
-            return _encode_call_return_resource(table.insert(ctor(*args)))
+            obj = ctor(*args)
+            return _encode_call_return_resource(table.insert(obj), self._class_name_of(obj))
         method = reg.methods.get(op)
         if method is None:
             raise ValueError(f"no method '{op}' on class '{class_name}'")
@@ -773,5 +787,5 @@ class Extension:
         result = method(instance, *args)
         # A returned registered instance becomes a new ext-side object; anything else is data.
         if isinstance(result, registered_types):
-            return _encode_call_return_resource(table.insert(result))
+            return _encode_call_return_resource(table.insert(result), self._class_name_of(result))
         return _encode_reply(result)

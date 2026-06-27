@@ -356,6 +356,15 @@ w = v.scale:2.0;
 "* the receiver is unchanged — distinct instances, each its own ext-side object
 (v.sum == 6.0).else:{{ ok = false }};
 
+"* cross-class return: a `Matrix` method returns a `Vector` instance, wrapped as the `Vector` class
+"* (so it responds to Vector's methods) — a method may return an instance of any of the ext's classes
+m = Matrix.ofRows:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
+(m.rowCount == 2).else:{{ ok = false }};
+r0 = m.row:0;
+(r0.sum == 3.0).else:{{ ok = false }};
+(r0.length == 2).else:{{ ok = false }};
+((m.row:1).sum == 7.0).else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
@@ -506,6 +515,13 @@ v = Vector.ofFloats:#( 1.0 2.0 3.0 );
 w = v.scale:2.0;
 (w.sum == 12.0).else:{{ ok = false }};
 (v.sum == 6.0).else:{{ ok = false }};
+
+"* cross-class return: a Python `Matrix` method returns a `Vector`, wrapped as the `Vector` class
+m = Matrix.ofRows:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
+(m.rowCount == 2).else:{{ ok = false }};
+r0 = m.row:0;
+(r0.sum == 3.0).else:{{ ok = false }};
+((m.row:1).sum == 7.0).else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
