@@ -25,6 +25,9 @@ use arrow_cast::display::array_value_to_string;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use quoin_ext::{DataValue, Extension, Handle, HandlerResult, Host};
 
+#[cfg(test)]
+mod tests;
+
 // ---- driver resolution (ADBC driver-manifest) --------------------------------------------------
 
 /// The current platform's key in an ADBC driver manifest's `[Driver.shared]` table (e.g. `macos_arm64`).
