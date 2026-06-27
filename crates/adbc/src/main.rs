@@ -1,12 +1,17 @@
 //! `adbc` — Quoin's ADBC database extension (out-of-process, out-of-core). See `DESIGN.md`.
 //!
-//! The class chain: `[ADBC]Database` (open SQLite / PostgreSQL) → `connect` → `[ADBC]Connection`
-//! (`query:` / `query:params:` → a streaming `[ADBC]ResultSet`; `execute:` / `execute:params:` →
-//! rows-affected; `prepare:` → a reusable `[ADBC]Statement`; `autocommit:` / `commit` / `rollback`),
-//! with the Arrow<->DataValue value mapping for both results and bound parameters. Every ADBC
-//! fallibility threads through the SDK's `HandlerResult`, so a driver-load failure or a SQL error
-//! surfaces as a *catchable* Quoin error and the extension stays alive. Deferred: a `transaction:`
-//! block wrapper (a block can't re-enter its own connection mid-call) and a hierarchical
+//! The class chain (declared here with *simple* names; the `adbc` package installs them under the
+//! `[ADBC]` namespace — see `pkg/extension.toml` and `docs/EXT_PACKAGING.md`): `Database` (open
+//! SQLite / PostgreSQL) → `connect` → `Connection` (`query:` / `query:params:` → a streaming
+//! `ResultSet`; `execute:` / `execute:params:` → rows-affected; `prepare:` → a reusable `Statement`;
+//! `autocommit:` / `commit` / `rollback`), with the Arrow<->DataValue value mapping for both results
+//! and bound parameters. Every ADBC fallibility threads through the SDK's `HandlerResult`, so a
+//! driver-load failure or a SQL error surfaces as a *catchable* Quoin error and the extension stays
+//! alive.
+//!
+//! `transaction:` block sugar lives in the package's `pkg/init.qn` (Quoin-side control flow over the
+//! `autocommit:`/`commit`/`rollback` primitives), not in this binary — so the block runs in the VM
+//! and never has to re-enter its own connection mid-call. Deferred: a hierarchical
 //! schema-introspection API (catalogs / schemas / tables / columns).
 
 use std::path::PathBuf;
@@ -145,6 +150,7 @@ impl Database {
     fn connect(&self) -> HandlerResult<Connection> {
         Ok(Connection {
             conn: self.db.new_connection()?,
+            autocommit: true,
         })
     }
 }
@@ -152,6 +158,11 @@ impl Database {
 /// A live session.
 struct Connection {
     conn: adbc_driver_manager::ManagedConnection,
+    /// The current autocommit mode, tracked here because ADBC drivers don't reliably support
+    /// *reading* the `AutoCommit` option back. ADBC connections start in autocommit mode, so this
+    /// is `true` until `set_autocommit` changes it. Exposed via the `autocommit` getter so the
+    /// `transaction:` sugar can save and restore the prior mode rather than assuming `true`.
+    autocommit: bool,
 }
 
 impl Connection {
@@ -196,15 +207,17 @@ impl Connection {
     }
 
     /// Enable/disable autocommit. With autocommit off, subsequent statements run in one explicit
-    /// transaction until `commit`/`rollback`. (A `transaction:`-block wrapper is deferred — a block
-    /// can't re-enter its own connection while the call holds it; the pattern is composed from these
-    /// primitives with `catch:` from Quoin instead.)
+    /// transaction until `commit`/`rollback`. The `[ADBC]Connection transaction:` block sugar (in the
+    /// package's `pkg/init.qn`) is composed from these primitives in Quoin: it saves the current mode
+    /// (`autocommit`), turns autocommit off, runs the block, then commits — or rolls back and
+    /// re-raises — and restores the saved mode (so a transaction nests / composes correctly).
     fn set_autocommit(&mut self, on: bool) -> HandlerResult<()> {
         let v = if on { "true" } else { "false" };
         self.conn.set_option(
             OptionConnection::AutoCommit,
             OptionValue::String(v.to_string()),
         )?;
+        self.autocommit = on;
         Ok(())
     }
 
@@ -485,7 +498,7 @@ fn main() {
     let path = std::env::args().nth(1).expect("usage: adbc <socket-path>");
 
     let mut ext = Extension::new();
-    ext.class::<Database>("[ADBC]Database", |c| {
+    ext.class::<Database>("Database", |c| {
         c.constructor("sqlite:", |_h, args| Database::sqlite(str_arg(args, 0)));
         c.constructor("sqliteMemory", |_h, _a| Database::sqlite(":memory:"));
         c.constructor("postgres:", |_h, args| Database::postgres(str_arg(args, 0)));
@@ -494,7 +507,7 @@ fn main() {
         });
         c.makes("connect", |db, _h, _a| db.connect());
     });
-    ext.class::<Connection>("[ADBC]Connection", |c| {
+    ext.class::<Connection>("Connection", |c| {
         c.makes("query:", |conn, _h, args| {
             conn.query(str_arg(args, 0), None)
         });
@@ -514,10 +527,14 @@ fn main() {
             conn.set_autocommit(bool_arg(args, 0))?;
             Ok(DataValue::Null)
         });
+        // The current autocommit mode (getter) — so `transaction:` can save and restore it.
+        c.method("autocommit", |conn, _h, _a| {
+            Ok(DataValue::Bool(conn.autocommit))
+        });
         c.method("commit", |conn, _h, _a| conn.commit());
         c.method("rollback", |conn, _h, _a| conn.rollback());
     });
-    ext.class::<Statement>("[ADBC]Statement", |c| {
+    ext.class::<Statement>("Statement", |c| {
         c.method("bind:", |st, _h, args| {
             st.bind(&list_arg(args, 0))?;
             Ok(DataValue::Null)
@@ -525,7 +542,7 @@ fn main() {
         c.makes("query", |st, _h, _a| st.query());
         c.method("execute", |st, _h, _a| st.execute());
     });
-    ext.class::<ResultSet>("[ADBC]ResultSet", |c| {
+    ext.class::<ResultSet>("ResultSet", |c| {
         c.method("next", |rs, _h, _a| rs.next_row());
         c.method("toList", |rs, _h, _a| rs.drain());
         c.method("columns", |rs, _h, _a| Ok(rs.columns()));

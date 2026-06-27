@@ -581,3 +581,59 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_ext_vector_python_test.qn", &script);
 }
+
+/// Slice 1 of extension packaging (`docs/EXT_PACKAGING.md`): `Extension loadPackage:` loads a
+/// *folder* — an `extension.toml` (launch spec + namespace) plus an optional `init.qn` of Quoin
+/// glue. The `ext_vector` fixture is packaged here with namespace `Vec` and an `init.qn` that
+/// reopens the installed class to add a convenience method. Proves: classes install **namespaced**
+/// (`[Vec]Vector` — the binary only declares a simple `Vector`, never a bare global), `init.qn` runs
+/// after install and its Quoin method composes a socket-backed primitive (`scale:` then `sum`), and
+/// a repeat `loadPackage:` of the same folder is idempotent (no re-spawn, classes still work).
+#[test]
+fn extension_load_package() {
+    let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let pkg_dir = std::env::temp_dir().join(format!("qn_ext_pkg_{}", std::process::id()));
+    std::fs::create_dir_all(&pkg_dir).expect("create package dir");
+    std::fs::write(
+        pkg_dir.join("extension.toml"),
+        format!(
+            "[package]\nname = \"vectors\"\n\n[extension]\ncommand = \"{ext_bin}\"\nnamespace = \"Vec\"\n"
+        ),
+    )
+    .expect("write extension.toml");
+    // init.qn reopens the (namespaced) class to add a Quoin method composing a socket primitive:
+    // `tripledSum` scales the vector by 3 (a socket `scale:` -> new instance) and sums it.
+    std::fs::write(
+        pkg_dir.join("init.qn"),
+        "[Vec]Vector <-- {\n    tripledSum -> { (self.scale:3.0).sum }\n}\n",
+    )
+    .expect("write init.qn");
+
+    let dir = pkg_dir.to_string_lossy().to_string();
+    let script = format!(
+        r#"
+ok = true;
+
+"* load the package folder: spawns the extension, installs its classes under the [Vec] namespace,
+"* then runs init.qn
+Extension.loadPackage:'{dir}';
+
+"* the class is reachable *namespaced* — the binary declares a simple `Vector`, installed as
+"* `[Vec]Vector` (so a package can never register a bare global)
+v = [Vec]Vector.ofFloats:#( 1.0 2.0 3.0 );
+(v.sum == 6.0).else:{{ ok = false }};
+
+"* init.qn's Quoin method ran after install and composes a socket-backed primitive (scale: then sum)
+(v.tripledSum == 18.0).else:{{ ok = false }};
+
+"* idempotent: re-loading the same folder returns the cached extension (no re-spawn); classes work
+Extension.loadPackage:'{dir}';
+(([Vec]Vector.ofFloats:#( 2.0 2.0 )).tripledSum == 12.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_load_package_test.qn", &script);
+
+    let _ = std::fs::remove_dir_all(&pkg_dir);
+}

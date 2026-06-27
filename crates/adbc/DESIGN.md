@@ -67,7 +67,7 @@ pooling and shared config land naturally later).
 - `query: sql` · `query: sql params: aList` → **`[ADBC]ResultSet`**   *(SELECT)*
 - `execute: sql` · `execute: sql params: aList` → rows-affected (`Integer`)   *(INSERT/UPDATE/DDL)*
 - `prepare: sql` → **`[ADBC]Statement`**
-- `commit` · `rollback` · `autocommit: aBool` · `transaction: aBlock`   *(sugar: begin → block → commit / rollback-on-raise)*
+- `commit` · `rollback` · `autocommit: aBool` (set) · `autocommit` (get) · `transaction: aBlock`   *(sugar: save mode → autocommit off → block → commit / rollback-on-raise → restore mode)*
 - `tables` → `List` of table names · `tableColumns: name` → column metadata   *(get_objects / get_table_schema)*
 - `close`
 
@@ -147,12 +147,16 @@ v1.
 typed `schema`; the value-mapping table (both directions); `commit` / `rollback` / `autocommit:`;
 catchable errors.
 
-**Deferred:** a `transaction:`-block wrapper (a block can't re-enter its own connection while the
-call holds it — needs re-entrant host-op support; compose it from `autocommit:`/`commit`/`rollback`
-+ `catch:` from Quoin meanwhile); a hierarchical **schema-introspection API** (catalogs / schemas /
-tables / columns — a flat `tables` string list wasn't worth shipping); full-Arrow columnar `Table`
-(Arrow C Data Interface); `DateTime` / temporal mapping; structured `[ADBC]Error`; bulk ingest;
-connection pooling; parallelism; additional drivers; driver-library bundling (the packaging story).
+**`transaction:` block sugar** ships in the package's `pkg/init.qn` (a Quoin `[ADBC]Connection`
+reopening, loaded by `Extension loadPackage:`), *not* in the extension binary — so it's ordinary
+VM-side control flow over the `autocommit:`/`commit`/`rollback` primitives, and the block never
+re-enters its own connection mid-call (which the in-binary approach couldn't do). It runs the block,
+commits on success or rolls back and re-raises on a throw, and always restores autocommit.
+
+**Deferred:** a hierarchical **schema-introspection API** (catalogs / schemas / tables / columns — a
+flat `tables` string list wasn't worth shipping); full-Arrow columnar `Table` (Arrow C Data
+Interface); `DateTime` / temporal mapping; structured `[ADBC]Error`; bulk ingest; connection pooling;
+parallelism; additional drivers; driver-library bundling (the packaging story).
 
 ## 8. Build slices
 
@@ -163,8 +167,8 @@ connection pooling; parallelism; additional drivers; driver-library bundling (th
    mapping; `next` / `each:` / `toList` / `columns`.
 3. **DML + params** — `execute:` (rows-affected); `params:` binding (the inverse Arrow batch);
    `prepare:` → `Statement` with `bind:` / `query` / `execute`.
-4. **Transactions** — `autocommit:` / `commit` / `rollback`. (A `transaction:` block wrapper and
-   schema introspection were both deferred — see §7.)
+4. **Transactions** — `autocommit:` / `commit` / `rollback`. (The `transaction:` block sugar lands
+   later as Quoin glue in `pkg/init.qn` via the packaging path; schema introspection deferred — §7.)
 5. **Tests** — an integration test against SQLite (`:memory:`, no external deps) for CI, and a
    PostgreSQL test gated on the local server (passwordless `damon` via the `/tmp` socket).
 
