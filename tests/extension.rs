@@ -24,6 +24,9 @@
 //! - `extension_backed_classes` (Phase 3): the `ext_vector` fixture *provides* a Quoin class
 //!   `Vector` — the host installs it as a global from the spawn-time manifest, and `Vector ofFloats:`
 //!   / `v sum` / `v scale:` dispatch over the socket as ordinary method sends (SDK-owned instances).
+//! - `extension_backed_classes_python` (Phase 3b): the same, but the `Vector`-providing extension is
+//!   a *Python* process (`ext_vector.py`) — proving the manifest + class-dispatch protocol is
+//!   polyglot. Gated on `python3` + `flatbuffers`.
 //! - `extension_python_sdk` (Slice 7): the extension is a *Python* process (`sdk/python`) speaking
 //!   the same `ext.fbs` wire protocol — the polyglot proof. Gated on `python3` + `flatbuffers`.
 //!
@@ -411,4 +414,43 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_python_parity_test.qn", &script);
+}
+
+#[test]
+fn extension_backed_classes_python() {
+    if !python_fixture_runnable() {
+        eprintln!(
+            "skipping extension_backed_classes_python: python3 with `flatbuffers` runtime unavailable"
+        );
+        return;
+    }
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/sdk/python/examples/ext_vector.py"
+    );
+    ensure_executable(fixture);
+
+    // The Python parity of `extension_backed_classes`: a *Python* process provides the Quoin class
+    // `Vector` over the identical manifest + dispatch protocol — the Rust and Python extensions are
+    // interchangeable to the host.
+    let script = format!(
+        r#"
+ok = true;
+
+e = Extension.spawn:'{fixture}';
+
+"* a Python extension provides `Vector`: constructor + method send dispatch over the socket
+v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+(v.sum == 6.0).else:{{ ok = false }};
+(v.length == 3).else:{{ ok = false }};
+
+"* a method returning a new instance is auto-detected Python-side (isinstance — no `makes`)
+w = v.scale:2.0;
+(w.sum == 12.0).else:{{ ok = false }};
+(v.sum == 6.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_vector_python_test.qn", &script);
 }

@@ -156,6 +156,7 @@ __all__ = [
     "Resource",
     "ReturnHandle",
     "ArrowArray",
+    "Extension",
 ]
 
 
@@ -410,12 +411,39 @@ def _encode_call_return_handle(handle):
     return _envelope(b, g.Message.CallReturnHandle, g.CallReturnHandleEnd(b))
 
 
-def _encode_manifest_return():
-    """The reply to the host's spawn-time ``GetManifest`` (Phase 3). A generic-handler extension
-    provides no classes, so this sends an empty manifest — an absent ``classes`` vector, which the
-    host reads as "no provided classes", keeping the generic ``serve`` backward-compatible."""
-    b = flatbuffers.Builder(32)
+def _build_class_decl(b, name, instance_selectors, class_selectors):
+    """Build one `ClassDecl` table; returns its offset. All strings and vectors are created before
+    the table is opened (FlatBuffers forbids creating an object while a vector is open)."""
+    name_off = b.CreateString(name)
+    inst_offs = [b.CreateString(s) for s in instance_selectors]
+    g.ClassDeclStartInstanceSelectorsVector(b, len(inst_offs))
+    for o in reversed(inst_offs):
+        b.PrependUOffsetTRelative(o)
+    inst_vec = b.EndVector()
+    cls_offs = [b.CreateString(s) for s in class_selectors]
+    g.ClassDeclStartClassSelectorsVector(b, len(cls_offs))
+    for o in reversed(cls_offs):
+        b.PrependUOffsetTRelative(o)
+    cls_vec = b.EndVector()
+    g.ClassDeclStart(b)
+    g.ClassDeclAddName(b, name_off)
+    g.ClassDeclAddInstanceSelectors(b, inst_vec)
+    g.ClassDeclAddClassSelectors(b, cls_vec)
+    return g.ClassDeclEnd(b)
+
+
+def _encode_manifest_return(classes):
+    """The reply to the host's spawn-time ``GetManifest`` (Phase 3): the classes this extension
+    provides, each ``(name, instance_selectors, class_selectors)``. An empty list keeps a
+    generic-handler extension backward-compatible (the host reads an absent vector as "no classes")."""
+    b = flatbuffers.Builder(64)
+    decl_offs = [_build_class_decl(b, name, inst, cls) for (name, inst, cls) in classes]
+    g.ManifestReturnStartClassesVector(b, len(decl_offs))
+    for o in reversed(decl_offs):
+        b.PrependUOffsetTRelative(o)
+    classes_vec = b.EndVector()
     g.ManifestReturnStart(b)
+    g.ManifestReturnAddClasses(b, classes_vec)
     return _envelope(b, g.Message.ManifestReturn, g.ManifestReturnEnd(b))
 
 
@@ -457,6 +485,19 @@ def _decode_call(buf):
     box = call.Data()
     data = _decode_dv(box) if box is not None else None
     return (_text(call.Op()), _text(call.Arg()), handles, resources, releases, arrays, data)
+
+
+def _decode_class_call(buf):
+    """Decode a `Call` for extension-backed-class dispatch (Phase 3): the selector (`op`), the
+    `class_name` it routes to, the receiver instance id (`recv`, 0 = class-side), the dropped-
+    instance ids (`releases`), and the method arguments (a `DvList` in `data`)."""
+    table = _msg(buf, g.Message.Call, "Call")
+    call = g.Call()
+    call.Init(table.Bytes, table.Pos)
+    releases = [call.Releases(j) for j in range(call.ReleasesLength())]
+    box = call.Data()
+    data = _decode_dv(box) if box is not None else None
+    return (_text(call.Op()), _text(call.ClassName()), call.Recv(), releases, data)
 
 
 def _decode_host_op_return(buf):
@@ -605,7 +646,7 @@ def serve(path, handler):
                 # Phase 3: the host asks for a class manifest once, right after connect. A
                 # generic-handler extension provides none; everything else is a Call.
                 if g.Envelope.GetRootAs(frame, 0).MsgType() == g.Message.GetManifest:
-                    write_frame(conn, _encode_manifest_return())
+                    write_frame(conn, _encode_manifest_return([]))
                     continue
                 op, arg, handles, resources, releases, arrays, data = _decode_call(frame)
                 host = Host(conn, handles, resources, releases, arrays, data)
@@ -614,3 +655,123 @@ def serve(path, handler):
             conn.close()
     finally:
         server.close()
+
+
+# --------------------------------------------------------------------------------------------
+# Extension-backed classes (Phase 3): the SDK owns the object table.
+#
+# Provide a Quoin class by registering a plain Python class plus a selector -> callable mapping.
+# The SDK keeps the instances (a dict keyed by an opaque id the host holds), answers the spawn-time
+# `GetManifest`, and routes each method `Call`. Unlike the Rust SDK there is no explicit `makes`:
+# a method that returns an instance of a registered class is detected with `isinstance` and wrapped
+# as a new instance; everything else is sent back as structured data.
+# --------------------------------------------------------------------------------------------
+
+
+class _ClassReg:
+    """One registered class: the Python type plus its class-side (constructor) and instance-side
+    (method) selector tables, mapping a Quoin selector to a Python callable."""
+
+    def __init__(self, name, cls, constructors, methods):
+        self.name = name
+        self.cls = cls
+        self.constructors = constructors  # selector -> (*args) -> instance
+        self.methods = methods  # selector -> (instance, *args) -> value-or-instance
+
+
+class _ObjectTable:
+    """The SDK-owned instance table: live instances keyed by an opaque id (the resource id the host
+    holds). Ids start at 1, so ``recv == 0`` unambiguously means a class-side send."""
+
+    def __init__(self):
+        self._objects = {}
+        self._next_id = 0
+
+    def insert(self, obj):
+        self._next_id += 1
+        self._objects[self._next_id] = obj
+        return self._next_id
+
+    def get(self, oid):
+        return self._objects.get(oid)
+
+    def remove(self, oid):
+        self._objects.pop(oid, None)
+
+
+class Extension:
+    """A class-providing extension (Phase 3). Register classes with :meth:`register`, then
+    :meth:`serve`. The SDK owns the instances, so writing an extension class is just writing a plain
+    Python class plus a selector -> method mapping."""
+
+    def __init__(self):
+        self._classes = {}  # name -> _ClassReg
+
+    def register(self, name, cls, constructors=None, methods=None):
+        """Register the Python class ``cls`` as the Quoin class ``name``. ``constructors`` maps
+        class-side selectors to callables ``(*args) -> instance``; ``methods`` maps instance-side
+        selectors to callables ``(instance, *args) -> value | instance``. Returns ``self`` for
+        chaining."""
+        self._classes[name] = _ClassReg(name, cls, constructors or {}, methods or {})
+        return self
+
+    def serve(self, path):
+        """Bind a unix socket at ``path``, accept one host connection, and serve until it
+        disconnects: answer the spawn-time ``GetManifest`` from the registered classes, and route
+        each method ``Call`` to its handler — materializing returned instances into the table."""
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+        table = _ObjectTable()
+        registered_types = tuple(reg.cls for reg in self._classes.values())
+        try:
+            conn, _ = server.accept()
+            try:
+                while True:
+                    frame = read_frame(conn)
+                    if frame is None:
+                        break
+                    if g.Envelope.GetRootAs(frame, 0).MsgType() == g.Message.GetManifest:
+                        write_frame(conn, _encode_manifest_return(self._manifest()))
+                        continue
+                    write_frame(conn, self._dispatch(frame, table, registered_types))
+            finally:
+                conn.close()
+        finally:
+            server.close()
+
+    def _manifest(self):
+        """``(name, instance_selectors, class_selectors)`` for each registered class."""
+        return [
+            (reg.name, list(reg.methods.keys()), list(reg.constructors.keys()))
+            for reg in self._classes.values()
+        ]
+
+    def _dispatch(self, frame, table, registered_types):
+        """Route one method ``Call`` to its handler and return the terminal reply frame."""
+        op, class_name, recv, releases, data = _decode_class_call(frame)
+        # The host batches dropped instances onto `releases`; free them from the table.
+        for rid in releases:
+            table.remove(rid)
+        reg = self._classes.get(class_name)
+        if reg is None:
+            raise ValueError(f"no extension-backed class '{class_name}'")
+        # The host packs the method arguments as a `DvList` (decoded to a Python list).
+        args = data if isinstance(data, list) else ([] if data is None else [data])
+        if recv == 0:
+            # Class-side: a constructor builds a new instance.
+            ctor = reg.constructors.get(op)
+            if ctor is None:
+                raise ValueError(f"no constructor '{op}' on class '{class_name}'")
+            return _encode_call_return_resource(table.insert(ctor(*args)))
+        method = reg.methods.get(op)
+        if method is None:
+            raise ValueError(f"no method '{op}' on class '{class_name}'")
+        instance = table.get(recv)
+        if instance is None:
+            raise ValueError(f"no live instance {recv}")
+        result = method(instance, *args)
+        # A returned registered instance becomes a new ext-side object; anything else is data.
+        if isinstance(result, registered_types):
+            return _encode_call_return_resource(table.insert(result))
+        return _encode_reply(result)
