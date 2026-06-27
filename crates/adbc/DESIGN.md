@@ -147,7 +147,7 @@ v1.
 typed `schema`; the value-mapping table (both directions); `commit` / `rollback` / `autocommit:`;
 catchable errors.
 
-**`transaction:` block sugar** ships in the package's `pkg/init.qn` (a Quoin `[ADBC]Connection`
+**`transaction:` block sugar** ships in the package's `quoin_packages/adbc/init.qn` (a Quoin `[ADBC]Connection`
 reopening, loaded by `Extension loadPackage:`), *not* in the extension binary — so it's ordinary
 VM-side control flow over the `autocommit:`/`commit`/`rollback` primitives, and the block never
 re-enters its own connection mid-call (which the in-binary approach couldn't do). It runs the block,
@@ -168,7 +168,7 @@ parallelism; additional drivers; driver-library bundling (the packaging story).
 3. **DML + params** — `execute:` (rows-affected); `params:` binding (the inverse Arrow batch);
    `prepare:` → `Statement` with `bind:` / `query` / `execute`.
 4. **Transactions** — `autocommit:` / `commit` / `rollback`. (The `transaction:` block sugar lands
-   later as Quoin glue in `pkg/init.qn` via the packaging path; schema introspection deferred — §7.)
+   later as Quoin glue in `quoin_packages/adbc/init.qn` via the packaging path; schema introspection deferred — §7.)
 5. **Tests** — an integration test against SQLite (`:memory:`, no external deps) for CI, and a
    PostgreSQL test gated on the local server (passwordless `damon` via the `/tmp` socket).
 

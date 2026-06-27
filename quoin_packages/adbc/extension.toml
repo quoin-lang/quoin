@@ -1,5 +1,6 @@
-# The `adbc` extension package — a `use`-able folder (docs/EXT_PACKAGING.md).
-# Loaded with `Extension loadPackage: '<this-dir>'` (or, once the resolver lands, `use adbc:*`).
+# The `adbc` extension package — a `use`-able folder (docs/EXT_PACKAGING.md). It lives on the
+# default search root (`./quoin_packages/`), so from the repo root `use adbc:*` loads it (the
+# resolver synthesizes `Extension loadPackage: '<this-dir>'`). The explicit `loadPackage:` works too.
 
 [package]
 name = "adbc"
@@ -9,7 +10,7 @@ description = "ADBC database access for Quoin (SQLite + PostgreSQL) — out-of-p
 [extension]
 # The built extension binary, relative to this package dir. Build it first with:
 #   cargo build --release        (run in crates/adbc/)
-command = "../target/release/adbc"
+command = "../../crates/adbc/target/release/adbc"
 # Every provided class installs under this namespace: Database -> [ADBC]Database, etc. The host
 # applies it; the binary only ever declares simple names (so it can never pollute the bare globals).
 namespace = "ADBC"

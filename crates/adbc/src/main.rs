@@ -1,7 +1,7 @@
 //! `adbc` — Quoin's ADBC database extension (out-of-process, out-of-core). See `DESIGN.md`.
 //!
 //! The class chain (declared here with *simple* names; the `adbc` package installs them under the
-//! `[ADBC]` namespace — see `pkg/extension.toml` and `docs/EXT_PACKAGING.md`): `Database` (open
+//! `[ADBC]` namespace — see `quoin_packages/adbc/extension.toml` and `docs/EXT_PACKAGING.md`): `Database` (open
 //! SQLite / PostgreSQL) → `connect` → `Connection` (`query:` / `query:params:` → a streaming
 //! `ResultSet`; `execute:` / `execute:params:` → rows-affected; `prepare:` → a reusable `Statement`;
 //! `autocommit:` / `commit` / `rollback`), with the Arrow<->DataValue value mapping for both results
@@ -9,7 +9,7 @@
 //! driver-load failure or a SQL error surfaces as a *catchable* Quoin error and the extension stays
 //! alive.
 //!
-//! `transaction:` block sugar lives in the package's `pkg/init.qn` (Quoin-side control flow over the
+//! `transaction:` block sugar lives in the package's `quoin_packages/adbc/init.qn` (Quoin-side control flow over the
 //! `autocommit:`/`commit`/`rollback` primitives), not in this binary — so the block runs in the VM
 //! and never has to re-enter its own connection mid-call. Deferred: a hierarchical
 //! schema-introspection API (catalogs / schemas / tables / columns).
@@ -208,7 +208,7 @@ impl Connection {
 
     /// Enable/disable autocommit. With autocommit off, subsequent statements run in one explicit
     /// transaction until `commit`/`rollback`. The `[ADBC]Connection transaction:` block sugar (in the
-    /// package's `pkg/init.qn`) is composed from these primitives in Quoin: it saves the current mode
+    /// package's `quoin_packages/adbc/init.qn`) is composed from these primitives in Quoin: it saves the current mode
     /// (`autocommit`), turns autocommit off, runs the block, then commits — or rolls back and
     /// re-raises — and restores the saved mode (so a transaction nests / composes correctly).
     fn set_autocommit(&mut self, on: bool) -> HandlerResult<()> {

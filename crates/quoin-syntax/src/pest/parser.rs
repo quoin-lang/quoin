@@ -251,7 +251,9 @@ fn parse_stmt(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         Rule::assignment => parse_assignment(inner, filename, source_text),
         Rule::use_stmt => {
             // use_stmt → use_kw use_target; the atomic `use_kw` token is skipped.
-            // `.qn` and the trailing `/*` glob are stripped into structured fields here.
+            // `.qn` and the glob suffix are stripped into structured fields here. The glob is
+            // either a trailing `/*` on a directory path or a bare `*` (the whole package root,
+            // which is the empty path).
             let target = inner
                 .into_inner()
                 .find(|p| p.as_rule() == Rule::use_target)
@@ -265,8 +267,12 @@ fn parse_stmt(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                     _ => {}
                 }
             }
-            let glob = path_str.ends_with("/*");
-            let path = path_str.strip_suffix("/*").unwrap_or(path_str).to_string();
+            let glob = path_str == "*" || path_str.ends_with("/*");
+            let path = if path_str == "*" {
+                String::new()
+            } else {
+                path_str.strip_suffix("/*").unwrap_or(path_str).to_string()
+            };
             Node {
                 source_info,
                 value: Use(UseNode {
