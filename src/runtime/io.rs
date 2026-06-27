@@ -507,7 +507,7 @@ mod tests {
         });
 
         arena.mutate_root(|mc, vm| {
-            vm.capture_output = true;
+            vm.output.capture = true;
             let out_handle =
                 new_native_io_handle_with_wrapper(vm, mc, NativeIoHandleWrapper::Stdout(stdout()));
             let err_handle =

@@ -383,7 +383,7 @@ fn make_socket<'gc>(
         class,
         NativeSocket {
             id,
-            reap: vm.socket_reap.clone(),
+            reap: vm.io.socket_reap.clone(),
             closed: false,
         },
     )
@@ -411,7 +411,7 @@ fn reap_handle<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, handle: Value<'gc>) {
         .ok()
         .flatten();
     if let Some(id) = to_reap {
-        vm.socket_reap.borrow_mut().push(id);
+        vm.io.socket_reap.borrow_mut().push(id);
     }
 }
 
@@ -604,7 +604,7 @@ fn make_listener<'gc>(
         class,
         NativeListener {
             id,
-            reap: vm.socket_reap.clone(),
+            reap: vm.io.socket_reap.clone(),
             closed: false,
             port,
         },
@@ -620,6 +620,6 @@ fn reap_listener_handle<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, handle: Valu
         .ok()
         .flatten();
     if let Some(id) = to_reap {
-        vm.socket_reap.borrow_mut().push(id);
+        vm.io.socket_reap.borrow_mut().push(id);
     }
 }

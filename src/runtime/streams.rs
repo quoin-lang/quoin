@@ -105,7 +105,7 @@ pub fn make_byte_stream<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, id: StreamId
         class,
         NativeStream {
             id,
-            reap: vm.socket_reap.clone(),
+            reap: vm.io.socket_reap.clone(),
             closed: false,
             rbuf: Vec::new(),
         },
@@ -257,7 +257,7 @@ pub fn make_string_stream<'gc>(
         class,
         NativeStream {
             id,
-            reap: vm.socket_reap.clone(),
+            reap: vm.io.socket_reap.clone(),
             closed: false,
             rbuf,
         },
@@ -537,7 +537,7 @@ fn reap_stream_handle<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, handle: Value<
         .ok()
         .flatten();
     if let Some(id) = to_reap {
-        vm.socket_reap.borrow_mut().push(id);
+        vm.io.socket_reap.borrow_mut().push(id);
     }
 }
 

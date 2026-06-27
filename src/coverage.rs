@@ -332,7 +332,7 @@ impl<'gc> VmState<'gc> {
         };
         let line = si.line as u32;
         let (file, start, end) = (bsi.filename.as_str(), bsi.start as u32, bsi.end as u32);
-        if let Some(cov) = self.coverage.as_mut() {
+        if let Some(cov) = self.instrumentation.coverage.as_mut() {
             cov.record_line(file, start, end, line);
         }
     }
@@ -342,7 +342,7 @@ impl<'gc> VmState<'gc> {
     /// denominator — and looking up each line's hit count from the attached collector.
     /// A compiled-but-never-called method appears here at 0%.
     pub fn build_coverage_report(&self) -> CoverageReport {
-        let hits = self.coverage.as_ref();
+        let hits = self.instrumentation.coverage.as_ref();
         let mut report = CoverageReport::default();
 
         // Snapshot the class handles, then drop the globals borrow before walking.

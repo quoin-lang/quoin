@@ -92,7 +92,7 @@ impl<'gc> Callable<'gc> {
                 // `new:` consumes `args` and can error in place — keep them for the
                 // stack trace before returning (cold paths; a plain move, no clone).
                 if args.len() != 1 {
-                    vm.last_send_args = args;
+                    vm.exceptions.last_send_args = args;
                     return Err(QuoinError::Other("new: expects a block".to_string()));
                 }
                 let block = if let Value::Object(obj) = args[0]
@@ -101,7 +101,7 @@ impl<'gc> Callable<'gc> {
                     *b
                 } else {
                     let got = args[0].type_name().to_string();
-                    vm.last_send_args = args;
+                    vm.exceptions.last_send_args = args;
                     return Err(QuoinError::TypeError {
                         expected: "Block".to_string(),
                         got,
@@ -118,7 +118,7 @@ impl<'gc> Callable<'gc> {
             Callable::NewNoBlock(class_obj) => {
                 vm.ensure_instantiable(class_obj)?;
                 if !args.is_empty() {
-                    vm.last_send_args = args;
+                    vm.exceptions.last_send_args = args;
                     return Err(QuoinError::Other("new expects no arguments".to_string()));
                 }
 
@@ -158,7 +158,7 @@ impl<'gc> Callable<'gc> {
                     // stack-trace formatter wants its args. Reuse the rooting snapshot
                     // (cloned only here, on the cold error path — not on every send).
                     if let Some(call) = vm.active_native_args.last() {
-                        vm.last_send_args = call.args.clone();
+                        vm.exceptions.last_send_args = call.args.clone();
                     }
                 }
                 vm.active_native_args.pop();
@@ -182,7 +182,7 @@ impl<'gc> Callable<'gc> {
                 if ret.is_err()
                     && let Some(call) = vm.active_native_args.last()
                 {
-                    vm.last_send_args = call.args.clone();
+                    vm.exceptions.last_send_args = call.args.clone();
                 }
                 vm.active_native_args.pop();
                 let ret = ret?;
@@ -345,7 +345,7 @@ impl<'gc> VmState<'gc> {
     /// per-class) is correct because a new/overridden method can shadow cached
     /// resolutions in *derived* classes too.
     pub fn invalidate_method_cache(&mut self) {
-        self.method_cache.clear();
+        self.dispatch_cache.entries.clear();
     }
 
     /// Build the cache key for a lookup, or `None` if the lookup must not be cached:
@@ -401,7 +401,7 @@ impl<'gc> VmState<'gc> {
         // Fast path: a memoized, guard-free resolution skips the whole walk + scoring.
         let key = self.method_cache_key(class_ref, selector, class_side, args);
         if let Some(k) = key {
-            if let Some(cached) = self.method_cache.get(&k) {
+            if let Some(cached) = self.dispatch_cache.entries.get(&k) {
                 return Ok(*cached);
             }
         }
@@ -409,8 +409,8 @@ impl<'gc> VmState<'gc> {
         // Miss: walk, tracking whether any guarded candidate was examined. Save and
         // restore `dispatch_uncacheable` so nested sends fired *by* a guard (which run
         // their own lookups) can't corrupt this lookup's cacheability accounting.
-        let saved_uncacheable = self.dispatch_uncacheable;
-        self.dispatch_uncacheable = false;
+        let saved_uncacheable = self.dispatch_cache.uncacheable;
+        self.dispatch_cache.uncacheable = false;
         let mut visited = Vec::new();
         let result = self.lookup_method_in_class_hierarchy_rec(
             mc,
@@ -421,14 +421,14 @@ impl<'gc> VmState<'gc> {
             args,
             &mut visited,
         );
-        let uncacheable = self.dispatch_uncacheable;
-        self.dispatch_uncacheable = saved_uncacheable;
+        let uncacheable = self.dispatch_cache.uncacheable;
+        self.dispatch_cache.uncacheable = saved_uncacheable;
 
         // Cache only a successful, guard-free resolution (errors and guarded
         // dispatches stay uncached — the latter can depend on argument values).
         if !uncacheable {
             if let (Some(k), Ok(resolved)) = (key, &result) {
-                self.method_cache.insert(k, *resolved);
+                self.dispatch_cache.entries.insert(k, *resolved);
             }
         }
         result
@@ -560,7 +560,7 @@ impl<'gc> VmState<'gc> {
             // in-progress lookup uncacheable. Set before running the guard so a throw
             // (or a failing-guard early return) still disables caching, and so it
             // holds regardless of which candidate ultimately wins.
-            self.dispatch_uncacheable = true;
+            self.dispatch_cache.uncacheable = true;
             let res =
                 self.execute_validation_block(mc, decl_block, receiver, &block.param_syms, args)?;
             if !res.is_true() {

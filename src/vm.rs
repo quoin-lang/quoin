@@ -126,18 +126,102 @@ pub struct OutputChunk {
     pub bytes: Vec<u8>,
 }
 
+/// In-flight exception + `catch:`/`throw` unwind bookkeeping, grouped out of `VmState` (cf.
+/// [`Scheduler`]). Stored inline by value.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct Exceptions<'gc> {
+    /// The exception currently being raised / handled, or `None`.
+    pub active: Option<Value<'gc>>,
+    /// Arguments of the most recent send that failed *in place* (no callee frame of its own) — read
+    /// only by the stack-trace formatter (`annotate_error`). Set on the in-place-error branches of
+    /// the `Send` handler / `Callable::call`, not on every send.
+    pub last_send_args: Vec<Value<'gc>>,
+    /// Declared exception types of each enclosing `catch:` whose protected block is currently running
+    /// (one `Vec` per active catch; `"Object"` marks a catch-all). The debugger's break-on-uncaught
+    /// searches this at a throw. Pushed/popped by the `catch` natives. Plain strings — no `Gc`.
+    pub handler_stack: Vec<Vec<String>>,
+    /// Set when a typed `catch:` re-raises (no handler matched), so break-on-uncaught fires once at
+    /// the innermost throw site rather than again at every catch it bubbles through.
+    pub reraised: bool,
+}
+
+/// `use` / package resolution + load-once state, grouped out of `VmState`.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct Modules<'gc> {
+    /// Resolves `use (pkg:)? path` to source — the filesystem-agnostic seam, swappable per host (FS
+    /// on the CLI, in-memory on WASM/embedded). See `src/packages.rs`.
+    #[collect(require_static)]
+    pub resolver: Box<dyn PackageResolver>,
+    /// Run-once registry for `use`, in load order (a `Vec`, not a set: run order *is* load order). A
+    /// per-entry status breaks cycles. See `USE_ARCH.md`.
+    #[collect(require_static)]
+    pub loaded: Vec<LoadedUnit>,
+    /// Loaded extension *packages* (`Extension loadPackage:`), keyed by canonical package directory →
+    /// the live `Extension` value, so a repeat `loadPackage:` of the same folder is idempotent. The
+    /// installed classes also root the extension, but this is its canonical owner for the session.
+    /// See `src/runtime/extension.rs` / `docs/EXT_PACKAGING.md`.
+    pub packages: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
+}
+
+/// Output-capture redirect: when on (the DAP adapter sets it), `write_std` buffers `[IO]Handle`
+/// stdout/stderr writes into `chunks` instead of fd 1/2 — so the debuggee's output becomes DAP
+/// `output` events rather than corrupting the protocol stream. Off by default. No `Gc` → static.
+pub struct OutputCapture {
+    pub capture: bool,
+    pub chunks: Vec<OutputChunk>,
+}
+
+/// Memoized method resolution, grouped out of `VmState`.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct DispatchCache<'gc> {
+    /// `(searched-class ptr, selector, class-side, arg-class ptrs)` → resolved method (or `None`
+    /// when the hierarchy has no match). Populated by `lookup_method_in_class_hierarchy` for
+    /// guard-free, non-eigenclass lookups; cleared whenever a class's method table changes
+    /// (`invalidate_method_cache`). Traced so cached `Value`s stay live; the key's class *pointers*
+    /// are sound because named classes are globals-rooted. All-integer key → `FxHashMap`.
+    pub entries: FxHashMap<MethodCacheKey, Option<Value<'gc>>>,
+    /// Scratch flag marking the in-progress lookup's result un-memoizable (a guarded candidate was
+    /// examined — its outcome depends on argument values, not just types). Saved/restored around each
+    /// `lookup_method_in_class_hierarchy` call for re-entrancy.
+    #[collect(require_static)]
+    pub uncacheable: bool,
+}
+
+/// The session's async-I/O backend plus the deferred resource-reap queues, grouped out of `VmState`.
+/// All `Rc`/non-`Gc` → static.
+pub struct Io {
+    /// The reactor + the `StreamId -> fd` registry. Held here so it **persists across separate driver
+    /// runs** — most importantly the REPL, where a long-lived resource opened on one line (an
+    /// extension socket, a file, a TCP/TLS connection) must survive into the next.
+    pub backend: crate::io_backend::SmolBackend,
+    /// fds whose QN `TcpSocket` handle has been closed or collected, awaiting a synchronous
+    /// `IoBackend::close` by the driver. A non-GC queue (the handle's `Drop` can only push a plain
+    /// `StreamId`); a shared `Rc` clone lives in each socket handle. See `docs/ASYNC_ARCH.md`.
+    pub socket_reap: std::rc::Rc<std::cell::RefCell<Vec<StreamId>>>,
+    /// Extension ids whose `Extension` handle was dropped (GC'd), awaiting bulk-release of the
+    /// host-value handles they held (`HandleTable::release_for_ext`). A non-GC queue mirroring
+    /// `socket_reap`; a shared `Rc` clone lives in each `Extension` handle.
+    pub ext_handle_reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+}
+
+/// Per-instruction instrumentation hooks, grouped out of `VmState`. Both `None` on a normal run, so
+/// the hot-path cost is a single bool load each. Plain data (no `Gc`) → static.
+pub struct Instrumentation {
+    /// Attached debugger session (see `src/debug.rs`), consulted once per instruction when `Some`.
+    pub debug: Option<crate::debug::DebugState>,
+    /// Active Quoin-level coverage collector (see `src/coverage.rs`), the same hot-path cost model.
+    pub coverage: Option<crate::coverage::CoverageState>,
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct VmState<'gc> {
     pub stack: Vec<Value<'gc>>,
     pub frames: Vec<Frame<'gc>>,
     pub globals: Gc<'gc, RefLock<HashMap<NamespacedName, Value<'gc>>>>,
-    /// Loaded extension *packages* (`Extension loadPackage:`), keyed by canonical package directory
-    /// → the live `Extension` value, so a repeat `loadPackage:` of the same folder is idempotent
-    /// (returns the cached extension rather than re-spawning). GC-traced — the installed classes also
-    /// root the extension, but this is its canonical owner for the session. See
-    /// `src/runtime/extension.rs` / `docs/EXT_PACKAGING.md`.
-    pub loaded_packages: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
     /// Intern pool for symbols: one canonical `Symbol` value per name, so symbols
     /// compare by identity. Rooted here and traced as part of `VmState`.
     pub symbol_table: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
@@ -149,30 +233,7 @@ pub struct VmState<'gc> {
     pub next_frame_id: usize,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
-    pub active_exception: Option<Value<'gc>>,
-    /// Arguments of the most recent send that failed *in place* (no callee frame of
-    /// its own) — read only by the stack-trace formatter (`annotate_error`). Set on
-    /// the in-place-error branches of the `Send` handler / `Callable::call`, not on
-    /// every send.
-    pub last_send_args: Vec<Value<'gc>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
-    /// When on (the DAP adapter sets it), `write_std` captures `[IO]Handle` stdout/stderr writes
-    /// into `program_output` instead of fd 1/2 — so the debuggee's output becomes DAP `output`
-    /// events rather than corrupting the protocol stream. Off by default (writes go to the real
-    /// fds, exactly as before).
-    pub capture_output: bool,
-    #[collect(require_static)]
-    pub program_output: Vec<OutputChunk>,
-    /// Declared exception types of each enclosing `catch:` whose protected block is currently
-    /// running (one `Vec` per active catch; `"Object"` marks a catch-all handler). The debugger's
-    /// break-on-uncaught searches this at a throw to decide whether the value will be caught.
-    /// Pushed/popped by the `catch` natives (`src/runtime/block.rs`). Plain strings — no `Gc`.
-    pub handler_stack: Vec<Vec<String>>,
-    /// Set when a typed `catch:` re-raises (no handler matched), so break-on-uncaught fires once
-    /// at the innermost throw site rather than again at every catch the error bubbles through.
-    /// Cleared when a catch begins and when a handler actually catches.
-    pub reraised: bool,
-
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
     /// The REPL's persistent top-level environment. `Some` only under `qn repl`: each
@@ -185,70 +246,24 @@ pub struct VmState<'gc> {
     /// the [`Scheduler`] struct). Stored inline by value — no indirection.
     pub sched: Scheduler<'gc>,
 
-    /// Memoized method resolution: `(searched-class ptr, selector, class-side,
-    /// arg-class ptrs)` → resolved method (or `None` when the hierarchy has no
-    /// match). Populated by `lookup_method_in_class_hierarchy` for guard-free,
-    /// non-eigenclass lookups; cleared whenever a class's method table changes
-    /// (`invalidate_method_cache`). Traced as part of `VmState` so cached method
-    /// `Value`s stay live; the key's class *pointers* are sound because named
-    /// classes are globals-rooted (stable address) — eigenclasses are excluded.
-    /// Keyed by an all-integer `MethodCacheKey`, so it uses `FxHashMap` (FxHash) —
-    /// SipHash's worst case, FxHash's best — for a faster per-send probe.
-    pub method_cache: FxHashMap<MethodCacheKey, Option<Value<'gc>>>,
-    /// Scratch flag marking the in-progress lookup's result as un-memoizable. Set
-    /// by `match_score` when a guarded candidate is examined — a guard's outcome
-    /// depends on argument *values*, not just types, so the resolution can't be keyed
-    /// on classes alone. Saved/restored around each `lookup_method_in_class_hierarchy`
-    /// call for re-entrancy safety (a guard's nested sends run their own lookups
-    /// without corrupting this one).
-    #[collect(require_static)]
-    pub dispatch_uncacheable: bool,
-
-    /// Resolves `use (pkg:)? path` to source — the filesystem-agnostic seam, swappable
-    /// per host (FS on the CLI, in-memory on WASM/embedded). See `src/packages.rs`.
-    #[collect(require_static)]
-    pub resolver: Box<dyn PackageResolver>,
-    /// Run-once registry for `use`, in load order (a `Vec`, not a set: run order *is*
-    /// load order). A per-entry status breaks cycles. See `USE_ARCH.md`.
-    #[collect(require_static)]
-    pub loaded: Vec<LoadedUnit>,
-
     #[collect(require_static)]
     pub options: VmOptions,
 
-    /// fds whose QN `TcpSocket` handle has been closed or collected, awaiting a
-    /// synchronous `IoBackend::close` by the driver. A non-GC queue (the handle's
-    /// `Drop` can only push a plain `StreamId`); see `docs/ASYNC_ARCH.md` resource
-    /// lifecycle. Shared `Rc` clone lives in each socket handle.
+    /// In-flight exception + `catch:`/`throw` unwind state ([`Exceptions`]).
+    pub exceptions: Exceptions<'gc>,
+    /// `use` / package resolution + load-once state ([`Modules`]).
+    pub modules: Modules<'gc>,
+    /// Output-capture redirect for the DAP adapter ([`OutputCapture`]).
     #[collect(require_static)]
-    pub socket_reap: std::rc::Rc<std::cell::RefCell<Vec<StreamId>>>,
-
-    /// Extension ids whose `Extension` handle was dropped (GC'd), awaiting bulk-release of the
-    /// host-value handles they held (`HandleTable::release_for_ext`) by the driver. A non-GC
-    /// queue (the handle's `Drop` can only push a plain id), mirroring `socket_reap`. Shared `Rc`
-    /// clone lives in each `Extension` handle.
+    pub output: OutputCapture,
+    /// Memoized method resolution ([`DispatchCache`]).
+    pub dispatch_cache: DispatchCache<'gc>,
+    /// The session's async-I/O backend + the deferred resource-reap queues ([`Io`]).
     #[collect(require_static)]
-    pub ext_handle_reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
-
-    /// The session's async I/O backend (the reactor + the `StreamId -> fd` registry). Held here so
-    /// it **persists across separate driver runs** — most importantly the REPL, which drives each
-    /// line in its own `drive_with_frontend`: a long-lived resource opened on one line (an extension
-    /// socket, a file, a TCP/TLS connection) must survive into the next. `SmolBackend` is an `Rc`
-    /// handle to the shared registry, so the driver clones it per run; non-GC, so `require_static`.
+    pub io: Io,
+    /// Per-instruction instrumentation hooks — debugger + coverage ([`Instrumentation`]).
     #[collect(require_static)]
-    pub io_backend: crate::io_backend::SmolBackend,
-
-    /// Attached debugger session, or `None` for a normal run. When `Some`, the step loop
-    /// consults it once per instruction (see `src/debug.rs`); when `None`, the hook is a
-    /// single bool load. Plain data (no `Gc`), so `require_static`.
-    #[collect(require_static)]
-    pub debug: Option<crate::debug::DebugState>,
-
-    /// Active Quoin-level coverage collector, or `None` for a normal run. Consulted once
-    /// per instruction (a single bool load when `None`), the same hot-path cost model as
-    /// `debug`. Plain data (no `Gc`), so `require_static`. See `src/coverage.rs`.
-    #[collect(require_static)]
-    pub coverage: Option<crate::coverage::CoverageState>,
+    pub instrumentation: Instrumentation,
 
     /// Opaque `u64` handles for host values held by out-of-process extensions (Tier 1).
     /// Inline by value so `#[derive(Collect)]` traces it: the table **is a GC root set**,
@@ -316,18 +331,11 @@ impl<'gc> VmState<'gc> {
             stack: Vec::new(),
             frames: Vec::new(),
             globals: gcl!(mc, HashMap::new()),
-            loaded_packages: gcl!(mc, HashMap::new()),
             symbol_table: gcl!(mc, HashMap::new()),
             pending_class_def: None,
             next_frame_id: 1,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
-            active_exception: None,
-            last_send_args: Vec::new(),
             active_native_args: Vec::new(),
-            capture_output: false,
-            program_output: Vec::new(),
-            handler_stack: Vec::new(),
-            reraised: false,
             last_popped_env: None,
             repl_env: None,
             sched: Scheduler {
@@ -346,16 +354,35 @@ impl<'gc> VmState<'gc> {
                 wake: None,
                 cancel_current: false,
             },
-            method_cache: FxHashMap::default(),
-            dispatch_uncacheable: false,
-            resolver: Box::new(FsResolver::new()),
-            loaded: Vec::new(),
+            exceptions: Exceptions {
+                active: None,
+                last_send_args: Vec::new(),
+                handler_stack: Vec::new(),
+                reraised: false,
+            },
+            modules: Modules {
+                resolver: Box::new(FsResolver::new()),
+                loaded: Vec::new(),
+                packages: gcl!(mc, HashMap::new()),
+            },
+            output: OutputCapture {
+                capture: false,
+                chunks: Vec::new(),
+            },
+            dispatch_cache: DispatchCache {
+                entries: FxHashMap::default(),
+                uncacheable: false,
+            },
+            io: Io {
+                backend: crate::io_backend::SmolBackend::new(),
+                socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            },
+            instrumentation: Instrumentation {
+                debug: None,
+                coverage: None,
+            },
             options,
-            socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            io_backend: crate::io_backend::SmolBackend::new(),
-            debug: None,
-            coverage: None,
             handle_table: crate::handle_table::HandleTable::new(),
         }
     }
@@ -365,8 +392,8 @@ impl<'gc> VmState<'gc> {
     /// as an `output` event; otherwise write straight to the real fd. The single chokepoint for
     /// `[IO]Handle`'s stdout/stderr writes (see `src/runtime/io.rs`).
     pub fn write_std(&mut self, stream: StdStream, bytes: &[u8]) -> std::io::Result<()> {
-        if self.capture_output {
-            self.program_output.push(OutputChunk {
+        if self.output.capture {
+            self.output.chunks.push(OutputChunk {
                 stream,
                 bytes: bytes.to_vec(),
             });
@@ -383,7 +410,7 @@ impl<'gc> VmState<'gc> {
     /// Drain the captured program output (the DAP driver calls this between resumes to emit
     /// `output` events). Empty when nothing was captured.
     pub fn take_program_output(&mut self) -> Vec<OutputChunk> {
-        std::mem::take(&mut self.program_output)
+        std::mem::take(&mut self.output.chunks)
     }
 
     pub fn new_object(
@@ -1328,7 +1355,7 @@ impl<'gc> VmState<'gc> {
         };
         self.frames.truncate(base_frames);
         self.stack.truncate(base_stack);
-        self.active_exception = None;
+        self.exceptions.active = None;
         result
     }
 
@@ -1914,7 +1941,7 @@ impl<'gc> VmState<'gc> {
         // An uncaught Quoin throw reaches here as `Thrown`; surface the actual
         // thrown value (which lives in `active_exception`) for display.
         let error = if matches!(error, QuoinError::Thrown) {
-            let msg = match self.active_exception {
+            let msg = match self.exceptions.active {
                 Some(v) => format!("{}", v),
                 None => "uncaught exception".to_string(),
             };
@@ -1983,7 +2010,7 @@ impl<'gc> VmState<'gc> {
                         let selector = selector.as_str();
                         let args_vec = if num_args > 0 {
                             if i == n - 1 {
-                                self.last_send_args.clone()
+                                self.exceptions.last_send_args.clone()
                             } else {
                                 self.frames[i + 1].args.clone()
                             }
@@ -2517,7 +2544,7 @@ impl<'gc> VmState<'gc> {
         let method_opt = match self.lookup_method(mc, receiver, selector, &args) {
             Ok(m) => m,
             Err(e) => {
-                self.last_send_args = args;
+                self.exceptions.last_send_args = args;
                 return Err(e);
             }
         };
@@ -2533,7 +2560,7 @@ impl<'gc> VmState<'gc> {
                 .collect();
             let receiver_name = receiver.class_name();
             let arg_names = args.iter().map(|a| a.class_name()).collect();
-            self.last_send_args = args;
+            self.exceptions.last_send_args = args;
             return Err(QuoinError::MessageNotUnderstood {
                 receiver: receiver_name,
                 selector: selector.as_str().to_string(),
@@ -2555,7 +2582,7 @@ impl<'gc> VmState<'gc> {
     ) -> Result<(), QuoinError> {
         if matches!(name.as_str(), "true" | "false" | "nil") {
             let err_msg = format!("Can't modify reserved identifier {}", name);
-            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+            self.exceptions.active = Some(self.new_string(mc, err_msg.clone()));
             return Err(QuoinError::Other(err_msg));
         }
         self.frames[frame_idx].env.borrow_mut(mc).bind(name, val);
@@ -2574,7 +2601,7 @@ impl<'gc> VmState<'gc> {
     ) -> Result<(), QuoinError> {
         if matches!(name.as_str(), "true" | "false" | "nil") {
             let err_msg = format!("Can't modify reserved identifier {}", name);
-            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+            self.exceptions.active = Some(self.new_string(mc, err_msg.clone()));
             return Err(QuoinError::Other(err_msg));
         }
         let frame = &mut self.frames[frame_idx];
@@ -2691,10 +2718,10 @@ impl<'gc> VmState<'gc> {
         // load). May suspend with `DebugBreak` to hand control to the driver; transparent —
         // execution continues here (then dispatches `inst`) on resume. `inst` borrows the
         // local `bytecode` clone, not `self`, so `&mut self` here is fine.
-        if self.debug.is_some() {
+        if self.instrumentation.debug.is_some() {
             self.debug_checkpoint(frame_idx, ip)?;
         }
-        if self.coverage.is_some() {
+        if self.instrumentation.coverage.is_some() {
             self.coverage_tick(frame_idx, ip);
         }
 
@@ -2746,7 +2773,7 @@ impl<'gc> VmState<'gc> {
                 let val = self.pop()?;
                 if name.name == "true" || name.name == "false" || name.name == "nil" {
                     let err_msg = format!("Can't modify reserved identifier {}", name.name);
-                    self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+                    self.exceptions.active = Some(self.new_string(mc, err_msg.clone()));
                     return Err(QuoinError::Other(err_msg));
                 }
                 let first_char = name.name.chars().next().unwrap_or('\0');
@@ -2758,7 +2785,7 @@ impl<'gc> VmState<'gc> {
                                 "Global {} is already defined in this scope",
                                 name.to_explicit_string()
                             );
-                            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+                            self.exceptions.active = Some(self.new_string(mc, err_msg.clone()));
                             return Err(QuoinError::Other(err_msg));
                         }
                     } else {
@@ -2767,7 +2794,7 @@ impl<'gc> VmState<'gc> {
                                 "Can't modify global constant {}",
                                 name.to_explicit_string()
                             );
-                            self.active_exception = Some(self.new_string(mc, err_msg.clone()));
+                            self.exceptions.active = Some(self.new_string(mc, err_msg.clone()));
                             return Err(QuoinError::Other(err_msg));
                         }
                     }
