@@ -60,6 +60,17 @@ pub struct ClassDecl {
     pub class_selectors: Vec<String>,
 }
 
+/// One ordered method argument for an extension-backed-class send (Phase 3 — `Call.method_args`).
+/// `Data` is an inline structured value; `Resource` is an ext-instance's object-table id (so a
+/// method can take another of the extension's objects); `Handle` is a host-value handle for a block
+/// or other non-data host object the extension drives via `invoke_block` / `call_method`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Arg {
+    Data(DataValue),
+    Resource(u64),
+    Handle(u64),
+}
+
 /// A single control-plane frame, in either direction. Mirrors the `Message` union in
 /// `ext.fbs`. Encode with [`encode`]; decode a received frame with [`decode_envelope`].
 /// (No `Eq` — `DataValue`/`ArrowArray` carry `f64`.)
@@ -80,9 +91,10 @@ pub enum Msg {
         data: Option<DataValue>,
         /// Extension-backed classes (Phase 3): names the class a method send dispatches to (empty
         /// for the legacy generic path); `recv` is the instance's ext-side resource id (0 =
-        /// class-side). The method args travel as a `DataValue::List` in `data`.
+        /// class-side). The method's ordered arguments travel in `method_args`.
         class_name: String,
         recv: u64,
+        method_args: Vec<Arg>,
     },
     /// ext -> host: the originating call is finished; `result` is the scalar return.
     CallReturn { result: String },
@@ -158,6 +170,7 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             data,
             class_name,
             recv,
+            method_args,
         } => g::Message::Call(Box::new(g::Call {
             op: Some(op.clone()),
             arg: Some(arg.clone()),
@@ -168,6 +181,7 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             data: data.as_ref().map(|dv| Box::new(encode_dv(dv))),
             class_name: Some(class_name.clone()),
             recv: *recv,
+            method_args: Some(method_args.iter().map(encode_arg).collect()),
         })),
         Msg::CallReturn { result } => g::Message::CallReturn(Box::new(g::CallReturn {
             result: Some(result.clone()),
@@ -296,6 +310,39 @@ fn decode_class_decl(c: g::ClassDeclRef<'_>) -> Result<ClassDecl, planus::Error>
     })
 }
 
+/// Owned [`Arg`] -> the generated `Arg` table.
+fn encode_arg(a: &Arg) -> g::Arg {
+    match a {
+        Arg::Data(d) => g::Arg {
+            kind: g::ArgKind::Data,
+            data: Some(Box::new(encode_dv(d))),
+            id: 0,
+        },
+        Arg::Resource(id) => g::Arg {
+            kind: g::ArgKind::Resource,
+            data: None,
+            id: *id,
+        },
+        Arg::Handle(h) => g::Arg {
+            kind: g::ArgKind::Handle,
+            data: None,
+            id: *h,
+        },
+    }
+}
+
+/// A decoded `ArgRef` -> owned [`Arg`].
+fn decode_arg(a: g::ArgRef<'_>) -> Result<Arg, planus::Error> {
+    Ok(match a.kind()? {
+        g::ArgKind::Data => Arg::Data(match a.data()? {
+            Some(b) => decode_dv(b)?,
+            None => DataValue::Null,
+        }),
+        g::ArgKind::Resource => Arg::Resource(a.id()?),
+        g::ArgKind::Handle => Arg::Handle(a.id()?),
+    })
+}
+
 /// Owned [`ArrowArray`] -> the generated builder struct.
 fn encode_arrow(a: &ArrowArray) -> g::ArrowArray {
     g::ArrowArray {
@@ -415,6 +462,15 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
             },
             class_name: c.class_name()?.unwrap_or_default().to_string(),
             recv: c.recv()?,
+            method_args: {
+                let mut method_args = Vec::new();
+                if let Some(v) = c.method_args()? {
+                    for a in v {
+                        method_args.push(decode_arg(a?)?);
+                    }
+                }
+                method_args
+            },
         },
         g::MessageRef::CallReturn(c) => Msg::CallReturn {
             result: c.result()?.unwrap_or_default().to_string(),

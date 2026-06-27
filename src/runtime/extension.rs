@@ -56,7 +56,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gc_arena::collect::Trace;
 use gc_arena::{Gc, lock::RefLock};
 
-use quoin_ext_proto::{ArrowArray, ArrowDType, ClassDecl, DataValue as WireData, Msg};
+use quoin_ext_proto::{Arg, ArrowArray, ArrowDType, ClassDecl, DataValue as WireData, Msg};
 
 use crate::arg;
 use crate::error::QuoinError;
@@ -516,6 +516,20 @@ fn host_op_error(message: String) -> Msg {
     }
 }
 
+/// Classify one extension-backed-class method argument (Phase 3) into a wire [`Arg`]: an ext-instance
+/// passes its object-table id (so a method can take another of the extension's objects); a
+/// data-representable value passes its `DataValue`; anything else (a block, a non-data host object)
+/// is minted a call-local host-value handle the extension drives via `invoke_block` / `call_method`.
+fn classify_arg<'gc>(vm: &mut VmState<'gc>, value: Value<'gc>, epoch: u32, ext_id: u64) -> Arg {
+    if let Ok(resource_id) = value.with_native_state::<NativeExtResource, _, _>(|r| r.resource_id) {
+        Arg::Resource(resource_id)
+    } else if let Ok(rt) = value_to_data(value) {
+        Arg::Data(runtime_to_wire(&rt))
+    } else {
+        Arg::Handle(vm.handle_table.mint_local(value, epoch, ext_id))
+    }
+}
+
 /// Drive one extension call to completion: open a call epoch, optionally mint a call-local
 /// handle for a host `block` the extension may invoke, send the `Call`, then service the
 /// re-entrant host-op conversation until the terminal `CallReturn`. The epoch is closed out
@@ -535,26 +549,35 @@ fn extension_call<'gc>(
 ) -> Result<CallOutcome<'gc>, QuoinError> {
     let epoch = vm.handle_table.begin_call();
 
-    // Route each arg by token space: an `ExtResource` passes its (ext-side) resource id; an
-    // `Array` is serialized into the bulk data plane; any other value is minted a call-local
-    // host-value handle (a block is one of these).
     let mut handles = Vec::new();
     let mut resources = Vec::new();
     let mut arrays = Vec::new();
-    for value in args {
-        if let Ok(resource_id) =
-            value.with_native_state::<NativeExtResource, _, _>(|r| r.resource_id)
-        {
-            resources.push(resource_id);
-        } else if let Some((dtype, data)) = array::array_parts(value) {
-            let length = (data.len() / 8) as u64;
-            arrays.push(ArrowArray {
-                dtype: to_wire_dtype(dtype),
-                length,
-                data,
-            });
-        } else {
-            handles.push(vm.handle_table.mint_local(value, epoch, ext_id));
+    let mut method_args = Vec::new();
+    if class_name.is_empty() {
+        // Generic `call:with:` paths: route each arg by token space — an `ExtResource` passes its
+        // (ext-side) resource id; an `Array` is serialized into the bulk data plane; any other
+        // value is minted a call-local host-value handle (a block is one of these).
+        for value in args {
+            if let Ok(resource_id) =
+                value.with_native_state::<NativeExtResource, _, _>(|r| r.resource_id)
+            {
+                resources.push(resource_id);
+            } else if let Some((dtype, data)) = array::array_parts(value) {
+                let length = (data.len() / 8) as u64;
+                arrays.push(ArrowArray {
+                    dtype: to_wire_dtype(dtype),
+                    length,
+                    data,
+                });
+            } else {
+                handles.push(vm.handle_table.mint_local(value, epoch, ext_id));
+            }
+        }
+    } else {
+        // Extension-backed-class method (Phase 3): build the ordered, tagged argument list, so a
+        // method can take data, another of the extension's instances, and host blocks together.
+        for value in args {
+            method_args.push(classify_arg(vm, value, epoch, ext_id));
         }
     }
 
@@ -572,6 +595,7 @@ fn extension_call<'gc>(
                 data,
                 class_name,
                 recv,
+                method_args,
             },
         )?;
         loop {
@@ -785,8 +809,8 @@ fn run_extension_method<'gc>(
 /// owning `Extension` value; `receiver` is the class itself (class-side — a constructor) or an
 /// instance (instance-side). The selector is forwarded as the `Call.op`, the class name routes it
 /// on the extension side, and `recv` is the receiver instance's resource id (0 for class-side).
-/// The method arguments travel as a structured `DvList` (Phase 1), so for MVP they must be
-/// data-representable; a returned resource wraps as an instance of the receiver's class.
+/// The method arguments are routed into the tagged `method_args` (data / ext-instances / blocks);
+/// a returned resource wraps as the class its `class_name` names (cross-class returns).
 pub fn dispatch_ext_method<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -819,18 +843,12 @@ pub fn dispatch_ext_method<'gc>(
     };
     let class_name = class_obj.borrow().name.to_string();
 
-    // The method arguments cross as a structured `DvList` (Phase 1). MVP limitation: each argument
-    // must be data-representable (passing another ext-object or a block is a later slice).
-    let arg_data: Vec<WireData> = args
-        .iter()
-        .map(|v| Ok(runtime_to_wire(&value_to_data(*v)?)))
-        .collect::<Result<_, QuoinError>>()?;
-    let data = Some(WireData::List(arg_data));
-
     let ctx = ext_prelude(ext)?;
     if ctx.dead {
         return Err(extension_dead_error("already exited"));
     }
+    // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
+    // `method_args` — data, ext-instances, and host blocks each by their kind.
     let outcome = extension_call(
         vm,
         mc,
@@ -838,8 +856,8 @@ pub fn dispatch_ext_method<'gc>(
         ctx.ext_id,
         selector.as_str().to_string(),
         String::new(),
-        Vec::new(),
-        data,
+        args,
+        None,
         class_name,
         recv,
         ctx.releases,
