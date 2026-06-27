@@ -23,7 +23,7 @@
 //! Structured args arrive via [`Host::data`]; bulk columns via [`Host::arrays`]. Host values the
 //! extension holds are opaque [`Handle`]s indexing a GC-rooted table on the host (§2).
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -180,6 +180,24 @@ impl<'a> Host<'a> {
         }
     }
 
+    /// Apply a host block (a `Handle` from a method argument — see [`Arg::handle`]) to each input,
+    /// in one batched round-trip, returning one result per input. Each input is made into a host
+    /// value, the block is invoked once per input, and each result is read back as a [`DataValue`].
+    /// The unary mapping form (`v map: { |x| … }`); for richer call shapes use [`Host::invoke_block`]
+    /// directly.
+    pub fn apply_block(
+        &mut self,
+        block: Handle,
+        inputs: &[DataValue],
+    ) -> io::Result<Vec<DataValue>> {
+        let batches: Vec<Vec<Handle>> = inputs
+            .iter()
+            .map(|d| Ok(vec![self.make_value(d.clone())?]))
+            .collect::<io::Result<_>>()?;
+        let results = self.invoke_block(block, &batches)?;
+        results.iter().map(|h| self.read_handle(*h)).collect()
+    }
+
     /// Resolve a name in the host's globals (a class is a class-valued global), returning a handle
     /// to its value — so the extension can reach and drive host classes/globals (e.g.
     /// `call_method(get_global("Array"), "ofFloats:", [list])`). Unbound name -> `io::Error`.
@@ -309,6 +327,7 @@ pub fn serve<R: Into<Reply>>(
                 // The generic `call:with:` handler doesn't use the extension-backed-class fields.
                 class_name: _,
                 recv: _,
+                method_args: _,
             } => {
                 // `host` borrows the stream for the call's re-entrant host-ops; the borrow ends
                 // before we write the terminal reply on the same stream.
@@ -339,7 +358,10 @@ pub fn serve<R: Into<Reply>>(
 fn reply_to_msg(reply: Reply) -> Msg {
     match reply {
         Reply::Scalar(result) => Msg::CallReturn { result },
-        Reply::Resource(resource) => Msg::CallReturnResource { resource },
+        Reply::Resource(resource) => Msg::CallReturnResource {
+            resource,
+            class_name: String::new(),
+        },
         Reply::Array(array) => Msg::CallReturnArray { array },
         Reply::Data(value) => Msg::CallReturnData { value },
         Reply::Handle(handle) => Msg::CallReturnHandle { handle },
@@ -356,10 +378,46 @@ fn reply_to_msg(reply: Reply) -> Msg {
 // method bodies, and instances are freed automatically when the host drops them.
 // ---------------------------------------------------------------------------
 
+/// One resolved method argument handed to a handler (Phase 3 — richer args). `Data` is a decoded
+/// value; `Object` is another of *this extension's* live instances (resolved from the object table —
+/// downcast with [`Arg::object`]); `Handle` is a host-value handle for a block or other host object
+/// the handler drives via [`Host::apply_block`] / the [`Host`] callbacks.
+pub enum Arg<'a> {
+    Data(DataValue),
+    Object(&'a dyn Any),
+    Handle(Handle),
+}
+
+impl<'a> Arg<'a> {
+    /// The decoded value, if this argument is plain data.
+    pub fn data(&self) -> Option<&DataValue> {
+        match self {
+            Arg::Data(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The live instance behind an ext-object argument, downcast to `T` (the type it was built as).
+    pub fn object<T: 'static>(&self) -> Option<&T> {
+        match self {
+            Arg::Object(o) => o.downcast_ref::<T>(),
+            _ => None,
+        }
+    }
+
+    /// The host-value handle behind a block / non-data argument (drive it via [`Host::apply_block`]).
+    pub fn handle(&self) -> Option<Handle> {
+        match self {
+            Arg::Handle(h) => Some(*h),
+            _ => None,
+        }
+    }
+}
+
 /// Erased per-selector handlers (the concrete `T` is captured at registration and downcast here).
-type CtorFn = Box<dyn Fn(&mut Host, &[DataValue]) -> io::Result<Box<dyn Any>>>;
-type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[DataValue]) -> io::Result<Reply>>;
-type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[DataValue]) -> io::Result<Box<dyn Any>>>;
+type CtorFn = Box<dyn Fn(&mut Host, &[Arg]) -> io::Result<Box<dyn Any>>>;
+type MethodFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> io::Result<Reply>>;
+type MakesFn = Box<dyn Fn(&mut dyn Any, &mut Host, &[Arg]) -> io::Result<Box<dyn Any>>>;
 
 /// One registered class's erased handler tables, keyed by selector.
 struct ClassReg {
@@ -377,9 +435,8 @@ fn downcast<T: 'static>(obj: &mut dyn Any) -> io::Result<&mut T> {
 
 /// Configures one extension-backed class, backed by the Rust type `T`. Class-side `constructor`s
 /// build a `T`; instance-side `method`s read/mutate it and return a [`Reply`]; `makes` produce a
-/// new `T` (a transform like `scale:` or `clone`). Method arguments arrive as already-decoded
-/// [`DataValue`]s — for MVP they must be data-representable (passing another instance or a host
-/// block is a later slice).
+/// new instance (of this or any registered class). Method arguments arrive as [`Arg`]s — data,
+/// another of the extension's live instances (`Arg::object`), or a host block (`Arg::handle`).
 pub struct ClassBuilder<T> {
     name: String,
     constructors: HashMap<String, CtorFn>,
@@ -394,7 +451,7 @@ impl<T: 'static> ClassBuilder<T> {
     pub fn constructor(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut Host, &[DataValue]) -> T + 'static,
+        f: impl Fn(&mut Host, &[Arg]) -> T + 'static,
     ) -> &mut Self {
         self.constructors.insert(
             selector.to_string(),
@@ -407,7 +464,7 @@ impl<T: 'static> ClassBuilder<T> {
     pub fn method<R: Into<Reply>>(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut T, &mut Host, &[DataValue]) -> R + 'static,
+        f: impl Fn(&mut T, &mut Host, &[Arg]) -> R + 'static,
     ) -> &mut Self {
         self.methods.insert(
             selector.to_string(),
@@ -416,11 +473,13 @@ impl<T: 'static> ClassBuilder<T> {
         self
     }
 
-    /// An instance-side method that yields a new instance of this class (e.g. `scale:` / `clone`).
-    pub fn makes(
+    /// An instance-side method that yields a new instance — of this class (`scale:` / `clone`) or
+    /// of *any* registered class (`Matrix.row:` -> `Vector`, a cross-class return). The returned
+    /// type's registered class is recovered by `TypeId` at dispatch, so the host wraps it correctly.
+    pub fn makes<U: 'static>(
         &mut self,
         selector: &str,
-        f: impl Fn(&mut T, &mut Host, &[DataValue]) -> T + 'static,
+        f: impl Fn(&mut T, &mut Host, &[Arg]) -> U + 'static,
     ) -> &mut Self {
         self.makes.insert(
             selector.to_string(),
@@ -447,12 +506,16 @@ impl<T: 'static> ClassBuilder<T> {
 #[derive(Default)]
 pub struct Extension {
     classes: Vec<ClassReg>,
+    /// Maps each registered Rust type to its Quoin class name, so an instance returned by a method
+    /// (of this class or another) is wrapped as the right class on the host — cross-class returns.
+    type_names: HashMap<TypeId, String>,
 }
 
 impl Extension {
     pub fn new() -> Self {
         Self {
             classes: Vec::new(),
+            type_names: HashMap::new(),
         }
     }
 
@@ -463,6 +526,7 @@ impl Extension {
         name: &str,
         build: impl FnOnce(&mut ClassBuilder<T>),
     ) -> &mut Self {
+        self.type_names.insert(TypeId::of::<T>(), name.to_string());
         let mut cb = ClassBuilder {
             name: name.to_string(),
             constructors: HashMap::new(),
@@ -491,16 +555,22 @@ impl Extension {
                     op,
                     class_name,
                     recv,
-                    data,
+                    method_args,
                     releases,
                     ..
                 } => {
                     // The host batches dropped instances onto `releases`; free them from the table.
                     for rid in &releases {
-                        table.remove(*rid);
+                        table.take(*rid);
                     }
-                    let reply =
-                        self.dispatch(&mut stream, &mut table, &class_name, &op, recv, data)?;
+                    let reply = self.dispatch(
+                        &mut stream,
+                        &mut table,
+                        &class_name,
+                        &op,
+                        recv,
+                        &method_args,
+                    )?;
                     write_frame(&mut stream, &quoin_ext_proto::encode(&reply))?;
                 }
                 other => {
@@ -511,6 +581,16 @@ impl Extension {
             }
         }
         Ok(())
+    }
+
+    /// The registered Quoin class name for a freshly built instance, recovered from its concrete
+    /// type — so a method returning an instance of *any* registered class is wrapped correctly
+    /// (cross-class returns). Empty if the type isn't registered (defensively, an `ExtResource`).
+    fn class_name_of(&self, obj: &dyn Any) -> String {
+        self.type_names
+            .get(&obj.type_id())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The `ManifestReturn` describing every registered class.
@@ -535,19 +615,13 @@ impl Extension {
         class_name: &str,
         op: &str,
         recv: u64,
-        data: Option<DataValue>,
+        method_args: &[quoin_ext_proto::Arg],
     ) -> io::Result<Msg> {
         let class = self
             .classes
             .iter()
             .find(|c| c.name == class_name)
             .ok_or_else(|| invalid_data(format!("no extension-backed class '{class_name}'")))?;
-        // The host packs the method arguments as a `DvList` (Phase 1); unwrap to the arg slice.
-        let args: Vec<DataValue> = match data {
-            Some(DataValue::List(items)) => items,
-            Some(other) => vec![other],
-            None => Vec::new(),
-        };
         let mut host = Host {
             stream,
             handles: Vec::new(),
@@ -561,26 +635,40 @@ impl Extension {
             let ctor = class.constructors.get(op).ok_or_else(|| {
                 invalid_data(format!("no constructor '{op}' on class '{class_name}'"))
             })?;
-            let obj = ctor(&mut host, &args)?;
+            let obj = {
+                let args = resolve_args(method_args, table)?;
+                ctor(&mut host, &args)?
+            };
+            let class_name = self.class_name_of(&*obj);
             Ok(Msg::CallReturnResource {
                 resource: table.insert(obj),
+                class_name,
             })
         } else if let Some(method) = class.methods.get(op) {
-            let obj = table
-                .get_mut(recv)
+            // Take the receiver out of the table so its `&mut` can't alias an ext-instance argument
+            // resolved from the same table, then put it back under its id.
+            let mut recv_box = table
+                .take(recv)
                 .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
-            let reply = method(obj.as_mut(), &mut host, &args)?;
+            let reply = {
+                let args = resolve_args(method_args, table)?;
+                method(recv_box.as_mut(), &mut host, &args)?
+            };
+            table.reinsert(recv, recv_box);
             Ok(reply_to_msg(reply))
         } else if let Some(makes) = class.makes.get(op) {
-            // Build the new instance under a scoped borrow, then store it under a fresh id.
+            let mut recv_box = table
+                .take(recv)
+                .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
             let new_obj = {
-                let obj = table
-                    .get_mut(recv)
-                    .ok_or_else(|| invalid_data(format!("no live instance {recv}")))?;
-                makes(obj.as_mut(), &mut host, &args)?
+                let args = resolve_args(method_args, table)?;
+                makes(recv_box.as_mut(), &mut host, &args)?
             };
+            table.reinsert(recv, recv_box);
+            let class_name = self.class_name_of(&*new_obj);
             Ok(Msg::CallReturnResource {
                 resource: table.insert(new_obj),
+                class_name,
             })
         } else {
             Err(invalid_data(format!(
@@ -588,6 +676,25 @@ impl Extension {
             )))
         }
     }
+}
+
+/// Resolve the wire arguments to the handler-facing [`Arg`]s: data passes through, an ext-instance
+/// id is looked up to a live object (a shared borrow of the table), and a handle passes through.
+fn resolve_args<'t>(
+    method_args: &[quoin_ext_proto::Arg],
+    table: &'t ObjectTable,
+) -> io::Result<Vec<Arg<'t>>> {
+    method_args
+        .iter()
+        .map(|a| match a {
+            quoin_ext_proto::Arg::Data(d) => Ok(Arg::Data(d.clone())),
+            quoin_ext_proto::Arg::Resource(id) => table
+                .get(*id)
+                .map(Arg::Object)
+                .ok_or_else(|| invalid_data(format!("argument references no live instance {id}"))),
+            quoin_ext_proto::Arg::Handle(h) => Ok(Arg::Handle(*h)),
+        })
+        .collect()
 }
 
 /// The SDK-owned instance table (Phase 3): live instances keyed by an opaque id — the resource id
@@ -606,13 +713,20 @@ impl ObjectTable {
         self.next_id
     }
 
-    /// The live instance for `id`, or `None` if it was never created or has been dropped.
-    fn get_mut(&mut self, id: u64) -> Option<&mut Box<dyn Any>> {
-        self.objects.get_mut(&id)
+    /// A shared borrow of the live instance for `id`, or `None` if it isn't (or no longer) live.
+    /// Shared so several args (and the receiver, once it's been `take`n out) can be resolved at once.
+    fn get(&self, id: u64) -> Option<&dyn Any> {
+        self.objects.get(&id).map(|b| &**b)
     }
 
-    /// Free an instance the host has dropped.
-    fn remove(&mut self, id: u64) {
-        self.objects.remove(&id);
+    /// Remove and return the instance for `id` (e.g. the receiver of an instance method, or one the
+    /// host has dropped), or `None` if it isn't live.
+    fn take(&mut self, id: u64) -> Option<Box<dyn Any>> {
+        self.objects.remove(&id)
+    }
+
+    /// Put a previously-`take`n instance back under its id.
+    fn reinsert(&mut self, id: u64, obj: Box<dyn Any>) {
+        self.objects.insert(id, obj);
     }
 }

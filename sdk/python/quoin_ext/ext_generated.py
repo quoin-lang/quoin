@@ -25,6 +25,12 @@ class DataValueKind(object):
     DvMap = 10
 
 
+class ArgKind(object):
+    Data = 0
+    Resource = 1
+    Handle = 2
+
+
 class Message(object):
     NONE = 0
     Call = 1
@@ -639,6 +645,65 @@ def DataValueBoxEnd(builder):
 
 
 
+class Arg(object):
+    __slots__ = ['_tab']
+
+    @classmethod
+    def GetRootAs(cls, buf, offset=0):
+        n = flatbuffers.encode.Get(flatbuffers.packer.uoffset, buf, offset)
+        x = Arg()
+        x.Init(buf, n + offset)
+        return x
+
+    @classmethod
+    def GetRootAsArg(cls, buf, offset=0):
+        """This method is deprecated. Please switch to GetRootAs."""
+        return cls.GetRootAs(buf, offset)
+    # Arg
+    def Init(self, buf, pos):
+        self._tab = flatbuffers.table.Table(buf, pos)
+
+    # Arg
+    def Kind(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, o + self._tab.Pos)
+        return 0
+
+    # Arg
+    def Data(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            x = self._tab.Indirect(o + self._tab.Pos)
+            obj = DataValueBox()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+    # Arg
+    def Id(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
+def ArgStart(builder):
+    builder.StartObject(3)
+
+def ArgAddKind(builder, kind):
+    builder.PrependUint8Slot(0, kind, 0)
+
+def ArgAddData(builder, data):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(data), 0)
+
+def ArgAddId(builder, id):
+    builder.PrependUint64Slot(2, id, 0)
+
+def ArgEnd(builder):
+    return builder.EndObject()
+
+
+
 class Call(object):
     __slots__ = ['_tab']
 
@@ -800,8 +865,32 @@ class Call(object):
             return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
         return 0
 
+    # Call
+    def MethodArgs(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(22))
+        if o != 0:
+            x = self._tab.Vector(o)
+            x += flatbuffers.number_types.UOffsetTFlags.py_type(j) * 4
+            x = self._tab.Indirect(x)
+            obj = Arg()
+            obj.Init(self._tab.Bytes, x)
+            return obj
+        return None
+
+    # Call
+    def MethodArgsLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(22))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # Call
+    def MethodArgsIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(22))
+        return o == 0
+
 def CallStart(builder):
-    builder.StartObject(9)
+    builder.StartObject(10)
 
 def CallAddOp(builder, op):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(op), 0)
@@ -841,6 +930,12 @@ def CallAddClassName(builder, className):
 
 def CallAddRecv(builder, recv):
     builder.PrependUint64Slot(8, recv, 0)
+
+def CallAddMethodArgs(builder, methodArgs):
+    builder.PrependUOffsetTRelativeSlot(9, flatbuffers.number_types.UOffsetTFlags.py_type(methodArgs), 0)
+
+def CallStartMethodArgsVector(builder, numElems):
+    return builder.StartVector(4, numElems, 4)
 
 def CallEnd(builder):
     return builder.EndObject()
@@ -967,11 +1062,21 @@ class CallReturnResource(object):
             return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
         return 0
 
+    # CallReturnResource
+    def ClassName(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.String(o + self._tab.Pos)
+        return None
+
 def CallReturnResourceStart(builder):
-    builder.StartObject(1)
+    builder.StartObject(2)
 
 def CallReturnResourceAddResource(builder, resource):
     builder.PrependUint64Slot(0, resource, 0)
+
+def CallReturnResourceAddClassName(builder, className):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(className), 0)
 
 def CallReturnResourceEnd(builder):
     return builder.EndObject()

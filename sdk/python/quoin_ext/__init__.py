@@ -381,10 +381,15 @@ def _encode_call_return(result):
     return _envelope(b, g.Message.CallReturn, g.CallReturnEnd(b))
 
 
-def _encode_call_return_resource(resource_id):
+def _encode_call_return_resource(resource_id, class_name=""):
     b = flatbuffers.Builder(64)
+    # `class_name` (Phase 3) names the registered class the resource is an instance of, so a method
+    # can return an instance of any of the extension's classes (cross-class returns); "" = ExtResource.
+    name_off = b.CreateString(class_name) if class_name else None
     g.CallReturnResourceStart(b)
     g.CallReturnResourceAddResource(b, resource_id)
+    if name_off is not None:
+        g.CallReturnResourceAddClassName(b, name_off)
     return _envelope(b, g.Message.CallReturnResource, g.CallReturnResourceEnd(b))
 
 
@@ -490,14 +495,23 @@ def _decode_call(buf):
 def _decode_class_call(buf):
     """Decode a `Call` for extension-backed-class dispatch (Phase 3): the selector (`op`), the
     `class_name` it routes to, the receiver instance id (`recv`, 0 = class-side), the dropped-
-    instance ids (`releases`), and the method arguments (a `DvList` in `data`)."""
+    instance ids (`releases`), and the ordered, tagged method arguments (`method_args`)."""
     table = _msg(buf, g.Message.Call, "Call")
     call = g.Call()
     call.Init(table.Bytes, table.Pos)
     releases = [call.Releases(j) for j in range(call.ReleasesLength())]
-    box = call.Data()
-    data = _decode_dv(box) if box is not None else None
-    return (_text(call.Op()), _text(call.ClassName()), call.Recv(), releases, data)
+    args = []
+    for j in range(call.MethodArgsLength()):
+        a = call.MethodArgs(j)
+        kind = a.Kind()
+        if kind == g.ArgKind.Data:
+            box = a.Data()
+            args.append(("data", _decode_dv(box) if box is not None else None))
+        elif kind == g.ArgKind.Resource:
+            args.append(("resource", a.Id()))
+        else:  # Handle
+            args.append(("handle", a.Id()))
+    return (_text(call.Op()), _text(call.ClassName()), call.Recv(), releases, args)
 
 
 def _decode_host_op_return(buf):
@@ -578,6 +592,13 @@ class Host:
         if error is not None:
             raise RuntimeError(error)
         return results
+
+    def apply_block(self, block, inputs):
+        """Apply a host block to each input value (one batched round-trip), returning one result per
+        input as a native Python value — the unary `v map: { |x| … }` mapping form."""
+        handles = [self.make_value(d) for d in inputs]
+        results = self.invoke_block(block, [[h] for h in handles])
+        return [self.read_handle(h) for h in results]
 
     # --- host reach (Phase 2) ---
     def get_global(self, name):
@@ -699,6 +720,19 @@ class _ObjectTable:
         self._objects.pop(oid, None)
 
 
+class _HostBlock:
+    """A host block passed as a method argument (Phase 3). Call it with one value to apply the block
+    to that value over the socket, returning the result as a native Python value — so a handler can
+    treat it like an ordinary function (e.g. ``[block(x) for x in self.data]``)."""
+
+    def __init__(self, conn, handle):
+        self._host = Host(conn, [], [], [], [], None)
+        self._handle = handle
+
+    def __call__(self, value):
+        return self._host.apply_block(self._handle, [value])[0]
+
+
 class Extension:
     """A class-providing extension (Phase 3). Register classes with :meth:`register`, then
     :meth:`serve`. The SDK owns the instances, so writing an extension class is just writing a plain
@@ -734,7 +768,7 @@ class Extension:
                     if g.Envelope.GetRootAs(frame, 0).MsgType() == g.Message.GetManifest:
                         write_frame(conn, _encode_manifest_return(self._manifest()))
                         continue
-                    write_frame(conn, self._dispatch(frame, table, registered_types))
+                    write_frame(conn, self._dispatch(conn, frame, table, registered_types))
             finally:
                 conn.close()
         finally:
@@ -747,23 +781,48 @@ class Extension:
             for reg in self._classes.values()
         ]
 
-    def _dispatch(self, frame, table, registered_types):
+    def _class_name_of(self, obj):
+        """The registered Quoin class name for an instance (so a method returning an instance of any
+        registered class is wrapped correctly — cross-class returns), or '' if it isn't registered."""
+        for reg in self._classes.values():
+            if isinstance(obj, reg.cls):
+                return reg.name
+        return ""
+
+    def _resolve_args(self, raw_args, table, conn):
+        """Resolve the tagged wire args to native Python values: data passes through, an ext-instance
+        id becomes the live instance, and a handle becomes a callable :class:`_HostBlock`. Order is
+        preserved, so the handler receives its arguments positionally."""
+        out = []
+        for kind, val in raw_args:
+            if kind == "data":
+                out.append(val)
+            elif kind == "resource":
+                obj = table.get(val)
+                if obj is None:
+                    raise ValueError(f"argument references no live instance {val}")
+                out.append(obj)
+            else:  # handle
+                out.append(_HostBlock(conn, val))
+        return out
+
+    def _dispatch(self, conn, frame, table, registered_types):
         """Route one method ``Call`` to its handler and return the terminal reply frame."""
-        op, class_name, recv, releases, data = _decode_class_call(frame)
+        op, class_name, recv, releases, raw_args = _decode_class_call(frame)
         # The host batches dropped instances onto `releases`; free them from the table.
         for rid in releases:
             table.remove(rid)
         reg = self._classes.get(class_name)
         if reg is None:
             raise ValueError(f"no extension-backed class '{class_name}'")
-        # The host packs the method arguments as a `DvList` (decoded to a Python list).
-        args = data if isinstance(data, list) else ([] if data is None else [data])
+        args = self._resolve_args(raw_args, table, conn)
         if recv == 0:
             # Class-side: a constructor builds a new instance.
             ctor = reg.constructors.get(op)
             if ctor is None:
                 raise ValueError(f"no constructor '{op}' on class '{class_name}'")
-            return _encode_call_return_resource(table.insert(ctor(*args)))
+            obj = ctor(*args)
+            return _encode_call_return_resource(table.insert(obj), self._class_name_of(obj))
         method = reg.methods.get(op)
         if method is None:
             raise ValueError(f"no method '{op}' on class '{class_name}'")
@@ -773,5 +832,5 @@ class Extension:
         result = method(instance, *args)
         # A returned registered instance becomes a new ext-side object; anything else is data.
         if isinstance(result, registered_types):
-            return _encode_call_return_resource(table.insert(result))
+            return _encode_call_return_resource(table.insert(result), self._class_name_of(result))
         return _encode_reply(result)

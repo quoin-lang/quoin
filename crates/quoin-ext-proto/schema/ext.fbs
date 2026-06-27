@@ -53,6 +53,19 @@ table DataValueBox {
     v: DataValueKind;
 }
 
+// One ordered, tagged method argument for an extension-backed-class send (Phase 3 — `method_args`).
+// The kind selects which field carries it: `Data` -> a structured `DataValue` (in `data`); `Resource`
+// -> an ext-instance's object-table id (in `id`), so a method can take another of the extension's
+// objects; `Handle` -> a host-value handle (in `id`) for a block or other non-data host object the
+// extension drives via `invoke_block` / `call_method`.
+enum ArgKind : ubyte { Data, Resource, Handle }
+
+table Arg {
+    kind: ArgKind;
+    data: DataValueBox;
+    id: uint64;
+}
+
 // host -> ext: invoke op `op` with scalar argument `arg`, plus typed handle arguments
 // (Slice 5b). Two distinct token spaces:
 //   - `handles`: host-value handle ids into the host's table (a block is one of these — the
@@ -74,10 +87,12 @@ table Call {
     // Extension-backed classes (Phase 3): a method send to an extension-provided class dispatches
     // as a `Call` whose `op` is the selector and `class_name` names the class. Empty `class_name`
     // is the legacy generic `call:with:` path. For an instance-side send, `recv` is the receiver's
-    // ext-side resource id (its object-table key); 0 means class-side (a constructor). The method
-    // arguments travel as a `DvList` in `data`.
+    // ext-side resource id (its object-table key); 0 means class-side (a constructor).
     class_name: string;
     recv: uint64;
+    // The method's arguments, in order — data, ext-instances, and host handles (blocks) mixed
+    // (Phase 3). The generic `call:with:` paths use the channels above instead.
+    method_args: [Arg];
 }
 
 // A tuple of handles — one invocation's argument list in a batched callback.
@@ -91,9 +106,13 @@ table CallReturn {
 }
 
 // ext -> host: the originating call is finished, returning an ext-side resource the host will
-// hold as an opaque token (and reap on drop). `resource` is the extension-assigned id.
+// hold as an opaque token (and reap on drop). `resource` is the extension-assigned id. For an
+// extension-backed-class method (Phase 3), `class_name` names the registered class the resource is
+// an instance of — so a method can return an instance of *any* of the extension's classes, not just
+// the one it was dispatched on (cross-class returns). Empty = the opaque `ExtResource` token.
 table CallReturnResource {
     resource: uint64;
+    class_name: string;
 }
 
 // ext -> host: the originating call is finished, returning a bulk Array (the data plane).

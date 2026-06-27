@@ -33,6 +33,28 @@ class Vector:
     def scale(self, factor):
         return Vector([x * factor for x in self.data])
 
+    def dot(self, other):
+        # `other` is a live `Vector` instance — an ext-object argument.
+        return sum(a * b for a, b in zip(self.data, other.data))
+
+    def map(self, block):
+        # `block` is a callable wrapping a host block — apply it to each element.
+        return Vector([block(x) for x in self.data])
+
+
+class Matrix:
+    """A second class — ``row`` returns a ``Vector``, exercising cross-class returns (the SDK detects
+    the returned ``Vector`` with ``isinstance`` and names it so the host wraps it correctly)."""
+
+    def __init__(self, rows):
+        self.rows = [[float(x) for x in row] for row in rows]
+
+    def rowCount(self):
+        return len(self.rows)
+
+    def row(self, i):
+        return Vector(self.rows[int(i)])
+
 
 if __name__ == "__main__":
     ext = quoin_ext.Extension()
@@ -40,6 +62,18 @@ if __name__ == "__main__":
         "Vector",
         Vector,
         constructors={"ofFloats:": Vector},
-        methods={"sum": Vector.sum, "length": Vector.length, "scale:": Vector.scale},
+        methods={
+            "sum": Vector.sum,
+            "length": Vector.length,
+            "scale:": Vector.scale,
+            "dot:": Vector.dot,
+            "map:": Vector.map,
+        },
+    )
+    ext.register(
+        "Matrix",
+        Matrix,
+        constructors={"ofRows:": Matrix},
+        methods={"rowCount": Matrix.rowCount, "row:": Matrix.row},
     )
     ext.serve(sys.argv[1])
