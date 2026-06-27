@@ -224,6 +224,14 @@ pub struct VmState<'gc> {
     #[collect(require_static)]
     pub ext_handle_reap: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
 
+    /// The session's async I/O backend (the reactor + the `StreamId -> fd` registry). Held here so
+    /// it **persists across separate driver runs** — most importantly the REPL, which drives each
+    /// line in its own `drive_with_frontend`: a long-lived resource opened on one line (an extension
+    /// socket, a file, a TCP/TLS connection) must survive into the next. `SmolBackend` is an `Rc`
+    /// handle to the shared registry, so the driver clones it per run; non-GC, so `require_static`.
+    #[collect(require_static)]
+    pub io_backend: crate::io_backend::SmolBackend,
+
     /// Attached debugger session, or `None` for a normal run. When `Some`, the step loop
     /// consults it once per instruction (see `src/debug.rs`); when `None`, the hook is a
     /// single bool load. Plain data (no `Gc`), so `require_static`.
@@ -338,6 +346,7 @@ impl<'gc> VmState<'gc> {
             options,
             socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             ext_handle_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            io_backend: crate::io_backend::SmolBackend::new(),
             debug: None,
             coverage: None,
             handle_table: crate::handle_table::HandleTable::new(),
