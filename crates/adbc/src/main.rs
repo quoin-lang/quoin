@@ -1,17 +1,21 @@
 //! `adbc` — Quoin's ADBC database extension (out-of-process, out-of-core). See `DESIGN.md`.
 //!
-//! The class chain so far: `[ADBC]Database` (open SQLite / PostgreSQL) → `connect` →
-//! `[ADBC]Connection` → `query:` → a streaming `[ADBC]ResultSet` (`next` / `each:` / `toList` /
-//! `columns` / `schema` / `close`), with the Arrow→DataValue value mapping. (DML / params /
-//! `prepare:`, transactions, and metadata are later slices.) Every ADBC fallibility threads through
-//! the SDK's `HandlerResult`, so a driver-load failure or a SQL error surfaces as a *catchable*
-//! Quoin error and the extension stays alive.
+//! The class chain: `[ADBC]Database` (open SQLite / PostgreSQL) → `connect` → `[ADBC]Connection`
+//! (`query:` / `query:params:` → a streaming `[ADBC]ResultSet`; `execute:` / `execute:params:` →
+//! rows-affected; `prepare:` → a reusable `[ADBC]Statement`; `autocommit:` / `commit` / `rollback`),
+//! with the Arrow<->DataValue value mapping for both results and bound parameters. Every ADBC
+//! fallibility threads through the SDK's `HandlerResult`, so a driver-load failure or a SQL error
+//! surfaces as a *catchable* Quoin error and the extension stays alive. Deferred: a `transaction:`
+//! block wrapper (a block can't re-enter its own connection mid-call) and a hierarchical
+//! schema-introspection API (catalogs / schemas / tables / columns).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use adbc_core::options::{AdbcVersion, OptionDatabase, OptionValue};
-use adbc_core::sync::{Connection as _, Database as _, Driver as _, Statement as _};
+use adbc_core::options::{AdbcVersion, OptionConnection, OptionDatabase, OptionValue};
+use adbc_core::sync::{
+    Connection as _, Database as _, Driver as _, Optionable as _, Statement as _,
+};
 use adbc_driver_manager::{ManagedDriver, ManagedStatement};
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, NullArray, RecordBatch,
@@ -186,6 +190,29 @@ impl Connection {
         let mut stmt = self.statement(sql, None)?;
         stmt.prepare()?;
         Ok(Statement { stmt })
+    }
+
+    /// Enable/disable autocommit. With autocommit off, subsequent statements run in one explicit
+    /// transaction until `commit`/`rollback`. (A `transaction:`-block wrapper is deferred — a block
+    /// can't re-enter its own connection while the call holds it; the pattern is composed from these
+    /// primitives with `catch:` from Quoin instead.)
+    fn set_autocommit(&mut self, on: bool) -> HandlerResult<()> {
+        let v = if on { "true" } else { "false" };
+        self.conn.set_option(
+            OptionConnection::AutoCommit,
+            OptionValue::String(v.to_string()),
+        )?;
+        Ok(())
+    }
+
+    fn commit(&mut self) -> HandlerResult<DataValue> {
+        self.conn.commit()?;
+        Ok(DataValue::Null)
+    }
+
+    fn rollback(&mut self) -> HandlerResult<DataValue> {
+        self.conn.rollback()?;
+        Ok(DataValue::Null)
     }
 }
 
@@ -480,6 +507,12 @@ fn main() {
             conn.execute(str_arg(args, 0), Some(params.as_slice()))
         });
         c.makes("prepare:", |conn, _h, args| conn.prepare(str_arg(args, 0)));
+        c.method("autocommit:", |conn, _h, args| {
+            conn.set_autocommit(bool_arg(args, 0))?;
+            Ok(DataValue::Null)
+        });
+        c.method("commit", |conn, _h, _a| conn.commit());
+        c.method("rollback", |conn, _h, _a| conn.rollback());
     });
     ext.class::<Statement>("[ADBC]Statement", |c| {
         c.method("bind:", |st, _h, args| {
@@ -520,4 +553,12 @@ fn list_arg(args: &[quoin_ext::Arg], n: usize) -> Vec<DataValue> {
         Some(DataValue::List(items)) => items.clone(),
         _ => Vec::new(),
     }
+}
+
+/// Read the `n`th argument as a bool (anything that isn't `true` reads as `false`).
+fn bool_arg(args: &[quoin_ext::Arg], n: usize) -> bool {
+    matches!(
+        args.get(n).and_then(|a| a.data()),
+        Some(DataValue::Bool(true))
+    )
 }

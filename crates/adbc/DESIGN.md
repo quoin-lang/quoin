@@ -143,13 +143,16 @@ v1.
 ## 7. v1 scope
 
 **In:** SQLite + PostgreSQL via the driver manager (manifest-resolved); `Database` / `Connection` /
-`Statement` / `ResultSet`; `query` / `execute` / `prepare` / `bind`; streaming rows-as-`Map`; the
-value-mapping table (both directions); `commit` / `rollback` / `autocommit:` / `transaction:`;
-`tables` / `tableColumns:`; catchable errors.
+`Statement` / `ResultSet`; `query` / `execute` / `prepare` / `bind`; streaming rows-as-`Map` with a
+typed `schema`; the value-mapping table (both directions); `commit` / `rollback` / `autocommit:`;
+catchable errors.
 
-**Deferred:** full-Arrow columnar `Table` (Arrow C Data Interface); `DateTime` / temporal mapping;
-structured `[ADBC]Error`; the full get_objects metadata hierarchy; bulk ingest; connection pooling;
-parallelism; additional drivers; driver-library bundling (the packaging story).
+**Deferred:** a `transaction:`-block wrapper (a block can't re-enter its own connection while the
+call holds it — needs re-entrant host-op support; compose it from `autocommit:`/`commit`/`rollback`
++ `catch:` from Quoin meanwhile); a hierarchical **schema-introspection API** (catalogs / schemas /
+tables / columns — a flat `tables` string list wasn't worth shipping); full-Arrow columnar `Table`
+(Arrow C Data Interface); `DateTime` / temporal mapping; structured `[ADBC]Error`; bulk ingest;
+connection pooling; parallelism; additional drivers; driver-library bundling (the packaging story).
 
 ## 8. Build slices
 
@@ -160,8 +163,8 @@ parallelism; additional drivers; driver-library bundling (the packaging story).
    mapping; `next` / `each:` / `toList` / `columns`.
 3. **DML + params** — `execute:` (rows-affected); `params:` binding (the inverse Arrow batch);
    `prepare:` → `Statement` with `bind:` / `query` / `execute`.
-4. **Transactions + metadata** — `commit` / `rollback` / `autocommit:` / `transaction:`; `tables` /
-   `tableColumns:`.
+4. **Transactions** — `autocommit:` / `commit` / `rollback`. (A `transaction:` block wrapper and
+   schema introspection were both deferred — see §7.)
 5. **Tests** — an integration test against SQLite (`:memory:`, no external deps) for CI, and a
    PostgreSQL test gated on the local server (passwordless `damon` via the `/tmp` socket).
 
