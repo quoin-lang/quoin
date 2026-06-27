@@ -3,8 +3,9 @@
 //! Slice 1: the crate skeleton, driver loading (via the ADBC driver-manifest), and the start of the
 //! class chain — `[ADBC]Database` (open SQLite / PostgreSQL) → `connect` → `[ADBC]Connection` with a
 //! first `query:` that materializes rows as a `List` of `Map`s. (Streaming `ResultSet`, DML/params,
-//! transactions, and metadata are later slices; catchable SQL errors need a protocol addition — see
-//! the report. For now an ADBC error aborts the call by panicking, which the host isolates.)
+//! transactions, and metadata are later slices.) Every ADBC fallibility threads through the SDK's
+//! `HandlerResult`, so a driver-load failure or a SQL error surfaces as a *catchable* Quoin error
+//! and the extension stays alive.
 
 use std::path::PathBuf;
 
@@ -13,7 +14,7 @@ use adbc_core::sync::{Connection as _, Database as _, Driver as _, Statement as 
 use adbc_driver_manager::ManagedDriver;
 use arrow_array::{Array, RecordBatch};
 use arrow_schema::DataType;
-use quoin_ext::{DataValue, Extension};
+use quoin_ext::{DataValue, Extension, HandlerResult};
 
 // ---- driver resolution (ADBC driver-manifest) --------------------------------------------------
 
@@ -89,10 +90,13 @@ fn manifest_shared_path(text: &str, key: &str) -> Option<String> {
 }
 
 /// Load an ADBC driver by name (resolving its manifest) at ADBC 1.1.0, default entrypoint.
-fn load_driver(name: &str) -> ManagedDriver {
-    let path = resolve_driver_path(name).expect("resolve ADBC driver");
-    ManagedDriver::load_dynamic_from_filename(&path, None, AdbcVersion::V110)
-        .expect("load ADBC driver")
+fn load_driver(name: &str) -> HandlerResult<ManagedDriver> {
+    let path = resolve_driver_path(name)?;
+    Ok(ManagedDriver::load_dynamic_from_filename(
+        &path,
+        None,
+        AdbcVersion::V110,
+    )?)
 }
 
 // ---- the database handles (live in the SDK object table) ---------------------------------------
@@ -105,30 +109,31 @@ struct Database {
 
 impl Database {
     /// Open `name` (a driver) with the database `uri`.
-    fn open(name: &str, uri: &str) -> Database {
-        let mut driver = load_driver(name);
-        let db = driver
-            .new_database_with_opts([(OptionDatabase::Uri, OptionValue::String(uri.to_string()))])
-            .expect("open ADBC database");
-        Database {
+    fn open(name: &str, uri: &str) -> HandlerResult<Database> {
+        let mut driver = load_driver(name)?;
+        let db = driver.new_database_with_opts([(
+            OptionDatabase::Uri,
+            OptionValue::String(uri.to_string()),
+        )])?;
+        Ok(Database {
             _driver: driver,
             db,
-        }
+        })
     }
 
-    fn sqlite(uri: &str) -> Database {
+    fn sqlite(uri: &str) -> HandlerResult<Database> {
         Database::open("sqlite", uri)
     }
 
-    fn postgres(conn: &str) -> Database {
+    fn postgres(conn: &str) -> HandlerResult<Database> {
         Database::open("postgresql", conn)
     }
 
     /// Open a new session. (A `Connection` holds the database alive via ADBC's Arc chain.)
-    fn connect(&self) -> Connection {
-        Connection {
-            conn: self.db.new_connection().expect("open ADBC connection"),
-        }
+    fn connect(&self) -> HandlerResult<Connection> {
+        Ok(Connection {
+            conn: self.db.new_connection()?,
+        })
     }
 }
 
@@ -139,17 +144,17 @@ struct Connection {
 
 impl Connection {
     /// Run a SQL query and materialize every row as a `Map` (column -> value). (Slice 2 makes this a
-    /// streaming `ResultSet`; this eager form is the round-trip proof.)
-    fn query(&mut self, sql: &str) -> DataValue {
-        let mut stmt = self.conn.new_statement().expect("new statement");
-        stmt.set_sql_query(sql).expect("set query");
-        let reader = stmt.execute().expect("execute");
+    /// streaming `ResultSet`; this eager form is the round-trip proof.) A SQL error surfaces as a
+    /// catchable Quoin error — the connection stays alive.
+    fn query(&mut self, sql: &str) -> HandlerResult<DataValue> {
+        let mut stmt = self.conn.new_statement()?;
+        stmt.set_sql_query(sql)?;
+        let reader = stmt.execute()?;
         let mut rows = Vec::new();
         for batch in reader {
-            let batch = batch.expect("read batch");
-            rows.extend(batch_rows(&batch));
+            rows.extend(batch_rows(&batch?));
         }
-        DataValue::List(rows)
+        Ok(DataValue::List(rows))
     }
 }
 
