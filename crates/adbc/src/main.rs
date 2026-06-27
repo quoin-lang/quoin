@@ -8,13 +8,17 @@
 //! Quoin error and the extension stays alive.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use adbc_core::options::{AdbcVersion, OptionDatabase, OptionValue};
 use adbc_core::sync::{Connection as _, Database as _, Driver as _, Statement as _};
-use adbc_driver_manager::ManagedDriver;
-use arrow_array::{Array, RecordBatch, RecordBatchReader};
+use adbc_driver_manager::{ManagedDriver, ManagedStatement};
+use arrow_array::{
+    Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, NullArray, RecordBatch,
+    RecordBatchReader, StringArray,
+};
 use arrow_cast::display::array_value_to_string;
-use arrow_schema::{DataType, SchemaRef};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use quoin_ext::{DataValue, Extension, Handle, HandlerResult, Host};
 
 // ---- driver resolution (ADBC driver-manifest) --------------------------------------------------
@@ -144,15 +148,44 @@ struct Connection {
 }
 
 impl Connection {
-    /// Run a SQL query, returning a streaming [`ResultSet`]. The `Statement` moves *into* the result:
-    /// despite the `'static` bound on `execute()`'s reader, some drivers (PostgreSQL/libpq) invalidate
-    /// the reader once its statement closes, so the `ResultSet` must keep the statement alive. A SQL
-    /// error surfaces as a catchable Quoin error — the connection stays alive.
-    fn query(&mut self, sql: &str) -> HandlerResult<ResultSet> {
+    /// Build a statement for `sql`, binding `params` (as one Arrow row) if given.
+    fn statement(
+        &mut self,
+        sql: &str,
+        params: Option<&[DataValue]>,
+    ) -> HandlerResult<ManagedStatement> {
         let mut stmt = self.conn.new_statement()?;
         stmt.set_sql_query(sql)?;
+        if let Some(params) = params {
+            stmt.bind(bind_batch(params)?)?;
+        }
+        Ok(stmt)
+    }
+
+    /// Run a query, returning a streaming [`ResultSet`]. The `Statement` moves *into* the result:
+    /// despite the `'static` bound on `execute()`'s reader, some drivers (PostgreSQL/libpq) invalidate
+    /// the reader once its statement closes, so the one-shot `ResultSet` owns its statement. A SQL
+    /// error surfaces as a catchable Quoin error — the connection stays alive.
+    fn query(&mut self, sql: &str, params: Option<&[DataValue]>) -> HandlerResult<ResultSet> {
+        let mut stmt = self.statement(sql, params)?;
         let reader = stmt.execute()?;
-        Ok(ResultSet::new(stmt, reader))
+        Ok(ResultSet::new(Some(stmt), reader))
+    }
+
+    /// Run a non-query statement (INSERT/UPDATE/DELETE/DDL), returning rows-affected (`nil` when the
+    /// driver doesn't report a count).
+    fn execute(&mut self, sql: &str, params: Option<&[DataValue]>) -> HandlerResult<DataValue> {
+        let mut stmt = self.statement(sql, params)?;
+        Ok(stmt
+            .execute_update()?
+            .map_or(DataValue::Null, DataValue::Int))
+    }
+
+    /// Prepare `sql` into a reusable [`Statement`].
+    fn prepare(&mut self, sql: &str) -> HandlerResult<Statement> {
+        let mut stmt = self.statement(sql, None)?;
+        stmt.prepare()?;
+        Ok(Statement { stmt })
     }
 }
 
@@ -166,22 +199,21 @@ struct ResultSet {
     batch: Option<RecordBatch>,
     schema: SchemaRef,
     row: usize,
-    // Kept alive solely so the reader stays valid (and, via its Arc chain, the connection).
-    stmt: Option<adbc_driver_manager::ManagedStatement>,
+    // The statement the reader reads from. `Some` for a one-shot `query:` (this result owns it);
+    // `None` when it came from a prepared `[ADBC]Statement` that owns the statement itself (kept
+    // alive by the still-held Statement object). Either way, dropped after the reader (above).
+    stmt: Option<ManagedStatement>,
 }
 
 impl ResultSet {
-    fn new(
-        stmt: adbc_driver_manager::ManagedStatement,
-        reader: Box<dyn RecordBatchReader + Send>,
-    ) -> ResultSet {
+    fn new(stmt: Option<ManagedStatement>, reader: Box<dyn RecordBatchReader + Send>) -> ResultSet {
         let schema = reader.schema();
         ResultSet {
             reader: Some(reader),
             batch: None,
             schema,
             row: 0,
-            stmt: Some(stmt),
+            stmt,
         }
     }
 
@@ -270,6 +302,35 @@ impl ResultSet {
     }
 }
 
+/// A prepared, reusable statement (`[ADBC]Statement`). Re-`bind:` then `query`/`execute` again;
+/// re-executing invalidates any prior result, so drain a `ResultSet` before re-querying.
+struct Statement {
+    stmt: ManagedStatement,
+}
+
+impl Statement {
+    /// Bind a fresh row of parameters, replacing any previous binding.
+    fn bind(&mut self, params: &[DataValue]) -> HandlerResult<()> {
+        self.stmt.bind(bind_batch(params)?)?;
+        Ok(())
+    }
+
+    /// Execute as a query. The returned `ResultSet` does NOT own the statement (this object does), so
+    /// keep this `[ADBC]Statement` alive while iterating the result.
+    fn query(&mut self) -> HandlerResult<ResultSet> {
+        let reader = self.stmt.execute()?;
+        Ok(ResultSet::new(None, reader))
+    }
+
+    /// Execute as a non-query, returning rows-affected (`nil` when the driver reports no count).
+    fn execute(&mut self) -> HandlerResult<DataValue> {
+        Ok(self
+            .stmt
+            .execute_update()?
+            .map_or(DataValue::Null, DataValue::Int))
+    }
+}
+
 // ---- Arrow -> DataValue --------------------------------------------------------------------------
 
 /// One row of `batch` as a `Map` (column name -> cell value).
@@ -336,6 +397,58 @@ fn cell_value(col: &dyn Array, row: usize) -> DataValue {
     }
 }
 
+// ---- DataValue -> Arrow (parameter binding) ----------------------------------------------------
+
+/// A Quoin `List` of params -> a single-row Arrow `RecordBatch` (one column per `?`/`$n`, bound
+/// positionally; column names are just the index). Types are inferred per value — the inverse of
+/// [`cell_value`].
+fn bind_batch(params: &[DataValue]) -> HandlerResult<RecordBatch> {
+    let mut fields = Vec::with_capacity(params.len());
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(params.len());
+    for (i, p) in params.iter().enumerate() {
+        let (dt, arr) = param_to_array(p)?;
+        fields.push(Field::new(i.to_string(), dt, true));
+        arrays.push(arr);
+    }
+    Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)?)
+}
+
+/// One bind parameter as a single-element Arrow array. A `Null` becomes an Arrow `Null` column,
+/// which the driver binds as an unspecified type (PostgreSQL infers it from context, like wire OID
+/// 0). `BigInt`/`Decimal` bind as an i64 when it fits, else as text (the driver/SQL coerces); a
+/// `List`/`Map` can't be a scalar parameter.
+fn param_to_array(p: &DataValue) -> HandlerResult<(DataType, ArrayRef)> {
+    let arr: (DataType, ArrayRef) = match p {
+        DataValue::Null => (DataType::Null, Arc::new(NullArray::new(1))),
+        DataValue::Bool(b) => (DataType::Boolean, Arc::new(BooleanArray::from(vec![*b]))),
+        DataValue::Int(i) => (DataType::Int64, Arc::new(Int64Array::from(vec![*i]))),
+        DataValue::Float(f) => (DataType::Float64, Arc::new(Float64Array::from(vec![*f]))),
+        DataValue::Str(s) => (
+            DataType::Utf8,
+            Arc::new(StringArray::from_iter_values([s.as_str()])),
+        ),
+        DataValue::Bytes(b) => (
+            DataType::Binary,
+            Arc::new(BinaryArray::from_iter_values([b.as_slice()])),
+        ),
+        DataValue::BigInt(s) => match s.parse::<i64>() {
+            Ok(i) => (DataType::Int64, Arc::new(Int64Array::from(vec![i]))),
+            Err(_) => (
+                DataType::Utf8,
+                Arc::new(StringArray::from_iter_values([s.as_str()])),
+            ),
+        },
+        DataValue::Decimal(s) => (
+            DataType::Utf8,
+            Arc::new(StringArray::from_iter_values([s.as_str()])),
+        ),
+        DataValue::List(_) | DataValue::Map(_) => {
+            return Err("cannot bind a List/Map as a SQL parameter".into());
+        }
+    };
+    Ok(arr)
+}
+
 // ---- the extension -----------------------------------------------------------------------------
 
 fn main() {
@@ -352,7 +465,29 @@ fn main() {
         c.makes("connect", |db, _h, _a| db.connect());
     });
     ext.class::<Connection>("[ADBC]Connection", |c| {
-        c.makes("query:", |conn, _h, args| conn.query(str_arg(args, 0)));
+        c.makes("query:", |conn, _h, args| {
+            conn.query(str_arg(args, 0), None)
+        });
+        c.makes("query:params:", |conn, _h, args| {
+            let params = list_arg(args, 1);
+            conn.query(str_arg(args, 0), Some(params.as_slice()))
+        });
+        c.method("execute:", |conn, _h, args| {
+            conn.execute(str_arg(args, 0), None)
+        });
+        c.method("execute:params:", |conn, _h, args| {
+            let params = list_arg(args, 1);
+            conn.execute(str_arg(args, 0), Some(params.as_slice()))
+        });
+        c.makes("prepare:", |conn, _h, args| conn.prepare(str_arg(args, 0)));
+    });
+    ext.class::<Statement>("[ADBC]Statement", |c| {
+        c.method("bind:", |st, _h, args| {
+            st.bind(&list_arg(args, 0))?;
+            Ok(DataValue::Null)
+        });
+        c.makes("query", |st, _h, _a| st.query());
+        c.method("execute", |st, _h, _a| st.execute());
     });
     ext.class::<ResultSet>("[ADBC]ResultSet", |c| {
         c.method("next", |rs, _h, _a| rs.next_row());
@@ -376,5 +511,13 @@ fn str_arg<'a>(args: &'a [quoin_ext::Arg], n: usize) -> &'a str {
     match args.get(n).and_then(|a| a.data()) {
         Some(DataValue::Str(s)) => s,
         _ => "",
+    }
+}
+
+/// Read the `n`th argument as a list of params (a Quoin `List`).
+fn list_arg(args: &[quoin_ext::Arg], n: usize) -> Vec<DataValue> {
+    match args.get(n).and_then(|a| a.data()) {
+        Some(DataValue::List(items)) => items.clone(),
+        _ => Vec::new(),
     }
 }
