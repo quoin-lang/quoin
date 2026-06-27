@@ -57,6 +57,10 @@ pub enum Callable<'gc> {
     NewNoBlock(Gc<'gc, RefLock<Class<'gc>>>),
     /// A native (Rust) method.
     Native(NativeFunc),
+    /// An extension-backed method (Phase 3): the send dispatches over the socket to `ext` (the
+    /// owning `Extension` instance). The class and class-vs-instance side are derived from the
+    /// receiver at call time; `selector` is the message to forward.
+    ExtMethod { ext: Value<'gc>, selector: Symbol },
 }
 
 impl<'gc> Callable<'gc> {
@@ -156,6 +160,29 @@ impl<'gc> Callable<'gc> {
                     if let Some(call) = vm.active_native_args.last() {
                         vm.last_send_args = call.args.clone();
                     }
+                }
+                vm.active_native_args.pop();
+                let ret = ret?;
+                vm.push(ret);
+                Ok(())
+            }
+            Callable::ExtMethod { ext, selector } => {
+                let receiver = receiver.ok_or_else(|| {
+                    QuoinError::Other("extension method called without a receiver".to_string())
+                })?;
+                // Root (receiver, args) as one unit across the socket round-trip (which yields),
+                // mirroring the `Native` arm; `ext` stays rooted via the class's method table.
+                vm.active_native_args.push(NativeCall {
+                    receiver,
+                    args: args.clone(),
+                });
+                let ret = crate::runtime::extension::dispatch_ext_method(
+                    vm, mc, ext, receiver, selector, args,
+                );
+                if ret.is_err()
+                    && let Some(call) = vm.active_native_args.last()
+                {
+                    vm.last_send_args = call.args.clone();
                 }
                 vm.active_native_args.pop();
                 let ret = ret?;
@@ -289,7 +316,9 @@ impl<'gc> VmState<'gc> {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
                     if let Some(method_state) = any_ref.downcast_ref::<NativeMethodState>() {
-                        if let Some(func) = method_state.native_func() {
+                        if let Some(ext) = method_state.ext_dispatch() {
+                            Ok(Some(Callable::ExtMethod { ext, selector }))
+                        } else if let Some(func) = method_state.native_func() {
                             Ok(Some(Callable::Native(func)))
                         } else if let Some(Value::Object(block_obj)) = method_state.get_block()
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload

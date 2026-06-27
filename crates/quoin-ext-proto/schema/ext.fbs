@@ -71,6 +71,13 @@ table Call {
     // A structured value payload (Phase 1), sent by `call:with:data:` — materialized into a
     // nested Quoin Value on the extension side (and vice versa).
     data: DataValueBox;
+    // Extension-backed classes (Phase 3): a method send to an extension-provided class dispatches
+    // as a `Call` whose `op` is the selector and `class_name` names the class. Empty `class_name`
+    // is the legacy generic `call:with:` path. For an instance-side send, `recv` is the receiver's
+    // ext-side resource id (its object-table key); 0 means class-side (a constructor). The method
+    // arguments travel as a `DvList` in `data`.
+    class_name: string;
+    recv: uint64;
 }
 
 // A tuple of handles — one invocation's argument list in a batched callback.
@@ -185,6 +192,24 @@ table CallReturnHandle {
     handle: uint64;
 }
 
+// One extension-provided class (Phase 3), in a `ManifestReturn`. The host installs a real Quoin
+// class named `name` as a global; each selector becomes a method that dispatches over the socket
+// (class-side selectors on the class, instance-side on its instances).
+table ClassDecl {
+    name: string;
+    instance_selectors: [string];
+    class_selectors: [string];
+}
+
+// host -> ext: sent once right after connect. Asks the extension which classes it provides.
+table GetManifest {}
+
+// ext -> host: the reply to `GetManifest`. An extension that provides no classes returns an empty
+// list (so the generic `call:with:` extensions stay backward-compatible).
+table ManifestReturn {
+    classes: [ClassDecl];
+}
+
 union Message {
     Call,
     CallReturn,
@@ -204,6 +229,8 @@ union Message {
     ReadHandle,
     ReadHandleReturn,
     HostOpReturn,
+    GetManifest,
+    ManifestReturn,
 }
 
 table Envelope {
