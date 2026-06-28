@@ -429,6 +429,58 @@ impl<'gc> VmState<'gc> {
             .collect()
     }
 
+    /// Variables for the DAP `variables` request: each row is `(name, rendered_value, expandable)`.
+    /// `path` empty = frame `idx`'s top-level scope (locals + `self` + `@ivars`); each subsequent
+    /// index descends into a child value (via `pretty::value_children`). `expandable` = the child
+    /// itself has children, so the DAP layer can mint a `variablesReference` handle for it. Live
+    /// values are re-fetched from the (rooted) frames each call — nothing is held across the pause.
+    pub(crate) fn debug_variables(&self, idx: usize, path: &[usize]) -> Vec<(String, String, bool)> {
+        let width = self.options.console_width.map(|w| w as usize).unwrap_or(80);
+        let children: Vec<(String, pretty::PpChild<'gc>)> = if path.is_empty() {
+            self.debug_frame_variables(idx)
+                .into_iter()
+                .map(|(name, v)| (name, pretty::PpChild::Val(v)))
+                .collect()
+        } else {
+            match self.debug_descend(idx, path) {
+                Some(v) => pretty::value_children(v),
+                None => return Vec::new(),
+            }
+        };
+        children
+            .into_iter()
+            .map(|(name, child)| match child {
+                pretty::PpChild::Val(v) => {
+                    let rendered = pretty::render(v, width, false);
+                    let expandable = !pretty::value_children(v).is_empty();
+                    (name, rendered, expandable)
+                }
+                pretty::PpChild::Text(s, role) => {
+                    let rendered = match role {
+                        pretty::PpRole::Str => format!("'{s}'"),
+                        pretty::PpRole::Number => s,
+                    };
+                    (name, rendered, false)
+                }
+            })
+            .collect()
+    }
+
+    /// Resolve the live value at frame `idx` following `path`: `path[0]` selects a top-level
+    /// variable, each subsequent index a child (via `pretty::value_children`). `None` if any index
+    /// is out of range or lands on a pre-rendered text leaf.
+    fn debug_descend(&self, idx: usize, path: &[usize]) -> Option<Value<'gc>> {
+        let (first, rest) = path.split_first()?;
+        let mut value = self.debug_frame_variables(idx).into_iter().nth(*first)?.1;
+        for &k in rest {
+            match pretty::value_children(value).into_iter().nth(k)?.1 {
+                pretty::PpChild::Val(v) => value = v,
+                pretty::PpChild::Text(..) => return None,
+            }
+        }
+        Some(value)
+    }
+
     /// Look up `name` as a local visible at frame `idx` — its own bindings, then up the
     /// lexical (closure) chain. Used for `$print <bare-local>`, which `eval:self:` can't see
     /// (it has no access to frame locals until `eval:bindings:` lands).

@@ -315,6 +315,57 @@ fn dap_inspection_stack_variables_and_evaluate() {
     assert!(out.contains(r#""result":"42""#), "{out}");
 }
 
+/// `variables` returns an expandable tree: a collection local reports a non-zero
+/// `variablesReference`, and requesting it returns the element children — recursively (a nested
+/// list mints its own child handle). Handles are lazy: scope -> handle 1, the first expandable
+/// row -> handle 2, its first expandable child -> handle 3.
+#[test]
+fn dap_variables_expand_nested_collection() {
+    use serde_json::json;
+    // At line 2, the block local `xs` is `#(#(1 2) 30)` — a list whose first element is a sub-list.
+    let source = "f = { |xs|\n    xs.size\n};\nf.value: #(#(1 2) 30)\n";
+    let out = run_dap_script(
+        source,
+        "fixture.qn",
+        &[("fixture.qn", 2)],
+        &[
+            json!({ "command": "initialize", "arguments": {} }),
+            json!({ "command": "launch", "arguments": {} }),
+            json!({ "command": "setBreakpoints", "arguments": {
+                "source": { "path": "fixture.qn" },
+                "breakpoints": [ { "line": 2 } ],
+            }}),
+            json!({ "command": "configurationDone", "arguments": {} }),
+            json!({ "command": "scopes", "arguments": { "frameId": 1 } }),               // -> handle 1
+            json!({ "command": "variables", "arguments": { "variablesReference": 1 } }),  // Locals: xs -> handle 2
+            json!({ "command": "variables", "arguments": { "variablesReference": 2 } }),  // xs: [0] sub-list -> handle 3
+            json!({ "command": "variables", "arguments": { "variablesReference": 3 } }),  // expand the sub-list
+            json!({ "command": "continue", "arguments": { "threadId": 1 } }),
+        ],
+    );
+    // `xs` is expandable (it got child handle 2).
+    assert!(out.contains(r#""name":"xs""#), "{out}");
+    assert!(out.contains(r#""variablesReference":2"#), "{out}");
+    // Its first element is itself an expandable sub-list (handle 3); the second is a leaf.
+    assert!(
+        out.contains(r##"{"name":"[0]","value":"#(1 2)","variablesReference":3}"##),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#"{"name":"[1]","value":"30","variablesReference":0}"#),
+        "{out}"
+    );
+    // Expanding the sub-list (handle 3) yields its leaf elements.
+    assert!(
+        out.contains(r#"{"name":"[0]","value":"1","variablesReference":0}"#),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#"{"name":"[1]","value":"2","variablesReference":0}"#),
+        "{out}"
+    );
+}
+
 #[test]
 fn breakpoint_pauses_per_arrival_and_resumes_to_completion() {
     // `dbl`'s body is on line 2 alone; it is invoked twice, so the line-2 breakpoint

@@ -85,11 +85,6 @@ fn dap_stack_frames(vm: &VmState<'_>) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// The DAP adapter frontend: translates the driver's debug touchpoints to/from the Debug Adapter
-/// Protocol over its [`Connection`](crate::dap::Connection). `configure` runs the handshake +
-/// breakpoint setup through `configurationDone`; `on_output` flushes program output as `output`
-/// events; `on_pause` emits `stopped` and services requests until the client resumes/disconnects.
-/// Generic over the streams so tests can drive it over in-memory buffers.
 /// Program-loading context for a DAP session whose program path arrives in the `launch` request
 /// (`qn debug --dap` with no file argument) rather than being installed eagerly from a CLI path.
 pub(crate) struct PendingProgram {
@@ -97,11 +92,26 @@ pub(crate) struct PendingProgram {
     pub(crate) break_on_uncaught: Vec<String>,
 }
 
+/// A `variablesReference` target: a frame's `Locals` scope, or a specific value reached from a
+/// frame's locals by a child-index `path`. The live value is re-fetched each `variables` request
+/// (so no `Value` is held across the pause); handles are minted lazily as the client expands the
+/// tree and cleared at each stop.
+#[derive(Clone)]
+enum VarRef {
+    Scope { frame: usize },
+    Value { frame: usize, path: Vec<usize> },
+}
+
+/// The DAP adapter frontend: translates the driver's debug touchpoints to/from the Debug Adapter
+/// Protocol over its [`Connection`](crate::dap::Connection). `configure` runs the handshake +
+/// breakpoint setup through `configurationDone`; `on_output` flushes program output as `output`
+/// events; `on_pause` emits `stopped` and services requests until the client resumes/disconnects.
+/// Generic over the streams so tests can drive it over in-memory buffers.
 pub(crate) struct DapFrontend<R: std::io::BufRead, W: std::io::Write> {
     pub(crate) conn: crate::dap::Connection<R, W>,
-    /// Per-pause `variablesReference` table: handle (1-based) -> the frame whose `Locals` scope it
-    /// expands. Cleared at each pause (a DAP handle is valid only for the current stop).
-    handles: Vec<usize>,
+    /// Per-pause `variablesReference` table: handle (1-based) -> what it expands (a frame scope or
+    /// a nested value). Cleared at each pause (a DAP handle is valid only for the current stop).
+    handles: Vec<VarRef>,
     /// `Some` until the program is installed from the `launch` request; `None` when the program was
     /// already installed eagerly (CLI path, or the test harness).
     pending: Option<PendingProgram>,
@@ -284,7 +294,7 @@ impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W
                         .get("frameId")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as usize;
-                    self.handles.push(frame);
+                    self.handles.push(VarRef::Scope { frame });
                     let var_ref = self.handles.len(); // 1-based handle
                     self.conn
                         .ok(
@@ -305,19 +315,34 @@ impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W
                         .get("variablesReference")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as usize;
-                    let vars = match self.handles.get(var_ref.wrapping_sub(1)).copied() {
-                        Some(frame) => arena.mutate_root(|_mc, vm| {
-                            vm.debug_frame_variables(frame)
-                                .into_iter()
-                                .map(|(name, val)| {
+                    let vars = match self.handles.get(var_ref.wrapping_sub(1)).cloned() {
+                        Some(target) => {
+                            let (frame, path) = match target {
+                                VarRef::Scope { frame } => (frame, Vec::new()),
+                                VarRef::Value { frame, path } => (frame, path),
+                            };
+                            let rows = arena.mutate_root(|_mc, vm| vm.debug_variables(frame, &path));
+                            // Mint a child handle for each expandable row so the client can expand
+                            // it; `i` is the child index used to re-fetch it (path + [i]).
+                            rows.into_iter()
+                                .enumerate()
+                                .map(|(i, (name, value, expandable))| {
+                                    let child_ref = if expandable {
+                                        let mut child_path = path.clone();
+                                        child_path.push(i);
+                                        self.handles.push(VarRef::Value { frame, path: child_path });
+                                        self.handles.len() // 1-based handle
+                                    } else {
+                                        0
+                                    };
                                     json!({
                                         "name": name,
-                                        "value": vm.debug_render(val),
-                                        "variablesReference": 0,
+                                        "value": value,
+                                        "variablesReference": child_ref,
                                     })
                                 })
                                 .collect::<Vec<_>>()
-                        }),
+                        }
                         None => Vec::new(),
                     };
                     self.conn

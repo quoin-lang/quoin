@@ -384,10 +384,11 @@ fn object_doc<'gc>(
     }
 }
 
-/// Render a native collection via its `PrettyPrint` shape (List/Set/Map), or an opaque
-/// `<ClassName>` for any other native object whose internals `.pp` doesn't expose.
-fn native_doc<'gc>(value: Value<'gc>, cname: &str, visited: &mut HashSet<usize>) -> Doc {
-    let shape = match cname {
+/// The `PpShape` for a native object, dispatched by class name (collections + scalar value-likes),
+/// or `None` for a non-collection native (`Regex`/`Method`/opaque). Shared by the renderer
+/// (`native_doc`) and the debugger's expandable-variables walker (`value_children`).
+fn value_native_shape<'gc>(value: Value<'gc>, cname: &str) -> Option<PpShape<'gc>> {
+    match cname {
         "List" => value
             .with_native_state::<NativeListState, _, _>(|s| s.pp_shape())
             .ok(),
@@ -426,7 +427,68 @@ fn native_doc<'gc>(value: Value<'gc>, cname: &str, visited: &mut HashSet<usize>)
             .with_native_state::<NativeUlid, _, _>(|s| s.pp_shape())
             .ok(),
         _ => None,
+    }
+}
+
+/// The expandable children of a value for the DAP `variables` view — `(label, child)` in display
+/// order, mirroring the inline renderer so the IDE-expanded tree matches what's shown inline. An
+/// instance yields its `@ivars` (declaration order); a native collection yields its `pp_shape`
+/// children (`[i]` for sequences, keys for maps, fields for records); scalars, strings, blocks,
+/// and opaque natives yield none (they render as a single leaf).
+pub fn value_children<'gc>(value: Value<'gc>) -> Vec<(String, PpChild<'gc>)> {
+    let Value::Object(o) = value else {
+        return Vec::new();
     };
+    enum Kind<'gc> {
+        Ivars(Vec<(String, Value<'gc>)>),
+        Native,
+        Leaf,
+    }
+    let kind = {
+        let b = o.borrow();
+        match &b.payload {
+            ObjectPayload::Instance => {
+                let cls = b.class.borrow();
+                let mut slots: Vec<(String, usize)> =
+                    cls.field_slots.iter().map(|(n, &s)| (n.clone(), s)).collect();
+                slots.sort_by_key(|x| x.1);
+                let ivars = slots
+                    .into_iter()
+                    .filter_map(|(n, s)| b.fields.get(s).map(|v| (n, *v)))
+                    .collect();
+                Kind::Ivars(ivars)
+            }
+            ObjectPayload::NativeState(_) => Kind::Native,
+            // String / Symbol / Bytes / Block render as a single inline leaf — no children.
+            _ => Kind::Leaf,
+        }
+    };
+    match kind {
+        Kind::Ivars(ivars) => ivars
+            .into_iter()
+            .map(|(n, v)| (format!("@{n}"), PpChild::Val(v)))
+            .collect(),
+        Kind::Native => match value_native_shape(value, &value.class_name()) {
+            Some(PpShape::Seq { items, .. }) => items
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| (format!("[{i}]"), PpChild::Val(v)))
+                .collect(),
+            Some(PpShape::Entries { entries, .. }) => entries
+                .into_iter()
+                .map(|(k, v)| (k, PpChild::Val(v)))
+                .collect(),
+            Some(PpShape::Record { fields, .. }) => fields,
+            None => Vec::new(),
+        },
+        Kind::Leaf => Vec::new(),
+    }
+}
+
+/// Render a native collection via its `PrettyPrint` shape (List/Set/Map), or an opaque
+/// `<ClassName>` for any other native object whose internals `.pp` doesn't expose.
+fn native_doc<'gc>(value: Value<'gc>, cname: &str, visited: &mut HashSet<usize>) -> Doc {
+    let shape = value_native_shape(value, cname);
     match shape {
         Some(PpShape::Seq { open, close, items }) => {
             let docs = items
