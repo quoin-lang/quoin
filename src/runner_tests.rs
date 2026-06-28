@@ -1,4 +1,4 @@
-use super::runner_dap::DapFrontend;
+use super::runner_dap::{DapFrontend, PendingProgram};
 use super::runner_driver::{drive_main_task, drive_with_frontend, install_main_task};
 use super::runner_repl::flow_names;
 use super::*;
@@ -199,6 +199,80 @@ fn dap_spine_launch_breakpoint_continue_terminate() {
         stopped < terminated,
         "stopped must precede terminated:\n{out}"
     );
+}
+
+/// `qn debug --dap` with no CLI file: the program path arrives in the `launch` request's
+/// `program` field and the adapter loads it from there (via a `DapFrontend::with_pending`).
+/// Proven by a breakpoint firing in the launch-supplied program, then terminating.
+#[test]
+fn dap_launch_loads_program_from_request() {
+    use serde_json::json;
+    use std::io::Write;
+
+    // The launch handler reads the program by path, so the fixture must exist on disk.
+    let source = "f = { |n|\n    n * 2\n};\nf.value: 21\n";
+    let mut path = std::env::temp_dir();
+    path.push("quoin_dap_launch_from_request.qn");
+    std::fs::File::create(&path)
+        .and_then(|mut f| f.write_all(source.as_bytes()))
+        .expect("write temp fixture");
+    let path_str = path.to_string_lossy().into_owned();
+
+    let requests = [
+        json!({ "command": "initialize", "arguments": { "adapterID": "quoin" } }),
+        json!({ "command": "launch", "arguments": { "program": path_str } }),
+        json!({ "command": "setBreakpoints", "arguments": {
+            "source": { "path": path_str },
+            "breakpoints": [ { "line": 2 } ],
+        }}),
+        json!({ "command": "configurationDone", "arguments": {} }),
+        json!({ "command": "continue", "arguments": { "threadId": 1 } }),
+    ];
+    let mut input = Vec::new();
+    for (i, req) in requests.iter().enumerate() {
+        let mut obj = req.clone();
+        obj["seq"] = json!(i + 1);
+        obj["type"] = json!("request");
+        let body = serde_json::to_string(&obj).unwrap();
+        input.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+        input.extend_from_slice(body.as_bytes());
+    }
+
+    // Build the arena + prelude only — NO program install; the launch handler installs it.
+    let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+        let mut vm = VmState::new(mc, VmOptions::default());
+        register_builtins(mc, &mut vm);
+        vm
+    });
+    for ast in prelude_asts() {
+        arena.mutate_root(|mc, vm| {
+            if let NodeValue::Program(p) = &ast.value
+                && let Ok(sb) = Compiler::new().compile_program(p)
+            {
+                let block = build_block(mc, &sb);
+                let _ = vm.execute_block(mc, block, Vec::new(), None);
+            }
+        });
+    }
+
+    let conn = crate::dap::Connection::new(std::io::Cursor::new(input), Vec::new());
+    let mut frontend = DapFrontend::with_pending(
+        conn,
+        PendingProgram {
+            break_on_throw: Vec::new(),
+            break_on_uncaught: Vec::new(),
+        },
+    );
+    let _ = drive_with_frontend(&mut arena, &mut frontend);
+    let out = String::from_utf8_lossy(&frontend.conn.into_writer()).into_owned();
+    let _ = std::fs::remove_file(&path);
+
+    // The launch-supplied program ran, hit the breakpoint, and terminated.
+    let stopped = out
+        .find(r#""event":"stopped""#)
+        .unwrap_or_else(|| panic!("no stopped event in:\n{out}"));
+    assert!(out[stopped..].contains(r#""reason":"breakpoint""#), "{out}");
+    assert!(out.contains(r#""event":"terminated""#), "{out}");
 }
 
 /// At a breakpoint inside an invoked block, `stackTrace`/`scopes`/`variables`/`evaluate`

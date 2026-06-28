@@ -110,7 +110,7 @@ mod runner_driver;
 #[path = "runner_repl.rs"]
 mod runner_repl;
 
-use runner_dap::DapFrontend;
+use runner_dap::{DapFrontend, PendingProgram};
 use runner_driver::{drive_main_task, drive_with_frontend, install_main_task};
 use runner_repl::{eval_once, load_quoinrc, run_repl_interactive, run_repl_piped};
 
@@ -293,6 +293,65 @@ impl VmRunnerOptions {
     }
 }
 
+/// Compile the Quoin program at `path` and install it as the debugger's main task #0, armed for
+/// interactive (DAP) pausing. Shared by `run_dap`'s eager (CLI-path) install and the DAP `launch`
+/// handler's deferred (program-from-protocol) install. Returns a human-readable error on failure
+/// so the DAP layer can report it as a failed `launch` rather than killing the process.
+pub(crate) fn install_dap_program(
+    arena: &mut ReplArena,
+    path: &str,
+    break_on_throw: &[String],
+    break_on_uncaught: &[String],
+) -> Result<(), String> {
+    use crate::debug::DebugState;
+    let source = read_to_string(path).map_err(|e| format!("error reading {path}: {e}"))?;
+    let node = try_parse_quoin_string_named(&source, path).map_err(|pe| {
+        format!(
+            "parse error at {}:{}:{}: {}",
+            path,
+            pe.line,
+            pe.column + 1,
+            pe.message
+        )
+    })?;
+    let mut compile_err = None;
+    let installed = arena.mutate_root(|mc, vm| {
+        let NodeValue::Program(p) = &node.value else {
+            compile_err = Some("expected a Program node".to_string());
+            return false;
+        };
+        let sb = match Compiler::new().compile_program(p) {
+            Ok(sb) => sb,
+            Err(e) => {
+                compile_err = Some(format!("compile error: {e}"));
+                return false;
+            }
+        };
+        let block = build_block(mc, &sb);
+        // Run to a breakpoint (`stopOnEntry` is honored at `launch`). Program output is captured
+        // and re-emitted as DAP `output` events rather than written to fd 1/2.
+        vm.instrumentation.debug = Some(DebugState {
+            // `interactive` = "bubble a pause up to the driver frontend" (here, the DAP adapter's
+            // `on_pause`) rather than auto-applying the scripted action in place.
+            interactive: true,
+            show_source: false,
+            step: None,
+            break_on_throw: break_on_throw.iter().cloned().collect(),
+            break_on_uncaught: break_on_uncaught.iter().cloned().collect(),
+            ..Default::default()
+        });
+        vm.output.capture = true;
+        vm.start_block(mc, block, Vec::new(), None, None);
+        install_main_task(mc, vm);
+        true
+    });
+    if installed {
+        Ok(())
+    } else {
+        Err(compile_err.unwrap_or_else(|| "failed to install program".to_string()))
+    }
+}
+
 pub struct VmRunner {
     options: VmRunnerOptions,
 }
@@ -364,13 +423,15 @@ impl VmRunner {
                 Ok(())
             }
             VmRunnerMode::Debug => {
-                let Some(ref path) = self.options.target_path else {
-                    eprintln!("Usage: qn debug FILE");
-                    exit(2);
-                };
                 if self.options.dap {
-                    self.run_dap(path);
+                    // `qn debug --dap [FILE]`: the file is optional. When omitted, the program
+                    // path is taken from the DAP `launch` request instead (IDE integration).
+                    self.run_dap(self.options.target_path.as_deref());
                 } else {
+                    let Some(ref path) = self.options.target_path else {
+                        eprintln!("Usage: qn debug FILE");
+                        exit(2);
+                    };
                     self.run_debug(path);
                 }
                 Ok(())
@@ -449,9 +510,7 @@ impl VmRunner {
     /// [`run_debug`] but speaks the Debug Adapter Protocol instead of the `$`-command loop — the
     /// debuggee's output is rerouted to DAP `output` events and stdout is reserved for the protocol
     /// stream (a stray Rust print can't corrupt it; see `src/dap.rs`).
-    fn run_dap(&self, path: &str) {
-        use crate::debug::DebugState;
-
+    fn run_dap(&self, path: Option<&str>) {
         // Reserve stdout for the protocol BEFORE anything can print; stray prints go to stderr.
         let protocol = match crate::dap::redirect_protocol_stdout() {
             Ok(f) => f,
@@ -460,63 +519,33 @@ impl VmRunner {
                 exit(1);
             }
         };
-        let source = match read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("dap: error reading {path}: {e}");
-                exit(1);
-            }
-        };
-        let node = match try_parse_quoin_string_named(&source, path) {
-            Ok(n) => n,
-            Err(pe) => {
-                eprintln!(
-                    "dap: parse error at {}:{}:{}: {}",
-                    path,
-                    pe.line,
-                    pe.column + 1,
-                    pe.message
-                );
-                exit(1);
-            }
-        };
         let Some(mut arena) = self.build_repl_arena() else {
             exit(1);
         };
-        let installed = arena.mutate_root(|mc, vm| {
-            let NodeValue::Program(p) = &node.value else {
-                return false;
-            };
-            let sb = match Compiler::new().compile_program(p) {
-                Ok(sb) => sb,
-                Err(e) => {
-                    eprintln!("dap: compile error: {e}");
-                    return false;
-                }
-            };
-            let block = build_block(mc, &sb);
-            // Run to a breakpoint (`stopOnEntry` is honored at `launch`). Program output is
-            // captured and re-emitted as DAP `output` events rather than written to fd 1/2.
-            vm.instrumentation.debug = Some(DebugState {
-                // `interactive` = "bubble a pause up to the driver frontend" (here, the DAP
-                // adapter's `on_pause`) rather than auto-applying the scripted action in place.
-                interactive: true,
-                show_source: false,
-                step: None,
-                break_on_throw: self.options.break_on_throw.iter().cloned().collect(),
-                break_on_uncaught: self.options.break_on_uncaught.iter().cloned().collect(),
-                ..Default::default()
-            });
-            vm.output.capture = true;
-            vm.start_block(mc, block, Vec::new(), None, None);
-            install_main_task(mc, vm);
-            true
-        });
-        if !installed {
-            exit(1);
-        }
         let conn = crate::dap::Connection::new(std::io::BufReader::new(std::io::stdin()), protocol);
-        let mut frontend = DapFrontend::new(conn);
+        let mut frontend = match path {
+            // `qn debug --dap FILE`: install eagerly; the launch request carries no program.
+            Some(path) => {
+                if let Err(e) = install_dap_program(
+                    &mut arena,
+                    path,
+                    &self.options.break_on_throw,
+                    &self.options.break_on_uncaught,
+                ) {
+                    eprintln!("dap: {e}");
+                    exit(1);
+                }
+                DapFrontend::new(conn)
+            }
+            // `qn debug --dap`: the program path arrives in the DAP `launch` request.
+            None => DapFrontend::with_pending(
+                conn,
+                PendingProgram {
+                    break_on_throw: self.options.break_on_throw.clone(),
+                    break_on_uncaught: self.options.break_on_uncaught.clone(),
+                },
+            ),
+        };
         if let Err(e) = drive_with_frontend(&mut arena, &mut frontend) {
             // stdout is the protocol channel — log to stderr.
             eprintln!("dap: VM error: {e}");

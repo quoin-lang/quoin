@@ -90,18 +90,39 @@ fn dap_stack_frames(vm: &VmState<'_>) -> Vec<serde_json::Value> {
 /// breakpoint setup through `configurationDone`; `on_output` flushes program output as `output`
 /// events; `on_pause` emits `stopped` and services requests until the client resumes/disconnects.
 /// Generic over the streams so tests can drive it over in-memory buffers.
+/// Program-loading context for a DAP session whose program path arrives in the `launch` request
+/// (`qn debug --dap` with no file argument) rather than being installed eagerly from a CLI path.
+pub(crate) struct PendingProgram {
+    pub(crate) break_on_throw: Vec<String>,
+    pub(crate) break_on_uncaught: Vec<String>,
+}
+
 pub(crate) struct DapFrontend<R: std::io::BufRead, W: std::io::Write> {
     pub(crate) conn: crate::dap::Connection<R, W>,
     /// Per-pause `variablesReference` table: handle (1-based) -> the frame whose `Locals` scope it
     /// expands. Cleared at each pause (a DAP handle is valid only for the current stop).
     handles: Vec<usize>,
+    /// `Some` until the program is installed from the `launch` request; `None` when the program was
+    /// already installed eagerly (CLI path, or the test harness).
+    pending: Option<PendingProgram>,
 }
 
 impl<R: std::io::BufRead, W: std::io::Write> DapFrontend<R, W> {
+    /// The program is already installed; the `launch` request only carries `stopOnEntry`.
     pub(crate) fn new(conn: crate::dap::Connection<R, W>) -> Self {
         Self {
             conn,
             handles: Vec::new(),
+            pending: None,
+        }
+    }
+
+    /// The program path is supplied in the `launch` request and installed there.
+    pub(crate) fn with_pending(conn: crate::dap::Connection<R, W>, pending: PendingProgram) -> Self {
+        Self {
+            conn,
+            handles: Vec::new(),
+            pending: Some(pending),
         }
     }
 }
@@ -124,6 +145,38 @@ impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W
                     self.conn.event("initialized", None).map_err(dap_io)?;
                 }
                 "launch" => {
+                    // If the program wasn't installed eagerly from a CLI path, load it now from the
+                    // launch request. The IDE/DAP client carries the path under `program` (we also
+                    // accept `file`/`path`). Install/parse errors fail the launch with a message
+                    // rather than killing the adapter, so the IDE shows what went wrong.
+                    if let Some(pending) = self.pending.take() {
+                        let prog = req
+                            .arguments
+                            .get("program")
+                            .or_else(|| req.arguments.get("file"))
+                            .or_else(|| req.arguments.get("path"))
+                            .and_then(|v| v.as_str());
+                        let Some(prog) = prog else {
+                            self.conn
+                                .fail(
+                                    &req,
+                                    "launch: no program path — expected `program` (or `file`/`path`) in the launch arguments".to_string(),
+                                )
+                                .map_err(dap_io)?;
+                            return Ok(false);
+                        };
+                        if let Err(e) = install_dap_program(
+                            arena,
+                            prog,
+                            &pending.break_on_throw,
+                            &pending.break_on_uncaught,
+                        ) {
+                            self.conn
+                                .fail(&req, format!("launch failed: {e}"))
+                                .map_err(dap_io)?;
+                            return Ok(false);
+                        }
+                    }
                     let stop_on_entry = req
                         .arguments
                         .get("stopOnEntry")
