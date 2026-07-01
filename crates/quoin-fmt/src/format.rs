@@ -245,6 +245,7 @@ fn lower_stmt(
         NodeValue::MethodDefinition(m) => lower_def(content_start, &m.block, source, comments),
         NodeValue::MethodExtension(m) => lower_def(content_start, &m.block, source, comments),
         NodeValue::Block(b) => lower_block(b, source, comments),
+        NodeValue::List(_) => lower_list(stmt, source, comments),
         NodeValue::MethodCall(_) => lower_send(stmt, content_start, content_end, source, comments),
         // `<lvalues> = <rvalue>` and `^^`/`^`/`^>` returns: the prefix through the assignment/return
         // operator is sliced verbatim; only the right-hand expression is lowered. This is what lets a
@@ -408,6 +409,79 @@ fn wrap_block(header: &str, body: Vec<Doc>, group: bool) -> Doc {
     if group { Doc::group(doc) } else { doc }
 }
 
+/// Lower a `#( … )` list literal, width-driven: `#( a b c )` inline when it fits, one element per
+/// line otherwise. Elements are sliced from raw source (paren-extended, like send arguments), so
+/// parentheses and exact spelling are preserved. `None` (→ caller emits verbatim) if a comment sits
+/// inside the list or an element spans lines.
+fn lower_list(node: &Node, source: &str, comments: &[Comment]) -> Option<Doc> {
+    let NodeValue::List(list) = &node.value else {
+        return None;
+    };
+    let si = node.source_info.as_ref()?;
+    let (lstart, lend) = (si.start, si.end);
+    if lend < lstart + 3 || source.get(lstart..lstart + 2) != Some("#(") {
+        return None;
+    }
+    let region_start = lstart + 2; // after `#(`
+    let close = lend - 1; // the `)`
+    if list.values.is_empty() {
+        return Some(Doc::verbatim(source[lstart..lend].to_string()));
+    }
+    // A comment inside the list would be dropped when we re-slice the elements — bail.
+    if comments
+        .iter()
+        .any(|c| c.start >= region_start && c.end <= close)
+    {
+        return None;
+    }
+
+    let n = list.values.len();
+    let mut starts = Vec::with_capacity(n);
+    for (i, e) in list.values.iter().enumerate() {
+        let floor = if i > 0 {
+            list.values[i - 1].source_info.as_ref()?.start
+        } else {
+            region_start
+        };
+        starts.push(statement_content_start(
+            source,
+            e.source_info.as_ref()?.start,
+            floor,
+        ));
+    }
+    let mut inner = Vec::with_capacity(2 * n);
+    for i in 0..n {
+        let end = if i + 1 < n { starts[i + 1] } else { close };
+        let elem = source[starts[i]..end].trim();
+        if elem.contains('\n') {
+            return None;
+        }
+        inner.push(Doc::Line);
+        inner.push(Doc::verbatim(elem.to_string()));
+    }
+    Some(Doc::group(Doc::concat(vec![
+        Doc::text("#("),
+        Doc::nest(INDENT, Doc::concat(inner)),
+        Doc::Line,
+        Doc::text(")"),
+    ])))
+}
+
+/// Lower a send argument: a list is width-driven (see [`lower_list`]); anything else is its verbatim
+/// source slice `raw`. `None` if the argument is an un-lowerable multi-line construct.
+fn lower_arg(arg: &Node, raw: &str, source: &str, comments: &[Comment]) -> Option<Doc> {
+    if matches!(&arg.value, NodeValue::List(_))
+        && let Some(doc) = lower_list(arg, source, comments)
+    {
+        return Some(doc);
+    }
+    if raw.contains('\n') {
+        None
+    } else {
+        Some(Doc::verbatim(raw.to_string()))
+    }
+}
+
 /// The block's leading declarations — a name (`#foo`) and/or an argument pipe (`|a b - decls|`) —
 /// and the offset where its statements begin. Empty header when the block has neither.
 fn block_header<'a>(
@@ -540,8 +614,9 @@ fn lower_send(
         return None;
     }
 
-    // Build each `name:arg` pair. Block args recurse; others are verbatim source between the
-    // colon and the next selector (or the send end), preserving their parentheses.
+    // Build each `name:arg` pair. Block args recurse and list args are width-driven; every other arg
+    // is its verbatim source between the colon and the next selector (or the send end), preserving
+    // parentheses.
     let mut pairs = Vec::with_capacity(sels.len());
     for i in 0..sels.len() {
         let name = sel_spans[i].2;
@@ -555,10 +630,7 @@ fn lower_send(
                     content_end
                 };
                 let raw = source[colon + 1..boundary].trim();
-                if raw.contains('\n') {
-                    return None;
-                }
-                Doc::verbatim(raw.to_string())
+                lower_arg(&args[i], raw, source, comments)?
             }
         };
         pairs.push(Doc::concat(vec![Doc::text(format!("{name}:")), arg_doc]));

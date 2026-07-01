@@ -240,3 +240,29 @@ fn hand_broken_multi_statement_value_block_stays_broken() {
         "m -> {\n    a;\n    b\n}\n"
     );
 }
+
+#[test]
+fn list_literal_inlines_when_short() {
+    assert_eq!(fmt("x = #( a b c )"), "x = #( a b c )\n");
+}
+
+#[test]
+fn empty_list_literal_is_preserved() {
+    assert_eq!(fmt("x = #()"), "x = #()\n");
+}
+
+#[test]
+fn long_list_arg_wraps_one_element_per_line_keeping_parens() {
+    let long = "check.valueWithArgs:#( 'timeout' round (timeoutRound.value:round) expectedResult moreStuff evenMore )";
+    assert!(long.len() > 100);
+    let out = fmt(long);
+    assert!(
+        out.starts_with("check.valueWithArgs:#(\n    'timeout'\n    round\n"),
+        "not wrapped:\n{out}"
+    );
+    // A paren-wrapped element keeps its parentheses (they're not in the element's AST span).
+    assert!(
+        out.contains("\n    (timeoutRound.value:round)\n"),
+        "parens lost:\n{out}"
+    );
+}
