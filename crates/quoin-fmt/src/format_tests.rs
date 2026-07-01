@@ -195,6 +195,17 @@ fn receiver_break_keeps_inline_blocks_inline() {
 }
 
 #[test]
+fn no_subject_send_aligns_continuation_under_the_first_keyword() {
+    // A leading-`.` (no-subject) send that wraps keeps `.kw0` on the opening line at the base and
+    // aligns the continuation keyword names one column past it (`.` at +4, names at +5).
+    let src = "m -> {\n    .recordResult:{ (actual - expected).abs < tolerance } evidence:#( expected 'not within tolerance of' actual ) block:block\n}";
+    assert_eq!(
+        fmt(src),
+        "m -> {\n    .recordResult:{ (actual - expected).abs < tolerance }\n     evidence:#( expected 'not within tolerance of' actual )\n     block:block\n}\n"
+    );
+}
+
+#[test]
 fn receiver_break_falls_back_to_base_column_when_a_block_must_break() {
     // Same wide send, but the `if:` body is a hand-broken multi-statement block that can't be
     // inlined — so the receiver stays with the first keyword and continuation keywords drop to the

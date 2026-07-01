@@ -105,15 +105,20 @@ the §6 guardrails green at every step:
 per line, in one of two shapes chosen **structurally — by whether every block argument can stay
 inline, not by width**:
 
-- **No block arg is force-broken** → a *receiver break*: the receiver takes the opening line on its
-  own and each `keyword:arg` follows, so the shortened keyword lines let the blocks stay inline.
-  Continuation keyword names align under the first keyword's name, the leading `.` hanging one
-  column to its left:
+- **No block arg is force-broken** → the continuation keyword names align under the first keyword's
+  name, the leading `.` hanging one column to its left. With a receiver this is a *receiver break*:
+  the receiver takes the opening line on its own, so the shortened keyword lines let the blocks stay
+  inline. A no-subject (leading-`.`) send has no receiver to move, so `.kw0` just stays on the
+  opening line and the continuations align one column past the base:
 
   ```
   framing = (te.defined? && (te.lower.contains?:'chunked'))
       .if:{ 'chunked' }
        else:{ cl.defined?.if:{ 'length' } else:{ 'close' } };
+
+  .recordResult:{ (actual - expected).abs < tolerance }
+   evidence:#( expected 'not within tolerance of' actual )
+   block:block
   ```
 
 - **A block arg must break across lines anyway** → the *base-column* layout: `receiver.kw0:…` stays

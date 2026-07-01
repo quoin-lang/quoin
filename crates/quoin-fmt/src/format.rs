@@ -581,9 +581,11 @@ fn block_header<'a>(
 
 /// Lower a message send. The subject and non-block arguments are sliced verbatim from raw
 /// source (preserving parentheses); block arguments recurse. A multi-keyword send that doesn't
-/// fit on one line wraps one keyword per line: a *receiver break* (the receiver alone on the
-/// opening line, continuation keyword names aligned under the first) when every block arg can stay
-/// inline, else the base-column layout (continuation keywords at the statement base, blocks breaking).
+/// fit on one line wraps one keyword per line: when every block arg can stay inline, continuation
+/// keyword names align under the first keyword's name — via a *receiver break* (receiver alone on
+/// the opening line) when there's a receiver, or with the first keyword kept on the opening line for
+/// a no-subject (leading-`.`) send; otherwise the base-column layout (continuation keywords at the
+/// statement base, blocks breaking).
 fn lower_send(
     node: &Node,
     content_start: usize,
@@ -719,13 +721,13 @@ fn lower_send(
     //  - Some block arg must break across lines anyway → the base-column layout: `subject.kw0:…`
     //    stays together on the first line and continuation keywords drop to the statement's base
     //    column, blocks breaking as needed. (Isolating a receiver above breaking blocks buys nothing.)
-    // A receiver break keeps block args inline, so it only helps when no block arg is one that
-    // `lower_block` would force to break (a member-declaration or a hand-broken multi-statement body).
+    // Name-aligning the continuation keywords keeps the block args inline, so it only helps when no
+    // block arg is one that `lower_block` would force to break (a member-declaration or a hand-broken
+    // multi-statement body). When some block must break anyway, fall back to the base-column layout.
     let all_blocks_inlineable = args.iter().all(|a| match &a.value {
         NodeValue::Block(b) => block_is_inlineable(b, source),
         _ => true,
     });
-    let receiver_break = !subject_text.is_empty() && all_blocks_inlineable;
     let mut cells = Vec::new();
     for (i, p) in pairs.into_iter().enumerate() {
         if i > 0 {
@@ -733,7 +735,10 @@ fn lower_send(
         }
         cells.push(p);
     }
-    if receiver_break {
+    if all_blocks_inlineable && !subject_text.is_empty() {
+        // Receiver break: the receiver drops to the opening line on its own so the shortened keyword
+        // lines keep the blocks inline. `.kw0` at +INDENT, the pairs at +INDENT+1 — continuation
+        // keyword names align under the first keyword's name, the leading `.` hanging one col left.
         Some(Doc::concat(vec![
             subject,
             Doc::group(Doc::concat(vec![
@@ -742,7 +747,19 @@ fn lower_send(
             ])),
             tail_doc,
         ]))
+    } else if all_blocks_inlineable {
+        // No-subject (leading-`.`) send: there's no receiver to drop to its own line, so `.kw0` stays
+        // on the opening line at the base and the continuation keyword names align one column past it
+        // (`Nest(1)`), the `.` hanging to the left — the same name alignment as the receiver break.
+        Some(Doc::concat(vec![
+            subject,
+            Doc::text("."),
+            Doc::nest(1, Doc::group(Doc::concat(cells))),
+            tail_doc,
+        ]))
     } else {
+        // Base-column: `subject.kw0:…` stays together on the first line, continuation keywords drop
+        // to the statement base, blocks breaking as needed.
         Some(Doc::concat(vec![
             subject,
             Doc::text("."),
