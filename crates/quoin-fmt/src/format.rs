@@ -544,7 +544,7 @@ fn block_header<'a>(
 
 /// Lower a message send. The subject and non-block arguments are sliced verbatim from raw
 /// source (preserving parentheses); block arguments recurse. A keyword send that spans lines
-/// breaks with continuation keywords aligned under the first (via `Align`).
+/// breaks with each continuation keyword on its own line at the statement's base column.
 fn lower_send(
     node: &Node,
     content_start: usize,
@@ -669,9 +669,11 @@ fn lower_send(
     }
 
     // Multiple keywords: width-driven. Flat joins the pairs with a space; when that doesn't fit
-    // the line budget (or an argument block spans lines, forcing the group to break), continuation
-    // keywords drop onto their own lines aligned under the first — via a `Group` of `Line`s wrapped
-    // in `Align` (which pins the break indent to the first keyword's column).
+    // the line budget (or an argument block spans lines, forcing the group to break), each
+    // continuation keyword drops onto its own line at the statement's base column — a `Group` of
+    // `Line`s whose breaks fall to the render-time indent (not a column derived from the receiver).
+    // Block bodies then nest one level (+4) from that base and closing braces return to it, so the
+    // indent grows by a fixed step per nesting level rather than by the subject's width.
     {
         let mut inner = Vec::new();
         for (i, p) in pairs.into_iter().enumerate() {
@@ -683,7 +685,7 @@ fn lower_send(
         Some(Doc::concat(vec![
             subject,
             Doc::text("."),
-            Doc::align(Doc::group(Doc::concat(inner))),
+            Doc::group(Doc::concat(inner)),
             tail_doc,
         ]))
     }

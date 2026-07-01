@@ -1,8 +1,9 @@
 //! A small Wadler/Leijen document algebra and a width-aware renderer — the layout
 //! engine the formatter lowers the AST into. `Group` renders its contents flat (on
 //! one line) when they fit the width budget and broken (with newlines) when they
-//! don't; `Align` pins subsequent line breaks to the current column (needed for the
-//! canonical "continuation keywords align under the first keyword" style).
+//! don't; `Align` pins subsequent line breaks to the current column — a general
+//! primitive the engine provides for column-anchored layouts (the formatter's
+//! keyword-continuation style now breaks to the statement base instead of using it).
 //!
 //! Phase 0 only uses `Verbatim`/`Text`/`HardLine`/`Concat`, but the full algebra is
 //! implemented and unit-tested here so the later phases (which add width-driven

@@ -110,11 +110,11 @@ fn single_keyword_send_indents_its_block_body() {
 }
 
 #[test]
-fn multi_keyword_send_breaks_aligned_under_first_keyword() {
-    // Multi-statement block args force the blocks (and so the send) to break; `else:` aligns under
-    // `if:` (column 7, after `result.`), block bodies at +4.
+fn multi_keyword_send_breaks_with_continuation_at_statement_base() {
+    // Multi-statement block args force the blocks (and so the send) to break; `else:` drops to the
+    // statement's base column, block bodies nest +4, and closing braces return to the base.
     let src = "result.if:{\n    a;\n    b\n} else:{\n    c;\n    d\n}";
-    let expected = "result.if:{\n           a;\n           b\n       }\n       else:{\n           c;\n           d\n       }\n";
+    let expected = "result.if:{\n    a;\n    b\n}\nelse:{\n    c;\n    d\n}\n";
     assert_eq!(fmt(src), expected);
 }
 
@@ -172,10 +172,11 @@ fn short_send_stays_flat_before_a_following_statement() {
 
 #[test]
 fn long_multi_keyword_send_breaks_to_fit_the_width() {
-    // Authored on one line but over 100 columns — it breaks, aligned under the first keyword.
+    // Authored on one line but over 100 columns — it breaks, each continuation keyword dropping to
+    // the statement's base column.
     let src = "objectName.firstKeyword:someArgument secondKeyword:anotherArgument \
                thirdKeyword:yetMoreStuffHere fourth:more";
-    let expected = "objectName.firstKeyword:someArgument\n           secondKeyword:anotherArgument\n           thirdKeyword:yetMoreStuffHere\n           fourth:more\n";
+    let expected = "objectName.firstKeyword:someArgument\nsecondKeyword:anotherArgument\nthirdKeyword:yetMoreStuffHere\nfourth:more\n";
     assert_eq!(fmt(src), expected);
 }
 

@@ -101,21 +101,23 @@ the §6 guardrails green at every step:
 | Doc comments | `"* …` kept on their own line directly above the definition they lead |
 | Leaves | verbatim spelling preserved (numbers, strings, regexes) |
 
-**Multi-keyword sends** (`if:else:`, `case:when:do:`) that don't fit break with **continuation
-keywords aligned under the first keyword** (via `Align`):
+**Multi-keyword sends** (`if:else:`, `case:when:do:`) that don't fit break with **each
+continuation keyword on its own line at the statement's base column**; block bodies nest one
+level (+4) and closing braces return to the base:
 
 ```
 cond.if:{
-         doThing;
-     }
-     else:{
-         fallback;
-     }
+    doThing;
+}
+else:{
+    fallback;
+}
 ```
 
-Edge rule: this alignment needs a stable column for the first keyword, which only exists while
-the receiver fits on the opening line. If the receiver itself overflows and breaks, continuation
-keywords fall back to a fixed indent from the statement's base column.
+Because breaks fall to the statement's base indent (not a column derived from the receiver), the
+indent grows by a fixed step per nesting level instead of by the subject's width — deeply nested
+conditionals (as in `qnlib/net/http.qn`) stay near the left margin rather than drifting into the
+right edge.
 
 Because the existing corpus uses a different (`+1` indent) convention, `qn fmt qnlib/` will
 produce a large reflow diff once P2 lands — expected, and proven safe by the AST-equality guard.
