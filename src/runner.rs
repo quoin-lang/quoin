@@ -32,7 +32,7 @@ use std::io::{BufRead, IsTerminal, stdin};
 use std::iter::once_with;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::exit;
+use std::process::{Command, exit};
 use std::sync::Once;
 use std::time::Instant;
 
@@ -140,6 +140,8 @@ pub struct VmRunnerOptions {
     pub fmt_check: bool,
     /// `qn fmt --dry-run`: print formatted source to stdout instead of rewriting in place.
     pub fmt_dry_run: bool,
+    /// `qn fmt --diff`: show a unified diff of what would change, without writing.
+    pub fmt_diff: bool,
 }
 
 /// Pull `--coverage[=fmt]` and `--coverage-out=PATH` out of an argument slice, pushing
@@ -205,8 +207,8 @@ pub enum VmRunnerMode {
     /// `qn debug <file>`: run a program under the interactive debugger. The path is carried in
     /// `VmRunnerOptions::target_path`.
     Debug,
-    /// `qn fmt [--check|--dry-run] <path>…`: format Quoin source in place. The paths are carried
-    /// in `VmRunnerOptions::vm_options.arguments`.
+    /// `qn fmt [--check|--dry-run|--diff] <path>…`: format Quoin source in place. The paths are
+    /// carried in `VmRunnerOptions::vm_options.arguments`.
     Fmt,
 }
 
@@ -223,6 +225,7 @@ impl VmRunnerOptions {
         let mut coverage_format = crate::coverage::CoverageFormat::Lcov;
         let mut fmt_check = false;
         let mut fmt_dry_run = false;
+        let mut fmt_diff = false;
 
         if let Some(arg) = args.get(1) {
             if arg == "highlight" {
@@ -291,6 +294,7 @@ impl VmRunnerOptions {
                     match a.as_str() {
                         "--check" => fmt_check = true,
                         "--dry-run" => fmt_dry_run = true,
+                        "--diff" => fmt_diff = true,
                         _ => vm_args.push(a.clone()),
                     }
                 }
@@ -332,6 +336,7 @@ impl VmRunnerOptions {
             coverage,
             fmt_check,
             fmt_dry_run,
+            fmt_diff,
         }
     }
 }
@@ -486,18 +491,24 @@ impl VmRunner {
         }
     }
 
-    /// `qn fmt [--check|--dry-run] <path>…`: format each named file in place (directories are
-    /// searched recursively for `.qn` files). `--dry-run` prints formatted source to stdout
-    /// without writing; `--check` lists files that aren't formatted and exits non-zero. A parse
+    /// `qn fmt [--check|--dry-run|--diff] <path>…`: format each named file in place (directories
+    /// are searched recursively for `.qn` files). `--dry-run` prints formatted source to stdout,
+    /// `--diff` shows a unified diff of what would change, and `--check` lists files that aren't
+    /// formatted — the last three write nothing and exit non-zero when anything differs. A parse
     /// error is reported and fails the run but doesn't abort the batch.
     fn run_fmt(&self) {
         let paths = &self.options.vm_options.arguments;
         if paths.is_empty() {
-            eprintln!("Usage: qn fmt [--check|--dry-run] <file-or-dir>…");
+            eprintln!("Usage: qn fmt [--check|--dry-run|--diff] <file-or-dir>…");
             exit(2);
         }
-        if self.options.fmt_check && self.options.fmt_dry_run {
-            eprintln!("qn fmt: --check and --dry-run are mutually exclusive");
+        let modes = [
+            self.options.fmt_check,
+            self.options.fmt_dry_run,
+            self.options.fmt_diff,
+        ];
+        if modes.iter().filter(|&&m| m).count() > 1 {
+            eprintln!("qn fmt: --check, --dry-run, and --diff are mutually exclusive");
             exit(2);
         }
 
@@ -513,7 +524,7 @@ impl VmRunner {
 
         let mut had_error = false;
         let mut unformatted = false;
-        for file in &files {
+        for (i, file) in files.iter().enumerate() {
             let name = file.display().to_string();
             let source = match read_to_string(file) {
                 Ok(s) => s,
@@ -538,6 +549,11 @@ impl VmRunner {
                 }
             } else if self.options.fmt_dry_run {
                 print!("{formatted}");
+            } else if self.options.fmt_diff {
+                if formatted != source {
+                    unformatted = true;
+                    had_error |= !self.show_fmt_diff(file, &name, &formatted, i);
+                }
             } else if formatted != source {
                 // Default: rewrite in place, only when something actually changed.
                 if let Err(e) = std::fs::write(file, &formatted) {
@@ -549,8 +565,34 @@ impl VmRunner {
             }
         }
 
-        if had_error || (self.options.fmt_check && unformatted) {
+        if had_error || ((self.options.fmt_check || self.options.fmt_diff) && unformatted) {
             exit(1);
+        }
+    }
+
+    /// Write `formatted` to a temp file, print a unified diff of `file` against it (via the
+    /// system `diff -u`), then remove the temp file. `index` disambiguates the temp path within
+    /// one run. Returns whether the diff was produced successfully.
+    fn show_fmt_diff(&self, file: &Path, name: &str, formatted: &str, index: usize) -> bool {
+        let tmp = std::env::temp_dir().join(format!("qn-fmt-{}-{index}.qn", std::process::id()));
+        if let Err(e) = std::fs::write(&tmp, formatted) {
+            eprintln!("qn fmt: cannot write temp file for diff: {e}");
+            return false;
+        }
+        let result = Command::new("diff").arg("-u").arg(file).arg(&tmp).output();
+        let _ = std::fs::remove_file(&tmp);
+        match result {
+            Ok(out) => {
+                // Replace the temp path in diff's `+++` header with a readable label.
+                let text = String::from_utf8_lossy(&out.stdout)
+                    .replace(&tmp.display().to_string(), &format!("{name} (formatted)"));
+                print!("{text}");
+                true
+            }
+            Err(e) => {
+                eprintln!("qn fmt: could not run `diff`: {e}");
+                false
+            }
         }
     }
 

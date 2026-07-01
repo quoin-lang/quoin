@@ -126,6 +126,47 @@ fn fmt_check_and_dry_run_conflict() {
 }
 
 #[test]
+fn fmt_diff_shows_a_unified_diff_without_writing() {
+    let path = tmp_file("diff.qn");
+    std::fs::write(&path, "x.foo: a bar: b").unwrap();
+    let out = qn()
+        .arg("fmt")
+        .arg("--diff")
+        .arg(&path)
+        .output()
+        .expect("run");
+    // Differs, so exit is non-zero and a unified diff is printed.
+    assert_eq!(out.status.code(), Some(1));
+    let diff = String::from_utf8_lossy(&out.stdout);
+    assert!(diff.contains("@@"), "no hunk header:\n{diff}");
+    assert!(
+        diff.contains("-x.foo: a bar: b"),
+        "no removed line:\n{diff}"
+    );
+    assert!(diff.contains("+x.foo:a"), "no added line:\n{diff}");
+    assert!(
+        diff.contains("(formatted)"),
+        "temp path not relabeled:\n{diff}"
+    );
+    // The original file is never touched.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x.foo: a bar: b");
+}
+
+#[test]
+fn fmt_diff_on_already_formatted_file_is_silent_and_succeeds() {
+    let path = tmp_file("diff_ok.qn");
+    std::fs::write(&path, "x.foo:a\n").unwrap();
+    let out = qn()
+        .arg("fmt")
+        .arg("--diff")
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).is_empty());
+}
+
+#[test]
 fn fmt_without_paths_prints_usage() {
     let out = qn().arg("fmt").output().expect("run");
     assert_eq!(out.status.code(), Some(2));

@@ -544,6 +544,19 @@ fn parse_fmt_dry_run_flag() {
 }
 
 #[test]
+fn parse_fmt_diff_flag() {
+    let args: Vec<String> = ["qn", "fmt", "--diff", "a.qn"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let opts = VmRunnerOptions::parse(&args);
+    assert!(matches!(opts.mode, VmRunnerMode::Fmt));
+    assert!(opts.fmt_diff);
+    assert!(!opts.fmt_check && !opts.fmt_dry_run);
+    assert_eq!(opts.vm_options.arguments, vec!["a.qn".to_string()]);
+}
+
+#[test]
 fn parse_debug_without_break_flag_has_no_break_on_throw() {
     let args: Vec<String> = ["qn", "debug", "file.qn"]
         .iter()
