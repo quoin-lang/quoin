@@ -512,20 +512,32 @@ fn lower_collection(node: &Node, source: &str, comments: &[Comment]) -> Option<D
     ])))
 }
 
-/// Lower a send argument: a collection literal is width-driven (see [`lower_collection`]); anything
-/// else is its verbatim source slice `raw`. `None` if the argument is an un-lowerable multi-line
-/// construct.
-fn lower_arg(arg: &Node, raw: &str, source: &str, comments: &[Comment]) -> Option<Doc> {
+/// Lower a send argument occupying `source[region_start..region_end)` (the span after the keyword's
+/// `:`, up to the next keyword or the send's end). A collection literal is width-driven (see
+/// [`lower_collection`]); a single-line argument is its verbatim source slice (parens and spelling
+/// preserved). A *multi-line* argument that isn't a collection is lowered structurally via
+/// [`lower_stmt`] — so a keyword argument that is itself a wrapping send (`Foo.new:{ … }`) formats
+/// instead of forcing the whole enclosing statement to fall back to verbatim. `None` if it's a
+/// multi-line construct we still can't lay out.
+fn lower_arg(
+    arg: &Node,
+    region_start: usize,
+    region_end: usize,
+    source: &str,
+    comments: &[Comment],
+) -> Option<Doc> {
     if is_collection(arg)
         && let Some(doc) = lower_collection(arg, source, comments)
     {
         return Some(doc);
     }
-    if raw.contains('\n') {
-        None
-    } else {
-        Some(Doc::verbatim(raw.to_string()))
+    let raw = source[region_start..region_end].trim();
+    if !raw.contains('\n') {
+        return Some(Doc::verbatim(raw.to_string()));
     }
+    let astart = statement_content_start(source, arg.source_info.as_ref()?.start, region_start);
+    let aend = statement_content_end(source, comments, astart, region_end);
+    lower_stmt(arg, astart, aend, source, comments)
 }
 
 /// The block's leading declarations — a name (`#foo`) and/or an argument pipe (`|a b - decls|`) —
@@ -677,8 +689,7 @@ fn lower_send(
                 } else {
                     content_end
                 };
-                let raw = source[colon + 1..boundary].trim();
-                lower_arg(&args[i], raw, source, comments)?
+                lower_arg(&args[i], colon + 1, boundary, source, comments)?
             }
         };
         pairs.push(Doc::concat(vec![Doc::text(format!("{name}:")), arg_doc]));

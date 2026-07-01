@@ -220,6 +220,18 @@ fn lowers_a_return_value() {
 }
 
 #[test]
+fn multi_line_send_argument_wraps_instead_of_bailing() {
+    // A keyword arg that is itself a multi-line send (`Foo.new:{ … }`) is lowered structurally.
+    // Regression: this used to bail (a multi-line non-collection arg had no layout), which forced
+    // the whole enclosing statement — and, cascading up, its class — to fall back to verbatim.
+    let src = "m -> {\n    r = self.addResult:Foo.new:{\n        a = 1;\n        b = 2\n    };\n    z = 2\n}";
+    assert_eq!(
+        fmt(src),
+        "m -> {\n    r = self.addResult:Foo.new:{\n        a = 1;\n        b = 2\n    };\n    z = 2\n}\n"
+    );
+}
+
+#[test]
 fn postfix_bang_selector_is_not_doubled() {
     // `!` is a separate token folded into the selector name but not its span; the tail must not
     // re-append it.
