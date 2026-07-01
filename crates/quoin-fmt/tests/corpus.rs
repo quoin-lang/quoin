@@ -6,10 +6,12 @@
 //!   3. **Idempotent** — `format(format(src)) == format(src)`.
 //!
 //! Files that don't parse are skipped (and counted): the formatter is not a linter, and
-//! the corpus may contain intentionally-broken fixtures.
+//! the corpus may contain intentionally-broken fixtures. (1) and (2) are also enforced inside
+//! `format_source` now — its self-check returns a verification error rather than bad output — so
+//! a self-check trip surfaces here as a failure, not a skip.
 
-use quoin_fmt::format_source;
 use quoin_fmt::verify::{ast_equal, comments_preserved};
+use quoin_fmt::{FormatError, format_source};
 use std::path::{Path, PathBuf};
 
 /// Repo root, two levels up from this crate (`crates/quoin-fmt`).
@@ -68,8 +70,14 @@ fn formats_the_whole_corpus_without_changing_meaning() {
 
         let out = match format_source(&src, &rel) {
             Ok(out) => out,
-            Err(_) => {
+            // A genuine parse failure just isn't formattable — skip it. A verification failure is
+            // the formatter's own self-check tripping, which is a real bug: surface it.
+            Err(FormatError::Parse(_)) => {
                 skipped_unparsable += 1;
+                continue;
+            }
+            Err(e) => {
+                failures.push(format!("{rel}: {e}"));
                 continue;
             }
         };

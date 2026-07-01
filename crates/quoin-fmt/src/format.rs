@@ -8,15 +8,18 @@
 //! which keeps parentheses and operator groupings byte-exact and sidesteps having to re-insert
 //! precedence parens (the AST drops them).
 //!
-//! Two invariants make this safe, checked over the whole corpus in the tests: formatting never
-//! changes the AST, and never drops a comment. A verbatim slice is only ever emitted where its
-//! first line sits at the target column (top level, or a single-line slice), never re-indented
-//! by shifting text — a Quoin string may contain a literal newline. Re-indentation happens only
-//! structurally, through the doc engine's `Nest`/`Align`.
+//! Two invariants make this safe: formatting never changes the AST, and never drops a comment.
+//! They're not just tested over the corpus — `format_source` re-parses its own output and returns
+//! a [`FormatError::Verification`] instead of the string if either would be violated, so a caller
+//! (e.g. `qn fmt --write`) can never write meaning-changing output. A verbatim slice is only ever
+//! emitted where its first line sits at the target column (top level, or a single-line slice),
+//! never re-indented by shifting text — a Quoin string may contain a literal newline. Re-indentation
+//! happens only structurally, through the doc engine's `Nest`/`Align`.
 
 use crate::comments::Comment;
 use crate::comments::scan_comments;
 use crate::doc::{Doc, render};
+use crate::verify;
 use quoin_syntax::ast::{BlockNode, Node, NodeValue};
 use quoin_syntax::{ParseError, try_parse_quoin_string_named};
 use std::sync::Arc;
@@ -31,12 +34,21 @@ const INDENT: isize = 4;
 pub enum FormatError {
     /// The input did not parse.
     Parse(ParseError),
+    /// The formatted output would change the program's meaning or drop a comment — a formatter
+    /// bug caught by the self-check. The output is withheld so it can never be written.
+    Verification(String),
 }
 
 impl std::fmt::Display for FormatError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FormatError::Parse(e) => write!(f, "parse error: {e}"),
+            FormatError::Verification(detail) => {
+                write!(
+                    f,
+                    "internal formatter error: {detail} — formatting aborted, please report this"
+                )
+            }
         }
     }
 }
@@ -58,6 +70,28 @@ pub fn format_source(source: &str, filename: &str) -> Result<String, FormatError
     out.truncate(out.trim_end().len());
     if !out.is_empty() {
         out.push('\n');
+    }
+
+    // Self-verification: the reformatted source must parse to the identical AST and preserve every
+    // comment. If it wouldn't (e.g. a dropped `;` that rebinds a `.`-leading statement, or any
+    // other bug), withhold the output entirely — a caller must never write meaning-changing output.
+    match verify::ast_equal(source, &out) {
+        Some(true) => {}
+        Some(false) => {
+            return Err(FormatError::Verification(
+                "the reformatted source would parse differently".into(),
+            ));
+        }
+        None => {
+            return Err(FormatError::Verification(
+                "the reformatted source does not parse".into(),
+            ));
+        }
+    }
+    if !verify::comments_preserved(source, &out) {
+        return Err(FormatError::Verification(
+            "a comment would be dropped or altered".into(),
+        ));
     }
     Ok(out)
 }

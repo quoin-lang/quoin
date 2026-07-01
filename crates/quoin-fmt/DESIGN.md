@@ -122,10 +122,16 @@ produce a large reflow diff once P2 lands — expected, and proven safe by the A
 
 ## 6. Correctness guardrails (`verify`)
 
-Enforced in unit tests and over the entire `qnlib/**` corpus (`tests/corpus.rs`):
+Three properties, enforced in unit tests and over the entire `qnlib/**` corpus (`tests/corpus.rs`):
 
 1. **Semantics preserved** — `parse(src) == parse(format(src))` (positions cleared).
 2. **Comments preserved** — the multiset of comment texts is unchanged (trailing-trimmed).
 3. **Idempotent** — `format(format(src)) == format(src)`.
+
+Properties 1 and 2 are also enforced **at runtime**: `format_source` re-parses its own output and
+returns `FormatError::Verification` instead of the string if either is violated, so a bug can never
+silently write meaning-changing output — e.g. a dropped `;` that would rebind a `.`-leading statement
+onto the previous block (`foo -> {…}` then `.mix:X`). This is why `qn fmt --write` is safe by
+construction, not just by testing. (Idempotence is a quality property, checked in tests only.)
 
 Files that don't parse are skipped and counted; the formatter is not a linter.

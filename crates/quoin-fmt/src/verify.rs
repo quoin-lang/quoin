@@ -37,3 +37,7 @@ fn comment_bag(source: &str) -> Vec<String> {
 pub fn comments_preserved(before: &str, after: &str) -> bool {
     comment_bag(before) == comment_bag(after)
 }
+
+#[cfg(test)]
+#[path = "verify_tests.rs"]
+mod verify_tests;
