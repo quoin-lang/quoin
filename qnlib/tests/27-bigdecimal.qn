@@ -52,4 +52,4 @@
         .is:{ (BigDecimal.of:'2.9').asInteger } equalTo:2;
         .is:{ (BigDecimal.of:'2.5').asDouble } closeTo:2.5;
     };
-};
+}

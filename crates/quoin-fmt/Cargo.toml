@@ -1,0 +1,10 @@
+[package]
+name = "quoin-fmt"
+version = "0.1.0"
+edition = "2024"
+description = "Opinionated, zero-config formatter for Quoin source code."
+
+[dependencies]
+# Parser, AST, and source spans. No `gc` feature — the formatter is pure tooling and
+# never links gc-arena.
+quoin-syntax = { path = "../quoin-syntax" }

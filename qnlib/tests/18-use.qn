@@ -14,4 +14,4 @@ use usetest/lib;
         use usetest/lib;
         .is:{ [UseTest]Greeter.new.greeting } equalTo:'hello from usetest/lib';
     };
-};
+}

@@ -119,4 +119,4 @@ use std:net/http;
         .is:{ [HTTP]Request.resolveLocation:'n' against:'http://h/a/b/c' }
             equalTo:'http://h:80/a/b/n';
     };
-};
+}

@@ -37,4 +37,4 @@
         "* malformed input
         .does:{ TOML.parse:'= bad' } throw:ParseError;
     };
-};
+}

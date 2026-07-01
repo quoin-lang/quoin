@@ -14,6 +14,7 @@ path = "src/main.rs"
 members = [
     ".",
     "crates/quoin-syntax",
+    "crates/quoin-fmt",
     "crates/quoin-ext",
     "crates/quoin-ext-proto",
     "lint/no_gc_across_yield",
@@ -37,6 +38,8 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 quoin-syntax = { path = "crates/quoin-syntax", features = ["gc"] }
+# The source formatter, driven by the `qn fmt` subcommand.
+quoin-fmt = { path = "crates/quoin-fmt" }
 # Extension-side SDK (Tier 1). A normal dep so the `ext_echo` test-fixture bin (src/bin/)
 # can link it; the VM itself does not use it.
 quoin-ext = { path = "crates/quoin-ext" }

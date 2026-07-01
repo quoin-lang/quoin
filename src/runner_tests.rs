@@ -336,10 +336,10 @@ fn dap_variables_expand_nested_collection() {
                 "breakpoints": [ { "line": 2 } ],
             }}),
             json!({ "command": "configurationDone", "arguments": {} }),
-            json!({ "command": "scopes", "arguments": { "frameId": 1 } }),               // -> handle 1
-            json!({ "command": "variables", "arguments": { "variablesReference": 1 } }),  // Locals: xs -> handle 2
-            json!({ "command": "variables", "arguments": { "variablesReference": 2 } }),  // xs: [0] sub-list -> handle 3
-            json!({ "command": "variables", "arguments": { "variablesReference": 3 } }),  // expand the sub-list
+            json!({ "command": "scopes", "arguments": { "frameId": 1 } }), // -> handle 1
+            json!({ "command": "variables", "arguments": { "variablesReference": 1 } }), // Locals: xs -> handle 2
+            json!({ "command": "variables", "arguments": { "variablesReference": 2 } }), // xs: [0] sub-list -> handle 3
+            json!({ "command": "variables", "arguments": { "variablesReference": 3 } }), // expand the sub-list
             json!({ "command": "continue", "arguments": { "threadId": 1 } }),
         ],
     );
@@ -511,6 +511,49 @@ fn parse_debug_break_on_throw_flag() {
         vec!["TypeError".to_string(), "Error".to_string()]
     );
     assert_eq!(opts.vm_options.arguments, vec!["extra".to_string()]);
+}
+
+#[test]
+fn parse_fmt_collects_paths_and_flags() {
+    let args: Vec<String> = ["qn", "fmt", "--check", "a.qn", "dir/"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let opts = VmRunnerOptions::parse(&args);
+    assert!(matches!(opts.mode, VmRunnerMode::Fmt));
+    assert!(opts.fmt_check);
+    assert!(!opts.fmt_dry_run);
+    // Non-flag arguments are the paths, in order.
+    assert_eq!(
+        opts.vm_options.arguments,
+        vec!["a.qn".to_string(), "dir/".to_string()]
+    );
+}
+
+#[test]
+fn parse_fmt_dry_run_flag() {
+    let args: Vec<String> = ["qn", "fmt", "--dry-run", "a.qn"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let opts = VmRunnerOptions::parse(&args);
+    assert!(matches!(opts.mode, VmRunnerMode::Fmt));
+    assert!(opts.fmt_dry_run);
+    assert!(!opts.fmt_check);
+    assert_eq!(opts.vm_options.arguments, vec!["a.qn".to_string()]);
+}
+
+#[test]
+fn parse_fmt_diff_flag() {
+    let args: Vec<String> = ["qn", "fmt", "--diff", "a.qn"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let opts = VmRunnerOptions::parse(&args);
+    assert!(matches!(opts.mode, VmRunnerMode::Fmt));
+    assert!(opts.fmt_diff);
+    assert!(!opts.fmt_check && !opts.fmt_dry_run);
+    assert_eq!(opts.vm_options.arguments, vec!["a.qn".to_string()]);
 }
 
 #[test]

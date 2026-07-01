@@ -1,2 +1,4 @@
 use cyc/a;
-[Cyc]B <- { name -> { 'B' } };
+[Cyc]B <- {
+    name -> { 'B' }
+}

@@ -1719,6 +1719,7 @@ dependencies = [
  "once_cell",
  "quoin-ext",
  "quoin-ext-proto",
+ "quoin-fmt",
  "quoin-syntax",
  "rcgen",
  "regex",
@@ -1750,6 +1751,13 @@ version = "0.1.0"
 dependencies = [
  "planus",
  "serde",
+]
+
+[[package]]
+name = "quoin-fmt"
+version = "0.1.0"
+dependencies = [
+ "quoin-syntax",
 ]
 
 [[package]]

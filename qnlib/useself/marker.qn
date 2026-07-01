@@ -1,4 +1,4 @@
 "* `self:` fixture, in a non-globbed / non-auto-loaded dir, loaded only via self:.
 [UseSelf]Marker <- {
     tag -> { 'self marker' }
-};
+}

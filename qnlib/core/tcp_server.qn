@@ -6,7 +6,7 @@ TcpServer <- { |@address @listener @tasks @acceptTask|
     init: -> { |address|
         @address = address;
         @tasks = #();
-        @listener = TcpListener.listen:@address;
+        @listener = TcpListener.listen:@address
     };
 
     "* The bound local port (e.g. after an ephemeral ':0' bind).
@@ -19,9 +19,9 @@ TcpServer <- { |@address @listener @tasks @acceptTask|
         @acceptTask = Task.spawn:{
             { true }.whileDo:{
                 conn = @listener.accept;
-                @tasks.add:Task.spawn:{ result = block.value:conn; conn.close; result };
-            };
-        };
+                @tasks.add:Task.spawn:{ result = block.value:conn; conn.close; result }
+            }
+        }
     };
 
     "* Stop accepting: cancel the accept loop, which aborts its parked `accept`. In-flight
@@ -30,10 +30,10 @@ TcpServer <- { |@address @listener @tasks @acceptTask|
 
     "* Wait for all connection-handler tasks and return their values, in connection order.
     join -> {
-        { @acceptTask.join }.catch:{}
+        { @acceptTask.join }.catch:{};
         Async.joinAll:@tasks
     };
 
     "* Release the listening socket / bound port.
-    close -> { @listener.close };
+    close -> { @listener.close }
 }

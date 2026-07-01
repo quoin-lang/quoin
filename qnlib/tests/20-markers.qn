@@ -3,47 +3,54 @@
 MarkerBase <- {
     greet -> { 'base' }
 };
-MarkerBase.abstract!;                "* abstract base — not instantiable, but subclassable
+MarkerBase.abstract!;  "* abstract base — not instantiable, but subclassable
 
 MarkerBase <- MarkerSub <- {
     greet --> { 'sub' }
-};                                    "* concrete subclass — instantiable
+};  "* concrete subclass — instantiable
 
 MarkerSealed <- {
     val -> { 42 }
 };
-MarkerSealed.sealed!;                "* frozen — no extension or subclassing
+MarkerSealed.sealed!;  "* frozen — no extension or subclassing
 
 (TestSuite.new:{ name = 'Markers' }).add:{
-    .test:
-    abstractClassCannotBeInstantiated -> {
-        .does:{ MarkerBase.new } throw:#/Cannot instantiate abstract class/;
+    .test:abstractClassCannotBeInstantiated -> {
+        .does:{ MarkerBase.new } throw:#/Cannot instantiate abstract class/
     };
 
-    .test:
-    concreteSubclassOfAbstractCanBeInstantiated -> {
-        .is:{ MarkerSub.new.greet } equalTo:'sub';
+    .test:concreteSubclassOfAbstractCanBeInstantiated -> {
+        .is:{ MarkerSub.new.greet } equalTo:'sub'
     };
 
-    .test:
-    sealedClassCannotBeExtended -> {
-        .does:{ MarkerSealed <-- { extra -> { 1 } } } throw:#/Cannot extend sealed class/;
+    .test:sealedClassCannotBeExtended -> {
+        .does:{
+            MarkerSealed <-- {
+                extra -> { 1 }
+            }
+        }
+        throw:#/Cannot extend sealed class/
     };
 
-    .test:
-    sealedClassCannotBeSubclassed -> {
-        .does:{ MarkerSealed <- SealedChild <- { } } throw:#/Cannot subclass sealed class/;
+    .test:sealedClassCannotBeSubclassed -> {
+        .does:{
+            MarkerSealed <- SealedChild <- { }
+        }
+        throw:#/Cannot subclass sealed class/
     };
 
-    .test:
-    sealedClassCannotBeMixedInto -> {
-        .does:{ MarkerSealed.mix:Iterate } throw:#/Cannot extend sealed class/;
+    .test:sealedClassCannotBeMixedInto -> {
+        .does:{ MarkerSealed.mix:Iterate } throw:#/Cannot extend sealed class/
     };
 
-    .test:
-    sealedInstanceCannotBeExtended -> {
+    .test:sealedInstanceCannotBeExtended -> {
         inst = MarkerSub.new;
         inst.sealed!;
-        .does:{ inst <-- { extra -> { 1 } } } throw:#/Cannot extend a sealed instance/;
-    };
-};
+        .does:{
+            inst <-- {
+                extra -> { 1 }
+            }
+        }
+        throw:#/Cannot extend a sealed instance/
+    }
+}

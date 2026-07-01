@@ -1,12 +1,12 @@
 String <-- {
     .meta <-- {
         default -> { '' }
-    }
+    };
 
-    split: -> { |pat:String| .splitString:pat }
-    split: --> { |p:Regex| p.split:self }
+    split: -> { |pat:String| .splitString:pat };
+    split: --> { |p:Regex| p.split:self };
 
-    split -> { #/\s+/.split:self }
+    split -> { #/\s+/.split:self };
 
     "* Left-justify to `width` by appending spaces; returns self if already that wide."
     padRight: -> { |width:Integer|

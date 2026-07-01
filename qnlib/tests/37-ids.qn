@@ -90,4 +90,4 @@
         .does:{ ULID.parse:'nope' } throw:ValueError;
         .does:{ ULID.parse:'' } throw:ValueError;
     };
-};
+}

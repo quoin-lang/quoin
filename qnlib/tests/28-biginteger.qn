@@ -48,4 +48,4 @@
         .does:{ (BigInteger.of:'100000000000000000000000').asInteger } throw:ArithmeticError;
         .is:{ (BigInteger.of:'8').asDouble } closeTo:8.0;
     };
-};
+}

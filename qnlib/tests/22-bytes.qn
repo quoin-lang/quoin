@@ -2,71 +2,55 @@
 "* socket/TLS/HTTP layers. Text crosses at the edges via `String.asBytes` /
 "* `Bytes.asString`. See `docs/ASYNC_ARCH.md`.
 (TestSuite.new:{ name = 'Bytes' }).add:{
-
     "* UTF-8 round-trips through Bytes and back.
-    .test:
-    stringRoundTrip -> {
-        .is:{ 'hello, world'.asBytes.asString } equalTo:'hello, world';
-    };
+    .test:stringRoundTrip -> { .is:{ 'hello, world'.asBytes.asString } equalTo:'hello, world' };
 
     "* size / at: expose the raw bytes (ASCII 'h' = 104).
-    .test:
-    sizeAndAt -> {
+    .test:sizeAndAt -> {
         b = 'hi'.asBytes;
         .is:{ b.size } equalTo:2;
         .is:{ b.count } equalTo:2;
         .is:{ b.at:0 } equalTo:104;
-        .is:{ b.at:1 } equalTo:105;
+        .is:{ b.at:1 } equalTo:105
     };
 
     "* Concatenation builds a new Bytes (immutable value semantics).
-    .test:
-    concatenation -> {
-        .is:{ ('foo'.asBytes + 'bar'.asBytes).asString } equalTo:'foobar';
-    };
+    .test:concatenation -> { .is:{ ('foo'.asBytes + 'bar'.asBytes).asString } equalTo:'foobar' };
 
     "* from:to: slices a half-open range, clamped to bounds.
-    .test:
-    slice -> {
+    .test:slice -> {
         b = 'abcdef'.asBytes;
         .is:{ (b.from:1 to:4).asString } equalTo:'bcd';
         .is:{ (b.from:0 to:100).asString } equalTo:'abcdef';
-        .is:{ (b.from:3 to:3).size } equalTo:0;
+        .is:{ (b.from:3 to:3).size } equalTo:0
     };
 
     "* Equality is byte-wise.
-    .test:
-    equality -> {
+    .test:equality -> {
         .is:{ 'x'.asBytes == 'x'.asBytes } equalTo:true;
-        .is:{ 'x'.asBytes == 'y'.asBytes } equalTo:false;
+        .is:{ 'x'.asBytes == 'y'.asBytes } equalTo:false
     };
 
     "* Construction from a list of integers, and the empty value.
-    .test:
-    constructors -> {
+    .test:constructors -> {
         .is:{ (Bytes.of:#(72 105)).asString } equalTo:'Hi';
-        .is:{ Bytes.empty.size } equalTo:0;
+        .is:{ Bytes.empty.size } equalTo:0
     };
 
     "* each: yields every byte as an Integer.
-    .test:
-    each -> {
+    .test:each -> {
         sum = 0;
         'AB'.asBytes.each:{ |x| sum = sum + x };
-        .is:{ sum } equalTo:131;
+        .is:{ sum } equalTo:131
     };
 
     "* The class is Bytes (not String).
-    .test:
-    className -> {
-        .is:{ 'x'.asBytes.class.name } equalTo:'Bytes';
-    };
+    .test:className -> { .is:{ 'x'.asBytes.class.name } equalTo:'Bytes' };
 
     "* asString throws (catchable) on invalid UTF-8; asStringLossy never does.
-    .test:
-    invalidUtf8 -> {
-        bad = Bytes.of:#(255 254);
+    .test:invalidUtf8 -> {
+        bad = Bytes.of:#( 255 254 );
         .is:{ { bad.asString }.catch:{ |ex| 'threw' } } equalTo:'threw';
-        .is:{ bad.asStringLossy.length } greaterThanOrEqualTo:1;
-    };
+        .is:{ bad.asStringLossy.length } greaterThanOrEqualTo:1
+    }
 }

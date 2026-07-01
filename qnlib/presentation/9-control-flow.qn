@@ -1,22 +1,22 @@
-﻿true <-- {
+true <-- {
     if: -> { |ifblock| ^^ifblock.value };
     else: -> { |_| ^^nil };
-    if:else: -> { |ifblock _| ^^ifblock.value };
+    if:else: -> { |ifblock _| ^^ifblock.value }
 };
 
 false <-- {
     if: -> { |ifblock| ^^nil };
-    if:else: -> { |_ elseblock| ^^elseblock.value };
+    if:else: -> { |_ elseblock| ^^elseblock.value }
 };
 
 Block <-- {
     whileDo: -> { |block|
-        s = self
+        s = self;
         s.value.if:{
             block.value;
-            ^^s.whileDo:block;
-        };
-    };
+            ^^s.whileDo:block
+        }
+    }
 };
 
-{}.class <-- {}   "* Same
+{}.class <-- {}  "* Same

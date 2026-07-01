@@ -2,4 +2,4 @@
 "* glob does NOT auto-load it — `use usetest/lib` must load it on demand.
 [UseTest]Greeter <- {
     greeting -> { 'hello from usetest/lib' }
-};
+}
