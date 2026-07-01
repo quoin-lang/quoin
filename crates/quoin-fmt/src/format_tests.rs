@@ -111,11 +111,47 @@ fn single_keyword_send_indents_its_block_body() {
 
 #[test]
 fn multi_keyword_send_breaks_aligned_under_first_keyword() {
-    let src = "result.if:{\n    doThing\n} else:{\n    fallback\n}";
-    // `else:` aligns under `if:` (column 7, after `result.`); block bodies at +4.
-    let expected =
-        "result.if:{\n           doThing\n       }\n       else:{\n           fallback\n       }\n";
+    // Multi-statement block args force the blocks (and so the send) to break; `else:` aligns under
+    // `if:` (column 7, after `result.`), block bodies at +4.
+    let src = "result.if:{\n    a;\n    b\n} else:{\n    c;\n    d\n}";
+    let expected = "result.if:{\n           a;\n           b\n       }\n       else:{\n           c;\n           d\n       }\n";
     assert_eq!(fmt(src), expected);
+}
+
+#[test]
+fn single_statement_value_block_collapses_when_it_fits() {
+    // A needlessly-broken short method body is pulled back onto one line.
+    assert_eq!(fmt("name -> {\n    @name\n}"), "name -> { @name }\n");
+    // Single-statement block args collapse too, so the whole send fits.
+    assert_eq!(fmt("x.if:{ a } else:{ b }"), "x.if:{ a } else:{ b }\n");
+}
+
+#[test]
+fn over_long_value_block_wraps() {
+    // A single-statement body that can't fit the width breaks onto its own indented line. The body
+    // is a single-keyword send (no continuation keyword to wrap), so the block is what breaks.
+    let long = "m -> { obj.call:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }";
+    assert!(long.len() > 100);
+    let out = fmt(long);
+    assert!(
+        out.starts_with("m -> {\n    obj.call:"),
+        "expected a wrapped body:\n{out}"
+    );
+    assert!(out.ends_with("}\n"));
+}
+
+#[test]
+fn declaration_block_always_breaks_one_member_per_line() {
+    // A class body is a member declaration block: it stays expanded even written on one line.
+    assert_eq!(
+        fmt("C <- { name -> { @name }; age -> { @age } }"),
+        "C <- {\n    name -> { @name };\n    age -> { @age }\n}\n"
+    );
+    // Even a single-method class body breaks (the method itself stays inline).
+    assert_eq!(
+        fmt("C <- { name -> { @name } }"),
+        "C <- {\n    name -> { @name }\n}\n"
+    );
 }
 
 #[test]

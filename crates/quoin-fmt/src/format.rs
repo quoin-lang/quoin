@@ -266,15 +266,19 @@ fn lower_def(
     ]))
 }
 
-/// Lower a `{ … }` block. A single-line block is kept verbatim (safe at any column); a
-/// multi-line one becomes `{ <args>` + indented statements + `}`.
+/// Lower a `{ … }` block.
+///
+/// A single, comment-free *value* statement (anything but a member declaration) is laid out
+/// width-driven — `{ stmt }` when it fits, broken otherwise — so a short method body like
+/// `name -> { @name }` stays on one line while an over-long one wraps. A block that *declares*
+/// members (a class or meta body, whose statement is a method/class definition) always breaks,
+/// one member per line, as do multi-statement blocks and any block whose body carries a comment.
+/// An empty block, and a single-line block we don't lay out ourselves, are kept verbatim.
 fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<Doc> {
     let si = block.source_info.as_ref()?;
     let (bstart, bend) = (si.start, si.end);
-    let slice = &source[bstart..bend];
-    if !slice.contains('\n') || block.statements.is_empty() {
-        // Single-line, or no statements (empty / only trivia): keep as-is.
-        return Some(Doc::verbatim(slice.to_string()));
+    if block.statements.is_empty() {
+        return Some(Doc::verbatim(source[bstart..bend].to_string()));
     }
 
     let region_start = bstart + 1;
@@ -282,6 +286,58 @@ fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<
     let (header, body_start) = block_header(block, source, region_start, region_end);
     if header.contains('\n') {
         return None;
+    }
+    let has_comment = comments
+        .iter()
+        .any(|c| c.start >= region_start && c.end <= region_end);
+    // A block that declares members (methods, nested classes) always breaks, one per line, so class
+    // and meta bodies stay expanded however they were written.
+    let declares_member = block.statements.iter().any(|s| {
+        matches!(
+            &s.value,
+            NodeValue::ClassDefinition(_)
+                | NodeValue::ClassExtension(_)
+                | NodeValue::MethodDefinition(_)
+                | NodeValue::MethodExtension(_)
+        )
+    });
+
+    // A single comment-free value statement is laid out width-driven: `{ stmt }` if it fits.
+    if !declares_member && block.statements.len() == 1 && !has_comment {
+        let stmt = &block.statements[0];
+        let sstart = stmt.source_info.as_ref()?.start;
+        let cstart = statement_content_start(source, sstart, body_start);
+        let cend = statement_content_end(source, comments, cstart, region_end);
+        let lowered = lower_stmt(stmt, cstart, cend, source, comments);
+        // Inline only when the statement can render on one line: a proper `Doc` (whose own hard
+        // breaks the group still honors), or a single-line verbatim slice. A multi-line verbatim
+        // slice can't sit in a flat group, so fall through to the always-break path.
+        let inlineable = match &lowered {
+            Some(_) => true,
+            None => !source[cstart..cend].contains('\n'),
+        };
+        if inlineable {
+            let stmt_doc =
+                lowered.unwrap_or_else(|| Doc::verbatim(source[cstart..cend].to_string()));
+            let mut open = vec![Doc::text("{")];
+            if !header.is_empty() {
+                open.push(Doc::text(" "));
+                open.push(Doc::verbatim(header.to_string()));
+            }
+            return Some(Doc::group(Doc::concat(vec![
+                Doc::concat(open),
+                Doc::nest(INDENT, Doc::concat(vec![Doc::Line, stmt_doc])),
+                Doc::Line,
+                Doc::text("}"),
+            ])));
+        }
+    }
+
+    // Otherwise break — a declaration block, or a multi-statement / commented / un-inlineable body —
+    // except a plain (non-declaration) single-line block, which we keep verbatim.
+    let slice = &source[bstart..bend];
+    if !declares_member && !slice.contains('\n') {
+        return Some(Doc::verbatim(slice.to_string()));
     }
     let body = emit_sequence(
         source,
@@ -291,7 +347,6 @@ fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<
         &block.statements,
         false,
     )?;
-
     let mut head = vec![Doc::text("{")];
     if !header.is_empty() {
         head.push(Doc::text(" "));
