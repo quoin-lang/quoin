@@ -193,16 +193,14 @@ fn emit_sequence(
             parts.push(Doc::HardLine);
         }
 
-        let doc = match lower_stmt(&stmts[i], start, end, source, comments) {
-            Some(d) => d,
-            None => {
-                let slice = &source[start..end];
-                if slice.contains('\n') && !allow_multiline_verbatim {
-                    return None;
-                }
-                Doc::verbatim(slice.to_string())
-            }
-        };
+        let doc = lower_or_verbatim(
+            &stmts[i],
+            start,
+            end,
+            source,
+            comments,
+            allow_multiline_verbatim,
+        )?;
         parts.push(doc);
         prev_end = Some(end);
     }
@@ -269,6 +267,27 @@ fn lower_stmt(
     }
 }
 
+/// Lower `node` over `[start, end)`, or fall back to its exact source slice. This is the formatter's
+/// core move: a construct we know how to lay out becomes a real `Doc`; anything else is emitted
+/// byte-for-byte. A verbatim slice is only safe where its first line already sits at the target
+/// column — a single-line slice always is, a multi-line one only when `allow_multiline` (the top
+/// level, at column 0). Otherwise `None` bubbles the un-lowerable construct up to an ancestor that
+/// can emit a larger verbatim slice.
+fn lower_or_verbatim(
+    node: &Node,
+    start: usize,
+    end: usize,
+    source: &str,
+    comments: &[Comment],
+    allow_multiline: bool,
+) -> Option<Doc> {
+    if let Some(doc) = lower_stmt(node, start, end, source, comments) {
+        return Some(doc);
+    }
+    let slice = &source[start..end];
+    (allow_multiline || !slice.contains('\n')).then(|| Doc::verbatim(slice.to_string()))
+}
+
 /// Lower a statement of the form `<prefix> <expr>` — an assignment (`lvalues =`) or a return
 /// (`^^` / `^` / `^>`). The prefix (everything up to the right-hand expression) is emitted verbatim;
 /// the expression is lowered, so its own multi-line layout works. `None` (→ caller emits verbatim)
@@ -285,16 +304,7 @@ fn lower_prefixed(
     if prefix.contains('\n') {
         return None;
     }
-    let expr_doc = match lower_stmt(expr, estart, content_end, source, comments) {
-        Some(d) => d,
-        None => {
-            let slice = &source[estart..content_end];
-            if slice.contains('\n') {
-                return None;
-            }
-            Doc::verbatim(slice.to_string())
-        }
-    };
+    let expr_doc = lower_or_verbatim(expr, estart, content_end, source, comments, false)?;
     Some(Doc::concat(vec![
         Doc::verbatim(prefix.to_string()),
         expr_doc,
@@ -343,41 +353,14 @@ fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<
     if header.contains('\n') {
         return None;
     }
-    // A block that declares members (methods, nested classes) always breaks, one per line, so class
-    // and meta bodies stay expanded however they were written.
-    let declares_member = block.statements.iter().any(|s| {
-        matches!(
-            &s.value,
-            NodeValue::ClassDefinition(_)
-                | NodeValue::ClassExtension(_)
-                | NodeValue::MethodDefinition(_)
-                | NodeValue::MethodExtension(_)
-        )
-    });
-    let single_line = !source[bstart..bend].contains('\n');
 
-    // Value blocks that are a single statement, or that were already on one line, are width-driven:
-    // the group renders `{ … }` inline when it fits and expands otherwise. A comment or blank line
-    // inside emits a `HardLine`, so such a block always breaks. A hand-broken multi-statement value
-    // block is left broken (not collapsed).
-    if !declares_member && (block.statements.len() == 1 || single_line) {
-        if let Some(body) = emit_sequence(
-            source,
-            comments,
-            body_start,
-            region_end,
-            &block.statements,
-            false,
-            true,
-        ) {
-            return Some(wrap_block(header, body, true));
-        }
-        // A statement couldn't be laid out; keep the block verbatim if it's one line, else bail.
-        return single_line.then(|| Doc::verbatim(source[bstart..bend].to_string()));
-    }
-
-    // Always break: a member-declaration block, or a multi-statement value block already split
-    // across lines.
+    // A value block that is a single statement or was written on one line lays out width-driven
+    // (`block_is_inlineable`, the predicate shared with `lower_send`): its statements join with soft
+    // `Line`s inside a `Group` that renders `{ … }` inline when it fits and expands otherwise (a
+    // comment or blank line inside forces the break). Everything else — a member-declaration body, or
+    // a hand-broken multi-statement value block — always breaks, one statement per line. `soft` and
+    // the `group` flag are the same bit either way.
+    let inline = block_is_inlineable(block, source);
     let body = emit_sequence(
         source,
         comments,
@@ -385,9 +368,9 @@ fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<
         region_end,
         &block.statements,
         false,
-        false,
+        inline,
     )?;
-    Some(wrap_block(header, body, false))
+    Some(wrap_block(header, body, inline))
 }
 
 /// Assemble `{ <header> <body> }` from a lowered statement `body`. When `group`, the statements are
@@ -411,11 +394,24 @@ fn wrap_block(header: &str, body: Vec<Doc>, group: bool) -> Doc {
     if group { Doc::group(doc) } else { doc }
 }
 
-/// Would [`lower_block`] lay this block out with its width-driven (groupable) branch rather than
-/// always breaking it? Mirrors that function's branch condition: a value block (not a
-/// member-declaration body) that is a single statement or was authored on one line. [`lower_send`]
-/// uses this to decide — structurally, not by width — whether a keyword send can wrap with its
-/// block args kept inline (a receiver break) or must fall back to the base-column layout.
+/// Does this block declare members (methods or nested classes)? Such a block is a class/meta body and
+/// always breaks, one member per line, rather than being laid out width-driven.
+fn declares_member(block: &BlockNode) -> bool {
+    block.statements.iter().any(|s| {
+        matches!(
+            &s.value,
+            NodeValue::ClassDefinition(_)
+                | NodeValue::ClassExtension(_)
+                | NodeValue::MethodDefinition(_)
+                | NodeValue::MethodExtension(_)
+        )
+    })
+}
+
+/// Would [`lower_block`] lay this block out width-driven (groupable) rather than always breaking it?
+/// True for a *value* block (no member declarations) that is a single statement or was authored on
+/// one line. The single source of truth for that decision, shared by [`lower_block`] and
+/// [`lower_send`] (which uses it to tell whether a keyword send can wrap with its block args inline).
 fn block_is_inlineable(block: &BlockNode, source: &str) -> bool {
     let Some(si) = block.source_info.as_ref() else {
         return false;
@@ -424,16 +420,7 @@ fn block_is_inlineable(block: &BlockNode, source: &str) -> bool {
     if block.statements.is_empty() {
         return single_line;
     }
-    let declares_member = block.statements.iter().any(|s| {
-        matches!(
-            &s.value,
-            NodeValue::ClassDefinition(_)
-                | NodeValue::ClassExtension(_)
-                | NodeValue::MethodDefinition(_)
-                | NodeValue::MethodExtension(_)
-        )
-    });
-    !declares_member && (block.statements.len() == 1 || single_line)
+    !declares_member(block) && (block.statements.len() == 1 || single_line)
 }
 
 /// Is `node` a collection literal — list `#(…)`, set `#<…>`, map `#{…}`, or user list `#Ident(…)`?
@@ -526,18 +513,19 @@ fn lower_arg(
     source: &str,
     comments: &[Comment],
 ) -> Option<Doc> {
-    if is_collection(arg)
-        && let Some(doc) = lower_collection(arg, source, comments)
-    {
-        return Some(doc);
-    }
     let raw = source[region_start..region_end].trim();
-    if !raw.contains('\n') {
-        return Some(Doc::verbatim(raw.to_string()));
+    let multiline = raw.contains('\n');
+    // Collections are width-driven even on one line; any other argument stays a verbatim slice while
+    // it fits on a line, and is lowered structurally (e.g. a wrapping send) only when it would
+    // otherwise span lines. Both cases lower via `lower_stmt`.
+    if is_collection(arg) || multiline {
+        let astart = statement_content_start(source, arg.source_info.as_ref()?.start, region_start);
+        let aend = statement_content_end(source, comments, astart, region_end);
+        if let Some(doc) = lower_stmt(arg, astart, aend, source, comments) {
+            return Some(doc);
+        }
     }
-    let astart = statement_content_start(source, arg.source_info.as_ref()?.start, region_start);
-    let aend = statement_content_end(source, comments, astart, region_end);
-    lower_stmt(arg, astart, aend, source, comments)
+    (!multiline).then(|| Doc::verbatim(raw.to_string()))
 }
 
 /// The block's leading declarations — a name (`#foo`) and/or an argument pipe (`|a b - decls|`) —
@@ -709,21 +697,10 @@ fn lower_send(
     }
 
     // Multiple keywords. Flat joins the pairs with a space on one line; when that doesn't fit the
-    // width budget (or a block arg forces a break), the send wraps one keyword per line. The wrap
-    // shape is chosen structurally — not by width — by whether every block arg can stay inline:
-    //
-    //  - No block arg is force-broken (and there's a receiver to move) → a *receiver break*: the
-    //    receiver sits alone on the opening line and each `keyword:arg` follows on its own, so the
-    //    shortened keyword lines let the blocks stay inline. Continuation keyword names align under
-    //    the first keyword's name, the leading `.` hanging one column to its left — `SoftLine + "."`
-    //    nested at +4, the pairs nested at +5. The break falls to the render-time indent, so it
-    //    grows a fixed step per nesting level rather than by the receiver's width.
-    //  - Some block arg must break across lines anyway → the base-column layout: `subject.kw0:…`
-    //    stays together on the first line and continuation keywords drop to the statement's base
-    //    column, blocks breaking as needed. (Isolating a receiver above breaking blocks buys nothing.)
-    // Name-aligning the continuation keywords keeps the block args inline, so it only helps when no
-    // block arg is one that `lower_block` would force to break (a member-declaration or a hand-broken
-    // multi-statement body). When some block must break anyway, fall back to the base-column layout.
+    // width budget (or a block arg forces a break), the send wraps one keyword per line. The shape is
+    // chosen structurally — not by width — by whether every block arg can stay inline: name-aligning
+    // the continuation keywords under the first only helps when no block arg is one that `lower_block`
+    // would force to break (a member-declaration or a hand-broken multi-statement body).
     let all_blocks_inlineable = args.iter().all(|a| match &a.value {
         NodeValue::Block(b) => block_is_inlineable(b, source),
         _ => true,
@@ -737,8 +714,10 @@ fn lower_send(
     }
     if all_blocks_inlineable && !subject_text.is_empty() {
         // Receiver break: the receiver drops to the opening line on its own so the shortened keyword
-        // lines keep the blocks inline. `.kw0` at +INDENT, the pairs at +INDENT+1 — continuation
+        // lines keep the blocks inline. `.kw0` at +INDENT and the pairs at +INDENT+1, so continuation
         // keyword names align under the first keyword's name, the leading `.` hanging one col left.
+        // The break falls to the render-time indent, so it grows a fixed step per nesting level rather
+        // than by the receiver's width.
         Some(Doc::concat(vec![
             subject,
             Doc::group(Doc::concat(vec![
@@ -747,23 +726,17 @@ fn lower_send(
             ])),
             tail_doc,
         ]))
-    } else if all_blocks_inlineable {
-        // No-subject (leading-`.`) send: there's no receiver to drop to its own line, so `.kw0` stays
-        // on the opening line at the base and the continuation keyword names align one column past it
-        // (`Nest(1)`), the `.` hanging to the left — the same name alignment as the receiver break.
-        Some(Doc::concat(vec![
-            subject,
-            Doc::text("."),
-            Doc::nest(1, Doc::group(Doc::concat(cells))),
-            tail_doc,
-        ]))
     } else {
-        // Base-column: `subject.kw0:…` stays together on the first line, continuation keywords drop
-        // to the statement base, blocks breaking as needed.
+        // `.kw0` stays on the opening line with `subject`. When name-aligning (a no-subject send, so
+        // the `.` sits at the base) the continuation keyword names align one column past it — `Nest(1)`,
+        // the `.` hanging left. Otherwise a block must break, so continuations drop to the statement
+        // base — `Nest(0)`, a no-op. (With a receiver, aligning continuations under the first keyword
+        // would need the receiver's width, which we avoid — hence base-column there.)
+        let cont_nest = if all_blocks_inlineable { 1 } else { 0 };
         Some(Doc::concat(vec![
             subject,
             Doc::text("."),
-            Doc::group(Doc::concat(cells)),
+            Doc::nest(cont_nest, Doc::group(Doc::concat(cells))),
             tail_doc,
         ]))
     }
