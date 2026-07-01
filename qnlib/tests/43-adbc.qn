@@ -1,0 +1,87 @@
+"* End-to-end tests for the `adbc` database extension, driven through the real VM (not the
+"* crate's in-process Rust tests). Both are optional install-time dependencies that a clean
+"* checkout / CI won't have:
+"*   1. the extension binary — a *separate* cargo workspace, so `cargo build` never builds it:
+"*        cargo build --release --manifest-path crates/adbc/Cargo.toml
+"*   2. the SQLite ADBC driver, resolved from the driver manifest (~/…/ADBC/Drivers/sqlite.toml).
+"* The probe below collapses both gates into one catchable boolean: loading the package covers
+"* (1), and connecting to an in-memory SQLite DB covers (2). If either is missing the whole suite
+"* reports as SKIPPED rather than failing the run (see TestSuite#skip: in test.qn).
+"*
+"* Uses only SQLite `:memory:` — no external server — so it's safe to run unconditionally once the
+"* binary and driver are present. The relative package path resolves against the repo root, which
+"* is `qn test`'s working directory.
+adbcReady = {
+    Extension.loadPackage: 'quoin_packages/adbc';
+    (([ADBC]Database.sqliteMemory.connect).query: 'select 1').toList;
+    true
+}.catch:{ false };
+
+(TestSuite.new:{ name = 'ADBC' }).add:{
+    adbcReady.if:{
+        "* A fresh in-memory database per test keeps them independent.
+        .test:
+        roundTripsRowsAsMaps -> {
+            c = [ADBC]Database.sqliteMemory.connect;
+            c.execute: 'create table t (id integer, name text)';
+            c.execute:'insert into t (id, name) values (?, ?)' params:#(1 'alice');
+            c.execute:'insert into t (id, name) values (?, ?)' params:#(2 'bob');
+
+            rows = (c.query: 'select id, name from t order by id').toList;
+            .is:{ rows.count } equalTo:2;
+            .is:{ rows.first.class.name } equalTo:'Map';
+            .is:{ rows.first.at: 'id' } equalTo:1;
+            .is:{ rows.first.at: 'name' } equalTo:'alice';
+            .is:{ rows.second.at: 'name' } equalTo:'bob';
+        };
+
+        .test:
+        bindsParamsIncludingNull -> {
+            c = [ADBC]Database.sqliteMemory.connect;
+            c.execute: 'create table t (id integer, name text)';
+
+            "* execute:params: returns the rows-affected count.
+            affected = c.execute:'insert into t (id, name) values (?, ?)' params:#(1 nil);
+            .is:{ affected } equalTo:1;
+
+            row = (c.query: 'select id, name from t').toList.first;
+            .is:{ row.at: 'id' } equalTo:1;
+            "* A SQL NULL comes back as Quoin nil.
+            .isTrue:{ (row.at: 'name') == nil };
+        };
+
+        .test:
+        preparedStatementsBindAndExecute -> {
+            c = [ADBC]Database.sqliteMemory.connect;
+            c.execute: 'create table t (id integer)';
+
+            st = c.prepare: 'insert into t (id) values (?)';
+            st.bind: #(42);
+            st.execute;
+
+            .is:{ (c.query: 'select id from t').toList.first.at: 'id' } equalTo:42;
+        };
+
+        .test:
+        transactionCommitsAndRollsBack -> {
+            c = [ADBC]Database.sqliteMemory.connect;
+            c.execute: 'create table t (id integer)';
+
+            "* A committed transaction keeps its writes.
+            c.transaction:{ |tx| tx.execute:'insert into t (id) values (?)' params:#(1) };
+            .is:{ (c.query: 'select count(*) as n from t').toList.first.at: 'n' } equalTo:1;
+
+            "* A transaction that throws rolls back and re-raises; the write is discarded.
+            .does:{
+                c.transaction:{ |tx|
+                    tx.execute:'insert into t (id) values (?)' params:#(2);
+                    'boom'.throw;
+                }
+            } throw:'boom';
+            .is:{ (c.query: 'select count(*) as n from t').toList.first.at: 'n' } equalTo:1;
+        };
+    }
+    else:{
+        .skip: 'adbc extension binary or SQLite driver not installed (build crates/adbc + install the ADBC SQLite driver to run)';
+    }
+};
