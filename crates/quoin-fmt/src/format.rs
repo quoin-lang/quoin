@@ -392,30 +392,32 @@ fn lower_send(
         pairs.push(Doc::concat(vec![Doc::text(format!("{name}:")), arg_doc]));
     }
 
-    let broken = source[content_start..content_end].contains('\n');
-    if !broken || pairs.len() == 1 {
-        // Flat: `subject.k0:a0 k1:a1` (a single multi-line block arg keeps the send otherwise flat).
-        let mut v = vec![subject, Doc::text(".")];
-        for (i, p) in pairs.into_iter().enumerate() {
-            if i > 0 {
-                v.push(Doc::text(" "));
-            }
-            v.push(p);
-        }
-        Some(Doc::concat(v))
-    } else {
-        // Broken: continuation keywords on their own line, aligned under the first keyword.
+    // A single keyword has no continuation to align: emit `subject.k0:a0` and let the block arg
+    // (if any) break on its own.
+    if pairs.len() == 1 {
+        return Some(Doc::concat(vec![
+            subject,
+            Doc::text("."),
+            pairs.into_iter().next().unwrap(),
+        ]));
+    }
+
+    // Multiple keywords: width-driven. Flat joins the pairs with a space; when that doesn't fit
+    // the line budget (or an argument block spans lines, forcing the group to break), continuation
+    // keywords drop onto their own lines aligned under the first — via a `Group` of `Line`s wrapped
+    // in `Align` (which pins the break indent to the first keyword's column).
+    {
         let mut inner = Vec::new();
         for (i, p) in pairs.into_iter().enumerate() {
             if i > 0 {
-                inner.push(Doc::HardLine);
+                inner.push(Doc::Line);
             }
             inner.push(p);
         }
         Some(Doc::concat(vec![
             subject,
             Doc::text("."),
-            Doc::align(Doc::concat(inner)),
+            Doc::align(Doc::group(Doc::concat(inner))),
         ]))
     }
 }

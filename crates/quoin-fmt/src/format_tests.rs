@@ -117,3 +117,21 @@ fn multi_keyword_send_breaks_aligned_under_first_keyword() {
         "result.if:{\n           doThing\n       }\n       else:{\n           fallback\n       }\n";
     assert_eq!(fmt(src), expected);
 }
+
+#[test]
+fn short_multi_keyword_send_flattens_when_it_fits() {
+    // Authored across lines, but it fits the width budget — width-driven wrapping flattens it.
+    assert_eq!(
+        fmt("obj.foo:1\n    bar:2\n    baz:3"),
+        "obj.foo:1 bar:2 baz:3\n"
+    );
+}
+
+#[test]
+fn long_multi_keyword_send_breaks_to_fit_the_width() {
+    // Authored on one line but over 100 columns — it breaks, aligned under the first keyword.
+    let src = "objectName.firstKeyword:someArgument secondKeyword:anotherArgument \
+               thirdKeyword:yetMoreStuffHere fourth:more";
+    let expected = "objectName.firstKeyword:someArgument\n           secondKeyword:anotherArgument\n           thirdKeyword:yetMoreStuffHere\n           fourth:more\n";
+    assert_eq!(fmt(src), expected);
+}
