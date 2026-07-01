@@ -101,22 +101,37 @@ the §6 guardrails green at every step:
 | Doc comments | `"* …` kept on their own line directly above the definition they lead |
 | Leaves | verbatim spelling preserved (numbers, strings, regexes) |
 
-**Multi-keyword sends** (`if:else:`, `case:when:do:`) that don't fit break with **each
-continuation keyword on its own line at the statement's base column**; block bodies nest one
-level (+4) and closing braces return to the base:
+**Multi-keyword sends** (`if:else:`, `case:when:do:`) that don't fit on one line wrap one keyword
+per line, in one of two shapes chosen **structurally — by whether every block argument can stay
+inline, not by width**:
 
-```
-cond.if:{
-    doThing;
-}
-else:{
-    fallback;
-}
-```
+- **No block arg is force-broken** → a *receiver break*: the receiver takes the opening line on its
+  own and each `keyword:arg` follows, so the shortened keyword lines let the blocks stay inline.
+  Continuation keyword names align under the first keyword's name, the leading `.` hanging one
+  column to its left:
 
-Because breaks fall to the statement's base indent (not a column derived from the receiver), the
-indent grows by a fixed step per nesting level instead of by the subject's width — deeply nested
-conditionals (as in `qnlib/net/http.qn`) stay near the left margin rather than drifting into the
+  ```
+  framing = (te.defined? && (te.lower.contains?:'chunked'))
+      .if:{ 'chunked' }
+       else:{ cl.defined?.if:{ 'length' } else:{ 'close' } };
+  ```
+
+- **A block arg must break across lines anyway** → the *base-column* layout: `receiver.kw0:…` stays
+  together and continuation keywords drop to the statement's base column, blocks breaking as needed
+  (isolating the receiver above breaking blocks would buy nothing):
+
+  ```
+  cond.if:{
+      doThing;
+  }
+  else:{
+      fallback;
+  }
+  ```
+
+Both fall to the statement's base indent (not a column derived from the receiver), so the indent
+grows by a fixed step per nesting level instead of by the receiver's width — deeply nested
+conditionals (as in `qnlib/net/http.qn`) stay near the left margin rather than drifting off the
 right edge.
 
 Because the existing corpus uses a different (`+1` indent) convention, `qn fmt qnlib/` will

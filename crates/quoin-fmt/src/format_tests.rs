@@ -171,13 +171,40 @@ fn short_send_stays_flat_before_a_following_statement() {
 }
 
 #[test]
-fn long_multi_keyword_send_breaks_to_fit_the_width() {
-    // Authored on one line but over 100 columns — it breaks, each continuation keyword dropping to
-    // the statement's base column.
+fn long_multi_keyword_send_receiver_breaks() {
+    // Authored on one line but over 100 columns. No block args are force-broken, so it takes a
+    // receiver break: the receiver drops to the opening line and continuation keyword names align
+    // under the first (`.firstKeyword` at +4, its name and the others at +5).
     let src = "objectName.firstKeyword:someArgument secondKeyword:anotherArgument \
                thirdKeyword:yetMoreStuffHere fourth:more";
-    let expected = "objectName.firstKeyword:someArgument\nsecondKeyword:anotherArgument\nthirdKeyword:yetMoreStuffHere\nfourth:more\n";
+    let expected = "objectName\n    .firstKeyword:someArgument\n     secondKeyword:anotherArgument\n     thirdKeyword:yetMoreStuffHere\n     fourth:more\n";
     assert_eq!(fmt(src), expected);
+}
+
+#[test]
+fn receiver_break_keeps_inline_blocks_inline() {
+    // Over 100 columns, but the `if:`/`else:` args are inline value blocks. Breaking before the `.`
+    // gives the long receiver its own line, which leaves the keyword lines short enough that the
+    // blocks stay inline — no block is broken open.
+    let src = "framing = (someCondition.checkThatIsFairlyLong:'chunked').if:{ 'chunked' } else:{ other.if:{ 'length' } else:{ 'close' } }";
+    assert!(src.len() > 100);
+    assert_eq!(
+        fmt(src),
+        "framing = (someCondition.checkThatIsFairlyLong:'chunked')\n    .if:{ 'chunked' }\n     else:{ other.if:{ 'length' } else:{ 'close' } }\n"
+    );
+}
+
+#[test]
+fn receiver_break_falls_back_to_base_column_when_a_block_must_break() {
+    // Same wide send, but the `if:` body is a hand-broken multi-statement block that can't be
+    // inlined — so the receiver stays with the first keyword and continuation keywords drop to the
+    // statement base (isolating the receiver above breaking blocks would buy nothing).
+    let src = "framing = (someCondition.checkThatIsFairlyLong:'chunked').if:{\n    a;\n    b\n} else:{ 'close' }";
+    let out = fmt(src);
+    assert!(
+        out.starts_with("framing = (someCondition.checkThatIsFairlyLong:'chunked').if:{\n    a;\n    b\n}\nelse:{ 'close' }"),
+        "expected base-column fallback:\n{out}"
+    );
 }
 
 #[test]

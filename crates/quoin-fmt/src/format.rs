@@ -411,6 +411,31 @@ fn wrap_block(header: &str, body: Vec<Doc>, group: bool) -> Doc {
     if group { Doc::group(doc) } else { doc }
 }
 
+/// Would [`lower_block`] lay this block out with its width-driven (groupable) branch rather than
+/// always breaking it? Mirrors that function's branch condition: a value block (not a
+/// member-declaration body) that is a single statement or was authored on one line. [`lower_send`]
+/// uses this to decide — structurally, not by width — whether a keyword send can wrap with its
+/// block args kept inline (a receiver break) or must fall back to the base-column layout.
+fn block_is_inlineable(block: &BlockNode, source: &str) -> bool {
+    let Some(si) = block.source_info.as_ref() else {
+        return false;
+    };
+    let single_line = !source[si.start..si.end].contains('\n');
+    if block.statements.is_empty() {
+        return single_line;
+    }
+    let declares_member = block.statements.iter().any(|s| {
+        matches!(
+            &s.value,
+            NodeValue::ClassDefinition(_)
+                | NodeValue::ClassExtension(_)
+                | NodeValue::MethodDefinition(_)
+                | NodeValue::MethodExtension(_)
+        )
+    });
+    !declares_member && (block.statements.len() == 1 || single_line)
+}
+
 /// Is `node` a collection literal — list `#(…)`, set `#<…>`, map `#{…}`, or user list `#Ident(…)`?
 fn is_collection(node: &Node) -> bool {
     matches!(
@@ -543,8 +568,10 @@ fn block_header<'a>(
 }
 
 /// Lower a message send. The subject and non-block arguments are sliced verbatim from raw
-/// source (preserving parentheses); block arguments recurse. A keyword send that spans lines
-/// breaks with each continuation keyword on its own line at the statement's base column.
+/// source (preserving parentheses); block arguments recurse. A multi-keyword send that doesn't
+/// fit on one line wraps one keyword per line: a *receiver break* (the receiver alone on the
+/// opening line, continuation keyword names aligned under the first) when every block arg can stay
+/// inline, else the base-column layout (continuation keywords at the statement base, blocks breaking).
 fn lower_send(
     node: &Node,
     content_start: usize,
@@ -668,24 +695,47 @@ fn lower_send(
         ]));
     }
 
-    // Multiple keywords: width-driven. Flat joins the pairs with a space; when that doesn't fit
-    // the line budget (or an argument block spans lines, forcing the group to break), each
-    // continuation keyword drops onto its own line at the statement's base column — a `Group` of
-    // `Line`s whose breaks fall to the render-time indent (not a column derived from the receiver).
-    // Block bodies then nest one level (+4) from that base and closing braces return to it, so the
-    // indent grows by a fixed step per nesting level rather than by the subject's width.
-    {
-        let mut inner = Vec::new();
-        for (i, p) in pairs.into_iter().enumerate() {
-            if i > 0 {
-                inner.push(Doc::Line);
-            }
-            inner.push(p);
+    // Multiple keywords. Flat joins the pairs with a space on one line; when that doesn't fit the
+    // width budget (or a block arg forces a break), the send wraps one keyword per line. The wrap
+    // shape is chosen structurally — not by width — by whether every block arg can stay inline:
+    //
+    //  - No block arg is force-broken (and there's a receiver to move) → a *receiver break*: the
+    //    receiver sits alone on the opening line and each `keyword:arg` follows on its own, so the
+    //    shortened keyword lines let the blocks stay inline. Continuation keyword names align under
+    //    the first keyword's name, the leading `.` hanging one column to its left — `SoftLine + "."`
+    //    nested at +4, the pairs nested at +5. The break falls to the render-time indent, so it
+    //    grows a fixed step per nesting level rather than by the receiver's width.
+    //  - Some block arg must break across lines anyway → the base-column layout: `subject.kw0:…`
+    //    stays together on the first line and continuation keywords drop to the statement's base
+    //    column, blocks breaking as needed. (Isolating a receiver above breaking blocks buys nothing.)
+    // A receiver break keeps block args inline, so it only helps when no block arg is one that
+    // `lower_block` would force to break (a member-declaration or a hand-broken multi-statement body).
+    let all_blocks_inlineable = args.iter().all(|a| match &a.value {
+        NodeValue::Block(b) => block_is_inlineable(b, source),
+        _ => true,
+    });
+    let receiver_break = !subject_text.is_empty() && all_blocks_inlineable;
+    let mut cells = Vec::new();
+    for (i, p) in pairs.into_iter().enumerate() {
+        if i > 0 {
+            cells.push(Doc::Line);
         }
+        cells.push(p);
+    }
+    if receiver_break {
+        Some(Doc::concat(vec![
+            subject,
+            Doc::group(Doc::concat(vec![
+                Doc::nest(INDENT, Doc::concat(vec![Doc::SoftLine, Doc::text(".")])),
+                Doc::nest(INDENT + 1, Doc::concat(cells)),
+            ])),
+            tail_doc,
+        ]))
+    } else {
         Some(Doc::concat(vec![
             subject,
             Doc::text("."),
-            Doc::group(Doc::concat(inner)),
+            Doc::group(Doc::concat(cells)),
             tail_doc,
         ]))
     }
