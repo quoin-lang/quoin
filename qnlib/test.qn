@@ -190,16 +190,31 @@ TestResult <- { |@test @name @assertions @elapsed @wallElapsed|
     s --> { 'TestResult{%1 %2 %3µs [%4]}' % #( @test @name @elapsed @assertions ) }
 };
 
-TestSuite <- { |@name @tests|
+TestSuite <- { |@name @tests @skipped? @reason|
     init: -> { |name:String|
         @name = name
 
         @tests = #()
+        @skipped? = false
         [Test]Suites.add:self
     }
 
     name -> { @name }
     s -> { @name }
+
+    "* Mark this whole suite skipped, with a human-readable reason (e.g. an optional
+    "* native extension or driver isn't installed on this machine). A skipped suite
+    "* registers no tests: the runner reports it as SKIPPED and it counts as neither a
+    "* pass nor a failure, so the overall run stays green. Call it from an `.add:` block,
+    "* typically in the `else:` of an availability check.
+    skip: -> { |reason:String|
+        @skipped? = true
+        @reason = reason
+        ^self
+    }
+
+    skipped? -> { @skipped? }
+    reason -> { @reason }
 
     add: -> { |b:Block|
         b.valueWithSelf:self
@@ -253,23 +268,36 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
     }
 
     endRun:elapsed: --> { |suites:List elapsed|
-        passes = suites.sum:{ |s| s.tests.sum:{ .passes.count } }
-        failures = suites.sum:{ |s| s.tests.sum:{ .failures.count } }
-        testsElapsed = suites.sum:{ |s| s.tests.sum:{ .elapsed } }
-        @out.writeln:#ANSI'All suites finished in $#00bfff[%1$] ($#00bfff[%2$]) : $#69ff61[%3 passes$] / $#ff6961[%4 failures$]' % #(
+        skips = (suites.select:{ |s| s.skipped? }).count
+        "* Skipped suites register no tests, and `.sum:` over an empty list yields nil
+        "* (which would poison the totals) — so fold only the suites that actually ran.
+        active = suites.select:{ |s| s.skipped? == false }
+        ran = (active.collect:{ |s| s.tests }).flatten
+        passes = ran.any?.if:{ ran.sum:{ .passes.count } } else:{ 0 }
+        failures = ran.any?.if:{ ran.sum:{ .failures.count } } else:{ 0 }
+        testsElapsed = ran.any?.if:{ ran.sum:{ .elapsed } } else:{ 0 }
+        @out.writeln:#ANSI'All suites finished in $#00bfff[%1$] ($#00bfff[%2$]) : $#69ff61[%3 passes$] / $#ff6961[%4 failures$] / $#ffd75f[%5 skipped$]' % #(
             (.humanize:testsElapsed)
             (.humanize:elapsed)
             passes
             failures
+            skips
         )
     }
 
     startSuite: --> { |suite:TestSuite|
         @currentSuite = suite
-        @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Running %2 tests' % #( .paddedName suite.tests.count )
+        suite.skipped?.if:{
+            @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] $#ffd75f[SKIPPED$] — %2' % #( .paddedName suite.reason )
+        }
+            else:{
+            @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Running %2 tests' % #( .paddedName suite.tests.count )
+        }
     }
 
     endSuite:elapsed: --> { |suite:TestSuite elapsed|
+        "* A skipped suite already announced itself in startSuite: and ran no tests.
+        suite.skipped?.if:{ ^^nil };
         passes = suite.tests.sum:{ .passes.count }
         failures = suite.tests.sum:{ .failures.count }
         testsElapsed = suite.tests.sum:{ .elapsed }
@@ -339,14 +367,16 @@ TestRunner <- { |@suites|
 
                 tr = nil
                 elapsed = Timer.time:{
-                    tr = s.tests.collect:{ #collectTests |t|
-                        reporter.startTest:t;
+                    tr = s.skipped?.if:{ #() } else:{
+                        s.tests.collect:{ #collectTests |t|
+                            reporter.startTest:t;
 
-                        r = t.run:reporter
+                            r = t.run:reporter
 
-                        reporter.endTest:r
+                            reporter.endTest:r
 
-                        ^r
+                            ^r
+                        }
                     }
                 };
 
