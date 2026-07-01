@@ -178,3 +178,39 @@ fn long_multi_keyword_send_breaks_to_fit_the_width() {
     let expected = "objectName.firstKeyword:someArgument\n           secondKeyword:anotherArgument\n           thirdKeyword:yetMoreStuffHere\n           fourth:more\n";
     assert_eq!(fmt(src), expected);
 }
+
+#[test]
+fn lowers_assignment_with_a_block_rhs() {
+    // The RHS is lowered (so a multi-line RHS no longer bails the enclosing block to verbatim).
+    let src = "m -> {\n    x = t.time:{ work };\n    x\n}";
+    assert_eq!(fmt(src), "m -> {\n    x = t.time:{ work };\n    x\n}\n");
+}
+
+#[test]
+fn lowers_a_return_value() {
+    assert_eq!(fmt("m -> { ^^ foo.bar:5 }"), "m -> { ^^ foo.bar:5 }\n");
+}
+
+#[test]
+fn postfix_bang_selector_is_not_doubled() {
+    // `!` is a separate token folded into the selector name but not its span; the tail must not
+    // re-append it.
+    let src = "C <- {\n    .sealed!;\n    m -> { 1 }\n}";
+    assert_eq!(fmt(src), "C <- {\n    .sealed!;\n    m -> { 1 }\n}\n");
+}
+
+#[test]
+fn preserves_a_named_block() {
+    // The `#tag` block name sits between `{` and the pipe; it must be kept.
+    let src = "s.collect:{ #tag |t|\n    t.print;\n    ^t\n}";
+    assert_eq!(fmt(src), "s.collect:{ #tag |t|\n    t.print;\n    ^t\n}\n");
+}
+
+#[test]
+fn paren_wrapped_return_value_keeps_its_parens() {
+    // The leading `(` is captured in the subject; the trailing `)` must be re-attached.
+    assert_eq!(
+        fmt("m -> { ^(.modes.first) }"),
+        "m -> { ^(.modes.first) }\n"
+    );
+}

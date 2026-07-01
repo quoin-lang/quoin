@@ -241,8 +241,56 @@ fn lower_stmt(
         NodeValue::MethodExtension(m) => lower_def(content_start, &m.block, source, comments),
         NodeValue::Block(b) => lower_block(b, source, comments),
         NodeValue::MethodCall(_) => lower_send(stmt, content_start, content_end, source, comments),
+        // `<lvalues> = <rvalue>` and `^^`/`^`/`^>` returns: the prefix through the assignment/return
+        // operator is sliced verbatim; only the right-hand expression is lowered. This is what lets a
+        // multi-line RHS (`x = Timer.time:{ … }`, `^^ foo.bar:{ … }`) format instead of forcing the
+        // whole enclosing block to fall back to verbatim.
+        NodeValue::Assignment(a) => {
+            lower_prefixed(content_start, &a.rvalue, content_end, source, comments)
+        }
+        NodeValue::MethodReturn(r) => {
+            lower_prefixed(content_start, &r.value, content_end, source, comments)
+        }
+        NodeValue::BlockReturn(r) => {
+            lower_prefixed(content_start, &r.value, content_end, source, comments)
+        }
+        NodeValue::YieldReturn(r) => {
+            lower_prefixed(content_start, &r.value, content_end, source, comments)
+        }
         _ => None,
     }
+}
+
+/// Lower a statement of the form `<prefix> <expr>` — an assignment (`lvalues =`) or a return
+/// (`^^` / `^` / `^>`). The prefix (everything up to the right-hand expression) is emitted verbatim;
+/// the expression is lowered, so its own multi-line layout works. `None` (→ caller emits verbatim)
+/// if the prefix spans lines or the expression is an un-lowerable multi-line construct.
+fn lower_prefixed(
+    content_start: usize,
+    expr: &Node,
+    content_end: usize,
+    source: &str,
+    comments: &[Comment],
+) -> Option<Doc> {
+    let estart = statement_content_start(source, expr.source_info.as_ref()?.start, content_start);
+    let prefix = &source[content_start..estart];
+    if prefix.contains('\n') {
+        return None;
+    }
+    let expr_doc = match lower_stmt(expr, estart, content_end, source, comments) {
+        Some(d) => d,
+        None => {
+            let slice = &source[estart..content_end];
+            if slice.contains('\n') {
+                return None;
+            }
+            Doc::verbatim(slice.to_string())
+        }
+    };
+    Some(Doc::concat(vec![
+        Doc::verbatim(prefix.to_string()),
+        expr_doc,
+    ]))
 }
 
 /// `<header> <block>` — a class/method definition or reopening. The header (`Point <- `,
@@ -362,8 +410,8 @@ fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<
     ]))
 }
 
-/// The block's argument pipe (`|a b - decls|`) and the offset where its statements begin.
-/// Empty header when the block takes no arguments.
+/// The block's leading declarations — a name (`#foo`) and/or an argument pipe (`|a b - decls|`) —
+/// and the offset where its statements begin. Empty header when the block has neither.
 fn block_header<'a>(
     block: &BlockNode,
     source: &'a str,
@@ -372,19 +420,33 @@ fn block_header<'a>(
 ) -> (&'a str, usize) {
     let has_pipe =
         !block.arguments.is_empty() || !block.decls.is_empty() || block.decl_block.is_some();
-    if !has_pipe {
+    let has_name = block.name.is_some();
+    if !has_pipe && !has_name {
         return ("", region_start);
     }
-    let Some(open) = source[region_start..region_end]
+    // The name and the pipe both sit between `{` and the first statement, name first. Capture from
+    // `region_start` (not the `|`) so a leading `#name` is kept, and end after the closing pipe.
+    if let Some(open) = source[region_start..region_end]
         .find('|')
         .map(|i| region_start + i)
-    else {
-        return ("", region_start);
-    };
-    let Some(close) = source[open + 1..region_end].find('|').map(|i| open + 1 + i) else {
-        return ("", region_start);
-    };
-    (&source[open..close + 1], close + 1)
+        && let Some(close) = source[open + 1..region_end].find('|').map(|i| open + 1 + i)
+    {
+        return (source[region_start..close + 1].trim(), close + 1);
+    }
+    // A named block with no pipe: the header is just the `#name` symbol.
+    let bytes = source.as_bytes();
+    let mut end = region_start;
+    while end < region_end && bytes[end].is_ascii_whitespace() {
+        end += 1;
+    }
+    if bytes.get(end) == Some(&b'#') {
+        end += 1;
+        while end < region_end && !bytes[end].is_ascii_whitespace() && bytes[end] != b'|' {
+            end += 1;
+        }
+        return (source[region_start..end].trim(), end);
+    }
+    ("", region_start)
 }
 
 /// Lower a message send. The subject and non-block arguments are sliced verbatim from raw
@@ -445,12 +507,35 @@ fn lower_send(
         Doc::verbatim(subject_text.to_string())
     };
 
+    // Trailing content between the send's last element and `content_end` — closing parens that wrap
+    // the whole send (the leading `(` was captured in `content_start`). A paren-wrapped keyword arg
+    // keeps its `)` inside the last verbatim arg slice, but a unary send or a block-terminated send
+    // would otherwise drop it, so re-attach it here.
+    let last_end = if args.is_empty() {
+        // A postfix marker (`!` / `?`) is part of the selector *name* but not its span, so measure
+        // from the name's rendered length to avoid re-appending the marker as a "trailing" char.
+        let last = &sel_spans[sel_spans.len() - 1];
+        last.0 + last.2.len()
+    } else {
+        match &args[args.len() - 1].value {
+            NodeValue::Block(b) => b.source_info.as_ref().map(|s| s.end).unwrap_or(content_end),
+            _ => content_end,
+        }
+    };
+    let tail = source[last_end..content_end].trim();
+    let tail_doc = if tail.is_empty() {
+        Doc::Nil
+    } else {
+        Doc::verbatim(tail.to_string())
+    };
+
     // Unary send: `subject.name`.
     if args.is_empty() {
         return Some(Doc::concat(vec![
             subject,
             Doc::text("."),
             Doc::text(sel_spans[0].2.to_string()),
+            tail_doc,
         ]));
     }
     if sels.len() != args.len() {
@@ -488,6 +573,7 @@ fn lower_send(
             subject,
             Doc::text("."),
             pairs.into_iter().next().unwrap(),
+            tail_doc,
         ]));
     }
 
@@ -507,6 +593,7 @@ fn lower_send(
             subject,
             Doc::text("."),
             Doc::align(Doc::group(Doc::concat(inner))),
+            tail_doc,
         ]))
     }
 }
