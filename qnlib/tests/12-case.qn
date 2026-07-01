@@ -151,4 +151,4 @@
         .is:{ describe.value:'12345' } equalTo:'all-digits';
         .is:{ describe.value:'hello' } equalTo:'some-string';
     };
-};
+}

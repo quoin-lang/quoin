@@ -5,8 +5,8 @@ use test;
 use std:tests/*;
 
 runner = TestRunner.new;
-[Test]Suites.each:{|s| runner.add:s };
+[Test]Suites.each:{ |s| runner.add:s };
 
-results = runner.run:AnsiTestReporter.new:{ out = [IO]Stdout }
+results = runner.run:AnsiTestReporter.new:{ out = [IO]Stdout };
 
-results.none?:{|tr| tr.failures.any? }
+results.none?:{ |tr| tr.failures.any? }

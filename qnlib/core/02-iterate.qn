@@ -9,31 +9,25 @@ re-entrant and `nil` is a perfectly valid element.
 "
 
 Mixin <- Iterate <- {
-    collect: -> {|collectBlock:Block|
+    collect: -> { |collectBlock:Block|
         l = #();
-        .each:{ |collectItem|
-            l.add:collectBlock.valueWithSelfOrArg:collectItem;
-        }
+        .each:{ |collectItem| l.add:collectBlock.valueWithSelfOrArg:collectItem };
         ^l
     };
 
-    select: -> {|selectBlock:Block|
+    select: -> { |selectBlock:Block|
         l = #();
-        .each:{ |x| (selectBlock.valueWithSelfOrArg:x).if:{ l.add:x } }
+        .each:{ |x| (selectBlock.valueWithSelfOrArg:x).if:{ l.add:x } };
         ^l
     };
 
-    all?: -> {|allBlock:Block|
-        .each:{ |x|
-            (allBlock.valueWithSelfOrArg:x).else:{ ^^false };
-        };
+    all?: -> { |allBlock:Block|
+        .each:{ |x| (allBlock.valueWithSelfOrArg:x).else:{ ^^false } };
         ^true
     };
 
-    none?: -> {|block:Block|
-        .each:{ |x|
-            (block.valueWithSelfOrArg:x).if:{ ^^false };
-        };
+    none?: -> { |block:Block|
+        .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^false } };
         ^true
     };
 
@@ -42,10 +36,8 @@ Mixin <- Iterate <- {
         ^false
     };
 
-    any?: -> {|block:Block|
-        .each:{ |x|
-            (block.valueWithSelfOrArg:x).if:{ ^^true }
-        }
+    any?: -> { |block:Block|
+        .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^true } };
         ^false
     };
 
@@ -53,34 +45,34 @@ Mixin <- Iterate <- {
         n = 0;
         .each:{ |_| n = n + 1 };
         ^n
-    }
+    };
 
     count: -> { |block:Block|
         n = 0;
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ n = n + 1 } };
         ^n
-    }
+    };
 
     detect: -> { |block|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^x } };
         ^nil
-    }
+    };
 
     nth: -> { |n|
         i = 0;
         .each:{ |x| (i == n).if:{ ^^x }; i = i + 1 };
         ^nil
-    }
+    };
 
-    first -> { .nth:0 }
-    second -> { .nth:1 }
-    third -> { .nth:2 }
-    fourth -> { .nth:3 }
-    fifth -> { .nth:4 }
-    last -> { .reduce:{|_ n| n } }
+    first -> { .nth:0 };
+    second -> { .nth:1 };
+    third -> { .nth:2 };
+    fourth -> { .nth:3 };
+    fifth -> { .nth:4 };
+    last -> { .reduce:{ |_ n| n } };
 
     "* External (pull-style) iteration, backed by a fiber over `each:`."
-    iterator -> { Iterator.over:self }
+    iterator -> { Iterator.over:self };
 
     take: -> { |n|
         l = #();
@@ -88,7 +80,7 @@ Mixin <- Iterate <- {
         i = 0;
         { (i < n) && it.hasNext? }.whileDo:{ l.add:it.next; i = i + 1 };
         ^l
-    }
+    };
 
     drop: -> { |n|
         l = #();
@@ -97,26 +89,23 @@ Mixin <- Iterate <- {
         { (i < n) && it.hasNext? }.whileDo:{ it.next; i = i + 1 };
         { it.hasNext? }.whileDo:{ l.add:it.next };
         ^l
-    }
+    };
 
     "* Lazy variants return a Generator instead of a materialized list, so they
     "* compose into pipelines and work on infinite sources (consume with take:)."
     lazyCollect: -> { |f|
         src = self;
         Generator.from:{ src.each:{ |x| ^>(f.valueWithSelfOrArg:x) } }
-    }
+    };
 
     lazySelect: -> { |p|
         src = self;
         Generator.from:{ src.each:{ |x| (p.valueWithSelfOrArg:x).if:{ ^>x } } }
-    }
+    };
 
     flatten -> {
         l = #();
-        .each:{ |x|
-            (x.class == List).if:{ x.flatten.each:{ |y| l.add:y } }
-                else:{ l.add:x }
-        }
+        .each:{ |x| (x.class == List).if:{ x.flatten.each:{ |y| l.add:y } } else:{ l.add:x } };
         ^l
     };
 
@@ -128,37 +117,35 @@ Mixin <- Iterate <- {
             list = map.at:key;
             list.defined?.else:{
                 list = #();
-                map.at:key put:list;
-            }
+                map.at:key put:list
+            };
 
-            list.add:x;
+            list.add:x
         };
         ^map
-    }
+    };
 
     contains?: -> { |item|
         .each:{ |x| (x == item).if:{ ^^true } };
         ^false
-    }
+    };
 
     reduce: -> { |block:Block|
         sum = nil;
         .each:{ |x|
             sum.defined?.else:{ sum = (block.valueWithArgs:#(x x)).class.default };
-            sum = block.valueWithArgs:#(sum x)
-        }
+            sum = block.valueWithArgs:#( sum x )
+        };
         ^sum
-    }
+    };
 
     reduce:into: -> { |block:Block start|
         sum = start;
-        .each:{ |x| sum = block.valueWithArgs:#(sum x) }
+        .each:{ |x| sum = block.valueWithArgs:#( sum x ) };
         ^sum
-    }
+    };
 
-    sum -> {
-        .sum:{|x| x }
-    }
+    sum -> { .sum:{ |x| x } };
 
     sum: -> { |block:Block|
         sum = nil;
@@ -166,93 +153,80 @@ Mixin <- Iterate <- {
             sum.defined?.else:{ sum = (block.valueWithSelfOrArg:x).class.default };
 
             sum = sum + (block.valueWithSelfOrArg:x)
-        }
+        };
         ^sum
-    }
+    };
 
     max: -> { |block:Block|
         max = nil;
         .each:{ |x|
-            max.defined?.if:{
-                (block.valueWithArgs:#(max x)).else:{ max = x };
-            }
-                else:{
-                max = x;
-            }
-        }
+            max.defined?.if:{ (block.valueWithArgs:#(max x)).else:{ max = x } } else:{ max = x }
+        };
         ^max
-    }
+    };
 
-    max -> { .max:{|a b| a > b} }
+    max -> { .max:{ |a b| a > b } };
 
     min: -> { |block:Block|
         min = nil;
         .each:{ |x|
-            min.defined?.if:{
-                (block.valueWithArgs:#(min x)).if:{ min = x };
-            }
-                else:{
-                min = x;
-            }
-        }
+            min.defined?.if:{ (block.valueWithArgs:#(min x)).if:{ min = x } } else:{ min = x }
+        };
         ^min
-    }
+    };
 
-    min -> { .min:{|a b| a > b} }
+    min -> { .min:{ |a b| a > b } };
 
     partition: -> { |block:Block|
         trueValues = #();
         falseValues = #();
 
         .each:{ |x|
-            ((block.valueWithSelfOrArg:x) == true).if:{ trueValues.add:x }
-                else:{ falseValues.add:x };
+            ((block.valueWithSelfOrArg:x) == true)
+                .if:{ trueValues.add:x }
+                 else:{ falseValues.add:x }
         };
 
-        #(trueValues falseValues)
-    }
+        #( trueValues falseValues )
+    };
 
     reject: -> { |block:Block|
         l = #();
-        .each:{ |x| (block.valueWithSelfOrArg:x).else:{ l.add:x } }
+        .each:{ |x| (block.valueWithSelfOrArg:x).else:{ l.add:x } };
         ^l
-    }
+    };
 
     uniq -> {
         result = #();
-        .each:{ |x|
-            (result.contains?:x).else:{ result.add:x }
-        };
+        .each:{ |x| (result.contains?:x).else:{ result.add:x } };
         ^result
-    }
+    };
 
     zip: -> { |other|
         r = #();
         a = .iterator;
         b = other.iterator;
-        { a.hasNext? && b.hasNext? }.whileDo:{
-            r.add:#( a.next b.next );
-        }
+        { a.hasNext? && b.hasNext? }.whileDo:{ r.add:#( a.next b.next ) };
         ^r
-    }
+    };
 
     join: -> { |sep:String|
         result = '';
         .each:{ |x|
             (result != '').if:{ result = result + sep };
             result = result + x.s
-        }
+        };
         ^result
-    }
+    };
 
     reverse -> {
         result = #();
-        .each:{|x| result.push:x }
+        .each:{ |x| result.push:x };
         ^result
-    }
+    };
 
-    sort: -> { |block| .list.sort:block }
-    sort -> { .list.sort }
+    sort: -> { |block| .list.sort:block };
+    sort -> { .list.sort };
 
     list -> { self.select:{ true } }
 };
@@ -270,17 +244,16 @@ Iterator <- { |@fiber @nextVal @hasNext|
             src = it;
             ^.new:{ fiber = Fiber.new:{ src.each:{ |x| ^>x } } }
         }
-    }
+    };
 
-    init -> { .advance }
+    init -> { .advance };
 
     advance -> {
         v = @fiber.resume;
-        @fiber.done?.if:{ @hasNext = false }
-            else:{ @hasNext = true; @nextVal = v }
-    }
+        @fiber.done?.if:{ @hasNext = false } else:{ @hasNext = true; @nextVal = v }
+    };
 
-    hasNext? -> { @hasNext }
+    hasNext? -> { @hasNext };
 
     next -> {
         @hasNext.else:{ StopIteration.throw:'Iterator exhausted' };
@@ -298,7 +271,7 @@ in a fiber and forwards every `^>` to the consumer. Consumed lazily through an
 Iterate <- Generator <- { |@genBlock|
     .meta <-- {
         from: -> { |b:Block| ^.new:{ genBlock = b } }
-    }
+    };
 
     each: -> { |consumer|
         f = Fiber.new:@genBlock;
@@ -313,10 +286,10 @@ Map <-- {
     .mix:Iterate;
 
     .meta <-- {
-        default -> { #{} }
+        default -> { #{} };
 
-        fromPairs: -> { |pairs| pairs.reduce:{|m kvp| m.at:kvp.key put:kvp.value } into:#{} }
-    }
+        fromPairs: -> { |pairs| pairs.reduce:{ |m kvp| m.at:kvp.key put:kvp.value } into:#{} }
+    };
 
     "* Iterate in insertion order (the Map preserves it)."
     each: -> { |b|
@@ -330,24 +303,24 @@ List <-- {
 
     .meta <-- {
         default -> { #() }
-    }
+    };
 
     each: -> { |b|
         i = 0;
         n = .count;
         { i < n }.whileDo:{
             b.valueWithSelfOrArg:(.at:i);
-            i = i + 1;
+            i = i + 1
         }
     }
-}
+};
 
 Set <-- {
     .mix:Iterate;
 
     .meta <-- {
         default -> { #<> }
-    }
+    };
 
     "* each: is implemented natively (Set#each: in src/runtime/set.rs).
 
@@ -357,21 +330,21 @@ Set <-- {
         .each:{ |x| r.add:x };
         other.each:{ |x| r.add:x };
         r
-    }
+    };
 
     intersection: -> { |other|
         r = #<>;
         .each:{ |x| (other.contains?:x).if:{ r.add:x } };
         r
-    }
+    };
 
     difference: -> { |other|
         r = #<>;
         .each:{ |x| (other.contains?:x).else:{ r.add:x } };
         r
-    }
+    };
 
-    subset?: -> { |other| .all?:{ |x| other.contains?:x } }
+    subset?: -> { |other| .all?:{ |x| other.contains?:x } };
 
     superset?: -> { |other| other.subset?:self }
 }

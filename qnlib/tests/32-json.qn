@@ -79,4 +79,4 @@
         .is:{ JSON.generate:(JSON.parse:pretty) } equalTo:compact;
         .isTrue:{ pretty.length > compact.length };
     };
-};
+}

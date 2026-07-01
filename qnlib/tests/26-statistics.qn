@@ -68,4 +68,4 @@
         .is:{ #(4 4 5 5).modes } equalTo:#(4 5); "* multimodal, first-encountered order
         .is:{ #().modes } equalTo:#();
     };
-};
+}

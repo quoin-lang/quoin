@@ -1,13 +1,13 @@
 name.case:{
-    .when:'Damon'               do:{ 'Hi Damon'.print          };
-    .when:'Bagel'               do:{ 'Hello delicious'.print   };
-    .when:#/^[A-Z]+$/           do:{ 'NO NEED TO SHOUT'.print  };
-    .when:{|x| x.length > 20 }  do:{ 'YOUR NAME IS LONG'.print };
+    .when:'Damon' do:{ 'Hi Damon'.print };
+    .when:'Bagel' do:{ 'Hello delicious'.print };
+    .when:#/^[A-Z]+$/ do:{ 'NO NEED TO SHOUT'.print };
+    .when:{ |x| x.length > 20 } do:{ 'YOUR NAME IS LONG'.print };
 
-    .default:{ 'Who are you and what did you do with my bagel'.print };
+    .default:{ 'Who are you and what did you do with my bagel'.print }
 };
 
 'Low' == 5.case:{
-    .when:1..10  do:'Low';
-    .when:11..20 do:'High';
-};
+    .when:1..10 do:'Low';
+    .when:11..20 do:'High'
+}

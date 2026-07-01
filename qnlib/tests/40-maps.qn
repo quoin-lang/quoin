@@ -72,4 +72,4 @@
         { KeyValuePair.new:{ Error.throw:'boom' } }.catch:{ |e| caught = e };
         .isTrue:{ caught.defined? };
     };
-};
+}

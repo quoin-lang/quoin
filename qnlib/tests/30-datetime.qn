@@ -3,19 +3,17 @@
 "* comparison/equality are by instant (the underlying timestamp), regardless of zone.
 
 (TestSuite.new:{ name = 'TimeZone' }).add:{
-    .test:
-    lookup -> {
+    .test:lookup -> {
         .is:{ (TimeZone.of:'America/New_York').name } equalTo:'America/New_York';
         .is:{ TimeZone.utc.name } equalTo:'UTC';
-        .does:{ TimeZone.of:'Mars/Olympus' } throw:ValueError;
+        .does:{ TimeZone.of:'Mars/Olympus' } throw:ValueError
     };
 
-    .test:
-    equality -> {
+    .test:equality -> {
         .isTrue:{ TimeZone.utc == TimeZone.utc };
         .isFalse:{ TimeZone.utc == (TimeZone.of:'America/New_York') };
-        .isFalse:{ TimeZone.utc == 'UTC' };
-    };
+        .isFalse:{ TimeZone.utc == 'UTC' }
+    }
 };
 
 (TestSuite.new:{ name = 'Timestamp' }).add:{
@@ -114,4 +112,4 @@
         .isTrue:{ DateTime.nowUtc.year >= 2026 };
         .is:{ DateTime.nowUtc.timeZone.name } equalTo:'UTC';
     };
-};
+}

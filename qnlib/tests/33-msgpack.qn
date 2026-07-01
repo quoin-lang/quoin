@@ -48,4 +48,4 @@
         "* a Block has no data representation
         .does:{ MessagePack.pack: { 1 } } throw:TypeError;
     };
-};
+}

@@ -1,33 +1,23 @@
 Case <- { |@subject|
     .meta <-- {
         for:with: -> { |obj block:Block|
-            { block.value:obj withSelf:.new:{ subject = obj } }.catch:{|r| ^^r }
-        };
+            { block.value:obj withSelf:.new:{ subject = obj } }.catch:{ |r| ^^r }
+        }
     };
 
-    init: -> {|subject| @subject = subject };
+    init: -> { |subject| @subject = subject };
 
     when:do: -> { |cond block:Block|
-        (cond ~ @subject).if:{
-            (block.value:@subject withSelf:@subject).throw
-        }
+        (cond ~ @subject).if:{ (block.value:@subject withSelf:@subject).throw }
     };
 
-    when:do: --> { |cond value:Object|
-        (cond ~ @subject).if:{
-            value.throw
-        }
-    };
+    when:do: --> { |cond value:Object| (cond ~ @subject).if:{ value.throw } };
 
-    default: -> { |block:Block|
-        block.value.throw
-    };
+    default: -> { |block:Block| block.value.throw };
 
-    default: --> { |value:Object|
-        value.throw
-    };
+    default: --> { |value:Object| value.throw }
 };
 
 Object <-- {
-    case: -> { |block:Block| Case.for:self with:block };
-};
+    case: -> { |block:Block| Case.for:self with:block }
+}

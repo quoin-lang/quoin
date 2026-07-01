@@ -8,8 +8,8 @@ true <-- {
     if: -> { |ifblock| ifblock.value };
     else: -> { |_| nil };
     if:else: -> { |ifblock _| ifblock.value };
-    not -> { false }
-    #'!' -> { false }
+    not -> { false };
+    #'!' -> { false };
 
     "* Boolean ordering: `true` sorts before `false`, so `true < x` iff x is falsy.
     #'<:' -> { |x| !x }
@@ -21,27 +21,27 @@ false <-- {
     if: -> { |ifblock| nil };
     else: -> { |elseblock| elseblock.value };
     if:else: -> { |_ elseblock| elseblock.value };
-    not -> { true }
-    #'!' -> { true }
+    not -> { true };
+    #'!' -> { true };
 
     "* `false` is the maximum, so `false < x` is never true.
     #'<:' -> { |_| false }
 };
 
 Object <-- {
-    defined? -> { true }
+    defined? -> { true };
 
     "* Everything except nil/false is truthy, so `!self` is false here; nil and
     "* the booleans override. (`-self` is handled per numeric type, not here.)
-    #'!' -> { false }
+    #'!' -> { false };
 
     "* Unary plus (`+self`) is identity for every type.
-    #'+' -> { self }
+    #'+' -> { self };
 
     "* Ordering derived from `<:` (defined natively per primitive type, and on the
     "* booleans). Any class that defines `<:` gets `>:`/`<=:`/`>=:` for free.
-    #'>:' -> { |x| x < self }
-    #'<=:' -> { |x| !(x < self) }
+    #'>:' -> { |x| x < self };
+    #'<=:' -> { |x| !(x < self) };
     #'>=:' -> { |x| !(self < x) }
 };
 
@@ -55,26 +55,22 @@ Mixin <- {
     .meta <-- {
         assertMeetsRequirements: -> {}
     }
-}
-
-Mixin <- ActAsUserList <- {
-    .sealed!;
 };
 
-Mixin <- ActAsUserString <- {
-    .sealed!;
-};
+Mixin <- ActAsUserList <- { .sealed! };
+
+Mixin <- ActAsUserString <- { .sealed! };
 
 Error <- { |@message @payload|
     .meta <-- {
         "* Convenience constructors that build an instance and immediately throw,
         "* e.g. `TypeError.throw:'expected an Integer'`. Inherited by subclasses.
-        throw: -> { |msg| ^(.new:{ message = msg }).throw }
+        throw: -> { |msg| ^(.new:{ message = msg }).throw };
         throw:payload: -> { |msg p| ^(.new:{ message = msg; payload = p }).throw }
-    }
+    };
 
-    message -> { @message }
-    payload -> { @payload }
+    message -> { @message };
+    payload -> { @payload };
 
     s --> { .class.name.s + ': ' + @message.s }
 };
@@ -90,7 +86,7 @@ Error <- ArithmeticError <- {};
 "* populates `index` (the offending index) and `length` (the collection's size) so a
 "* handler can report or recover without parsing the message.
 Error <- IndexError <- { |@index @length|
-    index -> { @index }
+    index -> { @index };
     length -> { @length }
 };
 Error <- FiberError <- {};
@@ -112,7 +108,7 @@ Error <- StopIteration <- {};
 Error <- IoError <- { |@kind|
     .meta <-- {
         throw:kind: -> { |msg k| ^(.new:{ message = msg; kind = k }).throw }
-    }
+    };
 
     kind -> { @kind }
 };
@@ -127,14 +123,14 @@ Error <- TimeoutError <- { |@ms|
 Double <-- {
     .meta <-- {
         default -> { 0.0 }
-    }
+    };
 
-    double -> { self }
+    double -> { self };
 
-    next -> { self + 1.0 }
+    next -> { self + 1.0 };
 
     "* Unary minus (`-self`). `0 - self` promotes through Integer#-:, yielding a Double.
-    #'-' -> { 0 - self }
+    #'-' -> { 0 - self };
 
     abs -> { (self < 0).if:{ -self } else:{ self } }
 };
@@ -142,14 +138,14 @@ Double <-- {
 Integer <-- {
     .meta <-- {
         default -> { 0 }
-    }
+    };
 
-    integer -> { self }
+    integer -> { self };
 
-    next -> { self + 1 }
+    next -> { self + 1 };
 
     "* Unary minus (`-self`).
-    #'-' -> { 0 - self }
+    #'-' -> { 0 - self };
 
     abs -> { (self < 0).if:{ -self } else:{ self } }
 };
@@ -157,17 +153,17 @@ Integer <-- {
 Nil <-- {
     .meta <-- {
         default -> { nil }
-    }
+    };
 
-    s --> { '' }
-    defined? --> { false }
+    s --> { '' };
+    defined? --> { false };
 
-    #'!' -> { true }
+    #'!' -> { true };
 
-    #'+:' -> { |_| self }
-    #'-:' -> { |_| self }
-    #'*:' -> { |_| self }
-    #'/:' -> { |_| self }
+    #'+:' -> { |_| self };
+    #'-:' -> { |_| self };
+    #'*:' -> { |_| self };
+    #'/:' -> { |_| self };
     #'%:' -> { |_| self }
 };
 
@@ -175,40 +171,38 @@ Block <-- {
     "* A block used as a match pattern (`{|n| n > 5} ~ x` / case `when:`) runs as a
     "* predicate: the subject is passed as the argument and as `self`, so both
     "* `{|n| ...}` and `{ . ... }` guard forms work.
-    #'~:' -> { |x| .valueWithSelfOrArg:x }
+    #'~:' -> { |x| .valueWithSelfOrArg:x };
 
     whileDo: -> { |block|
-        s = self
+        s = self;
         s.value.if:{
             block.value;
-            ^^s.whileDo:block;
-        };
+            ^^s.whileDo:block
+        }
     };
 
     whileDefinedDo: -> { |block|
-        s = self
-        v = s.value
+        s = self;
+        v = s.value;
         v.defined?.if:{
             block.value:v;
-            ^^s.whileDefinedDo:block;
-        };
-    };
+            ^^s.whileDefinedDo:block
+        }
+    }
 };
 
 ANSI <- { |@string|
     .mix:ActAsUserString;
 
     .meta <-- {
-        default -> { #ANSI'' }
+        default -> { #ANSI'' };
 
         newUserString: -> { |s:String| ^.new:{ string = s } }
-    }
+    };
 
-    init: -> { |string|
-        @string = string
-    }
+    init: -> { |string| @string = string };
 
-    string -> { @string }
+    string -> { @string };
 
     "* XXX: Need a way to modify scope for this to work.
     "* #'%' -> { .class.newUserString:(%@string) }
@@ -217,16 +211,14 @@ ANSI <- { |@string|
     "* codes (or corrupt the template). A nested ANSI argument is left alone, so its
     "* own markup still renders.
     #'%:' -> { |arg|
-        escaped = (arg.can?:List).if:{
-            arg.collect:{ |e| (e.can?:ANSI).if:{ e } else:{ e.s.ansiEscaped } }
-        } else:{
-            (arg.can?:ANSI).if:{ arg } else:{ arg.s.ansiEscaped }
-        };
+        escaped = (arg.can?:List)
+            .if:{ arg.collect:{ |e| (e.can?:ANSI).if:{ e } else:{ e.s.ansiEscaped } } }
+             else:{ (arg.can?:ANSI).if:{ arg } else:{ arg.s.ansiEscaped } };
         .class.newUserString:(@string % escaped)
-    }
+    };
 
     "* XXX: Rendered length?
-    length -> { @string.length }
+    length -> { @string.length };
 
     s --> { '#ANSI\'' + @string + '\'' }
-};
+}

@@ -4,5 +4,5 @@
 
 Integer <-- {
     "* This Integer as an exact arbitrary-precision BigInteger.
-    asBigInteger -> { BigInteger.of: self }
-};
+    asBigInteger -> { BigInteger.of:self }
+}

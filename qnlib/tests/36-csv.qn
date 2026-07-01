@@ -55,4 +55,4 @@
         .does:{ CSV.generate: #( 42 ) } throw:TypeError;
         .does:{ CSV.generateWithHeaders: #( 42 ) } throw:TypeError;
     };
-};
+}

@@ -34,7 +34,7 @@
         @length = length;
         @mediaType = mediaType;
         @encoding = encoding;
-        @meta = meta;
+        @meta = meta
     };
 
     .meta <-- {
@@ -43,7 +43,12 @@
 
         "* bytes-backed (request bodies, already-materialized responses)
         of:contentType:encoding: -> { |b ct enc|
-            ^[HTTP]Body.new:{ bytes = b; mediaType = [HTTP]Body.mediaTypeOf:ct; encoding = enc; meta = #{} }
+            ^[HTTP]Body.new:{
+                bytes = b;
+                mediaType = [HTTP]Body.mediaTypeOf:ct;
+                encoding = enc;
+                meta = #{}
+            }
         };
         of:contentType: -> { |bytes ct| ^[HTTP]Body.of:bytes contentType:ct encoding:nil };
         of: -> { |bytes| ^[HTTP]Body.of:bytes contentType:nil encoding:nil };
@@ -57,10 +62,14 @@
         "* stream-backed: a live stream framed as 'chunked' | 'length' (with len) | 'close'
         over:framing:length:contentType:encoding: -> { |stream framing len ct enc|
             ^[HTTP]Body.new:{
-                stream = stream; framing = framing; length = len;
-                mediaType = [HTTP]Body.mediaTypeOf:ct; encoding = enc; meta = #{}
+                stream = stream;
+                framing = framing;
+                length = len;
+                mediaType = [HTTP]Body.mediaTypeOf:ct;
+                encoding = enc;
+                meta = #{}
             }
-        };
+        }
     };
 
     mediaType -> { @mediaType };
@@ -76,8 +85,15 @@
     "* itself once; stream-backed drives the chunked/length/close framing, closing the stream
     "* at EOF. `.bytes` drains this; the public `.chunks` decodes on top of it.
     rawChunks -> {
-        @bytes.defined?.if:{ me = self; n = @bytes.count; ^^Generator.from:{ (n > 0).if:{ ^>me } } };
-        st = @stream; fr = @framing; len = @length; mt = @mediaType;
+        @bytes.defined?.if:{
+            me = self;
+            n = @bytes.count;
+            ^^Generator.from:{ (n > 0).if:{ ^>me } }
+        };
+        st = @stream;
+        fr = @framing;
+        len = @length;
+        mt = @mediaType;
         ^Generator.from:{
             (fr == 'chunked').if:{
                 reading = true;
@@ -90,41 +106,49 @@
                         trailing = true;
                         { trailing }.whileDo:{
                             tline = st.readUntil:'\r\n';
-                            (tline.count <= 2).if:{ trailing = false };
-                        };
-                    } else:{
+                            (tline.count <= 2).if:{ trailing = false }
+                        }
+                    }
+                    else:{
                         "* parse chunk extensions ('name=value' or valueless 'flag') into a Map
                         exts = #{};
                         (parts.drop:1).each:{ |ext|
                             kv = ext.splitString:'=';
-                            (kv.count > 1).if:{ exts.at:(kv.at:0) put:(kv.at:1) }
-                                          else:{ exts.at:(kv.at:0) put:true };
+                            (kv.count > 1)
+                                .if:{ exts.at:(kv.at:0) put:(kv.at:1) }
+                                 else:{ exts.at:(kv.at:0) put:true }
                         };
                         data = st.readExactly:size;
-                        st.readExactly:2;          "* the CRLF after the chunk data
-                        ^>([HTTP]Body.chunk:data meta:exts mediaType:mt);
-                    };
-                };
-            } else:{ (fr == 'length').if:{
-                remaining = len;
-                { remaining > 0 }.whileDo:{
-                    want = (remaining < 8192).if:{ remaining } else:{ 8192 };
-                    data = st.read:want;
-                    (data.count == 0).if:{ remaining = 0 } else:{
-                        ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt);
-                        remaining = remaining - data.count;
-                    };
-                };
-            } else:{
-                "* close-delimited: read fills until EOF
-                reading = true;
-                { reading }.whileDo:{
-                    data = st.read;
-                    (data.count == 0).if:{ reading = false }
-                                     else:{ ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt) };
-                };
-            } };
-            st.close;
+                        st.readExactly:2;  "* the CRLF after the chunk data
+                        ^>([HTTP]Body.chunk:data meta:exts mediaType:mt)
+                    }
+                }
+            }
+            else:{
+                (fr == 'length').if:{
+                    remaining = len;
+                    { remaining > 0 }.whileDo:{
+                        want = (remaining < 8192).if:{ remaining } else:{ 8192 };
+                        data = st.read:want;
+                        (data.count == 0).if:{ remaining = 0 }
+                        else:{
+                            ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt);
+                            remaining = remaining - data.count
+                        }
+                    }
+                }
+                else:{
+                    "* close-delimited: read fills until EOF
+                    reading = true;
+                    { reading }.whileDo:{
+                        data = st.read;
+                        (data.count == 0)
+                            .if:{ reading = false }
+                             else:{ ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt) }
+                    }
+                }
+            };
+            st.close
         }
     };
 
@@ -147,12 +171,14 @@
         @bytes.defined?.if:{ ^^@bytes };
         raw = Bytes.empty;
         (.rawChunks).each:{ |c| raw = raw + c.bytes };
-        @bytes = @encoding.defined?.if:{ [HTTP]Response.decodeBody:raw encoding:@encoding } else:{ raw };
+        @bytes = @encoding.defined?
+            .if:{ [HTTP]Response.decodeBody:raw encoding:@encoding }
+             else:{ raw };
         @stream = nil;
         ^@bytes
     };
-    text -> { ^(.bytes).asStringLossy };       "* UTF-8; charset-aware decoding is a follow-up
-    json -> { ^JSON.parse:(.text) };           "* parse-regardless; throws a catchable ParseError
+    text -> { ^(.bytes).asStringLossy };  "* UTF-8; charset-aware decoding is a follow-up
+    json -> { ^JSON.parse:(.text) };  "* parse-regardless; throws a catchable ParseError
     size -> { ^(.bytes).count };
     empty? -> { ^((.bytes).count == 0) };
 
@@ -163,7 +189,7 @@
         sz = @bytes.defined?.if:{ @bytes.count + ' bytes' } else:{ 'stream' };
         ext = @mediaType.defined?.if:{ ', ' + @mediaType } else:{ '' };
         '[HTTP]Body(' + sz + ext + ')'
-    };
+    }
 };
 
 "* An HTTP response: status line, headers (a list of #(name value) pairs, order- and
@@ -173,7 +199,7 @@
         @status = status;
         @reason = reason;
         @headers = headers;
-        @body = body;
+        @body = body
     };
 
     .meta <-- {
@@ -182,9 +208,7 @@
         "* the `header:` accessor.
         find:named: -> { |headers name|
             target = name.lower;
-            headers.each:{ |pair|
-                ((pair.at:0).lower == target).if:{ ^^pair.at:1 }
-            };
+            headers.each:{ |pair| ((pair.at:0).lower == target).if:{ ^^pair.at:1 } };
             ^nil
         };
 
@@ -197,7 +221,7 @@
             (e.contains?:'zstd').if:{ ^^bytes.decodeZstd };
             (e.contains?:'deflate').if:{ ^^bytes.decodeDeflate };
             ^bytes
-        };
+        }
     };
 
     status -> { @status };
@@ -208,7 +232,7 @@
     location -> { .header:'location' };
     "* A redirect we could follow: a 3xx status carrying a Location header.
     redirect? -> { (@status >= 300) && (@status < 400) && ((.header:'location').defined?) };
-    body -> { @body };
+    body -> { @body }
 };
 
 "* The request Builder. Convenience methods on [HTTP]Client cover the common cases;
@@ -222,7 +246,7 @@
         @body = nil;
         @insecure = false;
         @followRedirects = true;
-        @maxRedirects = 10;
+        @maxRedirects = 10
     };
 
     .meta <-- {
@@ -236,7 +260,9 @@
             host_port = restParts.at:0;
             path = '/' + ((restParts.drop:1).join:'/');
             hp = host_port.splitString:':';
-            port = (hp.count > 1).if:{ hp.at:1 } else:{ (scheme == 'https').if:{ '443' } else:{ '80' } };
+            port = (hp.count > 1)
+                .if:{ hp.at:1 }
+                 else:{ (scheme == 'https').if:{ '443' } else:{ '80' } };
             ^#( scheme (hp.at:0) port path )
         };
 
@@ -254,11 +280,11 @@
             dirStr = (comps.take:(comps.count - 1)).join:'/';
             dirPath = (dirStr.length > 0).if:{ '/' + dirStr + '/' } else:{ '/' };
             ^(origin + dirPath + loc)
-        };
+        }
     };
 
     method: -> { |m| @method = m; self };
-    header:value: -> { |name val| @headers.add:#(name val); self };
+    header:value: -> { |name val| @headers.add:#( name val ); self };
     headers: -> { |pairs| @headers = pairs; self };
     insecure: -> { |flag| @insecure = flag; self };
     followRedirects: -> { |flag| @followRedirects = flag; self };
@@ -318,9 +344,11 @@
         target = host + ':' + port;
 
         sock = (scheme == 'https').if:{
-            @insecure.if:{ TlsSocket.connect:target insecure:true }
-                     else:{ TlsSocket.connect:target }
-        } else:{ TcpSocket.connect:target };
+            @insecure
+                .if:{ TlsSocket.connect:target insecure:true }
+                 else:{ TlsSocket.connect:target }
+        }
+        else:{ TcpSocket.connect:target };
 
         sock.writeAll:(.requestBytes:host path:path);
 
@@ -329,7 +357,8 @@
         stream = ByteStream.over:sock;
         parsed = nil;
         { parsed = [HTTP]Parser.parseHead:(stream.readUntil:'\r\n\r\n') }.catch:{ |e|
-            stream.close; e.throw
+            stream.close;
+            e.throw
         };
         (parsed == nil).if:{
             stream.close;
@@ -344,8 +373,9 @@
         "* else read-to-close. Content-Encoding is whole-entity and decoded by the body on drain.
         te = [HTTP]Response.find:headers named:'transfer-encoding';
         cl = [HTTP]Response.find:headers named:'content-length';
-        framing = (te.defined? && (te.lower.contains?:'chunked')).if:{ 'chunked' }
-            else:{ cl.defined?.if:{ 'length' } else:{ 'close' } };
+        framing = (te.defined? && (te.lower.contains?:'chunked'))
+            .if:{ 'chunked' }
+             else:{ cl.defined?.if:{ 'length' } else:{ 'close' } };
         length = (framing == 'length').if:{ cl.to_integer } else:{ nil };
 
         ct = [HTTP]Response.find:headers named:'content-type';
@@ -369,11 +399,12 @@
                 resp.body.close;
                 (left == 0).if:{ ValueError.throw:'HTTP: too many redirects' };
                 current = current.nextRequestFor:resp;
-                left = left - 1;
-            } else:{
+                left = left - 1
+            }
+            else:{
                 result = resp;
-                looping = false;
-            };
+                looping = false
+            }
         };
         ^result
     };
@@ -383,23 +414,24 @@
     "* adjust the method/body per status. 307/308 preserve method+body; 303 (and a 301/302
     "* from a non-GET/HEAD method) become a bodyless GET.
     nextRequestFor: -> { |resp|
-        next = [HTTP]Request.new:{ url = [HTTP]Request.resolveLocation:(resp.location) against:@url };
+        next = [HTTP]Request.new:{
+            url = [HTTP]Request.resolveLocation:(resp.location) against:@url
+        };
         next.insecure:@insecure;
         next.followRedirects:@followRedirects;
         next.maxRedirects:@maxRedirects;
         next.headers:@headers;
         ((resp.status == 307) || (resp.status == 308)).if:{
             next.method:@method;
-            @body.defined?.if:{ next.body:@body };
-        } else:{
-            ((resp.status == 303) || ((@method != 'GET') && (@method != 'HEAD'))).if:{
-                next.method:'GET'
-            } else:{
-                next.method:@method
-            };
+            @body.defined?.if:{ next.body:@body }
+        }
+        else:{
+            ((resp.status == 303) || ((@method != 'GET') && (@method != 'HEAD')))
+                .if:{ next.method:'GET' }
+                 else:{ next.method:@method }
         };
         ^next
-    };
+    }
 };
 
 "* The convenience facade: class-side helpers for the common verbs. Kept thin so a
@@ -415,6 +447,6 @@
         post:body: -> { |url body| ^(((.request:url).method:'POST').body:body).send };
         post:body:headers: -> { |url body headers|
             ^((((.request:url).method:'POST').body:body).headers:headers).send
-        };
-    };
-};
+        }
+    }
+}

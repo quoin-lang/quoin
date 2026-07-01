@@ -42,4 +42,4 @@
     errors -> {
         .does:{ YAML.parse:': : :\n  - bad' } throw:ParseError;
     };
-};
+}

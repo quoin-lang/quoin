@@ -12,11 +12,11 @@
             listener.acceptLoop:{ |conn|
                 conn.writeAll:(conn.read:4);
                 count = count + 1;
-                (count >= n).if:{ ^^count };
+                (count >= n).if:{ ^^count }
             };
-            ^-1   "* unreachable: acceptLoop only exits via the ^^ above
-        };
-    };
+            ^-1  "* unreachable: acceptLoop only exits via the ^^ above
+        }
+    }
 };
 
 (TestSuite.new:{ name = 'Server' }).add:{
@@ -58,4 +58,4 @@
         .is:{ served.at:1 } equalTo:'AAAA';
         .is:{ served.at:2 } equalTo:'BBBB';
     };
-};
+}

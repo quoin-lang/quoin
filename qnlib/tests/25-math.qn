@@ -52,4 +52,4 @@
         .is:{ Math.cos: (Math.pi) } closeTo:(0.0-1.0);
         .is:{ Math.atan: 1 over: 1 } closeTo:(Math.pi / 4);
     };
-};
+}

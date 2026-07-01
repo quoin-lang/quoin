@@ -84,4 +84,4 @@ adbcReady = {
     else:{
         .skip: 'adbc extension binary or SQLite driver not installed (build crates/adbc + install the ADBC SQLite driver to run)';
     }
-};
+}

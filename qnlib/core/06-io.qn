@@ -10,4 +10,4 @@
         { .next }.whileDefinedDo:{ |e| b.valueWithSelfOrArg:e };
         .reset
     }
-};
+}

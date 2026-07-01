@@ -1,13 +1,11 @@
 Point <- { | @x @y |
     .meta <-- {
-        newX:y: -> { |x y|
-            .new: { x = x; y = y }
-        }
-    }
+        newX:y: -> { |x y| .new:{ x = x; y = y } }
+    };
 
-    x -> { @x }
-    y -> { @y }
-    name -> { 'Point' }
+    x -> { @x };
+    y -> { @y };
+    name -> { 'Point' };
 
     dist: -> { |other|
         dx = @x - other.x;
@@ -20,21 +18,19 @@ Point <- Point3D <- { | @z |
     z -> { @z }
 };
 
-PType <- {
-    .mix:Point;
-};
+PType <- { .mix:Point };
 
 ('PType.name = ' + PType.new.name).print;
 
-p1 = Point.newX: 3 y: 4;
-p2 = Point.newX: 0 y: 0;
+p1 = Point.newX:3 y:4;
+p2 = Point.newX:0 y:0;
 ('p1.x = ' + p1.x).print;
 ('p1.y = ' + p1.y).print;
-d = p1.dist: p2;
+d = p1.dist:p2;
 ('distance = ' + d).print;
 p1.print;
 
-p3 = Point3D.new: { |x y z| x = 10; y = 20; z = 30 };
+p3 = Point3D.new:{ |x y z| x = 10; y = 20; z = 30 };
 p3.print;
 p3.class.print;
 p3.class.s.print;
@@ -58,7 +54,7 @@ z = x + y;
 ('z = x + y = ' + z).print;
 
 "* Test 2: List destructuring
-a b * rest = #(100 200 300 400 500);
+a b * rest = #( 100 200 300 400 500 );
 ('a = ' + a).print;
 ('b = ' + b).print;
 ('rest = ' + rest).print;
@@ -72,7 +68,7 @@ make_counter = { |initial|
     }
 };
 
-counter = make_counter.value: 10;
+counter = make_counter.value:10;
 c1 = counter.value;
 c2 = counter.value;
 ('c1 = ' + c1).print;
@@ -93,7 +89,7 @@ neg_num = -num;
 my_map = #{ 'foo': 100 'bar': 200 };
 ('map = ' + my_map).print;
 
-list = #(1 2 3 4 5);
+list = #( 1 2 3 4 5 );
 ('Top half = ' + (list.select:{|n| n > 3})).print;
 
 re = #/^[a-z]+$/;
@@ -109,10 +105,8 @@ Point <-- {
             111
         };
 
-        nested_block = {
-            ^^ 777
-        };
-        bar_func.value: nested_block;
+        nested_block = { ^^ 777 };
+        bar_func.value:nested_block;
         'Inside foo: should NOT reach here!'.print;
         222
     }
@@ -125,25 +119,24 @@ result = p1.test_nlr;
 
 "* Test 7: Namespaces
 
-
-file = [IO]File.open: '/etc/zshrc';
+file = [IO]File.open:'/etc/zshrc';
 ('file path = ' + file.fullpath).print;
 ('file class = ' + file.class).print;
 ('file class name = ' + file.class.name).print;
 ('[/]Object = ' + [/]Object).print;
 ('Object == [/]Object = ' + (Object == [/]Object)).print;
 
-folder = [IO]Folder.open: 'qnlib/tests/';
+folder = [IO]Folder.open:'qnlib/tests/';
 ('Test files = ' + folder.list).print;
 
 name = 'Damon';
 name.case:{
-    .when:'Damon'               do:{ 'Hi Damon'.print          };
-    .when:'Bagel'               do:{ 'Hello delicious'.print   };
-    .when:#/^[A-Z]+$/           do:{ 'NO NEED TO SHOUT'.print  };
-    .when:{|x| x.length > 20 }  do:{ 'YOUR NAME IS LONG'.print };
+    .when:'Damon' do:{ 'Hi Damon'.print };
+    .when:'Bagel' do:{ 'Hello delicious'.print };
+    .when:#/^[A-Z]+$/ do:{ 'NO NEED TO SHOUT'.print };
+    .when:{ |x| x.length > 20 } do:{ 'YOUR NAME IS LONG'.print };
 
-    .default:{ 'Who are you and what did you do with my bagel'.print };
+    .default:{ 'Who are you and what did you do with my bagel'.print }
 };
 
 ('Low = ' + ('Low' == 5.case:{
@@ -152,25 +145,23 @@ name.case:{
 })).print;
 
 false.if:{
-    server = TcpServer.new:{
-        address = '127.0.0.1:0'
-    }
+    server = TcpServer.new:{ address = '127.0.0.1:0' };
 
-    i = 0
+    i = 0;
     #( 'Listening on' server.port ).print;
     server.start:{ |conn|
         #( 'Received connection' conn ).print;
 
-        conn.writeAll:'Hi\n'.asBytes
-        conn.close
+        conn.writeAll:'Hi\n'.asBytes;
+        conn.close;
 
-        i = i + 1
-        (i > 3).if:{server.stop}
+        i = i + 1;
+        (i > 3).if:{ server.stop };
         i
-    }
+    };
 
-    #( 'Server respponses: ' server.join ).print;
-}
+    #( 'Server respponses: ' server.join ).print
+};
 
 "*
 "* Test 8: Ambiguous method dispatch. Two variants are equally specific for `pick:10`
@@ -179,7 +170,7 @@ false.if:{
 "* script and prints the ambiguity report (each tied candidate, with its guard
 "* source, listed below the error and above the stack trace).
 Ambiguous <- {
-    pick: -> { |n:Integer {n > 0}|  'positive' }
+    pick: -> { |n:Integer {n > 0}| 'positive' };
     pick: --> { |n:Integer {n > 5}| 'big' }
 };
-Ambiguous.new.pick:10;
+Ambiguous.new.pick:10

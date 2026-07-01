@@ -1,30 +1,28 @@
 NumberRange <- { | @start @end @n |
     .mix:Iterate;
 
-    init: -> {|start end|
-        @start = start
-        @end = end
+    init: -> { |start end|
+        @start = start;
+        @end = end;
 
-        @n = (@start > @end).if: { -1 }
-                           else: { 1 }
-    }
+        @n = (@start > @end).if:{ -1 } else:{ 1 }
+    };
 
-    s --> { 'NumberRange(' + @start + '..' + @end + ')' }
+    s --> { 'NumberRange(' + @start + '..' + @end + ')' };
 
     #'~:' --> { |n|
-        (@start > @end).if:{ (n <= @start) && (n > @end) }
-                      else:{ (n >= @start) && (n < @end) }
-    }
+        (@start > @end).if:{ (n <= @start) && (n > @end) } else:{ (n >= @start) && (n < @end) }
+    };
 
     each: -> { |b|
         i = @start;
         { (@n > 0).if:{ i < @end } else:{ i > @end } }.whileDo:{
             b.valueWithSelfOrArg:i;
-            i = i + @n;
+            i = i + @n
         }
     };
 
-    .sealed!;
+    .sealed!
 };
 
 Integer <-- {
@@ -33,4 +31,4 @@ Integer <-- {
 
 Double <-- {
     #'..:' -> { |e| NumberRange.new:{ start=self; end=e } }
-};
+}

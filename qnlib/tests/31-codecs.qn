@@ -30,4 +30,4 @@
         .is:{ '6869'.fromHex.asString } equalTo:'hi';
         .is:{ 'round trip!'.toBase64.fromBase64.asString } equalTo:'round trip!';
     };
-};
+}

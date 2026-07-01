@@ -27,5 +27,5 @@ Case <- {
 };
 
 Object <-- {
-    case: -> { |block| Case.for:self with:block };
-};
+    case: -> { |block| Case.for:self with:block }
+}

@@ -7,6 +7,6 @@ Async <-- {
         "* Task is already running — joining one parks the caller while the rest keep
         "* progressing on the scheduler, so the total wait is ~max(task), not the sum. A
         "* failed or cancelled task propagates its error out of the join.
-        joinAll: -> { |tasks| tasks.collect:{ |task| task.join } };
-    };
-};
+        joinAll: -> { |tasks| tasks.collect:{ |task| task.join } }
+    }
+}
