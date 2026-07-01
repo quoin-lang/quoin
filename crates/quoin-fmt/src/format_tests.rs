@@ -266,3 +266,38 @@ fn long_list_arg_wraps_one_element_per_line_keeping_parens() {
         "parens lost:\n{out}"
     );
 }
+
+#[test]
+fn set_and_map_literals_inline_when_short() {
+    assert_eq!(fmt("x = #< a b c >"), "x = #< a b c >\n");
+    assert_eq!(fmt("x = #{ a: 1 b: 2 }"), "x = #{ a: 1 b: 2 }\n");
+}
+
+#[test]
+fn user_list_literal_is_width_driven() {
+    assert_eq!(fmt("x = #Foo( a b c )"), "x = #Foo( a b c )\n");
+}
+
+#[test]
+fn long_map_wraps_one_pair_per_line() {
+    let long = "cfg.set:#{ alpha: firstValue beta: secondValue gamma: thirdValue delta: fourthValue omega: lastValueHere }";
+    assert!(long.len() > 100);
+    let out = fmt(long);
+    assert!(
+        out.starts_with("cfg.set:#{\n    alpha: firstValue\n    beta: secondValue\n"),
+        "not wrapped:\n{out}"
+    );
+    assert!(out.ends_with("\n}\n"));
+}
+
+#[test]
+fn long_set_wraps_one_element_per_line() {
+    let long = "check.of:#< elementOne elementTwo elementThree elementFour elementFive elementSix elementSeven elementEight >";
+    assert!(long.len() > 100);
+    let out = fmt(long);
+    assert!(
+        out.starts_with("check.of:#<\n    elementOne\n    elementTwo\n"),
+        "not wrapped:\n{out}"
+    );
+    assert!(out.ends_with("\n>\n"));
+}

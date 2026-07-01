@@ -245,7 +245,9 @@ fn lower_stmt(
         NodeValue::MethodDefinition(m) => lower_def(content_start, &m.block, source, comments),
         NodeValue::MethodExtension(m) => lower_def(content_start, &m.block, source, comments),
         NodeValue::Block(b) => lower_block(b, source, comments),
-        NodeValue::List(_) => lower_list(stmt, source, comments),
+        NodeValue::List(_) | NodeValue::Set(_) | NodeValue::Map(_) | NodeValue::UserList(_) => {
+            lower_collection(stmt, source, comments)
+        }
         NodeValue::MethodCall(_) => lower_send(stmt, content_start, content_end, source, comments),
         // `<lvalues> = <rvalue>` and `^^`/`^`/`^>` returns: the prefix through the assignment/return
         // operator is sliced verbatim; only the right-hand expression is lowered. This is what lets a
@@ -409,25 +411,43 @@ fn wrap_block(header: &str, body: Vec<Doc>, group: bool) -> Doc {
     if group { Doc::group(doc) } else { doc }
 }
 
-/// Lower a `#( … )` list literal, width-driven: `#( a b c )` inline when it fits, one element per
-/// line otherwise. Elements are sliced from raw source (paren-extended, like send arguments), so
-/// parentheses and exact spelling are preserved. `None` (→ caller emits verbatim) if a comment sits
-/// inside the list or an element spans lines.
-fn lower_list(node: &Node, source: &str, comments: &[Comment]) -> Option<Doc> {
-    let NodeValue::List(list) = &node.value else {
-        return None;
-    };
+/// Is `node` a collection literal — list `#(…)`, set `#<…>`, map `#{…}`, or user list `#Ident(…)`?
+fn is_collection(node: &Node) -> bool {
+    matches!(
+        &node.value,
+        NodeValue::List(_) | NodeValue::Set(_) | NodeValue::Map(_) | NodeValue::UserList(_)
+    )
+}
+
+/// Lower a collection literal, width-driven: `#( a b c )` inline when it fits, one item per line
+/// otherwise (and likewise for `#<…>`, `#{ k: v … }`, and `#Ident(…)`). Items are sliced from raw
+/// source (paren-extended, like send arguments), so parentheses and exact spelling are preserved;
+/// a map item is the whole `key: value`. `None` (→ caller emits verbatim) if a comment sits inside
+/// the literal or an item spans lines.
+fn lower_collection(node: &Node, source: &str, comments: &[Comment]) -> Option<Doc> {
     let si = node.source_info.as_ref()?;
-    let (lstart, lend) = (si.start, si.end);
-    if lend < lstart + 3 || source.get(lstart..lstart + 2) != Some("#(") {
+    let (start, end) = (si.start, si.end);
+    if end < start + 3 {
         return None;
     }
-    let region_start = lstart + 2; // after `#(`
-    let close = lend - 1; // the `)`
-    if list.values.is_empty() {
-        return Some(Doc::verbatim(source[lstart..lend].to_string()));
+    // The offset just past the opening bracket, and the node whose `start` marks each item (values,
+    // or keys for a map). The closing bracket is always the last byte.
+    let (region_start, items): (usize, Vec<&Arc<Node>>) = match &node.value {
+        NodeValue::List(l) => (start + 2, l.values.iter().collect()), // `#(`
+        NodeValue::Set(s) => (start + 2, s.values.iter().collect()),  // `#<`
+        NodeValue::Map(m) => (start + 2, m.keys.iter().collect()),    // `#{`
+        NodeValue::UserList(u) => {
+            let paren = source[start..end].find('(').map(|i| start + i)?; // `#Ident(`
+            (paren + 1, u.values.iter().collect())
+        }
+        _ => return None,
+    };
+    let open = &source[start..region_start];
+    let close = end - 1;
+    if items.is_empty() {
+        return Some(Doc::verbatim(source[start..end].to_string()));
     }
-    // A comment inside the list would be dropped when we re-slice the elements — bail.
+    // A comment inside would be dropped when we re-slice the items — bail.
     if comments
         .iter()
         .any(|c| c.start >= region_start && c.end <= close)
@@ -435,43 +455,44 @@ fn lower_list(node: &Node, source: &str, comments: &[Comment]) -> Option<Doc> {
         return None;
     }
 
-    let n = list.values.len();
+    let n = items.len();
     let mut starts = Vec::with_capacity(n);
-    for (i, e) in list.values.iter().enumerate() {
+    for (i, item) in items.iter().enumerate() {
         let floor = if i > 0 {
-            list.values[i - 1].source_info.as_ref()?.start
+            items[i - 1].source_info.as_ref()?.start
         } else {
             region_start
         };
         starts.push(statement_content_start(
             source,
-            e.source_info.as_ref()?.start,
+            item.source_info.as_ref()?.start,
             floor,
         ));
     }
     let mut inner = Vec::with_capacity(2 * n);
     for i in 0..n {
-        let end = if i + 1 < n { starts[i + 1] } else { close };
-        let elem = source[starts[i]..end].trim();
-        if elem.contains('\n') {
+        let item_end = if i + 1 < n { starts[i + 1] } else { close };
+        let item = source[starts[i]..item_end].trim();
+        if item.contains('\n') {
             return None;
         }
         inner.push(Doc::Line);
-        inner.push(Doc::verbatim(elem.to_string()));
+        inner.push(Doc::verbatim(item.to_string()));
     }
     Some(Doc::group(Doc::concat(vec![
-        Doc::text("#("),
+        Doc::verbatim(open.to_string()),
         Doc::nest(INDENT, Doc::concat(inner)),
         Doc::Line,
-        Doc::text(")"),
+        Doc::verbatim(source[close..end].to_string()),
     ])))
 }
 
-/// Lower a send argument: a list is width-driven (see [`lower_list`]); anything else is its verbatim
-/// source slice `raw`. `None` if the argument is an un-lowerable multi-line construct.
+/// Lower a send argument: a collection literal is width-driven (see [`lower_collection`]); anything
+/// else is its verbatim source slice `raw`. `None` if the argument is an un-lowerable multi-line
+/// construct.
 fn lower_arg(arg: &Node, raw: &str, source: &str, comments: &[Comment]) -> Option<Doc> {
-    if matches!(&arg.value, NodeValue::List(_))
-        && let Some(doc) = lower_list(arg, source, comments)
+    if is_collection(arg)
+        && let Some(doc) = lower_collection(arg, source, comments)
     {
         return Some(doc);
     }
