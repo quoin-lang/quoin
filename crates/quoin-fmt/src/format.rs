@@ -102,7 +102,8 @@ fn lower_program(program: &Node, source: &str, comments: &[Comment]) -> Doc {
         _ => return Doc::verbatim(source),
     };
     // The top level always succeeds: multi-line statements are safe to emit verbatim at column 0.
-    match emit_sequence(source, comments, 0, source.len(), exprs, true) {
+    // Top-level statements always break (soft = false).
+    match emit_sequence(source, comments, 0, source.len(), exprs, true, false) {
         Some(parts) => Doc::Concat(parts),
         None => Doc::verbatim(source),
     }
@@ -121,6 +122,7 @@ fn emit_sequence(
     region_end: usize,
     stmts: &[Arc<Node>],
     allow_multiline_verbatim: bool,
+    soft: bool,
 ) -> Option<Vec<Doc>> {
     let mut ast_starts = Vec::with_capacity(stmts.len());
     for e in stmts.iter() {
@@ -177,7 +179,10 @@ fn emit_sequence(
                 parts.push(Doc::text("  "));
                 parts.push(Doc::verbatim(c.text.clone()));
             }
-            parts.push(Doc::HardLine);
+            // In soft mode the plain separator is a `Line` (a space when the enclosing group renders
+            // flat), but a trailing line comment or a requested blank line still forces a break.
+            let hard = !soft || !trailing_prev.is_empty() || blank;
+            parts.push(if hard { Doc::HardLine } else { Doc::Line });
             if blank {
                 parts.push(Doc::HardLine);
             }
@@ -335,9 +340,6 @@ fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<
     if header.contains('\n') {
         return None;
     }
-    let has_comment = comments
-        .iter()
-        .any(|c| c.start >= region_start && c.end <= region_end);
     // A block that declares members (methods, nested classes) always breaks, one per line, so class
     // and meta bodies stay expanded however they were written.
     let declares_member = block.statements.iter().any(|s| {
@@ -349,44 +351,30 @@ fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<
                 | NodeValue::MethodExtension(_)
         )
     });
+    let single_line = !source[bstart..bend].contains('\n');
 
-    // A single comment-free value statement is laid out width-driven: `{ stmt }` if it fits.
-    if !declares_member && block.statements.len() == 1 && !has_comment {
-        let stmt = &block.statements[0];
-        let sstart = stmt.source_info.as_ref()?.start;
-        let cstart = statement_content_start(source, sstart, body_start);
-        let cend = statement_content_end(source, comments, cstart, region_end);
-        let lowered = lower_stmt(stmt, cstart, cend, source, comments);
-        // Inline only when the statement can render on one line: a proper `Doc` (whose own hard
-        // breaks the group still honors), or a single-line verbatim slice. A multi-line verbatim
-        // slice can't sit in a flat group, so fall through to the always-break path.
-        let inlineable = match &lowered {
-            Some(_) => true,
-            None => !source[cstart..cend].contains('\n'),
-        };
-        if inlineable {
-            let stmt_doc =
-                lowered.unwrap_or_else(|| Doc::verbatim(source[cstart..cend].to_string()));
-            let mut open = vec![Doc::text("{")];
-            if !header.is_empty() {
-                open.push(Doc::text(" "));
-                open.push(Doc::verbatim(header.to_string()));
-            }
-            return Some(Doc::group(Doc::concat(vec![
-                Doc::concat(open),
-                Doc::nest(INDENT, Doc::concat(vec![Doc::Line, stmt_doc])),
-                Doc::Line,
-                Doc::text("}"),
-            ])));
+    // Value blocks that are a single statement, or that were already on one line, are width-driven:
+    // the group renders `{ … }` inline when it fits and expands otherwise. A comment or blank line
+    // inside emits a `HardLine`, so such a block always breaks. A hand-broken multi-statement value
+    // block is left broken (not collapsed).
+    if !declares_member && (block.statements.len() == 1 || single_line) {
+        if let Some(body) = emit_sequence(
+            source,
+            comments,
+            body_start,
+            region_end,
+            &block.statements,
+            false,
+            true,
+        ) {
+            return Some(wrap_block(header, body, true));
         }
+        // A statement couldn't be laid out; keep the block verbatim if it's one line, else bail.
+        return single_line.then(|| Doc::verbatim(source[bstart..bend].to_string()));
     }
 
-    // Otherwise break — a declaration block, or a multi-statement / commented / un-inlineable body —
-    // except a plain (non-declaration) single-line block, which we keep verbatim.
-    let slice = &source[bstart..bend];
-    if !declares_member && !slice.contains('\n') {
-        return Some(Doc::verbatim(slice.to_string()));
-    }
+    // Always break: a member-declaration block, or a multi-statement value block already split
+    // across lines.
     let body = emit_sequence(
         source,
         comments,
@@ -394,20 +382,30 @@ fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<
         region_end,
         &block.statements,
         false,
+        false,
     )?;
-    let mut head = vec![Doc::text("{")];
+    Some(wrap_block(header, body, false))
+}
+
+/// Assemble `{ <header> <body> }` from a lowered statement `body`. When `group`, the statements are
+/// joined with soft `Line`s inside a `Group`, so the block renders inline if it fits and expands
+/// otherwise; when not, they're joined with `HardLine`s and the block always breaks.
+fn wrap_block(header: &str, body: Vec<Doc>, group: bool) -> Doc {
+    let sep = || if group { Doc::Line } else { Doc::HardLine };
+    let mut open = vec![Doc::text("{")];
     if !header.is_empty() {
-        head.push(Doc::text(" "));
-        head.push(Doc::verbatim(header.to_string()));
+        open.push(Doc::text(" "));
+        open.push(Doc::verbatim(header.to_string()));
     }
-    let mut inner = vec![Doc::HardLine];
+    let mut inner = vec![sep()];
     inner.extend(body);
-    Some(Doc::concat(vec![
-        Doc::concat(head),
+    let doc = Doc::concat(vec![
+        Doc::concat(open),
         Doc::nest(INDENT, Doc::concat(inner)),
-        Doc::HardLine,
+        sep(),
         Doc::text("}"),
-    ]))
+    ]);
+    if group { Doc::group(doc) } else { doc }
 }
 
 /// The block's leading declarations — a name (`#foo`) and/or an argument pipe (`|a b - decls|`) —

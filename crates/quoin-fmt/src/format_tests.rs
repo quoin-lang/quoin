@@ -214,3 +214,29 @@ fn paren_wrapped_return_value_keeps_its_parens() {
         "m -> { ^(.modes.first) }\n"
     );
 }
+
+#[test]
+fn single_line_multi_statement_value_block_inlines_when_short() {
+    assert_eq!(fmt("x.foo:{ a; b }"), "x.foo:{ a; b }\n");
+}
+
+#[test]
+fn single_line_multi_statement_value_block_breaks_when_long() {
+    // Written on one line but over 100 columns, so the block expands one statement per line.
+    let long = "x.foo:{ aaa = 111; bbb = 222; ccc = 333; ddd = 444; eee = 555; fff = 666; ggg = 777; hhh = 888; iii = 999 }";
+    assert!(long.len() > 100);
+    let out = fmt(long);
+    assert!(
+        out.starts_with("x.foo:{\n    aaa = 111;\n    bbb = 222;"),
+        "not expanded:\n{out}"
+    );
+}
+
+#[test]
+fn hand_broken_multi_statement_value_block_stays_broken() {
+    // A short body the author split across lines is left broken (not collapsed to one line).
+    assert_eq!(
+        fmt("m -> {\n    a;\n    b\n}"),
+        "m -> {\n    a;\n    b\n}\n"
+    );
+}
