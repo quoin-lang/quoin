@@ -33,6 +33,17 @@ pub enum Doc {
     Align(Box<Doc>),
     /// Render flat if it fits the remaining width, otherwise render broken.
     Group(Box<Doc>),
+    /// Render `then` if `need` columns fit at `indent + extra` (i.e. `indent + extra + need <=
+    /// width`), else `els`. A render-time either/or keyed on the *indent*, not the current column —
+    /// used to keep the keyword receiver break only when its pairs fit at their broken columns, and
+    /// fall back to base-column otherwise. `then` and `els` must flatten identically. `need == None`
+    /// (a part that can't be flat) always picks `els`.
+    PreferIfFits {
+        need: Option<usize>,
+        extra: isize,
+        then: Box<Doc>,
+        els: Box<Doc>,
+    },
 }
 
 impl Doc {
@@ -53,6 +64,30 @@ impl Doc {
     }
     pub fn align(d: Doc) -> Doc {
         Doc::Align(Box::new(d))
+    }
+    pub fn prefer_if_fits(need: Option<usize>, extra: isize, then: Doc, els: Doc) -> Doc {
+        Doc::PreferIfFits {
+            need,
+            extra,
+            then: Box::new(then),
+            els: Box::new(els),
+        }
+    }
+}
+
+/// The width of `doc` rendered entirely flat, or `None` if it can't be flat (it contains a
+/// `HardLine`, or a `Verbatim` with an embedded newline). Layout-invariant, so a decision keyed on
+/// it is idempotent.
+pub fn flat_width(doc: &Doc) -> Option<usize> {
+    match doc {
+        Doc::Nil | Doc::SoftLine => Some(0),
+        Doc::Line => Some(1),
+        Doc::Text(s) => Some(s.chars().count()),
+        Doc::Verbatim(s) => (!s.contains('\n')).then(|| s.chars().count()),
+        Doc::HardLine => None,
+        Doc::Concat(ds) => ds.iter().try_fold(0, |acc, d| Some(acc + flat_width(d)?)),
+        Doc::Nest(_, d) | Doc::Align(d) | Doc::Group(d) => flat_width(d),
+        Doc::PreferIfFits { then, .. } => flat_width(then),
     }
 }
 
@@ -94,6 +129,16 @@ pub fn render(doc: &Doc, width: usize) -> String {
             }
             Doc::Align(sub) => {
                 stack.push((col, mode, sub));
+            }
+            Doc::PreferIfFits {
+                need,
+                extra,
+                then,
+                els,
+            } => {
+                let fits =
+                    need.is_some_and(|w| indent as isize + extra + w as isize <= width as isize);
+                stack.push((indent, mode, if fits { then } else { els }));
             }
             Doc::Line => match mode {
                 Mode::Flat => {
@@ -180,6 +225,8 @@ fn fits(mut remaining: isize, doc: &Doc, rest: &[(usize, Mode, &Doc)]) -> bool {
                 }
             }
             Doc::Nest(_, sub) | Doc::Align(sub) => local.push((mode, sub)),
+            // Both branches flatten identically, so measure via `then`.
+            Doc::PreferIfFits { then, .. } => local.push((mode, then)),
             Doc::Line => match mode {
                 Mode::Flat => {
                     remaining -= 1;

@@ -219,6 +219,40 @@ fn receiver_break_falls_back_to_base_column_when_a_block_must_break() {
 }
 
 #[test]
+fn too_wide_block_takes_base_column_not_a_stranded_receiver() {
+    // The `if:` block is too wide to fit inline even at the receiver-break column, so the send takes
+    // base-column (receiver stays with `.if:`, `else:` at the base) rather than stranding `cond` on
+    // its own line above a block that then breaks anyway.
+    let src = "m -> {\n    result = cond.if:{ aBlockWhoseSingleStatementIsSoExtremelyWideThatEvenAfterAReceiverBreakItCannotPossiblyFitInlineXXXX } else:{ fallbackValue }\n}";
+    assert_eq!(
+        fmt(src),
+        "m -> {\n    result = cond.if:{\n        aBlockWhoseSingleStatementIsSoExtremelyWideThatEvenAfterAReceiverBreakItCannotPossiblyFitInlineXXXX\n    }\n    else:{ fallbackValue }\n}\n"
+    );
+}
+
+#[test]
+fn receiver_break_layout_is_re_lowerable_not_bailed() {
+    // A send already in receiver-break layout (receiver on its own line, `.` on the next) must
+    // re-lower, not bail: `subject_text` is trimmed of the break's newline so it isn't mistaken for a
+    // multi-line receiver. Here re-lowering finds the block fits at the receiver-break column, so it
+    // stays a receiver break with the block inline (idempotent).
+    let src = "m -> {\n    sock = (scheme == 'https')\n        .if:{\n             theBodyStatementIsLongEnoughToKeepTheWholeSendFromFittingOnOneLineXXXXXX\n         }\n         else:{ fallback }\n}";
+    assert_eq!(
+        fmt(src),
+        "m -> {\n    sock = (scheme == 'https')\n        .if:{ theBodyStatementIsLongEnoughToKeepTheWholeSendFromFittingOnOneLineXXXXXX }\n         else:{ fallback }\n}\n"
+    );
+}
+
+#[test]
+fn blank_line_between_two_comment_paragraphs_is_preserved() {
+    // Two distinct leading comment paragraphs separated by a blank line stay separated, not fused.
+    assert_eq!(
+        fmt("\"* comment A\n\n\"* comment B\nx = 1"),
+        "\"* comment A\n\n\"* comment B\nx = 1\n"
+    );
+}
+
+#[test]
 fn lowers_assignment_with_a_block_rhs() {
     // The RHS is lowered (so a multi-line RHS no longer bails the enclosing block to verbatim).
     let src = "m -> {\n    x = t.time:{ work };\n    x\n}";

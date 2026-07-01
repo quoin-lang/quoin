@@ -102,14 +102,18 @@ the §6 guardrails green at every step:
 | Leaves | verbatim spelling preserved (numbers, strings, regexes) |
 
 **Multi-keyword sends** (`if:else:`, `case:when:do:`) that don't fit on one line wrap one keyword
-per line, in one of two shapes chosen **structurally — by whether every block argument can stay
-inline, not by width**:
+per line, in one of two shapes:
 
-- **No block arg is force-broken** → the continuation keyword names align under the first keyword's
-  name, the leading `.` hanging one column to its left. With a receiver this is a *receiver break*:
-  the receiver takes the opening line on its own, so the shortened keyword lines let the blocks stay
-  inline. A no-subject (leading-`.`) send has no receiver to move, so `.kw0` just stays on the
-  opening line and the continuations align one column past the base:
+- **Continuation names aligned under the first keyword**, the leading `.` hanging one column to its
+  left. With a receiver this is a *receiver break*: the receiver takes the opening line on its own,
+  so the shortened keyword lines let the blocks stay inline. A no-subject (leading-`.`) send has no
+  receiver to move, so `.kw0` just stays on the opening line and the continuations align one column
+  past the base. **Whether a block arg *can* align this way is structural** (does it lay out as a
+  group, not an always-break body — `block_is_inlineable`); **whether the receiver break is actually
+  taken is then decided at render time by width** (`Doc::PreferIfFits`): only if each keyword pair
+  fits inline at its broken column (`indent + INDENT + 1`). Deciding this at render (not from the
+  source layout, which changes as a block collapses across passes) keeps it idempotent and avoids
+  stranding the receiver above a block that then breaks.
 
   ```
   framing = (te.defined? && (te.lower.contains?:'chunked'))
@@ -121,9 +125,10 @@ inline, not by width**:
    block:block
   ```
 
-- **A block arg must break across lines anyway** → the *base-column* layout: `receiver.kw0:…` stays
-  together and continuation keywords drop to the statement's base column, blocks breaking as needed
-  (isolating the receiver above breaking blocks would buy nothing):
+- **Otherwise** (a block must break, or a pair is too wide to fit at the receiver-break column) → the
+  *base-column* layout: `receiver.kw0:…` stays together and continuation keywords drop to the
+  statement's base column, blocks breaking as needed (isolating the receiver above breaking blocks
+  would buy nothing):
 
   ```
   cond.if:{

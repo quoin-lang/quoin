@@ -19,7 +19,7 @@
 
 use crate::comments::Comment;
 use crate::comments::scan_comments;
-use crate::doc::{Doc, render};
+use crate::doc::{Doc, flat_width, render};
 use crate::verify;
 use quoin_syntax::ast::{BlockNode, Node, NodeValue};
 use quoin_syntax::{ParseError, try_parse_quoin_string_named};
@@ -184,13 +184,26 @@ fn emit_sequence(
             // flat), but a trailing line comment or a requested blank line still forces a break.
             let hard = !soft || !trailing_prev.is_empty() || blank;
             parts.push(if hard { Doc::HardLine } else { Doc::Line });
-            if blank {
-                parts.push(Doc::HardLine);
-            }
         }
 
+        // Leading comments and blank lines in the gap before this statement, placed by source
+        // position: a blank line survives wherever the author put one — after the previous statement,
+        // between two comment paragraphs, or before the statement itself. A blank at the very start of
+        // a region (nothing before it) is dropped.
+        let mut cur = trailing_prev.last().map(|c| c.end).or(prev_end);
         for c in &leading_this {
+            if let Some(lo) = cur
+                && has_blank_line(&source[lo..c.start])
+            {
+                parts.push(Doc::HardLine);
+            }
             parts.push(Doc::verbatim(c.text.clone()));
+            parts.push(Doc::HardLine);
+            cur = Some(c.end);
+        }
+        if let Some(lo) = cur
+            && has_blank_line(&source[lo..start])
+        {
             parts.push(Doc::HardLine);
         }
 
@@ -626,7 +639,12 @@ fn lower_send(
         sel_spans.push((s.start, s.end, id.name.as_str()));
     }
     let dot_pos = sel_spans[0].0.checked_sub(1)?;
-    let subject_text = &source[content_start..dot_pos];
+    // Trim trailing whitespace up to the `.`: when the receiver and its `.` sit on different lines
+    // (a send we already wrapped with a receiver break), this slice includes that break's
+    // newline+indent. Trimming it lets such output re-lower — so the receiver break is idempotent
+    // and the block-break fallback (`blocks_stay_inline`) actually re-evaluates — instead of bailing.
+    // A genuinely multi-line receiver still has an interior newline and bails below.
+    let subject_text = source[content_start..dot_pos].trim_end();
     if subject_text.contains('\n') {
         return None;
     }
@@ -725,47 +743,64 @@ fn lower_send(
         ]));
     }
 
-    // Multiple keywords. Flat joins the pairs with a space on one line; when that doesn't fit the
-    // width budget (or a block arg forces a break), the send wraps one keyword per line. The shape is
-    // chosen structurally — not by width — by whether every block arg can stay inline: name-aligning
-    // the continuation keywords under the first only helps when no block arg is one that `lower_block`
-    // would force to break (a member-declaration or a hand-broken multi-statement body).
+    // Multiple keywords. Flat joins the pairs with a space on one line; when that doesn't fit, the
+    // send wraps one keyword per line. Whether the continuation keyword names can align under the
+    // first (a receiver break, or the no-subject name align) is a *structural* question — does every
+    // block arg lay out as a group rather than an always-break body (`block_is_inlineable`).
     let all_blocks_inlineable = args.iter().all(|a| match &a.value {
         NodeValue::Block(b) => block_is_inlineable(b, source),
         _ => true,
     });
-    let mut cells = Vec::new();
-    for (i, p) in pairs.into_iter().enumerate() {
-        if i > 0 {
-            cells.push(Doc::Line);
+    // Rebuild the soft-`Line`-joined pair list on demand (pairs cloned) so the two candidate layouts
+    // below can each own a copy.
+    let mk_cells = |pairs: &[Doc]| {
+        let mut cells = Vec::with_capacity(2 * pairs.len());
+        for (i, p) in pairs.iter().enumerate() {
+            if i > 0 {
+                cells.push(Doc::Line);
+            }
+            cells.push(p.clone());
         }
-        cells.push(p);
-    }
+        cells
+    };
+
     if all_blocks_inlineable && !subject_text.is_empty() {
-        // Receiver break: the receiver drops to the opening line on its own so the shortened keyword
-        // lines keep the blocks inline. `.kw0` at +INDENT and the pairs at +INDENT+1, so continuation
-        // keyword names align under the first keyword's name, the leading `.` hanging one col left.
-        // The break falls to the render-time indent, so it grows a fixed step per nesting level rather
-        // than by the receiver's width.
-        Some(Doc::concat(vec![
-            subject,
+        // Receiver-break candidate: receiver alone on the opening line, `.kw0` at +INDENT and the
+        // pairs at +INDENT+1 (continuation names align under the first keyword, `.` hanging one col
+        // left). But that only reads well when every pair fits inline at those columns; otherwise a
+        // block would break under the stranded receiver — an eyesore. So emit both this and the
+        // base-column layout and let the renderer pick by width — idempotently, unlike deciding from
+        // source layout (a block collapses across passes): receiver break iff the widest pair fits at
+        // `indent + INDENT + 1`, else base-column (`subject.kw0:…` together, continuations at base).
+        let receiver_break = Doc::concat(vec![
+            subject.clone(),
             Doc::group(Doc::concat(vec![
                 Doc::nest(INDENT, Doc::concat(vec![Doc::SoftLine, Doc::text(".")])),
-                Doc::nest(INDENT + 1, Doc::concat(cells)),
+                Doc::nest(INDENT + 1, Doc::concat(mk_cells(&pairs))),
             ])),
+        ]);
+        let base_column = Doc::concat(vec![
+            subject,
+            Doc::text("."),
+            Doc::group(Doc::concat(mk_cells(&pairs))),
+        ]);
+        let widest_pair = pairs
+            .iter()
+            .try_fold(0usize, |acc, p| Some(acc.max(flat_width(p)?)));
+        Some(Doc::concat(vec![
+            Doc::prefer_if_fits(widest_pair, INDENT + 1, receiver_break, base_column),
             tail_doc,
         ]))
     } else {
-        // `.kw0` stays on the opening line with `subject`. When name-aligning (a no-subject send, so
-        // the `.` sits at the base) the continuation keyword names align one column past it — `Nest(1)`,
-        // the `.` hanging left. Otherwise a block must break, so continuations drop to the statement
-        // base — `Nest(0)`, a no-op. (With a receiver, aligning continuations under the first keyword
-        // would need the receiver's width, which we avoid — hence base-column there.)
+        // `.kw0` stays on the opening line with `subject`. A no-subject send (empty subject) with
+        // inline-able blocks name-aligns the continuations one column past the base (`Nest(1)`, the
+        // `.` hanging left); otherwise base-column (`Nest(0)`, a no-op). Neither strands a receiver,
+        // so no width check — a broken block just sits under its own keyword.
         let cont_nest = if all_blocks_inlineable { 1 } else { 0 };
         Some(Doc::concat(vec![
             subject,
             Doc::text("."),
-            Doc::nest(cont_nest, Doc::group(Doc::concat(cells))),
+            Doc::nest(cont_nest, Doc::group(Doc::concat(mk_cells(&pairs)))),
             tail_doc,
         ]))
     }
