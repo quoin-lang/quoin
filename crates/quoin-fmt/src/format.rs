@@ -3,10 +3,11 @@
 //! Statements are formatted structurally where we know how, and fall back to their exact
 //! source slice otherwise — so anything not yet handled is preserved verbatim rather than
 //! risked. The recursion only ever descends into constructs whose exact source boundaries we
-//! can determine (statement sequences, definition/block bodies, and the block arguments of a
-//! message send); everything else — subjects, non-block arguments — is sliced from raw source,
-//! which keeps parentheses and operator groupings byte-exact and sidesteps having to re-insert
-//! precedence parens (the AST drops them).
+//! can determine (statement sequences, definition/block bodies, the block arguments of a message
+//! send, and the trailing operand of a multi-line operator expression); everything else — subjects,
+//! non-block arguments, and the leading `<left> <op>` of an operator expression — is sliced from raw
+//! source, which keeps parentheses and operator groupings byte-exact and sidesteps having to
+//! re-insert precedence parens (the AST drops them).
 //!
 //! Two invariants make this safe: formatting never changes the AST, and never drops a comment.
 //! They're not just tested over the corpus — `format_source` re-parses its own output and returns
@@ -263,8 +264,36 @@ fn lower_stmt(
         NodeValue::YieldReturn(r) => {
             lower_prefixed(content_start, &r.value, content_end, source, comments)
         }
+        // Operator expressions `<left> <op> <right>` / `<op> <right>` are the same prefix shape: slice
+        // everything up to the final operand verbatim, lower that operand. Only when it spans lines
+        // (e.g. `#ANSI'…' % #( … )`) — a single-line one stays a verbatim slice (see
+        // `lower_operator_expr`).
+        NodeValue::BinaryOperator(b) => {
+            lower_operator_expr(content_start, &b.right, content_end, source, comments)
+        }
+        NodeValue::UnaryOperator(u) => {
+            lower_operator_expr(content_start, &u.right, content_end, source, comments)
+        }
         _ => None,
     }
+}
+
+/// Lower an operator expression by its final operand — slice `<left> <op>` (binary) or `<op>` (unary)
+/// verbatim from source and lower `right`, reusing [`lower_prefixed`]. Slicing the prefix from source
+/// keeps operand grouping byte-exact, so no precedence parens need reinserting. Only worth doing when
+/// the expression spans lines (a multi-line operand); a single-line operator expression returns
+/// `None` so the caller keeps it as one verbatim slice — byte-exact, zero churn.
+fn lower_operator_expr(
+    content_start: usize,
+    right: &Node,
+    content_end: usize,
+    source: &str,
+    comments: &[Comment],
+) -> Option<Doc> {
+    if !source[content_start..content_end].contains('\n') {
+        return None;
+    }
+    lower_prefixed(content_start, right, content_end, source, comments)
 }
 
 /// Lower `node` over `[start, end)`, or fall back to its exact source slice. This is the formatter's

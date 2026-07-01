@@ -231,6 +231,24 @@ fn lowers_a_return_value() {
 }
 
 #[test]
+fn multi_line_operator_expression_lowers_instead_of_bailing() {
+    // A binary-operator expression whose operand spans lines (`pre % #( … )`) is lowered by its
+    // final operand — `pre %` sliced verbatim, the `#( … )` lowered (here it collapses inline). Was a
+    // cascade-to-verbatim: no arm for `BinaryOperator` meant the enclosing block bailed.
+    let src = "m -> {\n    r = pre % #(\n        aaaa\n        bbbb\n    )\n    z = 2\n}";
+    assert_eq!(
+        fmt(src),
+        "m -> {\n    r = pre % #( aaaa bbbb );\n    z = 2\n}\n"
+    );
+}
+
+#[test]
+fn single_line_operator_expression_stays_verbatim() {
+    // A single-line operator expression is left as its exact source slice — no reformatting churn.
+    assert_eq!(fmt("x = a  %  b"), "x = a  %  b\n");
+}
+
+#[test]
 fn multi_line_send_argument_wraps_instead_of_bailing() {
     // A keyword arg that is itself a multi-line send (`Foo.new:{ … }`) is lowered structurally.
     // Regression: this used to bail (a multi-line non-collection arg had no layout), which forced
