@@ -522,7 +522,7 @@ fn parse_fmt_collects_paths_and_flags() {
     let opts = VmRunnerOptions::parse(&args);
     assert!(matches!(opts.mode, VmRunnerMode::Fmt));
     assert!(opts.fmt_check);
-    assert!(!opts.fmt_write);
+    assert!(!opts.fmt_dry_run);
     // Non-flag arguments are the paths, in order.
     assert_eq!(
         opts.vm_options.arguments,
@@ -531,14 +531,14 @@ fn parse_fmt_collects_paths_and_flags() {
 }
 
 #[test]
-fn parse_fmt_write_flag() {
-    let args: Vec<String> = ["qn", "fmt", "--write", "a.qn"]
+fn parse_fmt_dry_run_flag() {
+    let args: Vec<String> = ["qn", "fmt", "--dry-run", "a.qn"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     let opts = VmRunnerOptions::parse(&args);
     assert!(matches!(opts.mode, VmRunnerMode::Fmt));
-    assert!(opts.fmt_write);
+    assert!(opts.fmt_dry_run);
     assert!(!opts.fmt_check);
     assert_eq!(opts.vm_options.arguments, vec!["a.qn".to_string()]);
 }

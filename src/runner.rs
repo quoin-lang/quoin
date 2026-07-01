@@ -138,8 +138,8 @@ pub struct VmRunnerOptions {
     pub coverage: Option<crate::coverage::CoverageConfig>,
     /// `qn fmt --check`: report unformatted files and exit non-zero instead of writing.
     pub fmt_check: bool,
-    /// `qn fmt --write`: rewrite files in place instead of printing to stdout.
-    pub fmt_write: bool,
+    /// `qn fmt --dry-run`: print formatted source to stdout instead of rewriting in place.
+    pub fmt_dry_run: bool,
 }
 
 /// Pull `--coverage[=fmt]` and `--coverage-out=PATH` out of an argument slice, pushing
@@ -205,8 +205,8 @@ pub enum VmRunnerMode {
     /// `qn debug <file>`: run a program under the interactive debugger. The path is carried in
     /// `VmRunnerOptions::target_path`.
     Debug,
-    /// `qn fmt [--check|--write] <path>…`: format Quoin source. The paths are carried in
-    /// `VmRunnerOptions::vm_options.arguments`.
+    /// `qn fmt [--check|--dry-run] <path>…`: format Quoin source in place. The paths are carried
+    /// in `VmRunnerOptions::vm_options.arguments`.
     Fmt,
 }
 
@@ -222,7 +222,7 @@ impl VmRunnerOptions {
         let mut coverage_out = None;
         let mut coverage_format = crate::coverage::CoverageFormat::Lcov;
         let mut fmt_check = false;
-        let mut fmt_write = false;
+        let mut fmt_dry_run = false;
 
         if let Some(arg) = args.get(1) {
             if arg == "highlight" {
@@ -284,13 +284,13 @@ impl VmRunnerOptions {
                     }
                 }
             } else if arg == "fmt" {
-                // `qn fmt [--check|--write] <file-or-dir>…`: format Quoin source. Flags are
-                // pulled out; every other argument is a path (collected in `vm_args`).
+                // `qn fmt [--check|--dry-run] <file-or-dir>…`: format Quoin source in place.
+                // Flags are pulled out; every other argument is a path (collected in `vm_args`).
                 mode = VmRunnerMode::Fmt;
                 for a in &args[2..] {
                     match a.as_str() {
                         "--check" => fmt_check = true,
-                        "--write" | "-w" => fmt_write = true,
+                        "--dry-run" => fmt_dry_run = true,
                         _ => vm_args.push(a.clone()),
                     }
                 }
@@ -331,7 +331,7 @@ impl VmRunnerOptions {
             dap,
             coverage,
             fmt_check,
-            fmt_write,
+            fmt_dry_run,
         }
     }
 }
@@ -486,18 +486,18 @@ impl VmRunner {
         }
     }
 
-    /// `qn fmt [--check|--write] <path>…`: format each named file (directories are searched
-    /// recursively for `.qn` files). Without a flag, formatted source is written to stdout;
-    /// `--write` rewrites files in place; `--check` lists files that aren't formatted and exits
-    /// non-zero. A parse error is reported and fails the run but doesn't abort the batch.
+    /// `qn fmt [--check|--dry-run] <path>…`: format each named file in place (directories are
+    /// searched recursively for `.qn` files). `--dry-run` prints formatted source to stdout
+    /// without writing; `--check` lists files that aren't formatted and exits non-zero. A parse
+    /// error is reported and fails the run but doesn't abort the batch.
     fn run_fmt(&self) {
         let paths = &self.options.vm_options.arguments;
         if paths.is_empty() {
-            eprintln!("Usage: qn fmt [--check|--write] <file-or-dir>…");
+            eprintln!("Usage: qn fmt [--check|--dry-run] <file-or-dir>…");
             exit(2);
         }
-        if self.options.fmt_check && self.options.fmt_write {
-            eprintln!("qn fmt: --check and --write are mutually exclusive");
+        if self.options.fmt_check && self.options.fmt_dry_run {
+            eprintln!("qn fmt: --check and --dry-run are mutually exclusive");
             exit(2);
         }
 
@@ -536,17 +536,16 @@ impl VmRunner {
                     println!("{name}");
                     unformatted = true;
                 }
-            } else if self.options.fmt_write {
-                if formatted != source {
-                    if let Err(e) = std::fs::write(file, &formatted) {
-                        eprintln!("qn fmt: cannot write {name}: {e}");
-                        had_error = true;
-                    } else {
-                        eprintln!("formatted {name}");
-                    }
-                }
-            } else {
+            } else if self.options.fmt_dry_run {
                 print!("{formatted}");
+            } else if formatted != source {
+                // Default: rewrite in place, only when something actually changed.
+                if let Err(e) = std::fs::write(file, &formatted) {
+                    eprintln!("qn fmt: cannot write {name}: {e}");
+                    had_error = true;
+                } else {
+                    eprintln!("formatted {name}");
+                }
             }
         }
 

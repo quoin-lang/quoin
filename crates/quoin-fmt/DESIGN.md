@@ -85,7 +85,8 @@ the §6 guardrails green at every step:
 - **P1.** Recurse into class/method/block bodies: canonical indentation and spacing, breaks
   kept as authored. Verbatim shrinks to expression leaves.
 - **P2.** Width-driven `Group`s: break long keyword sends, list/map literals, and chains to fit.
-- **P3.** `qn fmt` CLI — bare (stdout), `--check` (CI gate), `--write` (in place); then `qn fmt qnlib/`.
+- **P3.** `qn fmt` CLI — in place by default, `--dry-run` (stdout), `--check` (CI gate, exit 1 if
+  unformatted); directories recurse. Then `qn fmt qnlib/`.
 
 ## 5. Canonical style
 

@@ -1,4 +1,7 @@
 //! End-to-end tests for the `qn fmt` subcommand, driving the built binary.
+//!
+//! Formatting is in place by default; `--dry-run` prints to stdout without writing, and
+//! `--check` reports unformatted files without writing.
 
 use std::process::Command;
 
@@ -14,8 +17,8 @@ fn tmp_file(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn fmt_writes_canonical_output_to_stdout() {
-    let path = tmp_file("stdout.qn");
+fn fmt_rewrites_in_place_by_default() {
+    let path = tmp_file("default.qn");
     std::fs::write(&path, "x.foo: a bar: b\ny=1").unwrap();
     let out = qn().arg("fmt").arg(&path).output().expect("run qn fmt");
     assert!(
@@ -23,12 +26,45 @@ fn fmt_writes_canonical_output_to_stdout() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // No space after `:`, explicit `;` between statements, trailing newline.
+    // No space after `:`, explicit `;` between statements, trailing newline — written to the file.
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "x.foo:a bar:b;\ny=1\n"
+    );
+    // The formatted file is on stderr as a changed file, and nothing goes to stdout.
+    assert!(String::from_utf8_lossy(&out.stderr).contains("default.qn"));
+    assert!(String::from_utf8_lossy(&out.stdout).is_empty());
+}
+
+#[test]
+fn fmt_is_idempotent_and_reports_no_change_the_second_time() {
+    let path = tmp_file("idem.qn");
+    std::fs::write(&path, "x.foo: a bar: b").unwrap();
+    qn().arg("fmt").arg(&path).output().expect("run");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x.foo:a bar:b\n");
+    // Second run leaves it unchanged and reports nothing (no "formatted" line).
+    let out2 = qn().arg("fmt").arg(&path).output().expect("run");
+    assert!(out2.status.success());
+    assert!(String::from_utf8_lossy(&out2.stderr).is_empty());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x.foo:a bar:b\n");
+}
+
+#[test]
+fn fmt_dry_run_writes_to_stdout_without_touching_the_file() {
+    let path = tmp_file("dry.qn");
+    std::fs::write(&path, "x.foo: a bar: b\ny=1").unwrap();
+    let out = qn()
+        .arg("fmt")
+        .arg("--dry-run")
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "x.foo:a bar:b;\ny=1\n"
     );
-    // stdout mode never touches the file.
+    // The file on disk is untouched.
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         "x.foo: a bar: b\ny=1"
@@ -36,7 +72,7 @@ fn fmt_writes_canonical_output_to_stdout() {
 }
 
 #[test]
-fn fmt_check_exits_nonzero_and_lists_unformatted_files() {
+fn fmt_check_exits_nonzero_and_lists_unformatted_files_without_writing() {
     let path = tmp_file("check_bad.qn");
     std::fs::write(&path, "x.foo: a").unwrap();
     let out = qn()
@@ -47,6 +83,8 @@ fn fmt_check_exits_nonzero_and_lists_unformatted_files() {
         .expect("run");
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stdout).contains("check_bad.qn"));
+    // --check never writes.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x.foo: a");
 }
 
 #[test]
@@ -64,36 +102,27 @@ fn fmt_check_exits_zero_for_already_formatted() {
 }
 
 #[test]
-fn fmt_write_rewrites_in_place_and_is_idempotent() {
-    let path = tmp_file("write.qn");
-    std::fs::write(&path, "x.foo: a bar: b").unwrap();
-    let out = qn()
-        .arg("fmt")
-        .arg("--write")
-        .arg(&path)
-        .output()
-        .expect("run");
-    assert!(out.status.success());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x.foo:a bar:b\n");
-    // Second write leaves it unchanged and reports nothing.
-    let out2 = qn()
-        .arg("fmt")
-        .arg("--write")
-        .arg(&path)
-        .output()
-        .expect("run");
-    assert!(out2.status.success());
-    assert!(String::from_utf8_lossy(&out2.stderr).is_empty());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x.foo:a bar:b\n");
-}
-
-#[test]
 fn fmt_reports_a_parse_error_and_fails() {
     let path = tmp_file("bad_syntax.qn");
     std::fs::write(&path, "x = (((").unwrap();
     let out = qn().arg("fmt").arg(&path).output().expect("run");
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("bad_syntax.qn"));
+    // A file that doesn't parse is left untouched.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x = (((");
+}
+
+#[test]
+fn fmt_check_and_dry_run_conflict() {
+    let out = qn()
+        .arg("fmt")
+        .arg("--check")
+        .arg("--dry-run")
+        .arg("x.qn")
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("mutually exclusive"));
 }
 
 #[test]
