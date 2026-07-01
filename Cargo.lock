@@ -1719,6 +1719,7 @@ dependencies = [
  "once_cell",
  "quoin-ext",
  "quoin-ext-proto",
+ "quoin-fmt",
  "quoin-syntax",
  "rcgen",
  "regex",

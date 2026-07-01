@@ -30,7 +30,7 @@ use std::fs::read_to_string;
 use std::future::Future;
 use std::io::{BufRead, IsTerminal, stdin};
 use std::iter::once_with;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Once;
@@ -136,6 +136,10 @@ pub struct VmRunnerOptions {
     /// Quoin-level coverage output, from `--coverage[=fmt]` / `--coverage-out=PATH`
     /// (on `qn test` or `qn <file>`). `None` when coverage wasn't requested.
     pub coverage: Option<crate::coverage::CoverageConfig>,
+    /// `qn fmt --check`: report unformatted files and exit non-zero instead of writing.
+    pub fmt_check: bool,
+    /// `qn fmt --write`: rewrite files in place instead of printing to stdout.
+    pub fmt_write: bool,
 }
 
 /// Pull `--coverage[=fmt]` and `--coverage-out=PATH` out of an argument slice, pushing
@@ -167,6 +171,27 @@ fn take_coverage_flags(
     }
 }
 
+/// Recursively collect `.qn` files under `dir`, in sorted order, skipping `target`/`.git`.
+/// Used by `qn fmt <dir>`.
+fn collect_qn_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "target" || name == ".git" {
+                continue;
+            }
+            collect_qn_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("qn") {
+            out.push(path);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmRunnerMode {
     Highlight,
@@ -180,6 +205,9 @@ pub enum VmRunnerMode {
     /// `qn debug <file>`: run a program under the interactive debugger. The path is carried in
     /// `VmRunnerOptions::target_path`.
     Debug,
+    /// `qn fmt [--check|--write] <path>…`: format Quoin source. The paths are carried in
+    /// `VmRunnerOptions::vm_options.arguments`.
+    Fmt,
 }
 
 impl VmRunnerOptions {
@@ -193,6 +221,8 @@ impl VmRunnerOptions {
         let mut coverage_enabled = false;
         let mut coverage_out = None;
         let mut coverage_format = crate::coverage::CoverageFormat::Lcov;
+        let mut fmt_check = false;
+        let mut fmt_write = false;
 
         if let Some(arg) = args.get(1) {
             if arg == "highlight" {
@@ -253,6 +283,17 @@ impl VmRunnerOptions {
                         vm_args.push(a.clone());
                     }
                 }
+            } else if arg == "fmt" {
+                // `qn fmt [--check|--write] <file-or-dir>…`: format Quoin source. Flags are
+                // pulled out; every other argument is a path (collected in `vm_args`).
+                mode = VmRunnerMode::Fmt;
+                for a in &args[2..] {
+                    match a.as_str() {
+                        "--check" => fmt_check = true,
+                        "--write" | "-w" => fmt_write = true,
+                        _ => vm_args.push(a.clone()),
+                    }
+                }
             } else {
                 mode = VmRunnerMode::Run;
                 target_path = Some(arg.clone());
@@ -289,6 +330,8 @@ impl VmRunnerOptions {
             break_on_uncaught,
             dap,
             coverage,
+            fmt_check,
+            fmt_write,
         }
     }
 }
@@ -436,6 +479,79 @@ impl VmRunner {
                 }
                 Ok(())
             }
+            VmRunnerMode::Fmt => {
+                self.run_fmt();
+                Ok(())
+            }
+        }
+    }
+
+    /// `qn fmt [--check|--write] <path>…`: format each named file (directories are searched
+    /// recursively for `.qn` files). Without a flag, formatted source is written to stdout;
+    /// `--write` rewrites files in place; `--check` lists files that aren't formatted and exits
+    /// non-zero. A parse error is reported and fails the run but doesn't abort the batch.
+    fn run_fmt(&self) {
+        let paths = &self.options.vm_options.arguments;
+        if paths.is_empty() {
+            eprintln!("Usage: qn fmt [--check|--write] <file-or-dir>…");
+            exit(2);
+        }
+        if self.options.fmt_check && self.options.fmt_write {
+            eprintln!("qn fmt: --check and --write are mutually exclusive");
+            exit(2);
+        }
+
+        let mut files = Vec::new();
+        for p in paths {
+            let path = Path::new(p);
+            if path.is_dir() {
+                collect_qn_files(path, &mut files);
+            } else {
+                files.push(path.to_path_buf());
+            }
+        }
+
+        let mut had_error = false;
+        let mut unformatted = false;
+        for file in &files {
+            let name = file.display().to_string();
+            let source = match read_to_string(file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("qn fmt: cannot read {name}: {e}");
+                    had_error = true;
+                    continue;
+                }
+            };
+            let formatted = match quoin_fmt::format_source(&source, &name) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("qn fmt: {name}: {e}");
+                    had_error = true;
+                    continue;
+                }
+            };
+            if self.options.fmt_check {
+                if formatted != source {
+                    println!("{name}");
+                    unformatted = true;
+                }
+            } else if self.options.fmt_write {
+                if formatted != source {
+                    if let Err(e) = std::fs::write(file, &formatted) {
+                        eprintln!("qn fmt: cannot write {name}: {e}");
+                        had_error = true;
+                    } else {
+                        eprintln!("formatted {name}");
+                    }
+                }
+            } else {
+                print!("{formatted}");
+            }
+        }
+
+        if had_error || (self.options.fmt_check && unformatted) {
+            exit(1);
         }
     }
 
