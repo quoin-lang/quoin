@@ -128,6 +128,13 @@ fn short_multi_keyword_send_flattens_when_it_fits() {
 }
 
 #[test]
+fn short_send_stays_flat_before_a_following_statement() {
+    // Regression: the statement-separator line break after the send must not force its group to
+    // break — a hard break in the trailing context only ends the line, it doesn't block flattening.
+    assert_eq!(fmt("x.foo:1 bar:2\ny = 3"), "x.foo:1 bar:2;\ny = 3\n");
+}
+
+#[test]
 fn long_multi_keyword_send_breaks_to_fit_the_width() {
     // Authored on one line but over 100 columns — it breaks, aligned under the first keyword.
     let src = "objectName.firstKeyword:someArgument secondKeyword:anotherArgument \

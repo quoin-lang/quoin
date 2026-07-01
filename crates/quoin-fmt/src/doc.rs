@@ -193,7 +193,9 @@ fn fits(mut remaining: isize, doc: &Doc, rest: &[(usize, Mode, &Doc)]) -> bool {
                     return true;
                 }
             }
-            Doc::HardLine => return false,
+            // A hard break inside the group's own (flat) content means the group can't be flat;
+            // one reached in the trailing context just ends the line, so what came before fit.
+            Doc::HardLine => return mode != Mode::Flat,
             Doc::Group(sub) => local.push((Mode::Flat, sub)),
         }
     }
