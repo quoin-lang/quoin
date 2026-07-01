@@ -57,7 +57,7 @@ fn collapses_multiple_blank_lines_to_one() {
 
 #[test]
 fn preserves_a_multiline_statement_body_verbatim() {
-    // The class body's internal formatting is untouched at P0; only the top level moves.
+    // Already-canonical input is a fixed point (class body lowered, indentation preserved).
     let src = "Point <- { |@x @y|\n    x -> { @x }\n};\ndone = 1";
     assert_eq!(
         fmt(src),
@@ -76,4 +76,44 @@ fn comment_inside_a_block_is_left_in_place_not_duplicated() {
 #[test]
 fn trailing_comment_after_last_statement_drops_below() {
     assert_eq!(fmt("x = 1\n\"* tail"), "x = 1\n\"* tail\n");
+}
+
+#[test]
+fn single_line_block_stays_inline() {
+    assert_eq!(fmt("m -> { @x }"), "m -> { @x }\n");
+}
+
+#[test]
+fn keyword_send_has_no_space_after_colon() {
+    assert_eq!(fmt("x.foo: a bar: b"), "x.foo:a bar:b\n");
+}
+
+#[test]
+fn keyword_arg_keeps_its_parentheses() {
+    // The arg is sliced from raw source, so its parens survive (they aren't in the AST).
+    assert_eq!(fmt("x.foo: (a + b)"), "x.foo:(a + b)\n");
+}
+
+#[test]
+fn method_def_body_indents_canonically() {
+    let src = "C <- {\n  greet -> {\n  x = 1;\n  x\n  }\n}";
+    assert_eq!(
+        fmt(src),
+        "C <- {\n    greet -> {\n        x = 1;\n        x\n    }\n}\n"
+    );
+}
+
+#[test]
+fn single_keyword_send_indents_its_block_body() {
+    let src = "list.each:{\n  a;\n  b\n}";
+    assert_eq!(fmt(src), "list.each:{\n    a;\n    b\n}\n");
+}
+
+#[test]
+fn multi_keyword_send_breaks_aligned_under_first_keyword() {
+    let src = "result.if:{\n    doThing\n} else:{\n    fallback\n}";
+    // `else:` aligns under `if:` (column 7, after `result.`); block bodies at +4.
+    let expected =
+        "result.if:{\n           doThing\n       }\n       else:{\n           fallback\n       }\n";
+    assert_eq!(fmt(src), expected);
 }

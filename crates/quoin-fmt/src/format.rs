@@ -1,26 +1,30 @@
-//! Phase 0 formatter: lower the top level of a program to the [`Doc`] engine.
+//! Formatter: lower the AST into the [`Doc`] engine.
 //!
-//! P0 deliberately makes only *top-level* layout decisions — one statement per line,
-//! an explicit `;` between statements (optional in the grammar, but emitting it removes
-//! all boundary ambiguity) with none after the last, one blank line between definitions
-//! when the source had one, and comments re-attached in the gaps. Each statement's own
-//! body is emitted **verbatim** from its source slice, so nothing inside it can be
-//! dropped or reordered. Later phases recurse into blocks and expressions, replacing the
-//! verbatim slices with real lowerings; the verification harness guards every step.
+//! Statements are formatted structurally where we know how, and fall back to their exact
+//! source slice otherwise — so anything not yet handled is preserved verbatim rather than
+//! risked. The recursion only ever descends into constructs whose exact source boundaries we
+//! can determine (statement sequences, definition/block bodies, and the block arguments of a
+//! message send); everything else — subjects, non-block arguments — is sliced from raw source,
+//! which keeps parentheses and operator groupings byte-exact and sidesteps having to re-insert
+//! precedence parens (the AST drops them).
 //!
-//! Verbatim slices are only ever emitted at column 0 (top level). We never re-indent a
-//! verbatim block by shifting its lines, because a Quoin string literal may contain a
-//! literal newline — line-shifting would corrupt it. Re-indentation therefore only ever
-//! happens structurally, via the doc engine's `Nest`, once a node is truly lowered.
+//! Two invariants make this safe, checked over the whole corpus in the tests: formatting never
+//! changes the AST, and never drops a comment. A verbatim slice is only ever emitted where its
+//! first line sits at the target column (top level, or a single-line slice), never re-indented
+//! by shifting text — a Quoin string may contain a literal newline. Re-indentation happens only
+//! structurally, through the doc engine's `Nest`/`Align`.
 
 use crate::comments::Comment;
 use crate::comments::scan_comments;
 use crate::doc::{Doc, render};
-use quoin_syntax::ast::{Node, NodeValue};
+use quoin_syntax::ast::{BlockNode, Node, NodeValue};
 use quoin_syntax::{ParseError, try_parse_quoin_string_named};
+use std::sync::Arc;
 
 /// Target maximum line width for the canonical style.
 pub const DEFAULT_WIDTH: usize = 100;
+/// Body indentation, in columns.
+const INDENT: isize = 4;
 
 /// Why formatting failed.
 #[derive(Debug)]
@@ -61,45 +65,51 @@ pub fn format_source(source: &str, filename: &str) -> Result<String, FormatError
 fn lower_program(program: &Node, source: &str, comments: &[Comment]) -> Doc {
     let exprs = match &program.value {
         NodeValue::Program(p) => &p.expressions,
-        // Not a program (shouldn't happen): emit the whole file verbatim rather than lose it.
         _ => return Doc::verbatim(source),
     };
-
-    // A top-level statement's `source_info` start is reliable (the first token), but its end
-    // runs on to the *next* statement's start — it swallows trailing whitespace, the `;`
-    // separator, and trailing comments. So take the starts and re-derive each statement's
-    // real content end by trimming that trailing trivia. If any statement lacks a span
-    // (shouldn't happen at top level), fall back to emitting the file unchanged rather than
-    // risk dropping code.
-    let mut ast_starts = Vec::with_capacity(exprs.len());
-    for e in exprs.iter() {
-        match e.source_info.as_ref() {
-            Some(si) => ast_starts.push(si.start),
-            None => return Doc::verbatim(source),
-        }
+    // The top level always succeeds: multi-line statements are safe to emit verbatim at column 0.
+    match emit_sequence(source, comments, 0, source.len(), exprs, true) {
+        Some(parts) => Doc::Concat(parts),
+        None => Doc::verbatim(source),
     }
-    if ast_starts.is_empty() {
-        return Doc::verbatim(source);
+}
+
+/// Lower a sequence of statements (a program, or a block body) over `[region_start, region_end)`.
+///
+/// Reconstructs each statement's real content span (see `statement_content_start`/`_end`),
+/// re-attaches comments found in the gaps, and joins statements with an explicit `;` and a line
+/// break. Returns the `Doc` parts, or `None` if a statement can't be laid out at this indent and
+/// `allow_multiline_verbatim` is false (which bubbles up so the caller falls back to verbatim).
+fn emit_sequence(
+    source: &str,
+    comments: &[Comment],
+    region_start: usize,
+    region_end: usize,
+    stmts: &[Arc<Node>],
+    allow_multiline_verbatim: bool,
+) -> Option<Vec<Doc>> {
+    let mut ast_starts = Vec::with_capacity(stmts.len());
+    for e in stmts.iter() {
+        ast_starts.push(e.source_info.as_ref()?.start);
     }
     let n = ast_starts.len();
-
-    // A parenthesized expression's node starts at the inner token, so `(expr).m` reports its
-    // start *after* the `(`. Extend each start left over any leading `(` (and whitespace) so
-    // the verbatim slice keeps them. The floor is the previous statement's start.
+    if n == 0 {
+        return Some(Vec::new());
+    }
     let starts: Vec<usize> = (0..n)
         .map(|i| {
-            let floor = if i > 0 { ast_starts[i - 1] } else { 0 };
+            let floor = if i > 0 {
+                ast_starts[i - 1]
+            } else {
+                region_start
+            };
             statement_content_start(source, ast_starts[i], floor)
         })
         .collect();
     let ends: Vec<usize> = (0..n)
         .map(|i| {
-            let region_end = if i + 1 < n {
-                starts[i + 1]
-            } else {
-                source.len()
-            };
-            statement_content_end(source, comments, starts[i], region_end)
+            let re = if i + 1 < n { starts[i + 1] } else { region_end };
+            statement_content_end(source, comments, starts[i], re)
         })
         .collect();
 
@@ -108,10 +118,7 @@ fn lower_program(program: &Node, source: &str, comments: &[Comment]) -> Doc {
 
     for i in 0..n {
         let (start, end) = (starts[i], ends[i]);
-        let text = &source[start..end];
 
-        // Comments in the gap before this statement, split into those that trail the
-        // previous statement (same line) and those that lead this one (own line).
         let (trailing_prev, leading_this, blank) = match prev_end {
             Some(pe) => {
                 let gap: Vec<&Comment> = comments
@@ -122,13 +129,14 @@ fn lower_program(program: &Node, source: &str, comments: &[Comment]) -> Doc {
                 (tr, ld, has_blank_line(&source[pe..start]))
             }
             None => {
-                let ld: Vec<&Comment> = comments.iter().filter(|c| c.end <= start).collect();
+                let ld: Vec<&Comment> = comments
+                    .iter()
+                    .filter(|c| c.start >= region_start && c.end <= start)
+                    .collect();
                 (Vec::new(), ld, false)
             }
         };
 
-        // Terminate the previous statement (its `;`, any same-line trailing comments, the
-        // line break, and a blank line if the source had one).
         if prev_end.is_some() {
             parts.push(Doc::text(";"));
             for c in &trailing_prev {
@@ -141,25 +149,35 @@ fn lower_program(program: &Node, source: &str, comments: &[Comment]) -> Doc {
             }
         }
 
-        // Leading comments (doc comments) sit on their own lines, hugging this statement.
         for c in &leading_this {
             parts.push(Doc::verbatim(c.text.clone()));
             parts.push(Doc::HardLine);
         }
 
-        parts.push(Doc::verbatim(text.to_string()));
+        let doc = match lower_stmt(&stmts[i], start, end, source, comments) {
+            Some(d) => d,
+            None => {
+                let slice = &source[start..end];
+                if slice.contains('\n') && !allow_multiline_verbatim {
+                    return None;
+                }
+                Doc::verbatim(slice.to_string())
+            }
+        };
+        parts.push(doc);
         prev_end = Some(end);
     }
 
-    // Comments after the last statement: same-line ones trail it (no `;`), the rest drop
-    // onto their own lines below.
+    // Comments after the last statement in the region.
     if let Some(pe) = prev_end {
-        let tail: Vec<&Comment> = comments.iter().filter(|c| c.start >= pe).collect();
+        let tail: Vec<&Comment> = comments
+            .iter()
+            .filter(|c| c.start >= pe && c.end <= region_end)
+            .collect();
         let mut cur = pe;
         let mut broke = false;
         for c in &tail {
-            let same_line = !broke && !source[cur..c.start].contains('\n');
-            if same_line {
+            if !broke && !source[cur..c.start].contains('\n') {
                 parts.push(Doc::text("  "));
                 parts.push(Doc::verbatim(c.text.clone()));
             } else {
@@ -171,7 +189,235 @@ fn lower_program(program: &Node, source: &str, comments: &[Comment]) -> Doc {
         }
     }
 
-    Doc::Concat(parts)
+    Some(parts)
+}
+
+/// Structurally lower one statement, or `None` to let the caller emit it verbatim.
+fn lower_stmt(
+    stmt: &Node,
+    content_start: usize,
+    content_end: usize,
+    source: &str,
+    comments: &[Comment],
+) -> Option<Doc> {
+    match &stmt.value {
+        NodeValue::ClassDefinition(c) => lower_def(content_start, &c.block, source, comments),
+        NodeValue::ClassExtension(c) => lower_def(content_start, &c.block, source, comments),
+        NodeValue::MethodDefinition(m) => lower_def(content_start, &m.block, source, comments),
+        NodeValue::MethodExtension(m) => lower_def(content_start, &m.block, source, comments),
+        NodeValue::Block(b) => lower_block(b, source, comments),
+        NodeValue::MethodCall(_) => lower_send(stmt, content_start, content_end, source, comments),
+        _ => None,
+    }
+}
+
+/// `<header> <block>` — a class/method definition or reopening. The header (`Point <- `,
+/// `dist: -> `, `Point <-- `) is sliced verbatim from the statement start to the block's `{`.
+fn lower_def(
+    header_start: usize,
+    block: &BlockNode,
+    source: &str,
+    comments: &[Comment],
+) -> Option<Doc> {
+    let bstart = block.source_info.as_ref()?.start;
+    let header = &source[header_start..bstart];
+    if header.contains('\n') {
+        return None;
+    }
+    let block_doc = lower_block(block, source, comments)?;
+    Some(Doc::concat(vec![
+        Doc::verbatim(header.trim_end().to_string()),
+        Doc::text(" "),
+        block_doc,
+    ]))
+}
+
+/// Lower a `{ … }` block. A single-line block is kept verbatim (safe at any column); a
+/// multi-line one becomes `{ <args>` + indented statements + `}`.
+fn lower_block(block: &BlockNode, source: &str, comments: &[Comment]) -> Option<Doc> {
+    let si = block.source_info.as_ref()?;
+    let (bstart, bend) = (si.start, si.end);
+    let slice = &source[bstart..bend];
+    if !slice.contains('\n') || block.statements.is_empty() {
+        // Single-line, or no statements (empty / only trivia): keep as-is.
+        return Some(Doc::verbatim(slice.to_string()));
+    }
+
+    let region_start = bstart + 1;
+    let region_end = bend - 1; // before the closing `}`
+    let (header, body_start) = block_header(block, source, region_start, region_end);
+    if header.contains('\n') {
+        return None;
+    }
+    let body = emit_sequence(
+        source,
+        comments,
+        body_start,
+        region_end,
+        &block.statements,
+        false,
+    )?;
+
+    let mut head = vec![Doc::text("{")];
+    if !header.is_empty() {
+        head.push(Doc::text(" "));
+        head.push(Doc::verbatim(header.to_string()));
+    }
+    let mut inner = vec![Doc::HardLine];
+    inner.extend(body);
+    Some(Doc::concat(vec![
+        Doc::concat(head),
+        Doc::nest(INDENT, Doc::concat(inner)),
+        Doc::HardLine,
+        Doc::text("}"),
+    ]))
+}
+
+/// The block's argument pipe (`|a b - decls|`) and the offset where its statements begin.
+/// Empty header when the block takes no arguments.
+fn block_header<'a>(
+    block: &BlockNode,
+    source: &'a str,
+    region_start: usize,
+    region_end: usize,
+) -> (&'a str, usize) {
+    let has_pipe =
+        !block.arguments.is_empty() || !block.decls.is_empty() || block.decl_block.is_some();
+    if !has_pipe {
+        return ("", region_start);
+    }
+    let Some(open) = source[region_start..region_end]
+        .find('|')
+        .map(|i| region_start + i)
+    else {
+        return ("", region_start);
+    };
+    let Some(close) = source[open + 1..region_end].find('|').map(|i| open + 1 + i) else {
+        return ("", region_start);
+    };
+    (&source[open..close + 1], close + 1)
+}
+
+/// Lower a message send. The subject and non-block arguments are sliced verbatim from raw
+/// source (preserving parentheses); block arguments recurse. A keyword send that spans lines
+/// breaks with continuation keywords aligned under the first (via `Align`).
+fn lower_send(
+    node: &Node,
+    content_start: usize,
+    content_end: usize,
+    source: &str,
+    comments: &[Comment],
+) -> Option<Doc> {
+    let NodeValue::MethodCall(mc) = &node.value else {
+        return None;
+    };
+    let sels = &mc.arguments.signature.identifiers;
+    let args = &mc.arguments.expressions;
+    if sels.is_empty() {
+        return None;
+    }
+
+    // Selector name spans (name only, the `:` sits at `end`).
+    let mut sel_spans = Vec::with_capacity(sels.len());
+    for id in sels.iter() {
+        let s = id.source_info.as_ref()?;
+        sel_spans.push((s.start, s.end, id.name.as_str()));
+    }
+    let dot_pos = sel_spans[0].0.checked_sub(1)?;
+    let subject_text = &source[content_start..dot_pos];
+    if subject_text.contains('\n') {
+        return None;
+    }
+
+    // Bail if a comment lives in a structural position (anywhere in the send that isn't inside a
+    // block argument) — reconstructing the send would drop it. Comments inside block args and
+    // inside verbatim arg slices are preserved.
+    let block_spans: Vec<(usize, usize)> = args
+        .iter()
+        .filter_map(|a| match &a.value {
+            NodeValue::Block(b) => b.source_info.as_ref().map(|s| (s.start, s.end)),
+            _ => None,
+        })
+        .collect();
+    let bad_comment = comments.iter().any(|c| {
+        c.start >= content_start
+            && c.end <= content_end
+            && !block_spans
+                .iter()
+                .any(|(s, e)| c.start >= *s && c.end <= *e)
+    });
+    if bad_comment {
+        return None;
+    }
+
+    let subject = if subject_text.is_empty() {
+        Doc::Nil
+    } else {
+        Doc::verbatim(subject_text.to_string())
+    };
+
+    // Unary send: `subject.name`.
+    if args.is_empty() {
+        return Some(Doc::concat(vec![
+            subject,
+            Doc::text("."),
+            Doc::text(sel_spans[0].2.to_string()),
+        ]));
+    }
+    if sels.len() != args.len() {
+        return None;
+    }
+
+    // Build each `name:arg` pair. Block args recurse; others are verbatim source between the
+    // colon and the next selector (or the send end), preserving their parentheses.
+    let mut pairs = Vec::with_capacity(sels.len());
+    for i in 0..sels.len() {
+        let name = sel_spans[i].2;
+        let arg_doc = match &args[i].value {
+            NodeValue::Block(b) => lower_block(b, source, comments)?,
+            _ => {
+                let colon = sel_spans[i].1;
+                let boundary = if i + 1 < sels.len() {
+                    sel_spans[i + 1].0
+                } else {
+                    content_end
+                };
+                let raw = source[colon + 1..boundary].trim();
+                if raw.contains('\n') {
+                    return None;
+                }
+                Doc::verbatim(raw.to_string())
+            }
+        };
+        pairs.push(Doc::concat(vec![Doc::text(format!("{name}:")), arg_doc]));
+    }
+
+    let broken = source[content_start..content_end].contains('\n');
+    if !broken || pairs.len() == 1 {
+        // Flat: `subject.k0:a0 k1:a1` (a single multi-line block arg keeps the send otherwise flat).
+        let mut v = vec![subject, Doc::text(".")];
+        for (i, p) in pairs.into_iter().enumerate() {
+            if i > 0 {
+                v.push(Doc::text(" "));
+            }
+            v.push(p);
+        }
+        Some(Doc::concat(v))
+    } else {
+        // Broken: continuation keywords on their own line, aligned under the first keyword.
+        let mut inner = Vec::new();
+        for (i, p) in pairs.into_iter().enumerate() {
+            if i > 0 {
+                inner.push(Doc::HardLine);
+            }
+            inner.push(p);
+        }
+        Some(Doc::concat(vec![
+            subject,
+            Doc::text("."),
+            Doc::align(Doc::concat(inner)),
+        ]))
+    }
 }
 
 /// Extend `ast_start` left over any leading `(` (and the whitespace around them), down to
@@ -211,12 +457,14 @@ fn statement_content_end(
         if end <= start {
             break;
         }
-        if bytes[end - 1] == b';' {
-            end -= 1;
-            continue;
-        }
+        // Trim a trailing comment before a `;` — a line comment may itself end in `;`
+        // (e.g. `"* … cases;`), which must not be mistaken for a statement separator.
         if let Some(c) = comments.iter().find(|c| c.end == end && c.start >= start) {
             end = c.start;
+            continue;
+        }
+        if bytes[end - 1] == b';' {
+            end -= 1;
             continue;
         }
         break;
@@ -225,8 +473,8 @@ fn statement_content_end(
 }
 
 /// Split the comments in a gap into those that trail the previous statement (on its line,
-/// before any newline) and those that lead the next one (on their own line). Once a
-/// newline is seen, everything after is "leading".
+/// before any newline) and those that lead the next one (on their own line). Once a newline is
+/// seen, everything after is "leading".
 fn split_trailing_leading<'a>(
     source: &str,
     prev_end: usize,
