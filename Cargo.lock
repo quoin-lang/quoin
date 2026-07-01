@@ -1753,6 +1753,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "quoin-fmt"
+version = "0.1.0"
+dependencies = [
+ "quoin-syntax",
+]
+
+[[package]]
 name = "quoin-syntax"
 version = "0.1.0"
 dependencies = [
