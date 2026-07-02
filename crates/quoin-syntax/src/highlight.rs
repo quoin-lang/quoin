@@ -38,7 +38,7 @@ pub enum HighlightType {
     MethodSignature,
     Global,
     Namespace,
-    /// The `use` keyword (and a slot for future keywords).
+    /// A statement keyword — `use`, `var`, `let`.
     Keyword,
     /// A `use` target path (and its trailing `/*` glob).
     Path,
@@ -193,6 +193,29 @@ impl<'a> HighlightParser<'a> {
                     s.extend(self.highlight_lvalue(lv, depth));
                 }
                 s.extend(self.highlight_expression(&a.rvalue, depth));
+                s
+            }
+            NodeValue::Declaration(d) => {
+                let mut s = Vec::new();
+                // `var` / `let` keyword — both are the first three bytes of the
+                // statement span (same treatment/color as `use`). `fill_in_gaps`
+                // covers the `:` / `=` / whitespace between the pieces.
+                if let Some((start, end)) = si_range(&stmt.source_info) {
+                    let kw_end = (start + 3).min(end);
+                    s.push(HighlightSpan::new(
+                        start,
+                        kw_end,
+                        HighlightType::Keyword,
+                        depth,
+                    ));
+                }
+                for lv in &d.lvalues {
+                    s.extend(self.highlight_lvalue(lv, depth));
+                }
+                if let Some(hint) = &d.type_hint {
+                    s.extend(self.highlight_identifier(hint, depth));
+                }
+                s.extend(self.highlight_expression(&d.rvalue, depth));
                 s
             }
             NodeValue::BlockReturn(b) => self.highlight_expression(&b.value, depth),
@@ -792,6 +815,20 @@ mod resilient_tests {
         let node = crate::try_parse_quoin_string_named(src, "<t>").unwrap();
         let plain = HighlightParser::new(src).highlight_program(&node);
         assert_eq!(highlight_resilient(src), plain);
+    }
+
+    #[test]
+    fn var_and_let_are_keywords_like_use() {
+        for (src, kw) in [("var x = 5", "var"), ("let y = 5", "let")] {
+            let node = crate::try_parse_quoin_string_named(src, "<t>").unwrap();
+            let spans = HighlightParser::new(src).highlight_program(&node);
+            assert!(
+                spans.iter().any(|s| s.start == 0
+                    && s.end == kw.len()
+                    && s.htype == HighlightType::Keyword),
+                "{src:?}: expected a Keyword span for `{kw}`: {spans:?}"
+            );
+        }
     }
 
     #[test]
