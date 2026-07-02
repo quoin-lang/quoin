@@ -11,4 +11,13 @@ use core/*;
 Integer.sealed!;
 Double.sealed!;
 Boolean.sealed!;
-Nil.sealed!
+Nil.sealed!;
+
+"* Seal the built-in collections too (after core mixes in Iterate and defines their
+"* primitives), so `at:`/`at:put:`/`add:` are frozen and compile-time devirtualization
+"* of typed collection access is sound. This freezes only List/Map/Set themselves — the
+"* Iterate mixin (where the shared combinators live) is a separate class and stays open,
+"* so `Iterate <-- { … }` still extends every collection.
+List.sealed!;
+Map.sealed!;
+Set.sealed!

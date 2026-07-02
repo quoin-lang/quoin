@@ -56,5 +56,27 @@
         } };
         .is:{ SumClass.addTwice:21 } equalTo:42;
         .is:{ SumClass.addTwice:(0 - 5) } equalTo:(0 - 10)
+    };
+
+    "* Slice 2e: devirtualized List access (ListGet/ListSet/ListPush, emitted for a
+    "* statically-List receiver) matches the native methods, including semantics — an
+    "* out-of-bounds read yields nil, an out-of-bounds write raises IndexError, and both
+    "* mutators evaluate to the receiver.
+    .test:
+    listAccessDevirt -> {
+        var l = #();
+        l.add:10;
+        l.add:20;
+        l.add:30;
+        .is:{ l.at:1 } equalTo:20;
+        .is:{ l.at:9 } equalTo:nil;
+        l.at:0 put:99;
+        .is:{ l.at:0 } equalTo:99;
+        .is:{ l.count } equalTo:3;
+        .is:{ (#().add:7).count } equalTo:1;
+        .does:{ l.at:10 put:1 } throw:IndexError;
+        "* the devirtualized path (typed `l`) and the dispatched path (untyped block
+        "* param `x`) must agree.
+        .is:{ { |x| x.at:1 }.valueWithSelfOrArg:l } equalTo:(l.at:1)
     }
 }

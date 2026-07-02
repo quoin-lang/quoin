@@ -2895,6 +2895,79 @@ impl<'gc> VmState<'gc> {
                 self.push(Value::Bool(a != b));
                 self.frames[frame_idx].ip += 1;
             }
+            // Devirtualized List accessors (Slice 2e). Operands are already on the stack in
+            // send order; if the receiver isn't a native list (or the index isn't an
+            // Integer, matching the typed native `at:`/`at:put:`), fall back to the real send.
+            Instruction::ListGet => {
+                let n = self.stack.len();
+                let index = self.stack[n - 1];
+                let receiver = self.stack[n - 2];
+                if let Value::Int(i) = index {
+                    let got = receiver.with_native_state::<NativeListState, _, _>(|l| {
+                        let vec = l.get_vec();
+                        if i >= 0 && (i as usize) < vec.len() {
+                            Some(vec[i as usize])
+                        } else {
+                            None // out of bounds → nil (native `at:` semantics)
+                        }
+                    });
+                    if let Ok(elem) = got {
+                        self.stack.truncate(n - 2);
+                        self.push(elem.unwrap_or(Value::Nil));
+                        self.frames[frame_idx].ip += 1;
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("at:"), 1);
+            }
+            Instruction::ListSet => {
+                let n = self.stack.len();
+                let value = self.stack[n - 1];
+                let index = self.stack[n - 2];
+                let receiver = self.stack[n - 3];
+                if let Value::Int(i) = index {
+                    let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
+                        let vec = l.get_vec_mut();
+                        if i >= 0 && (i as usize) < vec.len() {
+                            vec[i as usize] = value;
+                            Ok(())
+                        } else {
+                            Err(QuoinError::IndexError {
+                                index: i,
+                                len: vec.len() as i64,
+                                msg: format!(
+                                    "Index out of bounds: index is {}, but length is {}",
+                                    i,
+                                    vec.len()
+                                ),
+                            })
+                        }
+                    });
+                    if let Ok(inner) = res {
+                        self.stack.truncate(n - 3);
+                        inner?; // propagate an IndexError (out-of-bounds write)
+                        self.push(receiver); // `at:put:` evaluates to the receiver
+                        self.frames[frame_idx].ip += 1;
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("at:put:"), 2);
+            }
+            Instruction::ListPush => {
+                let n = self.stack.len();
+                let value = self.stack[n - 1];
+                let receiver = self.stack[n - 2];
+                let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
+                    l.get_vec_mut().push(value);
+                });
+                if res.is_ok() {
+                    self.stack.truncate(n - 2);
+                    self.push(receiver); // `add:` evaluates to the receiver
+                    self.frames[frame_idx].ip += 1;
+                    return Ok(VmStatus::Running);
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("add:"), 1);
+            }
             Instruction::Send(selector, num_args) => {
                 let (selector, num_args) = (*selector, *num_args);
                 return self.exec_send(mc, frame_idx, selector, num_args);

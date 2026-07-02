@@ -241,6 +241,10 @@ pub(crate) fn fuse_bytecode(
 enum StaticType {
     Int,
     Bool,
+    /// A built-in `List` (sealed). Enables devirtualized `at:`/`at:put:`/`add:` (Slice 2e).
+    /// Unlike `Int`, list devirt has a runtime fallback, so it is sound even for a mutable
+    /// `var` whose inferred type could go stale on reassignment.
+    List,
     Unknown,
 }
 
@@ -249,6 +253,7 @@ fn static_type_from_name(name: &str) -> StaticType {
     match name {
         "Integer" => StaticType::Int,
         "Boolean" => StaticType::Bool,
+        "List" => StaticType::List,
         _ => StaticType::Unknown,
     }
 }
@@ -459,6 +464,8 @@ impl Compiler {
             }
             NodeValue::BinaryOperator(op) => self.binop_result_type(op),
             NodeValue::MethodCall(call) => self.self_send_return_type(call),
+            // A list literal `#(…)` is a built-in `List` (Slice 2e).
+            NodeValue::List(_) => StaticType::List,
             _ => StaticType::Unknown,
         }
     }
@@ -984,6 +991,20 @@ impl Compiler {
 
         self.compile_node(&decl.rvalue, bytecode)?;
 
+        // Slice 2e: record a collection init type so the local's `at:`/`at:put:`/`add:`
+        // devirtualize. Only collection types (`List`) are inferred here — they have a
+        // runtime fallback, so an inferred type going stale on reassignment is harmless.
+        // (`Int`/`Bool` are deliberately NOT inferred for a `var`: arithmetic devirt has no
+        // fallback, so a reassigned `var` would be mis-devirtualized.)
+        if decl.lvalues.len() == 1
+            && let NodeValue::IdentLValue(l) = &decl.lvalues[0].value
+        {
+            let ty = self.static_type(&decl.rvalue);
+            if ty == StaticType::List {
+                self.record_local_type(&l.identifier.name, ty);
+            }
+        }
+
         if decl.lvalues.len() == 1 {
             let lval = &decl.lvalues[0];
             bytecode.push(Instruction::Dup);
@@ -1298,8 +1319,36 @@ impl Compiler {
             i += run;
         }
 
+        // Slice 2e: devirtualize `at:`/`at:put:`/`add:` when the receiver is statically a
+        // `List`. The operands a send would consume are already on the stack in send order,
+        // so the op is a drop-in replacement.
+        if let Some(op) = self.list_devirt_op(call, &selector, num_components) {
+            bytecode.push(op);
+            return Ok(());
+        }
+
         self.emit_call(bytecode, &selector, num_components, is_self);
         Ok(())
+    }
+
+    /// The devirtualized `List` op for a keyword send whose receiver is statically a `List`
+    /// (Slice 2e), or `None` to fall through to a normal send.
+    fn list_devirt_op(
+        &self,
+        call: &MethodCallNode,
+        selector: &str,
+        num_args: usize,
+    ) -> Option<Instruction> {
+        let subject = call.subject.as_ref()?;
+        if self.static_type(subject) != StaticType::List {
+            return None;
+        }
+        match (selector, num_args) {
+            ("at:", 1) => Some(Instruction::ListGet),
+            ("at:put:", 2) => Some(Instruction::ListSet),
+            ("add:", 1) => Some(Instruction::ListPush),
+            _ => None,
+        }
     }
 
     /// Slice 2d — control-flow inlining. If `call` is `recv.if:{…}` or
@@ -1338,7 +1387,8 @@ impl Compiler {
         let guarded = match self.static_type(subject) {
             StaticType::Bool => false,
             StaticType::Unknown => true,
-            StaticType::Int => return Ok(false),
+            // A known-non-Bool receiver (Int/List) → normal send; the guard would always miss.
+            StaticType::Int | StaticType::List => return Ok(false),
         };
 
         // Every arg must be a literal, 0-arg, declaration-free block (v1).

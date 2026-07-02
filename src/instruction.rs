@@ -152,6 +152,16 @@ pub enum Instruction {
     IntGe,
     IntEq,
     IntNe,
+    // Devirtualized List accessors (Slice 2e): emitted instead of `Send("at:", 1)` /
+    // `Send("at:put:", 2)` / `Send("add:", 1)` when the receiver is statically a `List` (a
+    // sealed value type — its access methods can't be redefined). Each pops the same
+    // operands a send would and does the indexed op directly on the backing `Vec`, matching
+    // native semantics (OOB read → nil; OOB write → IndexError; both mutators evaluate to the
+    // receiver). If the receiver isn't a native list at runtime (a `List`-typed local
+    // reassigned to something else), each falls back to the real send — a pure speedup.
+    ListGet,
+    ListSet,
+    ListPush,
     Return,
     Yeet,
     BlockReturn,
