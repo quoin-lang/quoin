@@ -2,7 +2,7 @@ Case <- {
     .meta <-- {
         for:with: -> { |obj block:Block|
             {
-                block.value:obj withSelf:.new:{ subject = obj }
+                block.value:obj withSelf:.new:{ var subject = obj }
             }.catch:{|r| ^^r }
         };
     };

@@ -102,27 +102,92 @@ pub fn run_vm_loop<'gc>(
         vm.register_yielder(mc, yptr);
     }
 
+    // Batch instructions per cooperative yield (Slice 2g), so the coroutine switch + driver
+    // round-trip + GC pacing amortize over many steps instead of being paid every step.
+    let batch: u32 = crate::tuning::step_batch();
+    let stats = crate::tuning::batch_stats();
     loop {
-        let (vm, mc) = unsafe { ctx.get() };
-        match vm.step(mc) {
-            Ok(VmStatus::Running) => {
-                ctx = yielder.suspend(YieldReason::CooperativeYield);
-            }
-            Ok(VmStatus::Finished(val)) => return Ok(val),
-            Ok(VmStatus::Yeeted(val)) => {
-                return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
-            }
-            Err(err) => {
-                // Break-on-throw: an exception is about to escape the task uncaught — its frames
-                // are still live (propagation doesn't pop them), so pause here if a debug session
-                // is watching its type, then let it propagate (the task ends).
-                if vm.has_break_on_throw() {
-                    vm.debug_check_throw(mc, &err);
+        // Per-batch tuning stats (QN_BATCH_STATS): wall time + GC bytes allocated over the
+        // batch (no collection runs mid-batch, so the live-allocation delta = bytes allocated).
+        let mark = if stats {
+            let (_, mc) = unsafe { ctx.get() };
+            Some((
+                std::time::Instant::now(),
+                mc.metrics().total_gc_allocation(),
+            ))
+        } else {
+            None
+        };
+        let mut budget = batch;
+        loop {
+            let (vm, mc) = unsafe { ctx.get() };
+            match vm.step(mc) {
+                Ok(VmStatus::Running) => {
+                    budget -= 1;
+                    if budget == 0 {
+                        break;
+                    }
                 }
-                return Err(err);
+                Ok(VmStatus::Finished(val)) => {
+                    if stats {
+                        report_batch_stats(batch);
+                    }
+                    return Ok(val);
+                }
+                Ok(VmStatus::Yeeted(val)) => {
+                    if stats {
+                        report_batch_stats(batch);
+                    }
+                    return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
+                }
+                Err(err) => {
+                    // Break-on-throw: an exception is about to escape the task uncaught — its
+                    // frames are still live (propagation doesn't pop them), so pause here if a
+                    // debug session is watching its type, then let it propagate (task ends).
+                    if vm.has_break_on_throw() {
+                        vm.debug_check_throw(mc, &err);
+                    }
+                    if stats {
+                        report_batch_stats(batch);
+                    }
+                    return Err(err);
+                }
             }
         }
+        if let Some((t0, a0)) = mark {
+            let (_, mc) = unsafe { ctx.get() };
+            let dt = t0.elapsed().as_nanos();
+            let db = mc.metrics().total_gc_allocation().saturating_sub(a0) as u128;
+            BATCH_ACC.with(|c| {
+                let (n, sn, sb) = c.get();
+                c.set((n + 1, sn + dt, sb + db));
+            });
+        }
+        ctx = yielder.suspend(YieldReason::CooperativeYield);
     }
+}
+
+thread_local! {
+    /// (full batches, sum wall-ns, sum GC bytes allocated) for the `QN_BATCH_STATS` harness.
+    static BATCH_ACC: std::cell::Cell<(u64, u128, u128)> = std::cell::Cell::new((0, 0, 0));
+}
+
+/// Emit the accumulated per-batch stats to stderr (the `QN_BATCH_STATS` harness). One
+/// full batch = exactly `batch` instructions, so total steps = batches * batch.
+fn report_batch_stats(batch: u32) {
+    let (n, sum_ns, sum_bytes) = BATCH_ACC.with(|c| c.get());
+    if n == 0 {
+        return;
+    }
+    let steps = n as u128 * batch as u128;
+    eprintln!(
+        "[batch-stats] batch={:>7} batches={:>9} time/batch={:>9.3}us alloc/batch={:>9}B per_instr={:>6.3}ns",
+        batch,
+        n,
+        sum_ns as f64 / n as f64 / 1000.0,
+        sum_bytes / n as u128,
+        sum_ns as f64 / steps as f64,
+    );
 }
 
 /// A wrapper around raw pointers to VMState and Mutation contexts.

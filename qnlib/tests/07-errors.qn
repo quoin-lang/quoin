@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Errors' }).add:{
+(TestSuite.new:{ var name = 'Errors' }).add:{
     .test:
     throw -> {
         .does:{ 77.throw } throw:77;
@@ -18,7 +18,7 @@
     "* Errors carry a message and an optional payload."
     .test:
     errorCarriesMessageAndPayload -> {
-        caught = nil;
+        var caught = nil;
         { ArgumentError.throw:'too many' payload:#(1 2 3) }.catch:{ |e| caught = e };
         .is:{ caught.message } equalTo:'too many';
         .is:{ caught.payload } equalTo:#(1 2 3);
@@ -28,7 +28,7 @@
     "* Errors are dispatched by type in a catch handler via case/`~`."
     .test:
     catchByType -> {
-        classify = { |block|
+        var classify = { |block|
             block.catch:{ |e|
                 e.case:{
                     .when:TypeError do:'type';
@@ -45,7 +45,7 @@
     "* Default display is `ClassName: message`."
     .test:
     errorDisplay -> {
-        .is:{ (TypeError.new:{ message = 'boom' }).s } equalTo:'TypeError: boom';
+        .is:{ (TypeError.new:{ var message = 'boom' }).s } equalTo:'TypeError: boom';
     };
 
     "* User-defined errors just subclass Error."
@@ -60,7 +60,7 @@
     "* dispatch on - and they're still matchable by message via does:throw:."
     .test:
     runtimeTypeErrorIsStructured -> {
-        caught = nil;
+        var caught = nil;
         { 'abc'.contains?:5 }.catch:{ |e| caught = e };
         .isTrue:{ caught.class == TypeError };
         .isTrue:{ TypeError ~ caught };
@@ -72,14 +72,14 @@
     "* index and the collection length (both populated by the VM).
     .test:
     indexErrorIsStructured -> {
-        caught = nil;
+        var caught = nil;
         { (Bytes.of:#(10 20 30)).at:10 }.catch:{ |e| caught = e };
         .isTrue:{ IndexError ~ caught };
         .is:{ caught.index } equalTo:10;
         .is:{ caught.length } equalTo:3;
 
         "* List.at:put: with a bad index throws the same typed error.
-        .does:{ l = #(1 2 3); l.at:10 put:99 } throw:IndexError;
+        .does:{ var l = #(1 2 3); l.at:10 put:99 } throw:IndexError;
         "* is-an Error, and still matchable by message.
         .does:{ (Bytes.of:#(1 2)).at:5 } throw:Error;
         .does:{ (Bytes.of:#(1 2)).at:5 } throw:#/out of range/;
@@ -122,7 +122,7 @@
     typedArgDispatch -> {
         .is:{ #(10 20 30).at:1 } equalTo:20;
         .is:{ (#(10 20 30).sliceFrom:1).count } equalTo:2;
-        .is:{ l = #(1 2 3); l.at:1 put:9; l.at:1 } equalTo:9;
+        .is:{ var l = #(1 2 3); l.at:1 put:9; l.at:1 } equalTo:9;
         .is:{ 'abcd'.insert:'X' at:2 } equalTo:'abXcd';
 
         .does:{ #(1 2).at:'x' } throw:MessageNotUnderstood;
@@ -140,7 +140,7 @@
     .test:
     ioErrorCarriesKind -> {
         "* IoError.throw:kind: sets the kind symbol, readable via .kind
-        caught = nil;
+        var caught = nil;
         { IoError.throw:'boom' kind:#custom }.catch:{ |e| caught = e };
         .isTrue:{ IoError ~ caught };
         .is:{ caught.kind } equalTo:#custom;
@@ -149,7 +149,7 @@
     .test:
     indexErrorCarriesLength -> {
         "* an out-of-bounds at:put: throws IndexError exposing .index and .length
-        caught = nil;
+        var caught = nil;
         { #(1 2 3).at:9 put:0 }.catch:{ |e| caught = e };
         .isTrue:{ IndexError ~ caught };
         .is:{ caught.index } equalTo:9;
@@ -193,11 +193,11 @@
     "* error re-raises.
     .test:
     typedCatchFinallyAlwaysRuns -> {
-        log = '';
+        var log = '';
         .is:{ { TypeError.throw:'x' }.catch:{ |e:TypeError| 'c' } finally:{ log = 'F' } }
             equalTo:'c';
         .is:{ log } equalTo:'F';
-        ran = nil;
+        var ran = nil;
         .does:{ { TypeError.throw:'x' }.catch:{ |e:ValueError| 'no' } finally:{ ran = true } }
             throw:TypeError;
         .isTrue:{ ran };

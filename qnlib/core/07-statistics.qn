@@ -9,7 +9,7 @@
 Iterate <-- {
     "* Arithmetic mean. Forces Double division so integer inputs don't truncate (#(1 2).mean -> 1.5).
     mean -> {
-        n = .count;
+        var n = .count;
         (n == 0).if:{ ^^nil };
         ^((.sum * 1.0) / n)
     };
@@ -17,10 +17,10 @@ Iterate <-- {
     "* Middle of the sorted data: the exact element for an odd count, the average of the two
     "* central elements (a Double) for an even count.
     median -> {
-        sorted = .sort;
-        n = sorted.count;
+        var sorted = .sort;
+        var n = sorted.count;
         (n == 0).if:{ ^^nil };
-        mid = n / 2;
+        var mid = n / 2;
         (n % 2 == 0)
             .if:{ ^^((((sorted.at:(mid - 1)) + (sorted.at:mid)) * 1.0) / 2) }
              else:{ ^^(sorted.at:mid) }
@@ -29,29 +29,29 @@ Iterate <-- {
     "* Sample variance — divides by n-1 (Bessel's correction), the right default when the data is
     "* a sample of something larger. nil for fewer than two elements (undefined).
     variance -> {
-        n = .count;
+        var n = .count;
         (n < 2).if:{ ^^nil };
-        m = .mean;
+        var m = .mean;
         ^((.sum:{ |x| (x - m) * (x - m) }) / (n - 1))
     };
 
     "* Population variance — divides by n. Use when the data *is* the whole population.
     populationVariance -> {
-        n = .count;
+        var n = .count;
         (n == 0).if:{ ^^nil };
-        m = .mean;
+        var m = .mean;
         ^((.sum:{ |x| (x - m) * (x - m) }) / n)
     };
 
     "* Sample / population standard deviation: the sqrt of the corresponding variance.
     stddev -> {
-        v = .variance;
+        var v = .variance;
         v.defined?.else:{ ^^nil };
         ^v.sqrt
     };
 
     populationStddev -> {
-        v = .populationVariance;
+        var v = .populationVariance;
         v.defined?.else:{ ^^nil };
         ^v.sqrt
     };
@@ -60,16 +60,16 @@ Iterate <-- {
     "* so percentile:50 == median, percentile:0 == min, percentile:100 == max. nil if empty.
     percentile: -> { |p|
         ((p < 0) || (p > 100)).if:{ ValueError.throw:'percentile: expects p in 0..100' };
-        sorted = .sort;
-        n = sorted.count;
+        var sorted = .sort;
+        var n = sorted.count;
         (n == 0).if:{ ^^nil };
-        rank = (p * (n - 1)) / 100.0;
-        lo = rank.floor;
-        hi = rank.ceil;
+        var rank = (p * (n - 1)) / 100.0;
+        var lo = rank.floor;
+        var hi = rank.ceil;
         (lo == hi).if:{ ^^(sorted.at:lo) };
-        frac = rank - lo;
-        loV = sorted.at:lo;
-        hiV = sorted.at:hi;
+        var frac = rank - lo;
+        var loV = sorted.at:lo;
+        var hiV = sorted.at:hi;
         ^(loV + ((hiV - loV) * frac))
     };
 
@@ -80,16 +80,16 @@ Iterate <-- {
     "* Use this when the data may be multimodal; `mode` is the single-value shortcut. Values are
     "* keyed by their string form, so == values (e.g. 1 and 1.0) are counted together.
     modes -> {
-        freqs = #{};
-        order = #();
+        var freqs = #{};
+        var order = #();
         .each:{ |x|
-            k = x.s;
+            var k = x.s;
             (freqs.at:k).defined?
                 .if:{ freqs.at:k put:((freqs.at:k) + 1) }
                  else:{ freqs.at:k put:1; order.add:x }
         };
         order.any?.else:{ ^^#() };
-        maxFreq = (order.collect:{ |v| freqs.at:(v.s) }).max;
+        var maxFreq = (order.collect:{ |v| freqs.at:(v.s) }).max;
         ^(order.select:{ |v| (freqs.at:(v.s)) == maxFreq })
     }
 }

@@ -38,7 +38,7 @@ pub enum HighlightType {
     MethodSignature,
     Global,
     Namespace,
-    /// The `use` keyword (and a slot for future keywords).
+    /// A statement keyword — `use`, `var`, `let`.
     Keyword,
     /// A `use` target path (and its trailing `/*` glob).
     Path,
@@ -195,6 +195,29 @@ impl<'a> HighlightParser<'a> {
                 s.extend(self.highlight_expression(&a.rvalue, depth));
                 s
             }
+            NodeValue::Declaration(d) => {
+                let mut s = Vec::new();
+                // `var` / `let` keyword — both are the first three bytes of the
+                // statement span (same treatment/color as `use`). `fill_in_gaps`
+                // covers the `:` / `=` / whitespace between the pieces.
+                if let Some((start, end)) = si_range(&stmt.source_info) {
+                    let kw_end = (start + 3).min(end);
+                    s.push(HighlightSpan::new(
+                        start,
+                        kw_end,
+                        HighlightType::Keyword,
+                        depth,
+                    ));
+                }
+                for lv in &d.lvalues {
+                    s.extend(self.highlight_lvalue(lv, depth));
+                }
+                if let Some(hint) = &d.type_hint {
+                    s.extend(self.highlight_identifier(hint, depth));
+                }
+                s.extend(self.highlight_expression(&d.rvalue, depth));
+                s
+            }
             NodeValue::BlockReturn(b) => self.highlight_expression(&b.value, depth),
             NodeValue::MethodReturn(m) => self.highlight_expression(&m.value, depth),
             NodeValue::YieldReturn(y) => self.highlight_expression(&y.value, depth),
@@ -292,6 +315,11 @@ impl<'a> HighlightParser<'a> {
                 for id in &md.signature.identifiers {
                     s.extend(single_span_ident(id, HighlightType::MethodSignature, depth));
                 }
+                // The `-> Type` return-type annotation (Slice 2b-A): color the type the same
+                // way as a typed param / declaration hint, via `highlight_identifier`.
+                if let Some(rt) = &md.return_type {
+                    s.extend(self.highlight_identifier(rt, depth));
+                }
                 s.extend(self.highlight_block(&md.block, depth));
                 s
             }
@@ -299,6 +327,9 @@ impl<'a> HighlightParser<'a> {
                 let mut s = Vec::new();
                 for id in &me.signature.identifiers {
                     s.extend(single_span_ident(id, HighlightType::MethodSignature, depth));
+                }
+                if let Some(rt) = &me.return_type {
+                    s.extend(self.highlight_identifier(rt, depth));
                 }
                 s.extend(self.highlight_block(&me.block, depth));
                 s
@@ -792,6 +823,39 @@ mod resilient_tests {
         let node = crate::try_parse_quoin_string_named(src, "<t>").unwrap();
         let plain = HighlightParser::new(src).highlight_program(&node);
         assert_eq!(highlight_resilient(src), plain);
+    }
+
+    #[test]
+    fn var_and_let_are_keywords_like_use() {
+        for (src, kw) in [("var x = 5", "var"), ("let y = 5", "let")] {
+            let node = crate::try_parse_quoin_string_named(src, "<t>").unwrap();
+            let spans = HighlightParser::new(src).highlight_program(&node);
+            assert!(
+                spans.iter().any(|s| s.start == 0
+                    && s.end == kw.len()
+                    && s.htype == HighlightType::Keyword),
+                "{src:?}: expected a Keyword span for `{kw}`: {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn method_return_type_is_highlighted_like_a_param_type() {
+        // `-> Type` (Slice 2b-A) must color the return type the same as a `|x: Type|` param.
+        let src = "Foo <- { bar -> Integer { |n: Integer| n } }";
+        let node = crate::try_parse_quoin_string_named(src, "<t>").unwrap();
+        let spans = HighlightParser::new(src).highlight_program(&node);
+        let occ: Vec<usize> = src.match_indices("Integer").map(|(i, _)| i).collect();
+        assert_eq!(occ.len(), 2, "expected the return type + the param type");
+        let htype_at = |pos: usize| {
+            spans
+                .iter()
+                .find(|s| s.start == pos && s.end == pos + "Integer".len())
+                .map(|s| s.htype)
+        };
+        let ret = htype_at(occ[0]).expect("return-type `Integer` should be highlighted");
+        let param = htype_at(occ[1]).expect("param-type `Integer` should be highlighted");
+        assert_eq!(ret, param, "return type should highlight like a param type");
     }
 
     #[test]

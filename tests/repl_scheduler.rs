@@ -47,7 +47,7 @@ fn piped_repl(input: &str) -> (String, String) {
 #[test]
 fn eval_resumes_a_fiber() {
     // The exact reported failure: a `Fiber.resume` from a top-level line.
-    let (stdout, stderr) = eval("f = Fiber.new:{ Fiber.yield:10; 20 }; f.resume");
+    let (stdout, stderr) = eval("var f = Fiber.new:{ Fiber.yield:10; 20 }; f.resume");
     assert!(
         !stderr.contains("outside the VM scheduler"),
         "fiber resume still hit the no-scheduler path.\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -88,7 +88,7 @@ fn eval_does_real_async_io() {
 
 #[test]
 fn eval_spawns_and_joins_a_task() {
-    let (stdout, stderr) = eval("h = Task.spawn:{ Async.sleep: 1; 6 * 7 }; h.join");
+    let (stdout, stderr) = eval("var h = Task.spawn:{ Async.sleep: 1; 6 * 7 }; h.join");
     assert!(
         !stderr.contains("outside the VM scheduler"),
         "task spawn/join hit the no-scheduler path.\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -104,7 +104,7 @@ fn piped_repl_resumes_a_fiber_across_lines() {
     // The interactive/piped REPL path (`eval_value`): a fiber bound on one line is resumed on
     // later lines — exercising both the scheduler *and* that top-level bindings persist.
     let (stdout, stderr) = piped_repl(
-        "f = Fiber.new:{ Fiber.yield:1; Fiber.yield:2; 3 }\nf.resume\nf.resume\nf.resume\n",
+        "var f = Fiber.new:{ Fiber.yield:1; Fiber.yield:2; 3 }\nf.resume\nf.resume\nf.resume\n",
     );
     assert!(
         !stderr.contains("outside the VM scheduler")

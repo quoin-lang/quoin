@@ -10,9 +10,9 @@ Person <- { |@name @age|
     s --> { %'%{@name}, %{@age} years old' }
 };
 
-damonPerson = Person.new:{
-    name = 'Damon';
-    age = 39  "* Narrator: He's not 39
+var damonPerson = Person.new:{
+    var name = 'Damon';
+    var age = 39  "* Narrator: He's not 39
 };
 
 damonEmployee.s.print

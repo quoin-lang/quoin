@@ -62,3 +62,33 @@ pub fn sched_stress() -> Option<u64> {
         Err(_) => None,
     })
 }
+
+/// Number of VM instructions `run_vm_loop` runs per cooperative-yield boundary. That
+/// yield is a coroutine switch back to the driver (which re-enters the GC arena), so
+/// paying it per instruction dominates compute-bound runtime; batching amortizes the
+/// switch + GC pacing over many steps (~2x on compute-bound programs). I/O parks and
+/// guest-fiber yields are unaffected — they suspend deeper in `step`, not via the
+/// cooperative yield, so responsiveness is preserved. Forced to 1 under GC- or
+/// scheduler-stress so those modes keep collecting/preempting at every step. Override
+/// with `QN_BATCH=N`. Read once and cached.
+pub fn step_batch() -> u32 {
+    if gc_stress() || sched_stress().is_some() {
+        return 1;
+    }
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("QN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(256)
+    })
+}
+
+/// `QN_BATCH_STATS`: have `run_vm_loop` accumulate per-batch wall time + GC bytes allocated
+/// and print a one-line summary on finish — the batch-size tuning harness
+/// (`profiling/batch-sweep/`). Off by default; adds two metric reads per batch when on.
+pub fn batch_stats() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| env_flag("QN_BATCH_STATS"))
+}

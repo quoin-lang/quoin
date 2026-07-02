@@ -2,7 +2,7 @@
 "* JSON it has a native bytes type, so Bytes round-trips. Big numbers beyond 64 bits fall back to a
 "* string (lossless as text).
 
-(TestSuite.new:{ name = 'MessagePack' }).add:{
+(TestSuite.new:{ var name = 'MessagePack' }).add:{
     .test:
     roundTripScalars -> {
         .is:{ MessagePack.unpack:(MessagePack.pack: 42) } equalTo:42;
@@ -15,10 +15,10 @@
     .test:
     roundTripStructures -> {
         .is:{ MessagePack.unpack:(MessagePack.pack: #(1 2 3)) } equalTo:#(1 2 3);
-        m = MessagePack.unpack:(MessagePack.pack: #{'a': 1 'b': 2});
+        var m = MessagePack.unpack:(MessagePack.pack: #{'a': 1 'b': 2});
         .is:{ m.at:'a' } equalTo:1;
         .is:{ m.at:'b' } equalTo:2;
-        nested = MessagePack.unpack:(MessagePack.pack: #{'nums': #(1 2) 'ok': true});
+        var nested = MessagePack.unpack:(MessagePack.pack: #{'nums': #(1 2) 'ok': true});
         .is:{ nested.at:'nums' } equalTo:#(1 2);
         .is:{ nested.at:'ok' } equalTo:true;
     };
@@ -26,7 +26,7 @@
     .test:
     bytesAreNative -> {
         "* unlike JSON, MessagePack has a native bytes type, so Bytes round-trips.
-        packed = MessagePack.pack: 'binary data'.asBytes;
+        var packed = MessagePack.pack: 'binary data'.asBytes;
         .is:{ packed } a:Bytes;
         .is:{ MessagePack.unpack:packed } a:Bytes;
         .is:{ (MessagePack.unpack:packed).asString } equalTo:'binary data';

@@ -2510,6 +2510,24 @@ impl<'gc> VmState<'gc> {
     /// `selector`. Shared by the `Send` handler and the fused `Send*` superinstructions
     /// (which push the send's last operand first). Advances the caller frame's ip by one
     /// slot, then either tail-starts a block, invokes the resolved callable, or raises MNU.
+    /// Fast path for a devirtualized Integer op (Slice 2a/2f): if the top two stack values
+    /// are both `Int`, pop them and return `Some((a, b))`; otherwise leave them in place and
+    /// return `None` so the caller falls back to the real send. This optimistic fallback is
+    /// what lets `Int` be *inferred* for a mutable `var` (a stale-typed var is handled by the
+    /// send) instead of only trusted for annotated params.
+    fn take_two_ints(&mut self) -> Option<(i64, i64)> {
+        let n = self.stack.len();
+        if n < 2 {
+            return None;
+        }
+        if let (Value::Int(a), Value::Int(b)) = (self.stack[n - 2], self.stack[n - 1]) {
+            self.stack.truncate(n - 2);
+            Some((a, b))
+        } else {
+            None
+        }
+    }
+
     fn exec_send(
         &mut self,
         mc: &Mutation<'gc>,
@@ -2816,7 +2834,187 @@ impl<'gc> VmState<'gc> {
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
+            // Devirtualized Integer operators (Slice 2a/2f). Fast path when both operands are
+            // `Value::Int`: compute directly and push. Semantics match Integer's native ops
+            // (`+`/`-`/`*` plain i64, wrap in release; `/`/`%` raise "Division by zero";
+            // compares yield a Bool). A non-Int operand (a var whose inferred `Int` type went
+            // stale, or an untyped operand) falls back to the real send — so `Int` can be
+            // inferred optimistically rather than only trusted for annotated params.
+            Instruction::IntAdd => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Int(a + b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("+:"), 1);
+                }
+            }
+            Instruction::IntSub => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Int(a - b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("-:"), 1);
+                }
+            }
+            Instruction::IntMul => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Int(a * b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("*:"), 1);
+                }
+            }
+            Instruction::IntDiv => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    if b == 0 {
+                        return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+                    }
+                    self.push(Value::Int(a / b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("/:"), 1);
+                }
+            }
+            Instruction::IntMod => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    if b == 0 {
+                        return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+                    }
+                    self.push(Value::Int(a % b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("%:"), 1);
+                }
+            }
+            Instruction::IntLt => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a < b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("<:"), 1);
+                }
+            }
+            Instruction::IntLe => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a <= b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("<=:"), 1);
+                }
+            }
+            Instruction::IntGt => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a > b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern(">:"), 1);
+                }
+            }
+            Instruction::IntGe => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a >= b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern(">=:"), 1);
+                }
+            }
+            Instruction::IntEq => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a == b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("==:"), 1);
+                }
+            }
+            Instruction::IntNe => {
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a != b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("!=:"), 1);
+                }
+            }
+            // Devirtualized List accessors (Slice 2e). Operands are already on the stack in
+            // send order; if the receiver isn't a native list (or the index isn't an
+            // Integer, matching the typed native `at:`/`at:put:`), fall back to the real send.
+            Instruction::ListGet => {
+                let n = self.stack.len();
+                let index = self.stack[n - 1];
+                let receiver = self.stack[n - 2];
+                if let Value::Int(i) = index {
+                    let got = receiver.with_native_state::<NativeListState, _, _>(|l| {
+                        let vec = l.get_vec();
+                        if i >= 0 && (i as usize) < vec.len() {
+                            Some(vec[i as usize])
+                        } else {
+                            None // out of bounds → nil (native `at:` semantics)
+                        }
+                    });
+                    if let Ok(elem) = got {
+                        self.stack.truncate(n - 2);
+                        self.push(elem.unwrap_or(Value::Nil));
+                        self.frames[frame_idx].ip += 1;
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("at:"), 1);
+            }
+            Instruction::ListSet => {
+                let n = self.stack.len();
+                let value = self.stack[n - 1];
+                let index = self.stack[n - 2];
+                let receiver = self.stack[n - 3];
+                if let Value::Int(i) = index {
+                    let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
+                        let vec = l.get_vec_mut();
+                        if i >= 0 && (i as usize) < vec.len() {
+                            vec[i as usize] = value;
+                            Ok(())
+                        } else {
+                            Err(QuoinError::IndexError {
+                                index: i,
+                                len: vec.len() as i64,
+                                msg: format!(
+                                    "Index out of bounds: index is {}, but length is {}",
+                                    i,
+                                    vec.len()
+                                ),
+                            })
+                        }
+                    });
+                    if let Ok(inner) = res {
+                        self.stack.truncate(n - 3);
+                        inner?; // propagate an IndexError (out-of-bounds write)
+                        self.push(receiver); // `at:put:` evaluates to the receiver
+                        self.frames[frame_idx].ip += 1;
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("at:put:"), 2);
+            }
+            Instruction::ListPush => {
+                let n = self.stack.len();
+                let value = self.stack[n - 1];
+                let receiver = self.stack[n - 2];
+                let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
+                    l.get_vec_mut().push(value);
+                });
+                if res.is_ok() {
+                    self.stack.truncate(n - 2);
+                    self.push(receiver); // `add:` evaluates to the receiver
+                    self.frames[frame_idx].ip += 1;
+                    return Ok(VmStatus::Running);
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("add:"), 1);
+            }
             Instruction::Send(selector, num_args) => {
+                let (selector, num_args) = (*selector, *num_args);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
+            // Self-send to a sealed class's own method (Slice 2b-B). Phase 1: identical to
+            // Send. Phase 2 will resolve + cache the callable at this call site (sealed ⇒
+            // never invalidated), skipping lookup_method.
+            Instruction::CallSelfDirect(selector, num_args) => {
                 let (selector, num_args) = (*selector, *num_args);
                 return self.exec_send(mc, frame_idx, selector, num_args);
             }
@@ -2960,6 +3158,19 @@ impl<'gc> VmState<'gc> {
                     frame.ip = (frame.ip as isize + offset) as usize;
                 } else {
                     frame.ip += 1;
+                }
+            }
+            Instruction::BranchIfNotBool(offset) => {
+                let offset = *offset;
+                // Peek the receiver (do not pop): a non-Bool takes the cold path (the real
+                // send), which needs it on the stack; a Bool falls through to the inlined
+                // branch, which consumes it.
+                let is_bool = matches!(self.stack.last(), Some(Value::Bool(_)));
+                let frame = &mut self.frames[frame_idx];
+                if is_bool {
+                    frame.ip += 1;
+                } else {
+                    frame.ip = (frame.ip as isize + offset) as usize;
                 }
             }
             Instruction::NewList(n) => {

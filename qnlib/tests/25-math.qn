@@ -3,7 +3,7 @@
 "* 09-numbers. libm results (log/exp/pow/hypot/non-trivial trig) aren't IEEE correctly-rounded,
 "* so they use closeTo:; exact special points and the correctly-rounded sqrt use equalTo.
 
-(TestSuite.new:{ name = 'Math' }).add:{
+(TestSuite.new:{ var name = 'Math' }).add:{
     .test:
     constants -> {
         .is:{ Math.pi } equalTo:3.141592653589793;

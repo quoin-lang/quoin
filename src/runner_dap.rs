@@ -128,7 +128,10 @@ impl<R: std::io::BufRead, W: std::io::Write> DapFrontend<R, W> {
     }
 
     /// The program path is supplied in the `launch` request and installed there.
-    pub(crate) fn with_pending(conn: crate::dap::Connection<R, W>, pending: PendingProgram) -> Self {
+    pub(crate) fn with_pending(
+        conn: crate::dap::Connection<R, W>,
+        pending: PendingProgram,
+    ) -> Self {
         Self {
             conn,
             handles: Vec::new(),
@@ -321,7 +324,8 @@ impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W
                                 VarRef::Scope { frame } => (frame, Vec::new()),
                                 VarRef::Value { frame, path } => (frame, path),
                             };
-                            let rows = arena.mutate_root(|_mc, vm| vm.debug_variables(frame, &path));
+                            let rows =
+                                arena.mutate_root(|_mc, vm| vm.debug_variables(frame, &path));
                             // Mint a child handle for each expandable row so the client can expand
                             // it; `i` is the child index used to re-fetch it (path + [i]).
                             rows.into_iter()
@@ -330,7 +334,10 @@ impl<R: std::io::BufRead, W: std::io::Write> DriverFrontend for DapFrontend<R, W
                                     let child_ref = if expandable {
                                         let mut child_path = path.clone();
                                         child_path.push(i);
-                                        self.handles.push(VarRef::Value { frame, path: child_path });
+                                        self.handles.push(VarRef::Value {
+                                            frame,
+                                            path: child_path,
+                                        });
                                         self.handles.len() // 1-based handle
                                     } else {
                                         0

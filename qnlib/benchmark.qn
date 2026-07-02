@@ -1,14 +1,16 @@
 Fib <- {
     .meta <-- {
-        value: -> { |n| (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) } }
+        value: -> Integer { |n: Integer|
+            (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) }
+        }
     }
 };
 
 Sieve <- {
     .meta <-- {
-        primesUpTo: -> { |limit|
-            is_prime = #();
-            i = 0;
+        primesUpTo: -> { |limit: Integer|
+            var is_prime = #();
+            var i = 0;
             { i <= limit }.whileDo:{
                 is_prime.add:true;
                 i = i + 1
@@ -17,7 +19,7 @@ Sieve <- {
             is_prime.at:0 put:false;
             is_prime.at:1 put:false;
 
-            p = 2;
+            var p = 2;
             { p * p <= limit }.whileDo:{
                 (is_prime.at:p).if:{
                     i = p * p;
@@ -29,7 +31,7 @@ Sieve <- {
                 p = p + 1
             };
 
-            primes = #();
+            var primes = #();
             i = 2;
             { i <= limit }.whileDo:{
                 (is_prime.at:i).if:{ primes.add:i };
@@ -41,7 +43,7 @@ Sieve <- {
 };
 
 TreeNode <- { | @left @right @item |
-    init: -> { |item left right|
+    init: -> { |item: Integer left right|
         @item = item;
         @left = left;
         @right = right
@@ -52,9 +54,9 @@ TreeNode <- { | @left @right @item |
 
 TreeBenchmark <- {
     .meta <-- {
-        powerOfTwo: -> { |p|
-            res = 1;
-            i = 0;
+        powerOfTwo: -> Integer { |p: Integer|
+            var res = 1;
+            var i = 0;
             { i < p }.whileDo:{
                 res = res * 2;
                 i = i + 1
@@ -62,19 +64,19 @@ TreeBenchmark <- {
             ^res
         };
 
-        run: -> { |max_depth|
-            min_depth = 4;
+        run: -> { |max_depth: Integer|
+            var min_depth = 4;
 
-            long_lived_tree = TreeBenchmark.makeTree:0 depth:max_depth;
+            var long_lived_tree = TreeBenchmark.makeTree:0 depth:max_depth;
 
-            depth = min_depth;
+            var depth = min_depth;
             { depth <= max_depth }.whileDo:{
-                iterations = TreeBenchmark.powerOfTwo:(max_depth - depth + min_depth);
-                check_sum = 0;
+                var iterations = TreeBenchmark.powerOfTwo:(max_depth - depth + min_depth);
+                var check_sum = 0;
 
-                i = 1;
+                var i = 1;
                 { i <= iterations }.whileDo:{
-                    t = TreeBenchmark.makeTree:i depth:depth;
+                    var t = TreeBenchmark.makeTree:i depth:depth;
                     check_sum = check_sum + t.check;
                     t = TreeBenchmark.makeTree:-i depth:depth;
                     check_sum = check_sum + t.check;
@@ -84,10 +86,10 @@ TreeBenchmark <- {
             }
         };
 
-        makeTree:depth: -> { |item depth|
+        makeTree:depth: -> { |item: Integer depth: Integer|
             (depth > 0).if:{
-                left = TreeBenchmark.makeTree:(2 * item - 1) depth:(depth - 1);
-                right = TreeBenchmark.makeTree:(2 * item) depth:(depth - 1);
+                var left = TreeBenchmark.makeTree:(2 * item - 1) depth:(depth - 1);
+                var right = TreeBenchmark.makeTree:(2 * item) depth:(depth - 1);
                 ^TreeNode.new:{ item=item; left=left; right=right }
             }
             else:{ ^TreeNode.new:{ item=item } }
@@ -99,15 +101,15 @@ Benchmark <- {
     .meta <-- {
         run:block:iterations: -> { |name block iterations|
             ('Running: ' + name).print;
-            total = 0;
-            i = 1;
+            var total = 0;
+            var i = 1;
             { i <= iterations }.whileDo:{
-                elapsed = Timer.time:block;
+                var elapsed = Timer.time:block;
                 ('  Iteration ' + i + ': ' + elapsed + ' µs').print;
                 total = total + elapsed;
                 i = i + 1
             };
-            avg = total / iterations;
+            var avg = total / iterations;
             ('  Average: ' + avg + ' µs').print;
             '--------------------------------------------------'.print;
             ^avg

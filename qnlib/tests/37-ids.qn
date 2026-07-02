@@ -4,10 +4,10 @@
 "* Object) and stringify with `.s`. Time-ordering tests sleep between generations so the two
 "* values land in different milliseconds (within one ms the low bits are random, not ordered).
 
-(TestSuite.new:{ name = 'IDs' }).add:{
+(TestSuite.new:{ var name = 'IDs' }).add:{
     .test:
     uuidV4 -> {
-        u = UUID.generateV4;
+        var u = UUID.generateV4;
         .is:{ u.version } equalTo:4;
         .is:{ u.s.length } equalTo:36;            "* canonical hyphenated form
         .is:{ u.asBytes.size } equalTo:16;
@@ -17,7 +17,7 @@
 
     .test:
     uuidV7 -> {
-        u = UUID.generateV7;
+        var u = UUID.generateV7;
         .is:{ u.version } equalTo:7;
         .is:{ u.s.length } equalTo:36;
         .is:{ u.asBytes.size } equalTo:16;
@@ -25,7 +25,7 @@
 
     .test:
     uuidParseRoundTrip -> {
-        u = UUID.generateV4;
+        var u = UUID.generateV4;
         .is:{ UUID.parse:(u.s) } equalTo:u;        "* parse ∘ render is identity
         "* parsing is case-insensitive and the rendered form is canonical (lower-case)
         .is:{ (UUID.parse:'550E8400-E29B-41D4-A716-446655440000').s }
@@ -35,9 +35,9 @@
     .test:
     uuidOrdering -> {
         "* v7 is time-ordered; sleep so the two land in distinct milliseconds.
-        a = UUID.generateV7;
+        var a = UUID.generateV7;
         Async.sleep:2;
-        b = UUID.generateV7;
+        var b = UUID.generateV7;
         .isTrue:{ a < b };
         .isTrue:{ b > a };
         .isTrue:{ a <= b };
@@ -46,7 +46,7 @@
 
     .test:
     uuidEquality -> {
-        u = UUID.generateV4;
+        var u = UUID.generateV4;
         .isTrue:{ u == (UUID.parse:(u.s)) };
         "* `==` against a non-UUID is false, never an error
         .isFalse:{ u == 'not a uuid' };
@@ -61,7 +61,7 @@
 
     .test:
     ulidBasics -> {
-        l = ULID.generate;
+        var l = ULID.generate;
         .is:{ l.s.length } equalTo:26;             "* 26-char Crockford base32
         .is:{ l.asBytes.size } equalTo:16;
         .isTrue:{ l.timestampMillis > 0 };
@@ -69,7 +69,7 @@
 
     .test:
     ulidParseRoundTrip -> {
-        l = ULID.generate;
+        var l = ULID.generate;
         .is:{ ULID.parse:(l.s) } equalTo:l;
         .isTrue:{ (ULID.parse:(l.s)) == l };
     };
@@ -77,9 +77,9 @@
     .test:
     ulidOrdering -> {
         "* ULID lexicographic order == chronological order (timestamp is the high bits).
-        a = ULID.generate;
+        var a = ULID.generate;
         Async.sleep:2;
-        b = ULID.generate;
+        var b = ULID.generate;
         .isTrue:{ a < b };
         .isTrue:{ b > a };
         .isTrue:{ a.timestampMillis < b.timestampMillis };

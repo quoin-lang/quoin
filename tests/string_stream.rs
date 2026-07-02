@@ -45,19 +45,19 @@ fn string_stream_lines_and_incremental_decode() {
 
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
 "* readLine: decoded lines with the newline stripped, nil at EOF. The é code points and
 "* the line breaks both straddle underlying reads; the buffer reassembles them.
 "* Expected values are built from the exact bytes the server sends — a source 'é' literal
 "* could be NFC or NFD and so not match the wire bytes (NFC, C3 A9 here). 10 = '\n'.
-cafe = (Bytes.of:#(99 97 102 195 169)).asString;
-resume = (Bytes.of:#(114 195 169 115 117 109 195 169)).asString;
-full = (Bytes.of:#(99 97 102 195 169 10 114 195 169 115 117 109 195 169 10 116 97 105 108)).asString;
+var cafe = (Bytes.of:#(99 97 102 195 169)).asString;
+var resume = (Bytes.of:#(114 195 169 115 117 109 195 169)).asString;
+var full = (Bytes.of:#(99 97 102 195 169 10 114 195 169 115 117 109 195 169 10 116 97 105 108)).asString;
 
-s = TcpSocket.connect:'127.0.0.1:{port}';
-bs = s.byteStream;
-ss = StringStream.over:bs;
+var s = TcpSocket.connect:'127.0.0.1:{port}';
+var bs = s.byteStream;
+var ss = StringStream.over:bs;
 (s.closed?).else:{{ ok = false }};      "* socket consumed by byteStream
 (bs.closed?).else:{{ ok = false }};     "* byte stream consumed by StringStream.over:
 ((ss.readLine) == cafe).else:{{ ok = false }};
@@ -68,12 +68,12 @@ ss.close;
 
 "* read: looping and concatenating the available-text chunks reproduces the whole text,
 "* which holds only if a code point split across reads is retained (not corrupted/thrown).
-s2 = TcpSocket.connect:'127.0.0.1:{port}';
-ss2 = s2.stringStream;
-acc = '';
-done = false;
+var s2 = TcpSocket.connect:'127.0.0.1:{port}';
+var ss2 = s2.stringStream;
+var acc = '';
+var done = false;
 {{ done == false }}.whileDo:{{
-    chunk = ss2.read;
+    var chunk = ss2.read;
     (chunk.length == 0).if:{{ done = true }} else:{{ acc = acc + chunk }};
 }};
 (acc == full).else:{{ ok = false }};
@@ -137,21 +137,21 @@ fn string_stream_emoji_and_rtl() {
 
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
 "* Expected lines, built from the exact wire bytes (10 = '\n'):
 "*   emojiLine  = "😀ab"   F0 9F 98 80 'a' 'b'
 "*   arabicLine = "مرحبا"  (Arabic, RTL; five 2-byte code points)
 "*   hebrewLine = "שלום"   (Hebrew, RTL; four 2-byte code points)
-emojiLine = (Bytes.of:#(240 159 152 128 97 98)).asString;
-arabicLine = (Bytes.of:#(217 133 216 177 216 173 216 168 216 167)).asString;
-hebrewLine = (Bytes.of:#(215 169 215 156 215 149 215 157)).asString;
-fullU = (Bytes.of:#(240 159 152 128 97 98 10 217 133 216 177 216 173 216 168 216 167 10 215 169 215 156 215 149 215 157)).asString;
+var emojiLine = (Bytes.of:#(240 159 152 128 97 98)).asString;
+var arabicLine = (Bytes.of:#(217 133 216 177 216 173 216 168 216 167)).asString;
+var hebrewLine = (Bytes.of:#(215 169 215 156 215 149 215 157)).asString;
+var fullU = (Bytes.of:#(240 159 152 128 97 98 10 217 133 216 177 216 173 216 168 216 167 10 215 169 215 156 215 149 215 157)).asString;
 
 "* readLine: the 4-byte emoji and an Arabic letter both straddle underlying reads;
 "* the buffer reassembles them before decoding.
-s = TcpSocket.connect:'127.0.0.1:{port}';
-ss = StringStream.over:(s.byteStream);
+var s = TcpSocket.connect:'127.0.0.1:{port}';
+var ss = StringStream.over:(s.byteStream);
 ((ss.readLine) == emojiLine).else:{{ ok = false }};
 ((ss.readLine) == arabicLine).else:{{ ok = false }};
 ((ss.readLine) == hebrewLine).else:{{ ok = false }};   "* final newline-less line
@@ -160,12 +160,12 @@ ss.close;
 
 "* read: concatenating the available-text chunks reproduces the whole payload, which holds
 "* only if the emoji split across reads is retained (4-byte sequence) rather than mangled.
-s2 = TcpSocket.connect:'127.0.0.1:{port}';
-ss2 = s2.stringStream;
-acc = '';
-done = false;
+var s2 = TcpSocket.connect:'127.0.0.1:{port}';
+var ss2 = s2.stringStream;
+var acc = '';
+var done = false;
 {{ done == false }}.whileDo:{{
-    chunk = ss2.read;
+    var chunk = ss2.read;
     (chunk.length == 0).if:{{ done = true }} else:{{ acc = acc + chunk }};
 }};
 (acc == fullU).else:{{ ok = false }};

@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Sets' }).add:{
+(TestSuite.new:{ var name = 'Sets' }).add:{
     .test:
     literalAndCount -> {
         .is:{ #<1 2 3 2 1>.count } equalTo:3;     "* literal dedups by ==:
@@ -14,13 +14,13 @@
     .test:
     addAndRemove -> {
         .is:{
-            s = #<1 2>;
+            var s = #<1 2>;
             s.add:3;
             s.add:2;                              "* duplicate ignored
             s.count
         } equalTo:3;
         .is:{
-            s = #<1 2 3>;
+            var s = #<1 2 3>;
             s.remove:2;
             s.contains?:2
         } equalTo:false;
@@ -57,7 +57,7 @@
 
     .test:
     eachVisitsEveryElement -> {
-        seen = #();
+        var seen = #();
         #<1 2 3>.each:{ |x| seen.add:x };
         .is:{ seen.count } equalTo:3;
         .isTrue:{ seen.contains?:2 };

@@ -25,20 +25,20 @@
 "* ===========================================================================
 
 "* --- configuration ---
-rounds = 200000;  "* high by default — a soak. Ctrl-C anytime, or pass a count.
-width = 8;  "* concurrent tasks per gather batch
-progressEvery = 200;  "* print a progress line every N rounds
+var rounds = 200000;  "* high by default — a soak. Ctrl-C anytime, or pass a count.
+var width = 8;  "* concurrent tasks per gather batch
+var progressEvery = 200;  "* print a progress line every N rounds
 
-args = Runtime.arguments;
+var args = Runtime.arguments;
 (args.count > 0).if:{ rounds = (args.at:0).to_integer };
 
 "* --- deterministic per-task computation ---
 "* A short summing loop seeded by round `r` and task index `k`. Pure and
 "* order-independent, so the concurrent task and the serial reference share it and
 "* cannot drift. (`r + i + 1` and `k + 1` keep every term non-zero.)
-worker = { |r k|
-    acc = 0;
-    i = 0;
+var worker = { |r k|
+    var acc = 0;
+    var i = 0;
     { i < 40 }.whileDo:{
         acc = acc + ((r + i + 1) * (k + 1));
         i = i + 1
@@ -47,14 +47,14 @@ worker = { |r k|
 };
 
 "* The serial reference list for round `r` (no concurrency, no sleeps).
-expectedCompute = { |r| (0..width).collect:{ |k| worker.valueWithArgs:#( r k ) } };
+var expectedCompute = { |r| (0..width).collect:{ |k| worker.valueWithArgs:#( r k ) } };
 
 "* The concurrent batch for round `r`: each task computes worker(r, k); a few park
 "* on a real sleep so the batch mixes parked and ready tasks through the reactor.
-gatherCompute = { |r|
+var gatherCompute = { |r|
     Async.gather:((0..width).collect:{ |k|
         {
-            v = worker.valueWithArgs:#( r k );
+            var v = worker.valueWithArgs:#( r k );
             ((k % 3) == 0).if:{ Async.sleep:1 };
             v
         }
@@ -63,36 +63,36 @@ gatherCompute = { |r|
 
 "* A nested gather (a task that itself gathers) plus a sleeper — exercises the
 "* save/load swap at two levels and gather-slot reuse.
-gatherNested = { |r|
+var gatherNested = { |r|
     Async.gather:#(
         { Async.gather:#( { r + 1 } { r + 2 } ) }
         { worker.valueWithArgs:#(r 0) }
         { Async.sleep: 1; r * 2 }
     )
 };
-expectedNested = { |r| #( #( (r + 1) (r + 2) ) (worker.valueWithArgs:#(r 0)) (r * 2) ) };
+var expectedNested = { |r| #( #( (r + 1) (r + 2) ) (worker.valueWithArgs:#(r 0)) (r * 2) ) };
 
 "* A guest Fiber driven inside a task (the hardest swap path: a child task is
 "* preempted while holding an active resume chain), alongside a sleeper.
-gatherFiber = { |r|
+var gatherFiber = { |r|
     Async.gather:#(
         {
-            f = Fiber.new:{ Fiber.yield: (r + 1); Fiber.yield: (r + 2); (r + 3) };
+            var f = Fiber.new:{ Fiber.yield: (r + 1); Fiber.yield: (r + 2); (r + 3) };
             #( f.resume f.resume f.resume )
         }
         { Async.sleep: 1; r }
     )
 };
-expectedFiber = { |r| #( #( (r + 1) (r + 2) (r + 3) ) r ) };
+var expectedFiber = { |r| #( #( (r + 1) (r + 2) (r + 3) ) r ) };
 
 "* Detached spawn + join (Stage 2b): spawn one task per index, then join them all.
 "* Each task computes worker(r, k); a few sleep so some are parked when joined. The
 "* joined results, in spawn order, must equal the serial reference. Handles fall out
 "* of scope each round and their slots are freed on completion, so nothing leaks.
-spawnJoin = { |r|
-    handles = (0..width).collect:{ |k|
+var spawnJoin = { |r|
+    var handles = (0..width).collect:{ |k|
         Task.spawn:{
-            v = worker.valueWithArgs:#( r k );
+            var v = worker.valueWithArgs:#( r k );
             ((k % 4) == 0).if:{ Async.sleep:1 };
             v
         }
@@ -104,12 +104,12 @@ spawnJoin = { |r|
 "* all, and join. Each sleeps far longer than a round so cancel always wins (whether
 "* the task is still ready or already parked on the sleep) — deterministic under the
 "* stress knobs. Every join must observe a (catchable) cancellation, mapped to -1.
-spawnCancel = { |r|
-    handles = (0..width).collect:{ |k| Task.spawn:{ Async.sleep:100000; r + k } };
+var spawnCancel = { |r|
+    var handles = (0..width).collect:{ |k| Task.spawn:{ Async.sleep:100000; r + k } };
     handles.each:{ |h| h.cancel };
     handles.collect:{ |h| { h.join }.catch:{ |ex| 0 - 1 } }
 };
-expectedCancel = (0..width).collect:{ |k| 0 - 1 };
+var expectedCancel = (0..width).collect:{ |k| 0 - 1 };
 
 "* Timeout combinator (Stage 5a): deterministic by construction. Even indices complete
 "* within a huge deadline (the work runs, returns its value); odd indices always blow a
@@ -117,7 +117,7 @@ expectedCancel = (0..width).collect:{ |k| 0 - 1 };
 "* value. So every element equals worker(r, k) regardless of scheduling — the margins are
 "* enormous, so the deadline-vs-completion outcomes never race. Exercises spawn + the
 "* timed-join race + cancel-on-deadline (finally/abort) every round, under all stress knobs.
-timeoutRound = { |r|
+var timeoutRound = { |r|
     (0..width).collect:{ |k|
         ((k % 2) == 0).if:{ Async.timeout:1000000 do:{ worker.valueWithArgs:#( r k ) } }
         else:{
@@ -134,8 +134,8 @@ timeoutRound = { |r|
 "* regardless of scheduling, and the buffered values must survive collection while they sit
 "* in the channel (trace_gc) — corruption or a lost value fails the check. `gather` returns
 "* #( producerResult consumerList ).
-channelPipeline = { |r|
-    ch = Channel.buffered: 4;
+var channelPipeline = { |r|
+    var ch = Channel.buffered: 4;
     Async.gather:#(
         {
             (0..width).each:{ |k|
@@ -146,33 +146,33 @@ channelPipeline = { |r|
             'done'
         }
         {
-            out = #();
+            var out = #();
             ch.each:{ |v| out.add: v };
             out
         }
     )
 };
-expectedPipeline = { |r| #( 'done' (expectedCompute.value:r) ) };
+var expectedPipeline = { |r| #( 'done' (expectedCompute.value:r) ) };
 
 "* Channel fan-in (unbuffered rendezvous): width sender tasks each send worker(r,k) on an
 "* unbuffered channel; this task receives width values and sums them. Many senders park on
 "* the rendezvous with one receiver; the sum is order-independent, so it is deterministic
 "* under any scheduling. Sender handles fall out of scope and their slots free on completion.
-channelFanIn = { |r|
-    ch = Channel.new;
+var channelFanIn = { |r|
+    var ch = Channel.new;
     (0..width).each:{ |k| Task.spawn:{ ch.send:(worker.valueWithArgs:#(r k)) } };
-    sum = 0;
+    var sum = 0;
     (0..width).each:{ |_| sum = sum + ch.receive };
     sum
 };
-expectedFanIn = { |r| (expectedCompute.value:r).sum };
+var expectedFanIn = { |r| (expectedCompute.value:r).sum };
 
 "* Compare, or fail loudly: print a greppable SOAK FAILED line to stdout (Run mode
 "* exits 0 even on an uncaught throw) and then throw to abort the loop and dump the
 "* detail to stderr.
-check = { |phase r actual expected|
+var check = { |phase r actual expected|
     (actual == expected).else:{
-        detail = ('round ' + r + ' phase ' + phase
+        var detail = ('round ' + r + ' phase ' + phase
             + ': expected ' + expected + ' got ' + actual);
         ('SOAK FAILED: ' + detail).print;
         detail.throw
@@ -182,11 +182,11 @@ check = { |phase r actual expected|
 "* --- the soak loop ---
 ('async_soak: ' + rounds + ' rounds, ' + width + ' tasks/batch').print;
 
-round = 0;
-checksum = 0;
+var round = 0;
+var checksum = 0;
 { round < rounds }.whileDo:{
     "* 1. concurrent compute vs serial reference
-    actual = gatherCompute.value:round;
+    var actual = gatherCompute.value:round;
     check.valueWithArgs:#( 'compute' round actual (expectedCompute.value:round) );
 
     "* 2. nested gather
@@ -231,8 +231,8 @@ checksum = 0;
     );
 
     "* 9. allocation pressure (give the GC debt) folded into a running checksum
-    pressure = (0..width).collect:{ |k| (round + k) * (k + 1) };
-    rsum = actual.sum + (pressure.select:{ |x| (x % 2) == 0 }).sum;
+    var pressure = (0..width).collect:{ |k| (round + k) * (k + 1) };
+    var rsum = actual.sum + (pressure.select:{ |x| (x % 2) == 0 }).sum;
     checksum = (checksum + rsum) % 1000000007;
 
     ((round % progressEvery) == 0).if:{ ('  round ' + round + '  checksum ' + checksum).print };

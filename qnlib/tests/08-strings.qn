@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Strings' }).add:{
+(TestSuite.new:{ var name = 'Strings' }).add:{
     .test:
     equality -> {
         .is:{ 'abc'.s } equalTo:'abc';

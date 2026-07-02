@@ -13,22 +13,22 @@ Mixin <- BuiltinAssertions <- {
     };
 
     recordResult:evidence:block: -> { |testBlock:Block evidenceArg:List block:Block|
-        assertionName = block.name.defined?.if:{ block.name } else:{ '{code}' };
+        var assertionName = block.name.defined?.if:{ block.name } else:{ '{code}' };
 
         .reporter.startAssertion:assertionName;
 
-        assertionResult = nil;
-        assertionElapsed = Timer.time:{ assertionResult = testBlock.value };
+        var assertionResult = nil;
+        var assertionElapsed = Timer.time:{ assertionResult = testBlock.value };
 
-        evidenceTemp = evidenceArg;
+        var evidenceTemp = evidenceArg;
 
-        r = self.addResult:TestAssertionResult.new:{
-            test = self;
-            name = assertionName;
-            passed? = (assertionResult == true);
-            evidence = evidenceTemp;
-            elapsed = assertionElapsed;
-            location = block.source
+        var r = self.addResult:TestAssertionResult.new:{
+            var test = self;
+            var name = assertionName;
+            var passed? = (assertionResult == true);
+            var evidence = evidenceTemp;
+            var elapsed = assertionElapsed;
+            var location = block.source
         };
 
         .reporter.endAssertion:r;
@@ -44,17 +44,17 @@ Mixin <- BuiltinAssertions <- {
     };
 
     is:a: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ expected ~ actual } evidence:#( expected '!~' actual ) block:block
     };
     is:an: -> { |block:Block expected| .is:block a:expected };
 
     is:equalTo: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ expected == actual } evidence:#( expected '!=' actual ) block:block
     };
     is:notEqualTo: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ expected != actual } evidence:#( expected '==' actual ) block:block
     };
 
@@ -63,37 +63,37 @@ Mixin <- BuiltinAssertions <- {
     "* (log/exp/pow/trig) across platforms; `closeTo:within:` sets the tolerance explicitly.
     is:closeTo: -> { |block:Block expected| .is:block closeTo:expected within:0.000000001 };
     is:closeTo:within: -> { |block:Block expected tolerance|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ (actual - expected).abs < tolerance }
          evidence:#( expected 'not within tolerance of' actual )
          block:block
     };
 
     is:lessThan: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ actual < expected } evidence:#( actual 'not <' expected ) block:block
     };
     is:greaterThan: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ actual > expected } evidence:#( actual 'not >' expected ) block:block
     };
     is:lessThanOrEqualTo: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ actual < = expected } evidence:#( actual 'not <=' expected ) block:block
     };
     is:greaterThanOrEqualTo: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ actual > = expected } evidence:#( actual 'not >=' expected ) block:block
     };
 
     does:match: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ actual ~ expected }
          evidence:#( expected 'didn\'t match' actual )
          block:block
     };
     does:notMatch: -> { |block:Block expected|
-        actual = block.value;
+        var actual = block.value;
         .recordResult:{ !(actual ~ expected) } evidence:#( expected 'matched' actual ) block:block
     };
 
@@ -105,7 +105,7 @@ Mixin <- BuiltinAssertions <- {
     };
 
     does:throw: -> { |block:Block expectedError|
-        actualError = nil;
+        var actualError = nil;
         { #doesThrowBlock | - | block.value }.catch:{ #doesThrowCatchBlock |x| actualError = x };
         "* Match either the thrown value/type directly (e.g. an error Class) or
         "* its string form (e.g. a regex against the message)."
@@ -192,11 +192,11 @@ Test <- { |@name @method @assertions @reporter @wallElapsed|
         @wallElapsed = Timer.time:{ @method.callOn:self };
 
         TestResult.new:{
-            test = self;
-            name = @name;
-            assertions = @assertions;
-            elapsed = @assertions.sum:{ .elapsed };
-            wallElapsed = @wallElapsed
+            var test = self;
+            var name = @name;
+            var assertions = @assertions;
+            var elapsed = @assertions.sum:{ .elapsed };
+            var wallElapsed = @wallElapsed
         }
     }
 };
@@ -255,7 +255,7 @@ TestSuite <- { |@name @tests @skipped? @reason|
 
     test: -> { |m:Method|
         (m.block.arity > 1).if:{ %'Test method %{m.selector} must have 0 or 1 args'.throw };
-        @tests.add:Test.new:{ method = m }
+        @tests.add:Test.new:{ var method = m }
     };
 
     tests -> { @tests }
@@ -296,14 +296,14 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
     startRun: --> { |suites:List| @nameWidth = (suites.collect:{ |s| s.name.length }).max };
 
     endRun:elapsed: --> { |suites:List elapsed|
-        skips = (suites.select:{ |s| s.skipped? }).count;
+        var skips = (suites.select:{ |s| s.skipped? }).count;
         "* Skipped suites register no tests, and `.sum:` over an empty list yields nil
         "* (which would poison the totals) — so fold only the suites that actually ran.
-        active = suites.select:{ |s| s.skipped? == false };
-        ran = (active.collect:{ |s| s.tests }).flatten;
-        passes = ran.any?.if:{ ran.sum:{ .passes.count } } else:{ 0 };
-        failures = ran.any?.if:{ ran.sum:{ .failures.count } } else:{ 0 };
-        testsElapsed = ran.any?.if:{ ran.sum:{ .elapsed } } else:{ 0 };
+        var active = suites.select:{ |s| s.skipped? == false };
+        var ran = (active.collect:{ |s| s.tests }).flatten;
+        var passes = ran.any?.if:{ ran.sum:{ .passes.count } } else:{ 0 };
+        var failures = ran.any?.if:{ ran.sum:{ .failures.count } } else:{ 0 };
+        var testsElapsed = ran.any?.if:{ ran.sum:{ .elapsed } } else:{ 0 };
         @out.writeln:#ANSI'All suites finished in $#00bfff[%1$] ($#00bfff[%2$]) : $#69ff61[%3 passes$] / $#ff6961[%4 failures$] / $#ffd75f[%5 skipped$]' % #(
             (.humanize:testsElapsed)
             (.humanize:elapsed)
@@ -326,9 +326,9 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
     endSuite:elapsed: --> { |suite:TestSuite elapsed|
         "* A skipped suite already announced itself in startSuite: and ran no tests.
         suite.skipped?.if:{ ^^nil };
-        passes = suite.tests.sum:{ .passes.count };
-        failures = suite.tests.sum:{ .failures.count };
-        testsElapsed = suite.tests.sum:{ .elapsed };
+        var passes = suite.tests.sum:{ .passes.count };
+        var failures = suite.tests.sum:{ .failures.count };
+        var testsElapsed = suite.tests.sum:{ .elapsed };
         @out.writeln:#ANSI'[$#5fd7af;bw[%1$]] Finished in $#00bfff[%4$] ($#00bfff[%5$]) : $#69ff61[%2 passes$] / $#ff6961[%3 failures$]' % #(
             .paddedName
             passes
@@ -348,7 +348,7 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
             (.humanize:result.wallElapsed)
         );
         (result.failures.any?).if:{
-            failedTests = result.failures.collect:{ |r|
+            var failedTests = result.failures.collect:{ |r|
                 #ANSI'$#69ff61[%1$] $bw[%2$] $#ff6961[%3$] at $#ffffff;bw[%4$]:$#00bfff[%5$]:$#00bfff[%6$]' % #(
                     r.expected.s.replace:#/\s+/ with:' '
                     r.comparison
@@ -358,8 +358,8 @@ TestReporter <- AnsiTestReporter <- { |@out @currentSuite @nameWidth|
                     r.locationColumn
                 )
             };
-            outTemp = @out;
-            suiteName = .paddedName;
+            var outTemp = @out;
+            var suiteName = .paddedName;
             @out.writeln:#ANSI' $#ff6961[%1 of %2 assertions failed$]:' % #(
                 result.failures.count
                 result.assertions.count
@@ -386,21 +386,21 @@ TestRunner <- { |@suites|
     suites -> { @suites };
 
     run: -> { |reporter|
-        results = #();
+        var results = #();
         reporter.startRun:@suites;
 
-        runElapsed = Timer.time:{
+        var runElapsed = Timer.time:{
             @suites.each:{ |s|
                 reporter.startSuite:s;
 
-                tr = nil;
-                elapsed = Timer.time:{
+                var tr = nil;
+                var elapsed = Timer.time:{
                     tr = s.skipped?.if:{ #() }
                     else:{
                         s.tests.collect:{ #collectTests |t|
                             reporter.startTest:t;
 
-                            r = t.run:reporter;
+                            var r = t.run:reporter;
 
                             reporter.endTest:r;
 

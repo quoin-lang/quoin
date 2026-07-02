@@ -449,8 +449,11 @@ pub fn value_children<'gc>(value: Value<'gc>) -> Vec<(String, PpChild<'gc>)> {
         match &b.payload {
             ObjectPayload::Instance => {
                 let cls = b.class.borrow();
-                let mut slots: Vec<(String, usize)> =
-                    cls.field_slots.iter().map(|(n, &s)| (n.clone(), s)).collect();
+                let mut slots: Vec<(String, usize)> = cls
+                    .field_slots
+                    .iter()
+                    .map(|(n, &s)| (n.clone(), s))
+                    .collect();
                 slots.sort_by_key(|x| x.1);
                 let ivars = slots
                     .into_iter()

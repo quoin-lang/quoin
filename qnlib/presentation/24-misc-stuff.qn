@@ -2,8 +2,8 @@
 #/bc/ ~ 'abcd';  "* true
 
 "* Basic JSON support w/ paths
-jsonText = '{"a": [1,{"five":5},3]}';
-jsonObject = (Json.deserialize:jsonText);
+var jsonText = '{"a": [1,{"five":5},3]}';
+var jsonObject = (Json.deserialize:jsonText);
 jsonObject.a.second.five;  "* 5
 
 Json.serialize:(1..5);  "* '[1,2,3,4,5]'

@@ -1,10 +1,10 @@
 "* CSV (src/runtime/csv_fmt.rs) — tabular text, RFC 4180. Fields are strings (CSV is untyped);
 "* generate stringifies via .s. Both positional (List of Lists) and header-keyed (List of Maps).
 
-(TestSuite.new:{ name = 'CSV' }).add:{
+(TestSuite.new:{ var name = 'CSV' }).add:{
     .test:
     parsePositional -> {
-        rows = CSV.parse:'a,b,c\n1,2,3';
+        var rows = CSV.parse:'a,b,c\n1,2,3';
         .is:{ rows.at:0 } equalTo:#('a' 'b' 'c');
         .is:{ rows.at:1 } equalTo:#('1' '2' '3');
         .is:{ (rows.at:1).at:0 } a:String;        "* every field is a String
@@ -13,14 +13,14 @@
     .test:
     parseQuoting -> {
         "* RFC 4180: a quoted field may contain commas and escaped (doubled) quotes.
-        rows = CSV.parse:'"Smith, Jr.","said ""hi"""';
+        var rows = CSV.parse:'"Smith, Jr.","said ""hi"""';
         .is:{ (rows.at:0).at:0 } equalTo:'Smith, Jr.';
         .is:{ (rows.at:0).at:1 } equalTo:'said "hi"';
     };
 
     .test:
     parseWithHeaders -> {
-        rows = CSV.parseWithHeaders:'name,age\nAlice,30\nBob,25';
+        var rows = CSV.parseWithHeaders:'name,age\nAlice,30\nBob,25';
         .is:{ rows.count } equalTo:2;
         .is:{ (rows.at:0).at:'name' } equalTo:'Alice';
         .is:{ (rows.at:0).at:'age' } equalTo:'30';
@@ -45,7 +45,7 @@
 
     .test:
     roundTrip -> {
-        original = 'x,y\n1,2\n3,4\n';
+        var original = 'x,y\n1,2\n3,4\n';
         .is:{ CSV.generate:(CSV.parse:original) } equalTo:original;
     };
 

@@ -1,8 +1,8 @@
-(TestSuite.new:{ name = 'Misc' }).add:{
+(TestSuite.new:{ var name = 'Misc' }).add:{
     .test:
     humanizeDuration -> {
         "* Reporter renders elapsed µs in the largest unit >= 1, one decimal for ms/s."
-        r = AnsiTestReporter.new:{ out = nil };
+        var r = AnsiTestReporter.new:{ var out = nil };
         .is:{ r.humanize:0 } equalTo:'0µs';
         .is:{ r.humanize:524 } equalTo:'524µs';
         .is:{ r.humanize:999 } equalTo:'999µs';
@@ -19,7 +19,7 @@
             EqTester1 <- {
                 #'==:' --> { true }
             }
-            x = EqTester1.new
+            var x = EqTester1.new
             #( (x==x) (x!=x) )
         } equalTo:#( true false );
 
@@ -27,7 +27,7 @@
             EqTester2 <- {
                 #'==:' --> { false }
             }
-            x = EqTester2.new
+            var x = EqTester2.new
             #( (x==x) (x!=x) )
         } equalTo:#( false true );
     };
@@ -35,8 +35,8 @@
     .test:
     whileDo -> {
         .is:{
-            i = 3;
-            r = #();
+            var i = 3;
+            var r = #();
             { i < 10 }.whileDo:{ r.add:i; i = i + 1 }
             ^r
         } equalTo:#( 3 4 5 6 7 8 9 );
@@ -45,7 +45,7 @@
     .test:
     blockRecursion -> {
         .is:{
-            block = {|a|
+            var block = {|a|
             (a >= 'aaaaa').if:{ a }
                          else:{ block.value:(a + 'a') };
             };
@@ -129,7 +129,7 @@
             init -> { @total = 7 }
             double -> { @total * 2 }
         };
-        b = EvalSelfProbe.new;
+        var b = EvalSelfProbe.new;
         .is:{ Runtime.eval:'self' self:b } equalTo:b;
         .is:{ Runtime.eval:'@total' self:b } equalTo:7;
         .is:{ Runtime.eval:'@total + 1' self:b } equalTo:8;

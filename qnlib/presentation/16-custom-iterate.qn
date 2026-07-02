@@ -9,14 +9,14 @@ MyRange <- { |@start @end|
 
     "* Only one method required to implement Iterate: call the block per element.
     each: -> { |b|
-        i = @start;
+        var i = @start;
         { i < @end }.whileDo:{ b.valueWithSelfOrArg:i; i = i + 1 }
     }
 };
 
-r = MyRange.new:{
-    start = 0;
-    end = 9
+var r = MyRange.new:{
+    var start = 0;
+    var end = 9
 };
 
 r.collect:{ |n| n + 1 }

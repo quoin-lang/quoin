@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Symbols' }).add:{
+(TestSuite.new:{ var name = 'Symbols' }).add:{
     .test:
     classAndStringForm -> {
         .is:{ #foo.class } equalTo:Symbol;

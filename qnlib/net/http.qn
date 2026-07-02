@@ -44,10 +44,10 @@
         "* bytes-backed (request bodies, already-materialized responses)
         of:contentType:encoding: -> { |b ct enc|
             ^[HTTP]Body.new:{
-                bytes = b;
-                mediaType = [HTTP]Body.mediaTypeOf:ct;
-                encoding = enc;
-                meta = #{}
+                var bytes = b;
+                var mediaType = [HTTP]Body.mediaTypeOf:ct;
+                var encoding = enc;
+                var meta = #{}
             }
         };
         of:contentType: -> { |bytes ct| ^[HTTP]Body.of:bytes contentType:ct encoding:nil };
@@ -56,7 +56,7 @@
         "* A single streamed chunk: bytes-backed, carrying its per-chunk metadata (chunk
         "* extensions) and inheriting the response's media type.
         chunk:meta:mediaType: -> { |b m mt|
-            ^[HTTP]Body.new:{ bytes = b; meta = m; mediaType = mt }
+            ^[HTTP]Body.new:{ var bytes = b; var meta = m; var mediaType = mt }
         };
 
         "* stream-backed: a live stream framed as 'chunked' | 'length' (with len) | 'close'
@@ -64,10 +64,10 @@
             ^[HTTP]Body.new:{
                 stream = stream;
                 framing = framing;
-                length = len;
-                mediaType = [HTTP]Body.mediaTypeOf:ct;
-                encoding = enc;
-                meta = #{}
+                var length = len;
+                var mediaType = [HTTP]Body.mediaTypeOf:ct;
+                var encoding = enc;
+                var meta = #{}
             }
         }
     };
@@ -86,39 +86,39 @@
     "* at EOF. `.bytes` drains this; the public `.chunks` decodes on top of it.
     rawChunks -> {
         @bytes.defined?.if:{
-            me = self;
-            n = @bytes.count;
+            var me = self;
+            var n = @bytes.count;
             ^^Generator.from:{ (n > 0).if:{ ^>me } }
         };
-        st = @stream;
-        fr = @framing;
-        len = @length;
-        mt = @mediaType;
+        var st = @stream;
+        var fr = @framing;
+        var len = @length;
+        var mt = @mediaType;
         ^Generator.from:{
             (fr == 'chunked').if:{
-                reading = true;
+                var reading = true;
                 { reading }.whileDo:{
-                    line = (((st.readUntil:'\r\n').asString).splitString:'\r\n').at:0;
-                    parts = line.splitString:';';
-                    size = Integer.fromHex:(parts.at:0);
+                    var line = (((st.readUntil:'\r\n').asString).splitString:'\r\n').at:0;
+                    var parts = line.splitString:';';
+                    var size = Integer.fromHex:(parts.at:0);
                     (size == 0).if:{
                         reading = false;
-                        trailing = true;
+                        var trailing = true;
                         { trailing }.whileDo:{
-                            tline = st.readUntil:'\r\n';
+                            var tline = st.readUntil:'\r\n';
                             (tline.count <= 2).if:{ trailing = false }
                         }
                     }
                     else:{
                         "* parse chunk extensions ('name=value' or valueless 'flag') into a Map
-                        exts = #{};
+                        var exts = #{};
                         (parts.drop:1).each:{ |ext|
-                            kv = ext.splitString:'=';
+                            var kv = ext.splitString:'=';
                             (kv.count > 1)
                                 .if:{ exts.at:(kv.at:0) put:(kv.at:1) }
                                  else:{ exts.at:(kv.at:0) put:true }
                         };
-                        data = st.readExactly:size;
+                        var data = st.readExactly:size;
                         st.readExactly:2;  "* the CRLF after the chunk data
                         ^>([HTTP]Body.chunk:data meta:exts mediaType:mt)
                     }
@@ -126,10 +126,10 @@
             }
             else:{
                 (fr == 'length').if:{
-                    remaining = len;
+                    var remaining = len;
                     { remaining > 0 }.whileDo:{
-                        want = (remaining < 8192).if:{ remaining } else:{ 8192 };
-                        data = st.read:want;
+                        var want = (remaining < 8192).if:{ remaining } else:{ 8192 };
+                        var data = st.read:want;
                         (data.count == 0).if:{ remaining = 0 }
                         else:{
                             ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt);
@@ -139,9 +139,9 @@
                 }
                 else:{
                     "* close-delimited: read fills until EOF
-                    reading = true;
+                    var reading = true;
                     { reading }.whileDo:{
-                        data = st.read;
+                        var data = st.read;
                         (data.count == 0)
                             .if:{ reading = false }
                              else:{ ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt) }
@@ -169,7 +169,7 @@
     "* stream, and cache. Idempotent — a second call returns the cached bytes.
     bytes -> {
         @bytes.defined?.if:{ ^^@bytes };
-        raw = Bytes.empty;
+        var raw = Bytes.empty;
         (.rawChunks).each:{ |c| raw = raw + c.bytes };
         @bytes = @encoding.defined?
             .if:{ [HTTP]Response.decodeBody:raw encoding:@encoding }
@@ -186,8 +186,8 @@
     close -> { @stream.defined?.if:{ @stream.close; @stream = nil }; self };
 
     s -> {
-        sz = @bytes.defined?.if:{ @bytes.count + ' bytes' } else:{ 'stream' };
-        ext = @mediaType.defined?.if:{ ', ' + @mediaType } else:{ '' };
+        var sz = @bytes.defined?.if:{ @bytes.count + ' bytes' } else:{ 'stream' };
+        var ext = @mediaType.defined?.if:{ ', ' + @mediaType } else:{ '' };
         '[HTTP]Body(' + sz + ext + ')'
     }
 };
@@ -207,7 +207,7 @@
         "* pair list, or nil. Shared by `send` (Content-Length/Transfer-Encoding) and
         "* the `header:` accessor.
         find:named: -> { |headers name|
-            target = name.lower;
+            var target = name.lower;
             headers.each:{ |pair| ((pair.at:0).lower == target).if:{ ^^pair.at:1 } };
             ^nil
         };
@@ -216,7 +216,7 @@
         "* Identity or an unrecognized coding returns the bytes unchanged. Picks the
         "* first recognized coding mentioned (a comma-list of codings is rare).
         decodeBody:encoding: -> { |bytes enc|
-            e = enc.lower;
+            var e = enc.lower;
             (e.contains?:'gzip').if:{ ^^bytes.decodeGz };
             (e.contains?:'zstd').if:{ ^^bytes.decodeZstd };
             (e.contains?:'deflate').if:{ ^^bytes.decodeDeflate };
@@ -253,14 +253,14 @@
         "* Parse 'scheme://host[:port]/path' into #( scheme host port path ). Port
         "* defaults by scheme; path defaults to '/'. Query (if any) rides in `path`.
         parseUrl: -> { |url|
-            afterScheme = url.splitString:'://';
-            scheme = afterScheme.at:0;
-            rest = afterScheme.at:1;
-            restParts = rest.splitString:'/';
-            host_port = restParts.at:0;
-            path = '/' + ((restParts.drop:1).join:'/');
-            hp = host_port.splitString:':';
-            port = (hp.count > 1)
+            var afterScheme = url.splitString:'://';
+            var scheme = afterScheme.at:0;
+            var rest = afterScheme.at:1;
+            var restParts = rest.splitString:'/';
+            var host_port = restParts.at:0;
+            var path = '/' + ((restParts.drop:1).join:'/');
+            var hp = host_port.splitString:':';
+            var port = (hp.count > 1)
                 .if:{ hp.at:1 }
                  else:{ (scheme == 'https').if:{ '443' } else:{ '80' } };
             ^#( scheme (hp.at:0) port path )
@@ -271,14 +271,14 @@
         "* to the base path's directory.
         resolveLocation:against: -> { |loc base|
             ((loc.starts?:'http://') || (loc.starts?:'https://')).if:{ ^^loc };
-            parts = [HTTP]Request.parseUrl:base;
-            origin = (parts.at:0) + '://' + (parts.at:1) + ':' + (parts.at:2);
+            var parts = [HTTP]Request.parseUrl:base;
+            var origin = (parts.at:0) + '://' + (parts.at:1) + ':' + (parts.at:2);
             (loc.starts?:'/').if:{ ^^(origin + loc) };
             "* relative to the base path's directory. '/a/b/c' splits to ['','a','b','c'];
             "* drop the leading '' and the last segment to get the directory '/a/b/'.
-            comps = ((parts.at:3).splitString:'/').drop:1;
-            dirStr = (comps.take:(comps.count - 1)).join:'/';
-            dirPath = (dirStr.length > 0).if:{ '/' + dirStr + '/' } else:{ '/' };
+            var comps = ((parts.at:3).splitString:'/').drop:1;
+            var dirStr = (comps.take:(comps.count - 1)).join:'/';
+            var dirPath = (dirStr.length > 0).if:{ '/' + dirStr + '/' } else:{ '/' };
             ^(origin + dirPath + loc)
         }
     };
@@ -310,7 +310,7 @@
 
     "* Serialize the request to Bytes for a given Host header value.
     requestBytes:path: -> { |hostHeader path|
-        head = @method + ' ' + path + ' HTTP/1.1\r\n';
+        var head = @method + ' ' + path + ' HTTP/1.1\r\n';
         head = head + 'Host: ' + hostHeader + '\r\n';
         @headers.each:{ |pair| head = head + (pair.at:0) + ': ' + (pair.at:1) + '\r\n' };
         "* Advertise the codings we can transparently decode, unless the caller set their own.
@@ -325,7 +325,7 @@
         };
         @body.defined?.if:{ head = head + 'Content-Length: ' + (@body.bytes.count) + '\r\n' };
         head = head + 'Connection: close\r\n\r\n';
-        bytes = head.asBytes;
+        var bytes = head.asBytes;
         @body.defined?.if:{ bytes = bytes + @body.bytes };
         ^bytes
     };
@@ -336,14 +336,14 @@
     "* (.text/.json/.bytes), fully iterated (.chunks/.each:), .close'd, or GC-reaped. Throws
     "* (catchable) on connection errors or a malformed head; the stream is closed before re-raising.
     internalSend -> {
-        url = [HTTP]Request.parseUrl:@url;
-        scheme = url.at:0;
-        host = url.at:1;
-        port = url.at:2;
-        path = url.at:3;
-        target = host + ':' + port;
+        var url = [HTTP]Request.parseUrl:@url;
+        var scheme = url.at:0;
+        var host = url.at:1;
+        var port = url.at:2;
+        var path = url.at:3;
+        var target = host + ':' + port;
 
-        sock = (scheme == 'https').if:{
+        var sock = (scheme == 'https').if:{
             @insecure
                 .if:{ TlsSocket.connect:target insecure:true }
                  else:{ TlsSocket.connect:target }
@@ -354,8 +354,8 @@
 
         "* Non-scoped stream (consumes the socket; no auto-close). Read the head; on any
         "* error before we hand the stream to the body, close it and re-raise.
-        stream = ByteStream.over:sock;
-        parsed = nil;
+        var stream = ByteStream.over:sock;
+        var parsed = nil;
         { parsed = [HTTP]Parser.parseHead:(stream.readUntil:'\r\n\r\n') }.catch:{ |e|
             stream.close;
             e.throw
@@ -365,23 +365,33 @@
             IoError.throw:'HTTP: connection closed before response head' kind:#unexpectedEof
         };
 
-        status = parsed.at:0;
-        reason = parsed.at:1;
-        headers = parsed.at:3;
+        var status = parsed.at:0;
+        var reason = parsed.at:1;
+        var headers = parsed.at:3;
 
         "* How the body is framed on the wire: chunked transfer-encoding, else Content-Length,
         "* else read-to-close. Content-Encoding is whole-entity and decoded by the body on drain.
-        te = [HTTP]Response.find:headers named:'transfer-encoding';
-        cl = [HTTP]Response.find:headers named:'content-length';
-        framing = (te.defined? && (te.lower.contains?:'chunked'))
+        var te = [HTTP]Response.find:headers named:'transfer-encoding';
+        var cl = [HTTP]Response.find:headers named:'content-length';
+        var framing = (te.defined? && (te.lower.contains?:'chunked'))
             .if:{ 'chunked' }
              else:{ cl.defined?.if:{ 'length' } else:{ 'close' } };
-        length = (framing == 'length').if:{ cl.to_integer } else:{ nil };
+        var length = (framing == 'length').if:{ cl.to_integer } else:{ nil };
 
-        ct = [HTTP]Response.find:headers named:'content-type';
-        ce = [HTTP]Response.find:headers named:'content-encoding';
-        bodyObj = [HTTP]Body.over:stream framing:framing length:length contentType:ct encoding:ce;
-        ^[HTTP]Response.new:{ status = status; reason = reason; headers = headers; body = bodyObj }
+        var ct = [HTTP]Response.find:headers named:'content-type';
+        var ce = [HTTP]Response.find:headers named:'content-encoding';
+        var bodyObj = [HTTP]Body
+            .over:stream
+             framing:framing
+             length:length
+             contentType:ct
+             encoding:ce;
+        ^[HTTP]Response.new:{
+            status = status;
+            reason = reason;
+            headers = headers;
+            var body = bodyObj
+        }
     };
 
     "* Send the request, following redirects (3xx + Location) up to @maxRedirects when
@@ -389,12 +399,12 @@
     "* exceeding the cap throws. With following off, the 3xx response is returned as-is.
     send -> {
         @followRedirects.else:{ ^^(.internalSend) };
-        current = self;
-        left = @maxRedirects;
-        result = nil;
-        looping = true;
+        var current = self;
+        var left = @maxRedirects;
+        var result = nil;
+        var looping = true;
         { looping }.whileDo:{
-            resp = current.internalSend;
+            var resp = current.internalSend;
             resp.redirect?.if:{
                 resp.body.close;
                 (left == 0).if:{ ValueError.throw:'HTTP: too many redirects' };
@@ -414,8 +424,8 @@
     "* adjust the method/body per status. 307/308 preserve method+body; 303 (and a 301/302
     "* from a non-GET/HEAD method) become a bodyless GET.
     nextRequestFor: -> { |resp|
-        next = [HTTP]Request.new:{
-            url = [HTTP]Request.resolveLocation:(resp.location) against:@url
+        var next = [HTTP]Request.new:{
+            var url = [HTTP]Request.resolveLocation:(resp.location) against:@url
         };
         next.insecure:@insecure;
         next.followRedirects:@followRedirects;

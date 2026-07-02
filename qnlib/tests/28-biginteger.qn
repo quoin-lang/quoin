@@ -2,7 +2,7 @@
 "* any size; division truncates toward zero. Mixing with Integer/Double requires an explicit
 "* BigInteger.of: (or Integer#asBigInteger) — there is no silent coercion.
 
-(TestSuite.new:{ name = 'BigInteger' }).add:{
+(TestSuite.new:{ var name = 'BigInteger' }).add:{
     .test:
     construct -> {
         .is:{ (BigInteger.of:'123').s } equalTo:'123';
@@ -14,7 +14,7 @@
     .test:
     bigArithmetic -> {
         "* beyond i64: 10^30 and 2^100 are exact.
-        big = (BigInteger.of:'1000000000000000000000000000000');
+        var big = (BigInteger.of:'1000000000000000000000000000000');
         .is:{ (big + big).s } equalTo:'2000000000000000000000000000000';
         .is:{ (BigInteger.of:'2').pow:100 } equalTo:(BigInteger.of:'1267650600228229401496703205376');
         .is:{ ((BigInteger.of:'10') * (BigInteger.of:'10')).s } equalTo:'100';

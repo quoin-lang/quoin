@@ -268,6 +268,12 @@ fn lower_stmt(
         NodeValue::Assignment(a) => {
             lower_prefixed(content_start, &a.rvalue, content_end, source, comments)
         }
+        // `var`/`let <lvalues> [: Type] = <rvalue>` — same prefix shape as an assignment:
+        // the `var …=` prefix (keyword, targets, type) is sliced verbatim; only the rvalue
+        // is lowered, so a multi-line initializer still formats.
+        NodeValue::Declaration(d) => {
+            lower_prefixed(content_start, &d.rvalue, content_end, source, comments)
+        }
         NodeValue::MethodReturn(r) => {
             lower_prefixed(content_start, &r.value, content_end, source, comments)
         }

@@ -1,0 +1,96 @@
+(TestSuite.new:{ var name = 'Devirt' }).add:{
+    "* The devirtualized Integer operators (emitted for typed operands) must produce
+    "* results identical to the dispatched native operators (untyped operands). Each
+    "* assertion compares a typed block — whose `x <op> y` compiles to an Int* op — against
+    "* the same operation on untyped locals, which lowers to a normal method send. `equalTo:`
+    "* takes the dispatched reference value; the `.is:{}` block holds the devirtualized one.
+    .test:
+    arithmeticMatchesDispatch -> {
+        "* `check` runs all nine operator comparisons for one (a, b). Operands are passed as
+        "* variables so `#(a b)` is an unambiguous two-element list (a bare `#(7 -3)` would
+        "* read the `-3` as binary subtraction). `t` is the captured test (leading-dot `self`
+        "* inside the block would be the block, not the test).
+        var t = self;
+        var check = { |a b|
+            var ab = #(a b);
+            t.is:{ { |x:Integer y:Integer| x + y }.valueWithArgs:ab } equalTo:(a + b);
+            t.is:{ { |x:Integer y:Integer| x - y }.valueWithArgs:ab } equalTo:(a - b);
+            t.is:{ { |x:Integer y:Integer| x * y }.valueWithArgs:ab } equalTo:(a * b);
+            t.is:{ { |x:Integer y:Integer| x < y }.valueWithArgs:ab } equalTo:(a < b);
+            t.is:{ { |x:Integer y:Integer| x <= y }.valueWithArgs:ab } equalTo:(a <= b);
+            t.is:{ { |x:Integer y:Integer| x > y }.valueWithArgs:ab } equalTo:(a > b);
+            t.is:{ { |x:Integer y:Integer| x >= y }.valueWithArgs:ab } equalTo:(a >= b);
+            t.is:{ { |x:Integer y:Integer| x == y }.valueWithArgs:ab } equalTo:(a == b);
+            t.is:{ { |x:Integer y:Integer| x != y }.valueWithArgs:ab } equalTo:(a != b)
+        };
+        var n7 = 0 - 7;
+        var n8 = 0 - 8;
+        var n3 = 0 - 3;
+        check.valueWithArgs:#(7 3);
+        check.valueWithArgs:#(n7 3);
+        check.valueWithArgs:#(7 n3);
+        check.valueWithArgs:#(n8 n3);
+        check.valueWithArgs:#(0 5);
+        check.valueWithArgs:#(5 0);
+        check.valueWithArgs:#(6 6)
+    };
+
+    "* Devirtualized `/` and `%` match dispatch, and raise the same catchable error on a
+    "* zero divisor.
+    .test:
+    divModMatchesDispatch -> {
+        .is:{ { |x:Integer y:Integer| x / y }.valueWithArgs:#(17 5) } equalTo:3;
+        .is:{ { |x:Integer y:Integer| x % y }.valueWithArgs:#(17 5) } equalTo:2;
+        .is:{ { |x:Integer y:Integer| x / y }.valueWithArgs:#(-17 5) } equalTo:(-17 / 5);
+        .does:{ { |x:Integer y:Integer| x / y }.valueWithArgs:#(1 0) } throw:'ArithmeticError: Division by zero';
+        .does:{ { |x:Integer y:Integer| x % y }.valueWithArgs:#(1 0) } throw:'ArithmeticError: Division by zero'
+    };
+
+    "* Slice 2b-A: a method declaring `-> Integer` makes its self-send result statically
+    "* Integer, so `(.f:(n)) + (.f:(n))` devirtualizes the `+`. The result must stay correct.
+    .test:
+    returnTypeDevirt -> {
+        SumClass <- { .meta <-- {
+            addTwice: -> Integer { |n: Integer| (.identity:(n)) + (.identity:(n)) };
+            identity: -> Integer { |n: Integer| ^n }
+        } };
+        .is:{ SumClass.addTwice:21 } equalTo:42;
+        .is:{ SumClass.addTwice:(0 - 5) } equalTo:(0 - 10)
+    };
+
+    "* Slice 2e: devirtualized List access (ListGet/ListSet/ListPush, emitted for a
+    "* statically-List receiver) matches the native methods, including semantics — an
+    "* out-of-bounds read yields nil, an out-of-bounds write raises IndexError, and both
+    "* mutators evaluate to the receiver.
+    .test:
+    listAccessDevirt -> {
+        var l = #();
+        l.add:10;
+        l.add:20;
+        l.add:30;
+        .is:{ l.at:1 } equalTo:20;
+        .is:{ l.at:9 } equalTo:nil;
+        l.at:0 put:99;
+        .is:{ l.at:0 } equalTo:99;
+        .is:{ l.count } equalTo:3;
+        .is:{ (#().add:7).count } equalTo:1;
+        .does:{ l.at:10 put:1 } throw:IndexError;
+        "* the devirtualized path (typed `l`) and the dispatched path (untyped block
+        "* param `x`) must agree.
+        .is:{ { |x| x.at:1 }.valueWithSelfOrArg:l } equalTo:(l.at:1)
+    };
+
+    "* Slice 2f: `Int` is inferred for a `var` from its initializer, and the devirtualized
+    "* arithmetic ops fall back to the real send on a non-Int operand — so a var reassigned
+    "* to another type dispatches correctly instead of raising.
+    .test:
+    optimisticIntFallback -> {
+        var x = 0;
+        x = 'hello';
+        .is:{ x + ' world' } equalTo:'hello world';
+        .is:{ x == 'hello' } equalTo:true;
+        "* a genuinely-Int var still devirtualizes and computes correctly.
+        var n = 10;
+        .is:{ (n * n) + 1 } equalTo:101
+    }
+}

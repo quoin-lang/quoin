@@ -275,7 +275,9 @@ fn pp_methods_show_variant_signatures() {
 fn pp_elides_cycles() {
     // `n.next = n` — the cycle guard renders the revisited node as `Node{…}`.
     assert_eq!(
-        pp("Node <- { |@next| setNext: -> { |x| @next = x } }; n = Node.new; n.setNext: n; n.pp"),
+        pp(
+            "Node <- { |@next| setNext: -> { |x| @next = x } }; var n = Node.new; n.setNext: n; n.pp"
+        ),
         "Node{@next: Node{…}}"
     );
 }

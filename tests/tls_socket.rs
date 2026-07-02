@@ -73,10 +73,10 @@ fn tls_socket_echo_and_concurrency() {
     // `catch`/`read` sends are parenthesized before the comparison (as in tcp_socket.rs).
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
 "* basic: connect (TLS, cert validation off), write, read, close
-s = TlsSocket.connect:'127.0.0.1:{port}' insecure: true;
+var s = TlsSocket.connect:'127.0.0.1:{port}' insecure: true;
 s.writeAll:'ping'.asBytes;
 ((s.read:4).asString == 'ping').else:{{ ok = false }};
 s.close;
@@ -93,8 +93,8 @@ s.close;
 
 "* wrap: upgrade a plaintext TcpSocket -> TLS; the TcpSocket is consumed (closed) and
 "* using it afterward throws, while the returned TlsSocket works.
-c = TcpSocket.connect:'127.0.0.1:{port}';
-t = TlsSocket.wrap: c host: 'localhost' insecure: true;
+var c = TcpSocket.connect:'127.0.0.1:{port}';
+var t = TlsSocket.wrap: c host: 'localhost' insecure: true;
 (c.closed?).else:{{ ok = false }};
 t.writeAll:'up'.asBytes;
 ((t.read:2).asString == 'up').else:{{ ok = false }};
@@ -102,11 +102,11 @@ t.writeAll:'up'.asBytes;
 t.close;
 
 "* 8 concurrent TLS connections, each echoes its own message in spawn order
-results = Async.gather:((0..8).collect:{{ |k|
+var results = Async.gather:((0..8).collect:{{ |k|
     {{
-        x = TlsSocket.connect:'127.0.0.1:{port}' insecure: true;
+        var x = TlsSocket.connect:'127.0.0.1:{port}' insecure: true;
         x.writeAll:('m' + k).asBytes;
-        v = (x.read:8).asString;
+        var v = (x.read:8).asString;
         x.close;
         v
     }}

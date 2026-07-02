@@ -43,11 +43,11 @@ fn byte_stream_buffered_reads() {
 
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
 "* over: consumes the socket; the stream then owns the fd
-s = TcpSocket.connect:'127.0.0.1:{port}';
-st = ByteStream.over:s;
+var s = TcpSocket.connect:'127.0.0.1:{port}';
+var st = ByteStream.over:s;
 (s.closed?).else:{{ ok = false }};
 
 "* readUntil: returns through-and-including the delimiter, even though \r\n straddles reads
@@ -72,8 +72,8 @@ st.close;
 (st.closed?).else:{{ ok = false }};
 
 "* the socket.byteStream constructor (separate connection)
-s2 = TcpSocket.connect:'127.0.0.1:{port}';
-st2 = s2.byteStream;
+var s2 = TcpSocket.connect:'127.0.0.1:{port}';
+var st2 = s2.byteStream;
 ((st2.readUntil:'\r\n').asString == 'ABCDE\r\n').else:{{ ok = false }};
 st2.close;
 

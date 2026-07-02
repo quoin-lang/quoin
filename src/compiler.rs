@@ -1,13 +1,13 @@
 use crate::instruction::{Constant, Instruction, SharedBytecode, SharedSourceMap, StaticBlock};
 use crate::parser::ast::{
-    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, IdentifierType,
-    MethodCallNode, MethodSelectorNode, Node, NodeValue, ProgramNode, UnaryOperatorNode,
-    UnaryOperatorType,
+    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, DeclKind, DeclarationNode,
+    IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode, Node, NodeValue,
+    ProgramNode, UnaryOperatorNode, UnaryOperatorType,
 };
 use crate::symbol::Symbol;
 use crate::value::{NamespacedName, SourceInfo};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -52,14 +52,20 @@ impl CodeBlock {
 
 fn jump_offset(inst: &Instruction) -> Option<isize> {
     match inst {
-        Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => Some(*o),
+        Instruction::Jump(o)
+        | Instruction::IfJump(o)
+        | Instruction::ElseJump(o)
+        | Instruction::BranchIfNotBool(o) => Some(*o),
         _ => None,
     }
 }
 
 fn set_jump_offset(inst: &mut Instruction, off: isize) {
     match inst {
-        Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => *o = off,
+        Instruction::Jump(o)
+        | Instruction::IfJump(o)
+        | Instruction::ElseJump(o)
+        | Instruction::BranchIfNotBool(o) => *o = off,
         _ => {}
     }
 }
@@ -227,8 +233,54 @@ pub(crate) fn fuse_bytecode(
     (new_code, new_smap)
 }
 
+/// Statically-known type of an expression, used to devirtualize numeric operators
+/// (Slice 2a). `Int`/`Bool` are proven; everything dynamic is `Unknown` (the default,
+/// so untyped code compiles exactly as before). Double is intentionally not tracked
+/// yet (Integer-only slice — see docs/TYPED_DEVIRT_ARCH.md §10 decision B).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StaticType {
+    Int,
+    Bool,
+    /// A built-in `List` (sealed). Enables devirtualized `at:`/`at:put:`/`add:` (Slice 2e).
+    /// Unlike `Int`, list devirt has a runtime fallback, so it is sound even for a mutable
+    /// `var` whose inferred type could go stale on reassignment.
+    List,
+    Unknown,
+}
+
+/// Map a declared type name (param/local annotation) to a tracked `StaticType`.
+fn static_type_from_name(name: &str) -> StaticType {
+    match name {
+        "Integer" => StaticType::Int,
+        "Boolean" => StaticType::Bool,
+        "List" => StaticType::List,
+        _ => StaticType::Unknown,
+    }
+}
+
+/// Compile-time context for the class body currently being compiled (Slice 2b). Pushed
+/// on a stack while compiling a class def / extension; used to type self-sends by their
+/// callee's declared return type and to devirtualize self-sends in a sealed class.
+struct ClassCtx {
+    /// Method selector → declared return `StaticType` (methods that annotate a return).
+    returns: HashMap<String, StaticType>,
+    /// Every method selector defined directly in this class body.
+    methods: HashSet<String>,
+    /// The class is compile-sealed: `sealed!` appears as a direct (unconditional) body
+    /// statement, so its method table is frozen and same-class self-sends can be
+    /// devirtualized (Slice 2b-B).
+    sealed: bool,
+}
+
 struct Scope {
     locals: HashSet<String>,
+    /// Subset of `locals` declared with `let` — reassigning one is a compile error.
+    immutable: HashSet<String>,
+    /// Declared type of a local/param, when known (Integer/Boolean); absent = Unknown.
+    types: HashMap<String, StaticType>,
+    /// True for the top-level scope of an object-initializer block (`X.new:{ … }`),
+    /// where a bare `field = value` binds an instance field (no `var` required).
+    is_init: bool,
 }
 
 pub struct Compiler {
@@ -239,6 +291,18 @@ pub struct Compiler {
     /// rejected there so the "value types have no fields" rule surfaces at compile
     /// time rather than only when a method runs.
     value_type_def_depth: usize,
+    /// One-shot flag set right before compiling the block argument of `X.new:{ … }`;
+    /// consumed by the next `compile_block` to mark that block's scope `is_init`.
+    next_block_is_init: bool,
+    /// Stack of per-class compile context, pushed while compiling a class body: method
+    /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
+    class_ctx: Vec<ClassCtx>,
+    /// While compiling an *inlined* control-flow block body (Slice 2d), collects the
+    /// bytecode positions of top-level `^` (BlockReturn) placeholder jumps so
+    /// `inline_block_body` can patch them to land just past the inlined region. `None`
+    /// outside inlining (a `^` then compiles to a normal `BlockReturn`). Cleared on entry
+    /// to a real nested block so its `^` isn't captured by an enclosing inlined region.
+    inline_carets: Option<Vec<usize>>,
 }
 
 impl Compiler {
@@ -246,17 +310,31 @@ impl Compiler {
         Self {
             scopes: vec![Scope {
                 locals: HashSet::new(),
+                immutable: HashSet::new(),
+                types: HashMap::new(),
+                is_init: false,
             }],
             temp_counter: 0,
             value_type_def_depth: 0,
+            next_block_is_init: false,
+            class_ctx: Vec::new(),
+            inline_carets: None,
         }
     }
 
     pub fn new_with_locals(locals: HashSet<String>) -> Self {
         Self {
-            scopes: vec![Scope { locals }],
+            scopes: vec![Scope {
+                locals,
+                immutable: HashSet::new(),
+                types: HashMap::new(),
+                is_init: false,
+            }],
             temp_counter: 0,
             value_type_def_depth: 0,
+            next_block_is_init: false,
+            class_ctx: Vec::new(),
+            inline_carets: None,
         }
     }
 
@@ -304,11 +382,216 @@ impl Compiler {
     }
 
     fn push_scope(&mut self, locals: HashSet<String>) {
-        self.scopes.push(Scope { locals });
+        self.scopes.push(Scope {
+            locals,
+            immutable: HashSet::new(),
+            types: HashMap::new(),
+            is_init: false,
+        });
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+    }
+
+    /// Declare a fresh local in the current (innermost) scope. Errors if the name is
+    /// already declared *in this scope* (redeclaration); shadowing an outer scope is
+    /// allowed. `let` bindings are recorded as immutable.
+    fn declare_local(&mut self, name: &str, mutable: bool) -> Result<(), String> {
+        let scope = self.scopes.last_mut().unwrap();
+        if scope.locals.contains(name) {
+            return Err(format!("`{}` is already declared in this scope", name));
+        }
+        scope.locals.insert(name.to_string());
+        if !mutable {
+            scope.immutable.insert(name.to_string());
+        }
+        Ok(())
+    }
+
+    /// Was `name` declared with `let`? Resolves to the nearest scope that binds it
+    /// (matching `is_local`'s innermost-first walk).
+    fn is_immutable(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if scope.locals.contains(name) {
+                return scope.immutable.contains(name);
+            }
+        }
+        false
+    }
+
+    /// Declared `StaticType` of a local/param — the nearest binding's recorded type,
+    /// or `Unknown` (untyped, or not a plain local).
+    fn local_type(&self, name: &str) -> StaticType {
+        for scope in self.scopes.iter().rev() {
+            if scope.locals.contains(name) {
+                return scope
+                    .types
+                    .get(name)
+                    .copied()
+                    .unwrap_or(StaticType::Unknown);
+            }
+        }
+        StaticType::Unknown
+    }
+
+    /// Record a known type for a local just declared in the innermost scope.
+    fn record_local_type(&mut self, name: &str, ty: StaticType) {
+        if ty != StaticType::Unknown {
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .types
+                .insert(name.to_string(), ty);
+        }
+    }
+
+    /// Statically infer an expression's type for devirtualization. Conservative: only
+    /// literals, typed locals/params, and numeric operators on them are known; anything
+    /// else is `Unknown` and compiles to a normal dynamic `Send`.
+    fn static_type(&self, node: &Node) -> StaticType {
+        match &node.value {
+            NodeValue::Integer(_) => StaticType::Int,
+            NodeValue::Identifier(id) => {
+                if id.namespace.is_none()
+                    && id.identifier_type != IdentifierType::Namespaced
+                    && id.identifier_type != IdentifierType::Instance
+                {
+                    self.local_type(&id.name)
+                } else {
+                    StaticType::Unknown
+                }
+            }
+            NodeValue::BinaryOperator(op) => self.binop_result_type(op),
+            NodeValue::MethodCall(call) => self.self_send_return_type(call),
+            // A list literal `#(…)` is a built-in `List` (Slice 2e).
+            NodeValue::List(_) => StaticType::List,
+            _ => StaticType::Unknown,
+        }
+    }
+
+    /// A self-send (`.sel:(…)` — no explicit receiver, or an explicit `self`) to a
+    /// current-class method with a declared return type is statically that type. Non-self
+    /// sends, unknown selectors, and variadic sends stay `Unknown` (a safe miss).
+    fn self_send_return_type(&self, call: &MethodCallNode) -> StaticType {
+        let is_self = match &call.subject {
+            None => true,
+            Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
+        };
+        if !is_self {
+            return StaticType::Unknown;
+        }
+        let Some(ctx) = self.class_ctx.last() else {
+            return StaticType::Unknown;
+        };
+        let idents = &call.arguments.signature.identifiers;
+        if idents.is_empty() {
+            return StaticType::Unknown;
+        }
+        // Canonical selector: unary uses the bare name; a keyword send joins `name:` parts.
+        // A variadic run folds to `name+:` in dispatch, which we don't reconstruct here — so
+        // such a send simply stays Unknown rather than risking a mismatched selector.
+        let selector = if call.arguments.expressions.is_empty() {
+            idents[0].name.clone()
+        } else {
+            idents
+                .iter()
+                .map(|i| format!("{}:", i.name))
+                .collect::<String>()
+        };
+        ctx.returns
+            .get(&selector)
+            .copied()
+            .unwrap_or(StaticType::Unknown)
+    }
+
+    /// Selector → declared-return-`StaticType` map for a class body, from its method
+    /// definitions/extensions that carry a return type.
+    fn collect_class_ctx(&self, block: &BlockNode) -> ClassCtx {
+        let mut returns = HashMap::new();
+        let mut methods = HashSet::new();
+        let mut sealed = false;
+        for stmt in &block.statements {
+            match &stmt.value {
+                NodeValue::MethodDefinition(m) => {
+                    if let Ok(selector) = self.reconstruct_selector(&m.signature) {
+                        methods.insert(selector.clone());
+                        if let Some(rt) = &m.return_type {
+                            returns.insert(selector, static_type_from_name(&rt.name));
+                        }
+                    }
+                }
+                NodeValue::MethodExtension(m) => {
+                    if let Ok(selector) = self.reconstruct_selector(&m.signature) {
+                        methods.insert(selector.clone());
+                        if let Some(rt) = &m.return_type {
+                            returns.insert(selector, static_type_from_name(&rt.name));
+                        }
+                    }
+                }
+                // A direct (unconditional) `sealed!` statement seals the class at compile
+                // time, freezing its method table so same-class self-sends devirtualize.
+                NodeValue::MethodCall(call) if Self::is_sealed_marker(call) => sealed = true,
+                _ => {}
+            }
+        }
+        ClassCtx {
+            returns,
+            methods,
+            sealed,
+        }
+    }
+
+    /// A bare `sealed!` self-send (`sealed!` or `self.sealed!`, no args).
+    fn is_sealed_marker(call: &MethodCallNode) -> bool {
+        let is_self = match &call.subject {
+            None => true,
+            Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
+        };
+        is_self
+            && call.arguments.expressions.is_empty()
+            && call.arguments.signature.identifiers.len() == 1
+            && call.arguments.signature.identifiers[0].name == "sealed!"
+    }
+
+    /// Static result type of a binary operator. Comparison/equality operators yield `Bool`
+    /// for *any* operands (Slice 2d, option B) — a language guarantee that they return
+    /// `Boolean`, which lets `(a < b).if:…` / `(x == y).if:…` inline even when the operands
+    /// aren't statically typed. Arithmetic yields `Int` only when *both* operands are
+    /// statically `Int` — the soundness condition for devirtualizing to the direct i64 ops.
+    /// Everything else (incl. `~`/`..`, and `&&`/`||`, which return an operand value not a
+    /// `Bool`) stays `Unknown`.
+    fn binop_result_type(&self, op: &BinaryOperatorNode) -> StaticType {
+        use BinaryOperatorType::*;
+        match op.operator {
+            Lt | LtEq | Gt | GtEq | Eq | NotEq => StaticType::Bool,
+            Add | Sub | Mul | Div | Mod
+                if self.static_type(&op.left) == StaticType::Int
+                    && self.static_type(&op.right) == StaticType::Int =>
+            {
+                StaticType::Int
+            }
+            _ => StaticType::Unknown,
+        }
+    }
+
+    /// The devirtualized Integer instruction for a binary operator, if it has one.
+    fn int_devirt_op(operator: &BinaryOperatorType) -> Option<Instruction> {
+        use BinaryOperatorType::*;
+        Some(match operator {
+            Add => Instruction::IntAdd,
+            Sub => Instruction::IntSub,
+            Mul => Instruction::IntMul,
+            Div => Instruction::IntDiv,
+            Mod => Instruction::IntMod,
+            Lt => Instruction::IntLt,
+            LtEq => Instruction::IntLe,
+            Gt => Instruction::IntGt,
+            GtEq => Instruction::IntGe,
+            Eq => Instruction::IntEq,
+            NotEq => Instruction::IntNe,
+            _ => return None,
+        })
     }
 
     pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, String> {
@@ -419,6 +702,9 @@ impl Compiler {
             NodeValue::Assignment(assign) => {
                 self.compile_assignment(assign, bytecode)?;
             }
+            NodeValue::Declaration(decl) => {
+                self.compile_declaration(decl, bytecode)?;
+            }
             NodeValue::MethodCall(call) => {
                 self.compile_method_call(call, bytecode)?;
             }
@@ -433,7 +719,15 @@ impl Compiler {
             }
             NodeValue::BlockReturn(ret) => {
                 self.compile_node(&ret.value, bytecode)?;
-                bytecode.push(Instruction::BlockReturn);
+                // Inside an inlined control-flow block (Slice 2d), `^expr` yields the
+                // block's value and jumps past the inlined region rather than popping a
+                // (now-absent) block frame; `inline_block_body` patches the placeholder.
+                if let Some(positions) = self.inline_carets.as_mut() {
+                    positions.push(bytecode.len());
+                    bytecode.push(Instruction::Jump(0));
+                } else {
+                    bytecode.push(Instruction::BlockReturn);
+                }
             }
             NodeValue::MethodReturn(ret) => {
                 self.compile_node(&ret.value, bytecode)?;
@@ -506,7 +800,10 @@ impl Compiler {
                 if is_value_type {
                     self.value_type_def_depth += 1;
                 }
+                let ctx = self.collect_class_ctx(&class_def.block);
+                self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_def.block, bytecode);
+                self.class_ctx.pop();
                 if is_value_type {
                     self.value_type_def_depth -= 1;
                 }
@@ -530,7 +827,10 @@ impl Compiler {
                     }
                     self.value_type_def_depth += 1;
                 }
+                let ctx = self.collect_class_ctx(&class_ext.block);
+                self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_ext.block, bytecode);
+                self.class_ctx.pop();
                 if is_value_type {
                     self.value_type_def_depth -= 1;
                 }
@@ -638,27 +938,16 @@ impl Compiler {
             return Err("Assignment requires at least one target lvalue".to_string());
         }
 
-        let mut target_names = Vec::new();
-        self.collect_lvalue_names(&assign.lvalues, &mut target_names);
-
-        let mut pre_declared = Vec::new();
-        for name in &target_names {
-            if !self.is_local(name) {
-                self.scopes.last_mut().unwrap().locals.insert(name.clone());
-                pre_declared.push(name.clone());
-            }
-        }
-
+        // Strict mode: assignment never declares. Plain-local targets must already be in
+        // scope (compile_ident_store errors otherwise); a new local is introduced with
+        // `var`/`let` (compile_declaration). Globals (`Foo`) and fields (`@x`) are handled
+        // per-target in compile_ident_store and are unaffected by this rule.
         self.compile_node(&assign.rvalue, bytecode)?;
-
-        for name in &pre_declared {
-            self.scopes.last_mut().unwrap().locals.remove(name);
-        }
 
         if assign.lvalues.len() == 1 {
             let lval = &assign.lvalues[0];
             bytecode.push(Instruction::Dup);
-            self.compile_lvalue_store(lval, bytecode)?;
+            self.compile_lvalue_store(lval, bytecode, false)?;
         } else {
             let temp_var = self.new_temp_var();
             self.scopes
@@ -670,10 +959,115 @@ impl Compiler {
             bytecode.push(Instruction::DefineLocal(Symbol::intern(
                 &(temp_var.clone()),
             )));
-
-            self.compile_destruct(&assign.lvalues, &temp_var, bytecode)?;
+            self.compile_destruct(&assign.lvalues, &temp_var, bytecode, false)?;
         }
 
+        Ok(())
+    }
+
+    fn compile_declaration(
+        &mut self,
+        decl: &DeclarationNode,
+        bytecode: &mut CodeBlock,
+    ) -> Result<(), String> {
+        if decl.lvalues.is_empty() {
+            return Err("declaration requires at least one target".to_string());
+        }
+        let mutable = matches!(decl.kind, DeclKind::Var);
+
+        // `var`/`let` declares plain locals only.
+        self.validate_decl_targets(&decl.lvalues)?;
+
+        // Introduce the fresh bindings BEFORE compiling the initializer, so a recursive
+        // reference resolves — `var f = { … f … }` (a self-recursive block) must see its
+        // own name. The name binds in the enclosing env the closure captures; the actual
+        // store runs after the value is built, so the captured frame is populated by the
+        // time the closure is invoked. (Same-scope redeclaration is an error.)
+        let mut names = Vec::new();
+        self.collect_lvalue_names(&decl.lvalues, &mut names);
+        for name in &names {
+            self.declare_local(name, mutable)?;
+        }
+
+        self.compile_node(&decl.rvalue, bytecode)?;
+
+        // Slice 2e/2f: infer the local's type from its initializer so its `at:`/`at:put:`/
+        // `add:` (List) and arithmetic (`Int`) devirtualize. Only `Int`/`List` are inferred
+        // — both devirt paths have a runtime fallback (`take_two_ints` / a non-list send), so
+        // an inferred type going stale on reassignment is harmless. `Bool` is deliberately
+        // excluded: the `if:else:` inline for a statically-`Bool` receiver has no fallback (a
+        // `Bool`-valued `var` still inlines via the guarded `Unknown` path, option C).
+        if decl.lvalues.len() == 1
+            && let NodeValue::IdentLValue(l) = &decl.lvalues[0].value
+        {
+            let ty = self.static_type(&decl.rvalue);
+            if ty == StaticType::Int || ty == StaticType::List {
+                self.record_local_type(&l.identifier.name, ty);
+            }
+        }
+
+        if decl.lvalues.len() == 1 {
+            let lval = &decl.lvalues[0];
+            bytecode.push(Instruction::Dup);
+            self.compile_lvalue_store(lval, bytecode, true)?;
+        } else {
+            let temp_var = self.new_temp_var();
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .locals
+                .insert(temp_var.clone());
+            bytecode.push(Instruction::Dup);
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(
+                &(temp_var.clone()),
+            )));
+            self.compile_destruct(&decl.lvalues, &temp_var, bytecode, true)?;
+        }
+
+        Ok(())
+    }
+
+    /// A `var`/`let` target must be a plain local (or `_` / splat / nested thereof) — not a
+    /// global (`Foo`), an instance variable (`@x`), or a namespaced name.
+    fn validate_decl_targets(&self, lvalues: &[Arc<Node>]) -> Result<(), String> {
+        for lval in lvalues {
+            match &lval.value {
+                NodeValue::IdentLValue(l) => self.validate_decl_ident(&l.identifier)?,
+                NodeValue::SplatLValue(l) => self.validate_decl_ident(&l.identifier)?,
+                NodeValue::IgnoredLValue | NodeValue::IgnoredSplatLValue => {}
+                NodeValue::SubLValue(s) => self.validate_decl_targets(&s.lvalues)?,
+                other => return Err(format!("unsupported `var`/`let` target: {:?}", other)),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_decl_ident(&self, id: &IdentifierNode) -> Result<(), String> {
+        if id.identifier_type == IdentifierType::Instance {
+            return Err(format!(
+                "`var`/`let` cannot declare an instance variable (`@{}`); \
+                 declare instance variables in the class header",
+                id.name
+            ));
+        }
+        if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced {
+            return Err(format!(
+                "`var`/`let` cannot declare a namespaced name (`{}`)",
+                id.name
+            ));
+        }
+        if id
+            .name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_uppercase())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "`var`/`let` declares locals; `{}` is uppercase — globals/classes use `{} = …`",
+                id.name, id.name
+            ));
+        }
         Ok(())
     }
 
@@ -681,6 +1075,7 @@ impl Compiler {
         &mut self,
         lval: &Node,
         bytecode: &mut CodeBlock,
+        declaring: bool,
     ) -> Result<(), String> {
         match &lval.value {
             NodeValue::IdentLValue(ident_lval) => {
@@ -690,7 +1085,7 @@ impl Compiler {
                     bytecode.push(Instruction::StoreGlobal(ns_name, false));
                 } else {
                     let name = &id.name;
-                    self.compile_ident_store(&id.identifier_type, name, bytecode)?;
+                    self.compile_ident_store(&id.identifier_type, name, bytecode, declaring)?;
                 }
             }
             NodeValue::IgnoredLValue => {
@@ -709,7 +1104,22 @@ impl Compiler {
         ident_type: &IdentifierType,
         name: &String,
         bytecode: &mut CodeBlock,
+        declaring: bool,
     ) -> Result<(), String> {
+        // A `var`/`let` declaration introduces a fresh binding. The target was
+        // validated as a plain local and inserted into the current scope by
+        // `compile_declaration`, so here we just emit the binding instruction.
+        if declaring {
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
+            return Ok(());
+        }
+        // Reserved identifiers parse as assignable lvalues (`true = false`); emit a store
+        // so the runtime raises "Can't modify reserved identifier" (unchanged behavior),
+        // rather than the compile-time "undeclared local" error below.
+        if matches!(name.as_str(), "true" | "false" | "nil") {
+            bytecode.push(Instruction::StoreLocal(Symbol::intern(&(name.clone()))));
+            return Ok(());
+        }
         let first_char = name.chars().next().unwrap_or('\0');
         if first_char.is_ascii_uppercase() {
             let ns_name = NamespacedName::new(Vec::new(), name.clone());
@@ -723,10 +1133,21 @@ impl Compiler {
             }
             bytecode.push(Instruction::StoreField(name.clone()));
         } else if self.is_local(name) {
+            if self.is_immutable(name) {
+                return Err(format!("cannot reassign `let` binding `{}`", name));
+            }
             bytecode.push(Instruction::StoreLocal(Symbol::intern(&(name.clone()))));
-        } else {
-            self.scopes.last_mut().unwrap().locals.insert(name.clone());
+        } else if self.scopes.last().map(|s| s.is_init).unwrap_or(false) {
+            // Inside an object-initializer block (`X.new:{ … }`), a bare `field = value`
+            // binds an instance field — no `var` needed. The instantiating frame binds it
+            // into the new object at runtime.
             bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
+        } else {
+            return Err(format!(
+                "undeclared local `{}` — declare it with `var {} = …` \
+                 (assignment no longer implicitly declares locals)",
+                name, name
+            ));
         }
         Ok(())
     }
@@ -736,6 +1157,7 @@ impl Compiler {
         lvalues: &[Arc<Node>],
         temp_var: &str,
         bytecode: &mut CodeBlock,
+        declaring: bool,
     ) -> Result<(), String> {
         for (i, lval) in lvalues.iter().enumerate() {
             match &lval.value {
@@ -751,6 +1173,7 @@ impl Compiler {
                         &ident_lval.identifier.identifier_type,
                         name,
                         bytecode,
+                        declaring,
                     )?;
                 }
                 NodeValue::SplatLValue(splat_lval) => {
@@ -765,6 +1188,7 @@ impl Compiler {
                         &splat_lval.identifier.identifier_type,
                         name,
                         bytecode,
+                        declaring,
                     )?;
                 }
                 NodeValue::IgnoredLValue => {}
@@ -786,7 +1210,7 @@ impl Compiler {
                         &(nested_temp.clone()),
                     )));
 
-                    self.compile_destruct(&sub_lval.lvalues, &nested_temp, bytecode)?;
+                    self.compile_destruct(&sub_lval.lvalues, &nested_temp, bytecode, declaring)?;
                 }
                 _ => {
                     return Err(format!(
@@ -799,12 +1223,45 @@ impl Compiler {
         Ok(())
     }
 
+    /// Emit a call instruction: `CallSelfDirect` for a self-send to a same-class method of
+    /// a compile-sealed class (devirtualizable — Slice 2b-B), else a normal `Send`.
+    fn emit_call(&self, bytecode: &mut CodeBlock, selector: &str, num_args: usize, is_self: bool) {
+        if is_self {
+            if let Some(ctx) = self.class_ctx.last() {
+                if ctx.sealed && ctx.methods.contains(selector) {
+                    bytecode.push(Instruction::CallSelfDirect(
+                        Symbol::intern(selector),
+                        num_args,
+                    ));
+                    return;
+                }
+            }
+        }
+        bytecode.push(Instruction::Send(Symbol::intern(selector), num_args));
+    }
+
     fn compile_method_call(
         &mut self,
         call: &MethodCallNode,
         bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         let args = &call.arguments;
+        // A self-send (no explicit receiver, or an explicit `self`) — eligible for
+        // devirtualization when the enclosing class is sealed (see `emit_call`).
+        let is_self = match &call.subject {
+            None => true,
+            Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
+        };
+
+        // Slice 2d: inline `if:`/`if:else:` on a statically-Bool receiver with literal,
+        // 0-arg, declaration-free block args into native jumps — no block allocation, no
+        // dispatch, no block-invocation frame. Falls through to a normal send otherwise.
+        if self.try_compile_inlined_conditional(call, bytecode)? {
+            return Ok(());
+        }
+        if self.try_compile_inlined_while(call, bytecode)? {
+            return Ok(());
+        }
 
         // Evaluate receiver
         if let Some(ref subject) = call.subject {
@@ -819,7 +1276,7 @@ impl Compiler {
                 return Err("No identifiers found in method call selector".to_string());
             }
             let selector = args.signature.identifiers[0].name.clone();
-            bytecode.push(Instruction::Send(Symbol::intern(&selector), 0));
+            self.emit_call(bytecode, &selector, 0, is_self);
             return Ok(());
         }
 
@@ -841,7 +1298,15 @@ impl Compiler {
             }
             // Evaluate this component's argument expression(s); a run folds into one list value.
             for j in 0..run {
-                self.compile_node(&args.expressions[i + j], bytecode)?;
+                let arg = &args.expressions[i + j];
+                // `X.new:{ … }` — the block argument is an object-initializer block, in
+                // which a bare `field = value` binds an instance field (see compile_block
+                // / Scope::is_init). Only a literal block gets the flag, and it's consumed
+                // immediately by that block's compile_block, so it can't leak.
+                if run == 1 && idents[i].name == "new" && matches!(arg.value, NodeValue::Block(_)) {
+                    self.next_block_is_init = true;
+                }
+                self.compile_node(arg, bytecode)?;
             }
             if run > 1 {
                 bytecode.push(Instruction::NewList(run));
@@ -855,8 +1320,270 @@ impl Compiler {
             i += run;
         }
 
-        bytecode.push(Instruction::Send(Symbol::intern(&selector), num_components));
+        // Slice 2e: devirtualize `at:`/`at:put:`/`add:` when the receiver is statically a
+        // `List`. The operands a send would consume are already on the stack in send order,
+        // so the op is a drop-in replacement.
+        if let Some(op) = self.list_devirt_op(call, &selector, num_components) {
+            bytecode.push(op);
+            return Ok(());
+        }
+
+        self.emit_call(bytecode, &selector, num_components, is_self);
         Ok(())
+    }
+
+    /// The devirtualized `List` op for a keyword send whose receiver is statically a `List`
+    /// (Slice 2e), or `None` to fall through to a normal send.
+    fn list_devirt_op(
+        &self,
+        call: &MethodCallNode,
+        selector: &str,
+        num_args: usize,
+    ) -> Option<Instruction> {
+        let subject = call.subject.as_ref()?;
+        if self.static_type(subject) != StaticType::List {
+            return None;
+        }
+        match (selector, num_args) {
+            ("at:", 1) => Some(Instruction::ListGet),
+            ("at:put:", 2) => Some(Instruction::ListSet),
+            ("add:", 1) => Some(Instruction::ListPush),
+            _ => None,
+        }
+    }
+
+    /// Slice 2d — control-flow inlining. If `call` is `recv.if:{…}` or
+    /// `recv.if:{…}else:{…}` where `recv` is statically `Boolean` and every block arg is
+    /// a literal, parameter-less, declaration-free block, splice the block bodies inline
+    /// as `ElseJump`/`Jump` bytecode (no block alloc, no dispatch, no block frame) and
+    /// return `true`. Otherwise emit nothing and return `false` so the caller compiles the
+    /// normal send.
+    ///
+    /// Soundness: `Boolean` is sealed (prelude), so `if:`/`if:else:` on a statically-Bool
+    /// receiver always resolve to the built-in `True`/`False` methods — treating them as
+    /// inlinable built-ins is a language guarantee, matching Smalltalk `ifTrue:ifFalse:`.
+    fn try_compile_inlined_conditional(
+        &mut self,
+        call: &MethodCallNode,
+        bytecode: &mut CodeBlock,
+    ) -> Result<bool, String> {
+        let subject = match &call.subject {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let idents = &call.arguments.signature.identifiers;
+        let exprs = &call.arguments.expressions;
+
+        // Selector shape: `if:` (then only) or `if:else:` (then + else).
+        let kws: Vec<&str> = idents.iter().map(|i| i.name.as_str()).collect();
+        let has_else = match kws.as_slice() {
+            ["if"] => false,
+            ["if", "else"] => true,
+            _ => return Ok(false),
+        };
+
+        // Bool receiver → inline directly. Unknown receiver → guarded inline (option C): a
+        // runtime Bool-check falls back to the real send for a non-Bool receiver. A
+        // known-non-Bool (Int) receiver → normal send (the guard would always miss).
+        let guarded = match self.static_type(subject) {
+            StaticType::Bool => false,
+            StaticType::Unknown => true,
+            // A known-non-Bool receiver (Int/List) → normal send; the guard would always miss.
+            StaticType::Int | StaticType::List => return Ok(false),
+        };
+
+        // Every arg must be a literal, 0-arg, declaration-free block (v1).
+        let then_blk = match Self::inlinable_block(&exprs[0]) {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+        let else_blk = if has_else {
+            match Self::inlinable_block(&exprs[1]) {
+                Some(b) => Some(b),
+                None => return Ok(false),
+            }
+        } else {
+            None
+        };
+
+        // Condition → stack.
+        self.compile_node(subject, bytecode)?;
+
+        if !guarded {
+            self.emit_inline_conditional_body(then_blk, else_blk, bytecode)?;
+            return Ok(true);
+        }
+
+        // Guarded (option C): if the receiver isn't a Bool at runtime, jump past the inlined
+        // body to a cold path that reissues the real send. The inlined body is
+        // self-contained (leaves its value on the stack), so it is wrapped verbatim.
+        let mut hot_bc = CodeBlock::new();
+        hot_bc.current_source = bytecode.current_source.clone();
+        self.emit_inline_conditional_body(then_blk, else_blk, &mut hot_bc)?;
+
+        let mut cold_bc = CodeBlock::new();
+        cold_bc.current_source = bytecode.current_source.clone();
+        self.compile_block(then_blk, &mut cold_bc)?;
+        if let Some(else_blk) = else_blk {
+            self.compile_block(else_blk, &mut cold_bc)?;
+            self.emit_call(&mut cold_bc, "if:else:", 2, false);
+        } else {
+            self.emit_call(&mut cold_bc, "if:", 1, false);
+        }
+
+        let h = hot_bc.len() as isize;
+        let k = cold_bc.len() as isize;
+        bytecode.push(Instruction::BranchIfNotBool(h + 2));
+        bytecode.extend(hot_bc);
+        bytecode.push(Instruction::Jump(k + 1));
+        bytecode.extend(cold_bc);
+        Ok(true)
+    }
+
+    /// Emit the unguarded inlined form of `if:`/`if:else:` (receiver already on the stack)
+    /// into `out`: `ElseJump; <then>; Jump; <else | Push(Nil)>`, leaving the construct's
+    /// value on the stack. Shared by the Bool-receiver path and the guarded (option C) hot
+    /// path.
+    fn emit_inline_conditional_body(
+        &mut self,
+        then_blk: &BlockNode,
+        else_blk: Option<&BlockNode>,
+        out: &mut CodeBlock,
+    ) -> Result<(), String> {
+        let mut then_bc = CodeBlock::new();
+        then_bc.current_source = out.current_source.clone();
+        self.inline_block_body(then_blk, &mut then_bc)?;
+        let t = then_bc.len() as isize;
+
+        if let Some(else_blk) = else_blk {
+            let mut else_bc = CodeBlock::new();
+            else_bc.current_source = out.current_source.clone();
+            self.inline_block_body(else_blk, &mut else_bc)?;
+            let e = else_bc.len() as isize;
+            // cond false → skip the then-body and its trailing Jump, land on the else-body.
+            out.push(Instruction::ElseJump(t + 2));
+            out.extend(then_bc);
+            out.push(Instruction::Jump(e + 1));
+            out.extend(else_bc);
+        } else {
+            // No else: a false condition makes the construct's value `nil`.
+            out.push(Instruction::ElseJump(t + 2));
+            out.extend(then_bc);
+            out.push(Instruction::Jump(2));
+            out.push(Instruction::Push(Constant::Nil));
+        }
+        Ok(())
+    }
+
+    /// A literal block usable for control-flow inlining: no parameters and no local
+    /// declarations. (v1 — declaration-carrying blocks need alpha-renaming, a follow-up.)
+    ///
+    /// A body `var`/`let` is a `Declaration` *statement*, not a `decls` header entry, so
+    /// both must be checked: inlining a block that binds a top-level local would splice
+    /// that binding into the method scope, colliding with a sibling branch's same-named
+    /// local (they are isolated only by their now-absent block frames).
+    fn inlinable_block(node: &Node) -> Option<&BlockNode> {
+        if let NodeValue::Block(b) = &node.value {
+            let declares_local = b
+                .statements
+                .iter()
+                .any(|s| matches!(&s.value, NodeValue::Declaration(_)));
+            if b.arguments.is_empty() && b.decls.is_empty() && !declares_local {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    /// Compile an inlined control-flow block body into `out`: its statements spliced
+    /// inline (value-on-stack like a block, but no frame and no trailing `Return`), with
+    /// each top-level `^expr` redirected to a `Jump` past the body (patched here). `^^`
+    /// (MethodReturn) is left untouched — it still returns from the enclosing method.
+    fn inline_block_body(&mut self, block: &BlockNode, out: &mut CodeBlock) -> Result<(), String> {
+        let saved = self.inline_carets.replace(Vec::new());
+        let len = block.statements.len();
+        for (idx, stmt) in block.statements.iter().enumerate() {
+            out.current_source = stmt.source_info.clone();
+            self.compile_node(stmt, out)?;
+            // Discard the value of every statement but the last (the block's value).
+            if idx + 1 < len {
+                out.push(Instruction::Pop);
+            }
+        }
+        if len == 0 {
+            out.push(Instruction::Push(Constant::Nil));
+        }
+        // Patch each top-level `^` to jump to just past the body (falls through to the
+        // construct's merge point).
+        let carets = self.inline_carets.take().unwrap_or_default();
+        let end = out.len() as isize;
+        for pos in carets {
+            set_jump_offset(&mut out.bytecode[pos], end - pos as isize);
+        }
+        self.inline_carets = saved;
+        Ok(())
+    }
+
+    /// Slice 2d (v2) — inline `{cond}.whileDo:{body}` when both the receiver (`cond`) and
+    /// the body are literal, 0-arg, declaration-free blocks, into a native jump loop.
+    /// Eliminates the per-iteration block allocation, dispatch, and frame — and the
+    /// recursion, since the bootstrap `whileDo:` recurses once per iteration
+    /// (`^^s.whileDo:block`). Returns `true` if inlined. Evaluates to `nil`, matching the
+    /// bootstrap (the terminating `if:` has no else). `^` in `cond`/`body` ends that block
+    /// (redirected by `inline_block_body`); `^^` still returns from the enclosing method.
+    fn try_compile_inlined_while(
+        &mut self,
+        call: &MethodCallNode,
+        bytecode: &mut CodeBlock,
+    ) -> Result<bool, String> {
+        let subject = match &call.subject {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let kws: Vec<&str> = call
+            .arguments
+            .signature
+            .identifiers
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        if kws.as_slice() != ["whileDo"] {
+            return Ok(false);
+        }
+        let cond_blk = match Self::inlinable_block(subject) {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+        let body_blk = match Self::inlinable_block(&call.arguments.expressions[0]) {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+
+        // Compile cond/body into their own sub-blocks so their lengths size the jumps.
+        let mut cond_bc = CodeBlock::new();
+        cond_bc.current_source = bytecode.current_source.clone();
+        self.inline_block_body(cond_blk, &mut cond_bc)?;
+        let c = cond_bc.len() as isize;
+
+        let mut body_bc = CodeBlock::new();
+        body_bc.current_source = bytecode.current_source.clone();
+        self.inline_block_body(body_blk, &mut body_bc)?;
+        let b = body_bc.len() as isize;
+
+        // Layout (each jump offset is relative to its own position):
+        //   [start] <cond>          (c instrs; leaves the condition on the stack)
+        //           ElseJump(b+3)    cond false → exit to the trailing nil
+        //           <body>          (b instrs; leaves the body value)
+        //           Pop              discard the body value
+        //           Jump(-(c+b+2))   back to [start]
+        //   [end]   Push(Nil)        whileDo: evaluates to nil
+        bytecode.extend(cond_bc);
+        bytecode.push(Instruction::ElseJump(b + 3));
+        bytecode.extend(body_bc);
+        bytecode.push(Instruction::Pop);
+        bytecode.push(Instruction::Jump(-(c + b + 2)));
+        bytecode.push(Instruction::Push(Constant::Nil));
+        Ok(true)
     }
 
     fn compile_binary_operator(
@@ -894,8 +1621,22 @@ impl Compiler {
             return Ok(());
         }
 
+        // Devirtualize when both operands are statically Integer: emit the direct i64 op
+        // instead of a method send. Computed from the AST before compiling the operands
+        // (no side effects). Integer is a sealed value type (see prelude.qn), so its
+        // arithmetic operators can't be redefined — this is sound.
+        let devirt = self.static_type(&op.left) == StaticType::Int
+            && self.static_type(&op.right) == StaticType::Int;
+
         self.compile_node(&op.left, bytecode)?;
         self.compile_node(&op.right, bytecode)?;
+
+        if devirt {
+            if let Some(op_instr) = Self::int_devirt_op(&op.operator) {
+                bytecode.push(op_instr);
+                return Ok(());
+            }
+        }
 
         let selector = match op.operator {
             BinaryOperatorType::Add => "+:",
@@ -955,6 +1696,14 @@ impl Compiler {
     }
 
     fn compile_block(&mut self, block: &BlockNode, bytecode: &mut CodeBlock) -> Result<(), String> {
+        // Consume the one-shot init-block flag (set by `compile_method_call` for a
+        // `X.new:{ … }` argument) before anything can reset it; nested blocks compiled
+        // within read it as `false`.
+        let is_init = std::mem::take(&mut self.next_block_is_init);
+        // A real block gets its own frame, so any enclosing inlined-region caret
+        // redirection (Slice 2d) must not leak into it: a `^` here is a genuine
+        // `BlockReturn` for this block. Cleared on entry, restored on exit.
+        let saved_inline = self.inline_carets.take();
         let mut param_names = Vec::new();
         let mut param_types = Vec::new();
         let mut locals = HashSet::new();
@@ -981,6 +1730,14 @@ impl Compiler {
         }
 
         self.push_scope(locals);
+        self.scopes.last_mut().unwrap().is_init = is_init;
+
+        // Seed declared param types (Integer/Boolean) so arithmetic on a typed param
+        // devirtualizes. Dispatch only selects a typed method when the arg matches, so
+        // the param is provably that type inside the body — no runtime guard needed.
+        for (name, tyname) in param_names.iter().zip(param_types.iter()) {
+            self.record_local_type(name, static_type_from_name(tyname));
+        }
 
         let mut block_bytecode = CodeBlock::new();
         block_bytecode.current_source = block.source_info.clone();
@@ -1037,6 +1794,7 @@ impl Compiler {
         };
 
         bytecode.push(Instruction::Push(Constant::Block(static_block)));
+        self.inline_carets = saved_inline;
         Ok(())
     }
 
@@ -1125,14 +1883,87 @@ mod tests {
         }
     }
 
+    // Builds a `var` declaration. First-binding compilation is now `var` (a bare
+    // assignment to an undeclared local is a strict-mode error — tested separately in
+    // `strict_declaration_semantics`). A fresh `var` binding emits the same
+    // Dup/DefineLocal bytecode the old implicit first-assignment did.
     fn assign_node(lvals: Vec<Node>, rval: Node) -> Node {
         Node {
             source_info: None,
-            value: NodeValue::Assignment(AssignmentNode {
+            value: NodeValue::Declaration(DeclarationNode {
+                kind: DeclKind::Var,
                 lvalues: lvals.into_iter().map(Arc::new).collect(),
+                type_hint: None,
                 rvalue: Arc::new(rval),
             }),
         }
+    }
+
+    #[test]
+    fn strict_declaration_semantics() {
+        fn compile_src(src: &str) -> Result<StaticBlock, String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            Compiler::new().compile_program(p)
+        }
+
+        // `var` declares; a later plain assignment reassigns the same binding.
+        assert!(compile_src("var x = 5; x = 6").is_ok());
+        assert!(compile_src("var a b = #(1 2); a b = #(3 4)").is_ok());
+        assert!(compile_src("var f = { |n| n * f.value: 1 }").is_ok()); // recursive self-ref
+
+        // A bare assignment to an undeclared local is a strict-mode error.
+        let e = compile_src("z = 10").unwrap_err();
+        assert!(e.contains("undeclared local"), "{e}");
+
+        // A `let` binding cannot be reassigned.
+        let e = compile_src("let w = 1; w = 2").unwrap_err();
+        assert!(e.contains("let"), "{e}");
+
+        // Re-declaring a name in the same scope is an error.
+        let e = compile_src("var d = 1; var d = 2").unwrap_err();
+        assert!(e.contains("already declared"), "{e}");
+
+        // `var`/`let` cannot declare an instance variable.
+        let e = compile_src("var @x = 1").unwrap_err();
+        assert!(e.contains("instance variable"), "{e}");
+    }
+
+    /// Recursively check whether a static block (or any nested block) contains a
+    /// `CallSelfDirect` instruction.
+    fn has_call_self_direct(sb: &StaticBlock) -> bool {
+        sb.bytecode.0.iter().any(|inst| match inst {
+            Instruction::CallSelfDirect(..) => true,
+            Instruction::Push(Constant::Block(nested)) => has_call_self_direct(nested),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn sealed_self_send_emits_call_self_direct() {
+        fn compile_src(src: &str) -> StaticBlock {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            Compiler::new().compile_program(p).unwrap()
+        }
+
+        // A self-send to a same-class method of a SEALED class devirtualizes.
+        let sealed = compile_src("Foo <- { bar: -> { |n| .bar:(n) }; .sealed! }");
+        assert!(
+            has_call_self_direct(&sealed),
+            "sealed same-class self-send should emit CallSelfDirect"
+        );
+
+        // Without the seal it stays a normal dynamic Send.
+        let unsealed = compile_src("Foo <- { bar: -> { |n| .bar:(n) } }");
+        assert!(
+            !has_call_self_direct(&unsealed),
+            "un-sealed self-send must stay a Send"
+        );
     }
 
     fn binary(op: BinaryOperatorType, left: Node, right: Node) -> Node {
@@ -1454,12 +2285,12 @@ mod tests {
 
     #[test]
     fn test_compile_binary_unary_operators() {
-        // 1 + 2
+        // 1 + 2  — two Integer literals devirtualize to a direct IntAdd (no method send).
         let res = compile(vec![binary(BinaryOperatorType::Add, int(1), int(2))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Push(Constant::Int(2)));
-        expected.push(Instruction::Send(Symbol::intern("+:"), 1));
+        expected.push(Instruction::IntAdd);
         assert_eq!(res.bytecode, fused(expected));
 
         // -x

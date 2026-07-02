@@ -2,7 +2,7 @@
 "* file in a subdir, so it is NOT auto-loaded by the startup `qnlib/*.qn` glob.
 use usetest/lib;
 
-(TestSuite.new:{ name = 'Use' }).add:{
+(TestSuite.new:{ var name = 'Use' }).add:{
     .test:
     loadsAndRegistersClass -> {
         .is:{ [UseTest]Greeter.new.greeting } equalTo:'hello from usetest/lib';

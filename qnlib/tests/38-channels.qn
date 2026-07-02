@@ -5,11 +5,11 @@
 "* need a task to be parked first synchronize on a marker via `whileDo:` (not a fixed
 "* sleep) so they are deterministic under the scheduler-stress shuffle.
 
-(TestSuite.new:{ name = 'Channels' }).add:{
+(TestSuite.new:{ var name = 'Channels' }).add:{
     .test:
     bufferedSendReceive -> {
         "* within capacity, send/receive need no parking; values come out FIFO.
-        c = Channel.buffered: 3;
+        var c = Channel.buffered: 3;
         c.send: 1; c.send: 2; c.send: 3;
         .is:{ c.count } equalTo:3;
         .is:{ c.receive } equalTo:1;
@@ -28,7 +28,7 @@
     .test:
     rendezvous -> {
         "* unbuffered: the receiver parks until a spawned sender hands off the value.
-        ch = Channel.new;
+        var ch = Channel.new;
         Task.spawn: { ch.send: 42 };
         .is:{ ch.receive } equalTo:42;
     };
@@ -38,9 +38,9 @@
         "* on an unbuffered channel, send blocks until a receiver takes the value: the
         "* sender records `pre` before sending and `post` after; once it has parked in
         "* send, `post` is still empty — it only completes once we receive.
-        ch = Channel.new;
-        pre = #(); post = #();
-        h = Task.spawn: { pre.add: 1; ch.send: 9; post.add: 1 };
+        var ch = Channel.new;
+        var pre = #(); var post = #();
+        var h = Task.spawn: { pre.add: 1; ch.send: 9; post.add: 1 };
         { pre.count == 0 }.whileDo:{ Async.sleep: 1 };   "* sender has reached (and parked in) send
         .is:{ post.count } equalTo:0;                    "* send has NOT returned yet
         .is:{ ch.receive } equalTo:9;
@@ -52,9 +52,9 @@
     bufferedFullSenderParks -> {
         "* capacity 1: the first send buffers and returns; the second blocks until a
         "* receive frees the slot.
-        ch = Channel.buffered: 1;
-        prog = #();
-        h = Task.spawn: { ch.send: 1; prog.add: 'a'; ch.send: 2; prog.add: 'b' };
+        var ch = Channel.buffered: 1;
+        var prog = #();
+        var h = Task.spawn: { ch.send: 1; prog.add: 'a'; ch.send: 2; prog.add: 'b' };
         { prog.count == 0 }.whileDo:{ Async.sleep: 1 };  "* first send done, second parked
         .is:{ prog } equalTo:#('a');
         .is:{ ch.count } equalTo:1;
@@ -67,9 +67,9 @@
     .test:
     fanIn -> {
         "* several senders, one receiver; the sum is order-independent (1..5 == 1,2,3,4).
-        ch = Channel.new;
+        var ch = Channel.new;
         (1..5).each:{ |k| Task.spawn: { ch.send: k } };
-        sum = 0;
+        var sum = 0;
         (1..5).each:{ |_| sum = sum + ch.receive };
         .is:{ sum } equalTo:10;
     };
@@ -77,18 +77,18 @@
     .test:
     closeDrainsThenEachStops -> {
         "* each: yields the buffered values then stops once the channel is closed+empty.
-        ch = Channel.buffered: 4;
+        var ch = Channel.buffered: 4;
         ch.send: 10; ch.send: 20; ch.send: 30;
         ch.close;
         .isTrue:{ ch.closed? };
-        total = 0;
+        var total = 0;
         ch.each:{ |v| total = total + v };
         .is:{ total } equalTo:60;
     };
 
     .test:
     receiveOnClosedEmptyIsNil -> {
-        ch = Channel.buffered: 2;
+        var ch = Channel.buffered: 2;
         ch.send: 1;
         ch.close;
         .is:{ ch.receive } equalTo:1;       "* buffered values remain receivable after close
@@ -98,7 +98,7 @@
 
     .test:
     sendOnClosedThrows -> {
-        ch = Channel.new;
+        var ch = Channel.new;
         ch.close;
         .does:{ ch.send: 1 } throw:ValueError;
     };
@@ -106,9 +106,9 @@
     .test:
     closeWakesParkedReceiver -> {
         "* a receiver parked on an empty channel is released (with nil) by close.
-        ch = Channel.new;
-        pre = #(); got = #();
-        h = Task.spawn: { pre.add: 1; got.add: ch.receive };
+        var ch = Channel.new;
+        var pre = #(); var got = #();
+        var h = Task.spawn: { pre.add: 1; got.add: ch.receive };
         { pre.count == 0 }.whileDo:{ Async.sleep: 1 };   "* receiver parked
         ch.close;
         h.join;
@@ -120,9 +120,9 @@
         "* cancelling a task parked in receive raises its (uncatchable) Cancelled, runs
         "* finally, and is observable as a cancelled status. The stale waiter it leaves
         "* behind is a harmless ghost — exercised by the next test.
-        ch = Channel.new;
-        entered = #(); trace = #();
-        h = Task.spawn: {
+        var ch = Channel.new;
+        var entered = #(); var trace = #();
+        var h = Task.spawn: {
             { entered.add: 1; ch.receive }.catch:{ |_| nil } finally:{ trace.add: 'finally' }
         };
         { entered.count == 0 }.whileDo:{ Async.sleep: 1 };
@@ -136,9 +136,9 @@
     ghostWaiterIsSkipped -> {
         "* after a cancelled receiver leaves a ghost in the queue, a fresh send/receive
         "* skips it and still delivers correctly.
-        ch = Channel.new;
-        entered = #();
-        h = Task.spawn: { entered.add: 1; ch.receive };
+        var ch = Channel.new;
+        var entered = #();
+        var h = Task.spawn: { entered.add: 1; ch.receive };
         { entered.count == 0 }.whileDo:{ Async.sleep: 1 };
         h.cancel;
         { h.join }.catch:{ |_| nil };
@@ -150,10 +150,10 @@
     gatherProducerConsumer -> {
         "* a producer and a consumer run concurrently over one channel under gather; the
         "* producer closes when done and the consumer drains to a deterministic sum.
-        ch = Channel.buffered: 4;
-        result = Async.gather:#(
+        var ch = Channel.buffered: 4;
+        var result = Async.gather:#(
             { (1..6).each:{ |k| ch.send: k }; ch.close; 'produced' }
-            { sum = 0; ch.each:{ |v| sum = sum + v }; sum }
+            { var sum = 0; ch.each:{ |v| sum = sum + v }; sum }
         );
         .is:{ result.at: 0 } equalTo:'produced';
         .is:{ result.at: 1 } equalTo:15;     "* 1+2+3+4+5
@@ -164,10 +164,10 @@
         "* buffered values must survive collection while they sit in the channel: fill
         "* the buffer, churn the heap hard, then confirm every value is intact (this is
         "* the Quoin-level companion to the trace_gc unit test).
-        ch = Channel.buffered: 8;
+        var ch = Channel.buffered: 8;
         (0..8).each:{ |k| ch.send: ('v' + k.s) };
         (0..1000).each:{ |i| (0..10).collect:{ |j| j * i } };
-        out = #();
+        var out = #();
         (0..8).each:{ |_| out.add: ch.receive };
         .is:{ out } equalTo:#('v0' 'v1' 'v2' 'v3' 'v4' 'v5' 'v6' 'v7');
     };

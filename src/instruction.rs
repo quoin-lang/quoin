@@ -107,6 +107,12 @@ pub enum Instruction {
     Pop,
     Dup,
     Send(Symbol, usize), // selector, num_args
+    // A self-send to a same-class method of a *sealed* class (Slice 2b-B). Same operand
+    // shape as `Send` (receiver + args on the stack); emitted by the compiler when it can
+    // prove the target method is fixed. Phase 1: behaves exactly like `Send`. Phase 2: a
+    // guard-free per-call-site cache resolves the callable once and reuses it (sealed ⇒
+    // never invalidated), skipping `lookup_method`.
+    CallSelfDirect(Symbol, usize), // selector, num_args
     // Superinstructions: a single fused op for the hot `<operand-load>; Send` pairs (the
     // last operand of a send is overwhelmingly a local / constant / field — see
     // profiling/superinstructions). Each pushes its operand then runs the normal send,
@@ -130,6 +136,32 @@ pub enum Instruction {
     // before the send (receiver + arg for a 1-arg send); produced by `fuse_bytecode`.
     SendLocalLocal(Symbol, Symbol, Symbol, usize), // local, local, selector, num_args
     SendLocalConst(Symbol, Constant, Symbol, usize), // local, constant, selector, num_args
+    // Devirtualized Integer operators (Slice 2a): the compiler emits these instead of a
+    // `Send("+:", 1)` etc. when both operands are statically `Integer` (a sealed value
+    // type). Each pops two `Value::Int`s and pushes the result directly — no method
+    // lookup, no dispatch. Semantics match Integer's native ops exactly: `+`/`-`/`*` wrap
+    // like i64; `/`/`%` raise "Division by zero" on a zero divisor; compares yield a Bool.
+    IntAdd,
+    IntSub,
+    IntMul,
+    IntDiv,
+    IntMod,
+    IntLt,
+    IntLe,
+    IntGt,
+    IntGe,
+    IntEq,
+    IntNe,
+    // Devirtualized List accessors (Slice 2e): emitted instead of `Send("at:", 1)` /
+    // `Send("at:put:", 2)` / `Send("add:", 1)` when the receiver is statically a `List` (a
+    // sealed value type — its access methods can't be redefined). Each pops the same
+    // operands a send would and does the indexed op directly on the backing `Vec`, matching
+    // native semantics (OOB read → nil; OOB write → IndexError; both mutators evaluate to the
+    // receiver). If the receiver isn't a native list at runtime (a `List`-typed local
+    // reassigned to something else), each falls back to the real send — a pure speedup.
+    ListGet,
+    ListSet,
+    ListPush,
     Return,
     Yeet,
     BlockReturn,
@@ -137,6 +169,12 @@ pub enum Instruction {
     Jump(isize),
     IfJump(isize),
     ElseJump(isize),
+    // Guard for control-flow inlining on a non-statically-Bool receiver (Slice 2d, option
+    // C). Peeks the stack top (the conditional's receiver): if it is *not* a `Bool`, jump
+    // by the offset to a cold path that performs the real `if:`/`if:else:` send (preserving
+    // MessageNotUnderstood / a user-defined `if:else:`), leaving the receiver on the stack;
+    // if it *is* a `Bool`, fall through to the inlined branch (which consumes it). Never pops.
+    BranchIfNotBool(isize),
     NewList(usize), // num_elements
     NewMap(usize),  // num_pairs (key/value count)
     NewSet(usize),  // num_elements

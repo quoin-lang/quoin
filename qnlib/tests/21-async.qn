@@ -2,7 +2,7 @@
 "* `QN_SCHED_STRESS=<seed>` runs, which preempt at every cooperative yield and
 "* pick ready tasks at random — exercising the per-task state swap and a wide
 "* range of interleavings. See `docs/ASYNC_ARCH.md` and `src/tuning.rs`.
-(TestSuite.new:{ name = 'Async' }).add:{
+(TestSuite.new:{ var name = 'Async' }).add:{
     "* Stage 1 async I/O: `Async.sleep:` parks the running fiber via an AwaitIo
     "* suspension and resumes with a value, all driven by the async IoBackend.
 
@@ -53,7 +53,7 @@
     "* The result is re-readable: joining twice yields the same value (Promise-style).
     .test:
     joinIsReadableMoreThanOnce -> {
-        h = Task.spawn:{ 7 };
+        var h = Task.spawn:{ 7 };
         .is:{ h.join } equalTo:7;
         .is:{ h.join } equalTo:7;
     };
@@ -63,7 +63,7 @@
     .test:
     spawnedTasksRunConcurrently -> {
         .is:{ Timer.time:{
-            hs = (0..8).collect:{ |k| Task.spawn:{ Async.sleep: 30; k } };
+            var hs = (0..8).collect:{ |k| Task.spawn:{ Async.sleep: 30; k } };
             hs.each:{ |h| h.join }
         } } lessThan:150000;
     };
@@ -80,9 +80,9 @@
     "* joiner observes a catchable cancellation and the status becomes 'cancelled'.
     .test:
     cancelRunsFinallyAndIsObservable -> {
-        trace = #();
-        entered = #();
-        h = Task.spawn:{
+        var trace = #();
+        var entered = #();
+        var h = Task.spawn:{
             { entered.add:1; Async.sleep: 1000 }
                 .catch:{ |e| trace.add:'caught' } finally:{ trace.add:'finally' }
         };
@@ -111,7 +111,7 @@
         .does:{ Async.timeout: 5 do:{ Async.sleep: 100000 } } throw:TimeoutError;
         "* a TimeoutError is-an Error, and exposes the deadline it elapsed.
         .does:{ Async.timeout: 5 do:{ Async.sleep: 100000 } } throw:Error;
-        caught = nil;
+        var caught = nil;
         { Async.timeout: 5 do:{ Async.sleep: 100000 } }.catch:{ |e| caught = e };
         .is:{ caught.ms } equalTo:5;
     };
@@ -137,7 +137,7 @@
     "* The block's `finally` runs on the deadline (cooperative unwind, like cancel).
     .test:
     timeoutRunsFinallyOnDeadline -> {
-        trace = #();
+        var trace = #();
         Async.timeout: 5 do:{
             { Async.sleep: 100000 }.catch:{ |e| nil } finally:{ trace.add:'finally' }
         } onCancel:{ nil };
@@ -158,8 +158,8 @@
     .test:
     joinAll -> {
         "* Async.joinAll: joins every task, returning their results in order
-        a = Task.spawn:{ 10 };
-        b = Task.spawn:{ 20 };
+        var a = Task.spawn:{ 10 };
+        var b = Task.spawn:{ 20 };
         .is:{ Async.joinAll:#( a b ) } equalTo:#( 10 20 );
     };
 }

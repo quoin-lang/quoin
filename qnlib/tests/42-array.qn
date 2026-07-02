@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Array' }).add:{
+(TestSuite.new:{ var name = 'Array' }).add:{
     .test:
     floats -> {
         .is:{ (Array.ofFloats:#(1.0 2.0 3.0)).length } equalTo:3;

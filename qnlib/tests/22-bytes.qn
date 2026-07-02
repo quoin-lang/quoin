@@ -1,13 +1,13 @@
 "* Stage 3a: the `Bytes` primitive — immutable binary data, the currency of the
 "* socket/TLS/HTTP layers. Text crosses at the edges via `String.asBytes` /
 "* `Bytes.asString`. See `docs/ASYNC_ARCH.md`.
-(TestSuite.new:{ name = 'Bytes' }).add:{
+(TestSuite.new:{ var name = 'Bytes' }).add:{
     "* UTF-8 round-trips through Bytes and back.
     .test:stringRoundTrip -> { .is:{ 'hello, world'.asBytes.asString } equalTo:'hello, world' };
 
     "* size / at: expose the raw bytes (ASCII 'h' = 104).
     .test:sizeAndAt -> {
-        b = 'hi'.asBytes;
+        var b = 'hi'.asBytes;
         .is:{ b.size } equalTo:2;
         .is:{ b.count } equalTo:2;
         .is:{ b.at:0 } equalTo:104;
@@ -19,7 +19,7 @@
 
     "* from:to: slices a half-open range, clamped to bounds.
     .test:slice -> {
-        b = 'abcdef'.asBytes;
+        var b = 'abcdef'.asBytes;
         .is:{ (b.from:1 to:4).asString } equalTo:'bcd';
         .is:{ (b.from:0 to:100).asString } equalTo:'abcdef';
         .is:{ (b.from:3 to:3).size } equalTo:0
@@ -39,7 +39,7 @@
 
     "* each: yields every byte as an Integer.
     .test:each -> {
-        sum = 0;
+        var sum = 0;
         'AB'.asBytes.each:{ |x| sum = sum + x };
         .is:{ sum } equalTo:131
     };
@@ -49,7 +49,7 @@
 
     "* asString throws (catchable) on invalid UTF-8; asStringLossy never does.
     .test:invalidUtf8 -> {
-        bad = Bytes.of:#( 255 254 );
+        var bad = Bytes.of:#( 255 254 );
         .is:{ { bad.asString }.catch:{ |ex| 'threw' } } equalTo:'threw';
         .is:{ bad.asStringLossy.length } greaterThanOrEqualTo:1
     }

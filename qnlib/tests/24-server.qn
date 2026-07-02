@@ -8,7 +8,7 @@
 [Test]EchoServer <- {
     .meta <-- {
         serve:on: -> { |n listener|
-            count = 0;
+            var count = 0;
             listener.acceptLoop:{ |conn|
                 conn.writeAll:(conn.read:4);
                 count = count + 1;
@@ -19,17 +19,17 @@
     }
 };
 
-(TestSuite.new:{ name = 'Server' }).add:{
+(TestSuite.new:{ var name = 'Server' }).add:{
     "* acceptOnce: accept a single connection, echo it, close; the client gets it back.
     .test:
     acceptOnceEchoesOneConnection -> {
-        listener = TcpListener.listen:'127.0.0.1:0';
-        target = '127.0.0.1:' + listener.port.s;
-        results = Async.timeout:5000 do:{
+        var listener = TcpListener.listen:'127.0.0.1:0';
+        var target = '127.0.0.1:' + listener.port.s;
+        var results = Async.timeout:5000 do:{
             Async.gather:#(
                 { listener.acceptOnce:{ |conn| conn.writeAll:(conn.read:5) }; 'served' }
-                { c = TcpSocket.connect:target; c.writeAll:'hello'.asBytes;
-                  reply = (c.read:5).asString; c.close; reply }
+                { var c = TcpSocket.connect:target; c.writeAll:'hello'.asBytes;
+                  var reply = (c.read:5).asString; c.close; reply }
             )
         };
         listener.close;
@@ -42,15 +42,15 @@
     "* connection, then the server breaks out with ^^ after the 2nd (returning the count).
     .test:
     acceptLoopHandlesManyThenBreaks -> {
-        listener = TcpListener.listen:'127.0.0.1:0';
-        target = '127.0.0.1:' + listener.port.s;
-        served = Async.timeout:5000 do:{
+        var listener = TcpListener.listen:'127.0.0.1:0';
+        var target = '127.0.0.1:' + listener.port.s;
+        var served = Async.timeout:5000 do:{
             Async.gather:#(
                 { [Test]EchoServer.serve:2 on:listener }
-                { c = TcpSocket.connect:target; c.writeAll:'AAAA'.asBytes;
-                  r = (c.read:4).asString; c.close; r }
-                { c = TcpSocket.connect:target; c.writeAll:'BBBB'.asBytes;
-                  r = (c.read:4).asString; c.close; r }
+                { var c = TcpSocket.connect:target; c.writeAll:'AAAA'.asBytes;
+                  var r = (c.read:4).asString; c.close; r }
+                { var c = TcpSocket.connect:target; c.writeAll:'BBBB'.asBytes;
+                  var r = (c.read:4).asString; c.close; r }
             )
         };
         listener.close;

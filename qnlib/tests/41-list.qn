@@ -3,7 +3,7 @@
 "* out-of-bounds at:, sliceFrom: past the end, ==: mismatches, bind:, and both sort:
 "* branches (a 1-arg key block and a 2-arg comparator block).
 
-(TestSuite.new:{ name = 'List' }).add:{
+(TestSuite.new:{ var name = 'List' }).add:{
     .test:
     atOutOfBoundsIsNil -> {
         .is:{ #(1 2 3).at:0 } equalTo:1;

@@ -18,8 +18,8 @@ TcpServer <- { |@address @listener @tasks @acceptTask|
     start: -> { |block|
         @acceptTask = Task.spawn:{
             { true }.whileDo:{
-                conn = @listener.accept;
-                @tasks.add:Task.spawn:{ result = block.value:conn; conn.close; result }
+                var conn = @listener.accept;
+                @tasks.add:Task.spawn:{ var result = block.value:conn; conn.close; result }
             }
         }
     };

@@ -4,9 +4,9 @@
 use test;
 use std:tests/*;
 
-runner = TestRunner.new;
+var runner = TestRunner.new;
 [Test]Suites.each:{ |s| runner.add:s };
 
-results = runner.run:AnsiTestReporter.new:{ out = [IO]Stdout };
+var results = runner.run:AnsiTestReporter.new:{ var out = [IO]Stdout };
 
 results.none?:{ |tr| tr.failures.any? }
