@@ -268,11 +268,11 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
   - **Followup — per-method sealing.** Whole-class `sealed!` is coarse; sealing an *individual method*
     (so only that method's dispatch is frozen/devirtualizable while the rest of the class stays open)
     would be finer-grained and preferable. Syntax TBD. Track for after 2b-B lands.
-- **Slice 2d — control-flow inlining (v1 `if:`/`if:else:` + v2 `whileDo:` + option B DONE; v3/C next).**
-  Measured **2.0× on typed fib(30)** (1.42s→0.71s), **1.5× on untyped fib** (B), and **~2.3× on
-  Sieve** (v2, ~40ms→~17ms). Tracked `qn benchmark`: Fibonacci ~11ms→~4-5ms, Sieve ~40→~17ms; Trees
-  unchanged (need v3/C). All green: `.qn` 1227/0 (incl. `QN_GC_STRESS=1`), `cargo test` 209/0. Notes:
-  `profiling/2d-controlflow-inline/notes.md`. `if:`/`if:else:`/
+- **Slice 2d — control-flow inlining (v1 `if:`/`if:else:` + v2 `whileDo:` + options B & C DONE; v3 next).**
+  Measured **2.0× typed fib(30)** (1.42s→0.71s), **1.5× untyped fib** (B), **~2.5× Sieve** (~40→~16ms),
+  **~1.2× Binary Trees** (~545→~454ms, C). All three tracked benchmarks improved. All green: `.qn`
+  1233/0 (incl. `QN_GC_STRESS=1`), `cargo test` 209/0. Notes: `profiling/2d-controlflow-inline/notes.md`.
+  `if:`/`if:else:`/
   `whileDo:` are ordinary Quoin method sends (`qnlib/core/00-bootstrap.qn`: `True/False` `if:else:`;
   `whileDo:` at :176), so each branch/iteration costs **2 block allocations + 2 dispatches + 2 frames**
   (the `if:else:` method frame, then `.value` on the chosen block) around a single compare/add. This is
@@ -285,9 +285,11 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
     - `if:`/`if:else:` — only when the **receiver is statically `Bool`** (2a's `static_type`) **and**
       the block args are literal, 0-arg, **declaration-free** blocks. **Option B (DONE):** comparison
       operators (`<` `<=` `>` `>=` `==` `!=`) are statically `Bool` for *any* operands, so untyped
-      `(n<=1)`/`(depth>0)`/`(x==y)` conditions inline too. Unknown receiver (e.g. a predicate send
-      `x.defined?`) → keep the send (option C, later, would guard-inline those). Decl-carrying blocks
-      → keep the send (v3, alpha-rename). All sound; no regression for dynamic code.
+      `(n<=1)`/`(depth>0)`/`(x==y)` conditions inline too. **Option C (DONE):** an `Unknown`-typed
+      receiver (e.g. a predicate send `x.defined?`) inlines behind a runtime `BranchIfNotBool` guard —
+      a non-Bool receiver at runtime jumps to a cold path that reissues the real send (MNU / a
+      user-defined `if:else:`), so it's fully sound. A known-non-Bool (`Int`) receiver skips inlining.
+      Decl-carrying blocks → keep the send (v3, alpha-rename). No regression for dynamic code.
     - `whileDo:` — when the receiver (cond) **and** the arg (body) are literal 0-arg blocks; the cond
       block's truthiness drives the loop.
     - Any non-literal-block arg → fall back to the normal send.

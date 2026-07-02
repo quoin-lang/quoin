@@ -3048,6 +3048,19 @@ impl<'gc> VmState<'gc> {
                     frame.ip += 1;
                 }
             }
+            Instruction::BranchIfNotBool(offset) => {
+                let offset = *offset;
+                // Peek the receiver (do not pop): a non-Bool takes the cold path (the real
+                // send), which needs it on the stack; a Bool falls through to the inlined
+                // branch, which consumes it.
+                let is_bool = matches!(self.stack.last(), Some(Value::Bool(_)));
+                let frame = &mut self.frames[frame_idx];
+                if is_bool {
+                    frame.ip += 1;
+                } else {
+                    frame.ip = (frame.ip as isize + offset) as usize;
+                }
+            }
             Instruction::NewList(n) => {
                 let n = *n;
                 let mut elements = Vec::new();

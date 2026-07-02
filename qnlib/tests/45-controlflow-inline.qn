@@ -1,0 +1,24 @@
+(TestSuite.new:{ var name = 'ControlFlowInline' }).add:{
+    "* Slice 2d option C: `if:`/`if:else:` on a non-statically-Bool receiver inline behind a
+    "* runtime Bool guard (BranchIfNotBool). A Bool receiver takes the inlined branch; a
+    "* non-Bool receiver falls back to the real send.
+    "* Hot path: a predicate receiver (`.defined?` returns a Bool) takes the inlined branch.
+    .test:guardedInlineHotPath -> {
+        .is:{ (5.defined?).if:{ 'yes' } else:{ 'no' } } equalTo:'yes';
+        .is:{ (nil.defined?).if:{ 'yes' } else:{ 'no' } } equalTo:'no';
+        .is:{ (5.defined?).if:{ 'yes' } } equalTo:'yes';
+        .is:{ (nil.defined?).if:{ 'yes' } } equalTo:nil
+    };
+
+    "* Cold path: a non-Bool receiver with a user-defined `if:else:`/`if:` must dispatch to
+    "* that method — not branch on the receiver's truthiness.
+    .test:guardedInlineColdPath -> {
+        Custom <- {
+            if:else: -> { |a b| 'customIfElse' };
+            if: -> { |a| 'customIf' }
+        };
+        var c = Custom.new;
+        .is:{ c.if:{ 't' } else:{ 'e' } } equalTo:'customIfElse';
+        .is:{ c.if:{ 't' } } equalTo:'customIf'
+    }
+}

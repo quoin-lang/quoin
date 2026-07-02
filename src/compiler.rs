@@ -52,14 +52,20 @@ impl CodeBlock {
 
 fn jump_offset(inst: &Instruction) -> Option<isize> {
     match inst {
-        Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => Some(*o),
+        Instruction::Jump(o)
+        | Instruction::IfJump(o)
+        | Instruction::ElseJump(o)
+        | Instruction::BranchIfNotBool(o) => Some(*o),
         _ => None,
     }
 }
 
 fn set_jump_offset(inst: &mut Instruction, off: isize) {
     match inst {
-        Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => *o = off,
+        Instruction::Jump(o)
+        | Instruction::IfJump(o)
+        | Instruction::ElseJump(o)
+        | Instruction::BranchIfNotBool(o) => *o = off,
         _ => {}
     }
 }
@@ -1326,10 +1332,14 @@ impl Compiler {
             _ => return Ok(false),
         };
 
-        // Only sound when the receiver is provably Boolean.
-        if self.static_type(subject) != StaticType::Bool {
-            return Ok(false);
-        }
+        // Bool receiver → inline directly. Unknown receiver → guarded inline (option C): a
+        // runtime Bool-check falls back to the real send for a non-Bool receiver. A
+        // known-non-Bool (Int) receiver → normal send (the guard would always miss).
+        let guarded = match self.static_type(subject) {
+            StaticType::Bool => false,
+            StaticType::Unknown => true,
+            StaticType::Int => return Ok(false),
+        };
 
         // Every arg must be a literal, 0-arg, declaration-free block (v1).
         let then_blk = match Self::inlinable_block(&exprs[0]) {
@@ -1348,29 +1358,70 @@ impl Compiler {
         // Condition → stack.
         self.compile_node(subject, bytecode)?;
 
+        if !guarded {
+            self.emit_inline_conditional_body(then_blk, else_blk, bytecode)?;
+            return Ok(true);
+        }
+
+        // Guarded (option C): if the receiver isn't a Bool at runtime, jump past the inlined
+        // body to a cold path that reissues the real send. The inlined body is
+        // self-contained (leaves its value on the stack), so it is wrapped verbatim.
+        let mut hot_bc = CodeBlock::new();
+        hot_bc.current_source = bytecode.current_source.clone();
+        self.emit_inline_conditional_body(then_blk, else_blk, &mut hot_bc)?;
+
+        let mut cold_bc = CodeBlock::new();
+        cold_bc.current_source = bytecode.current_source.clone();
+        self.compile_block(then_blk, &mut cold_bc)?;
+        if let Some(else_blk) = else_blk {
+            self.compile_block(else_blk, &mut cold_bc)?;
+            self.emit_call(&mut cold_bc, "if:else:", 2, false);
+        } else {
+            self.emit_call(&mut cold_bc, "if:", 1, false);
+        }
+
+        let h = hot_bc.len() as isize;
+        let k = cold_bc.len() as isize;
+        bytecode.push(Instruction::BranchIfNotBool(h + 2));
+        bytecode.extend(hot_bc);
+        bytecode.push(Instruction::Jump(k + 1));
+        bytecode.extend(cold_bc);
+        Ok(true)
+    }
+
+    /// Emit the unguarded inlined form of `if:`/`if:else:` (receiver already on the stack)
+    /// into `out`: `ElseJump; <then>; Jump; <else | Push(Nil)>`, leaving the construct's
+    /// value on the stack. Shared by the Bool-receiver path and the guarded (option C) hot
+    /// path.
+    fn emit_inline_conditional_body(
+        &mut self,
+        then_blk: &BlockNode,
+        else_blk: Option<&BlockNode>,
+        out: &mut CodeBlock,
+    ) -> Result<(), String> {
         let mut then_bc = CodeBlock::new();
-        then_bc.current_source = bytecode.current_source.clone();
+        then_bc.current_source = out.current_source.clone();
         self.inline_block_body(then_blk, &mut then_bc)?;
         let t = then_bc.len() as isize;
 
         if let Some(else_blk) = else_blk {
             let mut else_bc = CodeBlock::new();
-            else_bc.current_source = bytecode.current_source.clone();
+            else_bc.current_source = out.current_source.clone();
             self.inline_block_body(else_blk, &mut else_bc)?;
             let e = else_bc.len() as isize;
             // cond false → skip the then-body and its trailing Jump, land on the else-body.
-            bytecode.push(Instruction::ElseJump(t + 2));
-            bytecode.extend(then_bc);
-            bytecode.push(Instruction::Jump(e + 1));
-            bytecode.extend(else_bc);
+            out.push(Instruction::ElseJump(t + 2));
+            out.extend(then_bc);
+            out.push(Instruction::Jump(e + 1));
+            out.extend(else_bc);
         } else {
             // No else: a false condition makes the construct's value `nil`.
-            bytecode.push(Instruction::ElseJump(t + 2));
-            bytecode.extend(then_bc);
-            bytecode.push(Instruction::Jump(2));
-            bytecode.push(Instruction::Push(Constant::Nil));
+            out.push(Instruction::ElseJump(t + 2));
+            out.extend(then_bc);
+            out.push(Instruction::Jump(2));
+            out.push(Instruction::Push(Constant::Nil));
         }
-        Ok(true)
+        Ok(())
     }
 
     /// A literal block usable for control-flow inlining: no parameters and no local

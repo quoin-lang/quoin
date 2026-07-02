@@ -159,6 +159,12 @@ pub enum Instruction {
     Jump(isize),
     IfJump(isize),
     ElseJump(isize),
+    // Guard for control-flow inlining on a non-statically-Bool receiver (Slice 2d, option
+    // C). Peeks the stack top (the conditional's receiver): if it is *not* a `Bool`, jump
+    // by the offset to a cold path that performs the real `if:`/`if:else:` send (preserving
+    // MessageNotUnderstood / a user-defined `if:else:`), leaving the receiver on the stack;
+    // if it *is* a `Bool`, fall through to the inlined branch (which consumes it). Never pops.
+    BranchIfNotBool(isize),
     NewList(usize), // num_elements
     NewMap(usize),  // num_pairs (key/value count)
     NewSet(usize),  // num_elements
