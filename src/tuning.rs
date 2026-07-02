@@ -84,3 +84,11 @@ pub fn step_batch() -> u32 {
             .unwrap_or(256)
     })
 }
+
+/// `QN_BATCH_STATS`: have `run_vm_loop` accumulate per-batch wall time + GC bytes allocated
+/// and print a one-line summary on finish — the batch-size tuning harness
+/// (`profiling/batch-sweep/`). Off by default; adds two metric reads per batch when on.
+pub fn batch_stats() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| env_flag("QN_BATCH_STATS"))
+}
