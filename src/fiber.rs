@@ -118,16 +118,11 @@ pub fn run_vm_loop<'gc>(
         } else {
             None
         };
-        let mut budget = batch;
-        loop {
+        {
             let (vm, mc) = unsafe { ctx.get() };
-            match vm.step(mc) {
-                Ok(VmStatus::Running) => {
-                    budget -= 1;
-                    if budget == 0 {
-                        break;
-                    }
-                }
+            match vm.run_dispatch(mc, batch) {
+                // Budget spent — fall through to the cooperative yield below.
+                Ok(VmStatus::Running) => {}
                 Ok(VmStatus::Finished(val)) => {
                     if stats {
                         report_batch_stats(batch);

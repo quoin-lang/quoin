@@ -2,7 +2,7 @@ use crate::dispatch::{Callable, MethodCacheKey};
 use crate::error::QuoinError;
 use crate::fiber::{VMYielder, YieldReason};
 use crate::highlighter::{HighlightSpan, format_ansi, highlight_resilient, highlight_to_ansi};
-use crate::instruction::{Constant, Instruction, IntBinKind};
+use crate::instruction::{Constant, Instruction, IntBinKind, SharedBytecode};
 use crate::io_backend::StreamId;
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
 use crate::runtime::fiber::NativeFiberState;
@@ -2723,31 +2723,85 @@ impl<'gc> VmState<'gc> {
         res
     }
 
+    /// Execute a single VM instruction. The one-step entry point kept for the synchronous
+    /// sub-execution loops, the debugger, and `qn benchmark`; it clones the current frame's
+    /// bytecode `Rc` per call. The hot path (`run_vm_loop`) uses `run_dispatch`, which hoists
+    /// that clone out of the per-instruction path.
     #[allow(no_gc_across_yield)]
     pub(crate) fn step_internal(
         &mut self,
         mc: &Mutation<'gc>,
     ) -> Result<VmStatus<'gc>, QuoinError> {
-        // Cancellation checkpoint: a pending `cancel` raises here, then clears the live
-        // flag so the ensuing `finally` unwind runs to completion uninterrupted. Always
-        // `false` in benchmark mode (no task table), so this is a single cheap bool load.
         if self.sched.cancel_current {
             return Err(self.take_cancellation());
         }
         if self.frames.is_empty() {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
-            // assert_eq!(self.stack.len(), 0, "Stack is not empty! {:?}", self.stack);
             return Ok(VmStatus::Finished(ret));
         }
+        let bytecode = self.frames[self.frames.len() - 1].block.bytecode.clone();
+        self.dispatch_one(mc, &bytecode)
+    }
 
+    /// Run up to `budget` instructions in one flat loop, hoisting the current frame's bytecode
+    /// `Rc` into a local — cloned only when the frame stack changes (a call pushes / a return
+    /// pops), not once per instruction. This is the hot dispatch path driven by `run_vm_loop`.
+    /// It folds in the cancellation, empty-stack, and error handling that `step` +
+    /// `step_internal` do per instruction, so the result feeds `run_vm_loop` directly. Returns
+    /// `Running` once the budget is spent (i.e. "yield now"). The held `Rc` keeps the bytecode
+    /// alive across frame changes and GC, exactly as the per-step clone did.
+    #[allow(no_gc_across_yield)]
+    pub(crate) fn run_dispatch(
+        &mut self,
+        mc: &Mutation<'gc>,
+        budget: u32,
+    ) -> Result<VmStatus<'gc>, QuoinError> {
+        let mut cached_len = usize::MAX;
+        let mut bytecode: Option<SharedBytecode> = None;
+        let mut steps = 0u32;
+        loop {
+            if self.sched.cancel_current {
+                return Err(self.take_cancellation());
+            }
+            if self.frames.is_empty() {
+                let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
+                return Ok(VmStatus::Finished(ret));
+            }
+            let flen = self.frames.len();
+            if flen != cached_len {
+                cached_len = flen;
+                bytecode = Some(self.frames[flen - 1].block.bytecode.clone());
+            }
+            let bc = bytecode.as_ref().unwrap();
+            match self.dispatch_one(mc, bc) {
+                // A completed instruction, or a `^`/`^^` non-local return that unwound frames
+                // (`step` maps `NonLocalReturn` to `Running`). Count it; the changed frame
+                // stack re-hoists next iteration.
+                Ok(VmStatus::Running) | Err(QuoinError::NonLocalReturn) => {
+                    steps += 1;
+                    if steps >= budget {
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                Ok(other) => return Ok(other),
+                Err(QuoinError::Cancelled) => return Err(QuoinError::Cancelled),
+                Err(e) => return Err(self.annotate_error(e)),
+            }
+        }
+    }
+
+    /// One instruction, hoisted-bytecode form (the giant dispatch `match`). `bytecode` is the
+    /// current frame's bytecode `Rc` held by the caller (`step_internal` per-call, or
+    /// `run_dispatch` once per frame-entry), so `inst` borrows the caller's local — not
+    /// `self` — leaving handlers full `&mut self`. Callers guarantee `self.frames` is
+    /// non-empty and no cancellation is pending.
+    #[allow(no_gc_across_yield)]
+    pub(crate) fn dispatch_one(
+        &mut self,
+        mc: &Mutation<'gc>,
+        bytecode: &SharedBytecode,
+    ) -> Result<VmStatus<'gc>, QuoinError> {
         let frame_idx = self.frames.len() - 1;
-        // Borrow the current instruction instead of deep-cloning it every step: clone
-        // only the `Rc` to the bytecode (a refcount bump, no allocation) into a local,
-        // then take a `&Instruction` into it. `inst` borrows this local `Rc`, not
-        // `self`, so handlers keep full `&mut self` access; the `Rc` keeps the bytecode
-        // alive even if a handler pushes/pops frames. (`Instruction` is `'static` — no
-        // `Gc` pointers — so there's no GC-across-step concern.)
-        let bytecode = self.frames[frame_idx].block.bytecode.clone();
         let ip = self.frames[frame_idx].ip;
         let inst = match bytecode.0.get(ip) {
             Some(i) => i,
