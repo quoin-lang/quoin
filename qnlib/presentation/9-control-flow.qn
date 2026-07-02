@@ -1,13 +1,13 @@
-true <-- {
-    if: -> { |ifblock| ^^ifblock.value };
-    else: -> { |_| ^^nil };
-    if:else: -> { |ifblock _| ^^ifblock.value }
-};
-
-false <-- {
-    if: -> { |ifblock| ^^nil };
-    if:else: -> { |_ elseblock| ^^elseblock.value }
-};
+"* Control flow is built from ordinary message sends. `if:` / `else:` / `if:else:`
+"* live on the Boolean value type in the core stdlib — conceptually:
+"*
+"*   true  <-- { if: -> { |b| ^^b.value };  else: -> { |_| ^^nil };
+"*               if:else: -> { |b _| ^^b.value } }
+"*   false <-- { if: -> { |_| ^^nil };  if:else: -> { |_ e| ^^e.value } }
+"*
+"* Those ship built in; numerics/booleans are sealed (see prelude.qn), so user
+"* code can no longer reopen them. `whileDo:` lives on Block, which is NOT sealed,
+"* so it can still be (re)defined live:
 
 Block <-- {
     whileDo: -> { |block|

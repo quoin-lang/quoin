@@ -1,4 +1,14 @@
 "* The core standard library. `use core/*` loads qnlib/core/*.qn in UTF-8 sorted
 "* order (00-bootstrap … 06-io — zero-padded, so lexicographic == numeric). Every
 "* runner mode loads this first; user scripts get it automatically.
-use core/*
+use core/*;
+
+"* Seal the immediate value types now that the core stdlib has finished extending
+"* them (ranges, bignum, self-casts). Their method tables — the arithmetic
+"* operators in particular — are frozen from here on, which is what makes
+"* compile-time devirtualization of numeric arithmetic sound. User code can no
+"* longer reopen them.
+Integer.sealed!;
+Double.sealed!;
+Boolean.sealed!;
+Nil.sealed!

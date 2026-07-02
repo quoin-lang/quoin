@@ -17,13 +17,16 @@
 
     .test:
     operatorExtend -> {
-        .is:{ (42.class <-- { abc -> { 'Hi' } }); 42.abc } equalTo:'Hi';
-        .is:{ var n = 42; n <-- { inst -> { 'Hi' } }; n.inst; } equalTo:'Hi';
+        "* <-- adds methods to a (non-sealed) user class.
+        .is:{ TSCNC1 <-- { abc -> { 'Hi' } }; TSCNC1.new.abc } equalTo:'Hi';
+        "* Numeric value types are sealed (see prelude.qn) — adding a method to one throws.
+        .does:{ 42.class <-- { abc -> { 'Hi' } } } throw:'Cannot extend sealed class [/]Integer';
     };
 
     .test:
     operatorExtendReturnsLHS -> {
         .is:{ TSCNC1 <-- {} } equalTo:TSCNC1;
+        "* An empty extension mutates nothing, so it returns the LHS even for a sealed type.
         .is:{ 42 <-- {} } equalTo:42;
     };
 
