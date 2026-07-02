@@ -2,7 +2,7 @@ use crate::dispatch::{Callable, MethodCacheKey};
 use crate::error::QuoinError;
 use crate::fiber::{VMYielder, YieldReason};
 use crate::highlighter::{HighlightSpan, format_ansi, highlight_resilient, highlight_to_ansi};
-use crate::instruction::{Constant, Instruction};
+use crate::instruction::{Constant, Instruction, IntBinKind};
 use crate::io_backend::StreamId;
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
 use crate::runtime::fiber::NativeFiberState;
@@ -2528,6 +2528,35 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// The fused-`Int`-op computation (Slice a1), shared by `IntBinLL`/`IntBinLC`. Matches the
+    /// standalone `IntAdd`..`IntNe` arms exactly (arith wraps in release; `/`/`%` raise on a
+    /// zero divisor; compares yield a Bool).
+    fn int_bin_compute(kind: IntBinKind, a: i64, b: i64) -> Result<Value<'gc>, QuoinError> {
+        Ok(match kind {
+            IntBinKind::Add => Value::Int(a + b),
+            IntBinKind::Sub => Value::Int(a - b),
+            IntBinKind::Mul => Value::Int(a * b),
+            IntBinKind::Div => {
+                if b == 0 {
+                    return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+                }
+                Value::Int(a / b)
+            }
+            IntBinKind::Mod => {
+                if b == 0 {
+                    return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+                }
+                Value::Int(a % b)
+            }
+            IntBinKind::Lt => Value::Bool(a < b),
+            IntBinKind::Le => Value::Bool(a <= b),
+            IntBinKind::Gt => Value::Bool(a > b),
+            IntBinKind::Ge => Value::Bool(a >= b),
+            IntBinKind::Eq => Value::Bool(a == b),
+            IntBinKind::Ne => Value::Bool(a != b),
+        })
+    }
+
     fn exec_send(
         &mut self,
         mc: &Mutation<'gc>,
@@ -2932,6 +2961,45 @@ impl<'gc> VmState<'gc> {
                     self.frames[frame_idx].ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("!=:"), 1);
+                }
+            }
+            // Fused Int superinstructions (Slice a1): load the operand(s) directly and compute;
+            // on a non-Int operand push the operands and fall back to the real send (matching
+            // the standalone `Int` ops' contract, so MNU / user redefinition still work).
+            Instruction::IntBinLL(a, b, kind) => {
+                let (a, b, kind) = (*a, *b, *kind);
+                let (va, vb) = {
+                    let frame = &self.frames[frame_idx];
+                    (EnvFrame::get(frame.env, a), EnvFrame::get(frame.env, b))
+                };
+                if let (Some(Value::Int(x)), Some(Value::Int(y))) = (va, vb) {
+                    let res = Self::int_bin_compute(kind, x, y)?;
+                    self.push(res);
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    let va = va.unwrap_or_else(|| self.new_nil(mc));
+                    let vb = vb.unwrap_or_else(|| self.new_nil(mc));
+                    self.push(va);
+                    self.push(vb);
+                    return self.exec_send(mc, frame_idx, Symbol::intern(kind.selector()), 1);
+                }
+            }
+            Instruction::IntBinLC(a, c, kind) => {
+                let (a, kind) = (*a, *kind);
+                let va = {
+                    let frame = &self.frames[frame_idx];
+                    EnvFrame::get(frame.env, a)
+                };
+                if let (Some(Value::Int(x)), Some(y)) = (va, c.as_int()) {
+                    let res = Self::int_bin_compute(kind, x, y)?;
+                    self.push(res);
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    let va = va.unwrap_or_else(|| self.new_nil(mc));
+                    self.push(va);
+                    let cv = self.materialize_constant(mc, c);
+                    self.push(cv);
+                    return self.exec_send(mc, frame_idx, Symbol::intern(kind.selector()), 1);
                 }
             }
             // Devirtualized List accessors (Slice 2e). Operands are already on the stack in

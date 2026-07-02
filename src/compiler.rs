@@ -1,4 +1,6 @@
-use crate::instruction::{Constant, Instruction, SharedBytecode, SharedSourceMap, StaticBlock};
+use crate::instruction::{
+    Constant, Instruction, IntBinKind, SharedBytecode, SharedSourceMap, StaticBlock,
+};
 use crate::parser::ast::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, DeclKind, DeclarationNode,
     IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode, Node, NodeValue,
@@ -86,6 +88,24 @@ fn store_keep_variant(inst: &Instruction) -> Option<Instruction> {
         Instruction::StoreField(f) => Some(Instruction::StoreFieldKeep(f.clone())),
         _ => None,
     }
+}
+
+/// Maps a standalone devirtualized `Int` op to its `IntBinKind`, for the fusion pass.
+fn int_bin_kind(inst: &Instruction) -> Option<IntBinKind> {
+    Some(match inst {
+        Instruction::IntAdd => IntBinKind::Add,
+        Instruction::IntSub => IntBinKind::Sub,
+        Instruction::IntMul => IntBinKind::Mul,
+        Instruction::IntDiv => IntBinKind::Div,
+        Instruction::IntMod => IntBinKind::Mod,
+        Instruction::IntLt => IntBinKind::Lt,
+        Instruction::IntLe => IntBinKind::Le,
+        Instruction::IntGt => IntBinKind::Gt,
+        Instruction::IntGe => IntBinKind::Ge,
+        Instruction::IntEq => IntBinKind::Eq,
+        Instruction::IntNe => IntBinKind::Ne,
+        _ => return None,
+    })
 }
 
 /// Peephole pass: fuse hot adjacent instructions into single superinstructions, saving a
@@ -189,6 +209,31 @@ pub(crate) fn fuse_bytecode(
                 new_to_old.push(i);
                 new_code.push(three);
                 new_smap.push(source_map[i + 2].clone()); // keep the Send's source entry
+                i += 3;
+                continue;
+            }
+        }
+
+        // 3-instruction Int op (Slice a1): fuse `LoadLocal; <LoadLocal|Push>; IntXxx` into a
+        // single `IntBinLL`/`IntBinLC` — same shape as the send triple above, but the terminal
+        // is a devirtualized `Int` op. Collapses both operand-loads into the arithmetic op.
+        if i + 2 < n
+            && !is_target[i + 1]
+            && !is_target[i + 2]
+            && let Instruction::LoadLocal(a) = &bytecode[i]
+            && let Some(kind) = int_bin_kind(&bytecode[i + 2])
+        {
+            let three = match &bytecode[i + 1] {
+                Instruction::LoadLocal(b) => Some(Instruction::IntBinLL(*a, *b, kind)),
+                Instruction::Push(c) => Some(Instruction::IntBinLC(*a, c.clone(), kind)),
+                _ => None,
+            };
+            if let Some(three) = three {
+                old_to_new[i + 1] = new_code.len();
+                old_to_new[i + 2] = new_code.len();
+                new_to_old.push(i);
+                new_code.push(three);
+                new_smap.push(source_map[i + 2].clone()); // keep the Int op's source entry
                 i += 3;
                 continue;
             }
