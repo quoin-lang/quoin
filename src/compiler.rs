@@ -269,6 +269,10 @@ pub struct Compiler {
     /// One-shot flag set right before compiling the block argument of `X.new:{ … }`;
     /// consumed by the next `compile_block` to mark that block's scope `is_init`.
     next_block_is_init: bool,
+    /// Stack of "current class" method return types (selector → declared `StaticType`),
+    /// pushed while compiling a class body. A self-send to a method with an `Integer`
+    /// return is statically `Int`, so arithmetic on its result devirtualizes (Slice 2b-A).
+    method_returns: Vec<HashMap<String, StaticType>>,
 }
 
 impl Compiler {
@@ -283,6 +287,7 @@ impl Compiler {
             temp_counter: 0,
             value_type_def_depth: 0,
             next_block_is_init: false,
+            method_returns: Vec::new(),
         }
     }
 
@@ -297,6 +302,7 @@ impl Compiler {
             temp_counter: 0,
             value_type_def_depth: 0,
             next_block_is_init: false,
+            method_returns: Vec::new(),
         }
     }
 
@@ -425,8 +431,60 @@ impl Compiler {
                 }
             }
             NodeValue::BinaryOperator(op) => self.binop_result_type(op),
+            NodeValue::MethodCall(call) => self.self_send_return_type(call),
             _ => StaticType::Unknown,
         }
+    }
+
+    /// A self-send (`.sel:(…)` — no explicit receiver, or an explicit `self`) to a
+    /// current-class method with a declared return type is statically that type. Non-self
+    /// sends, unknown selectors, and variadic sends stay `Unknown` (a safe miss).
+    fn self_send_return_type(&self, call: &MethodCallNode) -> StaticType {
+        let is_self = match &call.subject {
+            None => true,
+            Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
+        };
+        if !is_self {
+            return StaticType::Unknown;
+        }
+        let Some(frame) = self.method_returns.last() else {
+            return StaticType::Unknown;
+        };
+        let idents = &call.arguments.signature.identifiers;
+        if idents.is_empty() {
+            return StaticType::Unknown;
+        }
+        // Canonical selector: unary uses the bare name; a keyword send joins `name:` parts.
+        // A variadic run folds to `name+:` in dispatch, which we don't reconstruct here — so
+        // such a send simply stays Unknown rather than risking a mismatched selector.
+        let selector = if call.arguments.expressions.is_empty() {
+            idents[0].name.clone()
+        } else {
+            idents
+                .iter()
+                .map(|i| format!("{}:", i.name))
+                .collect::<String>()
+        };
+        frame.get(&selector).copied().unwrap_or(StaticType::Unknown)
+    }
+
+    /// Selector → declared-return-`StaticType` map for a class body, from its method
+    /// definitions/extensions that carry a return type.
+    fn collect_method_returns(&self, block: &BlockNode) -> HashMap<String, StaticType> {
+        let mut map = HashMap::new();
+        for stmt in &block.statements {
+            let (sig, ret) = match &stmt.value {
+                NodeValue::MethodDefinition(m) => (&m.signature, &m.return_type),
+                NodeValue::MethodExtension(m) => (&m.signature, &m.return_type),
+                _ => continue,
+            };
+            if let Some(rt) = ret {
+                if let Ok(selector) = self.reconstruct_selector(sig) {
+                    map.insert(selector, static_type_from_name(&rt.name));
+                }
+            }
+        }
+        map
     }
 
     /// Result type of a binary operator when both operands are statically `Int`:
@@ -663,7 +721,10 @@ impl Compiler {
                 if is_value_type {
                     self.value_type_def_depth += 1;
                 }
+                let mrets = self.collect_method_returns(&class_def.block);
+                self.method_returns.push(mrets);
                 let r = self.compile_block(&class_def.block, bytecode);
+                self.method_returns.pop();
                 if is_value_type {
                     self.value_type_def_depth -= 1;
                 }
@@ -687,7 +748,10 @@ impl Compiler {
                     }
                     self.value_type_def_depth += 1;
                 }
+                let mrets = self.collect_method_returns(&class_ext.block);
+                self.method_returns.push(mrets);
                 let r = self.compile_block(&class_ext.block, bytecode);
+                self.method_returns.pop();
                 if is_value_type {
                     self.value_type_def_depth -= 1;
                 }

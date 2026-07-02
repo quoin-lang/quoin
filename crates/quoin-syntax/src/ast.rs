@@ -186,12 +186,16 @@ pub struct MethodCallNode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDefinitionNode {
     pub signature: Arc<MethodSelectorNode>,
+    /// Optional declared return type (`selector -> Integer { … }`), used for
+    /// return-type-aware devirtualization.
+    pub return_type: Option<Arc<IdentifierNode>>,
     pub block: Arc<BlockNode>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodExtensionNode {
     pub signature: Arc<MethodSelectorNode>,
+    pub return_type: Option<Arc<IdentifierNode>>,
     pub block: Arc<BlockNode>,
 }
 

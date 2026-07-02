@@ -4,7 +4,7 @@ use crate::source_info::{ParseError, SourceInfo};
 
 use once_cell::sync::Lazy;
 use pest::Parser;
-use pest::iterators::Pair;
+use pest::iterators::{Pair, Pairs};
 use pest::pratt_parser::PrattParser;
 use pest_derive::Parser;
 use regex::Captures;
@@ -905,6 +905,23 @@ fn parse_arg_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> Ident
     }
 }
 
+/// After a method-def selector, consume an optional `ret_type` (`-> Integer`) if present,
+/// returning the parsed return-type identifier and the following body-block pair.
+fn parse_opt_ret_type<'i>(
+    pairs: &mut Pairs<'i, Rule>,
+    filename: &str,
+    source_text: &str,
+) -> (Option<Arc<IdentifierNode>>, Pair<'i, Rule>) {
+    let next = pairs.next().unwrap();
+    if next.as_rule() == Rule::ret_type {
+        let ty = next.into_inner().next().unwrap();
+        let rt = Arc::new(parse_ident(ty, filename, source_text));
+        (Some(rt), pairs.next().unwrap())
+    } else {
+        (None, next)
+    }
+}
+
 fn parse_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> IdentifierNode {
     let source_info = extract_source_info(pair.as_span(), filename, source_text);
     let inner = pair.into_inner().next().unwrap();
@@ -974,9 +991,8 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
         }
         Rule::method_def => {
             let mut pairs = inner.into_inner();
-            let selector_pair = pairs.next().unwrap();
-            let selector = parse_selector(selector_pair, filename, source_text);
-            let block_pair = pairs.next().unwrap();
+            let selector = parse_selector(pairs.next().unwrap(), filename, source_text);
+            let (return_type, block_pair) = parse_opt_ret_type(&mut pairs, filename, source_text);
             let block_node = match parse_block(block_pair, filename, source_text).value {
                 Block(b) => b,
                 _ => unreachable!(),
@@ -985,15 +1001,15 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
                 source_info,
                 value: MethodDefinition(MethodDefinitionNode {
                     signature: Arc::new(selector),
+                    return_type,
                     block: Arc::new(block_node),
                 }),
             }
         }
         Rule::method_ext => {
             let mut pairs = inner.into_inner();
-            let selector_pair = pairs.next().unwrap();
-            let selector = parse_selector(selector_pair, filename, source_text);
-            let block_pair = pairs.next().unwrap();
+            let selector = parse_selector(pairs.next().unwrap(), filename, source_text);
+            let (return_type, block_pair) = parse_opt_ret_type(&mut pairs, filename, source_text);
             let block_node = match parse_block(block_pair, filename, source_text).value {
                 Block(b) => b,
                 _ => unreachable!(),
@@ -1002,6 +1018,7 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
                 source_info,
                 value: MethodExtension(MethodExtensionNode {
                     signature: Arc::new(selector),
+                    return_type,
                     block: Arc::new(block_node),
                 }),
             }
@@ -1789,6 +1806,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
+                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
                             source_info: None,
@@ -1816,6 +1834,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
+                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
                             source_info: None,
@@ -1843,6 +1862,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
+                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![
                             Arc::new(IdentifierNode {
@@ -1878,6 +1898,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
+                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
                             source_info: None,
@@ -1904,6 +1925,7 @@ mod tests {
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodExtension(MethodExtensionNode {
+                return_type: None,
                 signature: Arc::new(MethodSelectorNode {
                     identifiers: vec![Arc::new(IdentifierNode {
                         source_info: None,
@@ -1930,6 +1952,7 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
+                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
                             source_info: None,

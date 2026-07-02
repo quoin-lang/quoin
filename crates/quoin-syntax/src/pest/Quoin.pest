@@ -193,8 +193,13 @@ definition_expr = {
 class_def_2 = { nsvarident ~ op_def ~ nsvarident ~ op_def ~ block }
 class_def   = { nsvarident ~ op_def ~ block }
 const_def   = { nsvarident ~ op_def ~ expr }
-method_def  = { selector ~ op_meth ~ block }
-method_ext  = { selector ~ "-" ~ "-" ~ ">" ~ block }
+// Optional return type: `selector -> Integer { … }` (Rust-style, between the arrow and
+// the body block). Drives return-type-aware devirtualization (docs/TYPED_DEVIRT_ARCH.md
+// Slice 2b-A). `ret_type?` matches an ident only when one precedes the `{`, so the bare
+// `selector -> { … }` form is unchanged.
+method_def  = { selector ~ op_meth ~ ret_type? ~ block }
+method_ext  = { selector ~ "-" ~ "-" ~ ">" ~ ret_type? ~ block }
+ret_type    = { ident }
 
 selector = {
     selector_w_args
