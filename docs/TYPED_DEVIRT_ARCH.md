@@ -240,10 +240,21 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
     (never UB) — but it fails at runtime rather than compile time. Add a compile-time check that a
     method's return points match its declared return type (this is also the analysis needed to *infer*
     or widen return types). Touches `compiler.rs` (`collect_method_returns` / `self_send_return_type`).
-- **Slice 2b-B — devirtualize the calls (deferred, bigger).** Turn a self-recursive `.value:(…)` into a
-  direct call (no `lookup_method`). Needs a **compile-visible seal for user classes** (runtime
-  `.sealed!` isn't known at AOT — a *syntactic* seal marker) + a direct-call convention. The
-  "specializing tier" rearchitecture; where fib closes toward the Tier-1 ceiling.
+- **Slice 2b-B — devirtualize the calls (IN PROGRESS).** Turn a self-recursive `.value:(…)` in a
+  **sealed** class into a direct call (no `lookup_method`), targeting the ~15% dispatch cost.
+  - **Decisions:** (1) **A1** — a class is compile-sealed if `sealed!` appears as a *direct*
+    (unconditional) statement in its body (reuses the runtime marker; the direct-statement rule keeps
+    it sound). (2) **B1** — a guard-free monomorphic call-site cache in the `Block` (sealed ⇒ never
+    invalidated ⇒ no guard/epoch — the part that made the general inline cache not worth it).
+  - **Scope (first cut):** self-sends to a **same-class method** within the sealed class's own def
+    (the compiler knows sealedness + the method set there). Cross-unit sends and class-side/meta
+    methods (metaclass sealing) are follow-ons.
+  - **Phases:** 1 = compile-time seal detection + tracking + a behavior-neutral `CallSelfDirect` op
+    (delegates to the normal send) for sealed same-class self-sends. 2 = the guard-free cache in
+    `CallSelfDirect`'s handler (the speedup). 3 = inline the invocation (skip `Callable::call` too).
+  - **Followup — per-method sealing.** Whole-class `sealed!` is coarse; sealing an *individual method*
+    (so only that method's dispatch is frozen/devirtualizable while the rest of the class stays open)
+    would be finer-grained and preferable. Syntax TBD. Track for after 2b-B lands.
 - **Slice 2c — unboxed local slots.** §4.5. Kills the `EnvFrame` `Vec<(Symbol,Value)>` scan; compounds
   everywhere (typed or not). Broad + tractable + low-speculation — a strong candidate to do *before* 2b-B.
 - **Phase 3 — unboxed structs.** §5. The Binary-Trees lever. Separate investigation.

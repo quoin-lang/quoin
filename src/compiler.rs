@@ -247,6 +247,20 @@ fn static_type_from_name(name: &str) -> StaticType {
     }
 }
 
+/// Compile-time context for the class body currently being compiled (Slice 2b). Pushed
+/// on a stack while compiling a class def / extension; used to type self-sends by their
+/// callee's declared return type and to devirtualize self-sends in a sealed class.
+struct ClassCtx {
+    /// Method selector → declared return `StaticType` (methods that annotate a return).
+    returns: HashMap<String, StaticType>,
+    /// Every method selector defined directly in this class body.
+    methods: HashSet<String>,
+    /// The class is compile-sealed: `sealed!` appears as a direct (unconditional) body
+    /// statement, so its method table is frozen and same-class self-sends can be
+    /// devirtualized (Slice 2b-B).
+    sealed: bool,
+}
+
 struct Scope {
     locals: HashSet<String>,
     /// Subset of `locals` declared with `let` — reassigning one is a compile error.
@@ -269,10 +283,9 @@ pub struct Compiler {
     /// One-shot flag set right before compiling the block argument of `X.new:{ … }`;
     /// consumed by the next `compile_block` to mark that block's scope `is_init`.
     next_block_is_init: bool,
-    /// Stack of "current class" method return types (selector → declared `StaticType`),
-    /// pushed while compiling a class body. A self-send to a method with an `Integer`
-    /// return is statically `Int`, so arithmetic on its result devirtualizes (Slice 2b-A).
-    method_returns: Vec<HashMap<String, StaticType>>,
+    /// Stack of per-class compile context, pushed while compiling a class body: method
+    /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
+    class_ctx: Vec<ClassCtx>,
 }
 
 impl Compiler {
@@ -287,7 +300,7 @@ impl Compiler {
             temp_counter: 0,
             value_type_def_depth: 0,
             next_block_is_init: false,
-            method_returns: Vec::new(),
+            class_ctx: Vec::new(),
         }
     }
 
@@ -302,7 +315,7 @@ impl Compiler {
             temp_counter: 0,
             value_type_def_depth: 0,
             next_block_is_init: false,
-            method_returns: Vec::new(),
+            class_ctx: Vec::new(),
         }
     }
 
@@ -447,7 +460,7 @@ impl Compiler {
         if !is_self {
             return StaticType::Unknown;
         }
-        let Some(frame) = self.method_returns.last() else {
+        let Some(ctx) = self.class_ctx.last() else {
             return StaticType::Unknown;
         };
         let idents = &call.arguments.signature.identifiers;
@@ -465,26 +478,59 @@ impl Compiler {
                 .map(|i| format!("{}:", i.name))
                 .collect::<String>()
         };
-        frame.get(&selector).copied().unwrap_or(StaticType::Unknown)
+        ctx.returns
+            .get(&selector)
+            .copied()
+            .unwrap_or(StaticType::Unknown)
     }
 
     /// Selector → declared-return-`StaticType` map for a class body, from its method
     /// definitions/extensions that carry a return type.
-    fn collect_method_returns(&self, block: &BlockNode) -> HashMap<String, StaticType> {
-        let mut map = HashMap::new();
+    fn collect_class_ctx(&self, block: &BlockNode) -> ClassCtx {
+        let mut returns = HashMap::new();
+        let mut methods = HashSet::new();
+        let mut sealed = false;
         for stmt in &block.statements {
-            let (sig, ret) = match &stmt.value {
-                NodeValue::MethodDefinition(m) => (&m.signature, &m.return_type),
-                NodeValue::MethodExtension(m) => (&m.signature, &m.return_type),
-                _ => continue,
-            };
-            if let Some(rt) = ret {
-                if let Ok(selector) = self.reconstruct_selector(sig) {
-                    map.insert(selector, static_type_from_name(&rt.name));
+            match &stmt.value {
+                NodeValue::MethodDefinition(m) => {
+                    if let Ok(selector) = self.reconstruct_selector(&m.signature) {
+                        methods.insert(selector.clone());
+                        if let Some(rt) = &m.return_type {
+                            returns.insert(selector, static_type_from_name(&rt.name));
+                        }
+                    }
                 }
+                NodeValue::MethodExtension(m) => {
+                    if let Ok(selector) = self.reconstruct_selector(&m.signature) {
+                        methods.insert(selector.clone());
+                        if let Some(rt) = &m.return_type {
+                            returns.insert(selector, static_type_from_name(&rt.name));
+                        }
+                    }
+                }
+                // A direct (unconditional) `sealed!` statement seals the class at compile
+                // time, freezing its method table so same-class self-sends devirtualize.
+                NodeValue::MethodCall(call) if Self::is_sealed_marker(call) => sealed = true,
+                _ => {}
             }
         }
-        map
+        ClassCtx {
+            returns,
+            methods,
+            sealed,
+        }
+    }
+
+    /// A bare `sealed!` self-send (`sealed!` or `self.sealed!`, no args).
+    fn is_sealed_marker(call: &MethodCallNode) -> bool {
+        let is_self = match &call.subject {
+            None => true,
+            Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
+        };
+        is_self
+            && call.arguments.expressions.is_empty()
+            && call.arguments.signature.identifiers.len() == 1
+            && call.arguments.signature.identifiers[0].name == "sealed!"
     }
 
     /// Result type of a binary operator when both operands are statically `Int`:
@@ -721,10 +767,10 @@ impl Compiler {
                 if is_value_type {
                     self.value_type_def_depth += 1;
                 }
-                let mrets = self.collect_method_returns(&class_def.block);
-                self.method_returns.push(mrets);
+                let ctx = self.collect_class_ctx(&class_def.block);
+                self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_def.block, bytecode);
-                self.method_returns.pop();
+                self.class_ctx.pop();
                 if is_value_type {
                     self.value_type_def_depth -= 1;
                 }
@@ -748,10 +794,10 @@ impl Compiler {
                     }
                     self.value_type_def_depth += 1;
                 }
-                let mrets = self.collect_method_returns(&class_ext.block);
-                self.method_returns.push(mrets);
+                let ctx = self.collect_class_ctx(&class_ext.block);
+                self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_ext.block, bytecode);
-                self.method_returns.pop();
+                self.class_ctx.pop();
                 if is_value_type {
                     self.value_type_def_depth -= 1;
                 }
@@ -1129,12 +1175,35 @@ impl Compiler {
         Ok(())
     }
 
+    /// Emit a call instruction: `CallSelfDirect` for a self-send to a same-class method of
+    /// a compile-sealed class (devirtualizable — Slice 2b-B), else a normal `Send`.
+    fn emit_call(&self, bytecode: &mut CodeBlock, selector: &str, num_args: usize, is_self: bool) {
+        if is_self {
+            if let Some(ctx) = self.class_ctx.last() {
+                if ctx.sealed && ctx.methods.contains(selector) {
+                    bytecode.push(Instruction::CallSelfDirect(
+                        Symbol::intern(selector),
+                        num_args,
+                    ));
+                    return;
+                }
+            }
+        }
+        bytecode.push(Instruction::Send(Symbol::intern(selector), num_args));
+    }
+
     fn compile_method_call(
         &mut self,
         call: &MethodCallNode,
         bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
         let args = &call.arguments;
+        // A self-send (no explicit receiver, or an explicit `self`) — eligible for
+        // devirtualization when the enclosing class is sealed (see `emit_call`).
+        let is_self = match &call.subject {
+            None => true,
+            Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
+        };
 
         // Evaluate receiver
         if let Some(ref subject) = call.subject {
@@ -1149,7 +1218,7 @@ impl Compiler {
                 return Err("No identifiers found in method call selector".to_string());
             }
             let selector = args.signature.identifiers[0].name.clone();
-            bytecode.push(Instruction::Send(Symbol::intern(&selector), 0));
+            self.emit_call(bytecode, &selector, 0, is_self);
             return Ok(());
         }
 
@@ -1193,7 +1262,7 @@ impl Compiler {
             i += run;
         }
 
-        bytecode.push(Instruction::Send(Symbol::intern(&selector), num_components));
+        self.emit_call(bytecode, &selector, num_components, is_self);
         Ok(())
     }
 
@@ -1535,6 +1604,41 @@ mod tests {
         // `var`/`let` cannot declare an instance variable.
         let e = compile_src("var @x = 1").unwrap_err();
         assert!(e.contains("instance variable"), "{e}");
+    }
+
+    /// Recursively check whether a static block (or any nested block) contains a
+    /// `CallSelfDirect` instruction.
+    fn has_call_self_direct(sb: &StaticBlock) -> bool {
+        sb.bytecode.0.iter().any(|inst| match inst {
+            Instruction::CallSelfDirect(..) => true,
+            Instruction::Push(Constant::Block(nested)) => has_call_self_direct(nested),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn sealed_self_send_emits_call_self_direct() {
+        fn compile_src(src: &str) -> StaticBlock {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            Compiler::new().compile_program(p).unwrap()
+        }
+
+        // A self-send to a same-class method of a SEALED class devirtualizes.
+        let sealed = compile_src("Foo <- { bar: -> { |n| .bar:(n) }; .sealed! }");
+        assert!(
+            has_call_self_direct(&sealed),
+            "sealed same-class self-send should emit CallSelfDirect"
+        );
+
+        // Without the seal it stays a normal dynamic Send.
+        let unsealed = compile_src("Foo <- { bar: -> { |n| .bar:(n) } }");
+        assert!(
+            !has_call_self_direct(&unsealed),
+            "un-sealed self-send must stay a Send"
+        );
     }
 
     fn binary(op: BinaryOperatorType, left: Node, right: Node) -> Node {

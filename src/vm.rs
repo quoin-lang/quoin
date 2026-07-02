@@ -2899,6 +2899,13 @@ impl<'gc> VmState<'gc> {
                 let (selector, num_args) = (*selector, *num_args);
                 return self.exec_send(mc, frame_idx, selector, num_args);
             }
+            // Self-send to a sealed class's own method (Slice 2b-B). Phase 1: identical to
+            // Send. Phase 2 will resolve + cache the callable at this call site (sealed ⇒
+            // never invalidated), skipping lookup_method.
+            Instruction::CallSelfDirect(selector, num_args) => {
+                let (selector, num_args) = (*selector, *num_args);
+                return self.exec_send(mc, frame_idx, selector, num_args);
+            }
             // Fused superinstructions (see `Instruction::SendLocal` doc): push the last
             // operand the send consumes, then run the identical send path.
             Instruction::SendLocal(var, selector, num_args) => {
