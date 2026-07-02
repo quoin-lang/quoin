@@ -102,26 +102,36 @@ pub fn run_vm_loop<'gc>(
         vm.register_yielder(mc, yptr);
     }
 
+    // Batch instructions per cooperative yield (Slice 2g), so the coroutine switch + driver
+    // round-trip + GC pacing amortize over many steps instead of being paid every step.
+    let batch: u32 = crate::tuning::step_batch();
     loop {
-        let (vm, mc) = unsafe { ctx.get() };
-        match vm.step(mc) {
-            Ok(VmStatus::Running) => {
-                ctx = yielder.suspend(YieldReason::CooperativeYield);
-            }
-            Ok(VmStatus::Finished(val)) => return Ok(val),
-            Ok(VmStatus::Yeeted(val)) => {
-                return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
-            }
-            Err(err) => {
-                // Break-on-throw: an exception is about to escape the task uncaught — its frames
-                // are still live (propagation doesn't pop them), so pause here if a debug session
-                // is watching its type, then let it propagate (the task ends).
-                if vm.has_break_on_throw() {
-                    vm.debug_check_throw(mc, &err);
+        let mut budget = batch;
+        loop {
+            let (vm, mc) = unsafe { ctx.get() };
+            match vm.step(mc) {
+                Ok(VmStatus::Running) => {
+                    budget -= 1;
+                    if budget == 0 {
+                        break;
+                    }
                 }
-                return Err(err);
+                Ok(VmStatus::Finished(val)) => return Ok(val),
+                Ok(VmStatus::Yeeted(val)) => {
+                    return Err(QuoinError::Other(format!("Uncaught exception: {}", val)));
+                }
+                Err(err) => {
+                    // Break-on-throw: an exception is about to escape the task uncaught — its
+                    // frames are still live (propagation doesn't pop them), so pause here if a
+                    // debug session is watching its type, then let it propagate (task ends).
+                    if vm.has_break_on_throw() {
+                        vm.debug_check_throw(mc, &err);
+                    }
+                    return Err(err);
+                }
             }
         }
+        ctx = yielder.suspend(YieldReason::CooperativeYield);
     }
 }
 
