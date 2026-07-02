@@ -315,6 +315,11 @@ impl<'a> HighlightParser<'a> {
                 for id in &md.signature.identifiers {
                     s.extend(single_span_ident(id, HighlightType::MethodSignature, depth));
                 }
+                // The `-> Type` return-type annotation (Slice 2b-A): color the type the same
+                // way as a typed param / declaration hint, via `highlight_identifier`.
+                if let Some(rt) = &md.return_type {
+                    s.extend(self.highlight_identifier(rt, depth));
+                }
                 s.extend(self.highlight_block(&md.block, depth));
                 s
             }
@@ -322,6 +327,9 @@ impl<'a> HighlightParser<'a> {
                 let mut s = Vec::new();
                 for id in &me.signature.identifiers {
                     s.extend(single_span_ident(id, HighlightType::MethodSignature, depth));
+                }
+                if let Some(rt) = &me.return_type {
+                    s.extend(self.highlight_identifier(rt, depth));
                 }
                 s.extend(self.highlight_block(&me.block, depth));
                 s
@@ -829,6 +837,25 @@ mod resilient_tests {
                 "{src:?}: expected a Keyword span for `{kw}`: {spans:?}"
             );
         }
+    }
+
+    #[test]
+    fn method_return_type_is_highlighted_like_a_param_type() {
+        // `-> Type` (Slice 2b-A) must color the return type the same as a `|x: Type|` param.
+        let src = "Foo <- { bar -> Integer { |n: Integer| n } }";
+        let node = crate::try_parse_quoin_string_named(src, "<t>").unwrap();
+        let spans = HighlightParser::new(src).highlight_program(&node);
+        let occ: Vec<usize> = src.match_indices("Integer").map(|(i, _)| i).collect();
+        assert_eq!(occ.len(), 2, "expected the return type + the param type");
+        let htype_at = |pos: usize| {
+            spans
+                .iter()
+                .find(|s| s.start == pos && s.end == pos + "Integer".len())
+                .map(|s| s.htype)
+        };
+        let ret = htype_at(occ[0]).expect("return-type `Integer` should be highlighted");
+        let param = htype_at(occ[1]).expect("param-type `Integer` should be highlighted");
+        assert_eq!(ret, param, "return type should highlight like a param type");
     }
 
     #[test]
