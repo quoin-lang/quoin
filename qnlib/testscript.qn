@@ -8,8 +8,8 @@ Point <- { | @x @y |
     name -> { 'Point' };
 
     dist: -> { |other|
-        dx = @x - other.x;
-        dy = @y - other.y;
+        var dx = @x - other.x;
+        var dy = @y - other.y;
         ((dx * dx) + (dy * dy)).sqrt
     }
 };
@@ -22,15 +22,15 @@ PType <- { .mix:Point };
 
 ('PType.name = ' + PType.new.name).print;
 
-p1 = Point.newX:3 y:4;
-p2 = Point.newX:0 y:0;
+var p1 = Point.newX:3 y:4;
+var p2 = Point.newX:0 y:0;
 ('p1.x = ' + p1.x).print;
 ('p1.y = ' + p1.y).print;
-d = p1.dist:p2;
+var d = p1.dist:p2;
 ('distance = ' + d).print;
 p1.print;
 
-p3 = Point3D.new:{ |x y z| x = 10; y = 20; z = 30 };
+var p3 = Point3D.new:{ |x y z| x = 10; y = 20; z = 30 };
 p3.print;
 p3.class.print;
 p3.class.s.print;
@@ -48,64 +48,64 @@ p3.class.parent.parent.name.print;
 ('p3.z = ' + p3.z).print;
 
 "* Test 1: Simple assignments, variables, and operators
-x = 10;
-y = 20;
-z = x + y;
+var x = 10;
+var y = 20;
+var z = x + y;
 ('z = x + y = ' + z).print;
 
 "* Test 2: List destructuring
-a b * rest = #( 100 200 300 400 500 );
+var a b * rest = #( 100 200 300 400 500 );
 ('a = ' + a).print;
 ('b = ' + b).print;
 ('rest = ' + rest).print;
 
 "* Test 3: Lexical scopes and blocks/closures
-make_counter = { |initial|
-    count = initial;
+var make_counter = { |initial|
+    var count = initial;
     {
         count = count + 1;
         count
     }
 };
 
-counter = make_counter.value:10;
-c1 = counter.value;
-c2 = counter.value;
+var counter = make_counter.value:10;
+var c1 = counter.value;
+var c2 = counter.value;
 ('c1 = ' + c1).print;
 ('c2 = ' + c2).print;
 
 { |x| x.print }.value:42;
 
 "* Test 4: Unary operators
-flag = true;
-inv_flag = !flag;
+var flag = true;
+var inv_flag = !flag;
 ('flag = ' + flag + ' inv_flag = ' + inv_flag).print;
 
-num = 50;
-neg_num = -num;
+var num = 50;
+var neg_num = -num;
 ('num = ' + num + ' neg_num = ' + neg_num).print;
 
 "* Test 5: Maps & Regex
-my_map = #{ 'foo': 100 'bar': 200 };
+var my_map = #{ 'foo': 100 'bar': 200 };
 ('map = ' + my_map).print;
 
-list = #( 1 2 3 4 5 );
+var list = #( 1 2 3 4 5 );
 ('Top half = ' + (list.select:{|n| n > 3})).print;
 
-re = #/^[a-z]+$/;
-is_match = re ~ 'gemini';
+var re = #/^[a-z]+$/;
+var is_match = re ~ 'gemini';
 ('regex match = ' + is_match).print;
 
 "* Test 6: Non-local return (^^)
 Point <-- {
     test_nlr -> {
-        bar_func = { |blk|
+        var bar_func = { |blk|
             blk.value;
             'Inside bar: should NOT reach here!'.print;
             111
         };
 
-        nested_block = { ^^ 777 };
+        var nested_block = { ^^ 777 };
         bar_func.value:nested_block;
         'Inside foo: should NOT reach here!'.print;
         222
@@ -114,22 +114,22 @@ Point <-- {
 
 ('New Point= ' + Point.new).print;
 
-result = p1.test_nlr;
+var result = p1.test_nlr;
 ('Result of non-local return = ' + result).print;
 
 "* Test 7: Namespaces
 
-file = [IO]File.open:'/etc/zshrc';
+var file = [IO]File.open:'/etc/zshrc';
 ('file path = ' + file.fullpath).print;
 ('file class = ' + file.class).print;
 ('file class name = ' + file.class.name).print;
 ('[/]Object = ' + [/]Object).print;
 ('Object == [/]Object = ' + (Object == [/]Object)).print;
 
-folder = [IO]Folder.open:'qnlib/tests/';
+var folder = [IO]Folder.open:'qnlib/tests/';
 ('Test files = ' + folder.list).print;
 
-name = 'Damon';
+var name = 'Damon';
 name.case:{
     .when:'Damon' do:{ 'Hi Damon'.print };
     .when:'Bagel' do:{ 'Hello delicious'.print };
@@ -145,9 +145,9 @@ name.case:{
 })).print;
 
 false.if:{
-    server = TcpServer.new:{ address = '127.0.0.1:0' };
+    var server = TcpServer.new:{ var address = '127.0.0.1:0' };
 
-    i = 0;
+    var i = 0;
     #( 'Listening on' server.port ).print;
     server.start:{ |conn|
         #( 'Received connection' conn ).print;

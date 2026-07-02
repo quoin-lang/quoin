@@ -2,7 +2,7 @@
 "* Quoin type — Integer/BigInteger and Double/BigDecimal — so parsing never loses precision, and
 "* generate emits exact digits. Object keys emit in sorted order (Quoin Map iteration order).
 
-(TestSuite.new:{ name = 'JSON' }).add:{
+(TestSuite.new:{ var name = 'JSON' }).add:{
     .test:
     parsePrimitives -> {
         .is:{ JSON.parse:'42' } equalTo:42;
@@ -19,7 +19,7 @@
     parseStructures -> {
         .is:{ JSON.parse:'[1, 2, 3]' } equalTo:#(1 2 3);
         .is:{ (JSON.parse:'{"x": 42}').at:'x' } equalTo:42;
-        d = JSON.parse:'{"name": "qn", "nums": [1, 2], "ok": true}';
+        var d = JSON.parse:'{"name": "qn", "nums": [1, 2], "ok": true}';
         .is:{ d.at:'name' } equalTo:'qn';
         .is:{ d.at:'nums' } equalTo:#(1 2);
         .is:{ d.at:'ok' } equalTo:true;
@@ -31,7 +31,7 @@
     .test:
     numberCorrectness -> {
         "* integers beyond i64 -> BigInteger; the digits survive exactly.
-        big = JSON.parse:'99999999999999999999999999';
+        var big = JSON.parse:'99999999999999999999999999';
         .is:{ big } a:BigInteger;
         .is:{ big } equalTo:(BigInteger.of:'99999999999999999999999999');
         "* a decimal beyond f64 precision -> BigDecimal.
@@ -72,9 +72,9 @@
 
     .test:
     pretty -> {
-        v = #{'a': 1 'b': 2};
-        compact = JSON.generate: v;
-        pretty = JSON.generatePretty: v;
+        var v = #{'a': 1 'b': 2};
+        var compact = JSON.generate: v;
+        var pretty = JSON.generatePretty: v;
         "* pretty output is valid JSON carrying the same data, just longer (indented).
         .is:{ JSON.generate:(JSON.parse:pretty) } equalTo:compact;
         .isTrue:{ pretty.length > compact.length };

@@ -434,7 +434,11 @@ impl<'gc> VmState<'gc> {
     /// index descends into a child value (via `pretty::value_children`). `expandable` = the child
     /// itself has children, so the DAP layer can mint a `variablesReference` handle for it. Live
     /// values are re-fetched from the (rooted) frames each call — nothing is held across the pause.
-    pub(crate) fn debug_variables(&self, idx: usize, path: &[usize]) -> Vec<(String, String, bool)> {
+    pub(crate) fn debug_variables(
+        &self,
+        idx: usize,
+        path: &[usize],
+    ) -> Vec<(String, String, bool)> {
         let width = self.options.console_width.map(|w| w as usize).unwrap_or(80);
         let children: Vec<(String, pretty::PpChild<'gc>)> = if path.is_empty() {
             self.debug_frame_variables(idx)

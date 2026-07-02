@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Range' }).add:{
+(TestSuite.new:{ var name = 'Range' }).add:{
     .test:numberRange -> {
         .is:{ (1..5).list } equalTo:#( 1 2 3 4 );
         .is:{ (1..5).collect:{ |n| n*10 } } equalTo:#( 10 20 30 40 );

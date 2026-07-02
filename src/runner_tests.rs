@@ -164,7 +164,7 @@ fn run_dap_script(
 fn dap_spine_launch_breakpoint_continue_terminate() {
     use serde_json::json;
     // Breakpoint on line 2 (`n * 2`, the block body), which fires when `f` is invoked.
-    let source = "f = { |n|\n    n * 2\n};\nf.value: 21\n";
+    let source = "var f = { |n|\n    n * 2\n};\nf.value: 21\n";
     let out = run_dap_script(
         source,
         "fixture.qn",
@@ -210,7 +210,7 @@ fn dap_launch_loads_program_from_request() {
     use std::io::Write;
 
     // The launch handler reads the program by path, so the fixture must exist on disk.
-    let source = "f = { |n|\n    n * 2\n};\nf.value: 21\n";
+    let source = "var f = { |n|\n    n * 2\n};\nf.value: 21\n";
     let mut path = std::env::temp_dir();
     path.push("quoin_dap_launch_from_request.qn");
     std::fs::File::create(&path)
@@ -282,7 +282,7 @@ fn dap_launch_loads_program_from_request() {
 fn dap_inspection_stack_variables_and_evaluate() {
     use serde_json::json;
     // Breakpoint on line 2 (`n * 2`); the innermost frame at the stop is the invoked block.
-    let source = "double = { |n|\n    n * 2\n}\nresult = double.value: 21\nresult.print\n";
+    let source = "var double = { |n|\n    n * 2\n}\nvar result = double.value: 21\nresult.print\n";
     let out = run_dap_script(
         source,
         "fixture.qn",
@@ -323,7 +323,7 @@ fn dap_inspection_stack_variables_and_evaluate() {
 fn dap_variables_expand_nested_collection() {
     use serde_json::json;
     // At line 2, the block local `xs` is `#(#(1 2) 30)` — a list whose first element is a sub-list.
-    let source = "f = { |xs|\n    xs.size\n};\nf.value: #(#(1 2) 30)\n";
+    let source = "var f = { |xs|\n    xs.size\n};\nf.value: #(#(1 2) 30)\n";
     let out = run_dap_script(
         source,
         "fixture.qn",
@@ -372,11 +372,11 @@ fn breakpoint_pauses_per_arrival_and_resumes_to_completion() {
     // must fire once per invocation (a new frame each time) — proving the hook fires,
     // suspends, and resumes, and that re-entry in a fresh frame re-triggers.
     let source = "\
-dbl = { |n|
+var dbl = { |n|
     n * 2
 };
-a = dbl.value: 3;
-b = dbl.value: 4;
+var a = dbl.value: 3;
+var b = dbl.value: 4;
 a + b
 ";
     let log = run_debug(source, "fixture.qn", &[("fixture.qn", 2)], &[]);
@@ -388,20 +388,20 @@ a + b
 
 #[test]
 fn no_breakpoints_never_pauses() {
-    let log = run_debug("x = 1;\ny = 2;\nx + y\n", "fixture.qn", &[], &[]);
+    let log = run_debug("var x = 1;\nvar y = 2;\nx + y\n", "fixture.qn", &[], &[]);
     assert!(log.is_empty());
 }
 
 /// A fixture with a helper called from the top level — exercises step-into / over / out.
-/// Lines: 1 `f = { |n|`, 2 `a = n + 1;`, 3 `a * 2`, 4 `};`, 5 `x = 5;`,
-/// 6 `y = f.value: x;`, 7 `y + 1`.
+/// Lines: 1 `var f = { |n|`, 2 `var a = n + 1;`, 3 `a * 2`, 4 `};`, 5 `var x = 5;`,
+/// 6 `var y = f.value: x;`, 7 `y + 1`. (`var` keeps the same line numbers.)
 const STEP_FIXTURE: &str = "\
-f = { |n|
-    a = n + 1;
+var f = { |n|
+    var a = n + 1;
     a * 2
 };
-x = 5;
-y = f.value: x;
+var x = 5;
+var y = f.value: x;
 y + 1
 ";
 
@@ -460,7 +460,7 @@ fn step_out_runs_to_the_caller() {
 #[test]
 fn break_on_throw_pauses_at_the_throw_site() {
     let source = "\
-r = {
+var r = {
     nil.bogusMethod
 }.catch:{ |e| 0 };
 r
@@ -481,7 +481,7 @@ r
 #[test]
 fn break_on_throw_ignores_a_non_matching_type() {
     let source = "\
-r = {
+var r = {
     nil.bogusMethod
 }.catch:{ |e| 0 };
 r
@@ -573,7 +573,7 @@ fn parse_debug_without_break_flag_has_no_break_on_throw() {
 #[test]
 fn break_on_uncaught_pauses_when_no_handler_matches() {
     let source = "\
-r = {
+var r = {
     nil.bogusMethod
 }.catch:{ |e:ValueError| 0 };
 r
@@ -587,7 +587,7 @@ r
 #[test]
 fn break_on_uncaught_skips_a_caught_exception() {
     let source = "\
-r = {
+var r = {
     nil.bogusMethod
 }.catch:{ |e:Error| 0 };
 r
@@ -601,7 +601,7 @@ r
 #[test]
 fn break_on_uncaught_fires_once_for_a_bubbling_throw() {
     let source = "\
-r = {
+var r = {
     { nil.bogusMethod }.catch:{ |e:ValueError| 1 }
 }.catch:{ |e:ArgumentError| 2 };
 r
@@ -615,7 +615,7 @@ r
 #[test]
 fn break_on_uncaught_sees_an_outer_matching_handler() {
     let source = "\
-r = {
+var r = {
     { nil.bogusMethod }.catch:{ |e:ValueError| 1 }
 }.catch:{ |e:Error| 2 };
 r

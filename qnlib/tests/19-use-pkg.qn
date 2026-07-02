@@ -5,7 +5,7 @@ use usetest/*;  "* glob: loads usetest/lib + usetest/lib2 (UTF-8 sorted)
 use self:qnlib/useself/marker;  "* the self: package (self_root = CWD in dev mode)
 use cyc/a;  "* a<->b cycle, terminated by the in-progress marker
 
-(TestSuite.new:{ name = 'UsePackages' }).add:{
+(TestSuite.new:{ var name = 'UsePackages' }).add:{
     .test:
     globLoadsAllUnitsInDir -> {
         .is:{ [UseTest]Greeter.new.greeting } equalTo:'hello from usetest/lib';

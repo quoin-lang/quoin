@@ -1,7 +1,7 @@
 "* base64 / hex codecs (src/runtime/codecs.rs) and the Bytes/String convenience helpers
 "* (qnlib/core/09-codecs.qn).
 
-(TestSuite.new:{ name = 'Codecs' }).add:{
+(TestSuite.new:{ var name = 'Codecs' }).add:{
     .test:
     base64 -> {
         .is:{ Base64.encode:'hello'.asBytes } equalTo:'aGVsbG8=';

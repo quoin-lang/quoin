@@ -65,8 +65,8 @@ Error <- { |@message @payload|
     .meta <-- {
         "* Convenience constructors that build an instance and immediately throw,
         "* e.g. `TypeError.throw:'expected an Integer'`. Inherited by subclasses.
-        throw: -> { |msg| ^(.new:{ message = msg }).throw };
-        throw:payload: -> { |msg p| ^(.new:{ message = msg; payload = p }).throw }
+        throw: -> { |msg| ^(.new:{ var message = msg }).throw };
+        throw:payload: -> { |msg p| ^(.new:{ var message = msg; var payload = p }).throw }
     };
 
     message -> { @message };
@@ -107,7 +107,7 @@ Error <- StopIteration <- {};
 "* (the inherited bare `throw:` / `throw:payload:` leave `kind` nil).
 Error <- IoError <- { |@kind|
     .meta <-- {
-        throw:kind: -> { |msg k| ^(.new:{ message = msg; kind = k }).throw }
+        throw:kind: -> { |msg k| ^(.new:{ var message = msg; var kind = k }).throw }
     };
 
     kind -> { @kind }
@@ -174,7 +174,7 @@ Block <-- {
     #'~:' -> { |x| .valueWithSelfOrArg:x };
 
     whileDo: -> { |block|
-        s = self;
+        var s = self;
         s.value.if:{
             block.value;
             ^^s.whileDo:block
@@ -182,8 +182,8 @@ Block <-- {
     };
 
     whileDefinedDo: -> { |block|
-        s = self;
-        v = s.value;
+        var s = self;
+        var v = s.value;
         v.defined?.if:{
             block.value:v;
             ^^s.whileDefinedDo:block
@@ -197,7 +197,7 @@ ANSI <- { |@string|
     .meta <-- {
         default -> { #ANSI'' };
 
-        newUserString: -> { |s:String| ^.new:{ string = s } }
+        newUserString: -> { |s:String| ^.new:{ var string = s } }
     };
 
     init: -> { |string| @string = string };
@@ -211,7 +211,7 @@ ANSI <- { |@string|
     "* codes (or corrupt the template). A nested ANSI argument is left alone, so its
     "* own markup still renders.
     #'%:' -> { |arg|
-        escaped = (arg.can?:List)
+        var escaped = (arg.can?:List)
             .if:{ arg.collect:{ |e| (e.can?:ANSI).if:{ e } else:{ e.s.ansiEscaped } } }
              else:{ (arg.can?:ANSI).if:{ arg } else:{ arg.s.ansiEscaped } };
         .class.newUserString:(@string % escaped)

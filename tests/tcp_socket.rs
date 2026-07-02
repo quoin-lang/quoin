@@ -42,10 +42,10 @@ fn tcp_socket_echo_and_concurrency() {
     // matched. `Test.is:` is avoided to keep the script self-contained (no framework).
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
 "* basic: connect, write, read, close
-s2 = TcpSocket.connect:'127.0.0.1:{port}';
+var s2 = TcpSocket.connect:'127.0.0.1:{port}';
 s2.writeAll:'ping'.asBytes;
 ((s2.read:4).asString == 'ping').else:{{ ok = false }};
 s2.close;
@@ -62,11 +62,11 @@ s2.close;
 }}) == 'hi').else:{{ ok = false }};
 
 "* 8 concurrent connections, each echoes its own message in spawn order
-results = Async.gather:((0..8).collect:{{ |k|
+var results = Async.gather:((0..8).collect:{{ |k|
     {{
-        c = TcpSocket.connect:'127.0.0.1:{port}';
+        var c = TcpSocket.connect:'127.0.0.1:{port}';
         c.writeAll:('m' + k).asBytes;
-        v = (c.read:8).asString;
+        var v = (c.read:8).asString;
         c.close;
         v
     }}

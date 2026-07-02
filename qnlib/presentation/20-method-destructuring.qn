@@ -10,7 +10,7 @@
     c == 3
 };
 
-regexMatch = #/(?<a>\w{3})(?<b>\w{3})(?<c>\w{3})/.match:'foobarbaz';
+var regexMatch = #/(?<a>\w{3})(?<b>\w{3})(?<c>\w{3})/.match:'foobarbaz';
 regexMatch.bind:{ |a b c|
     a == 'foo';
     b == 'bar';

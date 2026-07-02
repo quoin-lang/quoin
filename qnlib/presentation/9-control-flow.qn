@@ -11,7 +11,7 @@ false <-- {
 
 Block <-- {
     whileDo: -> { |block|
-        s = self;
+        var s = self;
         s.value.if:{
             block.value;
             ^^s.whileDo:block

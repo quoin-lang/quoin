@@ -2,7 +2,7 @@
 "* serialization, the Response object). The full round-trip lives in tests/http.rs.
 use std:net/http;
 
-(TestSuite.new:{ name = 'HTTP' }).add:{
+(TestSuite.new:{ var name = 'HTTP' }).add:{
     .test:
     parsesUrlWithPortAndPath -> {
         .is:{ [HTTP]Request.parseUrl: 'https://example.org:8443/a/b' }
@@ -17,7 +17,7 @@ use std:net/http;
 
     .test:
     buildsRequestBytes -> {
-        r = [HTTP]Request.new:{ url = 'http://h/p' };
+        var r = [HTTP]Request.new:{ var url = 'http://h/p' };
         r.method:'POST';
         r.body:'hi'.asBytes;
         .is:{ (r.requestBytes:'h' path:'/p').asStringLossy }
@@ -26,9 +26,9 @@ use std:net/http;
 
     .test:
     callerAcceptEncodingSuppressesDefault -> {
-        r = [HTTP]Request.new:{ url = 'http://h/p' };
+        var r = [HTTP]Request.new:{ var url = 'http://h/p' };
         r.header:'Accept-Encoding' value:'identity';
-        out = (r.requestBytes:'h' path:'/p').asStringLossy;
+        var out = (r.requestBytes:'h' path:'/p').asStringLossy;
         .isTrue:{ out.contains?:'Accept-Encoding: identity' };
         .isFalse:{ out.contains?:'gzip' };
     };
@@ -47,8 +47,8 @@ use std:net/http;
 
     .test:
     responseHeaderLookupIsCaseInsensitive -> {
-        resp = [HTTP]Response.new:{ status = 200; reason = 'OK';
-            headers = #( #('Content-Type' 'text/plain') ); body = [HTTP]Body.of:('x'.asBytes) };
+        var resp = [HTTP]Response.new:{ var status = 200; var reason = 'OK';
+            var headers = #( #('Content-Type' 'text/plain') ); var body = [HTTP]Body.of:('x'.asBytes) };
         .is:{ resp.header:'CONTENT-TYPE' } equalTo:'text/plain';
         .is:{ (resp.header:'missing').defined? } equalTo:false;
         .is:{ resp.ok? } equalTo:true;
@@ -58,7 +58,7 @@ use std:net/http;
     .test:
     bodyViews -> {
         "* One [HTTP]Body exposes bytes / text / json views + parsed media type.
-        b = [HTTP]Body.of:('{"x": 1}'.asBytes) contentType:'application/json; charset=utf-8' encoding:nil;
+        var b = [HTTP]Body.of:('{"x": 1}'.asBytes) contentType:'application/json; charset=utf-8' encoding:nil;
         .is:{ b.text } equalTo:'{"x": 1}';
         .is:{ b.mediaType } equalTo:'application/json';
         .isTrue:{ b.json? };
@@ -71,7 +71,7 @@ use std:net/http;
         "* The uniform .chunks protocol: a bytes-backed body yields *itself* as one chunk
         "* (an empty body yields none). Each yield is an [HTTP]Body, so .text/.meta apply.
         "* Stream-backed chunking + chunk extensions are covered in tests/http.rs.
-        one = ([HTTP]Body.of:('abc'.asBytes)).chunks.list;
+        var one = ([HTTP]Body.of:('abc'.asBytes)).chunks.list;
         .is:{ one.count } equalTo:1;
         .is:{ (one.at:0).text } equalTo:'abc';
         .is:{ (one.at:0).meta } equalTo:#{};          "* no per-chunk metadata
@@ -80,11 +80,11 @@ use std:net/http;
 
     .test:
     postMapAutoEncodesJson -> {
-        r = [HTTP]Request.new:{ url = 'http://h/p' };
+        var r = [HTTP]Request.new:{ var url = 'http://h/p' };
         r.method:'POST';
         r.body:#{ 'name':'qn' 'n':2 };
         .is:{ r.body.mediaType } equalTo:'application/json';
-        out = (r.requestBytes:'h' path:'/p').asStringLossy;
+        var out = (r.requestBytes:'h' path:'/p').asStringLossy;
         .isTrue:{ out.contains?:'Content-Type: application/json' };
         .isTrue:{ out.contains?:'{"name":"qn","n":2}' };
     };
@@ -92,11 +92,11 @@ use std:net/http;
     .test:
     bodyShortcutTypes -> {
         "* String -> UTF-8 bytes (no media type); a pre-built [HTTP]Body is used directly.
-        rs = ([HTTP]Request.new:{ url = 'http://h/p' }).body:'raw';
+        var rs = ([HTTP]Request.new:{ var url = 'http://h/p' }).body:'raw';
         .is:{ rs.body.text } equalTo:'raw';
         .is:{ (rs.body.mediaType).defined? } equalTo:false;
-        pre = [HTTP]Body.of:('z'.asBytes) contentType:'text/plain' encoding:nil;
-        rb = ([HTTP]Request.new:{ url = 'http://h/p' }).body:pre;
+        var pre = [HTTP]Body.of:('z'.asBytes) contentType:'text/plain' encoding:nil;
+        var rb = ([HTTP]Request.new:{ var url = 'http://h/p' }).body:pre;
         .is:{ rb.body.mediaType } equalTo:'text/plain';
     };
 
@@ -104,12 +104,12 @@ use std:net/http;
     redirectHelpers -> {
         "* redirect? / location on a response; Location resolution against the request URL.
         "* Following itself (and the builder option) is exercised in tests/http.rs.
-        r302 = [HTTP]Response.new:{ status = 302; reason = 'Found';
-            headers = #( #('Location' '/next') ); body = [HTTP]Body.of:(Bytes.empty) };
+        var r302 = [HTTP]Response.new:{ var status = 302; var reason = 'Found';
+            var headers = #( #('Location' '/next') ); var body = [HTTP]Body.of:(Bytes.empty) };
         .isTrue:{ r302.redirect? };
         .is:{ r302.location } equalTo:'/next';
-        r200 = [HTTP]Response.new:{ status = 200; reason = 'OK';
-            headers = #(); body = [HTTP]Body.of:(Bytes.empty) };
+        var r200 = [HTTP]Response.new:{ var status = 200; var reason = 'OK';
+            var headers = #(); var body = [HTTP]Body.of:(Bytes.empty) };
         .isFalse:{ r200.redirect? };
 
         .is:{ [HTTP]Request.resolveLocation:'https://x/a' against:'http://h/p' }

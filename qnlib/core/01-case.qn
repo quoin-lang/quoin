@@ -1,7 +1,7 @@
 Case <- { |@subject|
     .meta <-- {
         for:with: -> { |obj block:Block|
-            { block.value:obj withSelf:.new:{ subject = obj } }.catch:{ |r| ^^r }
+            { block.value:obj withSelf:.new:{ var subject = obj } }.catch:{ |r| ^^r }
         }
     };
 

@@ -2,7 +2,7 @@
 "* values that are exact (integer-valued means, selected elements, nil/empty); closeTo for the
 "* sqrt/division results.
 
-(TestSuite.new:{ name = 'Statistics' }).add:{
+(TestSuite.new:{ var name = 'Statistics' }).add:{
     .test:
     mean -> {
         .is:{ #(1 2 3 4).mean } equalTo:2.5;
@@ -42,7 +42,7 @@
 
     .test:
     percentile -> {
-        data = #(1 2 3 4 5);
+        var data = #(1 2 3 4 5);
         .is:{ data.percentile:0 } equalTo:1;     "* min
         .is:{ data.percentile:100 } equalTo:5;   "* max
         .is:{ data.percentile:50 } closeTo:3.0;  "* == median

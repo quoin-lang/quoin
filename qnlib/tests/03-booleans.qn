@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Booleans' }).add:{
+(TestSuite.new:{ var name = 'Booleans' }).add:{
     .test:
     equality -> {
         .isTrue:{ true == true };

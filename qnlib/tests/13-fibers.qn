@@ -1,10 +1,10 @@
-(TestSuite.new:{ name = 'Fibers' }).add:{
+(TestSuite.new:{ var name = 'Fibers' }).add:{
     "* The first resume binds the block's parameter; each yield hands a value
     "* back out and suspends until the next resume.
     .test:
     yieldsValuesInOrder -> {
-        f = Fiber.new:{ |start|
-            n = start;
+        var f = Fiber.new:{ |start|
+            var n = start;
             { true }.whileDo:{
                 Fiber.yield:n;
                 n = n + 1;
@@ -19,7 +19,7 @@
     "* fiber becomes done.
     .test:
     returnsFinalValueThenIsDone -> {
-        f = Fiber.new:{
+        var f = Fiber.new:{
             Fiber.yield:1;
             Fiber.yield:2;
             'done'
@@ -35,9 +35,9 @@
     "* expression inside the fiber. Two-way communication.
     .test:
     twoWayCommunication -> {
-        f = Fiber.new:{ |x|
-            a = Fiber.yield:(x + 1);
-            b = Fiber.yield:(a + 1);
+        var f = Fiber.new:{ |x|
+            var a = Fiber.yield:(x + 1);
+            var b = Fiber.yield:(a + 1);
             a + b
         };
         .is:{ f.resume:10 } equalTo:11;
@@ -48,7 +48,7 @@
     "* status walks created -> suspended -> done.
     .test:
     statusTransitions -> {
-        f = Fiber.new:{ Fiber.yield:1; 2 };
+        var f = Fiber.new:{ Fiber.yield:1; 2 };
         .is:{ f.status } equalTo:'created';
         f.resume;
         .is:{ f.status } equalTo:'suspended';
@@ -61,8 +61,8 @@
     "* returns to the immediate resumer.
     .test:
     nestedFibers -> {
-        inner = Fiber.new:{ Fiber.yield:'a'; Fiber.yield:'b'; 'inner-done' };
-        outer = Fiber.new:{
+        var inner = Fiber.new:{ Fiber.yield:'a'; Fiber.yield:'b'; 'inner-done' };
+        var outer = Fiber.new:{
             Fiber.yield:(inner.resume);
             Fiber.yield:(inner.resume);
             inner.resume
@@ -76,7 +76,7 @@
     "* method that called back into the block (here, List#each).
     .test:
     yieldsFromInsideEach -> {
-        f = Fiber.new:{
+        var f = Fiber.new:{
             #(10 20 30).each:{ |x| Fiber.yield:x };
             'done'
         };
@@ -89,7 +89,7 @@
     "* Resuming a finished fiber is an error, raised as a typed FiberError.
     .test:
     resumingFinishedFiberThrows -> {
-        f = Fiber.new:{ 42 };
+        var f = Fiber.new:{ 42 };
         .is:{ f.resume } equalTo:42;
         .does:{ f.resume } throw:FiberError;
         .does:{ f.resume } throw:#/finished Fiber/;
@@ -106,14 +106,14 @@
     .test:
     fiberCurrent -> {
         .isFalse:{ Fiber.current.defined? };
-        f = Fiber.new:{ ^>Fiber.current };
+        var f = Fiber.new:{ ^>Fiber.current };
         .isTrue:{ f.resume == f };
     };
 
     "* A completed fiber exposes its final return value and status.
     .test:
     completedFiberHasResult -> {
-        f = Fiber.new:{ Fiber.yield:1; 'final' };
+        var f = Fiber.new:{ Fiber.yield:1; 'final' };
         f.resume;
         f.resume;
         .isTrue:{ f.done? };
@@ -126,8 +126,8 @@
     "* records the error value.
     .test:
     failedFiberRecordsError -> {
-        f = Fiber.new:{ TypeError.throw:'boom' };
-        caught = nil;
+        var f = Fiber.new:{ TypeError.throw:'boom' };
+        var caught = nil;
         { f.resume }.catch:{ |e| caught = e };
         .isTrue:{ f.failed? };
         .is:{ f.status } equalTo:'failed';
@@ -139,7 +139,7 @@
     .test:
     cannotResumeSelf -> {
         "* a fresh self-resuming fiber per assertion (resuming fails it)"
-        makeSelfResumer = { f = nil; f = Fiber.new:{ f.resume }; f };
+        var makeSelfResumer = { var f = nil; f = Fiber.new:{ f.resume }; f };
         .does:{ makeSelfResumer.value.resume } throw:FiberError;
         .does:{ makeSelfResumer.value.resume } throw:#/resume itself/;
     };
@@ -147,8 +147,8 @@
     "* The `^>` operator is sugar for `Fiber.yield:` and behaves identically.
     .test:
     yieldOperatorMatchesYieldMethod -> {
-        f = Fiber.new:{ |start|
-            n = start;
+        var f = Fiber.new:{ |start|
+            var n = start;
             { true }.whileDo:{
                 ^> n;
                 n = n + 1;
@@ -162,7 +162,7 @@
     "* `^>` yields from inside a native iterator too, just like the method form.
     .test:
     yieldOperatorFromInsideEach -> {
-        f = Fiber.new:{
+        var f = Fiber.new:{
             #(1 2 3).each:{ |x| ^> (x * 100) };
             'done'
         };
@@ -176,8 +176,8 @@
     "* captured mid-block (not just as a block's final statement).
     .test:
     yieldOperatorInExpressionPosition -> {
-        f = Fiber.new:{ |x|
-            a = ^> (x + 1);
+        var f = Fiber.new:{ |x|
+            var a = ^> (x + 1);
             (a + 100)
         };
         .is:{ f.resume:10 } equalTo:11;
@@ -192,7 +192,7 @@
         Mixin <- TFYieldReq <- {
             .meta <-- { assertMeetsRequirements: -> { |class| ^> 42 } }
         };
-        f = Fiber.new:{ TFYieldHost <- { .mix:TFYieldReq }; 'done' };
+        var f = Fiber.new:{ TFYieldHost <- { .mix:TFYieldReq }; 'done' };
         .is:{ f.resume } equalTo:42;            "* the deferred check yielded
         .is:{ f.resume } equalTo:'done';         "* class definition + fiber completed
         .is:{ f.status } equalTo:'done';

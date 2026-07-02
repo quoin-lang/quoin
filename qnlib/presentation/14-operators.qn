@@ -11,7 +11,7 @@ FakeNumber <- {
     #'-:' --> { |n:FakeNumber| -99 }
 };
 
-fn = FakeNumber.new;
+var fn = FakeNumber.new;
 
 fn + 100;  "* 42
 fn + fn;  "* 84

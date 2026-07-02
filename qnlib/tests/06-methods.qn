@@ -1,7 +1,7 @@
-(TestSuite.new:{ name = 'Methods' }).add:{
+(TestSuite.new:{ var name = 'Methods' }).add:{
     .test:
     operatorReturnsMethod -> {
-        .is:{ method = z -> {}; #( method.selector method.extension? ) } equalTo:#( #z false );
+        .is:{ var method = z -> {}; #( method.selector method.extension? ) } equalTo:#( #z false );
     };
 
     .test:
@@ -48,7 +48,7 @@
     .test:
     dispatchGuardUsesSelf -> {
         Bound <- { |@min|
-            .meta <-- { min: -> { |m| ^.new:{ min = m } } }
+            .meta <-- { min: -> { |m| ^.new:{ var min = m } } }
             within?: -> { |n:Integer| n >= @min }
             ok?: -> { |n:Integer { .within?:n }| 'yes' }   "* guard calls a method (which reads @min) via self
             ok?: --> { |n:Integer| 'no' }

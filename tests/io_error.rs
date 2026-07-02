@@ -47,24 +47,24 @@ fn io_errors_are_typed_with_kinds() {
 
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
 "* A missing file surfaces a typed IoError carrying kind #notFound.
-e1 = {{ [IO]File.open:'/no/such/quoin-file-xyz' }}.catch:{{ |e| e }};
+var e1 = {{ [IO]File.open:'/no/such/quoin-file-xyz' }}.catch:{{ |e| e }};
 (IoError ~ e1).else:{{ ok = false }};
 (e1.kind == #notFound).else:{{ ok = false }};
 
 "* Connecting to a closed port: a typed IoError, kind #connectionRefused.
-e2 = {{ TcpSocket.connect:'127.0.0.1:{refused_port}' }}.catch:{{ |e| e }};
+var e2 = {{ TcpSocket.connect:'127.0.0.1:{refused_port}' }}.catch:{{ |e| e }};
 (IoError ~ e2).else:{{ ok = false }};
 (e2.kind == #connectionRefused).else:{{ ok = false }};
 
 "* Operating on a closed stream throws IoError kind #closed. byteStream consumes the
 "* socket; after close, the next read finds a closed handle.
-sock = TcpSocket.connect:'127.0.0.1:{port}';
-bs = sock.byteStream;
+var sock = TcpSocket.connect:'127.0.0.1:{port}';
+var bs = sock.byteStream;
 bs.close;
-e3 = {{ bs.read }}.catch:{{ |e| e }};
+var e3 = {{ bs.read }}.catch:{{ |e| e }};
 (IoError ~ e3).else:{{ ok = false }};
 (e3.kind == #closed).else:{{ ok = false }};
 
@@ -73,13 +73,13 @@ e3 = {{ bs.read }}.catch:{{ |e| e }};
 (e3.message.length > 0).else:{{ ok = false }};
 
 "* An IoError thrown from Quoin: typed and catchable; the bare throw: leaves kind nil.
-e4 = {{ IoError.throw:'manual' }}.catch:{{ |e| e }};
+var e4 = {{ IoError.throw:'manual' }}.catch:{{ |e| e }};
 (IoError ~ e4).else:{{ ok = false }};
 (e4.kind == nil).else:{{ ok = false }};
 (e4.message == 'manual').else:{{ ok = false }};
 
 "* ...and throw:kind: carries an explicit kind symbol from Quoin.
-e5 = {{ IoError.throw:'slow' kind:#timedOut }}.catch:{{ |e| e }};
+var e5 = {{ IoError.throw:'slow' kind:#timedOut }}.catch:{{ |e| e }};
 (e5.kind == #timedOut).else:{{ ok = false }};
 (e5.message == 'slow').else:{{ ok = false }};
 

@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Case' }).add:{
+(TestSuite.new:{ var name = 'Case' }).add:{
     .test:
     caseWithEquality -> {
         .is:{
@@ -48,7 +48,7 @@
     "* instance-of test. So `.case:` doubles as a type switch.
     .test:
     caseMatchesByClass -> {
-        classify = { |val|
+        var classify = { |val|
             val.case:{
                 .when:Integer do:'int';
                 .when:String do:'str';
@@ -66,7 +66,7 @@
     "* subject (`cond ~ subject` executes the block on the subject).
     .test:
     caseMatchesByPredicateBlock -> {
-        grade = { |score|
+        var grade = { |score|
             score.case:{
                 .when:{ |n| n >= 90 } do:'A';
                 .when:{ |n| n >= 80 } do:'B';
@@ -139,7 +139,7 @@
     "* A single case can mix match strategies: literal equality, regex, and class.
     .test:
     caseMixesEqualityRegexAndClass -> {
-        describe = { |s|
+        var describe = { |s|
             s.case:{
                 .when:'exact' do:'matched-exact';
                 .when:#/^[0-9]+$/ do:'all-digits';

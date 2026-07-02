@@ -45,6 +45,7 @@ stmt = {
     use_stmt
   | method_return
   | block_return
+  | decl
   | assignment
   | bang3
   | dot3
@@ -73,6 +74,19 @@ dot3  = { "." ~ "." ~ "." }
 huh3  = { "?" ~ "?" ~ "?" }
 
 assignment = { lvalue+ ~ "=" ~ expr }
+
+// `var`/`let` local declarations. `var_kw`/`let_kw` are soft keywords (like `use`):
+// reserved only when immediately followed by a non-identifier char, so `variable`
+// and `letter` remain ordinary identifiers. A single target may carry a `: Type`
+// annotation; destructuring targets are untyped (typing a destructuring pattern is
+// deliberately unsupported — see docs/TYPED_DEVIRT_ARCH.md §10.4). `decl` precedes
+// `assignment` in `stmt` so `var x = …` isn't parsed as an assignment to lvalues
+// `var` `x`.
+decl              = { (var_kw | let_kw) ~ decl_body ~ "=" ~ expr }
+var_kw            = @{ "var" ~ !IDENT_REST }
+let_kw            = @{ "let" ~ !IDENT_REST }
+decl_body         = { typed_decl_target | lvalue+ }
+typed_decl_target = { ident_lvalue ~ ":" ~ ident }
 
 lvalue = {
     splat_ignored_lvalue

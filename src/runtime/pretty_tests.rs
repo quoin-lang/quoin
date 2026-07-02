@@ -148,7 +148,7 @@ fn pp_value_like_native_types() {
     assert_eq!(pp("#/ab+/.pp"), "#/ab+/");
     // A key/value pair shows its two named fields (the string key is quoted as a value).
     assert_eq!(
-        pp("(KeyValuePair.new:{ key='a'; value=1 }).pp"),
+        pp("(KeyValuePair.new:{ var key='a'; var value=1 }).pp"),
         "KeyValuePair{key: 'a' value: 1}"
     );
     // A bare (unnamed) block.
@@ -275,7 +275,9 @@ fn pp_methods_show_variant_signatures() {
 fn pp_elides_cycles() {
     // `n.next = n` — the cycle guard renders the revisited node as `Node{…}`.
     assert_eq!(
-        pp("Node <- { |@next| setNext: -> { |x| @next = x } }; n = Node.new; n.setNext: n; n.pp"),
+        pp(
+            "Node <- { |@next| setNext: -> { |x| @next = x } }; var n = Node.new; n.setNext: n; n.pp"
+        ),
         "Node{@next: Node{…}}"
     );
 }

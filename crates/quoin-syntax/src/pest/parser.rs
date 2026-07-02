@@ -249,6 +249,7 @@ fn parse_stmt(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
             }
         }
         Rule::assignment => parse_assignment(inner, filename, source_text),
+        Rule::decl => parse_decl(inner, filename, source_text),
         Rule::use_stmt => {
             // use_stmt → use_kw use_target; the atomic `use_kw` token is skipped.
             // `.qn` and the glob suffix are stripped into structured fields here. The glob is
@@ -311,6 +312,58 @@ fn parse_assignment(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node
         source_info,
         value: Assignment(AssignmentNode {
             lvalues,
+            rvalue: Arc::new(parse_expr(rvalue, filename, source_text)),
+        }),
+    }
+}
+
+fn parse_decl(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
+    let source_info = extract_source_info(pair.as_span(), filename, source_text);
+    let mut inner = pair.into_inner();
+    let kw = inner.next().unwrap();
+    let kind = match kw.as_rule() {
+        Rule::var_kw => DeclKind::Var,
+        Rule::let_kw => DeclKind::Let,
+        _ => unreachable!("decl must start with var_kw or let_kw"),
+    };
+    let body = inner.next().unwrap(); // Rule::decl_body
+    let rvalue = inner.next().unwrap(); // expr
+
+    let mut type_hint = None;
+    let mut body_inner = body.into_inner();
+    let first = body_inner.next().unwrap();
+    let lvalues: Vec<Arc<Node>> = match first.as_rule() {
+        Rule::typed_decl_target => {
+            // ident_lvalue ~ ":" ~ ident  (single typed target)
+            let mut ti = first.into_inner();
+            let ident_lv = ti.next().unwrap(); // Rule::ident_lvalue
+            let ty = ti.next().unwrap(); // Rule::ident
+            type_hint = Some(Arc::new(parse_ident(ty, filename, source_text)));
+            let lv_si = extract_source_info(ident_lv.as_span(), filename, source_text);
+            let nsvar = ident_lv.into_inner().next().unwrap();
+            vec![Arc::new(Node {
+                source_info: lv_si,
+                value: IdentLValue(IdentLValueNode {
+                    identifier: Arc::new(parse_nsvarident(nsvar, filename, source_text)),
+                }),
+            })]
+        }
+        _ => {
+            // lvalue+  — `first` is the first Rule::lvalue
+            let mut lvs = vec![Arc::new(parse_lvalue(first, filename, source_text))];
+            for lv in body_inner {
+                lvs.push(Arc::new(parse_lvalue(lv, filename, source_text)));
+            }
+            lvs
+        }
+    };
+
+    Node {
+        source_info,
+        value: Declaration(DeclarationNode {
+            kind,
+            lvalues,
+            type_hint,
             rvalue: Arc::new(parse_expr(rvalue, filename, source_text)),
         }),
     }

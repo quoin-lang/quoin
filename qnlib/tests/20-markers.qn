@@ -14,7 +14,7 @@ MarkerSealed <- {
 };
 MarkerSealed.sealed!;  "* frozen — no extension or subclassing
 
-(TestSuite.new:{ name = 'Markers' }).add:{
+(TestSuite.new:{ var name = 'Markers' }).add:{
     .test:abstractClassCannotBeInstantiated -> {
         .does:{ MarkerBase.new } throw:#/Cannot instantiate abstract class/
     };
@@ -44,7 +44,7 @@ MarkerSealed.sealed!;  "* frozen — no extension or subclassing
     };
 
     .test:sealedInstanceCannotBeExtended -> {
-        inst = MarkerSub.new;
+        var inst = MarkerSub.new;
         inst.sealed!;
         .does:{
             inst <-- {

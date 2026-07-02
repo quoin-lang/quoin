@@ -204,84 +204,84 @@ fn http_get_post_and_close() {
     let script = format!(
         r#"
 use std:net/http;
-ok = true;
-base = 'http://127.0.0.1:{port}';
+var ok = true;
+var base = 'http://127.0.0.1:{port}';
 
 "* Content-Length GET
-r1 = [HTTP]Client.get: base + '/cl';
+var r1 = [HTTP]Client.get: base + '/cl';
 (r1.status == 200).else:{{ ok = false }};
 (r1.ok?).else:{{ ok = false }};
 (r1.body.text == 'hello world').else:{{ ok = false }};
 ((r1.header:'CONTENT-TYPE') == 'text/plain').else:{{ ok = false }};
 
 "* POST body echo
-r2 = [HTTP]Client.post: base + '/post' body: 'ping-pong'.asBytes;
+var r2 = [HTTP]Client.post: base + '/post' body: 'ping-pong'.asBytes;
 (r2.body.text == 'ping-pong').else:{{ ok = false }};
 
 "* connection-close-delimited body (no Content-Length)
-r3 = [HTTP]Client.get: base + '/close';
+var r3 = [HTTP]Client.get: base + '/close';
 (r3.body.text == 'closed-body').else:{{ ok = false }};
 
 "* chunked transfer-encoding, drained to one String
-r4 = [HTTP]Client.get: base + '/chunked';
+var r4 = [HTTP]Client.get: base + '/chunked';
 (r4.status == 200).else:{{ ok = false }};
 (r4.body.text == 'Hello, world!').else:{{ ok = false }};
 
 "* the same response, streamed lazily: each chunk is an [HTTP]Body; boundaries preserved
-rs = [HTTP]Client.get: base + '/chunked';
-parts = rs.body.chunks.collect:{{ |c| c.text }};
+var rs = [HTTP]Client.get: base + '/chunked';
+var parts = rs.body.chunks.collect:{{ |c| c.text }};
 (parts == #( 'Hello, ' 'world!' )).else:{{ ok = false }};
 
 "* per-chunk metadata: a chunk extension surfaces on the chunk body's .meta
-rx = [HTTP]Client.get: base + '/chunked-ext';
-xs = rx.body.chunks.list;
+var rx = [HTTP]Client.get: base + '/chunked-ext';
+var xs = rx.body.chunks.list;
 (((xs.at:0).meta:'sig') == 'abc').else:{{ ok = false }};
 ((xs.at:0).text == 'Hello, ').else:{{ ok = false }};
 (((xs.at:1).meta) == #{{}}).else:{{ ok = false }};
 
 "* gzip Content-Encoding (transparently decoded)
-r5 = [HTTP]Client.get: base + '/gzip';
+var r5 = [HTTP]Client.get: base + '/gzip';
 (r5.body.text == 'hello gzip world').else:{{ ok = false }};
 
 "* streaming a content-encoded body: .chunks can't decode a transfer-chunk in isolation,
 "* so it drains+decodes the whole entity and yields a single decoded chunk
-r5b = [HTTP]Client.get: base + '/gzip';
+var r5b = [HTTP]Client.get: base + '/gzip';
 ((r5b.body.chunks.collect:{{ |c| c.text }}) == #( 'hello gzip world' )).else:{{ ok = false }};
 
 "* gzip delivered across multiple transfer-chunks: de-chunk, reassemble, then decode
-r5c = [HTTP]Client.get: base + '/gzip-chunked';
+var r5c = [HTTP]Client.get: base + '/gzip-chunked';
 (r5c.body.text == 'hello gzip world').else:{{ ok = false }};
-r5d = [HTTP]Client.get: base + '/gzip-chunked';
+var r5d = [HTTP]Client.get: base + '/gzip-chunked';
 ((r5d.body.chunks.collect:{{ |c| c.text }}) == #( 'hello gzip world' )).else:{{ ok = false }};
 
 "* zstd Content-Encoding (transparently decoded)
-r6 = [HTTP]Client.get: base + '/zstd';
+var r6 = [HTTP]Client.get: base + '/zstd';
 (r6.body.text == 'hello zstd world').else:{{ ok = false }};
 
 "* JSON response: .body.json parses, .json? reflects the Content-Type
-r7 = [HTTP]Client.get: base + '/json';
+var r7 = [HTTP]Client.get: base + '/json';
 (r7.body.json?).else:{{ ok = false }};
 ((r7.body.json.at:'hello') == 'world').else:{{ ok = false }};
 ((r7.body.json.at:'n') == 7).else:{{ ok = false }};
 
 "* POST of a Map auto-encodes to JSON (the echo server returns the bytes we sent)
-r8 = [HTTP]Client.post: base + '/post' body: #{{ 'k':1 'v':2 }};
+var r8 = [HTTP]Client.post: base + '/post' body: #{{ 'k':1 'v':2 }};
 (r8.body.text == '{{"k":1,"v":2}}').else:{{ ok = false }};
 
 "* redirects: a 302 is followed by default to its (root-relative) Location
-r9 = [HTTP]Client.get: base + '/redirect';
+var r9 = [HTTP]Client.get: base + '/redirect';
 ((r9.status == 200) && (r9.body.text == 'hello world')).else:{{ ok = false }};
 
 "* following can be turned off in the builder — the 3xx comes back as-is
-r10 = (([HTTP]Client.request: base + '/redirect').followRedirects:false).send;
+var r10 = (([HTTP]Client.request: base + '/redirect').followRedirects:false).send;
 ((r10.status == 302) && r10.redirect?).else:{{ ok = false }};
 
 "* a 307 preserves the method and body (re-POSTed to the echo endpoint)
-r11 = [HTTP]Client.post: base + '/redirect-307' body: 'keepme'.asBytes;
+var r11 = [HTTP]Client.post: base + '/redirect-307' body: 'keepme'.asBytes;
 (r11.body.text == 'keepme').else:{{ ok = false }};
 
 "* a redirect loop trips the max-redirects cap and throws
-caught = false;
+var caught = false;
 {{ [HTTP]Client.get: base + '/redirect-loop' }}.catch:{{ |e| caught = true }};
 (caught).else:{{ ok = false }};
 
@@ -318,12 +318,12 @@ fn https_get_insecure() {
     let script = format!(
         r#"
 use std:net/http;
-ok = true;
+var ok = true;
 
 "* HTTPS via the Builder with insecure cert validation (local self-signed server)
-req = [HTTP]Client.request: 'https://127.0.0.1:{port}/cl';
+var req = [HTTP]Client.request: 'https://127.0.0.1:{port}/cl';
 req.insecure:true;
-r = req.send;
+var r = req.send;
 (r.status == 200).else:{{ ok = false }};
 (r.body.text == 'hello world').else:{{ ok = false }};
 
@@ -343,8 +343,8 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 fn http_secure_real_host() {
     let script = r#"
 use std:net/http;
-r = [HTTP]Client.get: 'https://example.org/';
-ok = (r.status == 200) && (r.body.bytes.size > 0);
+var r = [HTTP]Client.get: 'https://example.org/';
+var ok = (r.status == 200) && (r.body.bytes.size > 0);
 ok.if:{ 'PASS'.print } else:{ ('FAIL status ' + r.status + ' size ' + r.body.bytes.size).print };
 "#;
     run_pass(script, "realhost");

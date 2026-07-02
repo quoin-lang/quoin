@@ -10,13 +10,13 @@ re-entrant and `nil` is a perfectly valid element.
 
 Mixin <- Iterate <- {
     collect: -> { |collectBlock:Block|
-        l = #();
+        var l = #();
         .each:{ |collectItem| l.add:collectBlock.valueWithSelfOrArg:collectItem };
         ^l
     };
 
     select: -> { |selectBlock:Block|
-        l = #();
+        var l = #();
         .each:{ |x| (selectBlock.valueWithSelfOrArg:x).if:{ l.add:x } };
         ^l
     };
@@ -42,13 +42,13 @@ Mixin <- Iterate <- {
     };
 
     count -> {
-        n = 0;
+        var n = 0;
         .each:{ |_| n = n + 1 };
         ^n
     };
 
     count: -> { |block:Block|
-        n = 0;
+        var n = 0;
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ n = n + 1 } };
         ^n
     };
@@ -59,7 +59,7 @@ Mixin <- Iterate <- {
     };
 
     nth: -> { |n|
-        i = 0;
+        var i = 0;
         .each:{ |x| (i == n).if:{ ^^x }; i = i + 1 };
         ^nil
     };
@@ -75,17 +75,17 @@ Mixin <- Iterate <- {
     iterator -> { Iterator.over:self };
 
     take: -> { |n|
-        l = #();
-        it = .iterator;
-        i = 0;
+        var l = #();
+        var it = .iterator;
+        var i = 0;
         { (i < n) && it.hasNext? }.whileDo:{ l.add:it.next; i = i + 1 };
         ^l
     };
 
     drop: -> { |n|
-        l = #();
-        it = .iterator;
-        i = 0;
+        var l = #();
+        var it = .iterator;
+        var i = 0;
         { (i < n) && it.hasNext? }.whileDo:{ it.next; i = i + 1 };
         { it.hasNext? }.whileDo:{ l.add:it.next };
         ^l
@@ -94,27 +94,27 @@ Mixin <- Iterate <- {
     "* Lazy variants return a Generator instead of a materialized list, so they
     "* compose into pipelines and work on infinite sources (consume with take:)."
     lazyCollect: -> { |f|
-        src = self;
+        var src = self;
         Generator.from:{ src.each:{ |x| ^>(f.valueWithSelfOrArg:x) } }
     };
 
     lazySelect: -> { |p|
-        src = self;
+        var src = self;
         Generator.from:{ src.each:{ |x| (p.valueWithSelfOrArg:x).if:{ ^>x } } }
     };
 
     flatten -> {
-        l = #();
+        var l = #();
         .each:{ |x| (x.class == List).if:{ x.flatten.each:{ |y| l.add:y } } else:{ l.add:x } };
         ^l
     };
 
     groupBy: -> { |block:Block|
-        map = #{};
+        var map = #{};
         .each:{ |x|
-            key = block.valueWithSelfOrArg:x;
+            var key = block.valueWithSelfOrArg:x;
 
-            list = map.at:key;
+            var list = map.at:key;
             list.defined?.else:{
                 list = #();
                 map.at:key put:list
@@ -131,7 +131,7 @@ Mixin <- Iterate <- {
     };
 
     reduce: -> { |block:Block|
-        sum = nil;
+        var sum = nil;
         .each:{ |x|
             sum.defined?.else:{ sum = (block.valueWithArgs:#(x x)).class.default };
             sum = block.valueWithArgs:#( sum x )
@@ -140,7 +140,7 @@ Mixin <- Iterate <- {
     };
 
     reduce:into: -> { |block:Block start|
-        sum = start;
+        var sum = start;
         .each:{ |x| sum = block.valueWithArgs:#( sum x ) };
         ^sum
     };
@@ -148,7 +148,7 @@ Mixin <- Iterate <- {
     sum -> { .sum:{ |x| x } };
 
     sum: -> { |block:Block|
-        sum = nil;
+        var sum = nil;
         .each:{ |x|
             sum.defined?.else:{ sum = (block.valueWithSelfOrArg:x).class.default };
 
@@ -158,7 +158,7 @@ Mixin <- Iterate <- {
     };
 
     max: -> { |block:Block|
-        max = nil;
+        var max = nil;
         .each:{ |x|
             max.defined?.if:{ (block.valueWithArgs:#(max x)).else:{ max = x } } else:{ max = x }
         };
@@ -168,7 +168,7 @@ Mixin <- Iterate <- {
     max -> { .max:{ |a b| a > b } };
 
     min: -> { |block:Block|
-        min = nil;
+        var min = nil;
         .each:{ |x|
             min.defined?.if:{ (block.valueWithArgs:#(min x)).if:{ min = x } } else:{ min = x }
         };
@@ -178,8 +178,8 @@ Mixin <- Iterate <- {
     min -> { .min:{ |a b| a > b } };
 
     partition: -> { |block:Block|
-        trueValues = #();
-        falseValues = #();
+        var trueValues = #();
+        var falseValues = #();
 
         .each:{ |x|
             ((block.valueWithSelfOrArg:x) == true)
@@ -191,27 +191,27 @@ Mixin <- Iterate <- {
     };
 
     reject: -> { |block:Block|
-        l = #();
+        var l = #();
         .each:{ |x| (block.valueWithSelfOrArg:x).else:{ l.add:x } };
         ^l
     };
 
     uniq -> {
-        result = #();
+        var result = #();
         .each:{ |x| (result.contains?:x).else:{ result.add:x } };
         ^result
     };
 
     zip: -> { |other|
-        r = #();
-        a = .iterator;
-        b = other.iterator;
+        var r = #();
+        var a = .iterator;
+        var b = other.iterator;
         { a.hasNext? && b.hasNext? }.whileDo:{ r.add:#( a.next b.next ) };
         ^r
     };
 
     join: -> { |sep:String|
-        result = '';
+        var result = '';
         .each:{ |x|
             (result != '').if:{ result = result + sep };
             result = result + x.s
@@ -220,7 +220,7 @@ Mixin <- Iterate <- {
     };
 
     reverse -> {
-        result = #();
+        var result = #();
         .each:{ |x| result.push:x };
         ^result
     };
@@ -241,15 +241,15 @@ fine.
 Iterator <- { |@fiber @nextVal @hasNext|
     .meta <-- {
         over: -> { |it|
-            src = it;
-            ^.new:{ fiber = Fiber.new:{ src.each:{ |x| ^>x } } }
+            var src = it;
+            ^.new:{ var fiber = Fiber.new:{ src.each:{ |x| ^>x } } }
         }
     };
 
     init -> { .advance };
 
     advance -> {
-        v = @fiber.resume;
+        var v = @fiber.resume;
         @fiber.done?.if:{ @hasNext = false } else:{ @hasNext = true; @nextVal = v }
     };
 
@@ -257,7 +257,7 @@ Iterator <- { |@fiber @nextVal @hasNext|
 
     next -> {
         @hasNext.else:{ StopIteration.throw:'Iterator exhausted' };
-        r = @nextVal;
+        var r = @nextVal;
         .advance;
         ^r
     }
@@ -270,13 +270,13 @@ in a fiber and forwards every `^>` to the consumer. Consumed lazily through an
 "
 Iterate <- Generator <- { |@genBlock|
     .meta <-- {
-        from: -> { |b:Block| ^.new:{ genBlock = b } }
+        from: -> { |b:Block| ^.new:{ var genBlock = b } }
     };
 
     each: -> { |consumer|
-        f = Fiber.new:@genBlock;
+        var f = Fiber.new:@genBlock;
         { f.alive? }.whileDo:{
-            v = f.resume;
+            var v = f.resume;
             f.done?.else:{ consumer.valueWithSelfOrArg:v }
         }
     }
@@ -293,8 +293,10 @@ Map <-- {
 
     "* Iterate in insertion order (the Map preserves it)."
     each: -> { |b|
-        src = self;
-        .keys.each:{ |k| b.valueWithSelfOrArg:(KeyValuePair.new:{ key = k; value = src.at:k }) }
+        var src = self;
+        .keys.each:{ |k|
+            b.valueWithSelfOrArg:(KeyValuePair.new:{ var key = k; var value = src.at:k })
+        }
     }
 };
 
@@ -306,8 +308,8 @@ List <-- {
     };
 
     each: -> { |b|
-        i = 0;
-        n = .count;
+        var i = 0;
+        var n = .count;
         { i < n }.whileDo:{
             b.valueWithSelfOrArg:(.at:i);
             i = i + 1
@@ -326,20 +328,20 @@ Set <-- {
 
     "* Set algebra, built on the native add:/contains?: and the Iterate combinators.
     union: -> { |other|
-        r = #<>;
+        var r = #<>;
         .each:{ |x| r.add:x };
         other.each:{ |x| r.add:x };
         r
     };
 
     intersection: -> { |other|
-        r = #<>;
+        var r = #<>;
         .each:{ |x| (other.contains?:x).if:{ r.add:x } };
         r
     };
 
     difference: -> { |other|
-        r = #<>;
+        var r = #<>;
         .each:{ |x| (other.contains?:x).else:{ r.add:x } };
         r
     };

@@ -6,10 +6,10 @@ Person <- Employee <- { |@title|
     s --> { %'%{@name}, %{@title}, %{@age} years old' }
 };
 
-damonEmployee = Employee.new:{
-    name = 'Damon';
-    age = 39;  "* Narrator: Still not 39
-    title = 'Lead Software Engineer'
+var damonEmployee = Employee.new:{
+    var name = 'Damon';
+    var age = 39;  "* Narrator: Still not 39
+    var title = 'Lead Software Engineer'
 };
 
 damonEmployee.s.print  "* Damon, Lead Software Engineering, 39 years old

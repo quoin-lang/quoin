@@ -3,11 +3,11 @@
 "* (src/runtime/io.rs). Network-free: it opens this very file and the qnlib/tests/ directory — both
 "* stable repo paths (cwd = repo root under `qn test`), so the suite depends on nothing external.
 
-(TestSuite.new:{ name = 'IO' }).add:{
+(TestSuite.new:{ var name = 'IO' }).add:{
     "* ---- [IO]File: metadata --------------------------------------------------
     .test:
     fileMetadata -> {
-        f = [IO]File.open:'qnlib/tests/39-io.qn';
+        var f = [IO]File.open:'qnlib/tests/39-io.qn';
         .is:{ f.fullpath } equalTo:'qnlib/tests/39-io.qn';
         .is:{ f.s } equalTo:'qnlib/tests/39-io.qn';
         .is:{ f.name } equalTo:'39-io.qn';
@@ -17,7 +17,7 @@
 
     .test:
     fileEquality -> {
-        f = [IO]File.open:'qnlib/tests/39-io.qn';
+        var f = [IO]File.open:'qnlib/tests/39-io.qn';
         .isTrue:{ f == ([IO]File.open:'qnlib/tests/39-io.qn') };
         .isFalse:{ f == ([IO]File.open:'qnlib/main.qn') };
         "* rhs is not an [IO]File -> the native ==: falls through to false
@@ -26,7 +26,7 @@
 
     .test:
     fileOpenMissingThrows -> {
-        caught = nil;
+        var caught = nil;
         { [IO]File.open:'no/such/file.xyz' }.catch:{ |e| caught = e };
         .isTrue:{ caught.defined? };
     };
@@ -34,22 +34,22 @@
     "* ---- [IO]File: streams (read-only; the file is not consumed) -------------
     .test:
     fileStringStreamReadsOwnHeader -> {
-        f = [IO]File.open:'qnlib/tests/39-io.qn';
-        line = f.stringStream.readLine;
+        var f = [IO]File.open:'qnlib/tests/39-io.qn';
+        var line = f.stringStream.readLine;
         .isTrue:{ line.contains?:'MARKER:io-coverage-39' };
     };
 
     .test:
     fileByteStreamReadsAll -> {
-        f = [IO]File.open:'qnlib/tests/39-io.qn';
-        content = f.byteStream.readAll.asString;
+        var f = [IO]File.open:'qnlib/tests/39-io.qn';
+        var content = f.byteStream.readAll.asString;
         .isTrue:{ content.contains?:'MARKER:io-coverage-39' };
     };
 
     "* ---- [IO]Folder: cursor + Iterate mixin ----------------------------------
     .test:
     folderPathAndIteration -> {
-        folder = [IO]Folder.open:'qnlib/tests/';
+        var folder = [IO]Folder.open:'qnlib/tests/';
         .is:{ folder.path } equalTo:'qnlib/tests/';
         "* collect:/detect: drive the native each: (next + reset) under the hood
         .isTrue:{ (folder.detect:{ |entry| entry.name == '39-io.qn' }).defined? };
@@ -58,9 +58,9 @@
 
     .test:
     folderNextAndReset -> {
-        folder = [IO]Folder.open:'qnlib/tests/';
+        var folder = [IO]Folder.open:'qnlib/tests/';
         "* directory order is OS-dependent, so only assert a file is yielded
-        first = folder.next;
+        var first = folder.next;
         .isTrue:{ first.defined? };
         .isTrue:{ first.name.defined? };
         folder.reset;
@@ -69,7 +69,7 @@
 
     .test:
     folderEquality -> {
-        a = [IO]Folder.open:'qnlib/tests/';
+        var a = [IO]Folder.open:'qnlib/tests/';
         .isTrue:{ a == ([IO]Folder.open:'qnlib/tests/') };
         .isFalse:{ a == ([IO]Folder.open:'qnlib/') };
         .isFalse:{ a == [IO]Stdout };
@@ -102,15 +102,15 @@
 
     .test:
     handleWriteNonStringThrows -> {
-        caught = nil;
+        var caught = nil;
         { [IO]Stderr.write:42 }.catch:{ |e| caught = e };
         .isTrue:{ caught.defined? };
     };
 
     .test:
     handleWriteToStdinThrows -> {
-        c1 = nil;
-        c2 = nil;
+        var c1 = nil;
+        var c2 = nil;
         { ([IO]Handle.stdin).write:'x' }.catch:{ |e| c1 = e };
         { ([IO]Handle.stdin).writeln:'x' }.catch:{ |e| c2 = e };
         .isTrue:{ c1.defined? };

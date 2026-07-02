@@ -2,7 +2,7 @@
 "* via parse: with fixed strings (so no clock flakiness); `now` is checked loosely. DateTime
 "* comparison/equality are by instant (the underlying timestamp), regardless of zone.
 
-(TestSuite.new:{ name = 'TimeZone' }).add:{
+(TestSuite.new:{ var name = 'TimeZone' }).add:{
     .test:lookup -> {
         .is:{ (TimeZone.of:'America/New_York').name } equalTo:'America/New_York';
         .is:{ TimeZone.utc.name } equalTo:'UTC';
@@ -16,7 +16,7 @@
     }
 };
 
-(TestSuite.new:{ name = 'Timestamp' }).add:{
+(TestSuite.new:{ var name = 'Timestamp' }).add:{
     .test:
     parseAndEpoch -> {
         .is:{ (Timestamp.parse:'2024-01-01T00:00:00Z').asUnixSeconds } equalTo:1704067200;
@@ -26,8 +26,8 @@
 
     .test:
     arithmetic -> {
-        base = Timestamp.parse:'2024-01-01T00:00:00Z';
-        later = Timestamp.parse:'2024-01-01T01:00:00Z';
+        var base = Timestamp.parse:'2024-01-01T00:00:00Z';
+        var later = Timestamp.parse:'2024-01-01T01:00:00Z';
         .is:{ (base + (Duration.hours:1)).asUnixSeconds } equalTo:1704070800;
         .is:{ (later - base).asSeconds } closeTo:3600.0;   "* ts - ts -> Duration
         .isTrue:{ base < later };
@@ -47,7 +47,7 @@
     };
 };
 
-(TestSuite.new:{ name = 'DateTime' }).add:{
+(TestSuite.new:{ var name = 'DateTime' }).add:{
     .test:
     parseAndFormat -> {
         "* RFC 9557 (RFC 3339 + [zone]) round-trips.
@@ -58,7 +58,7 @@
 
     .test:
     components -> {
-        d = DateTime.parse:'2024-03-10T12:30:45.123-04:00[America/New_York]';
+        var d = DateTime.parse:'2024-03-10T12:30:45.123-04:00[America/New_York]';
         .is:{ d.year } equalTo:2024;
         .is:{ d.month } equalTo:3;
         .is:{ d.day } equalTo:10;
@@ -72,9 +72,9 @@
 
     .test:
     absoluteArithmetic -> {
-        base = DateTime.parse:'2024-01-01T00:00:00Z[UTC]';
-        a = DateTime.parse:'2024-01-01T00:00:00Z[UTC]';
-        b = DateTime.parse:'2024-01-01T02:30:00Z[UTC]';
+        var base = DateTime.parse:'2024-01-01T00:00:00Z[UTC]';
+        var a = DateTime.parse:'2024-01-01T00:00:00Z[UTC]';
+        var b = DateTime.parse:'2024-01-01T02:30:00Z[UTC]';
         .is:{ (base + (Duration.hours:2)).hour } equalTo:2;
         .is:{ (b - a).asMilliseconds } equalTo:9000000;   "* 2.5h
         .isTrue:{ a < b };

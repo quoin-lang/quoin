@@ -277,7 +277,7 @@ fn build_index_snapshots_the_live_vm() {
     arena.mutate_root(|mc, vm| {
         let src = "Animal <- { |@legs| sound -> { 'woof' } }; \
                    Animal <- Dog <- { fetch: -> { |x:String| x } }; \
-                   spot = Dog.new;";
+                   var spot = Dog.new;";
         let node = crate::parser::parse_quoin_string(src);
         let NodeValue::Program(p) = &node.value else {
             panic!("not a program");

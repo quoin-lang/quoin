@@ -13,10 +13,10 @@
 "*   };
 [ADBC]Connection <-- {
     transaction: -> { |work|
-        wasAuto = self.autocommit;
-        self.autocommit: false;
-        { r = work.value: self; self.commit; r }
+        var wasAuto = self.autocommit;
+        self.autocommit:false;
+        { var r = work.value: self; self.commit; r }
             .catch:{ |e| self.rollback; e.throw }
-            finally:{ self.autocommit: wasAuto }
+             finally:{ self.autocommit:wasAuto }
     }
 }

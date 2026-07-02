@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Blocks' }).add:{
+(TestSuite.new:{ var name = 'Blocks' }).add:{
     .test:
     arity -> {
         .is:{ {}.arity } equalTo:0;
@@ -57,7 +57,7 @@
 
     .test:
     catchFinally -> {
-        finally = nil;
+        var finally = nil;
         .does:{
             { 42.throw }.catch:{|ex| finally = ex } finally:{ finally = 'Finally' }
         }

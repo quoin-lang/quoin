@@ -10,7 +10,7 @@ String <-- {
 
     "* Left-justify to `width` by appending spaces; returns self if already that wide."
     padRight: -> { |width:Integer|
-        gap = width - .length;
+        var gap = width - .length;
         (gap > 0).if:{ self + ((0..gap).collect:{ ' ' }).join:'' } else:{ self }
     }
 }

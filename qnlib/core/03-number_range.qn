@@ -15,7 +15,7 @@ NumberRange <- { | @start @end @n |
     };
 
     each: -> { |b|
-        i = @start;
+        var i = @start;
         { (@n > 0).if:{ i < @end } else:{ i > @end } }.whileDo:{
             b.valueWithSelfOrArg:i;
             i = i + @n
@@ -26,9 +26,9 @@ NumberRange <- { | @start @end @n |
 };
 
 Integer <-- {
-    #'..:' -> { |e| NumberRange.new:{ start=self; end=e } }
+    #'..:' -> { |e| NumberRange.new:{ var start=self; var end=e } }
 };
 
 Double <-- {
-    #'..:' -> { |e| NumberRange.new:{ start=self; end=e } }
+    #'..:' -> { |e| NumberRange.new:{ var start=self; var end=e } }
 }

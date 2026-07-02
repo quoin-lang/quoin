@@ -50,7 +50,7 @@ about statements.
 > - **No double-quoted strings exist** — a `"` always begins a comment.
 > - **Separators**: a newline ends a statement *when unambiguous*. A `;` is required when the next line would otherwise continue the expression — i.e. it begins with `.` (a message send) or an infix operator.
 > - **Identifiers**: start with a letter or `_`, then letters/digits/`_`/`?`. So `done?` and `my_var` are valid names. `!` is *not* part of a name (it's a selector suffix — see §5).
-> - **Reserved identifiers**: only `nil`, `true`, `false` (can't be reassigned). The only *keyword* is the soft keyword `use` (statement prefix; §21). Identifiers are case-sensitive.
+> - **Reserved identifiers**: only `nil`, `true`, `false` (can't be reassigned). The *keywords* are all soft keywords (reserved only as a statement prefix, so ordinary uses of the word are unaffected): `use` (§21) and `var`/`let` (local declarations; §4). Identifiers are case-sensitive.
 
 ### Comments
 
@@ -143,21 +143,26 @@ statement.
 ## 4. Variables, scope & destructuring
 
 > **Rules**
-> - `name = expr` assigns a **local**. Assignment is a **statement, not an expression** — you cannot nest it (`b = (a = 5)` is a parse error) or use it as a condition.
-> - Scope is **lexical**; blocks are closures that capture the enclosing scope. A local is created on first assignment in its frame.
+> - **Declare a local with `var` (mutable) or `let` (immutable)**, always with an initializer: `var x = 5`, `let pi = 3.14`. A plain `name = expr` **reassigns** an already-declared local — assigning an *undeclared* name, or reassigning a `let`, is a compile error. (`var`/`let` are soft keywords, like `use`: `variable`/`letter` are still ordinary identifiers.)
+> - Declaration/assignment is a **statement, not an expression** — you cannot nest it (`b = (a = 5)` is a parse error) or use it as a condition.
+> - Scope is **lexical**; blocks are closures that capture the enclosing scope. `var`/`let` may **shadow** an outer binding but cannot redeclare a name in the same scope. A recursive reference works — `var f = { … f … }` sees its own name.
+> - A single-target declaration may carry a **type**: `var n: Integer = 5` (drives the typed/unboxed tier). Destructuring targets are untyped.
 > - `_` discards a value on the left-hand side.
-> - **Destructuring**: multiple targets pull from a list — `a b c = #(1 2 3)`. One splat `*rest` (or `*_`) may appear in **any** position; sub-patterns nest with `( … )`.
-> - `@name` is an **instance variable** (only meaningful inside class/method bodies — Part III). `[Ns]name` / `[/]name` are namespaced globals (§20).
+> - **Destructuring**: `var` declares multiple targets from a list — `var a b c = #(1 2 3)`. One splat `*rest` (or `*_`) may appear in **any** position; sub-patterns nest with `( … )`. Plain (keyword-less) `a b c = …` reassigns already-declared targets.
+> - `@name` is an **instance variable** (only meaningful inside class/method bodies — Part III; declared in the class header). `[Ns]name` / `[/]name` are namespaced globals (§20).
 > - `Name <- expr` defines a **constant** (redefining one throws).
 
 ```quoin
-x = 10
-greeting = 'hi'
+var x = 10
+let greeting = 'hi'
+x = x + 1                   "* reassign a `var`
 
-a b c = #(1 2 3)            "* a=1, b=2, c=3
-first *rest = #(1 2 3 4)    "* first=1, rest=#(2 3 4)
-a *_ z = #(1 2 3 4 5)       "* a=1, z=5, middle discarded
-head (x y) = #(1 #(2 3))    "* head=1, x=2, y=3  (nested)
+var n: Integer = 42         "* typed local
+
+var a b c = #(1 2 3)        "* a=1, b=2, c=3
+var first *rest = #(1 2 3 4) "* first=1, rest=#(2 3 4)
+var a *_ z = #(1 2 3 4 5)   "* a=1, z=5, middle discarded
+var head (x2 y) = #(1 #(2 3)) "* head=1, x2=2, y=3  (nested)
 
 Pi <- 3.14159               "* a constant; a second `Pi <- …` would throw
 ```

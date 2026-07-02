@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Can' }).add:{
+(TestSuite.new:{ var name = 'Can' }).add:{
     .test:
     respondsToSelector -> {
         "* A Symbol or String argument asks: does the receiver implement this method?

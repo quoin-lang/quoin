@@ -2,7 +2,7 @@
 "* value (== ignores trailing-zero scale differences); construction/format use .s. Mixing with
 "* Integer/Double requires an explicit BigDecimal.of: — there is no silent coercion.
 
-(TestSuite.new:{ name = 'BigDecimal' }).add:{
+(TestSuite.new:{ var name = 'BigDecimal' }).add:{
     .test:
     construct -> {
         .is:{ (BigDecimal.of:'1.50').s } equalTo:'1.50';

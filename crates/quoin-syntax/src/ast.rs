@@ -51,6 +51,28 @@ pub struct AssignmentNode {
     pub rvalue: Arc<Node>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeclKind {
+    Var,
+    Let,
+}
+
+/// A `var`/`let` local declaration: `var x = e`, `let x: Integer = e`,
+/// `var a b *c = e`. Distinct from `AssignmentNode` — every target is a *fresh*
+/// binding (the compiler errors on same-scope redeclaration and on assigning a
+/// `let`), which is what retires the old first-assignment-declares rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclarationNode {
+    pub kind: DeclKind,
+    /// Declared targets, same node kinds as `AssignmentNode.lvalues`
+    /// (IdentLValue / SplatLValue / IgnoredLValue / IgnoredSplatLValue / SubLValue).
+    pub lvalues: Vec<Arc<Node>>,
+    /// Type annotation — only for a single ident target (`var x: Integer = …`);
+    /// destructuring targets are always untyped.
+    pub type_hint: Option<Arc<IdentifierNode>>,
+    pub rvalue: Arc<Node>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryOperatorNode {
     pub operator: BinaryOperatorType,
@@ -270,6 +292,7 @@ pub enum NodeValue {
     #[default]
     Unknown,
     Assignment(AssignmentNode),
+    Declaration(DeclarationNode),
     Bang3,
     BinaryOperator(BinaryOperatorNode),
     Block(BlockNode),
@@ -352,6 +375,15 @@ impl Node {
             Assignment(node) => {
                 for l in &mut node.lvalues {
                     Arc::make_mut(l).clear_source_info();
+                }
+                Arc::make_mut(&mut node.rvalue).clear_source_info();
+            }
+            Declaration(node) => {
+                for l in &mut node.lvalues {
+                    Arc::make_mut(l).clear_source_info();
+                }
+                if let Some(hint) = &mut node.type_hint {
+                    Arc::make_mut(hint).source_info = None;
                 }
                 Arc::make_mut(&mut node.rvalue).clear_source_info();
             }

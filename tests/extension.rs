@@ -120,7 +120,7 @@ fn extension_survives_across_repl_lines() {
     let mut last = String::new();
     for attempt in 1..=ATTEMPTS {
         let out = run_repl_lines(&[
-            format!("e = Extension.spawn:'{ext_bin}'"),
+            format!("var e = Extension.spawn:'{ext_bin}'"),
             "(e.call:'echo' with:'hi') == 'hi'".to_string(),
         ]);
         // The call on the *second* line must reach the extension spawned on the first.
@@ -144,9 +144,9 @@ fn extension_transport_round_trip() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_echo");
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{ext_bin}';
+var e = Extension.spawn:'{ext_bin}';
 
 "* basic scalar round-trips
 ((e.call:'echo' with:'hi') == 'hi').else:{{ ok = false }};
@@ -154,7 +154,7 @@ e = Extension.spawn:'{ext_bin}';
 
 "* the call parks on the socket: it runs concurrently with an independent task,
 "* and gather still returns both results in order.
-results = Async.gather:#( {{ e.call:'echo' with:'world' }} {{ 1 + 1 }} );
+var results = Async.gather:#( {{ e.call:'echo' with:'world' }} {{ 1 + 1 }} );
 (results == #( 'world' 2 )).else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
@@ -168,9 +168,9 @@ fn extension_handle_round_trip() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_handles");
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{ext_bin}';
+var e = Extension.spawn:'{ext_bin}';
 
 "* call 1: the extension makes a host String, retains its handle, and remembers it
 ((e.call:'stash' with:'kept-value') == 'ok').else:{{ ok = false }};
@@ -205,19 +205,19 @@ fn extension_crash_isolation() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{ext_bin}';
+var e = Extension.spawn:'{ext_bin}';
 
 "* a normal call works
 ((e.call:'ping' with:'') == 'pong').else:{{ ok = false }};
 
 "* the extension exits mid-call: the host surfaces a catchable error (no hang), VM survives
-crashed = {{ e.call:'crash' with:'' }}.catch:{{ |ex| 'caught' }};
+var crashed = {{ e.call:'crash' with:'' }}.catch:{{ |ex| 'caught' }};
 (crashed == 'caught').else:{{ ok = false }};
 
 "* the extension is now dead: a follow-up call fails fast, also catchable
-again = {{ e.call:'ping' with:'' }}.catch:{{ |ex| 'dead' }};
+var again = {{ e.call:'ping' with:'' }}.catch:{{ |ex| 'dead' }};
 (again == 'dead').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
@@ -231,17 +231,17 @@ fn extension_timeout() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{ext_bin}';
+var e = Extension.spawn:'{ext_bin}';
 
 "* a hung call is bounded by Async.timeout:do: — raises a catchable TimeoutError, VM survives
-r = {{ Async.timeout:300 do:{{ e.call:'hang' with:'' }} }}.catch:{{ |ex| 'timedout' }};
+var r = {{ Async.timeout:300 do:{{ e.call:'hang' with:'' }} }}.catch:{{ |ex| 'timedout' }};
 (r == 'timedout').else:{{ ok = false }};
 
 "* the conversation is desynced -> the extension is dead; a follow-up fails fast (does NOT hang
 "* waiting on a child still stuck in `hang`)
-again = {{ e.call:'ping' with:'' }}.catch:{{ |ex| 'dead' }};
+var again = {{ e.call:'ping' with:'' }}.catch:{{ |ex| 'dead' }};
 (again == 'dead').else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
@@ -255,12 +255,12 @@ fn extension_resource_handles() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_resources");
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{ext_bin}';
+var e = Extension.spawn:'{ext_bin}';
 
 "* create an ext-side counter; the host holds it as an opaque ExtResource token
-c = e.call:'new' with:'';
+var c = e.call:'new' with:'';
 
 "* pass the resource back into later calls via args: — it mutates the same ext-side counter
 ((e.call:'inc' with:'' args:#( c )) == '1').else:{{ ok = false }};
@@ -285,16 +285,16 @@ fn extension_array_data_plane() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_arrays");
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{ext_bin}';
-a = Array.ofFloats:#( 1.0 2.0 3.0 );
+var e = Extension.spawn:'{ext_bin}';
+var a = Array.ofFloats:#( 1.0 2.0 3.0 );
 
 "* the bulk column crosses the socket; the extension sums the whole buffer -> '6'
 ((e.call:'sum' with:'' args:#( a )) == '6').else:{{ ok = false }};
 
 "* scale: returns a new Array (the column round-trips back as an Array, not a List)
-r = e.call:'scale' with:'2' args:#( a );
+var r = e.call:'scale' with:'2' args:#( a );
 (r.dtype == #float64).else:{{ ok = false }};
 (r.toList == #( 2.0 4.0 6.0 )).else:{{ ok = false }};
 (r.sum == 12.0).else:{{ ok = false }};
@@ -310,19 +310,19 @@ fn extension_structured_values() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_data");
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{ext_bin}';
+var e = Extension.spawn:'{ext_bin}';
 
 "* a structured value round-trips: Quoin Map -> DataValue -> (ext) -> DataValue -> Quoin Map
-m = #{{ 'n': 42 'f': 1.5 's': 'hi' 'flag': true 'items': #( 1 2 3 ) }};
+var m = #{{ 'n': 42 'f': 1.5 's': 'hi' 'flag': true 'items': #( 1 2 3 ) }};
 ((e.call:'echoData' with:'' data:m) == m).else:{{ ok = false }};
 
 "* a structured value built extension-side materializes as a real Quoin List
 ((e.call:'mkList' with:'') == #( 1 2 3 )).else:{{ ok = false }};
 
 "* host reach (Phase 2): the ext reaches the Array class, builds it, and returns it live
-arr = e.call:'buildArray' with:'';
+var arr = e.call:'buildArray' with:'';
 (arr.dtype == #float64).else:{{ ok = false }};
 (arr.sum == 6.0).else:{{ ok = false }};
 
@@ -340,18 +340,18 @@ fn extension_backed_classes() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{ext_bin}';
+var e = Extension.spawn:'{ext_bin}';
 
 "* an extension-backed class (Phase 3): the class-side constructor builds a live instance, and an
 "* ordinary method send dispatches over the socket — `Vector` is a real global, `v` a real instance
-v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
 (v.sum == 6.0).else:{{ ok = false }};
 (v.length == 3).else:{{ ok = false }};
 
 "* an instance method that *makes* a new instance returns another (socket-backed) `Vector`
-w = v.scale:2.0;
+var w = v.scale:2.0;
 (w.sum == 12.0).else:{{ ok = false }};
 (w.length == 3).else:{{ ok = false }};
 
@@ -360,20 +360,20 @@ w = v.scale:2.0;
 
 "* cross-class return: a `Matrix` method returns a `Vector` instance, wrapped as the `Vector` class
 "* (so it responds to Vector's methods) — a method may return an instance of any of the ext's classes
-m = Matrix.ofRows:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
+var m = Matrix.ofRows:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
 (m.rowCount == 2).else:{{ ok = false }};
-r0 = m.row:0;
+var r0 = m.row:0;
 (r0.sum == 3.0).else:{{ ok = false }};
 (r0.length == 2).else:{{ ok = false }};
 ((m.row:1).sum == 7.0).else:{{ ok = false }};
 
 "* an ext-instance argument: `dot:` takes another Vector (resolved to a live instance) -> a scalar
-va = Vector.ofFloats:#( 1.0 2.0 3.0 );
-vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
+var va = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
 ((va.dot:vb) == 32.0).else:{{ ok = false }};
 
 "* a host-block argument: `map:` applies the passed block to each element -> a new Vector
-mapped = va.map:{{ |x| x * 10.0 }};
+var mapped = va.map:{{ |x| x * 10.0 }};
 (mapped.sum == 60.0).else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
@@ -390,15 +390,15 @@ fn extension_class_error_is_catchable() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_vector");
     let script = format!(
         r#"
-ok = true;
-e = Extension.spawn:'{ext_bin}';
-v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
 
 "* a valid index returns normally
 ((v.at:0) == 1.0).else:{{ ok = false }};
 
 "* an out-of-range index raises a CATCHABLE error carrying the handler's message
-caught = {{ v.at:9 }}.catch:{{ |ex| ex.message }};
+var caught = {{ v.at:9 }}.catch:{{ |ex| ex.message }};
 (caught == 'index 9 out of range (length 3)').else:{{ ok = false }};
 
 "* ...and the extension SURVIVED — the same instance still answers the next sends
@@ -450,9 +450,9 @@ fn extension_python_sdk() {
     // A Python extension, spoken to over the exact same protocol as the Rust fixtures.
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{fixture}';
+var e = Extension.spawn:'{fixture}';
 ((e.call:'echo' with:'hi') == 'hi').else:{{ ok = false }};
 ((e.call:'upper' with:'hello') == 'HELLO').else:{{ ok = false }};
 
@@ -481,8 +481,8 @@ fn extension_python_parity() {
     // + reap), and the Array data plane (sum/scale).
     let script = format!(
         r#"
-ok = true;
-e = Extension.spawn:'{fixture}';
+var ok = true;
+var e = Extension.spawn:'{fixture}';
 
 "* host-ops: make_string + call_method ('ab' +: '!').upper -> 'AB!'
 ((e.call:'compute' with:'ab') == 'AB!').else:{{ ok = false }};
@@ -491,7 +491,7 @@ e = Extension.spawn:'{fixture}';
 ((e.call:'mapUpper' with:'' args:#( {{ |s| s.upper }} )) == 'A,B,C').else:{{ ok = false }};
 
 "* ext-resource handles: create a counter, mutate it across calls, then drop + reap
-c = e.call:'new' with:'';
+var c = e.call:'new' with:'';
 ((e.call:'inc' with:'' args:#( c )) == '1').else:{{ ok = false }};
 ((e.call:'inc' with:'' args:#( c )) == '2').else:{{ ok = false }};
 ((e.call:'live' with:'') == '1').else:{{ ok = false }};
@@ -501,18 +501,18 @@ e.call:'live' with:'';
 ((e.call:'live' with:'') == '0').else:{{ ok = false }};
 
 "* Array data plane: sum the whole buffer, and scale -> a new Array
-a = Array.ofFloats:#( 1.0 2.0 3.0 );
+var a = Array.ofFloats:#( 1.0 2.0 3.0 );
 ((e.call:'sum' with:'' args:#( a )) == '6.0').else:{{ ok = false }};
-r = e.call:'scale' with:'2' args:#( a );
+var r = e.call:'scale' with:'2' args:#( a );
 (r.toList == #( 2.0 4.0 6.0 )).else:{{ ok = false }};
 
 "* structured values (Phase 1): a Map round-trips, and a record built in Python -> a Quoin Map
-m = #{{ 'a': 1 'b': #( 'x' 'y' ) 'c': true }};
+var m = #{{ 'a': 1 'b': #( 'x' 'y' ) 'c': true }};
 ((e.call:'echoData' with:'' data:m) == m).else:{{ ok = false }};
 ((e.call:'mkRecord' with:'') == #{{ 'name': 'quoin' 'items': #( 1 2 3 ) 'ok': true }}).else:{{ ok = false }};
 
 "* host reach (Phase 2): Python reaches the Array class, builds it, returns it live; and inspects
-arr = e.call:'buildArray' with:'';
+var arr = e.call:'buildArray' with:'';
 (arr.dtype == #float64).else:{{ ok = false }};
 (arr.sum == 6.0).else:{{ ok = false }};
 ((e.call:'inspect' with:'' args:#( #{{ 'k': 7 }} )) == #{{ 'k': 7 }}).else:{{ ok = false }};
@@ -542,37 +542,37 @@ fn extension_backed_classes_python() {
     // interchangeable to the host.
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
-e = Extension.spawn:'{fixture}';
+var e = Extension.spawn:'{fixture}';
 
 "* a Python extension provides `Vector`: constructor + method send dispatch over the socket
-v = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var v = Vector.ofFloats:#( 1.0 2.0 3.0 );
 (v.sum == 6.0).else:{{ ok = false }};
 (v.length == 3).else:{{ ok = false }};
 
 "* a method returning a new instance is auto-detected Python-side (isinstance — no `makes`)
-w = v.scale:2.0;
+var w = v.scale:2.0;
 (w.sum == 12.0).else:{{ ok = false }};
 (v.sum == 6.0).else:{{ ok = false }};
 
 "* cross-class return: a Python `Matrix` method returns a `Vector`, wrapped as the `Vector` class
-m = Matrix.ofRows:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
+var m = Matrix.ofRows:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
 (m.rowCount == 2).else:{{ ok = false }};
-r0 = m.row:0;
+var r0 = m.row:0;
 (r0.sum == 3.0).else:{{ ok = false }};
 ((m.row:1).sum == 7.0).else:{{ ok = false }};
 
 "* richer args: an ext-instance argument (`dot:`) and a host-block argument (`map:`)
-va = Vector.ofFloats:#( 1.0 2.0 3.0 );
-vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
+var va = Vector.ofFloats:#( 1.0 2.0 3.0 );
+var vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
 ((va.dot:vb) == 32.0).else:{{ ok = false }};
-mapped = va.map:{{ |x| x * 10.0 }};
+var mapped = va.map:{{ |x| x * 10.0 }};
 (mapped.sum == 60.0).else:{{ ok = false }};
 
 "* a Python handler that raises -> a CATCHABLE Quoin error (the SDK's CallReturnError), and the
 "* extension stays alive: the same instance still answers the next send
-caught = {{ va.at:9 }}.catch:{{ |ex| ex.message }};
+var caught = {{ va.at:9 }}.catch:{{ |ex| ex.message }};
 (caught == 'index 9 out of range (length 3)').else:{{ ok = false }};
 ((va.at:1) == 2.0).else:{{ ok = false }};
 
@@ -612,7 +612,7 @@ fn extension_load_package() {
     let dir = pkg_dir.to_string_lossy().to_string();
     let script = format!(
         r#"
-ok = true;
+var ok = true;
 
 "* load the package folder: spawns the extension, installs its classes under the [Vec] namespace,
 "* then runs init.qn
@@ -620,7 +620,7 @@ Extension.loadPackage:'{dir}';
 
 "* the class is reachable *namespaced* — the binary declares a simple `Vector`, installed as
 "* `[Vec]Vector` (so a package can never register a bare global)
-v = [Vec]Vector.ofFloats:#( 1.0 2.0 3.0 );
+var v = [Vec]Vector.ofFloats:#( 1.0 2.0 3.0 );
 (v.sum == 6.0).else:{{ ok = false }};
 
 "* init.qn's Quoin method ran after install and composes a socket-backed primitive (scale: then sum)
@@ -663,13 +663,13 @@ fn extension_use_package() {
     .expect("write init.qn");
 
     let script = r#"
-ok = true;
+var ok = true;
 
 "* `use vectors:*` finds vectors/ on $QUOIN_PATH, synthesizes Extension.loadPackage:, spawns +
 "* installs [Vec]Vector (namespaced), and runs init.qn — all via the use statement
 use vectors:*;
 
-v = [Vec]Vector.ofFloats:#( 1.0 2.0 3.0 );
+var v = [Vec]Vector.ofFloats:#( 1.0 2.0 3.0 );
 (v.sum == 6.0).else:{ ok = false };
 (v.tripledSum == 18.0).else:{ ok = false };
 

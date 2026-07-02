@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Classes' }).add:{
+(TestSuite.new:{ var name = 'Classes' }).add:{
     .test:
     operatorNew -> {
         TSCNC_Constant <- 42;
@@ -11,14 +11,14 @@
 
     .test:
     operatorNewReturnsClass -> {
-        newClass = nil;
+        var newClass = nil;
         .does:{ newClass = TSCNC4 <- {} } resultIn:{ newClass == TSCNC4 };
     };
 
     .test:
     operatorExtend -> {
         .is:{ (42.class <-- { abc -> { 'Hi' } }); 42.abc } equalTo:'Hi';
-        .is:{ n = 42; n <-- { inst -> { 'Hi' } }; n.inst; } equalTo:'Hi';
+        .is:{ var n = 42; n <-- { inst -> { 'Hi' } }; n.inst; } equalTo:'Hi';
     };
 
     .test:
@@ -45,7 +45,7 @@
                 init: -> {|a b c| @d = a+b+c }
                 d -> { @d }
             };
-            (TSCNC6.new: { a = 10; b = 20; c = 30 }).d
+            (TSCNC6.new: { var a = 10; var b = 20; var c = 30 }).d
         } equalTo:60;
     };
 
@@ -63,7 +63,7 @@
                 init: -> { |y| @y = y }
                 y -> { @y }
             };
-            o = TSCNC_ABSub.new: { y = 5 };
+            var o = TSCNC_ABSub.new: { var y = 5 };
             #( o.x o.y )
         } equalTo:#( 100 5 );
     };
@@ -81,7 +81,7 @@
                 init: -> { |y| @y = y }
                 y -> { @y }
             };
-            o = TSCNC_MixSub.new: { y = 7 };
+            var o = TSCNC_MixSub.new: { var y = 7 };
             #( o.m o.y )
         } equalTo:#( 9 7 );
     };
@@ -95,7 +95,7 @@
         TSCNC_Cap <- { |@a|
             a -> { @a }
         };
-        a = 42;
+        var a = 42;
         .is:{ (TSCNC_Cap.new:{}).a.defined? } equalTo:false;
         .is:{ (TSCNC_Cap.new:{ a = a }).a } equalTo:42;
         .does:{ TSCNC_Cap.new:{ a = 99 } } resultIn:{ a == 42 };
@@ -123,7 +123,7 @@
                 c -> { #( @a @b @c ) }
             }
 
-            newObj = TSCNC8.new;
+            var newObj = TSCNC8.new;
             #( newObj.c newObj.m newObj.z newObj.b )
         } equalTo:#( #( 1 11 22 ) 1 22 11 );
     };

@@ -2,7 +2,7 @@
 "* pure and tested exactly; Instant is clock-based and tested with loose lower bounds to stay
 "* non-flaky. Also covers the Duration overloads of Async.sleep:/Async.timeout:.
 
-(TestSuite.new:{ name = 'Duration' }).add:{
+(TestSuite.new:{ var name = 'Duration' }).add:{
     .test:
     construct -> {
         .is:{ (Duration.seconds:90).asSeconds } closeTo:90.0;
@@ -42,7 +42,7 @@
     };
 };
 
-(TestSuite.new:{ name = 'Instant' }).add:{
+(TestSuite.new:{ var name = 'Instant' }).add:{
     .test:
     elapsedNonNegative -> {
         .isTrue:{ Instant.now.elapsed.asNanoseconds >= 0 };
@@ -51,16 +51,16 @@
     .test:
     measuresSleep -> {
         "* loose lower bound: a ~20ms sleep should register at least ~15ms elapsed.
-        i = Instant.now;
+        var i = Instant.now;
         Async.sleep:(Duration.milliseconds:20);
         .isTrue:{ i.elapsed.asMilliseconds >= 15 };
     };
 
     .test:
     orderingAndSubtraction -> {
-        a = Instant.now;
+        var a = Instant.now;
         Async.sleep:5;
-        b = Instant.now;
+        var b = Instant.now;
         .isTrue:{ a < b };
         .isTrue:{ (b - a).asNanoseconds > 0 };   "* later - earlier > 0
         .isTrue:{ (a - b).asNanoseconds < 0 };   "* earlier - later < 0 (signed)

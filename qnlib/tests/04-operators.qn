@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Operators' }).add:{
+(TestSuite.new:{ var name = 'Operators' }).add:{
     .test:andOr -> {
         .isTrue:{ true && true };
         .isFalse:{ true && false };
@@ -24,7 +24,7 @@
         equalTo:42;
 
         .is:{
-            x = {
+            var x = {
                 ^42;
                 66
             };

@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Iterate' }).add:{
+(TestSuite.new:{ var name = 'Iterate' }).add:{
     .test:
     collect -> {
         .is:{ (1..5).collect:{|n| n*10 } } equalTo:#( 10 20 30 40 );
@@ -56,7 +56,7 @@
     .test:
     groupBy -> {
         "* groups into a Map keyed by the block's (string) result, preserving order
-        g = #(1 2 3 4 5 6).groupBy:{ |n| (n%2 == 0).if:{ 'even' } else:{ 'odd' } };
+        var g = #(1 2 3 4 5 6).groupBy:{ |n| (n%2 == 0).if:{ 'even' } else:{ 'odd' } };
         .is:{ g.at:'odd' } equalTo:#( 1 3 5 );
         .is:{ g.at:'even' } equalTo:#( 2 4 6 );
     };
@@ -67,8 +67,8 @@
         .isTrue:{ #(1 3 99 1000).contains?:3 };
         .isFalse:{ (1..5).contains?:6 };
         .isFalse:{ #(1 3 99 1000).contains?:9 };
-        .isTrue:{ #{ 'a':1 }.contains?:KeyValuePair.new:{ key='a'; value=1 } };
-        .isFalse:{ #{ 'a':1 }.contains?:KeyValuePair.new:{ key='a'; value=2 } };
+        .isTrue:{ #{ 'a':1 }.contains?:KeyValuePair.new:{ var key='a'; var value=1 } };
+        .isFalse:{ #{ 'a':1 }.contains?:KeyValuePair.new:{ var key='a'; var value=2 } };
     };
 
     .test:
@@ -76,9 +76,9 @@
         .is:{ (1..6).reduce:{|sum n| sum+n } } equalTo:15;
         .is:{ (1..4).reduce:{ |d x| d.at:x.s put:x} into:#{} } equalTo:#{ '1':1 '2':2 '3':3 };
         .is:{ #{ 'a':1 'b':2 'c':3 }.reduce:{ |l x| l.add:x } into:#() } equalTo:#(
-            KeyValuePair.new:{ key='a' value=1 }
-            KeyValuePair.new:{ key='b' value=2 }
-            KeyValuePair.new:{ key='c' value=3 }
+            KeyValuePair.new:{ var key='a' var value=1 }
+            KeyValuePair.new:{ var key='b' var value=2 }
+            KeyValuePair.new:{ var key='c' var value=3 }
         );
     };
 
@@ -132,9 +132,9 @@
     sort -> {
         .is:{ #( 4 3 1 nil 5 2 7 6 ).sort } equalTo:#( 1 2 3 4 5 6 7 nil );
         .is:{ #{ 'b':1 'a':42 'c':99 }.list.sort:{|kvp| kvp.value } } equalTo:#(
-            KeyValuePair.new:{ key='b' value=1 }
-            KeyValuePair.new:{ key='a' value=42 }
-            KeyValuePair.new:{ key='c' value=99 }
+            KeyValuePair.new:{ var key='b' var value=1 }
+            KeyValuePair.new:{ var key='a' var value=42 }
+            KeyValuePair.new:{ var key='c' var value=99 }
         );
     };
 
@@ -149,8 +149,8 @@
     .test:
     fromPairs -> {
         .is:{ Map.fromPairs:#(
-            (KeyValuePair.new:{ key='a' value=1 })
-            (KeyValuePair.new:{ key='b' value=2 })
+            (KeyValuePair.new:{ var key='a' var value=1 })
+            (KeyValuePair.new:{ var key='b' var value=2 })
         ) } equalTo:#{ 'a':1 'b':2 };
     };
 }

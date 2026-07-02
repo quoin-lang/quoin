@@ -1,4 +1,4 @@
-(TestSuite.new:{ name = 'Numbers' }).add:{
+(TestSuite.new:{ var name = 'Numbers' }).add:{
     .test:
     literals -> {
         .is:{ 1000000000 } a:Integer;

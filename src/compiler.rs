@@ -1,8 +1,8 @@
 use crate::instruction::{Constant, Instruction, SharedBytecode, SharedSourceMap, StaticBlock};
 use crate::parser::ast::{
-    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, IdentifierType,
-    MethodCallNode, MethodSelectorNode, Node, NodeValue, ProgramNode, UnaryOperatorNode,
-    UnaryOperatorType,
+    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, DeclKind, DeclarationNode,
+    IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode, Node, NodeValue,
+    ProgramNode, UnaryOperatorNode, UnaryOperatorType,
 };
 use crate::symbol::Symbol;
 use crate::value::{NamespacedName, SourceInfo};
@@ -229,6 +229,8 @@ pub(crate) fn fuse_bytecode(
 
 struct Scope {
     locals: HashSet<String>,
+    /// Subset of `locals` declared with `let` — reassigning one is a compile error.
+    immutable: HashSet<String>,
 }
 
 pub struct Compiler {
@@ -246,6 +248,7 @@ impl Compiler {
         Self {
             scopes: vec![Scope {
                 locals: HashSet::new(),
+                immutable: HashSet::new(),
             }],
             temp_counter: 0,
             value_type_def_depth: 0,
@@ -254,7 +257,10 @@ impl Compiler {
 
     pub fn new_with_locals(locals: HashSet<String>) -> Self {
         Self {
-            scopes: vec![Scope { locals }],
+            scopes: vec![Scope {
+                locals,
+                immutable: HashSet::new(),
+            }],
             temp_counter: 0,
             value_type_def_depth: 0,
         }
@@ -304,11 +310,40 @@ impl Compiler {
     }
 
     fn push_scope(&mut self, locals: HashSet<String>) {
-        self.scopes.push(Scope { locals });
+        self.scopes.push(Scope {
+            locals,
+            immutable: HashSet::new(),
+        });
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+    }
+
+    /// Declare a fresh local in the current (innermost) scope. Errors if the name is
+    /// already declared *in this scope* (redeclaration); shadowing an outer scope is
+    /// allowed. `let` bindings are recorded as immutable.
+    fn declare_local(&mut self, name: &str, mutable: bool) -> Result<(), String> {
+        let scope = self.scopes.last_mut().unwrap();
+        if scope.locals.contains(name) {
+            return Err(format!("`{}` is already declared in this scope", name));
+        }
+        scope.locals.insert(name.to_string());
+        if !mutable {
+            scope.immutable.insert(name.to_string());
+        }
+        Ok(())
+    }
+
+    /// Was `name` declared with `let`? Resolves to the nearest scope that binds it
+    /// (matching `is_local`'s innermost-first walk).
+    fn is_immutable(&self, name: &str) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if scope.locals.contains(name) {
+                return scope.immutable.contains(name);
+            }
+        }
+        false
     }
 
     pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, String> {
@@ -418,6 +453,9 @@ impl Compiler {
             }
             NodeValue::Assignment(assign) => {
                 self.compile_assignment(assign, bytecode)?;
+            }
+            NodeValue::Declaration(decl) => {
+                self.compile_declaration(decl, bytecode)?;
             }
             NodeValue::MethodCall(call) => {
                 self.compile_method_call(call, bytecode)?;
@@ -638,27 +676,16 @@ impl Compiler {
             return Err("Assignment requires at least one target lvalue".to_string());
         }
 
-        let mut target_names = Vec::new();
-        self.collect_lvalue_names(&assign.lvalues, &mut target_names);
-
-        let mut pre_declared = Vec::new();
-        for name in &target_names {
-            if !self.is_local(name) {
-                self.scopes.last_mut().unwrap().locals.insert(name.clone());
-                pre_declared.push(name.clone());
-            }
-        }
-
+        // Strict mode: assignment never declares. Plain-local targets must already be in
+        // scope (compile_ident_store errors otherwise); a new local is introduced with
+        // `var`/`let` (compile_declaration). Globals (`Foo`) and fields (`@x`) are handled
+        // per-target in compile_ident_store and are unaffected by this rule.
         self.compile_node(&assign.rvalue, bytecode)?;
-
-        for name in &pre_declared {
-            self.scopes.last_mut().unwrap().locals.remove(name);
-        }
 
         if assign.lvalues.len() == 1 {
             let lval = &assign.lvalues[0];
             bytecode.push(Instruction::Dup);
-            self.compile_lvalue_store(lval, bytecode)?;
+            self.compile_lvalue_store(lval, bytecode, false)?;
         } else {
             let temp_var = self.new_temp_var();
             self.scopes
@@ -670,10 +697,100 @@ impl Compiler {
             bytecode.push(Instruction::DefineLocal(Symbol::intern(
                 &(temp_var.clone()),
             )));
-
-            self.compile_destruct(&assign.lvalues, &temp_var, bytecode)?;
+            self.compile_destruct(&assign.lvalues, &temp_var, bytecode, false)?;
         }
 
+        Ok(())
+    }
+
+    fn compile_declaration(
+        &mut self,
+        decl: &DeclarationNode,
+        bytecode: &mut CodeBlock,
+    ) -> Result<(), String> {
+        if decl.lvalues.is_empty() {
+            return Err("declaration requires at least one target".to_string());
+        }
+        let mutable = matches!(decl.kind, DeclKind::Var);
+
+        // `var`/`let` declares plain locals only.
+        self.validate_decl_targets(&decl.lvalues)?;
+
+        // Introduce the fresh bindings BEFORE compiling the initializer, so a recursive
+        // reference resolves — `var f = { … f … }` (a self-recursive block) must see its
+        // own name. The name binds in the enclosing env the closure captures; the actual
+        // store runs after the value is built, so the captured frame is populated by the
+        // time the closure is invoked. (Same-scope redeclaration is an error.)
+        let mut names = Vec::new();
+        self.collect_lvalue_names(&decl.lvalues, &mut names);
+        for name in &names {
+            self.declare_local(name, mutable)?;
+        }
+
+        self.compile_node(&decl.rvalue, bytecode)?;
+
+        if decl.lvalues.len() == 1 {
+            let lval = &decl.lvalues[0];
+            bytecode.push(Instruction::Dup);
+            self.compile_lvalue_store(lval, bytecode, true)?;
+        } else {
+            let temp_var = self.new_temp_var();
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .locals
+                .insert(temp_var.clone());
+            bytecode.push(Instruction::Dup);
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(
+                &(temp_var.clone()),
+            )));
+            self.compile_destruct(&decl.lvalues, &temp_var, bytecode, true)?;
+        }
+
+        Ok(())
+    }
+
+    /// A `var`/`let` target must be a plain local (or `_` / splat / nested thereof) — not a
+    /// global (`Foo`), an instance variable (`@x`), or a namespaced name.
+    fn validate_decl_targets(&self, lvalues: &[Arc<Node>]) -> Result<(), String> {
+        for lval in lvalues {
+            match &lval.value {
+                NodeValue::IdentLValue(l) => self.validate_decl_ident(&l.identifier)?,
+                NodeValue::SplatLValue(l) => self.validate_decl_ident(&l.identifier)?,
+                NodeValue::IgnoredLValue | NodeValue::IgnoredSplatLValue => {}
+                NodeValue::SubLValue(s) => self.validate_decl_targets(&s.lvalues)?,
+                other => return Err(format!("unsupported `var`/`let` target: {:?}", other)),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_decl_ident(&self, id: &IdentifierNode) -> Result<(), String> {
+        if id.identifier_type == IdentifierType::Instance {
+            return Err(format!(
+                "`var`/`let` cannot declare an instance variable (`@{}`); \
+                 declare instance variables in the class header",
+                id.name
+            ));
+        }
+        if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced {
+            return Err(format!(
+                "`var`/`let` cannot declare a namespaced name (`{}`)",
+                id.name
+            ));
+        }
+        if id
+            .name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_uppercase())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "`var`/`let` declares locals; `{}` is uppercase — globals/classes use `{} = …`",
+                id.name, id.name
+            ));
+        }
         Ok(())
     }
 
@@ -681,6 +798,7 @@ impl Compiler {
         &mut self,
         lval: &Node,
         bytecode: &mut CodeBlock,
+        declaring: bool,
     ) -> Result<(), String> {
         match &lval.value {
             NodeValue::IdentLValue(ident_lval) => {
@@ -690,7 +808,7 @@ impl Compiler {
                     bytecode.push(Instruction::StoreGlobal(ns_name, false));
                 } else {
                     let name = &id.name;
-                    self.compile_ident_store(&id.identifier_type, name, bytecode)?;
+                    self.compile_ident_store(&id.identifier_type, name, bytecode, declaring)?;
                 }
             }
             NodeValue::IgnoredLValue => {
@@ -709,7 +827,22 @@ impl Compiler {
         ident_type: &IdentifierType,
         name: &String,
         bytecode: &mut CodeBlock,
+        declaring: bool,
     ) -> Result<(), String> {
+        // A `var`/`let` declaration introduces a fresh binding. The target was
+        // validated as a plain local and inserted into the current scope by
+        // `compile_declaration`, so here we just emit the binding instruction.
+        if declaring {
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
+            return Ok(());
+        }
+        // Reserved identifiers parse as assignable lvalues (`true = false`); emit a store
+        // so the runtime raises "Can't modify reserved identifier" (unchanged behavior),
+        // rather than the compile-time "undeclared local" error below.
+        if matches!(name.as_str(), "true" | "false" | "nil") {
+            bytecode.push(Instruction::StoreLocal(Symbol::intern(&(name.clone()))));
+            return Ok(());
+        }
         let first_char = name.chars().next().unwrap_or('\0');
         if first_char.is_ascii_uppercase() {
             let ns_name = NamespacedName::new(Vec::new(), name.clone());
@@ -723,10 +856,16 @@ impl Compiler {
             }
             bytecode.push(Instruction::StoreField(name.clone()));
         } else if self.is_local(name) {
+            if self.is_immutable(name) {
+                return Err(format!("cannot reassign `let` binding `{}`", name));
+            }
             bytecode.push(Instruction::StoreLocal(Symbol::intern(&(name.clone()))));
         } else {
-            self.scopes.last_mut().unwrap().locals.insert(name.clone());
-            bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
+            return Err(format!(
+                "undeclared local `{}` — declare it with `var {} = …` \
+                 (assignment no longer implicitly declares locals)",
+                name, name
+            ));
         }
         Ok(())
     }
@@ -736,6 +875,7 @@ impl Compiler {
         lvalues: &[Arc<Node>],
         temp_var: &str,
         bytecode: &mut CodeBlock,
+        declaring: bool,
     ) -> Result<(), String> {
         for (i, lval) in lvalues.iter().enumerate() {
             match &lval.value {
@@ -751,6 +891,7 @@ impl Compiler {
                         &ident_lval.identifier.identifier_type,
                         name,
                         bytecode,
+                        declaring,
                     )?;
                 }
                 NodeValue::SplatLValue(splat_lval) => {
@@ -765,6 +906,7 @@ impl Compiler {
                         &splat_lval.identifier.identifier_type,
                         name,
                         bytecode,
+                        declaring,
                     )?;
                 }
                 NodeValue::IgnoredLValue => {}
@@ -786,7 +928,7 @@ impl Compiler {
                         &(nested_temp.clone()),
                     )));
 
-                    self.compile_destruct(&sub_lval.lvalues, &nested_temp, bytecode)?;
+                    self.compile_destruct(&sub_lval.lvalues, &nested_temp, bytecode, declaring)?;
                 }
                 _ => {
                     return Err(format!(
@@ -1125,14 +1267,52 @@ mod tests {
         }
     }
 
+    // Builds a `var` declaration. First-binding compilation is now `var` (a bare
+    // assignment to an undeclared local is a strict-mode error — tested separately in
+    // `strict_declaration_semantics`). A fresh `var` binding emits the same
+    // Dup/DefineLocal bytecode the old implicit first-assignment did.
     fn assign_node(lvals: Vec<Node>, rval: Node) -> Node {
         Node {
             source_info: None,
-            value: NodeValue::Assignment(AssignmentNode {
+            value: NodeValue::Declaration(DeclarationNode {
+                kind: DeclKind::Var,
                 lvalues: lvals.into_iter().map(Arc::new).collect(),
+                type_hint: None,
                 rvalue: Arc::new(rval),
             }),
         }
+    }
+
+    #[test]
+    fn strict_declaration_semantics() {
+        fn compile_src(src: &str) -> Result<StaticBlock, String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            Compiler::new().compile_program(p)
+        }
+
+        // `var` declares; a later plain assignment reassigns the same binding.
+        assert!(compile_src("var x = 5; x = 6").is_ok());
+        assert!(compile_src("var a b = #(1 2); a b = #(3 4)").is_ok());
+        assert!(compile_src("var f = { |n| n * f.value: 1 }").is_ok()); // recursive self-ref
+
+        // A bare assignment to an undeclared local is a strict-mode error.
+        let e = compile_src("z = 10").unwrap_err();
+        assert!(e.contains("undeclared local"), "{e}");
+
+        // A `let` binding cannot be reassigned.
+        let e = compile_src("let w = 1; w = 2").unwrap_err();
+        assert!(e.contains("let"), "{e}");
+
+        // Re-declaring a name in the same scope is an error.
+        let e = compile_src("var d = 1; var d = 2").unwrap_err();
+        assert!(e.contains("already declared"), "{e}");
+
+        // `var`/`let` cannot declare an instance variable.
+        let e = compile_src("var @x = 1").unwrap_err();
+        assert!(e.contains("instance variable"), "{e}");
     }
 
     fn binary(op: BinaryOperatorType, left: Node, right: Node) -> Node {

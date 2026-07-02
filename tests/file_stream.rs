@@ -15,12 +15,12 @@ fn file_stream_read_lines_and_bytes() {
 
     let script = format!(
         r#"
-ok = true;
-f = [IO]File.open: '{data}';
+var ok = true;
+var f = [IO]File.open: '{data}';
 
 "* stringStream: readLine decodes each line, nil at EOF
-ss = f.stringStream;
-beta = (Bytes.of:#(98 195 169 116 97)).asString;   "* "béta"
+var ss = f.stringStream;
+var beta = (Bytes.of:#(98 195 169 116 97)).asString;   "* "béta"
 ((ss.readLine) == 'alpha').else:{{ ok = false }};
 ((ss.readLine) == beta).else:{{ ok = false }};
 ((ss.readLine) == 'gamma').else:{{ ok = false }};   "* final newline-less line
@@ -28,8 +28,8 @@ beta = (Bytes.of:#(98 195 169 116 97)).asString;   "* "béta"
 ss.close;
 
 "* byteStream on the SAME [IO]File (not consumed -> a fresh fd): readAll = exact bytes
-bs = f.byteStream;
-full = Bytes.of:#(97 108 112 104 97 10 98 195 169 116 97 10 103 97 109 109 97);
+var bs = f.byteStream;
+var full = Bytes.of:#(97 108 112 104 97 10 98 195 169 116 97 10 103 97 109 109 97);
 ((bs.readAll) == full).else:{{ ok = false }};
 bs.close;
 

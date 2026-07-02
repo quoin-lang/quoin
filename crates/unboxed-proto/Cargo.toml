@@ -1,0 +1,19 @@
+[package]
+name = "unboxed-proto"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# DETACHED from the parent `quoin` workspace on purpose. This is a throwaway
+# Tier-1 ceiling screen (see docs/FUTURE_ARCH.md) — a standalone unboxed bytecode
+# interpreter with zero coupling to the real VM. An empty [workspace] table makes
+# this crate its own workspace root so `cargo --manifest-path .../Cargo.toml`
+# never attaches it to (or perturbs) the qn build.
+[workspace]
+
+# No [profile.release] overrides: use cargo's default release settings, which is
+# what `qn` uses, so the ceiling number is a fair apples-to-apples comparison.
+
+[[bin]]
+name = "unboxed-proto"
+path = "src/main.rs"
