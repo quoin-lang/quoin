@@ -286,6 +286,12 @@ pub struct Compiler {
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
+    /// While compiling an *inlined* control-flow block body (Slice 2d), collects the
+    /// bytecode positions of top-level `^` (BlockReturn) placeholder jumps so
+    /// `inline_block_body` can patch them to land just past the inlined region. `None`
+    /// outside inlining (a `^` then compiles to a normal `BlockReturn`). Cleared on entry
+    /// to a real nested block so its `^` isn't captured by an enclosing inlined region.
+    inline_carets: Option<Vec<usize>>,
 }
 
 impl Compiler {
@@ -301,6 +307,7 @@ impl Compiler {
             value_type_def_depth: 0,
             next_block_is_init: false,
             class_ctx: Vec::new(),
+            inline_carets: None,
         }
     }
 
@@ -316,6 +323,7 @@ impl Compiler {
             value_type_def_depth: 0,
             next_block_is_init: false,
             class_ctx: Vec::new(),
+            inline_carets: None,
         }
     }
 
@@ -533,20 +541,24 @@ impl Compiler {
             && call.arguments.signature.identifiers[0].name == "sealed!"
     }
 
-    /// Result type of a binary operator when both operands are statically `Int`:
-    /// arithmetic yields `Int`, comparison yields `Bool`; otherwise `Unknown`.
+    /// Static result type of a binary operator. Comparison/equality operators yield `Bool`
+    /// for *any* operands (Slice 2d, option B) — a language guarantee that they return
+    /// `Boolean`, which lets `(a < b).if:…` / `(x == y).if:…` inline even when the operands
+    /// aren't statically typed. Arithmetic yields `Int` only when *both* operands are
+    /// statically `Int` — the soundness condition for devirtualizing to the direct i64 ops.
+    /// Everything else (incl. `~`/`..`, and `&&`/`||`, which return an operand value not a
+    /// `Bool`) stays `Unknown`.
     fn binop_result_type(&self, op: &BinaryOperatorNode) -> StaticType {
         use BinaryOperatorType::*;
-        if self.static_type(&op.left) == StaticType::Int
-            && self.static_type(&op.right) == StaticType::Int
-        {
-            match op.operator {
-                Add | Sub | Mul | Div | Mod => StaticType::Int,
-                Lt | LtEq | Gt | GtEq | Eq | NotEq => StaticType::Bool,
-                _ => StaticType::Unknown,
+        match op.operator {
+            Lt | LtEq | Gt | GtEq | Eq | NotEq => StaticType::Bool,
+            Add | Sub | Mul | Div | Mod
+                if self.static_type(&op.left) == StaticType::Int
+                    && self.static_type(&op.right) == StaticType::Int =>
+            {
+                StaticType::Int
             }
-        } else {
-            StaticType::Unknown
+            _ => StaticType::Unknown,
         }
     }
 
@@ -694,7 +706,15 @@ impl Compiler {
             }
             NodeValue::BlockReturn(ret) => {
                 self.compile_node(&ret.value, bytecode)?;
-                bytecode.push(Instruction::BlockReturn);
+                // Inside an inlined control-flow block (Slice 2d), `^expr` yields the
+                // block's value and jumps past the inlined region rather than popping a
+                // (now-absent) block frame; `inline_block_body` patches the placeholder.
+                if let Some(positions) = self.inline_carets.as_mut() {
+                    positions.push(bytecode.len());
+                    bytecode.push(Instruction::Jump(0));
+                } else {
+                    bytecode.push(Instruction::BlockReturn);
+                }
             }
             NodeValue::MethodReturn(ret) => {
                 self.compile_node(&ret.value, bytecode)?;
@@ -1205,6 +1225,13 @@ impl Compiler {
             Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
         };
 
+        // Slice 2d: inline `if:`/`if:else:` on a statically-Bool receiver with literal,
+        // 0-arg, declaration-free block args into native jumps — no block allocation, no
+        // dispatch, no block-invocation frame. Falls through to a normal send otherwise.
+        if self.try_compile_inlined_conditional(call, bytecode)? {
+            return Ok(());
+        }
+
         // Evaluate receiver
         if let Some(ref subject) = call.subject {
             self.compile_node(subject, bytecode)?;
@@ -1263,6 +1290,132 @@ impl Compiler {
         }
 
         self.emit_call(bytecode, &selector, num_components, is_self);
+        Ok(())
+    }
+
+    /// Slice 2d — control-flow inlining. If `call` is `recv.if:{…}` or
+    /// `recv.if:{…}else:{…}` where `recv` is statically `Boolean` and every block arg is
+    /// a literal, parameter-less, declaration-free block, splice the block bodies inline
+    /// as `ElseJump`/`Jump` bytecode (no block alloc, no dispatch, no block frame) and
+    /// return `true`. Otherwise emit nothing and return `false` so the caller compiles the
+    /// normal send.
+    ///
+    /// Soundness: `Boolean` is sealed (prelude), so `if:`/`if:else:` on a statically-Bool
+    /// receiver always resolve to the built-in `True`/`False` methods — treating them as
+    /// inlinable built-ins is a language guarantee, matching Smalltalk `ifTrue:ifFalse:`.
+    fn try_compile_inlined_conditional(
+        &mut self,
+        call: &MethodCallNode,
+        bytecode: &mut CodeBlock,
+    ) -> Result<bool, String> {
+        let subject = match &call.subject {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let idents = &call.arguments.signature.identifiers;
+        let exprs = &call.arguments.expressions;
+
+        // Selector shape: `if:` (then only) or `if:else:` (then + else).
+        let kws: Vec<&str> = idents.iter().map(|i| i.name.as_str()).collect();
+        let has_else = match kws.as_slice() {
+            ["if"] => false,
+            ["if", "else"] => true,
+            _ => return Ok(false),
+        };
+
+        // Only sound when the receiver is provably Boolean.
+        if self.static_type(subject) != StaticType::Bool {
+            return Ok(false);
+        }
+
+        // Every arg must be a literal, 0-arg, declaration-free block (v1).
+        let then_blk = match Self::inlinable_block(&exprs[0]) {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+        let else_blk = if has_else {
+            match Self::inlinable_block(&exprs[1]) {
+                Some(b) => Some(b),
+                None => return Ok(false),
+            }
+        } else {
+            None
+        };
+
+        // Condition → stack.
+        self.compile_node(subject, bytecode)?;
+
+        let mut then_bc = CodeBlock::new();
+        then_bc.current_source = bytecode.current_source.clone();
+        self.inline_block_body(then_blk, &mut then_bc)?;
+        let t = then_bc.len() as isize;
+
+        if let Some(else_blk) = else_blk {
+            let mut else_bc = CodeBlock::new();
+            else_bc.current_source = bytecode.current_source.clone();
+            self.inline_block_body(else_blk, &mut else_bc)?;
+            let e = else_bc.len() as isize;
+            // cond false → skip the then-body and its trailing Jump, land on the else-body.
+            bytecode.push(Instruction::ElseJump(t + 2));
+            bytecode.extend(then_bc);
+            bytecode.push(Instruction::Jump(e + 1));
+            bytecode.extend(else_bc);
+        } else {
+            // No else: a false condition makes the construct's value `nil`.
+            bytecode.push(Instruction::ElseJump(t + 2));
+            bytecode.extend(then_bc);
+            bytecode.push(Instruction::Jump(2));
+            bytecode.push(Instruction::Push(Constant::Nil));
+        }
+        Ok(true)
+    }
+
+    /// A literal block usable for control-flow inlining: no parameters and no local
+    /// declarations. (v1 — declaration-carrying blocks need alpha-renaming, a follow-up.)
+    ///
+    /// A body `var`/`let` is a `Declaration` *statement*, not a `decls` header entry, so
+    /// both must be checked: inlining a block that binds a top-level local would splice
+    /// that binding into the method scope, colliding with a sibling branch's same-named
+    /// local (they are isolated only by their now-absent block frames).
+    fn inlinable_block(node: &Node) -> Option<&BlockNode> {
+        if let NodeValue::Block(b) = &node.value {
+            let declares_local = b
+                .statements
+                .iter()
+                .any(|s| matches!(&s.value, NodeValue::Declaration(_)));
+            if b.arguments.is_empty() && b.decls.is_empty() && !declares_local {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    /// Compile an inlined control-flow block body into `out`: its statements spliced
+    /// inline (value-on-stack like a block, but no frame and no trailing `Return`), with
+    /// each top-level `^expr` redirected to a `Jump` past the body (patched here). `^^`
+    /// (MethodReturn) is left untouched — it still returns from the enclosing method.
+    fn inline_block_body(&mut self, block: &BlockNode, out: &mut CodeBlock) -> Result<(), String> {
+        let saved = self.inline_carets.replace(Vec::new());
+        let len = block.statements.len();
+        for (idx, stmt) in block.statements.iter().enumerate() {
+            out.current_source = stmt.source_info.clone();
+            self.compile_node(stmt, out)?;
+            // Discard the value of every statement but the last (the block's value).
+            if idx + 1 < len {
+                out.push(Instruction::Pop);
+            }
+        }
+        if len == 0 {
+            out.push(Instruction::Push(Constant::Nil));
+        }
+        // Patch each top-level `^` to jump to just past the body (falls through to the
+        // construct's merge point).
+        let carets = self.inline_carets.take().unwrap_or_default();
+        let end = out.len() as isize;
+        for pos in carets {
+            set_jump_offset(&mut out.bytecode[pos], end - pos as isize);
+        }
+        self.inline_carets = saved;
         Ok(())
     }
 
@@ -1380,6 +1533,10 @@ impl Compiler {
         // `X.new:{ … }` argument) before anything can reset it; nested blocks compiled
         // within read it as `false`.
         let is_init = std::mem::take(&mut self.next_block_is_init);
+        // A real block gets its own frame, so any enclosing inlined-region caret
+        // redirection (Slice 2d) must not leak into it: a `^` here is a genuine
+        // `BlockReturn` for this block. Cleared on entry, restored on exit.
+        let saved_inline = self.inline_carets.take();
         let mut param_names = Vec::new();
         let mut param_types = Vec::new();
         let mut locals = HashSet::new();
@@ -1470,6 +1627,7 @@ impl Compiler {
         };
 
         bytecode.push(Instruction::Push(Constant::Block(static_block)));
+        self.inline_carets = saved_inline;
         Ok(())
     }
 

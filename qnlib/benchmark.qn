@@ -1,12 +1,14 @@
 Fib <- {
     .meta <-- {
-        value: -> { |n| (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) } }
+        value: -> Integer { |n: Integer|
+            (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) }
+        }
     }
 };
 
 Sieve <- {
     .meta <-- {
-        primesUpTo: -> { |limit|
+        primesUpTo: -> { |limit: Integer|
             var is_prime = #();
             var i = 0;
             { i <= limit }.whileDo:{
@@ -41,7 +43,7 @@ Sieve <- {
 };
 
 TreeNode <- { | @left @right @item |
-    init: -> { |item left right|
+    init: -> { |item: Integer left right|
         @item = item;
         @left = left;
         @right = right
@@ -52,7 +54,7 @@ TreeNode <- { | @left @right @item |
 
 TreeBenchmark <- {
     .meta <-- {
-        powerOfTwo: -> { |p|
+        powerOfTwo: -> Integer { |p: Integer|
             var res = 1;
             var i = 0;
             { i < p }.whileDo:{
@@ -62,7 +64,7 @@ TreeBenchmark <- {
             ^res
         };
 
-        run: -> { |max_depth|
+        run: -> { |max_depth: Integer|
             var min_depth = 4;
 
             var long_lived_tree = TreeBenchmark.makeTree:0 depth:max_depth;
@@ -84,7 +86,7 @@ TreeBenchmark <- {
             }
         };
 
-        makeTree:depth: -> { |item depth|
+        makeTree:depth: -> { |item: Integer depth: Integer|
             (depth > 0).if:{
                 var left = TreeBenchmark.makeTree:(2 * item - 1) depth:(depth - 1);
                 var right = TreeBenchmark.makeTree:(2 * item) depth:(depth - 1);

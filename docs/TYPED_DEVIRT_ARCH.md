@@ -240,8 +240,9 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
     (never UB) — but it fails at runtime rather than compile time. Add a compile-time check that a
     method's return points match its declared return type (this is also the analysis needed to *infer*
     or widen return types). Touches `compiler.rs` (`collect_method_returns` / `self_send_return_type`).
-- **Slice 2b-B — devirtualize the calls (IN PROGRESS).** Turn a self-recursive `.value:(…)` in a
-  **sealed** class into a direct call (no `lookup_method`), targeting the ~15% dispatch cost.
+- **Slice 2b-B — devirtualize the calls (Phase 1 DONE; Phase 2 SPIKED & PARKED — dead end).** Turn a
+  self-recursive `.value:(…)` in a **sealed** class into a direct call (no `lookup_method`), targeting
+  the ~15% dispatch cost.
   - **Decisions:** (1) **A1** — a class is compile-sealed if `sealed!` appears as a *direct*
     (unconditional) statement in its body (reuses the runtime marker; the direct-statement rule keeps
     it sound). (2) **B1** — a guard-free monomorphic call-site cache in the `Block` (sealed ⇒ never
@@ -249,12 +250,75 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
   - **Scope (first cut):** self-sends to a **same-class method** within the sealed class's own def
     (the compiler knows sealedness + the method set there). Cross-unit sends and class-side/meta
     methods (metaclass sealing) are follow-ons.
-  - **Phases:** 1 = compile-time seal detection + tracking + a behavior-neutral `CallSelfDirect` op
-    (delegates to the normal send) for sealed same-class self-sends. 2 = the guard-free cache in
-    `CallSelfDirect`'s handler (the speedup). 3 = inline the invocation (skip `Callable::call` too).
+  - **Phase 1 — DONE** (`fb67760`): compile-time seal detection + tracking + a behavior-neutral
+    `CallSelfDirect` op (delegates to the normal send) for sealed same-class self-sends.
+  - **Phase 2 — SPIKED & PARKED (measured net loss).** A per-`(Block, ip)` call-site `Callable` cache
+    was **~9% slower** on a sealed-instance-method fib(30) and **never hit** (176/176 misses on
+    fib(10)): the `CallSelfDirect` sites live inside `if:else:` blocks, which Quoin **re-materializes
+    into a fresh `Gc<Block>` on every call** (each closes over a different `parent_env`). No per-block
+    cache can persist for exactly the hot sites, and the only stable key (the shared bytecode `Rc`)
+    needs a hashmap — i.e. the FxHash cost we were trying to undercut. See
+    `profiling/2bB-csd-cache/notes.md`. This also explains the earlier `experiment/inline-cache` park.
+  - **Consequence — CSD dispatch-caching is shelved.** Dispatch is already near the FxHash floor, and
+    the tracked Fib/Sieve/Tree benchmarks are class-side (`.meta`) methods on *unsealed* classes that
+    never hit `CallSelfDirect` at all. The transient-block finding redirected the real work to
+    **Slice 2d** (control-flow inlining), which attacks the fatter, on-benchmark costs. `CallSelfDirect`
+    (Phase 1) stays in as harmless plumbing; the old Phase 3 (inline the invocation) is not worth
+    pursuing on its own.
   - **Followup — per-method sealing.** Whole-class `sealed!` is coarse; sealing an *individual method*
     (so only that method's dispatch is frozen/devirtualizable while the rest of the class stays open)
     would be finer-grained and preferable. Syntax TBD. Track for after 2b-B lands.
+- **Slice 2d — control-flow inlining (v1 `if:`/`if:else:` + option B DONE; v2/v3 next).** Measured
+  **2.0× on typed fib(30)** (1.42s→0.71s) and **1.5× on untyped fib** (B). Tracked `qn benchmark`:
+  Fibonacci ~10-11ms→~4-5ms; Sieve/Trees unchanged (need v2/v3/C). All green: `.qn` 1227/0 (incl.
+  `QN_GC_STRESS=1`), `cargo test` 209/0. Notes: `profiling/2d-controlflow-inline/notes.md`. `if:`/
+  `if:else:`/
+  `whileDo:` are ordinary Quoin method sends (`qnlib/core/00-bootstrap.qn`: `True/False` `if:else:`;
+  `whileDo:` at :176), so each branch/iteration costs **2 block allocations + 2 dispatches + 2 frames**
+  (the `if:else:` method frame, then `.value` on the chosen block) around a single compare/add. This is
+  the dominant cost on **all three** tracked benchmarks and hits the exact profiled hotspots (block
+  materialization, frame-alloc, dispatch). Lower these forms — **when the argument(s) are literal
+  blocks** — to the native `IfJump`/`ElseJump`/`Jump` bytecode the VM already has (the classic
+  Smalltalk `ifTrue:ifFalse:`/`whileTrue:` inlining). Per branch/iteration: 2 allocs + 2 dispatches +
+  2 frames → 0.
+  - **When to inline:**
+    - `if:`/`if:else:` — only when the **receiver is statically `Bool`** (2a's `static_type`) **and**
+      the block args are literal, 0-arg, **declaration-free** blocks. **Option B (DONE):** comparison
+      operators (`<` `<=` `>` `>=` `==` `!=`) are statically `Bool` for *any* operands, so untyped
+      `(n<=1)`/`(depth>0)`/`(x==y)` conditions inline too. Unknown receiver (e.g. a predicate send
+      `x.defined?`) → keep the send (option C, later, would guard-inline those). Decl-carrying blocks
+      → keep the send (v3, alpha-rename). All sound; no regression for dynamic code.
+    - `whileDo:` — when the receiver (cond) **and** the arg (body) are literal 0-arg blocks; the cond
+      block's truthiness drives the loop.
+    - Any non-literal-block arg → fall back to the normal send.
+  - **Caret handling (the crux — the block frames disappear):**
+    - `^^` (`MethodReturn`) — **unchanged**: still a non-local return to the enclosing method (it
+      targets `enclosing_method_id`, which the inlined code is already inside).
+    - `^` (`BlockReturn`) — becomes a **`Jump` to the end of the inlined block's region**, leaving its
+      value on the stack as the construct's value (for a `while` body, the region-end is the loop-back).
+      It is **not** a `MethodReturn`. Only the inlined block's *own* top-level `^` is redirected; a `^`
+      inside a deeper, non-inlined block (e.g. a `.each:{}`) keeps normal `BlockReturn` semantics.
+  - **Block-local `var`s (the flat-frame hazard):** the VM has one `EnvFrame` per method frame (a flat
+    `Symbol → Value` list); a real block gets its own `EnvFrame`, so its `var`s are isolated. Inlining
+    removes that frame, so the block's `var`s must bind into the **method** frame. The compiler opens a
+    nested compile-time `Scope` (keeps lexical shadowing + 2a types correct), and — to stop the block's
+    names from clobbering the method's, or a sibling branch's, same-named locals in that shared flat
+    frame — gives inlined block locals **fresh unique symbols** (alpha-rename). Their lifetime stretches
+    to the method frame's (a harmless retained slot).
+    - **⚠ Debugger caveat (recorded per request):** this var-merging will be **confusing in the
+      debugger**. Inlined block locals surface in the *method* frame's variable view (not a separate
+      block scope), may carry mangled/alpha-renamed names, and stay visible past their original lexical
+      block; and there is no block frame to step into for inlined `if`/`while` bodies (stepping no
+      longer pushes a frame). The debugger's variable/scope display and step model will need scope
+      metadata to reconstruct the source view over inlined regions — track against
+      `docs/DEBUGGER_ARCH.md`.
+  - **Slicing:** v1 inlines **declaration-free** control-flow blocks (covers **fib** + **sieve**
+    immediately — their bodies only assign to method-level locals). v2 adds alpha-renaming for
+    **declaration-carrying** blocks (**tree**'s `makeTree` `if:` declares `var left`/`var right`).
+  - **Correctness gate:** the full `.qn` suite stays green (behavior-identical), plus a differential
+    test (inlined `bool.if:else:{}` vs. the same via a non-literal block variable) and `^`/`^^` edge
+    cases (early `^` in a branch, `^^` through an inlined branch, `^` inside a nested non-inlined block).
+  - **Measure:** fib + tree after v1's `if:`/`if:else:`; sieve after `whileDo:`.
 - **Slice 2c — unboxed local slots.** §4.5. Kills the `EnvFrame` `Vec<(Symbol,Value)>` scan; compounds
   everywhere (typed or not). Broad + tractable + low-speculation — a strong candidate to do *before* 2b-B.
 - **Phase 3 — unboxed structs.** §5. The Binary-Trees lever. Separate investigation.
