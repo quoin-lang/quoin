@@ -1231,6 +1231,9 @@ impl Compiler {
         if self.try_compile_inlined_conditional(call, bytecode)? {
             return Ok(());
         }
+        if self.try_compile_inlined_while(call, bytecode)? {
+            return Ok(());
+        }
 
         // Evaluate receiver
         if let Some(ref subject) = call.subject {
@@ -1417,6 +1420,68 @@ impl Compiler {
         }
         self.inline_carets = saved;
         Ok(())
+    }
+
+    /// Slice 2d (v2) — inline `{cond}.whileDo:{body}` when both the receiver (`cond`) and
+    /// the body are literal, 0-arg, declaration-free blocks, into a native jump loop.
+    /// Eliminates the per-iteration block allocation, dispatch, and frame — and the
+    /// recursion, since the bootstrap `whileDo:` recurses once per iteration
+    /// (`^^s.whileDo:block`). Returns `true` if inlined. Evaluates to `nil`, matching the
+    /// bootstrap (the terminating `if:` has no else). `^` in `cond`/`body` ends that block
+    /// (redirected by `inline_block_body`); `^^` still returns from the enclosing method.
+    fn try_compile_inlined_while(
+        &mut self,
+        call: &MethodCallNode,
+        bytecode: &mut CodeBlock,
+    ) -> Result<bool, String> {
+        let subject = match &call.subject {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let kws: Vec<&str> = call
+            .arguments
+            .signature
+            .identifiers
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        if kws.as_slice() != ["whileDo"] {
+            return Ok(false);
+        }
+        let cond_blk = match Self::inlinable_block(subject) {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+        let body_blk = match Self::inlinable_block(&call.arguments.expressions[0]) {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+
+        // Compile cond/body into their own sub-blocks so their lengths size the jumps.
+        let mut cond_bc = CodeBlock::new();
+        cond_bc.current_source = bytecode.current_source.clone();
+        self.inline_block_body(cond_blk, &mut cond_bc)?;
+        let c = cond_bc.len() as isize;
+
+        let mut body_bc = CodeBlock::new();
+        body_bc.current_source = bytecode.current_source.clone();
+        self.inline_block_body(body_blk, &mut body_bc)?;
+        let b = body_bc.len() as isize;
+
+        // Layout (each jump offset is relative to its own position):
+        //   [start] <cond>          (c instrs; leaves the condition on the stack)
+        //           ElseJump(b+3)    cond false → exit to the trailing nil
+        //           <body>          (b instrs; leaves the body value)
+        //           Pop              discard the body value
+        //           Jump(-(c+b+2))   back to [start]
+        //   [end]   Push(Nil)        whileDo: evaluates to nil
+        bytecode.extend(cond_bc);
+        bytecode.push(Instruction::ElseJump(b + 3));
+        bytecode.extend(body_bc);
+        bytecode.push(Instruction::Pop);
+        bytecode.push(Instruction::Jump(-(c + b + 2)));
+        bytecode.push(Instruction::Push(Constant::Nil));
+        Ok(true)
     }
 
     fn compile_binary_operator(

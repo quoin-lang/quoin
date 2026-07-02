@@ -268,11 +268,11 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
   - **Followup — per-method sealing.** Whole-class `sealed!` is coarse; sealing an *individual method*
     (so only that method's dispatch is frozen/devirtualizable while the rest of the class stays open)
     would be finer-grained and preferable. Syntax TBD. Track for after 2b-B lands.
-- **Slice 2d — control-flow inlining (v1 `if:`/`if:else:` + option B DONE; v2/v3 next).** Measured
-  **2.0× on typed fib(30)** (1.42s→0.71s) and **1.5× on untyped fib** (B). Tracked `qn benchmark`:
-  Fibonacci ~10-11ms→~4-5ms; Sieve/Trees unchanged (need v2/v3/C). All green: `.qn` 1227/0 (incl.
-  `QN_GC_STRESS=1`), `cargo test` 209/0. Notes: `profiling/2d-controlflow-inline/notes.md`. `if:`/
-  `if:else:`/
+- **Slice 2d — control-flow inlining (v1 `if:`/`if:else:` + v2 `whileDo:` + option B DONE; v3/C next).**
+  Measured **2.0× on typed fib(30)** (1.42s→0.71s), **1.5× on untyped fib** (B), and **~2.3× on
+  Sieve** (v2, ~40ms→~17ms). Tracked `qn benchmark`: Fibonacci ~11ms→~4-5ms, Sieve ~40→~17ms; Trees
+  unchanged (need v3/C). All green: `.qn` 1227/0 (incl. `QN_GC_STRESS=1`), `cargo test` 209/0. Notes:
+  `profiling/2d-controlflow-inline/notes.md`. `if:`/`if:else:`/
   `whileDo:` are ordinary Quoin method sends (`qnlib/core/00-bootstrap.qn`: `True/False` `if:else:`;
   `whileDo:` at :176), so each branch/iteration costs **2 block allocations + 2 dispatches + 2 frames**
   (the `if:else:` method frame, then `.value` on the chosen block) around a single compare/add. This is
