@@ -229,13 +229,23 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
     `field=value` is always field-binding (no `var`, never the undeclared-local error). Small, separate.
   - **Followup — highlighter.** Add `var`/`let` to the syntax highlighter, colored the same as `use`
     (`crates/quoin-syntax/src/highlight.rs`).
-- **Slice 2a — arithmetic devirt.** Type propagation (§4.1) + Integer devirt ops (§4.2) + guard-unbox
-  on call results (§4.3). Seal numeric builtins (§3). Target signal: a typed fib (`|n: Integer|`) and
-  the sieve inner loop drop sharply (arithmetic sends gone; recursive call still a boxed send).
-  Lowest risk, likely the biggest single step.
-- **Slice 2b — typed calling convention.** Return-type inference + specialized sealed-method entries
-  (§4.4). Target: typed fib approaches the Tier-1 ceiling. Highest complexity.
-- **Slice 2c — unboxed local slots.** §4.5. Kills the `EnvFrame` scan; compounds everywhere.
+- **Slice 2a — arithmetic devirt. ✅ DONE** (`df65763` seal + `e8d726b`). Type propagation +
+  Integer devirt ops on statically-Int operands; differential `Devirt` suite. ~30% faster typed fib(30).
+- **Slice 2b-A — return types (typed method results). ✅ DONE** (`d7fe17b`). `selector -> Integer { … }`
+  syntax; a self-send to a same-class method with a declared Integer return is statically Int, so the
+  result `+` devirtualizes. ~4% more on fib(30).
+  - **Followup — verify return types.** The declared return type is currently **trusted**: the compiler
+    does *not* check that every return point (`^expr` and the fall-through) actually yields the declared
+    type. A wrong annotation is *safe* — a devirt op on a non-Int result raises via `pop_two_ints`
+    (never UB) — but it fails at runtime rather than compile time. Add a compile-time check that a
+    method's return points match its declared return type (this is also the analysis needed to *infer*
+    or widen return types). Touches `compiler.rs` (`collect_method_returns` / `self_send_return_type`).
+- **Slice 2b-B — devirtualize the calls (deferred, bigger).** Turn a self-recursive `.value:(…)` into a
+  direct call (no `lookup_method`). Needs a **compile-visible seal for user classes** (runtime
+  `.sealed!` isn't known at AOT — a *syntactic* seal marker) + a direct-call convention. The
+  "specializing tier" rearchitecture; where fib closes toward the Tier-1 ceiling.
+- **Slice 2c — unboxed local slots.** §4.5. Kills the `EnvFrame` `Vec<(Symbol,Value)>` scan; compounds
+  everywhere (typed or not). Broad + tractable + low-speculation — a strong candidate to do *before* 2b-B.
 - **Phase 3 — unboxed structs.** §5. The Binary-Trees lever. Separate investigation.
 
 Honest expectation: Tier 2 keeps real frames + the boundary guards Tier 1 dropped, so the integrated
