@@ -172,3 +172,48 @@ fn fmt_without_paths_prints_usage() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("Usage"));
 }
+
+#[test]
+fn fmt_stdin_formats_to_stdout() {
+    use std::io::Write;
+    let mut child = qn()
+        .arg("fmt")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn qn fmt -");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"x = 1 y = 2\nfoo -> {\n@bar\n}\n")
+        .unwrap();
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success());
+    // The unsaved buffer is formatted and written to stdout; nothing touches disk.
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "x = 1;\ny = 2;\nfoo -> { @bar }\n"
+    );
+}
+
+#[test]
+fn fmt_stdin_reports_parse_error_and_emits_no_stdout() {
+    use std::io::Write;
+    let mut child = qn()
+        .arg("fmt")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn qn fmt -");
+    child.stdin.take().unwrap().write_all(b"x = (((\n").unwrap();
+    let out = child.wait_with_output().expect("wait");
+    // Non-zero exit, error on stderr, and nothing on stdout — so a caller keeps the buffer as-is.
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("parse error"));
+    assert!(String::from_utf8_lossy(&out.stdout).is_empty());
+}

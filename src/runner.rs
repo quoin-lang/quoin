@@ -499,8 +499,14 @@ impl VmRunner {
     fn run_fmt(&self) {
         let paths = &self.options.vm_options.arguments;
         if paths.is_empty() {
-            eprintln!("Usage: qn fmt [--check|--dry-run|--diff] <file-or-dir>…");
+            eprintln!("Usage: qn fmt [--check|--dry-run|--diff] <file-or-dir>… | qn fmt -");
             exit(2);
+        }
+        // `qn fmt -`: read source from stdin, write formatted source to stdout (the editor
+        // interface — format an unsaved buffer without touching disk). It stands alone.
+        if paths.len() == 1 && paths[0] == "-" {
+            self.run_fmt_stdin();
+            return;
         }
         let modes = [
             self.options.fmt_check,
@@ -567,6 +573,29 @@ impl VmRunner {
 
         if had_error || ((self.options.fmt_check || self.options.fmt_diff) && unformatted) {
             exit(1);
+        }
+    }
+
+    /// `qn fmt -`: read Quoin source from stdin, write the formatted source to stdout. The editor
+    /// interface for formatting an in-memory (possibly unsaved) buffer. On a parse or self-check
+    /// failure, write the message to stderr and exit non-zero, emitting nothing on stdout — so a
+    /// caller can leave the buffer untouched. Never returns (always exits).
+    fn run_fmt_stdin(&self) {
+        use std::io::Read;
+        let mut source = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut source) {
+            eprintln!("qn fmt: cannot read stdin: {e}");
+            exit(2);
+        }
+        match quoin_fmt::format_source(&source, "<stdin>") {
+            Ok(formatted) => {
+                print!("{formatted}");
+                exit(0);
+            }
+            Err(e) => {
+                eprintln!("qn fmt: {e}");
+                exit(1);
+            }
         }
     }
 
