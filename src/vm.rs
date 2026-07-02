@@ -2510,17 +2510,21 @@ impl<'gc> VmState<'gc> {
     /// `selector`. Shared by the `Send` handler and the fused `Send*` superinstructions
     /// (which push the send's last operand first). Advances the caller frame's ip by one
     /// slot, then either tail-starts a block, invokes the resolved callable, or raises MNU.
-    /// Pop the two operands of a devirtualized Integer op as raw i64s. The compiler emits
-    /// these ops only when both operands are statically `Integer`, so a non-Int here is a
-    /// compiler bug — surfaced as an error rather than silently mis-computing.
-    fn pop_two_ints(&mut self) -> Result<(i64, i64), QuoinError> {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        match (a, b) {
-            (Value::Int(x), Value::Int(y)) => Ok((x, y)),
-            _ => Err(QuoinError::Other(
-                "devirtualized Integer operator on a non-Integer operand".to_string(),
-            )),
+    /// Fast path for a devirtualized Integer op (Slice 2a/2f): if the top two stack values
+    /// are both `Int`, pop them and return `Some((a, b))`; otherwise leave them in place and
+    /// return `None` so the caller falls back to the real send. This optimistic fallback is
+    /// what lets `Int` be *inferred* for a mutable `var` (a stale-typed var is handled by the
+    /// send) instead of only trusted for annotated params.
+    fn take_two_ints(&mut self) -> Option<(i64, i64)> {
+        let n = self.stack.len();
+        if n < 2 {
+            return None;
+        }
+        if let (Value::Int(a), Value::Int(b)) = (self.stack[n - 2], self.stack[n - 1]) {
+            self.stack.truncate(n - 2);
+            Some((a, b))
+        } else {
+            None
         }
     }
 
@@ -2830,70 +2834,105 @@ impl<'gc> VmState<'gc> {
                 self.push(val);
                 self.frames[frame_idx].ip += 1;
             }
-            // Devirtualized Integer operators (Slice 2a). Operands are compiler-proven
-            // `Value::Int`; each computes directly and pushes the result. Semantics match
-            // Integer's native ops: `+`/`-`/`*` use plain i64 (wrap in release like native),
-            // `/`/`%` raise "Division by zero", compares yield a Bool.
+            // Devirtualized Integer operators (Slice 2a/2f). Fast path when both operands are
+            // `Value::Int`: compute directly and push. Semantics match Integer's native ops
+            // (`+`/`-`/`*` plain i64, wrap in release; `/`/`%` raise "Division by zero";
+            // compares yield a Bool). A non-Int operand (a var whose inferred `Int` type went
+            // stale, or an untyped operand) falls back to the real send — so `Int` can be
+            // inferred optimistically rather than only trusted for annotated params.
             Instruction::IntAdd => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Int(a + b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Int(a + b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("+:"), 1);
+                }
             }
             Instruction::IntSub => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Int(a - b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Int(a - b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("-:"), 1);
+                }
             }
             Instruction::IntMul => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Int(a * b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Int(a * b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("*:"), 1);
+                }
             }
             Instruction::IntDiv => {
-                let (a, b) = self.pop_two_ints()?;
-                if b == 0 {
-                    return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+                if let Some((a, b)) = self.take_two_ints() {
+                    if b == 0 {
+                        return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+                    }
+                    self.push(Value::Int(a / b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("/:"), 1);
                 }
-                self.push(Value::Int(a / b));
-                self.frames[frame_idx].ip += 1;
             }
             Instruction::IntMod => {
-                let (a, b) = self.pop_two_ints()?;
-                if b == 0 {
-                    return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+                if let Some((a, b)) = self.take_two_ints() {
+                    if b == 0 {
+                        return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+                    }
+                    self.push(Value::Int(a % b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("%:"), 1);
                 }
-                self.push(Value::Int(a % b));
-                self.frames[frame_idx].ip += 1;
             }
             Instruction::IntLt => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Bool(a < b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a < b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("<:"), 1);
+                }
             }
             Instruction::IntLe => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Bool(a <= b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a <= b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("<=:"), 1);
+                }
             }
             Instruction::IntGt => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Bool(a > b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a > b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern(">:"), 1);
+                }
             }
             Instruction::IntGe => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Bool(a >= b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a >= b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern(">=:"), 1);
+                }
             }
             Instruction::IntEq => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Bool(a == b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a == b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("==:"), 1);
+                }
             }
             Instruction::IntNe => {
-                let (a, b) = self.pop_two_ints()?;
-                self.push(Value::Bool(a != b));
-                self.frames[frame_idx].ip += 1;
+                if let Some((a, b)) = self.take_two_ints() {
+                    self.push(Value::Bool(a != b));
+                    self.frames[frame_idx].ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("!=:"), 1);
+                }
             }
             // Devirtualized List accessors (Slice 2e). Operands are already on the stack in
             // send order; if the receiver isn't a native list (or the index isn't an

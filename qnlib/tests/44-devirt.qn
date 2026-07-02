@@ -78,5 +78,19 @@
         "* the devirtualized path (typed `l`) and the dispatched path (untyped block
         "* param `x`) must agree.
         .is:{ { |x| x.at:1 }.valueWithSelfOrArg:l } equalTo:(l.at:1)
+    };
+
+    "* Slice 2f: `Int` is inferred for a `var` from its initializer, and the devirtualized
+    "* arithmetic ops fall back to the real send on a non-Int operand — so a var reassigned
+    "* to another type dispatches correctly instead of raising.
+    .test:
+    optimisticIntFallback -> {
+        var x = 0;
+        x = 'hello';
+        .is:{ x + ' world' } equalTo:'hello world';
+        .is:{ x == 'hello' } equalTo:true;
+        "* a genuinely-Int var still devirtualizes and computes correctly.
+        var n = 10;
+        .is:{ (n * n) + 1 } equalTo:101
     }
 }

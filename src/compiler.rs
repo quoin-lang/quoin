@@ -991,16 +991,17 @@ impl Compiler {
 
         self.compile_node(&decl.rvalue, bytecode)?;
 
-        // Slice 2e: record a collection init type so the local's `at:`/`at:put:`/`add:`
-        // devirtualize. Only collection types (`List`) are inferred here — they have a
-        // runtime fallback, so an inferred type going stale on reassignment is harmless.
-        // (`Int`/`Bool` are deliberately NOT inferred for a `var`: arithmetic devirt has no
-        // fallback, so a reassigned `var` would be mis-devirtualized.)
+        // Slice 2e/2f: infer the local's type from its initializer so its `at:`/`at:put:`/
+        // `add:` (List) and arithmetic (`Int`) devirtualize. Only `Int`/`List` are inferred
+        // — both devirt paths have a runtime fallback (`take_two_ints` / a non-list send), so
+        // an inferred type going stale on reassignment is harmless. `Bool` is deliberately
+        // excluded: the `if:else:` inline for a statically-`Bool` receiver has no fallback (a
+        // `Bool`-valued `var` still inlines via the guarded `Unknown` path, option C).
         if decl.lvalues.len() == 1
             && let NodeValue::IdentLValue(l) = &decl.lvalues[0].value
         {
             let ty = self.static_type(&decl.rvalue);
-            if ty == StaticType::List {
+            if ty == StaticType::Int || ty == StaticType::List {
                 self.record_local_type(&l.identifier.name, ty);
             }
         }
