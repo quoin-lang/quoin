@@ -1,0 +1,48 @@
+(TestSuite.new:{ var name = 'Devirt' }).add:{
+    "* The devirtualized Integer operators (emitted for typed operands) must produce
+    "* results identical to the dispatched native operators (untyped operands). Each
+    "* assertion compares a typed block — whose `x <op> y` compiles to an Int* op — against
+    "* the same operation on untyped locals, which lowers to a normal method send. `equalTo:`
+    "* takes the dispatched reference value; the `.is:{}` block holds the devirtualized one.
+    .test:
+    arithmeticMatchesDispatch -> {
+        "* `check` runs all nine operator comparisons for one (a, b). Operands are passed as
+        "* variables so `#(a b)` is an unambiguous two-element list (a bare `#(7 -3)` would
+        "* read the `-3` as binary subtraction). `t` is the captured test (leading-dot `self`
+        "* inside the block would be the block, not the test).
+        var t = self;
+        var check = { |a b|
+            var ab = #(a b);
+            t.is:{ { |x:Integer y:Integer| x + y }.valueWithArgs:ab } equalTo:(a + b);
+            t.is:{ { |x:Integer y:Integer| x - y }.valueWithArgs:ab } equalTo:(a - b);
+            t.is:{ { |x:Integer y:Integer| x * y }.valueWithArgs:ab } equalTo:(a * b);
+            t.is:{ { |x:Integer y:Integer| x < y }.valueWithArgs:ab } equalTo:(a < b);
+            t.is:{ { |x:Integer y:Integer| x <= y }.valueWithArgs:ab } equalTo:(a <= b);
+            t.is:{ { |x:Integer y:Integer| x > y }.valueWithArgs:ab } equalTo:(a > b);
+            t.is:{ { |x:Integer y:Integer| x >= y }.valueWithArgs:ab } equalTo:(a >= b);
+            t.is:{ { |x:Integer y:Integer| x == y }.valueWithArgs:ab } equalTo:(a == b);
+            t.is:{ { |x:Integer y:Integer| x != y }.valueWithArgs:ab } equalTo:(a != b)
+        };
+        var n7 = 0 - 7;
+        var n8 = 0 - 8;
+        var n3 = 0 - 3;
+        check.valueWithArgs:#(7 3);
+        check.valueWithArgs:#(n7 3);
+        check.valueWithArgs:#(7 n3);
+        check.valueWithArgs:#(n8 n3);
+        check.valueWithArgs:#(0 5);
+        check.valueWithArgs:#(5 0);
+        check.valueWithArgs:#(6 6)
+    };
+
+    "* Devirtualized `/` and `%` match dispatch, and raise the same catchable error on a
+    "* zero divisor.
+    .test:
+    divModMatchesDispatch -> {
+        .is:{ { |x:Integer y:Integer| x / y }.valueWithArgs:#(17 5) } equalTo:3;
+        .is:{ { |x:Integer y:Integer| x % y }.valueWithArgs:#(17 5) } equalTo:2;
+        .is:{ { |x:Integer y:Integer| x / y }.valueWithArgs:#(-17 5) } equalTo:(-17 / 5);
+        .does:{ { |x:Integer y:Integer| x / y }.valueWithArgs:#(1 0) } throw:'ArithmeticError: Division by zero';
+        .does:{ { |x:Integer y:Integer| x % y }.valueWithArgs:#(1 0) } throw:'ArithmeticError: Division by zero'
+    }
+}

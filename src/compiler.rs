@@ -7,7 +7,7 @@ use crate::parser::ast::{
 use crate::symbol::Symbol;
 use crate::value::{NamespacedName, SourceInfo};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -227,10 +227,32 @@ pub(crate) fn fuse_bytecode(
     (new_code, new_smap)
 }
 
+/// Statically-known type of an expression, used to devirtualize numeric operators
+/// (Slice 2a). `Int`/`Bool` are proven; everything dynamic is `Unknown` (the default,
+/// so untyped code compiles exactly as before). Double is intentionally not tracked
+/// yet (Integer-only slice — see docs/TYPED_DEVIRT_ARCH.md §10 decision B).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StaticType {
+    Int,
+    Bool,
+    Unknown,
+}
+
+/// Map a declared type name (param/local annotation) to a tracked `StaticType`.
+fn static_type_from_name(name: &str) -> StaticType {
+    match name {
+        "Integer" => StaticType::Int,
+        "Boolean" => StaticType::Bool,
+        _ => StaticType::Unknown,
+    }
+}
+
 struct Scope {
     locals: HashSet<String>,
     /// Subset of `locals` declared with `let` — reassigning one is a compile error.
     immutable: HashSet<String>,
+    /// Declared type of a local/param, when known (Integer/Boolean); absent = Unknown.
+    types: HashMap<String, StaticType>,
     /// True for the top-level scope of an object-initializer block (`X.new:{ … }`),
     /// where a bare `field = value` binds an instance field (no `var` required).
     is_init: bool,
@@ -255,6 +277,7 @@ impl Compiler {
             scopes: vec![Scope {
                 locals: HashSet::new(),
                 immutable: HashSet::new(),
+                types: HashMap::new(),
                 is_init: false,
             }],
             temp_counter: 0,
@@ -268,6 +291,7 @@ impl Compiler {
             scopes: vec![Scope {
                 locals,
                 immutable: HashSet::new(),
+                types: HashMap::new(),
                 is_init: false,
             }],
             temp_counter: 0,
@@ -323,6 +347,7 @@ impl Compiler {
         self.scopes.push(Scope {
             locals,
             immutable: HashSet::new(),
+            types: HashMap::new(),
             is_init: false,
         });
     }
@@ -355,6 +380,89 @@ impl Compiler {
             }
         }
         false
+    }
+
+    /// Declared `StaticType` of a local/param — the nearest binding's recorded type,
+    /// or `Unknown` (untyped, or not a plain local).
+    fn local_type(&self, name: &str) -> StaticType {
+        for scope in self.scopes.iter().rev() {
+            if scope.locals.contains(name) {
+                return scope
+                    .types
+                    .get(name)
+                    .copied()
+                    .unwrap_or(StaticType::Unknown);
+            }
+        }
+        StaticType::Unknown
+    }
+
+    /// Record a known type for a local just declared in the innermost scope.
+    fn record_local_type(&mut self, name: &str, ty: StaticType) {
+        if ty != StaticType::Unknown {
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .types
+                .insert(name.to_string(), ty);
+        }
+    }
+
+    /// Statically infer an expression's type for devirtualization. Conservative: only
+    /// literals, typed locals/params, and numeric operators on them are known; anything
+    /// else is `Unknown` and compiles to a normal dynamic `Send`.
+    fn static_type(&self, node: &Node) -> StaticType {
+        match &node.value {
+            NodeValue::Integer(_) => StaticType::Int,
+            NodeValue::Identifier(id) => {
+                if id.namespace.is_none()
+                    && id.identifier_type != IdentifierType::Namespaced
+                    && id.identifier_type != IdentifierType::Instance
+                {
+                    self.local_type(&id.name)
+                } else {
+                    StaticType::Unknown
+                }
+            }
+            NodeValue::BinaryOperator(op) => self.binop_result_type(op),
+            _ => StaticType::Unknown,
+        }
+    }
+
+    /// Result type of a binary operator when both operands are statically `Int`:
+    /// arithmetic yields `Int`, comparison yields `Bool`; otherwise `Unknown`.
+    fn binop_result_type(&self, op: &BinaryOperatorNode) -> StaticType {
+        use BinaryOperatorType::*;
+        if self.static_type(&op.left) == StaticType::Int
+            && self.static_type(&op.right) == StaticType::Int
+        {
+            match op.operator {
+                Add | Sub | Mul | Div | Mod => StaticType::Int,
+                Lt | LtEq | Gt | GtEq | Eq | NotEq => StaticType::Bool,
+                _ => StaticType::Unknown,
+            }
+        } else {
+            StaticType::Unknown
+        }
+    }
+
+    /// The devirtualized Integer instruction for a binary operator, if it has one.
+    fn int_devirt_op(operator: &BinaryOperatorType) -> Option<Instruction> {
+        use BinaryOperatorType::*;
+        Some(match operator {
+            Add => Instruction::IntAdd,
+            Sub => Instruction::IntSub,
+            Mul => Instruction::IntMul,
+            Div => Instruction::IntDiv,
+            Mod => Instruction::IntMod,
+            Lt => Instruction::IntLt,
+            LtEq => Instruction::IntLe,
+            Gt => Instruction::IntGt,
+            GtEq => Instruction::IntGe,
+            Eq => Instruction::IntEq,
+            NotEq => Instruction::IntNe,
+            _ => return None,
+        })
     }
 
     pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, String> {
@@ -1060,8 +1168,22 @@ impl Compiler {
             return Ok(());
         }
 
+        // Devirtualize when both operands are statically Integer: emit the direct i64 op
+        // instead of a method send. Computed from the AST before compiling the operands
+        // (no side effects). Integer is a sealed value type (see prelude.qn), so its
+        // arithmetic operators can't be redefined — this is sound.
+        let devirt = self.static_type(&op.left) == StaticType::Int
+            && self.static_type(&op.right) == StaticType::Int;
+
         self.compile_node(&op.left, bytecode)?;
         self.compile_node(&op.right, bytecode)?;
+
+        if devirt {
+            if let Some(op_instr) = Self::int_devirt_op(&op.operator) {
+                bytecode.push(op_instr);
+                return Ok(());
+            }
+        }
 
         let selector = match op.operator {
             BinaryOperatorType::Add => "+:",
@@ -1152,6 +1274,13 @@ impl Compiler {
 
         self.push_scope(locals);
         self.scopes.last_mut().unwrap().is_init = is_init;
+
+        // Seed declared param types (Integer/Boolean) so arithmetic on a typed param
+        // devirtualizes. Dispatch only selects a typed method when the arg matches, so
+        // the param is provably that type inside the body — no runtime guard needed.
+        for (name, tyname) in param_names.iter().zip(param_types.iter()) {
+            self.record_local_type(name, static_type_from_name(tyname));
+        }
 
         let mut block_bytecode = CodeBlock::new();
         block_bytecode.current_source = block.source_info.clone();
@@ -1663,12 +1792,12 @@ mod tests {
 
     #[test]
     fn test_compile_binary_unary_operators() {
-        // 1 + 2
+        // 1 + 2  — two Integer literals devirtualize to a direct IntAdd (no method send).
         let res = compile(vec![binary(BinaryOperatorType::Add, int(1), int(2))]).unwrap();
         let mut expected = prefix_ops();
         expected.push(Instruction::Push(Constant::Int(1)));
         expected.push(Instruction::Push(Constant::Int(2)));
-        expected.push(Instruction::Send(Symbol::intern("+:"), 1));
+        expected.push(Instruction::IntAdd);
         assert_eq!(res.bytecode, fused(expected));
 
         // -x

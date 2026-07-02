@@ -130,6 +130,22 @@ pub enum Instruction {
     // before the send (receiver + arg for a 1-arg send); produced by `fuse_bytecode`.
     SendLocalLocal(Symbol, Symbol, Symbol, usize), // local, local, selector, num_args
     SendLocalConst(Symbol, Constant, Symbol, usize), // local, constant, selector, num_args
+    // Devirtualized Integer operators (Slice 2a): the compiler emits these instead of a
+    // `Send("+:", 1)` etc. when both operands are statically `Integer` (a sealed value
+    // type). Each pops two `Value::Int`s and pushes the result directly — no method
+    // lookup, no dispatch. Semantics match Integer's native ops exactly: `+`/`-`/`*` wrap
+    // like i64; `/`/`%` raise "Division by zero" on a zero divisor; compares yield a Bool.
+    IntAdd,
+    IntSub,
+    IntMul,
+    IntDiv,
+    IntMod,
+    IntLt,
+    IntLe,
+    IntGt,
+    IntGe,
+    IntEq,
+    IntNe,
     Return,
     Yeet,
     BlockReturn,
