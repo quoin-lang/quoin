@@ -231,6 +231,9 @@ struct Scope {
     locals: HashSet<String>,
     /// Subset of `locals` declared with `let` — reassigning one is a compile error.
     immutable: HashSet<String>,
+    /// True for the top-level scope of an object-initializer block (`X.new:{ … }`),
+    /// where a bare `field = value` binds an instance field (no `var` required).
+    is_init: bool,
 }
 
 pub struct Compiler {
@@ -241,6 +244,9 @@ pub struct Compiler {
     /// rejected there so the "value types have no fields" rule surfaces at compile
     /// time rather than only when a method runs.
     value_type_def_depth: usize,
+    /// One-shot flag set right before compiling the block argument of `X.new:{ … }`;
+    /// consumed by the next `compile_block` to mark that block's scope `is_init`.
+    next_block_is_init: bool,
 }
 
 impl Compiler {
@@ -249,9 +255,11 @@ impl Compiler {
             scopes: vec![Scope {
                 locals: HashSet::new(),
                 immutable: HashSet::new(),
+                is_init: false,
             }],
             temp_counter: 0,
             value_type_def_depth: 0,
+            next_block_is_init: false,
         }
     }
 
@@ -260,9 +268,11 @@ impl Compiler {
             scopes: vec![Scope {
                 locals,
                 immutable: HashSet::new(),
+                is_init: false,
             }],
             temp_counter: 0,
             value_type_def_depth: 0,
+            next_block_is_init: false,
         }
     }
 
@@ -313,6 +323,7 @@ impl Compiler {
         self.scopes.push(Scope {
             locals,
             immutable: HashSet::new(),
+            is_init: false,
         });
     }
 
@@ -860,6 +871,11 @@ impl Compiler {
                 return Err(format!("cannot reassign `let` binding `{}`", name));
             }
             bytecode.push(Instruction::StoreLocal(Symbol::intern(&(name.clone()))));
+        } else if self.scopes.last().map(|s| s.is_init).unwrap_or(false) {
+            // Inside an object-initializer block (`X.new:{ … }`), a bare `field = value`
+            // binds an instance field — no `var` needed. The instantiating frame binds it
+            // into the new object at runtime.
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
         } else {
             return Err(format!(
                 "undeclared local `{}` — declare it with `var {} = …` \
@@ -983,7 +999,15 @@ impl Compiler {
             }
             // Evaluate this component's argument expression(s); a run folds into one list value.
             for j in 0..run {
-                self.compile_node(&args.expressions[i + j], bytecode)?;
+                let arg = &args.expressions[i + j];
+                // `X.new:{ … }` — the block argument is an object-initializer block, in
+                // which a bare `field = value` binds an instance field (see compile_block
+                // / Scope::is_init). Only a literal block gets the flag, and it's consumed
+                // immediately by that block's compile_block, so it can't leak.
+                if run == 1 && idents[i].name == "new" && matches!(arg.value, NodeValue::Block(_)) {
+                    self.next_block_is_init = true;
+                }
+                self.compile_node(arg, bytecode)?;
             }
             if run > 1 {
                 bytecode.push(Instruction::NewList(run));
@@ -1097,6 +1121,10 @@ impl Compiler {
     }
 
     fn compile_block(&mut self, block: &BlockNode, bytecode: &mut CodeBlock) -> Result<(), String> {
+        // Consume the one-shot init-block flag (set by `compile_method_call` for a
+        // `X.new:{ … }` argument) before anything can reset it; nested blocks compiled
+        // within read it as `false`.
+        let is_init = std::mem::take(&mut self.next_block_is_init);
         let mut param_names = Vec::new();
         let mut param_types = Vec::new();
         let mut locals = HashSet::new();
@@ -1123,6 +1151,7 @@ impl Compiler {
         }
 
         self.push_scope(locals);
+        self.scopes.last_mut().unwrap().is_init = is_init;
 
         let mut block_bytecode = CodeBlock::new();
         block_bytecode.current_source = block.source_info.clone();

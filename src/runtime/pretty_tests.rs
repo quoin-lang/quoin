@@ -148,7 +148,7 @@ fn pp_value_like_native_types() {
     assert_eq!(pp("#/ab+/.pp"), "#/ab+/");
     // A key/value pair shows its two named fields (the string key is quoted as a value).
     assert_eq!(
-        pp("(KeyValuePair.new:{ var key='a'; var value=1 }).pp"),
+        pp("(KeyValuePair.new:{ key='a'; value=1 }).pp"),
         "KeyValuePair{key: 'a' value: 1}"
     );
     // A bare (unnamed) block.
