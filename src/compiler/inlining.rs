@@ -18,45 +18,63 @@ impl Compiler {
     /// the send stays a normal dispatch.
     const MAX_INLINE_DEPTH: usize = 3;
 
-    /// A method body that can be spliced at a call site (Phase 5·1/5·2/5·4): no local decls, no
-    /// name, and a single statement that is an **inline-safe expression** (see `is_inline_safe_expr`).
-    /// Params ARE allowed (Phase 5·4) — the caller binds each arg to a temp and rebinds the param via
-    /// `param_override`. The body just evaluates to that expression. Returns the body expression.
-    fn inlinable_body(block: &BlockNode) -> Option<&Node> {
-        if !block.decls.is_empty() || block.decl_block.is_some() || block.name.is_some() {
-            return None;
+    /// Can this method body be spliced at a call site (Phase 5·1→5·5)? No name / header-decl /
+    /// decl-block, no *top-level* local decl (a `var`/`let` would splice a binding into the caller's
+    /// scope — needs alpha-renaming, deferred), and — the soundness crux — no **non-local escape**
+    /// (`^^`/`^>`) *anywhere*. Params are allowed (5·4); control-flow **blocks** are allowed (5·5),
+    /// since `inline_block_body` redirects each `^` (block-return) to the inlined value — only `^^`
+    /// (return-from-*method*) and `^>` (fiber-yield) would escape the callee's frame to the caller.
+    fn is_inlinable_body(block: &BlockNode) -> bool {
+        if block.name.is_some() || block.decl_block.is_some() || !block.decls.is_empty() {
+            return false;
         }
-        let [stmt] = block.statements.as_slice() else {
-            return None;
-        };
-        Self::is_inline_safe_expr(stmt).then_some(stmt)
+        block.statements.iter().all(|s| {
+            !matches!(&s.value, NodeValue::Declaration(_)) && !Self::escapes_inlined_frame(s)
+        })
     }
 
-    /// Is `node` an expression that can be spliced at a self-send call site (Phase 5·2)? A terminal
-    /// (`@field`/`self`/global/literal — all resolve identically under the same `self`), an operator,
-    /// or a method call whose subject/args are themselves inline-safe. **Blocks are excluded**, which
-    /// is the soundness crux: a block is the only place a `^^` (return-from-*method*) can hide, and an
-    /// inlined `^^` would return from the *caller's* method, not the callee. No block ⇒ no `^^` ⇒
-    /// safe. (A sub-send that stays a real dispatch is fine — it runs in its own frame.)
-    fn is_inline_safe_expr(node: &Node) -> bool {
+    /// Does `node` contain a non-local return that would escape the inlined callee's frame — `^^`
+    /// (MethodReturn: an inlined one returns from the *caller's* method) or `^>` (YieldReturn: it
+    /// suspends the caller's fiber)? A `^` (BlockReturn) is fine — `inline_block_body` redirects it to
+    /// the inlined value. Recurses structurally; an unrecognized node is treated as escaping (a
+    /// conservative "don't inline"), so soundness never depends on the walk being exhaustive.
+    fn escapes_inlined_frame(node: &Node) -> bool {
         match &node.value {
-            NodeValue::Integer(_)
-            | NodeValue::Double(_)
-            | NodeValue::Str(_)
-            | NodeValue::Identifier(_) => true,
+            NodeValue::MethodReturn(_) | NodeValue::YieldReturn(_) => true,
+            NodeValue::BlockReturn(r) => Self::escapes_inlined_frame(&r.value),
             NodeValue::BinaryOperator(op) => {
-                Self::is_inline_safe_expr(&op.left) && Self::is_inline_safe_expr(&op.right)
+                Self::escapes_inlined_frame(&op.left) || Self::escapes_inlined_frame(&op.right)
             }
-            NodeValue::UnaryOperator(u) => Self::is_inline_safe_expr(&u.right),
+            NodeValue::UnaryOperator(u) => Self::escapes_inlined_frame(&u.right),
             NodeValue::MethodCall(mc) => {
-                mc.subject.as_deref().is_none_or(Self::is_inline_safe_expr)
-                    && mc
+                mc.subject
+                    .as_deref()
+                    .is_some_and(Self::escapes_inlined_frame)
+                    || mc
                         .arguments
                         .expressions
                         .iter()
-                        .all(|e| Self::is_inline_safe_expr(e))
+                        .any(|e| Self::escapes_inlined_frame(e))
             }
-            _ => false, // blocks (⇒ possible `^^`), declarations, returns, and anything unrecognized
+            NodeValue::Block(b) => b.statements.iter().any(|s| Self::escapes_inlined_frame(s)),
+            NodeValue::Assignment(a) => Self::escapes_inlined_frame(&a.rvalue),
+            NodeValue::Declaration(d) => Self::escapes_inlined_frame(&d.rvalue),
+            NodeValue::List(l) => l.values.iter().any(|e| Self::escapes_inlined_frame(e)),
+            NodeValue::Set(s) => s.values.iter().any(|e| Self::escapes_inlined_frame(e)),
+            NodeValue::UserList(u) => u.values.iter().any(|e| Self::escapes_inlined_frame(e)),
+            NodeValue::Map(m) => m
+                .keys
+                .iter()
+                .chain(&m.values)
+                .any(|e| Self::escapes_inlined_frame(e)),
+            NodeValue::Identifier(_)
+            | NodeValue::Integer(_)
+            | NodeValue::Double(_)
+            | NodeValue::Str(_)
+            | NodeValue::Symbol(_)
+            | NodeValue::Regex(_)
+            | NodeValue::UserString(_) => false,
+            _ => true, // unrecognized ⇒ assume it might escape (never inline)
         }
     }
 
@@ -71,10 +89,12 @@ impl Compiler {
         }
     }
 
-    /// Splice `body` — a single inline-safe expression, possibly with `params` (Phase 5·4) — at a
+    /// Splice `body` — an inline-safe body, possibly with `params` (5·4) and control flow (5·5) — at a
     /// call site: bind each arg to a temp (evaluated in the *caller's* context) and compile the body
     /// with params rebound via `param_override`, and `self` → `self_temp` for an explicit receiver.
-    /// Precondition: `inlinable_body(body).is_some()` and `body.arguments.len() == args.len()`.
+    /// The body is spliced through `inline_block_body`, so multi-statement bodies and top-level `^`
+    /// (redirected to the inlined value) work. Precondition: `is_inlinable_body(body)` and
+    /// `body.arguments.len() == args.len()`.
     fn inline_body_with_args(
         &mut self,
         body: &BlockNode,
@@ -97,8 +117,7 @@ impl Compiler {
         }
         let saved_params = std::mem::replace(&mut self.param_override, bindings);
         self.inline_depth += 1;
-        let expr = Self::inlinable_body(body).expect("precondition: inlinable body");
-        let result = self.compile_node(expr, bytecode);
+        let result = self.inline_block_body(body, bytecode);
         self.inline_depth -= 1;
         self.param_override = saved_params;
         self.self_override = saved_self;
@@ -134,7 +153,7 @@ impl Compiler {
         };
         // Check inlinability + arity before emitting anything (a self-send has no receiver to emit,
         // but the arg temps below would be dangling on a bail).
-        if Self::inlinable_body(&body).is_none()
+        if !Self::is_inlinable_body(&body)
             || body.arguments.len() != call.arguments.expressions.len()
         {
             return Ok(false);
@@ -207,7 +226,7 @@ impl Compiler {
             return Ok(true);
         }
         // Any other inline-safe body: check BEFORE emitting the receiver, else a bail dangles it.
-        if Self::inlinable_body(&body).is_none() || body.arguments.len() != args.len() {
+        if !Self::is_inlinable_body(&body) || body.arguments.len() != args.len() {
             return Ok(false);
         }
         // Evaluate the receiver once into a temp; splice the body with `self` → that temp (and, in
