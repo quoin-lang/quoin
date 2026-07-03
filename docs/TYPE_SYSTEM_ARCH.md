@@ -204,20 +204,24 @@ the corpus's role here is to prove *narrowing* adds no regressions.
   long-deferred "persist return types" idea. Trust basis: the covariance check is a gradual *warning* (not a
   hard error), so `defined? → Bool` is a contract-backed judgment on the *same* basis the VM already uses to
   direct-inline `var b: Bool` — no new soundness class; corpus 0-FP stays the tripwire.
-  - **3c·4a** — `method_returns: HashMap<selector, Type>` on `ClassSig`; populate declared returns
-    (`block.return_type`) from the AST for **both** `ClassDefinition` (`Foo <- {}`) *and* `ClassExtension`
-    reopens of a simple class name (`Object <-- {}` — how the core classes add methods); make
-    `ClassTable::insert` **merge/preserve** `method_returns` so a later `populate_from_vm` (from_vm sigs carry
-    no returns today) doesn't clobber accumulated ones. No reader yet → corpus unchanged.
-  - **3c·4b** — declare `^Bool` on `Object#defined?` (+ `nil` override) in bootstrap (now formattable via the
-    return-only-header `qn fmt` fix); **covariance check**: an override's known return must be `compatible_with`
-    the nearest ancestor's declared return, else warn (`override of \`sel\` returns \`X\`, incompatible with
-    \`Y\` from \`Class\``, with span). Gradual: fires only when *both* returns are concrete (`Any` skips) →
-    0-FP. Verify corpus 0-FP.
-  - **3c·4c** — `static_type(RECV.sel) →` the declared return of an **Object-rooted** method (covariance makes
-    it sound for any receiver), giving `x.defined? → Bool`; feeds narrowing, nil-misuse, and the direct-inline
-    path. Verify the corpus-wide guarded→direct inline is behavior-preserving (full corpus + GC stress + output
-    diff). *Declares only `defined?` for now — other Object return contracts are follow-ups, each corpus-verified.*
+  - **3c·4a DONE** (`c5398a9`) — `method_returns: HashMap<selector, Type>` on `ClassSig`; populate declared
+    returns (`block.return_type`) from the AST for **both** `ClassDefinition` (`Foo <- {}`) *and* `ClassExtension`
+    reopens of a simple class name (`Object <-- {}` — how the core classes add methods, since they're reopened
+    not `<-`-defined); `ClassTable::insert` **merges/preserves** `method_returns` + `add_returns` augments a reopen
+    so a later `populate_from_vm` (from_vm sigs carry no returns today) doesn't clobber accumulated ones. No reader
+    yet → corpus unchanged. (The pre-fix `qn fmt` return-only-header bug that blocked `|^Bool|` headers was fixed
+    first in `6bfbd30`.)
+  - **3c·4b DONE** (`e5455bc`) — declared `^Boolean` on `Object#defined?` (+ `nil` override) in bootstrap;
+    **covariance check** (`ClassTable::inherited_return` = nearest ancestor's declared return, with `Object` as an
+    implicit universal-root fallback): an override's known return must be `compatible_with` the base, else warn
+    (`override of \`sel\` returns \`X\`, incompatible with \`Y\` from \`Class\``, with span). *Confident-only* —
+    `override_return_violates` speaks on a scalar mismatch or a **proven** non-subtype between two bare classes
+    (consulting `is_subtype`), silent on Any/mixed/nullable-of-class → 0-FP. Corpus 0-FP verified.
+  - **3c·4c DONE** (`0b6c6f1`) — `object_rooted_return_type`: `static_type(RECV.sel) →` the declared return of an
+    **Object-rooted** no-arg method (covariance makes it sound for any receiver), giving `x.defined? → Boolean`;
+    feeds narrowing, nil-misuse, and the direct-inline path. A bytecode regression test pins the guarded→direct
+    upgrade. Corpus 1255/0/0 + GC stress, behavior-preserving; covariance case added to `qnlib/warnings.qn`.
+    *Declares only `defined?` for now — other Object return contracts are follow-ups, each corpus-verified.*
   - **3c·4d — DEFERRED (nullable-guard inline recovery).** The 3c·1 early-return keeps *declared-`T?`* guards on
     the general (non-inlined) send path so their arms narrow; recovering the inline for them needs per-arm
     narrowing spliced into the inline path (`emit_inline_conditional_body`/`inline_block_body` save-restore of
