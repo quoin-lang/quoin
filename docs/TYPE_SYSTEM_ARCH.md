@@ -191,8 +191,18 @@ the corpus's role here is to prove *narrowing* adds no regressions.
   field-write **widens**. No user warning yet; validate via corpus + narrowing unit tests.
 - **3c·2 — the nil-misuse check (payoff).** Warn on non-nil-safe sends to a confidently-nullable,
   un-narrowed receiver. Corpus 0 false positives + positive tests.
-- **3c·3 — join/merge + loops (Tier 2).** Merge arm exit-states at the join; conservative loop back-edge
-  widening (no unsound narrowing); `&&` short-circuit narrowing if cheap.
+- **3c·3 — join/merge + loops (Tier 2).** `&&` short-circuit narrowing DONE (`421c049`). **Arm-exit
+  join/merge DONE** (`4fc8dd4`): after a guard conditional the guarded key's type is the **join** of the
+  arms' exit states (via `Type::join`, the nil-lattice LUB = the union constructor, kept nil-scoped), not a
+  revert to the declared type — so `x.defined?.if:{} else:{x=0}; x+1` sees `x` as `Integer`. Arm exits are
+  captured by a one-shot `next_block_capture` mirroring `next_block_narrowing`; `apply_guard_join` subsumes the
+  old divergence path (diverging arms drop out, surviving/fall-through paths join). **Sound by construction:** a
+  guard fires only on a declared `T?`, so the join is always `⊑ T?` and the checks are monotonic → a missed
+  (nested) reassignment is a false *negative*, never a new false positive. **Still deferred:** conservative loop
+  back-edge widening (its own mechanism, zero corpus impact). **Follow-up gap:** a typed *param* (`|x: Integer?|`)
+  uses `record_local_type` (devirt hint), not `record_declared_type`, so a param *reassignment* doesn't
+  flow-update narrowing — the join's reassignment case works for `var` locals but not params; making param
+  annotations declared-contracts is a small orthogonal change (needs its own corpus 0-FP check).
 - **3c·4 — return-type covariance (unlocks sound `defined? → Bool`).** The doc's original 3c·4 bonus —
   `static_type(x.defined?) → Bool` — was *unsound as stated*: `defined?` is a plain overridable Quoin method
   (`Object#defined? -> { true }`, `nil` → `false`; qnlib/core/00-bootstrap.qn), so a user class could reopen it
@@ -271,6 +281,14 @@ Let devirt/inlining consume the richer `Type` (receiver's exact class → method
 unboxed elements).
 
 ## Deferred / follow-up tasks (tracked)
+- **3c·3 loop back-edge widening** — the other Tier-2 half (arm-exit join/merge is done, `4fc8dd4`). Narrowing
+  across a loop must conservatively widen at the back-edge (a value narrowed in one iteration may not hold on
+  re-entry). Its own mechanism; zero corpus impact → deferred.
+- **Typed-param declared contracts** — a `|x: Integer?|` param is recorded via `record_local_type` (devirt hint)
+  not `record_declared_type`, so param *reassignment* isn't a checked contract *and* doesn't flow-update
+  narrowing (the join's reassignment case then works for `var` locals but not params). Switching params to
+  `record_declared_type` completes narrowing for the headline nullable-param case; needs its own corpus 0-FP
+  check (it also turns on the Phase 3a reassignment check for params).
 - **3c·4d — nullable-guard inline recovery** (see the 3c·4d slice above): per-arm narrowing spliced into the
   inline path so declared-`T?` guards inline *and* narrow. Opt-in, zero corpus impact → deferred.
 - **Fork-1b — persist return types into runtime introspection.** 3c·4a records declared returns into the
