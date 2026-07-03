@@ -323,12 +323,18 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   receiver). Self-send and exact-receiver, single/multi-arg; `inline_body_with_args` shared, `inline_selector`
   reconstructs the selector. With-arg bench (`v.scale:2` = `@x * k`, 10M loop): **2.25s → 1.77s, ~1.27×**;
   corpus 1255/0/0 + GC-stress unchanged.
-- **5·5+ (next) — the `fib`/control-flow prize (a dedicated, larger push):** inline bodies with **control flow**
-  — `.if:else:`/`.whileDo:` **blocks** and `^`/`^^` **returns**. The blanket block-exclusion (the `^^`-soundness
-  gate) must become precise: splice the arms as control-flow-inline (like Slice 2d) and make an inlined `^`/`^^`
-  yield the inlined call's value, not return from the caller. Then **bounded recursion unroll** (a self-call
-  inlines K levels then dispatches) — together these reach the recursive `fib` case. Also still open:
-  **multi-statement / local-binding** bodies (alpha-rename spliced locals) and **cross-unit** receiver bodies.
+- **5·5 — control-flow method bodies DONE** (`e83aaba`). The blanket block-exclusion became precise: the gate is
+  now `escapes_inlined_frame` (recursive scan for `^^`/`^>`) instead of "no blocks", so bodies with `.if:else:`/
+  `.whileDo:` blocks and `^` (block-return) inline. The body is spliced through `inline_block_body` (which
+  redirects each `^` to the inlined value — the existing Slice-2d caret mechanism), so multi-statement bodies
+  work too. `^^` (return-from-*method*) and `^>` (fiber-yield) still escape the callee frame, so they stay
+  excluded. Recursion is **bounded-unrolled** by `MAX_INLINE_DEPTH` (K levels, then dispatch). Control-flow
+  method in a loop: **2.27s → 1.75s, ~1.3×**; **fib(30): 0.96s → 0.89s, ~8%** — bounded unroll of *exponential*
+  recursion is inherently modest (the 2^K leaves still dispatch; the dramatic `fib` win is Tier-2 native codegen,
+  out of scope). Corpus 1255/0/0 + GC-stress unchanged.
+- **5·6+ (next):** redirect `^^` to the inlined-call's end (a second caret channel) → inline `^^`-bearing bodies;
+  **alpha-rename** spliced local bindings → inline `var`/`let` bodies; **cross-unit** receiver bodies (via the VM
+  class object, not the AST).
 - **`CallSelfDirect` removed DONE** (`e98cd0b`): it was a runtime no-op (identical `exec_send` to `Send`) whose
   planned resolve-and-cache was the ruled-out inline cache, *and* it blocked fusion (a sealed self-send emitted
   an unfused `LoadLocal(self); CallSelfDirect` where `Send` fuses to `SendLocal*`). `emit_call` now emits `Send`;
