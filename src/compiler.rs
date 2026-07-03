@@ -756,24 +756,52 @@ impl Compiler {
         (params.len() == call.arguments.expressions.len()).then_some(params)
     }
 
-    /// Recognize a nil-condition `RECV.defined?` on a narrowable path (Phase 3c). Returns the path
-    /// and whether a *true* result means RECV is non-nil (`.defined?` → `true`).
+    /// Recognize a nil-condition on a narrowable path (Phase 3c): `RECV.defined?`, or `RECV == nil`
+    /// / `RECV != nil` (either operand order). Returns the path and whether a *true* result means
+    /// RECV is non-nil (`.defined?` and `!= nil` → `true`; `== nil` → `false`).
     fn match_nil_condition(node: &Node) -> Option<(NarrowKey, bool)> {
-        let NodeValue::MethodCall(mc) = &node.value else {
-            return None;
-        };
-        // A unary `.defined?` send on an identifier.
-        if !mc.arguments.expressions.is_empty() {
-            return None;
+        match &node.value {
+            NodeValue::MethodCall(mc) => {
+                // A unary `.defined?` send on an identifier.
+                if !mc.arguments.expressions.is_empty() {
+                    return None;
+                }
+                let idents = &mc.arguments.signature.identifiers;
+                if idents.len() != 1 || idents[0].name != "defined?" {
+                    return None;
+                }
+                let NodeValue::Identifier(recv) = &mc.subject.as_ref()?.value else {
+                    return None;
+                };
+                Some((NarrowKey::from_ident(recv)?, true))
+            }
+            NodeValue::BinaryOperator(op)
+                if matches!(
+                    op.operator,
+                    BinaryOperatorType::Eq | BinaryOperatorType::NotEq
+                ) =>
+            {
+                let key = Self::nil_comparison_key(&op.left, &op.right)?;
+                Some((key, op.operator == BinaryOperatorType::NotEq))
+            }
+            _ => None,
         }
-        let idents = &mc.arguments.signature.identifiers;
-        if idents.len() != 1 || idents[0].name != "defined?" {
-            return None;
-        }
-        let NodeValue::Identifier(recv) = &mc.subject.as_ref()?.value else {
-            return None;
+    }
+
+    /// One operand is the reserved `nil`, the other a narrowable path → that path.
+    fn nil_comparison_key(a: &Node, b: &Node) -> Option<NarrowKey> {
+        let is_nil = |n: &Node| matches!(&n.value, NodeValue::Identifier(id) if id.name == "nil");
+        let path = |n: &Node| match &n.value {
+            NodeValue::Identifier(id) => NarrowKey::from_ident(id),
+            _ => None,
         };
-        Some((NarrowKey::from_ident(recv)?, true))
+        if is_nil(a) {
+            path(b)
+        } else if is_nil(b) {
+            path(a)
+        } else {
+            None
+        }
     }
 
     /// A path's type at the current point: its flow-narrowed type if any, else the recorded local
@@ -896,6 +924,67 @@ impl Compiler {
         };
         self.diagnostics
             .push(format!("receiver of `{selector}` may be nil"));
+    }
+
+    /// Phase 3c: warn on a nil-dereferencing binary op whose left operand is confidently nullable
+    /// (`x + 1` where `x: Integer?`). Equality and logical ops tolerate a `nil` left and are exempt.
+    fn check_binop_nil_misuse(&mut self, op: &BinaryOperatorNode) {
+        use BinaryOperatorType::*;
+        if matches!(op.operator, Eq | NotEq | And | Or | Unknown) {
+            return;
+        }
+        if matches!(self.static_type(&op.left), Type::Nullable(_)) {
+            self.diagnostics.push(format!(
+                "left operand of `{}` may be nil",
+                Self::binop_symbol(&op.operator)
+            ));
+        }
+    }
+
+    fn binop_symbol(op: &BinaryOperatorType) -> &'static str {
+        use BinaryOperatorType::*;
+        match op {
+            Add => "+",
+            Sub => "-",
+            Mul => "*",
+            Div => "/",
+            Mod => "%",
+            Gt => ">",
+            GtEq => ">=",
+            Lt => "<",
+            LtEq => "<=",
+            Range => "..",
+            Match => "=~",
+            Eq => "==",
+            NotEq => "!=",
+            And => "&&",
+            Or => "||",
+            Unknown => "?",
+        }
+    }
+
+    /// Install the *true*-branch refinement of a nil-condition into the current scope, returning
+    /// what to restore. Used for `&&` short-circuit narrowing (`RECV.defined? && EXPR`).
+    fn push_true_narrowing(&mut self, cond: &Node) -> Option<(NarrowKey, Option<Type>)> {
+        let (key, true_is_nonnil) = Self::match_nil_condition(cond)?;
+        let Type::Nullable(inner) = self.path_type(&key) else {
+            return None;
+        };
+        let refined = if true_is_nonnil { *inner } else { Type::Nil };
+        let scope = self.scopes.last_mut().unwrap();
+        let saved = scope.narrowed.get(&key).cloned();
+        scope.narrowed.insert(key.clone(), refined);
+        Some((key, saved))
+    }
+
+    fn pop_narrowing(&mut self, restore: Option<(NarrowKey, Option<Type>)>) {
+        if let Some((key, saved)) = restore {
+            let scope = self.scopes.last_mut().unwrap();
+            match saved {
+                Some(t) => scope.narrowed.insert(key, t),
+                None => scope.narrowed.remove(&key),
+            };
+        }
     }
 
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
@@ -2206,13 +2295,19 @@ impl Compiler {
         op: &BinaryOperatorNode,
         bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
+        // Phase 3c: a nil-dereferencing binop on a confidently-nullable left operand.
+        self.check_binop_nil_misuse(op);
+
         if op.operator == BinaryOperatorType::And {
             self.compile_node(&op.left, bytecode)?;
             bytecode.push(Instruction::Dup);
 
+            // Phase 3c: `RECV.defined? && EXPR` narrows RECV non-nil within EXPR (short-circuit).
+            let restore = self.push_true_narrowing(&op.left);
             let mut right_bytecode = CodeBlock::new();
             right_bytecode.current_source = bytecode.current_source.clone();
             self.compile_node(&op.right, &mut right_bytecode)?;
+            self.pop_narrowing(restore);
 
             let offset = 2 + right_bytecode.len() as isize;
             bytecode.push(Instruction::ElseJump(offset));
@@ -2776,6 +2871,37 @@ mod tests {
         // Non-nullable, and gradual `Any`, receivers → silent.
         assert!(diags("Foo <- { m -> { |x: Integer| x.abs } }").is_empty());
         assert!(diags("Foo <- { m -> { |x| x.abs } }").is_empty());
+    }
+
+    #[test]
+    fn checker_nil_misuse_binops_and_conditions() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics()
+                .iter()
+                .filter(|m| m.contains("may be nil"))
+                .cloned()
+                .collect()
+        }
+
+        // Binop nil-misuse: `x + 1` dereferences a nullable left → warns; `==` is nil-safe.
+        assert!(!diags("Foo <- { m -> { |x: Integer?| x + 1 } }").is_empty());
+        assert!(diags("Foo <- { m -> { |x: Integer?| x == 1 } }").is_empty());
+
+        // `!= nil` / `== nil` guard conditions narrow their arms.
+        assert!(diags("Foo <- { m -> { |x: Integer?| (x != nil).if:{ x + 1 } } }").is_empty());
+        assert!(
+            diags("Foo <- { m -> { |x: Integer?| (x == nil).if:{ 0 } else:{ x + 1 } } }")
+                .is_empty()
+        );
+
+        // `&&` short-circuit narrows the RHS.
+        assert!(diags("Foo <- { m -> { |x: Integer?| x.defined? && (x + 1) } }").is_empty());
     }
 
     #[test]
