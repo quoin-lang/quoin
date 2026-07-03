@@ -296,6 +296,18 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   then **small non-leaf** bodies (arithmetic, a bounded number of statements), then the recursive/`fib` case.
 
 ## Deferred / follow-up tasks (tracked)
+- **Remove the `CallSelfDirect` instruction (likely a small perf win, not just cleanup).** It's a **no-op** —
+  `vm.rs:3182` runs the identical `exec_send` as `Send`. It was a placeholder for a "Phase 2 cache" (resolve +
+  cache the callable per call site) that was **never built and is the ruled-out per-call-site inline cache** —
+  so it will never do anything. Phase 5 method inlining proves monomorphism at compile time and inlines
+  *directly*, so the marker earns nothing. **Worse, it's a tiny pessimization:** `fuse_bytecode` fuses only
+  `Send` (compiler.rs:117), *not* `CallSelfDirect`, so a sealed self-send emits an unfused `LoadLocal(self);
+  CallSelfDirect(foo)` (2 ops) where plain `Send` fuses to `SendLocal(self, foo)` (1 op). **Removal:** make
+  `emit_call` emit `Send` for the sealed self-send branch (delete the branch, compiler.rs:2090); delete the
+  variant (instruction.rs:162) + its VM arm (vm.rs:3182); delete tests `sealed_self_send_emits_call_self_direct`
+  / `has_call_self_direct` (compiler.rs:3481+) and drop the `CallSelfDirect` arm from the 5·1 `dispatches` test
+  helper. Behavior-preserving (no-op → `Send`); verify corpus 1255/0/0 + a before/after on a self-send-heavy
+  bench to confirm the fusion win.
 - **3c·3 loop back-edge widening** — the other Tier-2 half (arm-exit join/merge is done, `4fc8dd4`). Narrowing
   across a loop must conservatively widen at the back-edge (a value narrowed in one iteration may not hold on
   re-entry). Its own mechanism; zero corpus impact → deferred.
