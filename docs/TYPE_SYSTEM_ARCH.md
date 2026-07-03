@@ -152,8 +152,76 @@ are the anti-drift guards.
 MNU and arg-checks are gated on **`from_vm` + `sealed`** (an open class could gain the method/overload, so
 staying silent there is sound); missed check = fine, false positive = not. Inline-block-args still deferred.
 
-**3c — flow-sensitive nil** (deferred; hardest): narrow `T?`→`T` after a nil-guard; warn on a method
-send to an un-narrowed nullable receiver. Needs real flow analysis to avoid false positives.
+**3c — flow-sensitive type narrowing (nil-first, generic framework).** The hardest slice; needs real
+flow analysis to avoid false positives. Built as a **general refinement layer**, not a nil special case.
+
+*Core decision.* A per-program-point overlay maps a **narrowable path** (`Local(name)` or `Field(@name)`)
+→ refined `Type`, laid over the flow-insensitive `types`/`declared_types` scope maps. The **mechanism is
+type-generic** (any `Type` refinement); only the initial **rule set** is nil-specific. `static_type` /
+`local_type` consult the overlay — a narrowed key's type wins.
+
+*Guard grammar (from a corpus survey — the guard is a syntactic shape, not one operator).* `.defined?` is
+a plain Bool-returning method (`true` on any object, overridden `--> false` on Nil), composed with the
+`.if:`/`.else:` sends. So the true-arm narrows to **non-nil** (reverse polarity of a `nil?` check):
+
+| idiom | narrows |
+|---|---|
+| `RECV.defined?.if:{A} else:{B}` | `A`: RECV non-nil · `B`: RECV nil |
+| `RECV.defined?.else:{B}` | `B`: RECV nil; if `B` diverges (`^^`/`^`/throw) → RECV non-nil *after* |
+| `RECV.defined?.if:{A}` | `A`: RECV non-nil |
+| `RECV == nil` / `!= nil` as the condition | polarity-flipped |
+| `RECV.defined? && EXPR` | `EXPR`: RECV non-nil (short-circuit) |
+
+`RECV` is a local *or* a `@field` (the corpus narrows fields heavily). The condition matching keys off the
+**AST shape**, hooked at the existing `try_compile_inlined_conditional` site — but *independent of the
+devirt-inline gate* (that needs a statically-Bool receiver; `x.defined?` types as `Any` today).
+
+*Two surfaces.* (1) **Read side (narrowing)** — the overlay above. (2) **Use side (the payoff):** a
+non-nil-safe send to a *confidently* `Nullable(T)` receiver → `warning: receiver may be nil`. Nil-safe
+allowlist: `defined?`, `==`, `!=`, `s`, `pp`, `class`, `hash`. **Gated to explicit `T?` or a
+narrowed-nullable**, silent on `Any`/unknown — so it speaks only on code that opts in by annotating `T?`.
+The corpus annotates nothing `T?` yet, so the misuse check is **silent on today's corpus by construction**;
+the corpus's role here is to prove *narrowing* adds no regressions.
+
+*Slices.*
+- **3c·0 — representation + locked grammar.** Overlay + `NarrowKey`; wire `static_type`; lock the grammar
+  above. No checks; corpus unchanged. Settles the open questions below.
+- **3c·1 — arm + divergence narrowing (Tier 1, the 80%).** Recognize the shape; compile arms with
+  refinements; post-guard narrowing when the nil-arm diverges (`defined?.else:{ ^^… }`). Reassignment /
+  field-write **widens**. No user warning yet; validate via corpus + narrowing unit tests.
+- **3c·2 — the nil-misuse check (payoff).** Warn on non-nil-safe sends to a confidently-nullable,
+  un-narrowed receiver. Corpus 0 false positives + positive tests.
+- **3c·3 — join/merge + loops (Tier 2).** Merge arm exit-states at the join; conservative loop back-edge
+  widening (no unsound narrowing); `&&` short-circuit narrowing if cheap.
+- **3c·4 — polish.** Provenance seed for Phase 4; bonus `static_type(x.defined?) → Bool` (also devirt-inlines
+  the guard); doc + memory; corpus + stress + fmt.
+
+*Correctness guards.* Corpus 0 false positives is the tripwire (as in 3a/3b); gradual (silent on
+`Any`/unknown); a unit test per rule (arm polarity, divergence, reassignment-widen, merge, loop-conservatism,
+field-invalidation).
+
+*Open questions for 3c·0.* (1) Field-narrowing conservatism — invalidate `@x`'s narrowing on `@x = …`, and
+also on any `self`-send that could reassign it (leaning yes). (2) Bare `.else:` on a Bool — recognized for
+narrowing regardless of codegen inlining. (3) The exact nil-safe allowlist.
+
+*Future unlocked by this framework (generic by design):*
+- **Type-test narrowing** — a new *condition rule* (`x is-a Dog` → `Dog` in the arm) on the same overlay,
+  reusing 3b's subtype relation. The framework is rule-agnostic.
+- **General union types** (Phase 1 deferred these) — 3c's **join** operation *is* the union constructor;
+  today it joins only `T`/`Nullable(T)`, but generalizing join → `A｜B` is the natural next step, and
+  narrowing then becomes "narrow a union to a member." **3c is the substrate for unions.**
+- **Exhaustiveness** (a `case` over a union), **reachability / dead-code** and **definite-assignment** (both
+  seeded by the divergence tracking), and **devirt** (a narrowed non-nil/exact type removes nil-checks and
+  enables monomorphic inlining — Phase 5).
+
+*Cross-cutting follow-up (not a blocker): an AST-matcher.* Structural recognizers are accreting
+(`call_selector_*`, `receiver_class`, `is_sealed_marker`, `mixin_target`, plus 3c's guard shapes), each a
+nested `if let … && matches!(…)` chain that's easy to get subtly wrong (the 3b variadic-fold bug was one).
+Extract a matcher **after ~3 real 3c matchers land** (rule of three), shaped by the real patterns — start
+with composable matcher fns / `macro_rules!` combinators, reserve a proc-macro surface-syntax DSL only if it
+earns it. Hard constraint: Quoin AST matching is **not purely structural** (a selector is a *reconstruction*
+with variadic folding; local-vs-`@field`-vs-`Instance` are semantic predicates), so the matcher must **bottom
+out on the existing helpers**, never re-derive them.
 
 ### Phase 4 — error ergonomics
 Reuse the existing span + caret renderer. Deliver:
