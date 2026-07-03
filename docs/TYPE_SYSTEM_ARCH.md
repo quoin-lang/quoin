@@ -310,10 +310,16 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   `p.x` where `p: SomeSiblingClass` inlines to `LoadFieldOf` too, not just same-class operands. Sealed check
   moved to the ClassTable flag; `ClassCtx.name` dropped as redundant. Sibling-accessor bench (`Reader` reads
   `Point.x` in a 10M loop): **1.70s → 0.95s, ~1.8×**; corpus 1255/0/0 + GC-stress unchanged.
-- **5·3c+ (next):** **non-field bodies** for exact receivers (`v.area` = `.width * .height`) — needs general
-  `self → v` rewriting of the spliced body (self-sends → `v`-sends, `@field` → `LoadFieldOf`), the harder half.
-  Then **multi-statement / local-binding** bodies (alpha-renaming), the arg-passing + bounded-unroll
-  recursive/`fib` case, and **cross-unit** receiver bodies (via the VM class object, not the AST).
+- **5·3c — computed exact-receiver bodies DONE** (`ef590cf`). New `self_override` compile mode: to splice a
+  non-field `v.foo` body, the receiver is evaluated once into a temp and the body compiled with `self` rebound —
+  `@x` → `LoadLocal(tmp); LoadFieldOf(x)`, `self` → `LoadLocal(tmp)`, an implicit self-send dispatches on `tmp`
+  (self-send inlining gated off under the override). Field accessors keep the temp-free fast path;
+  `try_inline_exact_receiver` unifies both. Same soundness gate (inline-safe ⇒ no block ⇒ no `^^`). Computed-
+  receiver bench (`p.area` = `@x * @y` × 10M): **2.37s → 1.95s, ~1.2×** (temp store/load offsets some of the
+  removed dispatch); corpus 1255/0/0 + GC-stress unchanged.
+- **5·4+ (next):** **arg-passing** inlining — self/exact-receiver sends *with* args (bind each arg to a temp,
+  splice the body; the recursive/`fib` prize also needs bounded-unroll). Then **multi-statement / local-binding**
+  bodies (alpha-rename spliced locals), and **cross-unit** receiver bodies (via the VM class object, not the AST).
 - **`CallSelfDirect` removed DONE** (`e98cd0b`): it was a runtime no-op (identical `exec_send` to `Send`) whose
   planned resolve-and-cache was the ruled-out inline cache, *and* it blocked fusion (a sealed self-send emitted
   an unfused `LoadLocal(self); CallSelfDirect` where `Send` fuses to `SendLocal*`). `emit_call` now emits `Send`;
