@@ -291,9 +291,19 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   `selector → Arc<BlockNode>` map; `inlinable_leaf_body` gates the shape; `try_inline_leaf_self_send` splices.
   Leaf ⇒ no sub-sends ⇒ no recursion. Accessor-heavy bench (6 accessor self-sends/call, 10M iters):
   whole-process **9.85s → 4.50s, ~2.2×**; corpus 1255/0/0 + GC-stress unchanged (`profiling/method-inlining/`).
-- **5·2+ (next):** extend to **exact-receiver** sends (`v.dot` where `v: SealedClass` — needs the callee body,
-  which for another unit's class lives in the VM class object, not the AST → a cross-unit body-access step),
-  then **small non-leaf** bodies (arithmetic, a bounded number of statements), then the recursive/`fib` case.
+- **5·2 — non-leaf self-send inlining DONE** (`3031195`). `inlinable_body` broadened from trivial terminals to
+  any **inline-safe expression** (terminal / operator / block-free method call), so a computed self-send like
+  `self.area` (`.width * .height`) is spliced too, and its inner leaf self-sends inline in turn. **Soundness
+  crux: blocks are excluded** — a block is the only place a `^^` (return-from-method) hides, and an inlined `^^`
+  would return from the *caller's* method; no block ⇒ no `^^` ⇒ safe. A `MAX_INLINE_DEPTH` (=3) guard bounds
+  recursive/fan-out expansion. Computed-self-send bench (`.bumped` in a 10M loop): **2.69s → 1.82s, ~1.48×**;
+  corpus 1255/0/0 + GC-stress unchanged.
+- **5·3+ (next):** **exact-receiver** sends (`v.dot` where `v: SealedClass`) — the dominant `obj.method` pattern.
+  Blocked on: (a) a new `LoadFieldOf`-style instruction to read a field from an arbitrary object (`LoadField`
+  reads only `self`), since inlining `v.x` must read *v's* field; (b) callee-body access for receivers whose
+  class is another unit (body lives in the VM class object, not the AST) — a first cut can restrict to
+  in-unit/current-class receivers. Then **multi-statement / local-binding** bodies (need alpha-renaming) and the
+  arg-passing + bounded-unroll recursive/`fib` case. Also: **remove the no-op `CallSelfDirect`** (tracked below).
 
 ## Deferred / follow-up tasks (tracked)
 - **Remove the `CallSelfDirect` instruction (likely a small perf win, not just cleanup).** It's a **no-op** —
