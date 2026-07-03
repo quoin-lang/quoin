@@ -324,6 +324,25 @@ impl NarrowKey {
     }
 }
 
+/// A recognized nil-guard's narrowing (Phase 3c): the path it tests and the type it refines to in
+/// each arm. For `x.defined?.if:{…} else:{…}` with `x: T?`, `if_arm = T`, `else_arm = Nil`.
+struct GuardInfo {
+    key: NarrowKey,
+    if_arm: Type,
+    else_arm: Type,
+}
+
+impl GuardInfo {
+    /// The refinement for the arm reached by keyword `kw` (`if` → true branch, `else` → false).
+    fn arm_type(&self, kw: &str) -> Option<Type> {
+        match kw {
+            "if" => Some(self.if_arm.clone()),
+            "else" => Some(self.else_arm.clone()),
+            _ => None,
+        }
+    }
+}
+
 struct Scope {
     locals: HashSet<String>,
     /// Subset of `locals` declared with `let` — reassigning one is a compile error.
@@ -354,6 +373,9 @@ pub struct Compiler {
     /// One-shot flag set right before compiling the block argument of `X.new:{ … }`;
     /// consumed by the next `compile_block` to mark that block's scope `is_init`.
     next_block_is_init: bool,
+    /// One-shot narrowing set right before compiling a guard arm block (Phase 3c); the next
+    /// `compile_block` installs it into that arm's scope. Mirrors `next_block_is_init`.
+    next_block_narrowing: Option<(NarrowKey, Type)>,
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
@@ -393,6 +415,7 @@ impl Compiler {
             temp_counter: 0,
             value_type_def_depth: 0,
             next_block_is_init: false,
+            next_block_narrowing: None,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -415,6 +438,7 @@ impl Compiler {
             temp_counter: 0,
             value_type_def_depth: 0,
             next_block_is_init: false,
+            next_block_narrowing: None,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -728,6 +752,115 @@ impl Compiler {
         (params.len() == call.arguments.expressions.len()).then_some(params)
     }
 
+    /// Recognize a nil-condition `RECV.defined?` on a narrowable path (Phase 3c). Returns the path
+    /// and whether a *true* result means RECV is non-nil (`.defined?` → `true`).
+    fn match_nil_condition(node: &Node) -> Option<(NarrowKey, bool)> {
+        let NodeValue::MethodCall(mc) = &node.value else {
+            return None;
+        };
+        // A unary `.defined?` send on an identifier.
+        if !mc.arguments.expressions.is_empty() {
+            return None;
+        }
+        let idents = &mc.arguments.signature.identifiers;
+        if idents.len() != 1 || idents[0].name != "defined?" {
+            return None;
+        }
+        let NodeValue::Identifier(recv) = &mc.subject.as_ref()?.value else {
+            return None;
+        };
+        Some((NarrowKey::from_ident(recv)?, true))
+    }
+
+    /// A path's type at the current point: its flow-narrowed type if any, else the recorded local
+    /// type (a field carries none → `Any`).
+    fn path_type(&self, key: &NarrowKey) -> Type {
+        self.narrowed_type(key).unwrap_or_else(|| match key {
+            NarrowKey::Local(name) => self.local_type(name),
+            NarrowKey::Field(_) => Type::Any,
+        })
+    }
+
+    /// If `call` is a nil-guard conditional (`RECV.defined?` composed with `.if:`/`.if:else:`/
+    /// `.else:`) whose path is currently `Nullable(T)`, the per-arm refinement. `None` otherwise —
+    /// so narrowing only fires on a declared-nullable path, never on the optimizer's inferred types.
+    fn guard_narrowing(&self, call: &MethodCallNode) -> Option<GuardInfo> {
+        let kws: Vec<&str> = call
+            .arguments
+            .signature
+            .identifiers
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        if !matches!(kws.as_slice(), ["if"] | ["if", "else"] | ["else"]) {
+            return None;
+        }
+        let (key, true_is_nonnil) = Self::match_nil_condition(call.subject.as_deref()?)?;
+        let Type::Nullable(inner) = self.path_type(&key) else {
+            return None;
+        };
+        let non_nil = *inner;
+        let (if_arm, else_arm) = if true_is_nonnil {
+            (non_nil, Type::Nil)
+        } else {
+            (Type::Nil, non_nil)
+        };
+        Some(GuardInfo {
+            key,
+            if_arm,
+            else_arm,
+        })
+    }
+
+    /// Does this arm expression always exit non-locally (its tail is `^^`/`^`)? Used for post-guard
+    /// narrowing: when the nil-arm diverges, the surviving arm's refinement holds afterward.
+    fn expr_diverges(node: &Node) -> bool {
+        let NodeValue::Block(b) = &node.value else {
+            return false;
+        };
+        matches!(
+            b.statements.last().map(|s| &s.value),
+            Some(NodeValue::MethodReturn(_)) | Some(NodeValue::BlockReturn(_))
+        )
+    }
+
+    /// After a guard send, if exactly one arm diverges the *other* arm's refinement holds for the
+    /// rest of the current scope (the `x.defined?.else:{ ^^… }` early-return idiom).
+    fn apply_post_guard_narrowing(&mut self, call: &MethodCallNode, g: &GuardInfo) {
+        let idents = &call.arguments.signature.identifiers;
+        let diverges = |kw: &str| -> bool {
+            idents
+                .iter()
+                .position(|i| i.name == kw)
+                .map(|k| Self::expr_diverges(&call.arguments.expressions[k]))
+                .unwrap_or(false)
+        };
+        let survivor = match (diverges("if"), diverges("else")) {
+            (true, false) => Some(g.else_arm.clone()),
+            (false, true) => Some(g.if_arm.clone()),
+            _ => None,
+        };
+        if let Some(ty) = survivor {
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .narrowed
+                .insert(g.key.clone(), ty);
+        }
+    }
+
+    /// Flow-update a *declared* path's narrowing after a (re)assignment (Phase 3c): a concrete
+    /// rvalue type re-narrows it; an `Any` (unknown) rvalue drops to gradual. Only called for
+    /// declared targets, so an untyped `var`'s inferred type is never shadowed.
+    fn update_narrowing(&mut self, key: NarrowKey, ty: Type) {
+        let scope = self.scopes.last_mut().unwrap();
+        if ty == Type::Any {
+            scope.narrowed.remove(&key);
+        } else {
+            scope.narrowed.insert(key, ty);
+        }
+    }
+
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
@@ -760,12 +893,9 @@ impl Compiler {
             NodeValue::Set(_) => Type::Set,
             NodeValue::Block(_) => Type::Block,
             NodeValue::Identifier(id) => match NarrowKey::from_ident(id) {
-                // A narrowable read (local or `@field`): a flow-narrowed type wins (Phase 3c),
+                // A narrowable read (local or `@field`): its flow-narrowed type if any (Phase 3c),
                 // else the recorded local type (a field carries none → `Any`).
-                Some(key) => self.narrowed_type(&key).unwrap_or_else(|| match key {
-                    NarrowKey::Local(ref name) => self.local_type(name),
-                    NarrowKey::Field(_) => Type::Any,
-                }),
+                Some(key) => self.path_type(&key),
                 // Not narrowable: `nil`/`true`/`false` are reserved names (they parse as plain
                 // idents, so match by name); everything else (globals/namespaced) is unknown here.
                 None => match id.name.as_str() {
@@ -1328,6 +1458,11 @@ impl Compiler {
             && let Some(expected) = self.declared_type(&l.identifier.name)
         {
             self.compile_expecting(&assign.rvalue, &expected, bytecode)?;
+            // Phase 3c: the local now holds the rvalue's type — flow-update its narrowing (a
+            // concrete type re-narrows; `Any` widens to gradual). Declared targets only, so the
+            // optimizer's inferred type for an untyped `var` is never shadowed.
+            let rt = self.static_type(&assign.rvalue);
+            self.update_narrowing(NarrowKey::Local(l.identifier.name.clone()), rt);
         } else {
             self.compile_node(&assign.rvalue, bytecode)?;
         }
@@ -1699,6 +1834,9 @@ impl Compiler {
         // numeric literals promoted against them; otherwise compiled unchecked (gradual). `Some`
         // only for fully non-variadic calls, so `i + j` indexes `params` directly.
         let param_types = self.call_param_types(call);
+        // Phase 3c: if this is a nil-guard conditional (`RECV.defined?.if:`/`.else:`), the per-arm
+        // narrowing to install while compiling each arm, and post-guard on divergence.
+        let guard = self.guard_narrowing(call);
         let idents = &args.signature.identifiers;
         debug_assert_eq!(idents.len(), args.expressions.len());
         let mut selector = String::new();
@@ -1720,6 +1858,14 @@ impl Compiler {
                 if run == 1 && idents[i].name == "new" && matches!(arg.value, NodeValue::Block(_)) {
                     self.next_block_is_init = true;
                 }
+                // Phase 3c: narrow the guarded path inside this arm's block (`if` → non-nil arm,
+                // `else` → nil arm). One-shot, consumed by the arm's `compile_block`.
+                if let Some(g) = &guard
+                    && matches!(arg.value, NodeValue::Block(_))
+                    && let Some(arm_ty) = g.arm_type(&idents[i].name)
+                {
+                    self.next_block_narrowing = Some((g.key.clone(), arm_ty));
+                }
                 match &param_types {
                     Some(params) => self.compile_expecting(arg, &params[i + j], bytecode)?,
                     None => self.compile_node(arg, bytecode)?,
@@ -1735,6 +1881,12 @@ impl Compiler {
             selector.push(':');
             num_components += 1;
             i += run;
+        }
+
+        // Phase 3c: after a guard send, a diverging arm narrows the receiver for the rest of the
+        // enclosing scope (the `x.defined?.else:{ ^^… }` early-return idiom).
+        if let Some(g) = &guard {
+            self.apply_post_guard_narrowing(call, g);
         }
 
         // Slice 2e: devirtualize `at:`/`at:put:`/`add:` when the receiver is statically a
@@ -1798,6 +1950,13 @@ impl Compiler {
             ["if", "else"] => true,
             _ => return Ok(false),
         };
+
+        // Phase 3c: a nil-guard on a *declared-nullable* path is not inlined — it takes the general
+        // send path so its arms narrow (via each arm's `compile_block` scope). Rare and opt-in;
+        // untyped guards (the common case) aren't `Nullable`, so they still inline — no perf change.
+        if self.guard_narrowing(call).is_some() {
+            return Ok(false);
+        }
 
         // Bool receiver → inline directly. A known-non-Bool receiver (Int/List) → normal send
         // (the guard would always miss). Everything else — `Any`, and any other static type we
@@ -2117,6 +2276,9 @@ impl Compiler {
         // `X.new:{ … }` argument) before anything can reset it; nested blocks compiled
         // within read it as `false`.
         let is_init = std::mem::take(&mut self.next_block_is_init);
+        // Phase 3c: a guard arm's narrowing, installed into this block's scope below. Taken here
+        // (one-shot) so nested blocks don't inherit it.
+        let block_narrowing = std::mem::take(&mut self.next_block_narrowing);
         // A real block gets its own frame, so any enclosing inlined-region caret
         // redirection (Slice 2d) must not leak into it: a `^` here is a genuine
         // `BlockReturn` for this block. Cleared on entry, restored on exit.
@@ -2148,6 +2310,9 @@ impl Compiler {
 
         self.push_scope(locals);
         self.scopes.last_mut().unwrap().is_init = is_init;
+        if let Some((key, ty)) = block_narrowing {
+            self.scopes.last_mut().unwrap().narrowed.insert(key, ty);
+        }
 
         // Seed declared param types so arithmetic on a typed param devirtualizes. Dispatch only
         // selects a typed method when the arg matches, so the param is provably that type inside
@@ -2508,6 +2673,43 @@ mod tests {
 
         // An absent key stays `None`.
         assert_eq!(c.narrowed_type(&NarrowKey::Field("y".to_string())), None);
+    }
+
+    #[test]
+    fn checker_narrows_nullable_after_defined_guard() {
+        // Narrowing is observable through the decl check: `var y: Integer = x` type-checks only
+        // where `x: Integer?` has been narrowed non-nil.
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics()
+                .iter()
+                .filter(|m| m.contains("type mismatch"))
+                .cloned()
+                .collect()
+        }
+
+        // Unguarded: assigning a nullable to an `Integer` local → warns.
+        assert!(!diags("Foo <- { m -> { |x: Integer?| var y: Integer = x } }").is_empty());
+        // Guarded true-arm narrows `x` non-nil, so the arm's decl type-checks.
+        assert!(
+            diags("Foo <- { m -> { |x: Integer?| x.defined?.if:{ var y: Integer = x } } }")
+                .is_empty()
+        );
+        // Divergent nil-arm: after `.else:{ ^^0 }`, `x` is non-nil for the rest of the body.
+        assert!(
+            diags("Foo <- { m -> { |x: Integer?| x.defined?.else:{ ^^0 }; var y: Integer = x } }")
+                .is_empty()
+        );
+        // Reassignment re-narrows a declared nullable local: `x = 5` makes it non-nil.
+        assert!(
+            diags("Foo <- { m -> { var x: Integer? = nil; x = 5; var y: Integer = x } }")
+                .is_empty()
+        );
     }
 
     #[test]
