@@ -298,6 +298,10 @@ struct ClassCtx {
     /// statement, so its method table is frozen and same-class self-sends can be
     /// devirtualized (Slice 2b-B).
     sealed: bool,
+    /// Selector → method body, for inlining a leaf self-send (Phase 5·1). A sealed class can't be
+    /// subclassed, so `self.foo` provably resolves to this class's own `foo`; a trivial body is
+    /// spliced at the call site instead of dispatched.
+    bodies: HashMap<String, Arc<BlockNode>>,
 }
 
 /// A non-fatal type diagnostic: the message plus the source span it points at, for `path:line:col`
@@ -1171,34 +1175,32 @@ impl Compiler {
     fn collect_class_ctx(&mut self, block: &BlockNode) -> ClassCtx {
         let mut returns = HashMap::new();
         let mut methods = HashSet::new();
+        let mut bodies = HashMap::new();
         let mut sealed = false;
         for stmt in &block.statements {
-            match &stmt.value {
-                NodeValue::MethodDefinition(m) => {
-                    if let Ok(selector) = self.reconstruct_selector(&m.signature) {
-                        methods.insert(selector.clone());
-                        if let Some(rt) = &m.block.return_type {
-                            returns.insert(selector, self.resolve_annotation(rt));
-                        }
-                    }
-                }
-                NodeValue::MethodExtension(m) => {
-                    if let Ok(selector) = self.reconstruct_selector(&m.signature) {
-                        methods.insert(selector.clone());
-                        if let Some(rt) = &m.block.return_type {
-                            returns.insert(selector, self.resolve_annotation(rt));
-                        }
-                    }
-                }
+            let (signature, method_block) = match &stmt.value {
+                NodeValue::MethodDefinition(m) => (&m.signature, &m.block),
+                NodeValue::MethodExtension(m) => (&m.signature, &m.block),
                 // A direct (unconditional) `sealed!` statement seals the class at compile
                 // time, freezing its method table so same-class self-sends devirtualize.
-                NodeValue::MethodCall(call) if Self::is_sealed_marker(call) => sealed = true,
-                _ => {}
+                NodeValue::MethodCall(call) if Self::is_sealed_marker(call) => {
+                    sealed = true;
+                    continue;
+                }
+                _ => continue,
+            };
+            if let Ok(selector) = self.reconstruct_selector(signature) {
+                methods.insert(selector.clone());
+                bodies.insert(selector.clone(), method_block.clone());
+                if let Some(rt) = &method_block.return_type {
+                    returns.insert(selector, self.resolve_annotation(rt));
+                }
             }
         }
         ClassCtx {
             returns,
             methods,
+            bodies,
             sealed,
         }
     }
@@ -2102,6 +2104,66 @@ impl Compiler {
         bytecode.push(Instruction::Send(Symbol::intern(selector), num_args));
     }
 
+    /// A method body that can be spliced verbatim at a self-send call site (Phase 5·1): no params,
+    /// no local decls, no name, and a single statement that is a **trivial terminal** — a field load
+    /// (`@x`), `self`, a reserved literal (`nil`/`true`/`false`), or an `Int`/`Double`/`String`
+    /// constant. Such a body compiles to one load/push, with no dispatch, no sub-sends (so no
+    /// recursion), and no side effects — and, being a self-send, `self` is identical at the call
+    /// site, so a field load reads the same object. Returns the body expression to inline.
+    fn inlinable_leaf_body(block: &BlockNode) -> Option<&Node> {
+        if !block.arguments.is_empty()
+            || !block.decls.is_empty()
+            || block.decl_block.is_some()
+            || block.name.is_some()
+        {
+            return None;
+        }
+        let [stmt] = block.statements.as_slice() else {
+            return None;
+        };
+        match &stmt.value {
+            NodeValue::Integer(_) | NodeValue::Double(_) | NodeValue::Str(_) => Some(stmt),
+            NodeValue::Identifier(id) => {
+                let ok = id.identifier_type == IdentifierType::Instance
+                    || matches!(id.name.as_str(), "self" | "nil" | "true" | "false");
+                ok.then_some(stmt)
+            }
+            _ => None,
+        }
+    }
+
+    /// Inline a no-arg self-send to a sealed class's own **leaf** method (Phase 5·1): splice the
+    /// callee's trivial body at the call site instead of pushing the receiver and dispatching. Sound
+    /// because a sealed class can't be subclassed, so `self.foo` provably resolves to this class's
+    /// `foo`; the receiver is `self` on both sides. Returns `true` if it inlined.
+    fn try_inline_leaf_self_send(
+        &mut self,
+        call: &MethodCallNode,
+        is_self: bool,
+        bytecode: &mut CodeBlock,
+    ) -> Result<bool, String> {
+        if !is_self || !call.arguments.expressions.is_empty() {
+            return Ok(false);
+        }
+        let idents = &call.arguments.signature.identifiers;
+        if idents.len() != 1 {
+            return Ok(false);
+        }
+        // Clone the callee body out (releasing the `class_ctx` borrow) so we can compile into `self`.
+        let body = match self.class_ctx.last() {
+            Some(ctx) if ctx.sealed => ctx.bodies.get(idents[0].name.as_str()).cloned(),
+            _ => None,
+        };
+        let Some(body) = body else {
+            return Ok(false);
+        };
+        let Some(leaf) = Self::inlinable_leaf_body(&body) else {
+            return Ok(false);
+        };
+        self.compile_node(leaf, bytecode)?;
+        Ok(true)
+    }
+
     fn compile_method_call(
         &mut self,
         call: &MethodCallNode,
@@ -2126,6 +2188,11 @@ impl Compiler {
             return Ok(());
         }
         if self.try_compile_inlined_while(call, bytecode)? {
+            return Ok(());
+        }
+        // Phase 5·1: inline a leaf self-send (`self.width` → the field load) — no receiver push,
+        // no dispatch. Before the receiver is evaluated, since the inline replaces it entirely.
+        if self.try_inline_leaf_self_send(call, is_self, bytecode)? {
             return Ok(());
         }
 
@@ -3442,6 +3509,51 @@ mod tests {
         assert!(
             !has_call_self_direct(&unsealed),
             "un-sealed self-send must stay a Send"
+        );
+    }
+
+    #[test]
+    fn sealed_leaf_self_send_is_inlined() {
+        fn compile_src(src: &str) -> StaticBlock {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            Compiler::new().compile_program(p).unwrap()
+        }
+        // Does any send-family instruction dispatch `sel` (recursing into nested blocks)?
+        fn dispatches(sb: &StaticBlock, sel: Symbol) -> bool {
+            sb.bytecode.0.iter().any(|inst| match inst {
+                Instruction::Send(s, _)
+                | Instruction::CallSelfDirect(s, _)
+                | Instruction::SendLocal(_, s, _)
+                | Instruction::SendConst(_, s, _)
+                | Instruction::SendField(_, s, _)
+                | Instruction::SendLocalLocal(_, _, s, _)
+                | Instruction::SendLocalConst(_, _, s, _) => *s == sel,
+                Instruction::Push(Constant::Block(nested)) => dispatches(nested, sel),
+                _ => false,
+            })
+        }
+        let width = Symbol::intern("width");
+
+        // Sealed class, leaf accessor `width -> { @width }` self-sent → inlined (never dispatched).
+        let inlined = compile_src("Foo <- { width -> { @width }; getW -> { .width }; .sealed! }");
+        assert!(
+            !dispatches(&inlined, width),
+            "sealed leaf accessor self-send should inline, not dispatch"
+        );
+        // Un-sealed: the callee isn't provably fixed, so the same send stays a real dispatch.
+        let unsealed = compile_src("Foo <- { width -> { @width }; getW -> { .width } }");
+        assert!(
+            dispatches(&unsealed, width),
+            "un-sealed leaf self-send must dispatch"
+        );
+        // Sealed but a non-leaf body (a sub-send) is not inlined → still dispatched.
+        let nonleaf = compile_src("Foo <- { name -> { @n.upper }; getN -> { .name }; .sealed! }");
+        assert!(
+            dispatches(&nonleaf, Symbol::intern("name")),
+            "sealed non-leaf self-send must dispatch"
         );
     }
 
