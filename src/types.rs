@@ -72,7 +72,7 @@ pub const BUILTIN_CLASS_NAMES: &[&str] = &[
 /// runner and VM spawn, so a later unit "sees" the classes earlier units defined — the basis
 /// for the resolver's `unknown type Foo` diagnostic (docs/TYPE_SYSTEM_ARCH.md Phase 2). The VM
 /// is single-threaded (gc_arena), so `Rc<RefCell<…>>` is sufficient.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SeenTypes(Rc<RefCell<HashSet<Arc<str>>>>);
 
 impl SeenTypes {

@@ -329,6 +329,9 @@ impl VmRunnerOptions {
                 arguments: vm_args,
                 supports_color,
                 console_width: None,
+                // The single shared class-name accumulator for this run — cloned (Rc) into
+                // every VM and top-level compile, so units see each other's classes.
+                seen_types: crate::types::SeenTypes::with_builtins(),
             },
             break_on_throw,
             break_on_uncaught,
@@ -852,12 +855,14 @@ impl VmRunner {
                 };
 
                 let mut compiler = Compiler::new();
+                compiler.set_seen_types(vm.options.seen_types.clone());
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {
                         panic!("Compilation error: {}", e);
                     }
                 };
+                crate::compiler::report_type_warnings(compiler.diagnostics());
 
                 let decl_block = program.decl_block.as_ref().map(|db| {
                     gc!(
@@ -1099,12 +1104,14 @@ impl VmRunner {
                 };
 
                 let mut compiler = Compiler::new();
+                compiler.set_seen_types(vm.options.seen_types.clone());
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {
                         panic!("Compilation error: {}", e);
                     }
                 };
+                crate::compiler::report_type_warnings(compiler.diagnostics());
 
                 let decl_block = program.decl_block.as_ref().map(|db| {
                     gc!(

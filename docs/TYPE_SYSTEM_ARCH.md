@@ -109,9 +109,22 @@ Replace `StaticType{Int,Bool,List,Unknown}` with a proper `Type`:
 
 This is the shared substrate for both the checker and the optimizer.
 
-### Phase 2 — resolver
-Resolve annotations (bare-name `IdentifierNode`) → `Type` against the class scope. First new error:
-**"unknown type `Foo`"**. Absent annotation → `Any`.
+### Phase 2 — resolver ✅ DONE
+Resolve annotations → `Type` against a real known-class set and flag unknown names. Landed as
+`Compiler::resolve_annotation` + a `SeenTypes` accumulator (`src/types.rs`); un-annotated → `Any`
+(the `"Object"` default is now only the runtime *dispatch* signature, decoupled from the static type).
+
+Decisions (forced by the investigation — classes are compile-time-invisible across units, since the
+runner compiles the prelude and each `use` in a *separate* `Compiler`; the VM class table isn't
+reachable at compile time):
+- **Non-fatal warnings**, not errors — an unknown type prints `warning: unknown type Foo` to stderr
+  and still lowers/runs (gradual best-effort; also the diagnostics substrate Phase 3 needs).
+- **Shared "seen types" accumulator** — one `SeenTypes` (`Rc<RefCell<HashSet>>`) rides on `VmOptions`,
+  threaded into every `Compiler` the run spawns (the VM's `use`-loads *and* the runner's top-level
+  program), plus a per-unit top-level pre-scan and a record-on-definition hook (catches nested defs).
+  So a unit sees the classes earlier-compiled units (prelude, imports) defined — no false positives on
+  stdlib types. Residual gap: a class the program itself `use`s (loaded during its *own* run) is unseen
+  at its compile → a non-fatal warning.
 
 ### Phase 3 — checker pass (best-effort, gradual; separate from codegen)
 - Bidirectional: check against annotations where present, infer where absent.

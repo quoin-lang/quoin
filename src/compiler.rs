@@ -339,6 +339,14 @@ pub struct Compiler {
     diagnostics: Vec<String>,
 }
 
+/// Print the non-fatal Phase-2 type diagnostics collected by a `Compiler` (e.g.
+/// `unknown type Foo`) to stderr. Precise source locations are Phase 4.
+pub fn report_type_warnings(diagnostics: &[String]) {
+    for d in diagnostics {
+        eprintln!("warning: {d}");
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Self {
@@ -512,6 +520,13 @@ impl Compiler {
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
+    }
+
+    /// Use a shared class-name accumulator instead of this compiler's own. The runner threads
+    /// one set through every unit (via the VM), so a later unit sees the classes that
+    /// earlier-compiled units — the prelude, `use`d modules — defined.
+    pub fn set_seen_types(&mut self, seen: SeenTypes) {
+        self.seen_types = seen;
     }
 
     /// Statically infer an expression's type for devirtualization. Conservative: only
@@ -844,6 +859,9 @@ impl Compiler {
             }
             NodeValue::ClassDefinition(class_def) => {
                 let name = NamespacedName::from_ast(&class_def.identifier);
+                // Record the class as known as soon as it's defined — covers classes in nested
+                // blocks the top-level pre-scan can't reach (a def-before-use in any scope).
+                self.seen_types.insert(&name.name);
                 let parent_name = class_def
                     .parent_identifier
                     .as_ref()

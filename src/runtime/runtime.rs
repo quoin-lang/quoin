@@ -166,12 +166,16 @@ fn compile_and_execute_source<'gc>(
     } else {
         Compiler::new_with_locals(binding_names)
     };
+    // Share the VM's class-name accumulator so this unit sees classes earlier-compiled units
+    // defined (and later units see this one's) — the basis for `unknown type Foo`.
+    compiler.set_seen_types(vm.options.seen_types.clone());
     // When a `self` is supplied (`eval:self:`), don't emit the top-level `self = nil` default —
     // the frame setup binds `self` to the receiver, so `self`/`@ivars`/`self.method` resolve in
     // the eval'd code. Plain `eval:` / `use` (no receiver) keep `self == nil` at top level.
     let static_block = compiler
         .compile_program_with(program_node, self_val.is_none())
         .map_err(|e| QuoinError::ParseError(format!("Compilation error: {}", e)))?;
+    crate::compiler::report_type_warnings(compiler.diagnostics());
     // Seed the bindings into a parent env the eval'd frame walks into.
     let parent_env = (!bindings.is_empty()).then(|| {
         let mut env = EnvFrame::new(None);

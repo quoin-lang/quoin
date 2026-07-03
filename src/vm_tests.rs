@@ -1987,6 +1987,7 @@ fn test_vm_options_at_runtime() {
         arguments: vec!["foo".to_string(), "bar".to_string()],
         supports_color: true,
         console_width: None,
+        ..Default::default()
     };
 
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
