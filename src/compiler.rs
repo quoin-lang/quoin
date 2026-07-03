@@ -3291,6 +3291,36 @@ mod tests {
     }
 
     #[test]
+    fn object_rooted_s_and_pp_type_as_string() {
+        fn diags(src: &str, seed: bool) -> Vec<String> {
+            let node = parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            if seed {
+                // Simulate the native `Object` contracts seeded by `populate_from_vm`.
+                let mut r = HashMap::new();
+                r.insert(Arc::from("s"), Type::String);
+                r.insert(Arc::from("pp"), Type::String);
+                c.class_table.add_returns("Object", r);
+            }
+            c.compile_program(p).unwrap();
+            c.diagnostics()
+                .iter()
+                .filter(|d| d.message.contains("type mismatch"))
+                .map(|d| d.message.clone())
+                .collect()
+        }
+        // With the contract, `x.s`/`x.pp` are `String` for any receiver.
+        assert!(diags("Foo <- { m -> { |x| var t: String = x.s; t } }", true).is_empty());
+        assert!(!diags("Foo <- { m -> { |x| var n: Integer = x.s; n } }", true).is_empty());
+        assert!(!diags("Foo <- { m -> { |x| var n: Integer = x.pp; n } }", true).is_empty());
+        // Without it they're `Any` → gradual, silent either way (no false positive).
+        assert!(diags("Foo <- { m -> { |x| var n: Integer = x.s; n } }", false).is_empty());
+    }
+
+    #[test]
     fn checker_flags_nil_misuse() {
         fn diags(src: &str) -> Vec<String> {
             let node = crate::parser::parse_quoin_string(src);

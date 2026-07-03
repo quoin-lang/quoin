@@ -111,6 +111,25 @@ pub fn populate_from_vm<'gc>(vm: &crate::vm::VmState<'gc>, table: &ClassTable) {
             table.insert(&g.name, ClassSig::from_class_info(&info));
         }
     }
+    seed_native_object_returns(table);
+}
+
+/// Native `Object` methods have no `^Ret` AST header (they're Rust), so their universal return
+/// contracts are recorded here — one source shared by both the return-covariance check and
+/// object-rooted send typing (`x.s → String`). The Rust impls always return these; a Quoin override
+/// that *declares* an incompatible return is caught by covariance, and an undeclared one is a
+/// best-effort miss (false-negative only), per the gradual contract. `add_returns` merges, so this
+/// is idempotent across the per-compile-site calls and never clobbers structural sig fields.
+fn seed_native_object_returns(table: &ClassTable) {
+    table.add_returns(
+        "Object",
+        [
+            (Arc::from("s"), Type::String),
+            (Arc::from("pp"), Type::String),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }
 
 /// A shared, mutable map `class name → ClassSig`, threaded through every `Compiler` a run spawns
