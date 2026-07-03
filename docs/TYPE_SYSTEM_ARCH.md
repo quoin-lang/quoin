@@ -278,7 +278,22 @@ Reuse the existing span + caret renderer. Deliver:
 
 ### Phase 5 — feed the optimizer
 Let devirt/inlining consume the richer `Type` (receiver's exact class → method inlining; `List<Int>` →
-unboxed elements).
+unboxed elements). Method inlining is the documented highest-ROI Tier-1 lever (`docs/FUTURE_ARCH.md`) and
+subsumes the "skip lookup" win *without* the ruled-out per-call-site inline cache. Key enabler: a **sealed
+class can't be subclassed** (`ensure_not_sealed`), so a self-send to its own method is provably monomorphic
+at compile time — the compiler already proves this for `CallSelfDirect` (which today is a no-op = `Send`;
+its designed "Phase 2 cache" was never built and is the ruled-out path — don't).
+
+- **5·1 — leaf self-send inlining DONE** (`ca903aa`). A no-arg self-send in a sealed class to one of its own
+  **leaf** methods (body = a single trivial terminal: `@field` / `self` / a reserved literal / an
+  `Int`/`Double`/`String` constant) is inlined — the body is spliced at the call site (`self` is identical on
+  both sides), replacing receiver-push + dispatch + frame + `exec_send` with one load/push. `ClassCtx` gains a
+  `selector → Arc<BlockNode>` map; `inlinable_leaf_body` gates the shape; `try_inline_leaf_self_send` splices.
+  Leaf ⇒ no sub-sends ⇒ no recursion. Accessor-heavy bench (6 accessor self-sends/call, 10M iters):
+  whole-process **9.85s → 4.50s, ~2.2×**; corpus 1255/0/0 + GC-stress unchanged (`profiling/method-inlining/`).
+- **5·2+ (next):** extend to **exact-receiver** sends (`v.dot` where `v: SealedClass` — needs the callee body,
+  which for another unit's class lives in the VM class object, not the AST → a cross-unit body-access step),
+  then **small non-leaf** bodies (arithmetic, a bounded number of statements), then the recursive/`fib` case.
 
 ## Deferred / follow-up tasks (tracked)
 - **3c·3 loop back-edge widening** — the other Tier-2 half (arm-exit join/merge is done, `4fc8dd4`). Narrowing
