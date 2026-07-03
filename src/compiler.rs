@@ -290,9 +290,6 @@ pub(crate) fn fuse_bytecode(
 /// on a stack while compiling a class def / extension; used to type self-sends by their
 /// callee's declared return type and to devirtualize self-sends in a sealed class.
 struct ClassCtx {
-    /// The class's name (`""` for an anonymous/expression reopen target) — lets an explicit-receiver
-    /// send whose static class is *this* class be inlined against its own bodies (Phase 5·3).
-    name: String,
     /// Method selector → declared return `Type` (methods that annotate a return).
     returns: HashMap<String, Type>,
     /// The class is compile-sealed: `sealed!` appears as a direct (unconditional) body
@@ -438,6 +435,10 @@ pub struct Compiler {
     captured_arm_exit: Option<Type>,
     /// Current self-send inlining nesting depth (Phase 5·2), bounded by `MAX_INLINE_DEPTH`.
     inline_depth: usize,
+    /// `class name → (selector → method body)` for every class compiled so far in this unit, so an
+    /// explicit-receiver `v.x` can inline against *any* in-unit sealed class, not just the one being
+    /// compiled (Phase 5·3b). Backward references only; cross-unit bodies aren't available as AST.
+    class_bodies: HashMap<String, HashMap<String, Arc<BlockNode>>>,
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
@@ -481,6 +482,7 @@ impl Compiler {
             next_block_capture: None,
             captured_arm_exit: None,
             inline_depth: 0,
+            class_bodies: HashMap::new(),
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -507,6 +509,7 @@ impl Compiler {
             next_block_capture: None,
             captured_arm_exit: None,
             inline_depth: 0,
+            class_bodies: HashMap::new(),
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -1200,8 +1203,15 @@ impl Compiler {
                 }
             }
         }
+        // Record this class's bodies unit-wide so an explicit-receiver `v.x` can inline against it
+        // from another class (Phase 5·3b). A reopen (`<--`) merges; anonymous targets are skipped.
+        if !name.is_empty() {
+            self.class_bodies
+                .entry(name.to_string())
+                .or_default()
+                .extend(bodies.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
         ClassCtx {
-            name: name.to_string(),
             returns,
             bodies,
             sealed,
@@ -2220,10 +2230,10 @@ impl Compiler {
     }
 
     /// For a no-arg explicit-receiver send `v.x` whose receiver is statically an instance of the
-    /// (sealed) class *currently being compiled*, and whose selector is one of that class's own
-    /// field accessors: the field to read. Inlining emits `<eval v>; LoadFieldOf(field)` — sound
-    /// because a sealed class can't be subclassed, so `v` is exactly this class and `v.x` reads its
-    /// field (Phase 5·3, current-class first cut; other in-unit classes are a follow-up).
+    /// (sealed) in-unit class, and whose selector is one of that class's field accessors: the field
+    /// to read. Inlining emits `<eval v>; LoadFieldOf(field)` — sound because a sealed class can't be
+    /// subclassed, so `v` is exactly that class and `v.x` reads its field (Phase 5·3b: any class
+    /// recorded in `class_bodies`, not just the one being compiled).
     fn exact_receiver_field_accessor(&self, call: &MethodCallNode) -> Option<String> {
         if !call.arguments.expressions.is_empty() {
             return None;
@@ -2232,11 +2242,12 @@ impl Compiler {
             return None;
         };
         let class = self.receiver_class(call)?;
-        let ctx = self.class_ctx.last()?;
-        if !ctx.sealed || ctx.name != class {
+        // Sealed ⇒ `v` is exactly this class (the ClassTable's flag covers any in-unit class, not
+        // just the current one), and we must have its AST body recorded this unit.
+        if self.class_table.get(&class).map(|s| s.sealed) != Some(true) {
             return None;
         }
-        Self::field_accessor_field(ctx.bodies.get(sel.name.as_str())?)
+        Self::field_accessor_field(self.class_bodies.get(&class)?.get(sel.name.as_str())?)
     }
 
     fn compile_method_call(
@@ -3667,6 +3678,23 @@ mod tests {
         assert!(
             !loads_field_of(&unsealed, "x"),
             "un-sealed exact-receiver send must dispatch"
+        );
+
+        // Phase 5·3b: an accessor on a *sibling* in-unit sealed class (defined earlier) also inlines.
+        let sibling = compile_src(
+            "Point <- { |@x| x -> { @x }; .sealed! }; Reader <- { get: -> { |p: Point| p.x }; .sealed! }",
+        );
+        assert!(
+            loads_field_of(&sibling, "x"),
+            "accessor on a sibling in-unit sealed class should inline"
+        );
+        // But a *forward* reference can't (the class's body isn't recorded yet) → dispatch.
+        let forward = compile_src(
+            "Reader <- { get: -> { |p: Point| p.x }; .sealed! }; Point <- { |@x| x -> { @x }; .sealed! }",
+        );
+        assert!(
+            !loads_field_of(&forward, "x"),
+            "a forward-referenced class body isn't available yet → dispatch"
         );
     }
 
