@@ -1,6 +1,7 @@
 #![allow(unknown_lints)]
 
 pub mod ansi_colorizer;
+pub mod class_table;
 pub mod compiler;
 pub mod coverage;
 pub mod dap;
