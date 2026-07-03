@@ -305,10 +305,15 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   `v` is exactly that class; a non-nullable typed receiver is never nil. `ClassCtx` gains its `name` (to match
   receiver-class == current-class). Exact-receiver-accessor bench (`other.x` in a 10M loop): **1.71s → 0.95s,
   ~1.8×**; corpus 1255/0/0 + GC-stress unchanged.
-- **5·3b+ (next):** broaden exact-receiver inlining to **any in-unit sealed class** (a compiler-wide
-  `class → selector → body` map, backward refs; cross-unit bodies live in the VM class object → later) and to
-  **non-field bodies** (needs general `self → v` rewriting of the spliced body). Then **multi-statement /
-  local-binding** bodies (alpha-renaming) and the arg-passing + bounded-unroll recursive/`fib` case.
+- **5·3b — exact-receiver accessors on any in-unit sealed class DONE** (`e7bf6b6`). Compiler-wide
+  `class_bodies: class → selector → body` map (populated as each class compiles — backward refs, in-unit), so
+  `p.x` where `p: SomeSiblingClass` inlines to `LoadFieldOf` too, not just same-class operands. Sealed check
+  moved to the ClassTable flag; `ClassCtx.name` dropped as redundant. Sibling-accessor bench (`Reader` reads
+  `Point.x` in a 10M loop): **1.70s → 0.95s, ~1.8×**; corpus 1255/0/0 + GC-stress unchanged.
+- **5·3c+ (next):** **non-field bodies** for exact receivers (`v.area` = `.width * .height`) — needs general
+  `self → v` rewriting of the spliced body (self-sends → `v`-sends, `@field` → `LoadFieldOf`), the harder half.
+  Then **multi-statement / local-binding** bodies (alpha-renaming), the arg-passing + bounded-unroll
+  recursive/`fib` case, and **cross-unit** receiver bodies (via the VM class object, not the AST).
 - **`CallSelfDirect` removed DONE** (`e98cd0b`): it was a runtime no-op (identical `exec_send` to `Send`) whose
   planned resolve-and-cache was the ruled-out inline cache, *and* it blocked fusion (a sealed self-send emitted
   an unfused `LoadLocal(self); CallSelfDirect` where `Send` fuses to `SendLocal*`). `emit_call` now emits `Send`;
