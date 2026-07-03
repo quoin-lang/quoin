@@ -561,7 +561,7 @@ impl Compiler {
                 NodeValue::MethodDefinition(m) => {
                     if let Ok(selector) = self.reconstruct_selector(&m.signature) {
                         methods.insert(selector.clone());
-                        if let Some(rt) = &m.return_type {
+                        if let Some(rt) = &m.block.return_type {
                             returns.insert(selector, static_type_from_name(&rt.name));
                         }
                     }
@@ -569,7 +569,7 @@ impl Compiler {
                 NodeValue::MethodExtension(m) => {
                     if let Ok(selector) = self.reconstruct_selector(&m.signature) {
                         methods.insert(selector.clone());
-                        if let Some(rt) = &m.return_type {
+                        if let Some(rt) = &m.block.return_type {
                             returns.insert(selector, static_type_from_name(&rt.name));
                         }
                     }
@@ -2394,6 +2394,7 @@ mod tests {
     fn test_compile_blocks() {
         // { |x| x + 1 }
         let block_node = BlockNode {
+            return_type: None,
             source_info: None,
             name: None,
             arguments: vec![Arc::new(BlockArgNode {
@@ -2519,6 +2520,7 @@ mod tests {
     #[test]
     fn test_compile_class_and_method_definitions() {
         let block_node = BlockNode {
+            return_type: None,
             source_info: None,
             arguments: vec![
                 Arc::new(BlockArgNode {

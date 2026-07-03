@@ -51,7 +51,47 @@ ergonomics, opt-in, never nagging on dynamic code.
 2. **Defer "suggest the fix" (did-you-mean).** Ecosystem/method-surface too small to be worth the
    fine-tuning, and a *wrong* suggestion is worse than none. Revisit when the ecosystem is larger.
 
+## Settled surface syntax
+
+Three type-syntax decisions, locked before building the parser/resolver around them:
+
+**Nullable — `Integer?`.** `?` is an identifier character (so `nil?`/`empty?` are single tokens),
+which means `Integer?` lexes as *one* identifier. So nullability is a **resolver** rule, not a
+grammar change: a type-position identifier ending in `?` → `Nullable(base)`. Unambiguous because
+class names are PascalCase while predicates are lowercase. No space (`Integer ?` is not it).
+
+**Generics — `Class(args)`, space-separated.** `List(Integer)`, `Map(String Integer)`. `<…>` is
+ruled out (`<`/`>` are operators + `<-`/`<--`/`->`/`-->` arrows, plus the `>>` nesting problem);
+`[…]` is namespaces; `{…}` is blocks. A bare `ident(…)` is unused (sends are `.sel:`), so parens
+are free, delimited, and nest cleanly: `Map(String List(Integer))`.
+
+**Block signatures — `Block(args… ^Ret)`, and `^Ret` moves into the block header.** A function
+type needs both args and a return, and a flat list can't tell `Block(Integer Integer)` (two args,
+`Any` return) from a one-arg/one-return reading. The fix: mark the return with `^`, reusing
+Quoin's return operator. So `^` means "the return" in three positions — statement (`^ expr`),
+header annotation (`|a ^Ret|`), and type slot (`Block(… ^Ret)`). This makes **a block's type its
+header with the names stripped**:
+
+```
+{ |a:Integer b:Integer ^Integer| … }   ⟺   Block(Integer Integer ^Integer)
+```
+
+Consequences: `->` is de-overloaded back to just the method arrow (`sel -> { … }`); the return
+type moves out of `-> Ret` into the header as `^Ret`; **a bare (non-method) block can now declare
+its return type** (`{ |x ^Integer| … }`), which `-> Ret {}` couldn't reach. No `^` ⇒ `Any` return;
+`Block()` = zero args / `Any`; `Block` (no parens) = fully unconstrained. `^` is single (the
+block's own return), never `^^` (that's the non-local return, a control-flow marker, not a type).
+`^Ret` sits after the args, before the `-` local-decl separator; and last in `Block(… ^Ret)`.
+
 ## Work plan (sequenced)
+
+### Phase 0 — migrate the return-type syntax (do first)
+Move the return type from `sel -> Ret { |args| }` (Slice 2b-A) to `sel -> { |args ^Ret| }`, per
+the settled syntax above. Touches: the pest grammar (drop `ret_type` after `op_meth`; add
+`block_ret = "^" ident` to `block_decls`), the AST (`return_type` moves from the method nodes onto
+`BlockNode`), the parser + compiler (`collect_class_ctx` reads `m.block.return_type`), the
+highlighter, the ~4 qnlib/test sites, and the IntelliJ plugin. Mechanical and small; done before
+Phase 1 so the resolver/checker build on the final location.
 
 ### Phase 1 — the real `Type` representation (foundation)
 Replace `StaticType{Int,Bool,List,Unknown}` with a proper `Type`:
@@ -60,7 +100,7 @@ Replace `StaticType{Int,Bool,List,Unknown}` with a proper `Type`:
 - **Nullability**: `T?` (union with `Nil`) — Quoin has `nil`, so this matters a lot.
 - **`Any`** (gradual escape) — DISTINCT from `Object` (the top class).
 - **`Never`** (bottom).
-- Later: generics (`List<T>`), general unions (from control flow).
+- Later: generics (`List(T)` / `Block(args… ^Ret)` — see Settled surface syntax), general unions.
 
 This is the shared substrate for both the checker and the optimizer.
 

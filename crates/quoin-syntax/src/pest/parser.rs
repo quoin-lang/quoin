@@ -4,7 +4,7 @@ use crate::source_info::{ParseError, SourceInfo};
 
 use once_cell::sync::Lazy;
 use pest::Parser;
-use pest::iterators::{Pair, Pairs};
+use pest::iterators::Pair;
 use pest::pratt_parser::PrattParser;
 use pest_derive::Parser;
 use regex::Captures;
@@ -725,7 +725,7 @@ fn parse_block(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                 .to_string();
             let symbol_node = SymbolNode { value: symbol_val };
             let block_decls = pairs.next().unwrap();
-            let (arguments, decls, decl_block) =
+            let (arguments, return_type, decls, decl_block) =
                 parse_block_decls(block_decls, filename, source_text);
             let mut statements = Vec::new();
             for stmt in pairs {
@@ -735,6 +735,7 @@ fn parse_block(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                 source_info: source_info.clone(),
                 value: Block(BlockNode {
                     arguments,
+                    return_type,
                     decls,
                     decl_block,
                     statements,
@@ -746,7 +747,7 @@ fn parse_block(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         Rule::block_w_decls => {
             let mut pairs = inner.into_inner();
             let block_decls = pairs.next().unwrap();
-            let (arguments, decls, decl_block) =
+            let (arguments, return_type, decls, decl_block) =
                 parse_block_decls(block_decls, filename, source_text);
             let mut statements = Vec::new();
             for stmt in pairs {
@@ -756,6 +757,7 @@ fn parse_block(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                 source_info: source_info.clone(),
                 value: Block(BlockNode {
                     arguments,
+                    return_type,
                     decls,
                     decl_block,
                     statements,
@@ -775,6 +777,7 @@ fn parse_block(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                 value: Block(BlockNode {
                     arguments: vec![],
                     decls: vec![],
+                    return_type: None,
                     decl_block: None,
                     statements,
                     name: None,
@@ -792,10 +795,12 @@ fn parse_block_decls(
     source_text: &str,
 ) -> (
     Vec<Arc<BlockArgNode>>,
+    Option<Arc<IdentifierNode>>,
     Vec<Arc<BlockDeclNode>>,
     Option<Arc<BlockNode>>,
 ) {
     let mut arguments = Vec::new();
+    let mut return_type = None;
     let mut decls = Vec::new();
     let mut decl_block = None;
 
@@ -805,6 +810,10 @@ fn parse_block_decls(
             Rule::block_arg => {
                 let arg = parse_block_arg(inner, filename, source_text);
                 arguments.push(Arc::new(arg));
+            }
+            Rule::block_ret => {
+                let ty = inner.into_inner().next().unwrap();
+                return_type = Some(Arc::new(parse_ident(ty, filename, source_text)));
             }
             Rule::block => {
                 let blk = parse_block(inner, filename, source_text);
@@ -821,7 +830,7 @@ fn parse_block_decls(
             _ => unreachable!(),
         }
     }
-    (arguments, decls, decl_block)
+    (arguments, return_type, decls, decl_block)
 }
 
 fn parse_block_arg(pair: Pair<Rule>, filename: &str, source_text: &str) -> BlockArgNode {
@@ -905,23 +914,6 @@ fn parse_arg_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> Ident
     }
 }
 
-/// After a method-def selector, consume an optional `ret_type` (`-> Integer`) if present,
-/// returning the parsed return-type identifier and the following body-block pair.
-fn parse_opt_ret_type<'i>(
-    pairs: &mut Pairs<'i, Rule>,
-    filename: &str,
-    source_text: &str,
-) -> (Option<Arc<IdentifierNode>>, Pair<'i, Rule>) {
-    let next = pairs.next().unwrap();
-    if next.as_rule() == Rule::ret_type {
-        let ty = next.into_inner().next().unwrap();
-        let rt = Arc::new(parse_ident(ty, filename, source_text));
-        (Some(rt), pairs.next().unwrap())
-    } else {
-        (None, next)
-    }
-}
-
 fn parse_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> IdentifierNode {
     let source_info = extract_source_info(pair.as_span(), filename, source_text);
     let inner = pair.into_inner().next().unwrap();
@@ -992,8 +984,7 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
         Rule::method_def => {
             let mut pairs = inner.into_inner();
             let selector = parse_selector(pairs.next().unwrap(), filename, source_text);
-            let (return_type, block_pair) = parse_opt_ret_type(&mut pairs, filename, source_text);
-            let block_node = match parse_block(block_pair, filename, source_text).value {
+            let block_node = match parse_block(pairs.next().unwrap(), filename, source_text).value {
                 Block(b) => b,
                 _ => unreachable!(),
             };
@@ -1001,7 +992,6 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
                 source_info,
                 value: MethodDefinition(MethodDefinitionNode {
                     signature: Arc::new(selector),
-                    return_type,
                     block: Arc::new(block_node),
                 }),
             }
@@ -1009,8 +999,7 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
         Rule::method_ext => {
             let mut pairs = inner.into_inner();
             let selector = parse_selector(pairs.next().unwrap(), filename, source_text);
-            let (return_type, block_pair) = parse_opt_ret_type(&mut pairs, filename, source_text);
-            let block_node = match parse_block(block_pair, filename, source_text).value {
+            let block_node = match parse_block(pairs.next().unwrap(), filename, source_text).value {
                 Block(b) => b,
                 _ => unreachable!(),
             };
@@ -1018,7 +1007,6 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
                 source_info,
                 value: MethodExtension(MethodExtensionNode {
                     signature: Arc::new(selector),
-                    return_type,
                     block: Arc::new(block_node),
                 }),
             }
@@ -1447,6 +1435,7 @@ mod tests {
                 name: None,
                 arguments: vec![],
                 decls: vec![],
+                return_type: None,
                 decl_block: None,
                 statements: vec![binary(BinaryOperatorType::Add, integer(1), integer(2))],
             }))],
@@ -1743,6 +1732,7 @@ mod tests {
                     name: None,
                     arguments: vec![],
                     decls: vec![],
+                    return_type: None,
                     decl_block: None,
                     statements: vec![integer(1)],
                 }),
@@ -1772,6 +1762,7 @@ mod tests {
                     name: None,
                     arguments: vec![],
                     decls: vec![],
+                    return_type: None,
                     decl_block: None,
                     statements: vec![integer(1)],
                 }),
@@ -1790,6 +1781,7 @@ mod tests {
                     name: None,
                     arguments: vec![],
                     decls: vec![],
+                    return_type: None,
                     decl_block: None,
                     statements: vec![integer(1)],
                 }),
@@ -1806,7 +1798,6 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
-                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
                             source_info: None,
@@ -1820,6 +1811,7 @@ mod tests {
                         name: None,
                         arguments: vec![],
                         decls: vec![],
+                        return_type: None,
                         decl_block: None,
                         statements: vec![integer(1)],
                     }),
@@ -1834,7 +1826,6 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
-                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
                             source_info: None,
@@ -1848,6 +1839,7 @@ mod tests {
                         name: None,
                         arguments: vec![],
                         decls: vec![],
+                        return_type: None,
                         decl_block: None,
                         statements: vec![integer(1)],
                     }),
@@ -1862,7 +1854,6 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
-                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![
                             Arc::new(IdentifierNode {
@@ -1884,6 +1875,7 @@ mod tests {
                         name: None,
                         arguments: vec![],
                         decls: vec![],
+                        return_type: None,
                         decl_block: None,
                         statements: vec![integer(1)],
                     }),
@@ -1898,7 +1890,6 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
-                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
                             source_info: None,
@@ -1912,6 +1903,7 @@ mod tests {
                         name: None,
                         arguments: vec![],
                         decls: vec![],
+                        return_type: None,
                         decl_block: None,
                         statements: vec![integer(1)],
                     }),
@@ -1925,7 +1917,6 @@ mod tests {
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodExtension(MethodExtensionNode {
-                return_type: None,
                 signature: Arc::new(MethodSelectorNode {
                     identifiers: vec![Arc::new(IdentifierNode {
                         source_info: None,
@@ -1939,6 +1930,7 @@ mod tests {
                     name: None,
                     arguments: vec![],
                     decls: vec![],
+                    return_type: None,
                     decl_block: None,
                     statements: vec![integer(1)],
                 }),
@@ -1952,7 +1944,6 @@ mod tests {
             source_info: None,
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
-                    return_type: None,
                     signature: Arc::new(MethodSelectorNode {
                         identifiers: vec![Arc::new(IdentifierNode {
                             source_info: None,
@@ -1966,6 +1957,7 @@ mod tests {
                         name: None,
                         arguments: vec![],
                         decls: vec![],
+                        return_type: None,
                         decl_block: None,
                         statements: vec![integer(1)],
                     }),
@@ -2191,6 +2183,7 @@ mod tests {
                 })),
                 arguments: vec![block_arg("x", IdentifierType::Local, None)],
                 decls: vec![],
+                return_type: None,
                 decl_block: None,
                 statements: vec![integer(1)],
             }))],
@@ -2210,6 +2203,7 @@ mod tests {
                     Some(ident_node("Int", IdentifierType::Local)),
                 )],
                 decls: vec![],
+                return_type: None,
                 decl_block: None,
                 statements: vec![integer(1)],
             }))],
@@ -2226,6 +2220,7 @@ mod tests {
                 name: None,
                 arguments: vec![block_arg("_", IdentifierType::Local, None)],
                 decls: vec![],
+                return_type: None,
                 decl_block: None,
                 statements: vec![integer(1)],
             }))],
@@ -2241,6 +2236,7 @@ mod tests {
                 name: None,
                 arguments: vec![block_arg("x", IdentifierType::Instance, None)],
                 decls: vec![],
+                return_type: None,
                 decl_block: None,
                 statements: vec![integer(1)],
             }))],
@@ -2256,6 +2252,7 @@ mod tests {
                 name: None,
                 arguments: vec![],
                 decls: vec![block_decl("x", IdentifierType::Local, None)],
+                return_type: None,
                 decl_block: None,
                 statements: vec![integer(1)],
             }))],
@@ -2275,6 +2272,7 @@ mod tests {
                     IdentifierType::Local,
                     Some(ident_node("Int", IdentifierType::Local)),
                 )],
+                return_type: None,
                 decl_block: None,
                 statements: vec![integer(1)],
             }))],
@@ -2290,11 +2288,13 @@ mod tests {
                 name: None,
                 arguments: vec![block_arg("x", IdentifierType::Local, None)],
                 decls: vec![block_decl("y", IdentifierType::Local, None)],
+                return_type: None,
                 decl_block: Some(Arc::new(BlockNode {
                     source_info: None,
                     name: None,
                     arguments: vec![],
                     decls: vec![],
+                    return_type: None,
                     decl_block: None,
                     statements: vec![integer(2)],
                 })),
