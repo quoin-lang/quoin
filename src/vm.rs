@@ -416,12 +416,23 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    /// Emit collected compile-time type diagnostics (Phase 2 `unknown type Foo` warnings) through
-    /// the stderr sink, so under the DAP adapter (`capture` on) they become `output` events
-    /// instead of leaking to the adapter's raw stderr. Best-effort; never fatal.
-    pub fn report_type_warnings(&mut self, diagnostics: &[String]) {
+    /// Emit collected compile-time type diagnostics through the stderr sink (so under the DAP
+    /// adapter, with `capture` on, they become `output` events rather than leaking to raw stderr).
+    /// Each is rendered `file:line:col: warning: message` (the standard, editor-jumpable form) when
+    /// a span is known, else bare `warning: message`. Best-effort; never fatal. (Phase 4.)
+    pub fn report_type_warnings(&mut self, diagnostics: &[crate::compiler::Diagnostic]) {
         for d in diagnostics {
-            let _ = self.write_std(StdStream::Err, format!("warning: {d}\n").as_bytes());
+            let out = match &d.span {
+                Some(s) => format!(
+                    "{}:{}:{}: warning: {}\n",
+                    s.filename,
+                    s.line,
+                    s.column + 1,
+                    d.message
+                ),
+                None => format!("warning: {}\n", d.message),
+            };
+            let _ = self.write_std(StdStream::Err, out.as_bytes());
         }
     }
 

@@ -415,8 +415,8 @@ mod tests {
                     c.compile_program(p).unwrap();
                     c.diagnostics()
                         .iter()
-                        .filter(|m| m.contains("type mismatch"))
-                        .cloned()
+                        .filter(|d| d.message.contains("type mismatch"))
+                        .map(|d| d.message.clone())
                         .collect()
                 };
 

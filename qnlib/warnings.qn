@@ -1,0 +1,51 @@
+"* Gallery of the compile-time type diagnostics (Phases 3a–3c + 4).
+"*
+"* Run it to see each warning, rendered `file:line:col: warning: <message>`:
+"*
+"*     qn qnlib/warnings.qn
+"*
+"* Every example lives in a method that is defined but never called, so the warnings
+"* are emitted when the class is compiled while nothing actually runs. The last few are
+"* CORRECT on purpose — they demonstrate cases that must stay silent.
+
+Warnings <- {
+    "* --- diagnostics (each should warn) ---
+
+    "* unknown type: `Wibble` is not a defined class.
+    unknownType -> { var a: Wibble = nil; a };
+
+    "* type mismatch (declaration): a String where an Integer is declared.
+    declMismatch -> { var n: Integer = 'hello'; n };
+
+    "* type mismatch (reassignment): assigning nil to a non-nullable Integer.
+    reassignMismatch -> { var m: Integer = 5; m = nil; m };
+
+    "* type mismatch (return): declared `^Integer`, returns a String.
+    returnMismatch -> { |^Integer| 'nope' };
+
+    "* compile-time MNU: a sealed stdlib class can't answer `nopeMethod`.
+    methodNotUnderstood -> { var r: NumberRange = (1..5); r.nopeMethod };
+
+    "* nil-misuse (method send): `abs` sent to a possibly-nil receiver.
+    nilSend -> { |x: Integer?| x.abs };
+
+    "* nil-misuse (binary op): `+` dereferences a possibly-nil left operand.
+    nilBinop -> { |x: Integer?| x + 1 };
+
+    "* --- these are CORRECT and must emit NO warning ---
+
+    "* numeric promotion: the Integer literal 1 becomes the Double 1.0 (no warning).
+    promotes -> { var d: Double = 1; d };
+
+    "* narrowing: the `.defined?` guard proves `x` non-nil, so the use is fine.
+    narrowsWithGuard -> { |x: Integer?| x.defined?.if:{ x + 1 } else:{ 0 } };
+
+    "* narrowing: an early-return guard leaves `x` non-nil for the rest of the body.
+    narrowsWithDivergence -> { |x: Integer?| x.defined?.else:{ ^^0 }; x + 1 };
+
+    "* narrowing: `!= nil` and `&&` short-circuit narrow too.
+    narrowsWithComparison -> { |x: Integer?| (x != nil).if:{ x + 1 } else:{ 0 } };
+    narrowsWithAnd -> { |x: Integer?| x.defined? && (x + 1) };
+};
+
+'Defined Warnings — see the diagnostics printed above.'.print

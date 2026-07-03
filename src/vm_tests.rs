@@ -1989,7 +1989,10 @@ fn type_warnings_route_through_the_capture_sink() {
         Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
     arena.mutate_root(|_mc, vm| {
         vm.output.capture = true;
-        vm.report_type_warnings(&["unknown type `Widget`".to_string()]);
+        vm.report_type_warnings(&[crate::compiler::Diagnostic {
+            message: "unknown type `Widget`".to_string(),
+            span: None,
+        }]);
         let chunks = vm.take_program_output();
         assert_eq!(chunks.len(), 1, "expected one captured chunk");
         assert_eq!(chunks[0].stream, StdStream::Err);

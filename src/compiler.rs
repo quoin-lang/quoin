@@ -300,6 +300,14 @@ struct ClassCtx {
     sealed: bool,
 }
 
+/// A non-fatal type diagnostic: the message plus the source span it points at, for `path:line:col`
+/// rendering (Phase 4). `span` is `None` when a check can't attribute a precise location.
+#[derive(Clone, Debug)]
+pub struct Diagnostic {
+    pub message: String,
+    pub span: Option<SourceInfo>,
+}
+
 /// Unary methods safe to send to `nil` — they don't dereference the receiver, so a possibly-nil
 /// receiver isn't flagged for these (Phase 3c nil-misuse check).
 const NIL_SAFE_SELECTORS: &[&str] = &["defined?", "s", "pp", "class", "hash"];
@@ -434,7 +442,7 @@ pub struct Compiler {
     class_table: ClassTable,
     /// Non-fatal type diagnostics (e.g. `unknown type Foo`) collected during compilation.
     /// Surfaced by the caller; never blocks lowering (gradual best-effort).
-    diagnostics: Vec<String>,
+    diagnostics: Vec<Diagnostic>,
     /// Declared return types of the block(s) currently being compiled (`|args ^T|`), innermost
     /// last. A `^`/`^^` return or a block's tail expression is checked (and numeric literals
     /// promoted) against the top entry; `None` = no declared return → not checked. Phase 3a.
@@ -640,8 +648,16 @@ impl Compiler {
     /// Resolve a type-annotation name to a `Type`, flagging an unknown user class with a
     /// non-fatal `unknown type Foo` diagnostic (Phase 2). Resolution never fails: an unknown
     /// name still yields `Instance(name)` so lowering proceeds (gradual best-effort).
-    fn resolve_annotation(&mut self, name: &str) -> Type {
-        let ty = Type::from_annotation_name(name);
+    /// Push a non-fatal type diagnostic, pointing at `span` when one is available (Phase 4).
+    fn warn(&mut self, message: String, span: Option<&SourceInfo>) {
+        self.diagnostics.push(Diagnostic {
+            message,
+            span: span.cloned(),
+        });
+    }
+
+    fn resolve_annotation(&mut self, ident: &IdentifierNode) -> Type {
+        let ty = Type::from_annotation_name(&ident.name);
         // `T?` is unknown iff its base `T` is unknown.
         let base = match &ty {
             Type::Nullable(inner) => inner.as_ref(),
@@ -649,7 +665,10 @@ impl Compiler {
         };
         if let Type::Instance(class) = base {
             if !self.seen_types.contains(class) {
-                self.diagnostics.push(format!("unknown type `{}`", class));
+                self.warn(
+                    format!("unknown type `{}`", class),
+                    ident.source_info.as_ref(),
+                );
             }
         }
         ty
@@ -697,11 +716,14 @@ impl Compiler {
                 Some(false) => {}
             }
         }
-        self.diagnostics.push(format!(
-            "type mismatch: expected `{}`, found `{}`",
-            expected.name(),
-            actual.name()
-        ));
+        self.warn(
+            format!(
+                "type mismatch: expected `{}`, found `{}`",
+                expected.name(),
+                actual.name()
+            ),
+            node.source_info.as_ref(),
+        );
     }
 
     /// Compile a returned value (`^expr` / `^^expr`), checked and promoted against the innermost
@@ -736,8 +758,10 @@ impl Compiler {
             return;
         };
         if self.class_table.responds_to(&class, &selector) == Some(false) {
-            self.diagnostics
-                .push(format!("`{class}` does not respond to `{selector}`"));
+            self.warn(
+                format!("`{class}` does not respond to `{selector}`"),
+                call.subject.as_deref().and_then(|n| n.source_info.as_ref()),
+            );
         }
     }
 
@@ -944,8 +968,10 @@ impl Compiler {
                 )
             })
         };
-        self.diagnostics
-            .push(format!("receiver of `{selector}` may be nil"));
+        self.warn(
+            format!("receiver of `{selector}` may be nil"),
+            subject.source_info.as_ref(),
+        );
     }
 
     /// Phase 3c: warn on a nil-dereferencing binary op whose left operand is confidently nullable
@@ -956,10 +982,13 @@ impl Compiler {
             return;
         }
         if matches!(self.static_type(&op.left), Type::Nullable(_)) {
-            self.diagnostics.push(format!(
-                "left operand of `{}` may be nil",
-                Self::binop_symbol(&op.operator)
-            ));
+            self.warn(
+                format!(
+                    "left operand of `{}` may be nil",
+                    Self::binop_symbol(&op.operator)
+                ),
+                op.left.source_info.as_ref(),
+            );
         }
     }
 
@@ -1010,7 +1039,7 @@ impl Compiler {
     }
 
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
-    pub fn diagnostics(&self) -> &[String] {
+    pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
 
@@ -1102,7 +1131,7 @@ impl Compiler {
                     if let Ok(selector) = self.reconstruct_selector(&m.signature) {
                         methods.insert(selector.clone());
                         if let Some(rt) = &m.block.return_type {
-                            returns.insert(selector, self.resolve_annotation(&rt.name));
+                            returns.insert(selector, self.resolve_annotation(rt));
                         }
                     }
                 }
@@ -1110,7 +1139,7 @@ impl Compiler {
                     if let Ok(selector) = self.reconstruct_selector(&m.signature) {
                         methods.insert(selector.clone());
                         if let Some(rt) = &m.block.return_type {
-                            returns.insert(selector, self.resolve_annotation(&rt.name));
+                            returns.insert(selector, self.resolve_annotation(rt));
                         }
                     }
                 }
@@ -1662,10 +1691,7 @@ impl Compiler {
 
         // Phase 3a: an annotated `var x: T = expr` resolves `T` (flagging an unknown type) and
         // checks/promotes the initializer against it; un-annotated decls compile plainly.
-        let annotated = decl
-            .type_hint
-            .as_ref()
-            .map(|h| self.resolve_annotation(&h.name));
+        let annotated = decl.type_hint.as_ref().map(|h| self.resolve_annotation(h));
         match &annotated {
             Some(expected) => self.compile_expecting(&decl.rvalue, expected, bytecode)?,
             None => self.compile_node(&decl.rvalue, bytecode)?,
@@ -2477,7 +2503,7 @@ impl Compiler {
         // default above is only the runtime dispatch signature, not a static type.
         for arg in &block.arguments {
             if let Some(hint) = &arg.type_hint {
-                let ty = self.resolve_annotation(&hint.name);
+                let ty = self.resolve_annotation(hint);
                 self.record_local_type(&arg.identifier.name, ty);
             }
         }
@@ -2670,7 +2696,7 @@ mod tests {
             };
             let mut c = Compiler::new();
             c.compile_program(p).unwrap();
-            c.diagnostics().to_vec()
+            c.diagnostics().iter().map(|d| d.message.clone()).collect()
         }
 
         // Builtins resolve silently — in a return type and in a param type.
@@ -2702,7 +2728,7 @@ mod tests {
             };
             let mut c = Compiler::new();
             c.compile_program(p).unwrap();
-            c.diagnostics().to_vec()
+            c.diagnostics().iter().map(|d| d.message.clone()).collect()
         }
 
         // A confident return mismatch is flagged (non-fatal).
@@ -2735,7 +2761,7 @@ mod tests {
             };
             let mut c = Compiler::new();
             c.compile_program(p).unwrap();
-            c.diagnostics().to_vec()
+            c.diagnostics().iter().map(|d| d.message.clone()).collect()
         }
 
         assert!(diags("var x: Integer = 'hi'")[0].contains("expected `Integer`, found `String`"));
@@ -2758,7 +2784,7 @@ mod tests {
             };
             let mut c = Compiler::new();
             c.compile_program(p).unwrap();
-            c.diagnostics().to_vec()
+            c.diagnostics().iter().map(|d| d.message.clone()).collect()
         }
 
         // `Animal <- Dog` makes Dog a subtype of Animal — a Dog where an Animal is wanted is fine.
@@ -2782,7 +2808,7 @@ mod tests {
             };
             let mut c = Compiler::new();
             c.compile_program(p).unwrap();
-            c.diagnostics().to_vec()
+            c.diagnostics().iter().map(|d| d.message.clone()).collect()
         }
 
         // Reassigning an *annotated* var to a wrong type is flagged.
@@ -2844,8 +2870,8 @@ mod tests {
             c.compile_program(p).unwrap();
             c.diagnostics()
                 .iter()
-                .filter(|m| m.contains("type mismatch"))
-                .cloned()
+                .filter(|d| d.message.contains("type mismatch"))
+                .map(|d| d.message.clone())
                 .collect()
         }
 
@@ -2879,8 +2905,8 @@ mod tests {
             c.compile_program(p).unwrap();
             c.diagnostics()
                 .iter()
-                .filter(|m| m.contains("may be nil"))
-                .cloned()
+                .filter(|d| d.message.contains("may be nil"))
+                .map(|d| d.message.clone())
                 .collect()
         }
 
@@ -2906,8 +2932,8 @@ mod tests {
             c.compile_program(p).unwrap();
             c.diagnostics()
                 .iter()
-                .filter(|m| m.contains("may be nil"))
-                .cloned()
+                .filter(|d| d.message.contains("may be nil"))
+                .map(|d| d.message.clone())
                 .collect()
         }
 
