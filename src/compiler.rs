@@ -1,10 +1,11 @@
+use crate::class_table::{ClassSig, ClassTable};
 use crate::instruction::{
     Constant, Instruction, IntBinKind, SharedBytecode, SharedSourceMap, StaticBlock,
 };
 use crate::parser::ast::{
-    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, DeclKind, DeclarationNode,
-    IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode, Node, NodeValue,
-    ProgramNode, UnaryOperatorNode, UnaryOperatorType,
+    AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, ClassDefinitionNode,
+    DeclKind, DeclarationNode, IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode,
+    Node, NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType,
 };
 use crate::symbol::Symbol;
 use crate::types::{SeenTypes, Type};
@@ -334,6 +335,9 @@ pub struct Compiler {
     /// this program's own defs (seeded by `prescan_class_defs`). Shared across units so a
     /// later unit sees earlier ones' classes; consulted by `resolve_annotation` (Phase 2).
     seen_types: SeenTypes,
+    /// Shared class-signature table for the cross-class checks (Phase 3b) — parallel to
+    /// `seen_types`, populated from the current unit's AST and threaded across units.
+    class_table: ClassTable,
     /// Non-fatal type diagnostics (e.g. `unknown type Foo`) collected during compilation.
     /// Surfaced by the caller; never blocks lowering (gradual best-effort).
     diagnostics: Vec<String>,
@@ -358,6 +362,7 @@ impl Compiler {
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
+            class_table: ClassTable::new(),
             diagnostics: Vec::new(),
             return_type_stack: Vec::new(),
         }
@@ -377,6 +382,7 @@ impl Compiler {
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
+            class_table: ClassTable::new(),
             diagnostics: Vec::new(),
             return_type_stack: Vec::new(),
         }
@@ -493,6 +499,8 @@ impl Compiler {
         for expr in &program.expressions {
             if let NodeValue::ClassDefinition(cd) = &expr.value {
                 self.seen_types.insert(&cd.identifier.name);
+                self.class_table
+                    .insert(&cd.identifier.name, self.class_sig_from_def(cd));
             }
         }
     }
@@ -546,13 +554,22 @@ impl Compiler {
             _ => {}
         }
         let actual = self.static_type(node);
-        if !actual.compatible_with(expected) {
-            self.diagnostics.push(format!(
-                "type mismatch: expected `{}`, found `{}`",
-                expected.name(),
-                actual.name()
-            ));
+        if actual.compatible_with(expected) {
+            return;
         }
+        // Instance-vs-Instance: the class table may prove a subtype relation that structural
+        // `compatible_with` (exact match only) can't. `None` (unknown hierarchy) stays silent.
+        if let (Type::Instance(sub), Type::Instance(sup)) = (&actual, expected) {
+            match self.class_table.is_subtype(sub, sup) {
+                Some(true) | None => return,
+                Some(false) => {}
+            }
+        }
+        self.diagnostics.push(format!(
+            "type mismatch: expected `{}`, found `{}`",
+            expected.name(),
+            actual.name()
+        ));
     }
 
     /// Compile a returned value (`^expr` / `^^expr`), checked and promoted against the innermost
@@ -578,6 +595,11 @@ impl Compiler {
     /// earlier-compiled units — the prelude, `use`d modules — defined.
     pub fn set_seen_types(&mut self, seen: SeenTypes) {
         self.seen_types = seen;
+    }
+
+    /// Use a shared class-signature table (threaded alongside `seen_types`).
+    pub fn set_class_table(&mut self, table: ClassTable) {
+        self.class_table = table;
     }
 
     /// Statically infer an expression's type for devirtualization. Conservative: only
@@ -695,6 +717,66 @@ impl Compiler {
             && call.arguments.expressions.is_empty()
             && call.arguments.signature.identifiers.len() == 1
             && call.arguments.signature.identifiers[0].name == "sealed!"
+    }
+
+    /// The class name in a `.mix:X` self-send (a mixin application), if this call is one.
+    fn mixin_target(call: &MethodCallNode) -> Option<&str> {
+        let is_self = match &call.subject {
+            None => true,
+            Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
+        };
+        if !is_self
+            || call.arguments.signature.identifiers.len() != 1
+            || call.arguments.signature.identifiers[0].name != "mix"
+            || call.arguments.expressions.len() != 1
+        {
+            return None;
+        }
+        match &call.arguments.expressions[0].value {
+            NodeValue::Identifier(id) => Some(id.name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Build a `ClassSig` from a class definition's AST — the current-unit source for the class
+    /// table (Phase 3b). Selectors come from the same `reconstruct_selector` as `collect_class_ctx`,
+    /// so the method set can't drift from it. `has_catch_all` is left `false` here (only MNU uses
+    /// it, and MNU consults VM-sourced sigs); the parent comes from the def, mixins from `.mix:`.
+    fn class_sig_from_def(&self, class_def: &ClassDefinitionNode) -> ClassSig {
+        let mut own_selectors = HashSet::new();
+        let mut mixins = Vec::new();
+        let mut sealed = false;
+        for stmt in &class_def.block.statements {
+            match &stmt.value {
+                NodeValue::MethodDefinition(m) => {
+                    if let Ok(sel) = self.reconstruct_selector(&m.signature) {
+                        own_selectors.insert(Arc::from(sel.as_str()));
+                    }
+                }
+                NodeValue::MethodExtension(m) => {
+                    if let Ok(sel) = self.reconstruct_selector(&m.signature) {
+                        own_selectors.insert(Arc::from(sel.as_str()));
+                    }
+                }
+                NodeValue::MethodCall(call) if Self::is_sealed_marker(call) => sealed = true,
+                NodeValue::MethodCall(call) => {
+                    if let Some(mixin) = Self::mixin_target(call) {
+                        mixins.push(Arc::from(mixin));
+                    }
+                }
+                _ => {}
+            }
+        }
+        ClassSig {
+            parent: class_def
+                .parent_identifier
+                .as_ref()
+                .map(|p| Arc::from(p.name.as_str())),
+            mixins,
+            own_selectors,
+            sealed,
+            has_catch_all: false,
+        }
     }
 
     /// Static result type of a binary operator. Comparison/equality operators yield `Bool`
@@ -925,6 +1007,8 @@ impl Compiler {
                 // Record the class as known as soon as it's defined — covers classes in nested
                 // blocks the top-level pre-scan can't reach (a def-before-use in any scope).
                 self.seen_types.insert(&name.name);
+                self.class_table
+                    .insert(&name.name, self.class_sig_from_def(class_def));
                 let parent_name = class_def
                     .parent_identifier
                     .as_ref()
@@ -2172,6 +2256,30 @@ mod tests {
         assert!(diags("var x: Integer? = nil").is_empty());
         // A typed decl now resolves its annotation, so an unknown type is flagged.
         assert!(diags("var x: Nope = 5")[0].contains("unknown type `Nope`"));
+    }
+
+    #[test]
+    fn checker_subtyping_via_class_table() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics().to_vec()
+        }
+
+        // `Animal <- Dog` makes Dog a subtype of Animal — a Dog where an Animal is wanted is fine.
+        assert!(
+            diags("Animal <- { }; Animal <- Dog <- { }; var d: Dog = Dog.new; var a: Animal = d")
+                .is_empty()
+        );
+        // Unrelated classes in the same hierarchy still mismatch.
+        assert!(
+            diags("Animal <- { }; Animal <- Dog <- { }; Animal <- Cat <- { }; var d: Dog = Dog.new; var c: Cat = d")[0]
+                .contains("expected `Cat`, found `Dog`")
+        );
     }
 
     #[test]

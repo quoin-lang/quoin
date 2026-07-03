@@ -236,6 +236,7 @@ where
         // Share the session's class accumulator so a class defined on an earlier line (and the
         // prelude's classes) are known here, then surface any type warnings for this line.
         compiler.set_seen_types(vm.options.seen_types.clone());
+        compiler.set_class_table(vm.options.class_table.clone());
         let sb = match compiler.compile_program(p) {
             Ok(sb) => sb,
             Err(e) => return Setup::CompileErr(format!("Compile error: {e}")),

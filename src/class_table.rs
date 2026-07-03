@@ -36,7 +36,7 @@ pub struct ClassSig {
 
 /// A shared, mutable map `class name → ClassSig`, threaded through every `Compiler` a run spawns
 /// (like `SeenTypes`) so a unit sees the classes earlier-compiled units defined.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct ClassTable(Rc<RefCell<HashMap<Arc<str>, ClassSig>>>);
 
 impl ClassTable {

@@ -108,6 +108,10 @@ pub struct VmOptions {
     /// unit sees the classes earlier-compiled units defined. Not a runtime knob — it rides
     /// here because `VmOptions` is the value already cloned into every VM.
     pub seen_types: crate::types::SeenTypes,
+    /// Shared compile-time class-signature table (Phase 3b) — parallel to `seen_types`, threaded
+    /// the same way. Carries parent/mixins/method-set/sealed for cross-class checks (subtyping,
+    /// MNU).
+    pub class_table: crate::class_table::ClassTable,
 }
 
 // The scheduler / task / guest-fiber subsystem lives in `vm_scheduler.rs` (still

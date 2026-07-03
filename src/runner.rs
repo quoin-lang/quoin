@@ -332,6 +332,7 @@ impl VmRunnerOptions {
                 // The single shared class-name accumulator for this run — cloned (Rc) into
                 // every VM and top-level compile, so units see each other's classes.
                 seen_types: crate::types::SeenTypes::with_builtins(),
+                class_table: crate::class_table::ClassTable::new(),
             },
             break_on_throw,
             break_on_uncaught,
@@ -376,6 +377,7 @@ pub(crate) fn install_dap_program(
         vm.output.capture = true;
         let mut compiler = Compiler::new();
         compiler.set_seen_types(vm.options.seen_types.clone());
+        compiler.set_class_table(vm.options.class_table.clone());
         let sb = match compiler.compile_program(p) {
             Ok(sb) => sb,
             Err(e) => {
@@ -670,6 +672,7 @@ impl VmRunner {
             };
             let mut compiler = Compiler::new();
             compiler.set_seen_types(vm.options.seen_types.clone());
+            compiler.set_class_table(vm.options.class_table.clone());
             let sb = match compiler.compile_program(p) {
                 Ok(sb) => sb,
                 Err(e) => {
@@ -864,6 +867,7 @@ impl VmRunner {
 
                 let mut compiler = Compiler::new();
                 compiler.set_seen_types(vm.options.seen_types.clone());
+                compiler.set_class_table(vm.options.class_table.clone());
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {
@@ -1113,6 +1117,7 @@ impl VmRunner {
 
                 let mut compiler = Compiler::new();
                 compiler.set_seen_types(vm.options.seen_types.clone());
+                compiler.set_class_table(vm.options.class_table.clone());
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {
