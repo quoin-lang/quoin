@@ -2795,6 +2795,16 @@ impl<'gc> VmState<'gc> {
     /// `run_dispatch` once per frame-entry), so `inst` borrows the caller's local — not
     /// `self` — leaving handlers full `&mut self`. Callers guarantee `self.frames` is
     /// non-empty and no cancellation is pending.
+    ///
+    /// `ip` is hoisted into a local (Slice b2, the ip-register hoist on top of b1's flat
+    /// loop): fall-through arms advance it as `ip += 1` in a register, instead of a
+    /// bounds-checked `self.frames[frame_idx].ip += 1` per instruction, and the guarded
+    /// write-back at the tail syncs it to the frame. **Invariant:** an arm that advances `ip`
+    /// and then leaves via an early `return` (or a value-return like `ExecuteBlockWithSelf`'s
+    /// `return if …`), rather than falling through, MUST sync it itself with
+    /// `self.frames[frame_idx].ip = ip` — the tail write-back only runs on fall-through. A
+    /// violation is never silent: it surfaces immediately as a stack imbalance under the
+    /// `.qn` suite.
     #[allow(no_gc_across_yield)]
     pub(crate) fn dispatch_one(
         &mut self,
@@ -2802,7 +2812,9 @@ impl<'gc> VmState<'gc> {
         bytecode: &SharedBytecode,
     ) -> Result<VmStatus<'gc>, QuoinError> {
         let frame_idx = self.frames.len() - 1;
-        let ip = self.frames[frame_idx].ip;
+        // Hoisted instruction pointer (Slice b2): read once, advanced in a register by the
+        // arms, synced back at the tail. See the invariant on this fn.
+        let mut ip = self.frames[frame_idx].ip;
         let inst = match bytecode.0.get(ip) {
             Some(i) => i,
             None => {
@@ -2832,13 +2844,13 @@ impl<'gc> VmState<'gc> {
                 let frame = &self.frames[frame_idx];
                 let val = EnvFrame::get(frame.env, name).unwrap_or_else(|| self.new_nil(mc));
                 self.push(val);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::DefineLocal(name) => {
                 let name = *name;
                 let val = self.pop()?;
                 self.store_define_local(mc, frame_idx, name, val)?;
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             // Store-and-keep: store the top of stack without popping it (fused `Dup;
             // DefineLocal`, an assignment used as an expression).
@@ -2846,19 +2858,19 @@ impl<'gc> VmState<'gc> {
                 let name = *name;
                 let val = self.peek()?;
                 self.store_define_local(mc, frame_idx, name, val)?;
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::StoreLocal(name) => {
                 let name = *name;
                 let val = self.pop()?;
                 self.store_set_local(mc, frame_idx, name, val)?;
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::StoreLocalKeep(name) => {
                 let name = *name;
                 let val = self.peek()?;
                 self.store_set_local(mc, frame_idx, name, val)?;
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::LoadGlobal(name) => {
                 let val = self
@@ -2868,7 +2880,7 @@ impl<'gc> VmState<'gc> {
                     .copied()
                     .unwrap_or_else(|| self.new_nil(mc));
                 self.push(val);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::StoreGlobal(name, is_define) => {
                 let val = self.pop()?;
@@ -2901,21 +2913,21 @@ impl<'gc> VmState<'gc> {
                     }
                 }
                 self.globals.borrow_mut(mc).insert(name.clone(), val);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::Push(constant) => {
                 let val = self.materialize_constant(mc, constant);
                 self.push(val);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::Pop => {
                 self.pop()?;
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::Dup => {
                 let val = self.peek()?;
                 self.push(val);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             // Devirtualized Integer operators (Slice 2a/2f). Fast path when both operands are
             // `Value::Int`: compute directly and push. Semantics match Integer's native ops
@@ -2926,7 +2938,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntAdd => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Int(a + b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("+:"), 1);
                 }
@@ -2934,7 +2946,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntSub => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Int(a - b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("-:"), 1);
                 }
@@ -2942,7 +2954,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntMul => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Int(a * b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("*:"), 1);
                 }
@@ -2953,7 +2965,7 @@ impl<'gc> VmState<'gc> {
                         return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
                     }
                     self.push(Value::Int(a / b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("/:"), 1);
                 }
@@ -2964,7 +2976,7 @@ impl<'gc> VmState<'gc> {
                         return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
                     }
                     self.push(Value::Int(a % b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("%:"), 1);
                 }
@@ -2972,7 +2984,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntLt => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Bool(a < b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("<:"), 1);
                 }
@@ -2980,7 +2992,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntLe => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Bool(a <= b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("<=:"), 1);
                 }
@@ -2988,7 +3000,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntGt => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Bool(a > b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern(">:"), 1);
                 }
@@ -2996,7 +3008,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntGe => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Bool(a >= b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern(">=:"), 1);
                 }
@@ -3004,7 +3016,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntEq => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Bool(a == b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("==:"), 1);
                 }
@@ -3012,7 +3024,7 @@ impl<'gc> VmState<'gc> {
             Instruction::IntNe => {
                 if let Some((a, b)) = self.take_two_ints() {
                     self.push(Value::Bool(a != b));
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("!=:"), 1);
                 }
@@ -3029,7 +3041,7 @@ impl<'gc> VmState<'gc> {
                 if let (Some(Value::Int(x)), Some(Value::Int(y))) = (va, vb) {
                     let res = Self::int_bin_compute(kind, x, y)?;
                     self.push(res);
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     let va = va.unwrap_or_else(|| self.new_nil(mc));
                     let vb = vb.unwrap_or_else(|| self.new_nil(mc));
@@ -3047,7 +3059,7 @@ impl<'gc> VmState<'gc> {
                 if let (Some(Value::Int(x)), Some(y)) = (va, c.as_int()) {
                     let res = Self::int_bin_compute(kind, x, y)?;
                     self.push(res);
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     let va = va.unwrap_or_else(|| self.new_nil(mc));
                     self.push(va);
@@ -3075,7 +3087,8 @@ impl<'gc> VmState<'gc> {
                     if let Ok(elem) = got {
                         self.stack.truncate(n - 2);
                         self.push(elem.unwrap_or(Value::Nil));
-                        self.frames[frame_idx].ip += 1;
+                        // b2: early-return arm — sync the hoisted ip (see dispatch_one invariant).
+                        self.frames[frame_idx].ip = ip + 1;
                         return Ok(VmStatus::Running);
                     }
                 }
@@ -3108,7 +3121,8 @@ impl<'gc> VmState<'gc> {
                         self.stack.truncate(n - 3);
                         inner?; // propagate an IndexError (out-of-bounds write)
                         self.push(receiver); // `at:put:` evaluates to the receiver
-                        self.frames[frame_idx].ip += 1;
+                        // b2: early-return arm — sync the hoisted ip (see dispatch_one invariant).
+                        self.frames[frame_idx].ip = ip + 1;
                         return Ok(VmStatus::Running);
                     }
                 }
@@ -3124,7 +3138,7 @@ impl<'gc> VmState<'gc> {
                 if res.is_ok() {
                     self.stack.truncate(n - 2);
                     self.push(receiver); // `add:` evaluates to the receiver
-                    self.frames[frame_idx].ip += 1;
+                    self.frames[frame_idx].ip = ip + 1;
                     return Ok(VmStatus::Running);
                 }
                 return self.exec_send(mc, frame_idx, Symbol::intern("add:"), 1);
@@ -3259,27 +3273,24 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::Jump(offset) => {
                 let offset = *offset;
-                let frame = &mut self.frames[frame_idx];
-                frame.ip = (frame.ip as isize + offset) as usize;
+                ip = (ip as isize + offset) as usize;
             }
             Instruction::IfJump(offset) => {
                 let offset = *offset;
                 let cond = self.pop()?;
-                let frame = &mut self.frames[frame_idx];
                 if cond.is_truthy() {
-                    frame.ip = (frame.ip as isize + offset) as usize;
+                    ip = (ip as isize + offset) as usize;
                 } else {
-                    frame.ip += 1;
+                    ip += 1;
                 }
             }
             Instruction::ElseJump(offset) => {
                 let offset = *offset;
                 let cond = self.pop()?;
-                let frame = &mut self.frames[frame_idx];
                 if !cond.is_truthy() {
-                    frame.ip = (frame.ip as isize + offset) as usize;
+                    ip = (ip as isize + offset) as usize;
                 } else {
-                    frame.ip += 1;
+                    ip += 1;
                 }
             }
             Instruction::BranchIfNotBool(offset) => {
@@ -3288,11 +3299,10 @@ impl<'gc> VmState<'gc> {
                 // send), which needs it on the stack; a Bool falls through to the inlined
                 // branch, which consumes it.
                 let is_bool = matches!(self.stack.last(), Some(Value::Bool(_)));
-                let frame = &mut self.frames[frame_idx];
                 if is_bool {
-                    frame.ip += 1;
+                    ip += 1;
                 } else {
-                    frame.ip = (frame.ip as isize + offset) as usize;
+                    ip = (ip as isize + offset) as usize;
                 }
             }
             Instruction::NewList(n) => {
@@ -3304,7 +3314,7 @@ impl<'gc> VmState<'gc> {
                 elements.reverse();
                 let list = self.new_list(mc, elements);
                 self.push(list);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::NewMap(n) => {
                 let n = *n;
@@ -3332,7 +3342,7 @@ impl<'gc> VmState<'gc> {
                 }
                 let map_val = self.new_map(mc, map);
                 self.push(map_val);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::NewSet(n) => {
                 let n = *n;
@@ -3348,7 +3358,7 @@ impl<'gc> VmState<'gc> {
                     self.set_add(mc, set_val, v)?;
                 }
                 self.push(set_val);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::NewRegex => {
                 let pattern_val = self.pop()?;
@@ -3365,7 +3375,7 @@ impl<'gc> VmState<'gc> {
                         msg: format!("Regex pattern must be a String, got: {:?}", pattern_val),
                     });
                 }
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::DefineClass {
                 name,
@@ -3439,7 +3449,7 @@ impl<'gc> VmState<'gc> {
                 // Hand the name to the upcoming ExecuteBlockWithSelf (the body).
                 self.pending_class_def = Some(name.clone());
                 self.push(Value::Class(class_obj));
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::ExecuteBlockWithSelf => {
                 let block_val = self.pop()?;
@@ -3452,7 +3462,7 @@ impl<'gc> VmState<'gc> {
                 return if let Value::Object(obj) = block_val
                     && let ObjectPayload::Block(block) = &obj.borrow().payload
                 {
-                    self.frames[frame_idx].ip += 1;
+                    self.frames[frame_idx].ip = ip + 1;
                     self.start_block_as_method(mc, *block, self_val, Vec::new(), None, false);
                     // A new class definition (DefineClass ran just before) marks its
                     // body frame so a failed deferred mixin check unregisters the class.
@@ -3522,7 +3532,7 @@ impl<'gc> VmState<'gc> {
                     // The class's method table just changed — drop memoized resolutions.
                     self.invalidate_method_cache();
                     self.push(method_obj);
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return Err(QuoinError::TypeError {
                         expected: "Block".to_string(),
@@ -3594,7 +3604,7 @@ impl<'gc> VmState<'gc> {
                     // The class's method table just changed — drop memoized resolutions.
                     self.invalidate_method_cache();
                     self.push(method_obj);
-                    self.frames[frame_idx].ip += 1;
+                    ip += 1;
                 } else {
                     return Err(QuoinError::TypeError {
                         expected: "Block".to_string(),
@@ -3607,17 +3617,17 @@ impl<'gc> VmState<'gc> {
             Instruction::LoadField(name) => {
                 let val = self.load_field(mc, frame_idx, name);
                 self.push(val);
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::StoreField(name) => {
                 let val = self.pop()?;
                 self.store_field_value(mc, frame_idx, name, val)?;
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::StoreFieldKeep(name) => {
                 let val = self.peek()?;
                 self.store_field_value(mc, frame_idx, name, val)?;
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
             }
             Instruction::Use {
                 package,
@@ -3630,7 +3640,7 @@ impl<'gc> VmState<'gc> {
                 let package = package.clone();
                 let path = path.clone();
                 let glob = *glob;
-                self.frames[frame_idx].ip += 1;
+                ip += 1;
                 if glob {
                     load_glob(self, mc, package.as_deref(), &path)?;
                 } else {
@@ -3643,6 +3653,12 @@ impl<'gc> VmState<'gc> {
             }
         }
 
+        // Sync the hoisted `ip` (Slice b2) back to the current frame on fall-through. Guarded
+        // so a pop-arm (a non-local return that shrank the frame stack) doesn't index a popped
+        // frame; early-returning arms that advanced `ip` sync it themselves (see the invariant).
+        if frame_idx < self.frames.len() {
+            self.frames[frame_idx].ip = ip;
+        }
         Ok(VmStatus::Running)
     }
 }
