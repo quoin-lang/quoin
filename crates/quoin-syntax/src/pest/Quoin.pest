@@ -193,13 +193,11 @@ definition_expr = {
 class_def_2 = { nsvarident ~ op_def ~ nsvarident ~ op_def ~ block }
 class_def   = { nsvarident ~ op_def ~ block }
 const_def   = { nsvarident ~ op_def ~ expr }
-// Optional return type: `selector -> Integer { … }` (Rust-style, between the arrow and
-// the body block). Drives return-type-aware devirtualization (docs/TYPED_DEVIRT_ARCH.md
-// Slice 2b-A). `ret_type?` matches an ident only when one precedes the `{`, so the bare
-// `selector -> { … }` form is unchanged.
-method_def  = { selector ~ op_meth ~ ret_type? ~ block }
-method_ext  = { selector ~ "-" ~ "-" ~ ">" ~ ret_type? ~ block }
-ret_type    = { ident }
+// `->` is purely the method arrow; the return type lives in the block header as `^Type`
+// (see `block_ret` below and docs/TYPE_SYSTEM_ARCH.md). This lets a bare block declare its
+// return too, and makes a block's type its header with names stripped.
+method_def  = { selector ~ op_meth ~ block }
+method_ext  = { selector ~ "-" ~ "-" ~ ">" ~ block }
 
 selector = {
     selector_w_args
@@ -253,9 +251,12 @@ block_no_decls      = { "{" ~ (stmt ~ ";"?)* ~ "}" }
 
 op_dash = { "-" }
 block_decls = {
-    "|" ~ block_arg* ~ block? ~ op_dash ~ block_decl* ~ "|"
-  | "|" ~ block_arg* ~ block? ~ "|"
+    "|" ~ block_arg* ~ block_ret? ~ block? ~ op_dash ~ block_decl* ~ "|"
+  | "|" ~ block_arg* ~ block_ret? ~ block? ~ "|"
 }
+// The block's return type: `^Type`, after the args. Single `^` (the block's own return —
+// `^^` is the non-local return, a control-flow marker, never a type).
+block_ret = { "^" ~ ident }
 
 block_arg = {
     block_arg_ignored

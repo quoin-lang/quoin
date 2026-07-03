@@ -315,11 +315,6 @@ impl<'a> HighlightParser<'a> {
                 for id in &md.signature.identifiers {
                     s.extend(single_span_ident(id, HighlightType::MethodSignature, depth));
                 }
-                // The `-> Type` return-type annotation (Slice 2b-A): color the type the same
-                // way as a typed param / declaration hint, via `highlight_identifier`.
-                if let Some(rt) = &md.return_type {
-                    s.extend(self.highlight_identifier(rt, depth));
-                }
                 s.extend(self.highlight_block(&md.block, depth));
                 s
             }
@@ -327,9 +322,6 @@ impl<'a> HighlightParser<'a> {
                 let mut s = Vec::new();
                 for id in &me.signature.identifiers {
                     s.extend(single_span_ident(id, HighlightType::MethodSignature, depth));
-                }
-                if let Some(rt) = &me.return_type {
-                    s.extend(self.highlight_identifier(rt, depth));
                 }
                 s.extend(self.highlight_block(&me.block, depth));
                 s
@@ -574,6 +566,11 @@ impl<'a> HighlightParser<'a> {
             if let Some(type_hint) = &arg.type_hint {
                 spans.extend(self.highlight_identifier(type_hint, depth));
             }
+        }
+
+        // The `^Type` return-type annotation in the header, coloured like a param type.
+        if let Some(rt) = &block.return_type {
+            spans.extend(self.highlight_identifier(rt, depth));
         }
 
         if let Some(decl_block) = &block.decl_block {
@@ -841,20 +838,21 @@ mod resilient_tests {
 
     #[test]
     fn method_return_type_is_highlighted_like_a_param_type() {
-        // `-> Type` (Slice 2b-A) must color the return type the same as a `|x: Type|` param.
-        let src = "Foo <- { bar -> Integer { |n: Integer| n } }";
+        // The `^Type` return type in the header must color the same as a `|x: Type|` param
+        // (the param comes first in the header, the return `^Type` second).
+        let src = "Foo <- { bar -> { |n: Integer ^Integer| n } }";
         let node = crate::try_parse_quoin_string_named(src, "<t>").unwrap();
         let spans = HighlightParser::new(src).highlight_program(&node);
         let occ: Vec<usize> = src.match_indices("Integer").map(|(i, _)| i).collect();
-        assert_eq!(occ.len(), 2, "expected the return type + the param type");
+        assert_eq!(occ.len(), 2, "expected the param type + the return type");
         let htype_at = |pos: usize| {
             spans
                 .iter()
                 .find(|s| s.start == pos && s.end == pos + "Integer".len())
                 .map(|s| s.htype)
         };
-        let ret = htype_at(occ[0]).expect("return-type `Integer` should be highlighted");
-        let param = htype_at(occ[1]).expect("param-type `Integer` should be highlighted");
+        let param = htype_at(occ[0]).expect("param-type `Integer` should be highlighted");
+        let ret = htype_at(occ[1]).expect("return-type `Integer` should be highlighted");
         assert_eq!(ret, param, "return type should highlight like a param type");
     }
 

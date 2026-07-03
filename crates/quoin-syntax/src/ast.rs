@@ -83,6 +83,9 @@ pub struct BinaryOperatorNode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockNode {
     pub arguments: Vec<Arc<BlockArgNode>>,
+    /// Declared return type (`|args ^Integer|`), for return-type-aware devirtualization. On a
+    /// method-body block this is the method's return type (`sel -> { |args ^Integer| … }`).
+    pub return_type: Option<Arc<IdentifierNode>>,
     pub decls: Vec<Arc<BlockDeclNode>>,
     pub decl_block: Option<Arc<BlockNode>>,
     pub statements: Vec<Arc<Node>>,
@@ -186,16 +189,13 @@ pub struct MethodCallNode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDefinitionNode {
     pub signature: Arc<MethodSelectorNode>,
-    /// Optional declared return type (`selector -> Integer { … }`), used for
-    /// return-type-aware devirtualization.
-    pub return_type: Option<Arc<IdentifierNode>>,
+    /// `sel -> { … }`. The return type (if any) lives on `block.return_type` (`|args ^Ret|`).
     pub block: Arc<BlockNode>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodExtensionNode {
     pub signature: Arc<MethodSelectorNode>,
-    pub return_type: Option<Arc<IdentifierNode>>,
     pub block: Arc<BlockNode>,
 }
 

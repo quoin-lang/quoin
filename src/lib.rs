@@ -1,6 +1,7 @@
 #![allow(unknown_lints)]
 
 pub mod ansi_colorizer;
+pub mod class_table;
 pub mod compiler;
 pub mod coverage;
 pub mod dap;
@@ -22,6 +23,7 @@ pub mod runner;
 pub mod runtime;
 pub mod symbol;
 pub mod tuning;
+pub mod types;
 pub mod value;
 pub mod vm;
 pub mod vm_scheduler;

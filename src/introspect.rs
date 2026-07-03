@@ -362,6 +362,75 @@ mod tests {
          Animal <- Dog <- { sound -> { 'woof' } fetch: -> { |item:String| item } }; \
          Spot = Animal.new;";
 
+    /// Anti-drift: the checker's `ClassTable::responds_to` must never say "does not respond" for a
+    /// selector the VM's own dispatch actually resolves. Cross-checks the compile-time table
+    /// (built via `populate_from_vm`) against the runtime dispatch view over a real hierarchy.
+    #[test]
+    fn class_table_never_false_when_dispatch_resolves() {
+        use crate::class_table::{ClassTable, populate_from_vm};
+        check(SRC, |_mc, vm| {
+            let table = ClassTable::new();
+            populate_from_vm(vm, &table);
+            let classes = ["Animal", "Dog", "Object", "String", "Integer"];
+            let selectors = ["sound", "legs", "fetch:", "s", "class", "nope", "zzz:"];
+            for class in classes {
+                let resolves: std::collections::HashSet<String> =
+                    find_selectors(vm, class, "", true).into_iter().collect();
+                for sel in selectors {
+                    if table.responds_to(class, sel) == Some(false) {
+                        assert!(
+                            !resolves.contains(sel),
+                            "{class}.{sel}: checker says no, but dispatch resolves it"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    /// Arg-type checking: a call to a single fully-typed method on a sealed, VM-resident class is
+    /// checked against the declared param types. Mirrors the real prior-unit → later-unit flow.
+    #[test]
+    fn arg_check_against_a_sealed_vm_class() {
+        use crate::class_table::{ClassTable, populate_from_vm};
+        check(
+            "Widget <- { take: -> { |n: Integer ^Integer| ^n }; .sealed! }; Widget.new;",
+            |_mc, vm| {
+                let table = ClassTable::new();
+                populate_from_vm(vm, &table);
+                assert_eq!(
+                    table.own_method_params("Widget", "take:"),
+                    Some(vec![crate::types::Type::Int]),
+                    "the sealed method's Integer param should be captured"
+                );
+
+                // Compile a "later unit" against that table; keep only type-mismatch diagnostics.
+                let mismatches = |src: &str| -> Vec<String> {
+                    let node = crate::parser::parse_quoin_string(src);
+                    let NodeValue::Program(p) = &node.value else {
+                        panic!("not a program");
+                    };
+                    let mut c = crate::compiler::Compiler::new();
+                    c.set_class_table(table.clone());
+                    c.compile_program(p).unwrap();
+                    c.diagnostics()
+                        .iter()
+                        .filter(|d| d.message.contains("type mismatch"))
+                        .map(|d| d.message.clone())
+                        .collect()
+                };
+
+                let d = mismatches("var w: Widget = Widget.new; w.take: 'oops'");
+                assert!(
+                    d.iter()
+                        .any(|m| m.contains("expected `Integer`, found `String`")),
+                    "{d:?}"
+                );
+                assert!(mismatches("var w: Widget = Widget.new; w.take: 5").is_empty());
+            },
+        );
+    }
+
     #[test]
     fn describe_class_reads_parent_methods_and_ivars() {
         check(SRC, |_mc, vm| {

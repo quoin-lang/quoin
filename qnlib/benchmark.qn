@@ -1,6 +1,6 @@
 Fib <- {
     .meta <-- {
-        value: -> Integer { |n: Integer|
+        value: -> { |n: Integer ^Integer|
             (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) }
         }
     }
@@ -54,7 +54,7 @@ TreeNode <- { | @left @right @item |
 
 TreeBenchmark <- {
     .meta <-- {
-        powerOfTwo: -> Integer { |p: Integer|
+        powerOfTwo: -> { |p: Integer ^Integer|
             var res = 1;
             var i = 0;
             { i < p }.whileDo:{

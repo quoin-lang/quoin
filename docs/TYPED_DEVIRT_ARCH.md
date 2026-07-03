@@ -231,9 +231,11 @@ Each slice is independently shippable and profiled before/after (`profiling/<sli
     (`crates/quoin-syntax/src/highlight.rs`).
 - **Slice 2a — arithmetic devirt. ✅ DONE** (`df65763` seal + `e8d726b`). Type propagation +
   Integer devirt ops on statically-Int operands; differential `Devirt` suite. ~30% faster typed fib(30).
-- **Slice 2b-A — return types (typed method results). ✅ DONE** (`d7fe17b`). `selector -> Integer { … }`
-  syntax; a self-send to a same-class method with a declared Integer return is statically Int, so the
-  result `+` devirtualizes. ~4% more on fib(30).
+- **Slice 2b-A — return types (typed method results). ✅ DONE** (`d7fe17b`). Originally `selector ->
+  Integer { … }`; the return type later **moved into the block header as `^Integer`**
+  (`selector -> { |args ^Integer| … }`) — see docs/TYPE_SYSTEM_ARCH.md Phase 0. A self-send to a
+  same-class method with a declared Integer return is statically Int, so the result `+` devirtualizes.
+  ~4% more on fib(30).
   - **Followup — verify return types.** The declared return type is currently **trusted**: the compiler
     does *not* check that every return point (`^expr` and the fall-through) actually yields the declared
     type. A wrong annotation is *safe* — a devirt op on a non-Int result raises via `pop_two_ints`

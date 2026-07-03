@@ -310,6 +310,14 @@ fn preserves_a_named_block() {
 }
 
 #[test]
+fn preserves_a_return_only_block_header() {
+    // A no-arg method with just a declared return type — `|^Integer|` — is header-only
+    // content that must be kept; if dropped it gets swept into the body and reparses
+    // differently (regression: return_type was missing from the header's has-pipe test).
+    assert_eq!(fmt("m -> { |^Integer| 5 }"), "m -> { |^Integer| 5 }\n");
+}
+
+#[test]
 fn paren_wrapped_return_value_keeps_its_parens() {
     // The leading `(` is captured in the subject; the trailing `)` must be re-attached.
     assert_eq!(

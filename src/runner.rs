@@ -329,6 +329,10 @@ impl VmRunnerOptions {
                 arguments: vm_args,
                 supports_color,
                 console_width: None,
+                // The single shared class-name accumulator for this run — cloned (Rc) into
+                // every VM and top-level compile, so units see each other's classes.
+                seen_types: crate::types::SeenTypes::with_builtins(),
+                class_table: crate::class_table::ClassTable::new(),
             },
             break_on_throw,
             break_on_uncaught,
@@ -368,13 +372,21 @@ pub(crate) fn install_dap_program(
             compile_err = Some("expected a Program node".to_string());
             return false;
         };
-        let sb = match Compiler::new().compile_program(p) {
+        // Capture output as DAP `output` events from here on — crucially before the compile, so
+        // the resolver's type warnings below reach the client instead of the adapter's raw stderr.
+        vm.output.capture = true;
+        let mut compiler = Compiler::new();
+        compiler.set_seen_types(vm.options.seen_types.clone());
+        compiler.set_class_table(vm.options.class_table.clone());
+        crate::class_table::populate_from_vm(vm, &vm.options.class_table);
+        let sb = match compiler.compile_program(p) {
             Ok(sb) => sb,
             Err(e) => {
                 compile_err = Some(format!("compile error: {e}"));
                 return false;
             }
         };
+        vm.report_type_warnings(compiler.diagnostics());
         let block = build_block(mc, &sb);
         // Run to a breakpoint (`stopOnEntry` is honored at `launch`). Program output is captured
         // and re-emitted as DAP `output` events rather than written to fd 1/2.
@@ -388,7 +400,6 @@ pub(crate) fn install_dap_program(
             break_on_uncaught: break_on_uncaught.iter().cloned().collect(),
             ..Default::default()
         });
-        vm.output.capture = true;
         vm.start_block(mc, block, Vec::new(), None, None);
         install_main_task(mc, vm);
         true
@@ -660,13 +671,18 @@ impl VmRunner {
             let NodeValue::Program(p) = &node.value else {
                 return false;
             };
-            let sb = match Compiler::new().compile_program(p) {
+            let mut compiler = Compiler::new();
+            compiler.set_seen_types(vm.options.seen_types.clone());
+            compiler.set_class_table(vm.options.class_table.clone());
+            crate::class_table::populate_from_vm(vm, &vm.options.class_table);
+            let sb = match compiler.compile_program(p) {
                 Ok(sb) => sb,
                 Err(e) => {
                     eprintln!("Compile error: {e}");
                     return false;
                 }
             };
+            vm.report_type_warnings(compiler.diagnostics());
             let block = build_block(mc, &sb);
             // Stop at entry: an armed `StepInto` halts at the first line start. Source is
             // shown at each pause by default ($source off to silence). `--break-on-throw` types
@@ -852,12 +868,16 @@ impl VmRunner {
                 };
 
                 let mut compiler = Compiler::new();
+                compiler.set_seen_types(vm.options.seen_types.clone());
+                compiler.set_class_table(vm.options.class_table.clone());
+                crate::class_table::populate_from_vm(vm, &vm.options.class_table);
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {
                         panic!("Compilation error: {}", e);
                     }
                 };
+                vm.report_type_warnings(compiler.diagnostics());
 
                 let decl_block = program.decl_block.as_ref().map(|db| {
                     gc!(
@@ -1099,12 +1119,16 @@ impl VmRunner {
                 };
 
                 let mut compiler = Compiler::new();
+                compiler.set_seen_types(vm.options.seen_types.clone());
+                compiler.set_class_table(vm.options.class_table.clone());
+                crate::class_table::populate_from_vm(vm, &vm.options.class_table);
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {
                         panic!("Compilation error: {}", e);
                     }
                 };
+                vm.report_type_warnings(compiler.diagnostics());
 
                 let decl_block = program.decl_block.as_ref().map(|db| {
                     gc!(

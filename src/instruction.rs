@@ -154,12 +154,6 @@ pub enum Instruction {
     Pop,
     Dup,
     Send(Symbol, usize), // selector, num_args
-    // A self-send to a same-class method of a *sealed* class (Slice 2b-B). Same operand
-    // shape as `Send` (receiver + args on the stack); emitted by the compiler when it can
-    // prove the target method is fixed. Phase 1: behaves exactly like `Send`. Phase 2: a
-    // guard-free per-call-site cache resolves the callable once and reuses it (sealed ⇒
-    // never invalidated), skipping `lookup_method`.
-    CallSelfDirect(Symbol, usize), // selector, num_args
     // Superinstructions: a single fused op for the hot `<operand-load>; Send` pairs (the
     // last operand of a send is overwhelmingly a local / constant / field — see
     // profiling/superinstructions). Each pushes its operand then runs the normal send,
@@ -242,6 +236,10 @@ pub enum Instruction {
     DefineMethod(String),
     OverrideMethod(String),
     LoadField(String),
+    // Like `LoadField`, but reads the field off the object popped from the top of the stack
+    // instead of `self`. Emitted when a field accessor (`x -> { @x }`) on a statically-known
+    // sealed class is inlined at an explicit-receiver call site (`v.x`) — Phase 5·3.
+    LoadFieldOf(String),
     StoreField(String),
     /// `use (pkg:)? path;` — load a file once. `package` is `None` for stdlib; `path`
     /// has `.qn` implied; `glob` loads every `.qn` in the directory (Stage 2).

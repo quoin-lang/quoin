@@ -232,10 +232,17 @@ where
         let NodeValue::Program(p) = &node.value else {
             return Setup::Empty;
         };
-        let sb = match Compiler::new_with_locals(repl_locals(vm)).compile_program(p) {
+        let mut compiler = Compiler::new_with_locals(repl_locals(vm));
+        // Share the session's class accumulator so a class defined on an earlier line (and the
+        // prelude's classes) are known here, then surface any type warnings for this line.
+        compiler.set_seen_types(vm.options.seen_types.clone());
+        compiler.set_class_table(vm.options.class_table.clone());
+        crate::class_table::populate_from_vm(vm, &vm.options.class_table);
+        let sb = match compiler.compile_program(p) {
             Ok(sb) => sb,
             Err(e) => return Setup::CompileErr(format!("Compile error: {e}")),
         };
+        vm.report_type_warnings(compiler.diagnostics());
         let block = build_block(mc, &sb);
         let (base_frames, base_stack) = vm.begin_repl_line(block);
         install_main_task(mc, vm);

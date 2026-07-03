@@ -103,6 +103,15 @@ pub struct VmOptions {
     pub arguments: Vec<String>,
     pub supports_color: bool,
     pub console_width: Option<u16>,
+    /// Shared compile-time class-name accumulator (Phase 2). Threaded into every `Compiler`
+    /// this VM spawns for `use`-loads, and used by the runner for the top-level program, so a
+    /// unit sees the classes earlier-compiled units defined. Not a runtime knob — it rides
+    /// here because `VmOptions` is the value already cloned into every VM.
+    pub seen_types: crate::types::SeenTypes,
+    /// Shared compile-time class-signature table (Phase 3b) — parallel to `seen_types`, threaded
+    /// the same way. Carries parent/mixins/method-set/sealed for cross-class checks (subtyping,
+    /// MNU).
+    pub class_table: crate::class_table::ClassTable,
 }
 
 // The scheduler / task / guest-fiber subsystem lives in `vm_scheduler.rs` (still
@@ -404,6 +413,26 @@ impl<'gc> VmState<'gc> {
                 StdStream::Out => std::io::stdout().write_all(bytes),
                 StdStream::Err => std::io::stderr().write_all(bytes),
             }
+        }
+    }
+
+    /// Emit collected compile-time type diagnostics through the stderr sink (so under the DAP
+    /// adapter, with `capture` on, they become `output` events rather than leaking to raw stderr).
+    /// Each is rendered `file:line:col: warning: message` (the standard, editor-jumpable form) when
+    /// a span is known, else bare `warning: message`. Best-effort; never fatal. (Phase 4.)
+    pub fn report_type_warnings(&mut self, diagnostics: &[crate::compiler::Diagnostic]) {
+        for d in diagnostics {
+            let out = match &d.span {
+                Some(s) => format!(
+                    "{}:{}:{}: warning: {}\n",
+                    s.filename,
+                    s.line,
+                    s.column + 1,
+                    d.message
+                ),
+                None => format!("warning: {}\n", d.message),
+            };
+            let _ = self.write_std(StdStream::Err, out.as_bytes());
         }
     }
 
@@ -2494,7 +2523,13 @@ impl<'gc> VmState<'gc> {
     fn load_field(&mut self, mc: &Mutation<'gc>, frame_idx: usize, name: &str) -> Value<'gc> {
         let frame = &self.frames[frame_idx];
         let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-        if let Value::Object(obj) = self_val {
+        self.field_of(mc, self_val, name)
+    }
+
+    /// Read instance field `name` off an arbitrary object value (the body of `LoadFieldOf`, and
+    /// shared by `load_field` with `self`). Missing/undeclared field, or a non-object value => nil.
+    fn field_of(&mut self, mc: &Mutation<'gc>, obj_val: Value<'gc>, name: &str) -> Value<'gc> {
+        if let Value::Object(obj) = obj_val {
             let class = obj.borrow().class;
             // No slot (undeclared) or a slot past this instance's array (declared on the
             // class after this object was created) => nil.
@@ -3147,13 +3182,6 @@ impl<'gc> VmState<'gc> {
                 let (selector, num_args) = (*selector, *num_args);
                 return self.exec_send(mc, frame_idx, selector, num_args);
             }
-            // Self-send to a sealed class's own method (Slice 2b-B). Phase 1: identical to
-            // Send. Phase 2 will resolve + cache the callable at this call site (sealed ⇒
-            // never invalidated), skipping lookup_method.
-            Instruction::CallSelfDirect(selector, num_args) => {
-                let (selector, num_args) = (*selector, *num_args);
-                return self.exec_send(mc, frame_idx, selector, num_args);
-            }
             // Fused superinstructions (see `Instruction::SendLocal` doc): push the last
             // operand the send consumes, then run the identical send path.
             Instruction::SendLocal(var, selector, num_args) => {
@@ -3616,6 +3644,13 @@ impl<'gc> VmState<'gc> {
 
             Instruction::LoadField(name) => {
                 let val = self.load_field(mc, frame_idx, name);
+                self.push(val);
+                ip += 1;
+            }
+            // Phase 5·3: read a field off the object on top of the stack (an inlined `v.x`).
+            Instruction::LoadFieldOf(name) => {
+                let obj = self.pop()?;
+                let val = self.field_of(mc, obj, name);
                 self.push(val);
                 ip += 1;
             }

@@ -46,13 +46,13 @@
         .does:{ { |x:Integer y:Integer| x % y }.valueWithArgs:#(1 0) } throw:'ArithmeticError: Division by zero'
     };
 
-    "* Slice 2b-A: a method declaring `-> Integer` makes its self-send result statically
+    "* Slice 2b-A: a method declaring `^ Integer` makes its self-send result statically
     "* Integer, so `(.f:(n)) + (.f:(n))` devirtualizes the `+`. The result must stay correct.
     .test:
     returnTypeDevirt -> {
         SumClass <- { .meta <-- {
-            addTwice: -> Integer { |n: Integer| (.identity:(n)) + (.identity:(n)) };
-            identity: -> Integer { |n: Integer| ^n }
+            addTwice: -> { |n: Integer ^Integer| (.identity:(n)) + (.identity:(n)) };
+            identity: -> { |n: Integer ^Integer| ^n }
         } };
         .is:{ SumClass.addTwice:21 } equalTo:42;
         .is:{ SumClass.addTwice:(0 - 5) } equalTo:(0 - 10)

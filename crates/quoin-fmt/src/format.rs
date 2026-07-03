@@ -584,8 +584,10 @@ fn block_header<'a>(
     region_start: usize,
     region_end: usize,
 ) -> (&'a str, usize) {
-    let has_pipe =
-        !block.arguments.is_empty() || !block.decls.is_empty() || block.decl_block.is_some();
+    let has_pipe = !block.arguments.is_empty()
+        || !block.decls.is_empty()
+        || block.decl_block.is_some()
+        || block.return_type.is_some();
     let has_name = block.name.is_some();
     if !has_pipe && !has_name {
         return ("", region_start);
