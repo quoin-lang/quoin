@@ -290,6 +290,9 @@ pub(crate) fn fuse_bytecode(
 /// on a stack while compiling a class def / extension; used to type self-sends by their
 /// callee's declared return type and to devirtualize self-sends in a sealed class.
 struct ClassCtx {
+    /// The class's name (`""` for an anonymous/expression reopen target) — lets an explicit-receiver
+    /// send whose static class is *this* class be inlined against its own bodies (Phase 5·3).
+    name: String,
     /// Method selector → declared return `Type` (methods that annotate a return).
     returns: HashMap<String, Type>,
     /// Every method selector defined directly in this class body.
@@ -1176,7 +1179,7 @@ impl Compiler {
 
     /// Selector → declared-return-`Type` map for a class body, from its method
     /// definitions/extensions that carry a return type.
-    fn collect_class_ctx(&mut self, block: &BlockNode) -> ClassCtx {
+    fn collect_class_ctx(&mut self, name: &str, block: &BlockNode) -> ClassCtx {
         let mut returns = HashMap::new();
         let mut methods = HashSet::new();
         let mut bodies = HashMap::new();
@@ -1202,6 +1205,7 @@ impl Compiler {
             }
         }
         ClassCtx {
+            name: name.to_string(),
             returns,
             methods,
             bodies,
@@ -1619,6 +1623,7 @@ impl Compiler {
                         name.name, instance_vars[0]
                     ));
                 }
+                let class_name = name.name.clone();
                 bytecode.push(Instruction::DefineClass {
                     name,
                     parent_name,
@@ -1627,7 +1632,7 @@ impl Compiler {
                 if is_value_type {
                     self.value_type_def_depth += 1;
                 }
-                let ctx = self.collect_class_ctx(&class_def.block);
+                let ctx = self.collect_class_ctx(&class_name, &class_def.block);
                 self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_def.block, bytecode);
                 self.class_ctx.pop();
@@ -1662,7 +1667,11 @@ impl Compiler {
                     }
                     self.value_type_def_depth += 1;
                 }
-                let ctx = self.collect_class_ctx(&class_ext.block);
+                let ext_name = match &class_ext.expression.value {
+                    NodeValue::Identifier(id) => id.name.as_str(),
+                    _ => "",
+                };
+                let ctx = self.collect_class_ctx(ext_name, &class_ext.block);
                 self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_ext.block, bytecode);
                 self.class_ctx.pop();
@@ -2201,6 +2210,48 @@ impl Compiler {
         Ok(true)
     }
 
+    /// If `block` is a bare field accessor (`x -> { @x }` — a single `@field` statement, no
+    /// params/decls/name), the field's name. Unlike a general inline-safe body, this needs no
+    /// `self`-rebinding: at an explicit-receiver `v.x` it's just "read `v`'s field" (Phase 5·3).
+    fn field_accessor_field(block: &BlockNode) -> Option<String> {
+        if !block.arguments.is_empty()
+            || !block.decls.is_empty()
+            || block.decl_block.is_some()
+            || block.name.is_some()
+        {
+            return None;
+        }
+        let [stmt] = block.statements.as_slice() else {
+            return None;
+        };
+        match &stmt.value {
+            NodeValue::Identifier(id) if id.identifier_type == IdentifierType::Instance => {
+                Some(id.name.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// For a no-arg explicit-receiver send `v.x` whose receiver is statically an instance of the
+    /// (sealed) class *currently being compiled*, and whose selector is one of that class's own
+    /// field accessors: the field to read. Inlining emits `<eval v>; LoadFieldOf(field)` — sound
+    /// because a sealed class can't be subclassed, so `v` is exactly this class and `v.x` reads its
+    /// field (Phase 5·3, current-class first cut; other in-unit classes are a follow-up).
+    fn exact_receiver_field_accessor(&self, call: &MethodCallNode) -> Option<String> {
+        if !call.arguments.expressions.is_empty() {
+            return None;
+        }
+        let [sel] = call.arguments.signature.identifiers.as_slice() else {
+            return None;
+        };
+        let class = self.receiver_class(call)?;
+        let ctx = self.class_ctx.last()?;
+        if !ctx.sealed || ctx.name != class {
+            return None;
+        }
+        Self::field_accessor_field(ctx.bodies.get(sel.name.as_str())?)
+    }
+
     fn compile_method_call(
         &mut self,
         call: &MethodCallNode,
@@ -2247,6 +2298,12 @@ impl Compiler {
                 return Err("No identifiers found in method call selector".to_string());
             }
             let selector = args.signature.identifiers[0].name.clone();
+            // Phase 5·3: an explicit-receiver field accessor on the current sealed class reads the
+            // field directly off the already-pushed receiver — no dispatch, no frame.
+            if let Some(field) = self.exact_receiver_field_accessor(call) {
+                bytecode.push(Instruction::LoadFieldOf(field));
+                return Ok(());
+            }
             self.emit_call(bytecode, &selector, 0, is_self);
             return Ok(());
         }
@@ -3627,6 +3684,38 @@ mod tests {
             })
         }
         assert!(dispatches(&sb, Symbol::intern("loop")));
+    }
+
+    #[test]
+    fn exact_receiver_field_accessor_is_inlined() {
+        fn compile_src(src: &str) -> StaticBlock {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            Compiler::new().compile_program(p).unwrap()
+        }
+        fn loads_field_of(sb: &StaticBlock, field: &str) -> bool {
+            sb.bytecode.0.iter().any(|inst| match inst {
+                Instruction::LoadFieldOf(f) => f == field,
+                Instruction::Push(Constant::Block(nested)) => loads_field_of(nested, field),
+                _ => false,
+            })
+        }
+
+        // `o.x` (o: the current sealed class) reads the field directly off `o` — no dispatch.
+        let inlined =
+            compile_src("Vec <- { |@x| x -> { @x }; get: -> { |o: Vec| o.x }; .sealed! }");
+        assert!(
+            loads_field_of(&inlined, "x"),
+            "exact-receiver accessor on the current sealed class should emit LoadFieldOf"
+        );
+        // Un-sealed: the receiver's class isn't provably fixed → a normal dispatch, no LoadFieldOf.
+        let unsealed = compile_src("Vec <- { |@x| x -> { @x }; get: -> { |o: Vec| o.x } }");
+        assert!(
+            !loads_field_of(&unsealed, "x"),
+            "un-sealed exact-receiver send must dispatch"
+        );
     }
 
     fn binary(op: BinaryOperatorType, left: Node, right: Node) -> Node {

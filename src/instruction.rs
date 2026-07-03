@@ -242,6 +242,10 @@ pub enum Instruction {
     DefineMethod(String),
     OverrideMethod(String),
     LoadField(String),
+    // Like `LoadField`, but reads the field off the object popped from the top of the stack
+    // instead of `self`. Emitted when a field accessor (`x -> { @x }`) on a statically-known
+    // sealed class is inlined at an explicit-receiver call site (`v.x`) — Phase 5·3.
+    LoadFieldOf(String),
     StoreField(String),
     /// `use (pkg:)? path;` — load a file once. `package` is `None` for stdlib; `path`
     /// has `.qn` implied; `glob` loads every `.qn` in the directory (Stage 2).

@@ -2523,7 +2523,13 @@ impl<'gc> VmState<'gc> {
     fn load_field(&mut self, mc: &Mutation<'gc>, frame_idx: usize, name: &str) -> Value<'gc> {
         let frame = &self.frames[frame_idx];
         let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-        if let Value::Object(obj) = self_val {
+        self.field_of(mc, self_val, name)
+    }
+
+    /// Read instance field `name` off an arbitrary object value (the body of `LoadFieldOf`, and
+    /// shared by `load_field` with `self`). Missing/undeclared field, or a non-object value => nil.
+    fn field_of(&mut self, mc: &Mutation<'gc>, obj_val: Value<'gc>, name: &str) -> Value<'gc> {
+        if let Value::Object(obj) = obj_val {
             let class = obj.borrow().class;
             // No slot (undeclared) or a slot past this instance's array (declared on the
             // class after this object was created) => nil.
@@ -3645,6 +3651,13 @@ impl<'gc> VmState<'gc> {
 
             Instruction::LoadField(name) => {
                 let val = self.load_field(mc, frame_idx, name);
+                self.push(val);
+                ip += 1;
+            }
+            // Phase 5·3: read a field off the object on top of the stack (an inlined `v.x`).
+            Instruction::LoadFieldOf(name) => {
+                let obj = self.pop()?;
+                let val = self.field_of(mc, obj, name);
                 self.push(val);
                 ip += 1;
             }
