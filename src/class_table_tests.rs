@@ -14,6 +14,7 @@ fn sig(
         sealed,
         has_catch_all: catch_all,
         from_vm: false,
+        method_params: HashMap::new(),
     }
 }
 

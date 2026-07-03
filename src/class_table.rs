@@ -13,6 +13,7 @@
 //! checker isn't sure about (absent from the table, or carrying a catch-all handler) yields `None`
 //! / stays silent — a missed MNU is fine, a wrong MNU is not.
 
+use crate::types::Type;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -34,9 +35,14 @@ pub struct ClassSig {
     pub has_catch_all: bool,
     /// Built from the VM's live class object (`introspect::describe_class`) rather than the AST.
     /// Only VM sigs are *complete* — they include native methods and any `Foo <-- {}` extensions
-    /// already applied — so **MNU trusts only `from_vm` sigs**. Subtyping uses either (parent/mixins
-    /// are structural and unaffected by method extensions).
+    /// already applied — so **MNU and arg-checks trust only `from_vm` sigs**. Subtyping uses either
+    /// (parent/mixins are structural and unaffected by method extensions).
     pub from_vm: bool,
+    /// For arg-type checking: `selector → declared param types`, but only for a method that has
+    /// exactly ONE variant with every parameter typed. Multi-variant (multimethod) or any untyped
+    /// (`Object`) parameter is omitted, so a checkable entry unambiguously fixes the arg types.
+    /// Populated only for `from_vm` sigs (a VM sig's variant set is complete).
+    pub method_params: HashMap<Arc<str>, Vec<Type>>,
 }
 
 impl ClassSig {
@@ -50,6 +56,20 @@ impl ClassSig {
             .chain(&info.class_methods)
             .map(|m| Arc::from(m.selector.as_str()))
             .collect();
+        let mut method_params = HashMap::new();
+        for m in info.instance_methods.iter().chain(&info.class_methods) {
+            // A single variant with every parameter typed fixes the arg types unambiguously.
+            if let [variant] = m.variants.as_slice() {
+                if variant.param_types.iter().all(Option::is_some) {
+                    let types = variant
+                        .param_types
+                        .iter()
+                        .map(|p| Type::from_annotation_name(p.as_deref().unwrap()))
+                        .collect();
+                    method_params.insert(Arc::from(m.selector.as_str()), types);
+                }
+            }
+        }
         ClassSig {
             parent: info.parent.as_deref().map(Arc::from),
             mixins: info.mixins.iter().map(|m| Arc::from(m.as_str())).collect(),
@@ -57,6 +77,7 @@ impl ClassSig {
             sealed: info.is_sealed,
             has_catch_all: false,
             from_vm: true,
+            method_params,
         }
     }
 }
@@ -141,6 +162,13 @@ impl ClassTable {
             Some(parent) => self.responds_rec(parent, selector, visited),
             None => Some(false),
         }
+    }
+
+    /// The declared param types of `selector` defined *directly* on `class_name` — only when it's a
+    /// single, fully-typed variant (so the arg types are unambiguous). `None` otherwise. Own methods
+    /// only for now (inherited methods aren't arg-checked yet).
+    pub fn own_method_params(&self, class_name: &str, selector: &str) -> Option<Vec<Type>> {
+        self.get(class_name)?.method_params.get(selector).cloned()
     }
 
     /// Is `sub` a subtype of `sup` — the same class, or a descendant via the parent/mixin chain?

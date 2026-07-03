@@ -388,6 +388,49 @@ mod tests {
         });
     }
 
+    /// Arg-type checking: a call to a single fully-typed method on a sealed, VM-resident class is
+    /// checked against the declared param types. Mirrors the real prior-unit → later-unit flow.
+    #[test]
+    fn arg_check_against_a_sealed_vm_class() {
+        use crate::class_table::{ClassTable, populate_from_vm};
+        check(
+            "Widget <- { take: -> { |n: Integer ^Integer| ^n }; .sealed! }; Widget.new;",
+            |_mc, vm| {
+                let table = ClassTable::new();
+                populate_from_vm(vm, &table);
+                assert_eq!(
+                    table.own_method_params("Widget", "take:"),
+                    Some(vec![crate::types::Type::Int]),
+                    "the sealed method's Integer param should be captured"
+                );
+
+                // Compile a "later unit" against that table; keep only type-mismatch diagnostics.
+                let mismatches = |src: &str| -> Vec<String> {
+                    let node = crate::parser::parse_quoin_string(src);
+                    let NodeValue::Program(p) = &node.value else {
+                        panic!("not a program");
+                    };
+                    let mut c = crate::compiler::Compiler::new();
+                    c.set_class_table(table.clone());
+                    c.compile_program(p).unwrap();
+                    c.diagnostics()
+                        .iter()
+                        .filter(|m| m.contains("type mismatch"))
+                        .cloned()
+                        .collect()
+                };
+
+                let d = mismatches("var w: Widget = Widget.new; w.take: 'oops'");
+                assert!(
+                    d.iter()
+                        .any(|m| m.contains("expected `Integer`, found `String`")),
+                    "{d:?}"
+                );
+                assert!(mismatches("var w: Widget = Widget.new; w.take: 5").is_empty());
+            },
+        );
+    }
+
     #[test]
     fn describe_class_reads_parent_methods_and_ivars() {
         check(SRC, |_mc, vm| {

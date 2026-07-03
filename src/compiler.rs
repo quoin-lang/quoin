@@ -632,6 +632,34 @@ impl Compiler {
         None
     }
 
+    /// The canonical non-variadic selector of a call *with* args (`foo:` / `foo:bar:`). `None` for a
+    /// no-arg call, or any variadic run (a repeated consecutive keyword, which folds to `name+:`).
+    fn call_selector_nonvariadic(call: &MethodCallNode) -> Option<String> {
+        let idents = &call.arguments.signature.identifiers;
+        if call.arguments.expressions.is_empty() || idents.len() != call.arguments.expressions.len()
+        {
+            return None;
+        }
+        if idents.windows(2).any(|w| w[0].name == w[1].name) {
+            return None; // a variadic run — its dispatched selector is `name+:`
+        }
+        Some(idents.iter().map(|i| format!("{}:", i.name)).collect())
+    }
+
+    /// The declared parameter types for a call, when they're checkable: the receiver is an
+    /// authoritative (`from_vm`), `sealed` class, and the (non-variadic) selector resolves to a
+    /// single fully-typed method whose arity matches. `None` → args compile unchecked (gradual).
+    fn call_param_types(&self, call: &MethodCallNode) -> Option<Vec<Type>> {
+        let class = self.receiver_class(call)?;
+        let sig = self.class_table.get(&class)?;
+        if !sig.from_vm || !sig.sealed {
+            return None;
+        }
+        let selector = Self::call_selector_nonvariadic(call)?;
+        let params = self.class_table.own_method_params(&class, &selector)?;
+        (params.len() == call.arguments.expressions.len()).then_some(params)
+    }
+
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
@@ -824,6 +852,7 @@ impl Compiler {
             sealed,
             has_catch_all: false,
             from_vm: false,
+            method_params: HashMap::new(),
         }
     }
 
@@ -1583,6 +1612,10 @@ impl Compiler {
         // fold into one `List` and the keyword interns as `name+:`, matching a `name+:` method
         // definition. A lone keyword stays `name:`. This is resolved entirely at compile time, so
         // dispatch only ever sees a canonical interned selector — no runtime collapse.
+        // Phase 3b arg-checks: when the receiver + method params are known, args are checked and
+        // numeric literals promoted against them; otherwise compiled unchecked (gradual). `Some`
+        // only for fully non-variadic calls, so `i + j` indexes `params` directly.
+        let param_types = self.call_param_types(call);
         let idents = &args.signature.identifiers;
         debug_assert_eq!(idents.len(), args.expressions.len());
         let mut selector = String::new();
@@ -1604,7 +1637,10 @@ impl Compiler {
                 if run == 1 && idents[i].name == "new" && matches!(arg.value, NodeValue::Block(_)) {
                     self.next_block_is_init = true;
                 }
-                self.compile_node(arg, bytecode)?;
+                match &param_types {
+                    Some(params) => self.compile_expecting(arg, &params[i + j], bytecode)?,
+                    None => self.compile_node(arg, bytecode)?,
+                }
             }
             if run > 1 {
                 bytecode.push(Instruction::NewList(run));
