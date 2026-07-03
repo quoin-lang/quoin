@@ -776,6 +776,7 @@ impl Compiler {
             own_selectors,
             sealed,
             has_catch_all: false,
+            from_vm: false,
         }
     }
 

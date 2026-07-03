@@ -378,6 +378,7 @@ pub(crate) fn install_dap_program(
         let mut compiler = Compiler::new();
         compiler.set_seen_types(vm.options.seen_types.clone());
         compiler.set_class_table(vm.options.class_table.clone());
+        crate::class_table::populate_from_vm(vm, &vm.options.class_table);
         let sb = match compiler.compile_program(p) {
             Ok(sb) => sb,
             Err(e) => {
@@ -673,6 +674,7 @@ impl VmRunner {
             let mut compiler = Compiler::new();
             compiler.set_seen_types(vm.options.seen_types.clone());
             compiler.set_class_table(vm.options.class_table.clone());
+            crate::class_table::populate_from_vm(vm, &vm.options.class_table);
             let sb = match compiler.compile_program(p) {
                 Ok(sb) => sb,
                 Err(e) => {
@@ -868,6 +870,7 @@ impl VmRunner {
                 let mut compiler = Compiler::new();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
+                crate::class_table::populate_from_vm(vm, &vm.options.class_table);
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {
@@ -1118,6 +1121,7 @@ impl VmRunner {
                 let mut compiler = Compiler::new();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
+                crate::class_table::populate_from_vm(vm, &vm.options.class_table);
                 let program = match compiler.compile_program(program_node) {
                     Ok(p) => p,
                     Err(e) => {

@@ -13,6 +13,7 @@ fn sig(
         own_selectors: own.iter().map(|s| Arc::from(*s)).collect(),
         sealed,
         has_catch_all: catch_all,
+        from_vm: false,
     }
 }
 

@@ -30,8 +30,58 @@ pub struct ClassSig {
     /// `sealed!` in the class body — its method table is frozen, so a "not found" is authoritative.
     pub sealed: bool,
     /// This class (or an ancestor) can answer *any* selector at runtime (a `doesNotUnderstand:`-style
-    /// catch-all). MNU must stay silent for it.
+    /// catch-all). MNU must stay silent for it. (Quoin has none today, so this is always `false`.)
     pub has_catch_all: bool,
+    /// Built from the VM's live class object (`introspect::describe_class`) rather than the AST.
+    /// Only VM sigs are *complete* — they include native methods and any `Foo <-- {}` extensions
+    /// already applied — so **MNU trusts only `from_vm` sigs**. Subtyping uses either (parent/mixins
+    /// are structural and unaffected by method extensions).
+    pub from_vm: bool,
+}
+
+impl ClassSig {
+    /// Convert `introspect`'s runtime `ClassInfo` into a checker signature. Authoritative
+    /// (`from_vm = true`). Instance- and class-side selectors are pooled — being *permissive* about
+    /// what a class responds to only ever *suppresses* an MNU, never invents one.
+    pub fn from_class_info(info: &crate::introspect::ClassInfo) -> ClassSig {
+        let own_selectors = info
+            .instance_methods
+            .iter()
+            .chain(&info.class_methods)
+            .map(|m| Arc::from(m.selector.as_str()))
+            .collect();
+        ClassSig {
+            parent: info.parent.as_deref().map(Arc::from),
+            mixins: info.mixins.iter().map(|m| Arc::from(m.as_str())).collect(),
+            own_selectors,
+            sealed: info.is_sealed,
+            has_catch_all: false,
+            from_vm: true,
+        }
+    }
+}
+
+/// Populate the table with every class currently defined in the VM (stdlib + prior units) via
+/// `introspect::describe_class` — whose selector walk *is* the VM's dispatch traversal. Idempotent
+/// and cheap on repeat: a class already recorded `from_vm` is skipped. Called at each compile site
+/// (where `vm` is in scope) so a unit's checker sees the fully-built classes it can dispatch to.
+pub fn populate_from_vm<'gc>(vm: &crate::vm::VmState<'gc>, table: &ClassTable) {
+    for g in crate::introspect::globals(vm) {
+        if !matches!(g.kind, crate::introspect::GlobalKind::Class) {
+            continue;
+        }
+        let already_authoritative = table
+            .0
+            .borrow()
+            .get(g.name.as_str())
+            .is_some_and(|s| s.from_vm);
+        if already_authoritative {
+            continue;
+        }
+        if let Some(info) = crate::introspect::describe_class(vm, &g.name) {
+            table.insert(&g.name, ClassSig::from_class_info(&info));
+        }
+    }
 }
 
 /// A shared, mutable map `class name → ClassSig`, threaded through every `Compiler` a run spawns

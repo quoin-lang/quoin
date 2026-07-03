@@ -170,6 +170,7 @@ fn compile_and_execute_source<'gc>(
     // defined (and later units see this one's) — the basis for `unknown type Foo`.
     compiler.set_seen_types(vm.options.seen_types.clone());
     compiler.set_class_table(vm.options.class_table.clone());
+    crate::class_table::populate_from_vm(vm, &vm.options.class_table);
     // When a `self` is supplied (`eval:self:`), don't emit the top-level `self = nil` default —
     // the frame setup binds `self` to the receiver, so `self`/`@ivars`/`self.method` resolve in
     // the eval'd code. Plain `eval:` / `use` (no receiver) keep `self == nil` at top level.
