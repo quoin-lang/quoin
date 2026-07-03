@@ -281,9 +281,11 @@ pub fn build_string_class() -> NativeClassBuilder {
                         }
 
                         let mut compiler = Compiler::new_with_locals(local_names);
+                        compiler.set_seen_types(vm.options.seen_types.clone());
                         let compiled = compiler
                             .compile_program(program_node)
                             .map_err(|e| QuoinError::Other(e))?;
+                        crate::compiler::report_type_warnings(compiler.diagnostics());
 
                         let decl_block = compiled.decl_block.as_ref().map(|db| {
                             crate::gc!(
