@@ -300,6 +300,30 @@ struct ClassCtx {
     sealed: bool,
 }
 
+/// A flow-narrowable path — what a guard (Phase 3c) can refine the type of. Only locals and
+/// instance fields (`@name`) narrow; global, namespaced, and reserved reads do not.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum NarrowKey {
+    Local(String),
+    Field(String),
+}
+
+impl NarrowKey {
+    /// The narrowable path an identifier read refers to, or `None` if it isn't one (a global,
+    /// namespaced, or reserved `nil`/`true`/`false` read).
+    fn from_ident(id: &IdentifierNode) -> Option<NarrowKey> {
+        if id.identifier_type == IdentifierType::Instance {
+            Some(NarrowKey::Field(id.name.clone()))
+        } else if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced {
+            None
+        } else if matches!(id.name.as_str(), "nil" | "true" | "false") {
+            None
+        } else {
+            Some(NarrowKey::Local(id.name.clone()))
+        }
+    }
+}
+
 struct Scope {
     locals: HashSet<String>,
     /// Subset of `locals` declared with `let` — reassigning one is a compile error.
@@ -311,6 +335,9 @@ struct Scope {
     /// hint, not a contract, so `var x = 0` reassigned to a String is fine, but `var x: Integer`
     /// reassigned to a String is not (Phase 3a).
     declared_types: HashMap<String, Type>,
+    /// Flow-narrowed types active in this scope (Phase 3c) — a guard refines a local/field here;
+    /// `narrowed_type` reads the innermost. Empty until 3c·1 installs the narrowing rules.
+    narrowed: HashMap<NarrowKey, Type>,
     /// True for the top-level scope of an object-initializer block (`X.new:{ … }`),
     /// where a bare `field = value` binds an instance field (no `var` required).
     is_init: bool,
@@ -360,6 +387,7 @@ impl Compiler {
                 immutable: HashSet::new(),
                 types: HashMap::new(),
                 declared_types: HashMap::new(),
+                narrowed: HashMap::new(),
                 is_init: false,
             }],
             temp_counter: 0,
@@ -381,6 +409,7 @@ impl Compiler {
                 immutable: HashSet::new(),
                 types: HashMap::new(),
                 declared_types: HashMap::new(),
+                narrowed: HashMap::new(),
                 is_init: false,
             }],
             temp_counter: 0,
@@ -444,6 +473,7 @@ impl Compiler {
             immutable: HashSet::new(),
             types: HashMap::new(),
             declared_types: HashMap::new(),
+            narrowed: HashMap::new(),
             is_init: false,
         });
     }
@@ -519,6 +549,15 @@ impl Compiler {
             }
         }
         None
+    }
+
+    /// The flow-narrowed type of a path at the current point, if any — innermost scope wins
+    /// (Phase 3c). Empty until 3c·1 installs narrowing, so today this always returns `None`.
+    fn narrowed_type(&self, key: &NarrowKey) -> Option<Type> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.narrowed.get(key).cloned())
     }
 
     /// Add every top-level `Name <- …` class definition to `seen_types`, so an annotation can
@@ -720,23 +759,21 @@ impl Compiler {
             NodeValue::Map(_) => Type::Map,
             NodeValue::Set(_) => Type::Set,
             NodeValue::Block(_) => Type::Block,
-            NodeValue::Identifier(id) => {
-                // `nil`/`true`/`false` are reserved names (they parse as plain idents in expression
-                // position, so match by name, not `identifier_type`). Namespaced/instance idents
-                // carry no static type here.
-                if id.namespace.is_some()
-                    || id.identifier_type == IdentifierType::Namespaced
-                    || id.identifier_type == IdentifierType::Instance
-                {
-                    Type::Any
-                } else {
-                    match id.name.as_str() {
-                        "nil" => Type::Nil,
-                        "true" | "false" => Type::Bool,
-                        _ => self.local_type(&id.name),
-                    }
-                }
-            }
+            NodeValue::Identifier(id) => match NarrowKey::from_ident(id) {
+                // A narrowable read (local or `@field`): a flow-narrowed type wins (Phase 3c),
+                // else the recorded local type (a field carries none → `Any`).
+                Some(key) => self.narrowed_type(&key).unwrap_or_else(|| match key {
+                    NarrowKey::Local(ref name) => self.local_type(name),
+                    NarrowKey::Field(_) => Type::Any,
+                }),
+                // Not narrowable: `nil`/`true`/`false` are reserved names (they parse as plain
+                // idents, so match by name); everything else (globals/namespaced) is unknown here.
+                None => match id.name.as_str() {
+                    "nil" => Type::Nil,
+                    "true" | "false" => Type::Bool,
+                    _ => Type::Any,
+                },
+            },
             NodeValue::BinaryOperator(op) => self.binop_result_type(op),
             NodeValue::MethodCall(call) => self.self_send_return_type(call),
             _ => Type::Any,
@@ -2440,6 +2477,37 @@ mod tests {
         // An UN-annotated var is untyped: its inferred type is a devirt hint, not a contract, so
         // reassigning it to any type is fine (the `optimisticIntFallback` corpus pattern).
         assert!(diags("var x = 5; x = 'hi'").is_empty());
+    }
+
+    #[test]
+    fn narrowing_overlay_reads_innermost_scope() {
+        // 3c·0 plumbing: the narrowing overlay stores per-scope refinements; innermost wins, and
+        // an absent key falls through (gradual). No rules install narrowing yet, so this exercises
+        // the store/lookup directly.
+        let mut c = Compiler::new();
+        let x = NarrowKey::Local("x".to_string());
+        assert_eq!(c.narrowed_type(&x), None);
+
+        c.scopes
+            .last_mut()
+            .unwrap()
+            .narrowed
+            .insert(x.clone(), Type::Int);
+        assert_eq!(c.narrowed_type(&x), Some(Type::Int));
+
+        // A pushed inner scope still sees the outer narrowing…
+        c.push_scope(HashSet::new());
+        assert_eq!(c.narrowed_type(&x), Some(Type::Int));
+        // …but its own narrowing shadows it.
+        c.scopes
+            .last_mut()
+            .unwrap()
+            .narrowed
+            .insert(x.clone(), Type::String);
+        assert_eq!(c.narrowed_type(&x), Some(Type::String));
+
+        // An absent key stays `None`.
+        assert_eq!(c.narrowed_type(&NarrowKey::Field("y".to_string())), None);
     }
 
     #[test]
