@@ -6,6 +6,9 @@
 //! Surface syntax: builtins by name, `T?` → `Nullable(T)`, other PascalCase names →
 //! `Instance`. Generics (`List(T)` / `Block(args ^Ret)`) and general unions come later.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,5 +57,44 @@ impl Type {
             "Block" => Type::Block,
             _ => Type::Instance(Arc::from(name)),
         }
+    }
+}
+
+/// Every built-in class *name* — a superset of the enum's dedicated variants (the extras
+/// resolve to `Instance` but are still "known", so annotating with them is not flagged).
+pub const BUILTIN_CLASS_NAMES: &[&str] = &[
+    "Integer", "Double", "Boolean", "String", "Nil", "List", "Map", "Set", "Block", "Object",
+    "Symbol", "Range", "Regex", "Bytes", "Method", "Class",
+];
+
+/// The set of class names known so far during compilation: the builtins plus every class a
+/// unit compiled up to this point has defined. Shared (via `Rc`) across every `Compiler` the
+/// runner and VM spawn, so a later unit "sees" the classes earlier units defined — the basis
+/// for the resolver's `unknown type Foo` diagnostic (docs/TYPE_SYSTEM_ARCH.md Phase 2). The VM
+/// is single-threaded (gc_arena), so `Rc<RefCell<…>>` is sufficient.
+#[derive(Clone)]
+pub struct SeenTypes(Rc<RefCell<HashSet<Arc<str>>>>);
+
+impl SeenTypes {
+    /// A fresh set seeded with the builtin class names.
+    pub fn with_builtins() -> Self {
+        let set: HashSet<Arc<str>> = BUILTIN_CLASS_NAMES.iter().map(|s| Arc::from(*s)).collect();
+        SeenTypes(Rc::new(RefCell::new(set)))
+    }
+
+    /// Record a class name as known (idempotent).
+    pub fn insert(&self, name: &str) {
+        self.0.borrow_mut().insert(Arc::from(name));
+    }
+
+    /// Is this a known type name (a builtin, or a class seen so far)?
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.borrow().contains(name)
+    }
+}
+
+impl Default for SeenTypes {
+    fn default() -> Self {
+        Self::with_builtins()
     }
 }

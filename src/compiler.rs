@@ -7,7 +7,7 @@ use crate::parser::ast::{
     ProgramNode, UnaryOperatorNode, UnaryOperatorType,
 };
 use crate::symbol::Symbol;
-use crate::types::Type;
+use crate::types::{SeenTypes, Type};
 use crate::value::{NamespacedName, SourceInfo};
 
 use std::collections::{HashMap, HashSet};
@@ -330,6 +330,13 @@ pub struct Compiler {
     /// outside inlining (a `^` then compiles to a normal `BlockReturn`). Cleared on entry
     /// to a real nested block so its `^` isn't captured by an enclosing inlined region.
     inline_carets: Option<Vec<usize>>,
+    /// Class names known so far — builtins + classes defined by earlier-compiled units +
+    /// this program's own defs (seeded by `prescan_class_defs`). Shared across units so a
+    /// later unit sees earlier ones' classes; consulted by `resolve_annotation` (Phase 2).
+    seen_types: SeenTypes,
+    /// Non-fatal type diagnostics (e.g. `unknown type Foo`) collected during compilation.
+    /// Surfaced by the caller; never blocks lowering (gradual best-effort).
+    diagnostics: Vec<String>,
 }
 
 impl Compiler {
@@ -346,6 +353,8 @@ impl Compiler {
             next_block_is_init: false,
             class_ctx: Vec::new(),
             inline_carets: None,
+            seen_types: SeenTypes::with_builtins(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -362,6 +371,8 @@ impl Compiler {
             next_block_is_init: false,
             class_ctx: Vec::new(),
             inline_carets: None,
+            seen_types: SeenTypes::with_builtins(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -469,6 +480,40 @@ impl Compiler {
         }
     }
 
+    /// Add every top-level `Name <- …` class definition to `seen_types`, so an annotation can
+    /// forward-reference a class defined later in the same unit (and so later units see it).
+    /// Only simple top-level defs are collected — the common case.
+    fn prescan_class_defs(&self, program: &ProgramNode) {
+        for expr in &program.expressions {
+            if let NodeValue::ClassDefinition(cd) = &expr.value {
+                self.seen_types.insert(&cd.identifier.name);
+            }
+        }
+    }
+
+    /// Resolve a type-annotation name to a `Type`, flagging an unknown user class with a
+    /// non-fatal `unknown type Foo` diagnostic (Phase 2). Resolution never fails: an unknown
+    /// name still yields `Instance(name)` so lowering proceeds (gradual best-effort).
+    fn resolve_annotation(&mut self, name: &str) -> Type {
+        let ty = Type::from_annotation_name(name);
+        // `T?` is unknown iff its base `T` is unknown.
+        let base = match &ty {
+            Type::Nullable(inner) => inner.as_ref(),
+            other => other,
+        };
+        if let Type::Instance(class) = base {
+            if !self.seen_types.contains(class) {
+                self.diagnostics.push(format!("unknown type `{}`", class));
+            }
+        }
+        ty
+    }
+
+    /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
+    }
+
     /// Statically infer an expression's type for devirtualization. Conservative: only
     /// literals, typed locals/params, and numeric operators on them are known; anything
     /// else is `Unknown` and compiles to a normal dynamic `Send`.
@@ -527,7 +572,7 @@ impl Compiler {
 
     /// Selector → declared-return-`Type` map for a class body, from its method
     /// definitions/extensions that carry a return type.
-    fn collect_class_ctx(&self, block: &BlockNode) -> ClassCtx {
+    fn collect_class_ctx(&mut self, block: &BlockNode) -> ClassCtx {
         let mut returns = HashMap::new();
         let mut methods = HashSet::new();
         let mut sealed = false;
@@ -537,7 +582,7 @@ impl Compiler {
                     if let Ok(selector) = self.reconstruct_selector(&m.signature) {
                         methods.insert(selector.clone());
                         if let Some(rt) = &m.block.return_type {
-                            returns.insert(selector, Type::from_annotation_name(&rt.name));
+                            returns.insert(selector, self.resolve_annotation(&rt.name));
                         }
                     }
                 }
@@ -545,7 +590,7 @@ impl Compiler {
                     if let Ok(selector) = self.reconstruct_selector(&m.signature) {
                         methods.insert(selector.clone());
                         if let Some(rt) = &m.block.return_type {
-                            returns.insert(selector, Type::from_annotation_name(&rt.name));
+                            returns.insert(selector, self.resolve_annotation(&rt.name));
                         }
                     }
                 }
@@ -628,6 +673,9 @@ impl Compiler {
         program: &ProgramNode,
         define_self: bool,
     ) -> Result<StaticBlock, String> {
+        // Pre-scan this unit's class defs so annotations can forward-reference them (and so
+        // later-compiled units see them via the shared `seen_types`).
+        self.prescan_class_defs(program);
         let mut cb = CodeBlock::new();
 
         cb.current_source = program.source_info.clone();
@@ -1752,11 +1800,16 @@ impl Compiler {
         self.push_scope(locals);
         self.scopes.last_mut().unwrap().is_init = is_init;
 
-        // Seed declared param types (Integer/Boolean) so arithmetic on a typed param
-        // devirtualizes. Dispatch only selects a typed method when the arg matches, so
-        // the param is provably that type inside the body — no runtime guard needed.
-        for (name, tyname) in param_names.iter().zip(param_types.iter()) {
-            self.record_local_type(name, Type::from_annotation_name(tyname));
+        // Seed declared param types so arithmetic on a typed param devirtualizes. Dispatch only
+        // selects a typed method when the arg matches, so the param is provably that type inside
+        // the body — no runtime guard needed. Resolve the annotation (flagging unknown types).
+        // An *un-annotated* param is `Any` (gradual, unchecked), NOT `Object` — the `Object`
+        // default above is only the runtime dispatch signature, not a static type.
+        for arg in &block.arguments {
+            if let Some(hint) = &arg.type_hint {
+                let ty = self.resolve_annotation(&hint.name);
+                self.record_local_type(&arg.identifier.name, ty);
+            }
         }
 
         let mut block_bytecode = CodeBlock::new();
@@ -1917,6 +1970,37 @@ mod tests {
                 rvalue: Arc::new(rval),
             }),
         }
+    }
+
+    #[test]
+    fn resolver_flags_unknown_types() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics().to_vec()
+        }
+
+        // Builtins resolve silently — in a return type and in a param type.
+        assert!(diags("Foo <- { greet -> { |^String| ^^ 'hi' } }").is_empty());
+        assert!(diags("Foo <- { take -> { |n: Integer| ^^ n } }").is_empty());
+
+        // An unknown class is flagged (non-fatal: compilation still succeeds).
+        let d = diags("Foo <- { make -> { |^Widget| ^^ nil } }");
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].contains("unknown type `Widget`"), "{d:?}");
+        // …and in a param type.
+        assert!(diags("Foo <- { take -> { |g: Gadget| ^^ g } }")[0].contains("Gadget"));
+
+        // `T?` is flagged iff its base is unknown.
+        assert!(diags("Foo <- { make -> { |^Widget?| ^^ nil } }")[0].contains("Widget"));
+        assert!(diags("Foo <- { make -> { |^String?| ^^ nil } }").is_empty());
+
+        // A class defined anywhere in the unit is known — forward reference via the pre-scan.
+        assert!(diags("Foo <- { make -> { |^Widget| ^^ nil } }; Widget <- { }").is_empty());
     }
 
     #[test]
