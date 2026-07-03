@@ -306,6 +306,11 @@ struct Scope {
     immutable: HashSet<String>,
     /// Declared type of a local/param, when known (Integer/Boolean); absent = Unknown.
     types: HashMap<String, Type>,
+    /// Subset of `types` that came from an *explicit* annotation, not devirt inference. A
+    /// reassignment is checked against the declared type only for these — an inferred type is a
+    /// hint, not a contract, so `var x = 0` reassigned to a String is fine, but `var x: Integer`
+    /// reassigned to a String is not (Phase 3a).
+    declared_types: HashMap<String, Type>,
     /// True for the top-level scope of an object-initializer block (`X.new:{ … }`),
     /// where a bare `field = value` binds an instance field (no `var` required).
     is_init: bool,
@@ -354,6 +359,7 @@ impl Compiler {
                 locals: HashSet::new(),
                 immutable: HashSet::new(),
                 types: HashMap::new(),
+                declared_types: HashMap::new(),
                 is_init: false,
             }],
             temp_counter: 0,
@@ -374,6 +380,7 @@ impl Compiler {
                 locals,
                 immutable: HashSet::new(),
                 types: HashMap::new(),
+                declared_types: HashMap::new(),
                 is_init: false,
             }],
             temp_counter: 0,
@@ -436,6 +443,7 @@ impl Compiler {
             locals,
             immutable: HashSet::new(),
             types: HashMap::new(),
+            declared_types: HashMap::new(),
             is_init: false,
         });
     }
@@ -490,6 +498,27 @@ impl Compiler {
                 .types
                 .insert(name.to_string(), ty);
         }
+    }
+
+    /// Record a local's *declared* (annotated) type — into both `types` (devirt) and
+    /// `declared_types` (the reassignment check, which enforces only explicit contracts).
+    fn record_declared_type(&mut self, name: &str, ty: Type) {
+        if ty != Type::Any {
+            let scope = self.scopes.last_mut().unwrap();
+            scope.types.insert(name.to_string(), ty.clone());
+            scope.declared_types.insert(name.to_string(), ty);
+        }
+    }
+
+    /// The explicitly-declared type of a local, if any — `None` for an untyped local even when a
+    /// type was *inferred* for it (an inferred type is a devirt hint, not a reassignment contract).
+    fn declared_type(&self, name: &str) -> Option<Type> {
+        for scope in self.scopes.iter().rev() {
+            if scope.locals.contains(name) {
+                return scope.declared_types.get(name).cloned();
+            }
+        }
+        None
     }
 
     /// Add every top-level `Name <- …` class definition to `seen_types`, so an annotation can
@@ -692,19 +721,20 @@ impl Compiler {
             NodeValue::Set(_) => Type::Set,
             NodeValue::Block(_) => Type::Block,
             NodeValue::Identifier(id) => {
-                if id.identifier_type == IdentifierType::ReservedIdentifier {
+                // `nil`/`true`/`false` are reserved names (they parse as plain idents in expression
+                // position, so match by name, not `identifier_type`). Namespaced/instance idents
+                // carry no static type here.
+                if id.namespace.is_some()
+                    || id.identifier_type == IdentifierType::Namespaced
+                    || id.identifier_type == IdentifierType::Instance
+                {
+                    Type::Any
+                } else {
                     match id.name.as_str() {
                         "nil" => Type::Nil,
                         "true" | "false" => Type::Bool,
-                        _ => Type::Any,
+                        _ => self.local_type(&id.name),
                     }
-                } else if id.namespace.is_none()
-                    && id.identifier_type != IdentifierType::Namespaced
-                    && id.identifier_type != IdentifierType::Instance
-                {
-                    self.local_type(&id.name)
-                } else {
-                    Type::Any
                 }
             }
             NodeValue::BinaryOperator(op) => self.binop_result_type(op),
@@ -1252,7 +1282,18 @@ impl Compiler {
         // scope (compile_ident_store errors otherwise); a new local is introduced with
         // `var`/`let` (compile_declaration). Globals (`Foo`) and fields (`@x`) are handled
         // per-target in compile_ident_store and are unaffected by this rule.
-        self.compile_node(&assign.rvalue, bytecode)?;
+
+        // Phase 3a: a reassignment to a *typed* local is checked (and numeric literals promoted)
+        // against its declared type — the var's contract. An untyped/unrecorded target resolves to
+        // `Any`, so `compile_expecting` compiles it unchecked. Destructuring targets are untyped.
+        if let [lval] = assign.lvalues.as_slice()
+            && let NodeValue::IdentLValue(l) = &lval.value
+            && let Some(expected) = self.declared_type(&l.identifier.name)
+        {
+            self.compile_expecting(&assign.rvalue, &expected, bytecode)?;
+        } else {
+            self.compile_node(&assign.rvalue, bytecode)?;
+        }
 
         if assign.lvalues.len() == 1 {
             let lval = &assign.lvalues[0];
@@ -1318,16 +1359,21 @@ impl Compiler {
         if decl.lvalues.len() == 1
             && let NodeValue::IdentLValue(l) = &decl.lvalues[0].value
         {
-            let record = match &annotated {
-                Some(t) if *t != Type::Bool && *t != Type::Any => Some(t.clone()),
-                Some(_) => None,
-                None => {
-                    let ty = self.static_type(&decl.rvalue);
-                    (ty == Type::Int || ty == Type::List).then_some(ty)
+            match &annotated {
+                // An explicit annotation is the local's declared type (the reassignment contract).
+                // `Bool` is excluded — its `if:else:` inline has no fallback for a stale `var`.
+                Some(t) if *t != Type::Bool && *t != Type::Any => {
+                    self.record_declared_type(&l.identifier.name, t.clone());
                 }
-            };
-            if let Some(ty) = record {
-                self.record_local_type(&l.identifier.name, ty);
+                Some(_) => {}
+                None => {
+                    // No annotation: infer Int/List from the initializer for devirt only (a hint,
+                    // not a contract — an untyped `var` may be reassigned to any type).
+                    let ty = self.static_type(&decl.rvalue);
+                    if ty == Type::Int || ty == Type::List {
+                        self.record_local_type(&l.identifier.name, ty);
+                    }
+                }
             }
         }
 
@@ -2285,7 +2331,8 @@ mod tests {
         assert!(diags("Foo <- { make -> { |^String?| ^^ nil } }").is_empty());
 
         // A class defined anywhere in the unit is known — forward reference via the pre-scan.
-        assert!(diags("Foo <- { make -> { |^Widget| ^^ nil } }; Widget <- { }").is_empty());
+        // (`^Widget?` so the `nil` body is a valid return, not a nil-misuse.)
+        assert!(diags("Foo <- { make -> { |^Widget?| ^^ nil } }; Widget <- { }").is_empty());
     }
 
     #[test]
@@ -2366,6 +2413,33 @@ mod tests {
             diags("Animal <- { }; Animal <- Dog <- { }; Animal <- Cat <- { }; var d: Dog = Dog.new; var c: Cat = d")[0]
                 .contains("expected `Cat`, found `Dog`")
         );
+    }
+
+    #[test]
+    fn checker_flags_typed_reassignment() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics().to_vec()
+        }
+
+        // Reassigning an *annotated* var to a wrong type is flagged.
+        assert!(
+            diags("var x: Integer = 5; x = nil")[0].contains("expected `Integer`, found `Nil`")
+        );
+        assert!(
+            diags("var x: Integer = 5; x = 'hi'")[0].contains("expected `Integer`, found `String`")
+        );
+        // Correct type — and a promotable Integer literal into a Double var — are silent.
+        assert!(diags("var x: Integer = 5; x = 6").is_empty());
+        assert!(diags("var x: Double = 1.0; x = 2").is_empty());
+        // An UN-annotated var is untyped: its inferred type is a devirt hint, not a contract, so
+        // reassigning it to any type is fine (the `optimisticIntFallback` corpus pattern).
+        assert!(diags("var x = 5; x = 'hi'").is_empty());
     }
 
     #[test]
