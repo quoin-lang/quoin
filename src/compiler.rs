@@ -300,6 +300,10 @@ struct ClassCtx {
     sealed: bool,
 }
 
+/// Unary methods safe to send to `nil` — they don't dereference the receiver, so a possibly-nil
+/// receiver isn't flagged for these (Phase 3c nil-misuse check).
+const NIL_SAFE_SELECTORS: &[&str] = &["defined?", "s", "pp", "class", "hash"];
+
 /// A flow-narrowable path — what a guard (Phase 3c) can refine the type of. Only locals and
 /// instance fields (`@name`) narrow; global, namespaced, and reserved reads do not.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -859,6 +863,39 @@ impl Compiler {
         } else {
             scope.narrowed.insert(key, ty);
         }
+    }
+
+    /// Phase 3c: warn on a non-nil-safe send to a receiver whose current (narrowed) type is
+    /// confidently `Nullable(T)` — `nil.<sel>` would fail at runtime. Gated to explicit `T?` /
+    /// narrowed paths (silent on `Any`), so it speaks only on opt-in nullable annotations, and a
+    /// guarded (narrowed non-nil) receiver reads as `T` here and is silent.
+    fn check_nil_misuse(&mut self, call: &MethodCallNode) {
+        let Some(subject) = call.subject.as_deref() else {
+            return; // a self-send has no nullable receiver
+        };
+        if !matches!(self.static_type(subject), Type::Nullable(_)) {
+            return;
+        }
+        let idents = &call.arguments.signature.identifiers;
+        // A nil-safe unary method (`s`, `class`, `defined?`, …) doesn't dereference the receiver.
+        if call.arguments.expressions.is_empty()
+            && let Some(first) = idents.first()
+            && NIL_SAFE_SELECTORS.contains(&first.name.as_str())
+        {
+            return;
+        }
+        let selector = if call.arguments.expressions.is_empty() {
+            idents.first().map(|i| i.name.clone()).unwrap_or_default()
+        } else {
+            Self::call_selector_nonvariadic(call).unwrap_or_else(|| {
+                format!(
+                    "{}:",
+                    idents.first().map(|i| i.name.as_str()).unwrap_or("?")
+                )
+            })
+        };
+        self.diagnostics
+            .push(format!("receiver of `{selector}` may be nil"));
     }
 
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
@@ -1790,6 +1827,8 @@ impl Compiler {
     ) -> Result<(), String> {
         // Phase 3b: compile-time MNU (a pure analysis, before any inlining/lowering).
         self.check_mnu(call);
+        // Phase 3c: a non-nil-safe send to a confidently-nullable, un-narrowed receiver.
+        self.check_nil_misuse(call);
         let args = &call.arguments;
         // A self-send (no explicit receiver, or an explicit `self`) — eligible for
         // devirtualization when the enclosing class is sealed (see `emit_call`).
@@ -2710,6 +2749,33 @@ mod tests {
             diags("Foo <- { m -> { var x: Integer? = nil; x = 5; var y: Integer = x } }")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn checker_flags_nil_misuse() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics()
+                .iter()
+                .filter(|m| m.contains("may be nil"))
+                .cloned()
+                .collect()
+        }
+
+        // A non-nil-safe send to an un-narrowed nullable → warns.
+        assert!(!diags("Foo <- { m -> { |x: Integer?| x.abs } }").is_empty());
+        // Guarded: `x` is narrowed non-nil in the arm → silent.
+        assert!(diags("Foo <- { m -> { |x: Integer?| x.defined?.if:{ x.abs } } }").is_empty());
+        // Nil-safe methods don't dereference → silent even on a nullable.
+        assert!(diags("Foo <- { m -> { |x: Integer?| x.s } }").is_empty());
+        // Non-nullable, and gradual `Any`, receivers → silent.
+        assert!(diags("Foo <- { m -> { |x: Integer| x.abs } }").is_empty());
+        assert!(diags("Foo <- { m -> { |x| x.abs } }").is_empty());
     }
 
     #[test]
