@@ -317,9 +317,18 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   `try_inline_exact_receiver` unifies both. Same soundness gate (inline-safe ⇒ no block ⇒ no `^^`). Computed-
   receiver bench (`p.area` = `@x * @y` × 10M): **2.37s → 1.95s, ~1.2×** (temp store/load offsets some of the
   removed dispatch); corpus 1255/0/0 + GC-stress unchanged.
-- **5·4+ (next):** **arg-passing** inlining — self/exact-receiver sends *with* args (bind each arg to a temp,
-  splice the body; the recursive/`fib` prize also needs bounded-unroll). Then **multi-statement / local-binding**
-  bodies (alpha-rename spliced locals), and **cross-unit** receiver bodies (via the VM class object, not the AST).
+- **5·4 — arg-passing (with-arg methods) DONE** (`a5e8539`). `inlinable_body` allows params; a `param_override`
+  (param → temp) rebinds param refs in the spliced body. Each arg is evaluated into a temp (in the caller's
+  context) and the body compiled with params → those temps (+ `self` → the receiver temp for an explicit
+  receiver). Self-send and exact-receiver, single/multi-arg; `inline_body_with_args` shared, `inline_selector`
+  reconstructs the selector. With-arg bench (`v.scale:2` = `@x * k`, 10M loop): **2.25s → 1.77s, ~1.27×**;
+  corpus 1255/0/0 + GC-stress unchanged.
+- **5·5+ (next) — the `fib`/control-flow prize (a dedicated, larger push):** inline bodies with **control flow**
+  — `.if:else:`/`.whileDo:` **blocks** and `^`/`^^` **returns**. The blanket block-exclusion (the `^^`-soundness
+  gate) must become precise: splice the arms as control-flow-inline (like Slice 2d) and make an inlined `^`/`^^`
+  yield the inlined call's value, not return from the caller. Then **bounded recursion unroll** (a self-call
+  inlines K levels then dispatches) — together these reach the recursive `fib` case. Also still open:
+  **multi-statement / local-binding** bodies (alpha-rename spliced locals) and **cross-unit** receiver bodies.
 - **`CallSelfDirect` removed DONE** (`e98cd0b`): it was a runtime no-op (identical `exec_send` to `Send`) whose
   planned resolve-and-cache was the ruled-out inline cache, *and* it blocked fusion (a sealed self-send emitted
   an unfused `LoadLocal(self); CallSelfDirect` where `Send` fuses to `SendLocal*`). `emit_call` now emits `Send`;
