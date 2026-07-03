@@ -58,6 +58,47 @@ impl Type {
             _ => Type::Instance(Arc::from(name)),
         }
     }
+
+    /// Is a value of `self` usable where `expected` is wanted (the subtype direction)? Strict —
+    /// signatures never auto-widen (`Int` is NOT compatible with `Double`; numeric *literals* are
+    /// promoted at the value level by the checker instead). Gradual: `Any` on either side always
+    /// fits, so untyped code is never flagged. `Instance` matches by name only — subtyping arrives
+    /// with the class table (Phase 3b).
+    pub fn compatible_with(&self, expected: &Type) -> bool {
+        match (self, expected) {
+            (Type::Any, _) | (_, Type::Any) => true,
+            // Bottom: a diverging expression satisfies any expected type.
+            (Type::Never, _) => true,
+            // `T?` expected: `nil` fits, else the actual (unwrapped) must fit the inner type.
+            (_, Type::Nullable(inner)) => match self {
+                Type::Nil => true,
+                Type::Nullable(a) => a.compatible_with(inner),
+                other => other.compatible_with(inner),
+            },
+            // A nullable actual can't satisfy a non-nullable expected (it could be `nil`).
+            (Type::Nullable(_), _) => false,
+            (a, b) => a == b,
+        }
+    }
+
+    /// The Quoin-facing class name, for diagnostics (`Integer`, `Boolean`, `Foo?`, `Any`, …).
+    pub fn name(&self) -> String {
+        match self {
+            Type::Int => "Integer".to_string(),
+            Type::Double => "Double".to_string(),
+            Type::Bool => "Boolean".to_string(),
+            Type::String => "String".to_string(),
+            Type::Nil => "Nil".to_string(),
+            Type::List => "List".to_string(),
+            Type::Map => "Map".to_string(),
+            Type::Set => "Set".to_string(),
+            Type::Block => "Block".to_string(),
+            Type::Instance(n) => n.to_string(),
+            Type::Nullable(inner) => format!("{}?", inner.name()),
+            Type::Any => "Any".to_string(),
+            Type::Never => "Never".to_string(),
+        }
+    }
 }
 
 /// Every built-in class *name* — a superset of the enum's dedicated variants (the extras

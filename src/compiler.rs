@@ -337,6 +337,10 @@ pub struct Compiler {
     /// Non-fatal type diagnostics (e.g. `unknown type Foo`) collected during compilation.
     /// Surfaced by the caller; never blocks lowering (gradual best-effort).
     diagnostics: Vec<String>,
+    /// Declared return types of the block(s) currently being compiled (`|args ^T|`), innermost
+    /// last. A `^`/`^^` return or a block's tail expression is checked (and numeric literals
+    /// promoted) against the top entry; `None` = no declared return → not checked. Phase 3a.
+    return_type_stack: Vec<Option<Type>>,
 }
 
 impl Compiler {
@@ -355,6 +359,7 @@ impl Compiler {
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
             diagnostics: Vec::new(),
+            return_type_stack: Vec::new(),
         }
     }
 
@@ -373,6 +378,7 @@ impl Compiler {
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
             diagnostics: Vec::new(),
+            return_type_stack: Vec::new(),
         }
     }
 
@@ -509,6 +515,59 @@ impl Compiler {
         ty
     }
 
+    /// Compile `node` in a position that expects `expected`. A numeric *literal* promotes to
+    /// match (`1` where a `Double` is wanted → the Double `1.0`); otherwise it compiles normally
+    /// and its synthesized type is checked against `expected`. Phase 3a.
+    fn compile_expecting(
+        &mut self,
+        node: &Node,
+        expected: &Type,
+        bytecode: &mut CodeBlock,
+    ) -> Result<(), String> {
+        // Value-level promotion: an Integer *literal* where a Double is wanted becomes a Double.
+        if *expected == Type::Double {
+            if let NodeValue::Integer(i) = &node.value {
+                bytecode.push(Instruction::Push(Constant::Double(i.value as f64)));
+                return Ok(());
+            }
+        }
+        self.compile_node(node, bytecode)?;
+        self.check_type(node, expected);
+        Ok(())
+    }
+
+    /// Warn if `node`'s statically-known type is confidently incompatible with `expected`. Silent
+    /// whenever either side is `Any`, `expected` is an unknown class (already flagged as `unknown
+    /// type`), or the actual type can't be pinned down — the gradual "never speak on Any" rule.
+    fn check_type(&mut self, node: &Node, expected: &Type) {
+        match expected {
+            Type::Any => return,
+            Type::Instance(n) if !self.seen_types.contains(n) => return,
+            _ => {}
+        }
+        let actual = self.static_type(node);
+        if !actual.compatible_with(expected) {
+            self.diagnostics.push(format!(
+                "type mismatch: expected `{}`, found `{}`",
+                expected.name(),
+                actual.name()
+            ));
+        }
+    }
+
+    /// Compile a returned value (`^expr` / `^^expr`), checked and promoted against the innermost
+    /// declared return type on `return_type_stack`. `None` → compile normally, unchecked.
+    fn compile_return_value(
+        &mut self,
+        value: &Node,
+        bytecode: &mut CodeBlock,
+    ) -> Result<(), String> {
+        match self.return_type_stack.last().cloned().flatten() {
+            Some(expected) => self.compile_expecting(value, &expected, bytecode),
+            None => self.compile_node(value, bytecode),
+        }
+    }
+
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
@@ -526,9 +585,23 @@ impl Compiler {
     /// else is `Unknown` and compiles to a normal dynamic `Send`.
     fn static_type(&self, node: &Node) -> Type {
         match &node.value {
+            // Literals synthesize their builtin type. (Only `Int`/`List`/`Bool` drive devirt;
+            // the rest are inert there but let the checker see real mismatches — Phase 3a.)
             NodeValue::Integer(_) => Type::Int,
+            NodeValue::Double(_) => Type::Double,
+            NodeValue::Str(_) => Type::String,
+            NodeValue::List(_) => Type::List,
+            NodeValue::Map(_) => Type::Map,
+            NodeValue::Set(_) => Type::Set,
+            NodeValue::Block(_) => Type::Block,
             NodeValue::Identifier(id) => {
-                if id.namespace.is_none()
+                if id.identifier_type == IdentifierType::ReservedIdentifier {
+                    match id.name.as_str() {
+                        "nil" => Type::Nil,
+                        "true" | "false" => Type::Bool,
+                        _ => Type::Any,
+                    }
+                } else if id.namespace.is_none()
                     && id.identifier_type != IdentifierType::Namespaced
                     && id.identifier_type != IdentifierType::Instance
                 {
@@ -539,8 +612,6 @@ impl Compiler {
             }
             NodeValue::BinaryOperator(op) => self.binop_result_type(op),
             NodeValue::MethodCall(call) => self.self_send_return_type(call),
-            // A list literal `#(…)` is a built-in `List` (Slice 2e).
-            NodeValue::List(_) => Type::List,
             _ => Type::Any,
         }
     }
@@ -793,7 +864,7 @@ impl Compiler {
                 self.compile_block(block, bytecode)?;
             }
             NodeValue::BlockReturn(ret) => {
-                self.compile_node(&ret.value, bytecode)?;
+                self.compile_return_value(&ret.value, bytecode)?;
                 // Inside an inlined control-flow block (Slice 2d), `^expr` yields the
                 // block's value and jumps past the inlined region rather than popping a
                 // (now-absent) block frame; `inline_block_body` patches the placeholder.
@@ -805,7 +876,7 @@ impl Compiler {
                 }
             }
             NodeValue::MethodReturn(ret) => {
-                self.compile_node(&ret.value, bytecode)?;
+                self.compile_return_value(&ret.value, bytecode)?;
                 bytecode.push(Instruction::MethodReturn);
             }
             NodeValue::YieldReturn(ret) => {
@@ -1830,14 +1901,33 @@ impl Compiler {
             block_bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
         }
 
+        // Phase 3a: check/promote returns against this block's declared return type (`|args ^T|`).
+        let expected_ret = block
+            .return_type
+            .as_ref()
+            .map(|rt| Type::from_annotation_name(&rt.name));
+        self.return_type_stack.push(expected_ret.clone());
+
         let len = block.statements.len();
         for (idx, stmt) in block.statements.iter().enumerate() {
             block_bytecode.current_source = stmt.source_info.clone();
-            self.compile_node(stmt, &mut block_bytecode)?;
+            // The final statement is the block's implicit return value; check it against the
+            // declared return type. Explicit `^`/`^^` returns are handled by their own arms.
+            let is_tail_expr = idx == len - 1
+                && !matches!(
+                    &stmt.value,
+                    NodeValue::BlockReturn(_) | NodeValue::MethodReturn(_)
+                );
+            if let (true, Some(expected)) = (is_tail_expr, &expected_ret) {
+                self.compile_expecting(stmt, expected, &mut block_bytecode)?;
+            } else {
+                self.compile_node(stmt, &mut block_bytecode)?;
+            }
             if idx < len - 1 {
                 block_bytecode.push(Instruction::Pop);
             }
         }
+        self.return_type_stack.pop();
 
         block_bytecode.current_source = block.source_info.clone();
         if len == 0 {
@@ -2011,6 +2101,39 @@ mod tests {
 
         // A class defined anywhere in the unit is known — forward reference via the pre-scan.
         assert!(diags("Foo <- { make -> { |^Widget| ^^ nil } }; Widget <- { }").is_empty());
+    }
+
+    #[test]
+    fn checker_flags_return_mismatches() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics().to_vec()
+        }
+
+        // A confident return mismatch is flagged (non-fatal).
+        assert!(
+            diags("F <- { m -> { |^Integer| 'x' } }")[0]
+                .contains("expected `Integer`, found `String`")
+        );
+        // Correct returns are silent.
+        assert!(diags("F <- { m -> { |^Integer| 40 + 2 } }").is_empty());
+        assert!(diags("F <- { m -> { |^String| 'hi' } }").is_empty());
+        // Nullable: `nil` satisfies `T?`.
+        assert!(diags("F <- { m -> { |^Integer?| nil } }").is_empty());
+        // Numeric literal promotion: an Integer literal where a Double is declared is fine…
+        assert!(diags("F <- { m -> { |^Double| 1 } }").is_empty());
+        // …but a non-constant Integer where a Double is expected is flagged (strict signatures).
+        assert!(
+            diags("F <- { m: -> { |n: Integer ^Double| n } }")[0]
+                .contains("expected `Double`, found `Integer`")
+        );
+        // An explicit `^` return is checked too.
+        assert!(diags("F <- { m -> { |^Integer| ^'x' } }")[0].contains("found `String`"));
     }
 
     #[test]
