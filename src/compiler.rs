@@ -443,6 +443,9 @@ pub struct Compiler {
     /// local holding the receiver: `self`/`@field`/implicit self-sends in the body are rebound to it
     /// (`self` was the callee `v`, not the caller). `None` outside such a splice.
     self_override: Option<Symbol>,
+    /// While splicing a body that has parameters (Phase 5·4): each param name → the temp holding its
+    /// argument, so a bare param reference in the body loads that temp. Saved/restored across nesting.
+    param_override: HashMap<String, Symbol>,
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
@@ -488,6 +491,7 @@ impl Compiler {
             inline_depth: 0,
             class_bodies: HashMap::new(),
             self_override: None,
+            param_override: HashMap::new(),
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -516,6 +520,7 @@ impl Compiler {
             inline_depth: 0,
             class_bodies: HashMap::new(),
             self_override: None,
+            param_override: HashMap::new(),
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -1531,6 +1536,9 @@ impl Compiler {
                         "false" => bytecode.push(Instruction::Push(Constant::Bool(false))),
                         _ => unreachable!(),
                     }
+                } else if let Some(&sym) = self.param_override.get(&id.name) {
+                    // Phase 5·4: inside a spliced body, a param reference loads its bound-arg temp.
+                    bytecode.push(Instruction::LoadLocal(sym));
                 } else if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced
                 {
                     let ns_name = NamespacedName::from_ast(id);
@@ -2137,17 +2145,12 @@ impl Compiler {
     /// the send stays a normal dispatch.
     const MAX_INLINE_DEPTH: usize = 3;
 
-    /// A method body that can be spliced verbatim at a self-send call site (Phase 5·1/5·2): no
-    /// params, no local decls, no name, and a single statement that is an **inline-safe expression**
-    /// (see `is_inline_safe_expr`). The body just evaluates to that expression, so at a self-send —
-    /// where `self` is identical on both sides — splicing it is behavior-identical to the call.
-    /// Returns the body expression to inline.
+    /// A method body that can be spliced at a call site (Phase 5·1/5·2/5·4): no local decls, no
+    /// name, and a single statement that is an **inline-safe expression** (see `is_inline_safe_expr`).
+    /// Params ARE allowed (Phase 5·4) — the caller binds each arg to a temp and rebinds the param via
+    /// `param_override`. The body just evaluates to that expression. Returns the body expression.
     fn inlinable_body(block: &BlockNode) -> Option<&Node> {
-        if !block.arguments.is_empty()
-            || !block.decls.is_empty()
-            || block.decl_block.is_some()
-            || block.name.is_some()
-        {
+        if !block.decls.is_empty() || block.decl_block.is_some() || block.name.is_some() {
             return None;
         }
         let [stmt] = block.statements.as_slice() else {
@@ -2184,11 +2187,56 @@ impl Compiler {
         }
     }
 
-    /// Inline a no-arg self-send to a sealed class's own method with an inline-safe body (Phase
-    /// 5·1/5·2): splice the callee's body at the call site instead of pushing the receiver and
-    /// dispatching. Sound because a sealed class can't be subclassed, so `self.foo` provably resolves
-    /// to this class's `foo`, and the receiver is `self` on both sides. A `MAX_INLINE_DEPTH` guard
-    /// bounds recursive/nested expansion (a body may itself self-send). Returns `true` if it inlined.
+    /// The selector a call inlines under: the bare name for a unary send, the joined `foo:bar:` for a
+    /// non-variadic keyword send. `None` for a variadic run (whose dispatched selector is `name+:`).
+    fn inline_selector(call: &MethodCallNode) -> Option<String> {
+        if call.arguments.expressions.is_empty() {
+            let idents = &call.arguments.signature.identifiers;
+            (idents.len() == 1).then(|| idents[0].name.clone())
+        } else {
+            Self::call_selector_nonvariadic(call)
+        }
+    }
+
+    /// Splice `body` — a single inline-safe expression, possibly with `params` (Phase 5·4) — at a
+    /// call site: bind each arg to a temp (evaluated in the *caller's* context) and compile the body
+    /// with params rebound via `param_override`, and `self` → `self_temp` for an explicit receiver.
+    /// Precondition: `inlinable_body(body).is_some()` and `body.arguments.len() == args.len()`.
+    fn inline_body_with_args(
+        &mut self,
+        body: &BlockNode,
+        args: &[Arc<Node>],
+        self_temp: Option<Symbol>,
+        bytecode: &mut CodeBlock,
+    ) -> Result<bool, String> {
+        let mut bindings: HashMap<String, Symbol> = HashMap::new();
+        for (param, arg) in body.arguments.iter().zip(args) {
+            self.compile_node(arg, bytecode)?;
+            let tmp = self.new_temp_var();
+            let sym = Symbol::intern(&tmp);
+            self.scopes.last_mut().unwrap().locals.insert(tmp);
+            bytecode.push(Instruction::DefineLocal(sym));
+            bindings.insert(param.identifier.name.clone(), sym);
+        }
+        let saved_self = self.self_override;
+        if self_temp.is_some() {
+            self.self_override = self_temp;
+        }
+        let saved_params = std::mem::replace(&mut self.param_override, bindings);
+        self.inline_depth += 1;
+        let expr = Self::inlinable_body(body).expect("precondition: inlinable body");
+        let result = self.compile_node(expr, bytecode);
+        self.inline_depth -= 1;
+        self.param_override = saved_params;
+        self.self_override = saved_self;
+        result?;
+        Ok(true)
+    }
+
+    /// Inline a self-send to a sealed class's own method with an inline-safe body (Phase 5·1/5·2/5·4):
+    /// splice the callee's body instead of dispatching, binding any args to temps. Sound because a
+    /// sealed class can't be subclassed, so `self.foo` provably resolves to this class's `foo`, and
+    /// the receiver is `self` on both sides. `MAX_INLINE_DEPTH` bounds recursive/nested expansion.
     fn try_inline_self_send(
         &mut self,
         call: &MethodCallNode,
@@ -2198,35 +2246,27 @@ impl Compiler {
         // Under a `self_override` (5·3c), `self` is a rebound receiver, not the caller's `self`, so a
         // bare self-send resolves against *that* class (handled by `try_inline_exact_receiver`), not
         // the class being compiled — never self-inline here.
-        if !is_self
-            || self.self_override.is_some()
-            || !call.arguments.expressions.is_empty()
-            || self.inline_depth >= Self::MAX_INLINE_DEPTH
-        {
+        if !is_self || self.self_override.is_some() || self.inline_depth >= Self::MAX_INLINE_DEPTH {
             return Ok(false);
         }
-        let idents = &call.arguments.signature.identifiers;
-        if idents.len() != 1 {
+        let Some(selector) = Self::inline_selector(call) else {
             return Ok(false);
-        }
-        // Clone the callee body out (releasing the `class_ctx` borrow) so we can compile into `self`.
+        };
         let body = match self.class_ctx.last() {
-            Some(ctx) if ctx.sealed => ctx.bodies.get(idents[0].name.as_str()).cloned(),
+            Some(ctx) if ctx.sealed => ctx.bodies.get(&selector).cloned(),
             _ => None,
         };
         let Some(body) = body else {
             return Ok(false);
         };
-        let Some(expr) = Self::inlinable_body(&body) else {
+        // Check inlinability + arity before emitting anything (a self-send has no receiver to emit,
+        // but the arg temps below would be dangling on a bail).
+        if Self::inlinable_body(&body).is_none()
+            || body.arguments.len() != call.arguments.expressions.len()
+        {
             return Ok(false);
-        };
-        // The body may self-send further methods (each re-entering here); bound the nesting so a
-        // recursive or fan-out body can't blow up code size / loop forever at compile time.
-        self.inline_depth += 1;
-        let result = self.compile_node(expr, bytecode);
-        self.inline_depth -= 1;
-        result?;
-        Ok(true)
+        }
+        self.inline_body_with_args(&body, &call.arguments.expressions, None, bytecode)
     }
 
     /// If `block` is a bare field accessor (`x -> { @x }` — a single `@field` statement, no
@@ -2251,20 +2291,17 @@ impl Compiler {
         }
     }
 
-    /// Inline a no-arg explicit-receiver send `v.foo` to a sealed in-unit class (Phase 5·3/5·3b/5·3c).
-    /// Sound because a sealed class can't be subclassed, so `v` is exactly that class; a non-nullable
-    /// typed receiver is never nil. A **field accessor** reads `v`'s field directly (`<eval v>;
-    /// LoadFieldOf`); any other **inline-safe** body is spliced with `self`/`@field`/implicit-sends
-    /// rebound to `v` (evaluated once into a temp — the `self_override`). Returns `true` if it inlined.
+    /// Inline an explicit-receiver send `v.foo` (possibly with args) to a sealed in-unit class (Phase
+    /// 5·3/5·3b/5·3c/5·4). Sound because a sealed class can't be subclassed, so `v` is exactly that
+    /// class; a non-nullable typed receiver is never nil. A no-arg **field accessor** reads `v`'s
+    /// field directly (`<eval v>; LoadFieldOf`); any other **inline-safe** body is spliced with
+    /// `self` rebound to `v` (a temp) and params rebound to arg temps. Returns `true` if it inlined.
     fn try_inline_exact_receiver(
         &mut self,
         call: &MethodCallNode,
         bytecode: &mut CodeBlock,
     ) -> Result<bool, String> {
-        if !call.arguments.expressions.is_empty()
-            || call.arguments.signature.identifiers.len() != 1
-            || self.inline_depth >= Self::MAX_INLINE_DEPTH
-        {
+        if self.inline_depth >= Self::MAX_INLINE_DEPTH {
             return Ok(false);
         }
         let Some(subject) = call.subject.as_deref() else {
@@ -2276,38 +2313,38 @@ impl Compiler {
         if self.class_table.get(&class).map(|s| s.sealed) != Some(true) {
             return Ok(false);
         }
-        let selector = call.arguments.signature.identifiers[0].name.as_str();
+        let Some(selector) = Self::inline_selector(call) else {
+            return Ok(false);
+        };
         let Some(body) = self
             .class_bodies
             .get(&class)
-            .and_then(|b| b.get(selector))
+            .and_then(|b| b.get(&selector))
             .cloned()
         else {
             return Ok(false);
         };
-        // Field accessor: read the field directly off the receiver — no temp needed.
-        if let Some(field) = Self::field_accessor_field(&body) {
+        let args = &call.arguments.expressions;
+        // No-arg field accessor: read the field directly off the receiver — no temp needed.
+        if args.is_empty()
+            && let Some(field) = Self::field_accessor_field(&body)
+        {
             self.compile_node(subject, bytecode)?;
             bytecode.push(Instruction::LoadFieldOf(field));
             return Ok(true);
         }
-        // Computed body: evaluate the receiver once into a temp, then splice the body with `self`
-        // rebound to it. `body` is an owned `Arc`, so `expr` doesn't borrow `self`.
-        let Some(expr) = Self::inlinable_body(&body) else {
+        // Any other inline-safe body: check BEFORE emitting the receiver, else a bail dangles it.
+        if Self::inlinable_body(&body).is_none() || body.arguments.len() != args.len() {
             return Ok(false);
-        };
+        }
+        // Evaluate the receiver once into a temp; splice the body with `self` → that temp (and, in
+        // `inline_body_with_args`, params → arg temps).
         self.compile_node(subject, bytecode)?;
         let tmp = self.new_temp_var();
-        let tmp_sym = Symbol::intern(&tmp);
+        let v_sym = Symbol::intern(&tmp);
         self.scopes.last_mut().unwrap().locals.insert(tmp);
-        bytecode.push(Instruction::DefineLocal(tmp_sym));
-        let saved = self.self_override.replace(tmp_sym);
-        self.inline_depth += 1;
-        let result = self.compile_node(expr, bytecode);
-        self.inline_depth -= 1;
-        self.self_override = saved;
-        result?;
-        Ok(true)
+        bytecode.push(Instruction::DefineLocal(v_sym));
+        self.inline_body_with_args(&body, args, Some(v_sym), bytecode)
     }
 
     fn compile_method_call(
@@ -3799,6 +3836,48 @@ mod tests {
                 &|i| matches!(i, Instruction::LoadFieldOf(f) if f == "y")
             ),
             "the body's @fields are read off the receiver via LoadFieldOf"
+        );
+    }
+
+    #[test]
+    fn arg_passing_inlines_with_arg_methods() {
+        fn compile_src(src: &str) -> StaticBlock {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            Compiler::new().compile_program(p).unwrap()
+        }
+        fn dispatches(sb: &StaticBlock, sel: Symbol) -> bool {
+            sb.bytecode.0.iter().any(|inst| match inst {
+                Instruction::Send(s, _)
+                | Instruction::SendLocal(_, s, _)
+                | Instruction::SendConst(_, s, _)
+                | Instruction::SendField(_, s, _)
+                | Instruction::SendLocalLocal(_, _, s, _)
+                | Instruction::SendLocalConst(_, _, s, _) => *s == sel,
+                Instruction::Push(Constant::Block(nested)) => dispatches(nested, sel),
+                _ => false,
+            })
+        }
+        let scale = Symbol::intern("scale:");
+
+        // Phase 5·4: a self-send WITH an arg (`.scale:2`, body `@x * k`) inlines — the arg binds to a
+        // temp and `k` in the body loads it; `scale:` never dispatches.
+        let selfsend =
+            compile_src("C <- { |@x| scale: -> { |k| @x * k }; go -> { .scale:2 }; .sealed! }");
+        assert!(
+            !dispatches(&selfsend, scale),
+            "self-send with an arg should inline"
+        );
+        // And an explicit-receiver with an arg (`v.scale:2`) inlines too.
+        let exact = compile_src(
+            "C <- { |@x| scale: -> { |k| @x * k }; .sealed! }; \
+             R <- { go: -> { |v: C| v.scale:2 }; .sealed! }",
+        );
+        assert!(
+            !dispatches(&exact, scale),
+            "exact-receiver with an arg should inline"
         );
     }
 
