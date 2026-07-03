@@ -93,7 +93,12 @@ the settled syntax above. Touches: the pest grammar (drop `ret_type` after `op_m
 highlighter, the ~4 qnlib/test sites, and the IntelliJ plugin. Mechanical and small; done before
 Phase 1 so the resolver/checker build on the final location.
 
-### Phase 1 — the real `Type` representation (foundation)
+### Phase 1 — the real `Type` representation (foundation) ✅ DONE
+Landed in `src/types.rs` (`Type` enum + `Type::from_annotation_name`); `compiler.rs` swapped
+off `StaticType`. Behavior-preserving — the devirt gates still act only on `Int`/`List`/`Bool`
+and treat every other type (`Any` included) as "no static knowledge", so codegen is byte-identical.
+`Instance` uses the class **name** (`Arc<str>`), not a numeric `ClassId` (no class registry yet).
+
 Replace `StaticType{Int,Bool,List,Unknown}` with a proper `Type`:
 - **Builtins**: `Int`, `Double`, `Bool`, `String`, `Nil`, `List`, `Map`, `Set`, `Block`.
 - **User class types**: `Instance(ClassId)`.

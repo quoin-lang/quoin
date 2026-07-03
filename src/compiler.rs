@@ -7,6 +7,7 @@ use crate::parser::ast::{
     ProgramNode, UnaryOperatorNode, UnaryOperatorType,
 };
 use crate::symbol::Symbol;
+use crate::types::Type;
 use crate::value::{NamespacedName, SourceInfo};
 
 use std::collections::{HashMap, HashSet};
@@ -278,37 +279,18 @@ pub(crate) fn fuse_bytecode(
     (new_code, new_smap)
 }
 
-/// Statically-known type of an expression, used to devirtualize numeric operators
-/// (Slice 2a). `Int`/`Bool` are proven; everything dynamic is `Unknown` (the default,
-/// so untyped code compiles exactly as before). Double is intentionally not tracked
-/// yet (Integer-only slice — see docs/TYPED_DEVIRT_ARCH.md §10 decision B).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StaticType {
-    Int,
-    Bool,
-    /// A built-in `List` (sealed). Enables devirtualized `at:`/`at:put:`/`add:` (Slice 2e).
-    /// Unlike `Int`, list devirt has a runtime fallback, so it is sound even for a mutable
-    /// `var` whose inferred type could go stale on reassignment.
-    List,
-    Unknown,
-}
-
-/// Map a declared type name (param/local annotation) to a tracked `StaticType`.
-fn static_type_from_name(name: &str) -> StaticType {
-    match name {
-        "Integer" => StaticType::Int,
-        "Boolean" => StaticType::Bool,
-        "List" => StaticType::List,
-        _ => StaticType::Unknown,
-    }
-}
+// The static-type lattice lives in `crate::types::Type` (the shared substrate for the
+// resolver/checker; docs/TYPE_SYSTEM_ARCH.md). The optimizer below only *consumes* it: the
+// devirt gates act on `Int`/`List`/`Bool` and treat every other type — `Any` included — as
+// "no static knowledge", so untyped code compiles exactly as before. `Int` devirt is sound
+// only for values proven `Int`; list devirt has a runtime fallback (sound even for a `var`).
 
 /// Compile-time context for the class body currently being compiled (Slice 2b). Pushed
 /// on a stack while compiling a class def / extension; used to type self-sends by their
 /// callee's declared return type and to devirtualize self-sends in a sealed class.
 struct ClassCtx {
-    /// Method selector → declared return `StaticType` (methods that annotate a return).
-    returns: HashMap<String, StaticType>,
+    /// Method selector → declared return `Type` (methods that annotate a return).
+    returns: HashMap<String, Type>,
     /// Every method selector defined directly in this class body.
     methods: HashSet<String>,
     /// The class is compile-sealed: `sealed!` appears as a direct (unconditional) body
@@ -322,7 +304,7 @@ struct Scope {
     /// Subset of `locals` declared with `let` — reassigning one is a compile error.
     immutable: HashSet<String>,
     /// Declared type of a local/param, when known (Integer/Boolean); absent = Unknown.
-    types: HashMap<String, StaticType>,
+    types: HashMap<String, Type>,
     /// True for the top-level scope of an object-initializer block (`X.new:{ … }`),
     /// where a bare `field = value` binds an instance field (no `var` required).
     is_init: bool,
@@ -465,24 +447,20 @@ impl Compiler {
         false
     }
 
-    /// Declared `StaticType` of a local/param — the nearest binding's recorded type,
+    /// Declared `Type` of a local/param — the nearest binding's recorded type,
     /// or `Unknown` (untyped, or not a plain local).
-    fn local_type(&self, name: &str) -> StaticType {
+    fn local_type(&self, name: &str) -> Type {
         for scope in self.scopes.iter().rev() {
             if scope.locals.contains(name) {
-                return scope
-                    .types
-                    .get(name)
-                    .copied()
-                    .unwrap_or(StaticType::Unknown);
+                return scope.types.get(name).cloned().unwrap_or(Type::Any);
             }
         }
-        StaticType::Unknown
+        Type::Any
     }
 
     /// Record a known type for a local just declared in the innermost scope.
-    fn record_local_type(&mut self, name: &str, ty: StaticType) {
-        if ty != StaticType::Unknown {
+    fn record_local_type(&mut self, name: &str, ty: Type) {
+        if ty != Type::Any {
             self.scopes
                 .last_mut()
                 .unwrap()
@@ -494,9 +472,9 @@ impl Compiler {
     /// Statically infer an expression's type for devirtualization. Conservative: only
     /// literals, typed locals/params, and numeric operators on them are known; anything
     /// else is `Unknown` and compiles to a normal dynamic `Send`.
-    fn static_type(&self, node: &Node) -> StaticType {
+    fn static_type(&self, node: &Node) -> Type {
         match &node.value {
-            NodeValue::Integer(_) => StaticType::Int,
+            NodeValue::Integer(_) => Type::Int,
             NodeValue::Identifier(id) => {
                 if id.namespace.is_none()
                     && id.identifier_type != IdentifierType::Namespaced
@@ -504,34 +482,34 @@ impl Compiler {
                 {
                     self.local_type(&id.name)
                 } else {
-                    StaticType::Unknown
+                    Type::Any
                 }
             }
             NodeValue::BinaryOperator(op) => self.binop_result_type(op),
             NodeValue::MethodCall(call) => self.self_send_return_type(call),
             // A list literal `#(…)` is a built-in `List` (Slice 2e).
-            NodeValue::List(_) => StaticType::List,
-            _ => StaticType::Unknown,
+            NodeValue::List(_) => Type::List,
+            _ => Type::Any,
         }
     }
 
     /// A self-send (`.sel:(…)` — no explicit receiver, or an explicit `self`) to a
     /// current-class method with a declared return type is statically that type. Non-self
     /// sends, unknown selectors, and variadic sends stay `Unknown` (a safe miss).
-    fn self_send_return_type(&self, call: &MethodCallNode) -> StaticType {
+    fn self_send_return_type(&self, call: &MethodCallNode) -> Type {
         let is_self = match &call.subject {
             None => true,
             Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
         };
         if !is_self {
-            return StaticType::Unknown;
+            return Type::Any;
         }
         let Some(ctx) = self.class_ctx.last() else {
-            return StaticType::Unknown;
+            return Type::Any;
         };
         let idents = &call.arguments.signature.identifiers;
         if idents.is_empty() {
-            return StaticType::Unknown;
+            return Type::Any;
         }
         // Canonical selector: unary uses the bare name; a keyword send joins `name:` parts.
         // A variadic run folds to `name+:` in dispatch, which we don't reconstruct here — so
@@ -544,13 +522,10 @@ impl Compiler {
                 .map(|i| format!("{}:", i.name))
                 .collect::<String>()
         };
-        ctx.returns
-            .get(&selector)
-            .copied()
-            .unwrap_or(StaticType::Unknown)
+        ctx.returns.get(&selector).cloned().unwrap_or(Type::Any)
     }
 
-    /// Selector → declared-return-`StaticType` map for a class body, from its method
+    /// Selector → declared-return-`Type` map for a class body, from its method
     /// definitions/extensions that carry a return type.
     fn collect_class_ctx(&self, block: &BlockNode) -> ClassCtx {
         let mut returns = HashMap::new();
@@ -562,7 +537,7 @@ impl Compiler {
                     if let Ok(selector) = self.reconstruct_selector(&m.signature) {
                         methods.insert(selector.clone());
                         if let Some(rt) = &m.block.return_type {
-                            returns.insert(selector, static_type_from_name(&rt.name));
+                            returns.insert(selector, Type::from_annotation_name(&rt.name));
                         }
                     }
                 }
@@ -570,7 +545,7 @@ impl Compiler {
                     if let Ok(selector) = self.reconstruct_selector(&m.signature) {
                         methods.insert(selector.clone());
                         if let Some(rt) = &m.block.return_type {
-                            returns.insert(selector, static_type_from_name(&rt.name));
+                            returns.insert(selector, Type::from_annotation_name(&rt.name));
                         }
                     }
                 }
@@ -606,17 +581,17 @@ impl Compiler {
     /// statically `Int` — the soundness condition for devirtualizing to the direct i64 ops.
     /// Everything else (incl. `~`/`..`, and `&&`/`||`, which return an operand value not a
     /// `Bool`) stays `Unknown`.
-    fn binop_result_type(&self, op: &BinaryOperatorNode) -> StaticType {
+    fn binop_result_type(&self, op: &BinaryOperatorNode) -> Type {
         use BinaryOperatorType::*;
         match op.operator {
-            Lt | LtEq | Gt | GtEq | Eq | NotEq => StaticType::Bool,
+            Lt | LtEq | Gt | GtEq | Eq | NotEq => Type::Bool,
             Add | Sub | Mul | Div | Mod
-                if self.static_type(&op.left) == StaticType::Int
-                    && self.static_type(&op.right) == StaticType::Int =>
+                if self.static_type(&op.left) == Type::Int
+                    && self.static_type(&op.right) == Type::Int =>
             {
-                StaticType::Int
+                Type::Int
             }
-            _ => StaticType::Unknown,
+            _ => Type::Any,
         }
     }
 
@@ -1046,7 +1021,7 @@ impl Compiler {
             && let NodeValue::IdentLValue(l) = &decl.lvalues[0].value
         {
             let ty = self.static_type(&decl.rvalue);
-            if ty == StaticType::Int || ty == StaticType::List {
+            if ty == Type::Int || ty == Type::List {
                 self.record_local_type(&l.identifier.name, ty);
             }
         }
@@ -1386,7 +1361,7 @@ impl Compiler {
         num_args: usize,
     ) -> Option<Instruction> {
         let subject = call.subject.as_ref()?;
-        if self.static_type(subject) != StaticType::List {
+        if self.static_type(subject) != Type::List {
             return None;
         }
         match (selector, num_args) {
@@ -1427,14 +1402,14 @@ impl Compiler {
             _ => return Ok(false),
         };
 
-        // Bool receiver → inline directly. Unknown receiver → guarded inline (option C): a
-        // runtime Bool-check falls back to the real send for a non-Bool receiver. A
-        // known-non-Bool (Int) receiver → normal send (the guard would always miss).
+        // Bool receiver → inline directly. A known-non-Bool receiver (Int/List) → normal send
+        // (the guard would always miss). Everything else — `Any`, and any other static type we
+        // don't specifically reason about — → guarded inline (option C): a runtime Bool-check
+        // falls back to the real send for a non-Bool receiver.
         let guarded = match self.static_type(subject) {
-            StaticType::Bool => false,
-            StaticType::Unknown => true,
-            // A known-non-Bool receiver (Int/List) → normal send; the guard would always miss.
-            StaticType::Int | StaticType::List => return Ok(false),
+            Type::Bool => false,
+            Type::Int | Type::List => return Ok(false),
+            _ => true,
         };
 
         // Every arg must be a literal, 0-arg, declaration-free block (v1).
@@ -1670,8 +1645,8 @@ impl Compiler {
         // instead of a method send. Computed from the AST before compiling the operands
         // (no side effects). Integer is a sealed value type (see prelude.qn), so its
         // arithmetic operators can't be redefined — this is sound.
-        let devirt = self.static_type(&op.left) == StaticType::Int
-            && self.static_type(&op.right) == StaticType::Int;
+        let devirt =
+            self.static_type(&op.left) == Type::Int && self.static_type(&op.right) == Type::Int;
 
         self.compile_node(&op.left, bytecode)?;
         self.compile_node(&op.right, bytecode)?;
@@ -1781,7 +1756,7 @@ impl Compiler {
         // devirtualizes. Dispatch only selects a typed method when the arg matches, so
         // the param is provably that type inside the body — no runtime guard needed.
         for (name, tyname) in param_names.iter().zip(param_types.iter()) {
-            self.record_local_type(name, static_type_from_name(tyname));
+            self.record_local_type(name, Type::from_annotation_name(tyname));
         }
 
         let mut block_bytecode = CodeBlock::new();

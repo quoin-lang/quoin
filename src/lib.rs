@@ -22,6 +22,7 @@ pub mod runner;
 pub mod runtime;
 pub mod symbol;
 pub mod tuning;
+pub mod types;
 pub mod value;
 pub mod vm;
 pub mod vm_scheduler;
