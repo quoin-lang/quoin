@@ -302,9 +302,12 @@ unboxed elements).
   `MethodVariant`), so `$inspect` shows returns *and* cross-unit return contracts survive without relying on the
   AST-recording + merge-preserve path. Cheap-ish once 3c·4a's accumulator exists; also lifts the
   cross-class-return→`Any` limit noted in Phase 3b.
-- **Object return contracts beyond `defined?`** (3c·4c note): declaring `^T` on other universal `Object`
-  methods (`s : String`, `hash : Integer`, …) generalizes the Object-rooted `static_type` rule — each needs its
-  own corpus 0-FP verification before landing.
+- **Object return contracts beyond `defined?`** — `s : String` and `pp : String` **DONE** (`8c0336d`). These
+  two are *native* (Rust) methods with no `^Ret` AST header, so their contracts are **seeded** into the
+  ClassTable via `seed_native_object_returns` (called from `populate_from_vm`) rather than declared in bootstrap;
+  one source feeds both object-rooted typing and covariance. `hash` is *not* native on `Object` and `class`
+  returns a class object (needs a `Class` type) — both skipped. Further native contracts would follow the same
+  seed pattern (or wait for Fork-1b to carry native returns through introspection); each needs corpus 0-FP.
 
 ## Synergy with the perf roadmap
 
