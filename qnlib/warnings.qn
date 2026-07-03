@@ -45,7 +45,7 @@ Warnings <- {
 
     "* narrowing: `!= nil` and `&&` short-circuit narrow too.
     narrowsWithComparison -> { |x: Integer?| (x != nil).if:{ x + 1 } else:{ 0 } };
-    narrowsWithAnd -> { |x: Integer?| x.defined? && (x + 1) };
+    narrowsWithAnd -> { |x: Integer?| x.defined? && (x + 1) }
 };
 
 'Defined Warnings — see the diagnostics printed above.'.print
