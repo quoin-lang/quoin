@@ -1253,6 +1253,72 @@ impl Compiler {
         out
     }
 
+    /// Return-type covariance (the Liskov rule): a method that overrides an ancestor's method must
+    /// return a type usable where the ancestor's *declared* return is expected — a subtype is fine,
+    /// a widened or unrelated type is not. Warns on a confident violation, pointing at the override's
+    /// `^Ret` annotation. Gradual: silent unless both returns are known and the mismatch can't be
+    /// explained by class subtyping. This is what makes `Object#defined? : Boolean` a contract every
+    /// override must honor, so `x.defined?` is soundly `Boolean` (Phase 3c·4b). `class_name` and its
+    /// ancestors must already be in the class table (true at the class's compile site).
+    fn check_return_covariance(&mut self, class_name: &str, block: &BlockNode) {
+        for stmt in &block.statements {
+            let (sig, blk) = match &stmt.value {
+                NodeValue::MethodDefinition(m) => (&m.signature, &m.block),
+                NodeValue::MethodExtension(m) => (&m.signature, &m.block),
+                _ => continue,
+            };
+            let Some(rt) = &blk.return_type else { continue };
+            let Ok(selector) = self.reconstruct_selector(sig) else {
+                continue;
+            };
+            let Some((base, from)) = self.class_table.inherited_return(class_name, &selector)
+            else {
+                continue;
+            };
+            let over = Type::from_annotation_name(&rt.name);
+            if self.override_return_violates(&over, &base) {
+                self.warn(
+                    format!(
+                        "override of `{}` returns `{}`, incompatible with `{}` from `{}`",
+                        selector,
+                        over.name(),
+                        base.name(),
+                        from,
+                    ),
+                    rt.source_info.as_ref(),
+                );
+            }
+        }
+    }
+
+    /// Is an override returning `over` a *confident* covariance violation against a base return
+    /// `base`? Only speaks when sure — a scalar mismatch (no class subtyping can rescue it) or a
+    /// *proven* non-subtype between two bare classes. Anything the type/class lattice can't
+    /// adjudicate (mixed class/scalar, nullable-of-class, unknown classes) stays silent (no FP).
+    fn override_return_violates(&self, over: &Type, base: &Type) -> bool {
+        if over.compatible_with(base) {
+            return false; // Any/Never/exact/nullable-rules all fit
+        }
+        if Self::type_is_class_free(over) && Self::type_is_class_free(base) {
+            return true; // e.g. `String` where `Boolean` is declared
+        }
+        if let (Type::Instance(o), Type::Instance(b)) = (over, base) {
+            // Covariant returns permit a subtype; only a proven non-subtype is a violation.
+            return self.class_table.is_subtype(o, b) == Some(false);
+        }
+        false
+    }
+
+    /// Does `ty` mention no class name (recursing through `Nullable`)? Such types have no subtype
+    /// relation beyond `compatible_with`, so an incompatibility between two of them is definite.
+    fn type_is_class_free(ty: &Type) -> bool {
+        match ty {
+            Type::Instance(_) => false,
+            Type::Nullable(inner) => Self::type_is_class_free(inner),
+            _ => true,
+        }
+    }
+
     /// Static result type of a binary operator. Comparison/equality operators yield `Bool`
     /// for *any* operands (Slice 2d, option B) — a language guarantee that they return
     /// `Boolean`, which lets `(a < b).if:…` / `(x == y).if:…` inline even when the operands
@@ -1483,6 +1549,7 @@ impl Compiler {
                 self.seen_types.insert(&name.name);
                 self.class_table
                     .insert(&name.name, self.class_sig_from_def(class_def));
+                self.check_return_covariance(&name.name, &class_def.block);
                 let parent_name = class_def
                     .parent_identifier
                     .as_ref()
@@ -1524,6 +1591,7 @@ impl Compiler {
                 if let NodeValue::Identifier(target) = &class_ext.expression.value {
                     self.class_table
                         .add_returns(&target.name, self.declared_method_returns(&class_ext.block));
+                    self.check_return_covariance(&target.name, &class_ext.block);
                 }
                 self.compile_node(&class_ext.expression, bytecode)?;
                 let is_value_type = Self::is_value_type_target(&class_ext.expression);
@@ -2770,6 +2838,48 @@ mod tests {
         // A `Foo <-- {}` reopen contributes its declared returns too (how the core classes do it).
         let r = returns_of("Foo <- { }; Foo <-- { grow -> { |^String| 'x' } }", "Foo");
         assert_eq!(r.get("grow"), Some(&Type::String));
+    }
+
+    #[test]
+    fn checker_flags_return_covariance() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics()
+                .iter()
+                .map(|d| d.message.clone())
+                .filter(|m| m.contains("override of"))
+                .collect()
+        }
+
+        // Subclassing is `Parent <- Child <- { }`. Dog <: Animal, and B <: A below.
+        // Widening an inherited return is a violation: base `get:` returns `Dog`, the override
+        // returns `Animal` — a supertype, not usable where `Dog` is expected.
+        let d = diags(
+            "Animal <- { }; Animal <- Dog <- { }; \
+             A <- { get: -> { |x ^Dog| x } }; A <- B <- { get: -> { |x ^Animal| x } }",
+        );
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].contains("override of `get:`") && d[0].contains("incompatible"));
+
+        // Narrowing to a subtype is fine (covariant returns): base `Animal`, override `Dog`.
+        let d = diags(
+            "Animal <- { }; Animal <- Dog <- { }; \
+             A <- { get: -> { |x ^Animal| x } }; A <- B <- { get: -> { |x ^Dog| x } }",
+        );
+        assert!(d.is_empty(), "{d:?}");
+
+        // A confident scalar mismatch is flagged (base `String`, override `Integer`).
+        let d = diags("A <- { n -> { |^String| 'x' } }; A <- B <- { n -> { |^Integer| 5 } }");
+        assert_eq!(d.len(), 1, "{d:?}");
+
+        // Same scalar return is silent.
+        let d = diags("A <- { n -> { |^String| 'x' } }; A <- B <- { n -> { |^String| 'y' } }");
+        assert!(d.is_empty(), "{d:?}");
     }
 
     #[test]

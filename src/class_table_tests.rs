@@ -116,6 +116,33 @@ fn add_returns_upserts_and_merges_without_disturbing_the_sig() {
 }
 
 #[test]
+fn inherited_return_finds_nearest_ancestor_then_object_fallback() {
+    let t = ClassTable::new();
+    t.add_returns("Object", returns(&[("defined?", Type::Bool)]));
+    t.insert("Animal", sig(None, &[], &["make"], false, false));
+    t.add_returns(
+        "Animal",
+        returns(&[("make", Type::Instance(Arc::from("Animal")))]),
+    );
+    t.insert("Dog", sig(Some("Animal"), &[], &["make"], false, false));
+
+    // The nearest explicit ancestor's declared return, paired with the declaring class.
+    let (ty, from) = t.inherited_return("Dog", "make").unwrap();
+    assert_eq!(ty, Type::Instance(Arc::from("Animal")));
+    assert_eq!(&*from, "Animal");
+
+    // No explicit ancestor declares it → the universal `Object` contract applies.
+    let (ty, from) = t.inherited_return("Dog", "defined?").unwrap();
+    assert_eq!(ty, Type::Bool);
+    assert_eq!(&*from, "Object");
+
+    // A class's OWN return is not "inherited"; nothing above `Animal` declares `make`.
+    assert!(t.inherited_return("Animal", "make").is_none());
+    // `Object` has no ancestor and does not fall back to itself.
+    assert!(t.inherited_return("Object", "defined?").is_none());
+}
+
+#[test]
 fn insert_preserves_accumulated_returns_across_a_returnless_overwrite() {
     let t = ClassTable::new();
     // AST-recorded returns land first…

@@ -212,6 +212,61 @@ impl ClassTable {
         self.get(class_name)?.method_params.get(selector).cloned()
     }
 
+    /// The return type declared for `selector` by the nearest *ancestor* of `class` — walking mixins
+    /// then parent (recursively), not `class` itself — paired with the class that declares it.
+    /// `Object`, the universal root, is consulted as an implicit fallback so an override of a core
+    /// method (e.g. `defined?`) is checked against its base contract even without an explicit parent
+    /// link in the table. `None` when no ancestor declares a return for `selector` (Phase 3c·4b).
+    pub fn inherited_return(&self, class: &str, selector: &str) -> Option<(Type, Arc<str>)> {
+        let sig = self.get(class)?;
+        let mut visited = HashSet::new();
+        visited.insert(Arc::from(class));
+        for mixin in &sig.mixins {
+            if let Some(found) = self.declared_return_rec(mixin, selector, &mut visited) {
+                return Some(found);
+            }
+        }
+        if let Some(parent) = &sig.parent {
+            if let Some(found) = self.declared_return_rec(parent, selector, &mut visited) {
+                return Some(found);
+            }
+        }
+        // Implicit universal root: every class IS-A Object, so its contract always applies.
+        if class != "Object" {
+            if let Some(t) = self
+                .get("Object")
+                .and_then(|s| s.method_returns.get(selector).cloned())
+            {
+                return Some((t, Arc::from("Object")));
+            }
+        }
+        None
+    }
+
+    fn declared_return_rec(
+        &self,
+        class: &str,
+        selector: &str,
+        visited: &mut HashSet<Arc<str>>,
+    ) -> Option<(Type, Arc<str>)> {
+        if !visited.insert(Arc::from(class)) {
+            return None;
+        }
+        let sig = self.get(class)?;
+        if let Some(t) = sig.method_returns.get(selector) {
+            return Some((t.clone(), Arc::from(class)));
+        }
+        for mixin in &sig.mixins {
+            if let Some(found) = self.declared_return_rec(mixin, selector, visited) {
+                return Some(found);
+            }
+        }
+        match &sig.parent {
+            Some(parent) => self.declared_return_rec(parent, selector, visited),
+            None => None,
+        }
+    }
+
     /// Is `sub` a subtype of `sup` — the same class, or a descendant via the parent/mixin chain?
     /// `None` when either class is unknown to the table (caller stays silent).
     pub fn is_subtype(&self, sub: &str, sup: &str) -> Option<bool> {

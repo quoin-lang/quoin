@@ -29,7 +29,7 @@ false <-- {
 };
 
 Object <-- {
-    defined? -> { true };
+    defined? -> { |^Boolean| true };
 
     "* Everything except nil/false is truthy, so `!self` is false here; nil and
     "* the booleans override. (`-self` is handled per numeric type, not here.)
@@ -156,7 +156,7 @@ Nil <-- {
     };
 
     s --> { '' };
-    defined? --> { false };
+    defined? --> { |^Boolean| false };
 
     #'!' -> { true };
 
