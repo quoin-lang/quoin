@@ -288,12 +288,11 @@ unboxed elements).
   `record_declared_type`, so its annotation is a contract — reassignment is checked *and* flow-updates
   narrowing, completing the arm-exit join for nullable params. Corpus 1255/0/0. **Surfaced** the `Object`-as-top
   gap below.
-- **`Object` annotation should be the top type (`Any`), not `Instance("Object")`** — `var x: Object = 5` (and
-  now `|x: Object|` reassignment) *false-positives* `type mismatch: expected Object, found Integer`, because
-  `from_annotation_name("Object")` yields a concrete `Instance("Object")` that only `compatible_with` an exact
-  `Object`. `Object` is the universal supertype ⇒ an annotation of it means "no constraint" ⇒ resolve it to
-  `Any`. Pre-existing (affects `var` locals too); **zero corpus impact** (nothing annotates `: Object`). Small
-  fix in `resolve_annotation`/`from_annotation_name`; verify no other caller relies on `Instance("Object")`.
+- **`Object` annotation → top type `Any` — DONE** (`df54bfe`): `from_annotation_name("Object")` now yields
+  `Any` (not `Instance("Object")`), so `var x: Object = …` / `|x: Object|` no longer false-positive `expected
+  Object, found …`; `Object?` collapses to `Any` too. All six callers benefit (checker decls/params/returns,
+  covariance, VM-sourced arg-checks); the runtime `Object` *string* (dispatch/hierarchy) is a separate path,
+  untouched. Corpus 1255/0/0.
 - **3c·4d — nullable-guard inline recovery** (see the 3c·4d slice above): per-arm narrowing spliced into the
   inline path so declared-`T?` guards inline *and* narrow. Opt-in, zero corpus impact → deferred.
 - **Fork-1b — persist return types into runtime introspection.** 3c·4a records declared returns into the
