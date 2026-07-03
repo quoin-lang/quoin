@@ -328,6 +328,42 @@ impl NarrowKey {
     }
 }
 
+// ---- AST shape matchers (Phase 3c) -----------------------------------------------------------
+// Small, shallow structural matchers shared by the checker's recognizers. They match *one* level
+// of shape and **bottom out on the semantic helpers** — path classification via
+// `NarrowKey::from_ident`, selector reconstruction via `call_selector_*` — so a match can never
+// silently disagree with the VM's dispatch (e.g. the variadic-fold selector). Compose these rather
+// than re-deriving shapes inline; new checks add matchers here.
+
+/// `RECV.sel` with no arguments → (receiver, selector). `None` for a keyword send or a
+/// receiver-less (`self`) send.
+fn as_unary_send(node: &Node) -> Option<(&Node, &str)> {
+    let NodeValue::MethodCall(mc) = &node.value else {
+        return None;
+    };
+    if !mc.arguments.expressions.is_empty() {
+        return None;
+    }
+    let idents = &mc.arguments.signature.identifiers;
+    if idents.len() != 1 {
+        return None;
+    }
+    Some((mc.subject.as_deref()?, idents[0].name.as_str()))
+}
+
+/// The narrowable path an expression reads, if it is a bare local or `@field` identifier.
+fn as_path(node: &Node) -> Option<NarrowKey> {
+    match &node.value {
+        NodeValue::Identifier(id) => NarrowKey::from_ident(id),
+        _ => None,
+    }
+}
+
+/// The reserved `nil` literal.
+fn is_nil_literal(node: &Node) -> bool {
+    matches!(&node.value, NodeValue::Identifier(id) if id.name == "nil")
+}
+
 /// A recognized nil-guard's narrowing (Phase 3c): the path it tests and the type it refines to in
 /// each arm. For `x.defined?.if:{…} else:{…}` with `x: T?`, `if_arm = T`, `else_arm = Nil`.
 struct GuardInfo {
@@ -760,45 +796,31 @@ impl Compiler {
     /// / `RECV != nil` (either operand order). Returns the path and whether a *true* result means
     /// RECV is non-nil (`.defined?` and `!= nil` → `true`; `== nil` → `false`).
     fn match_nil_condition(node: &Node) -> Option<(NarrowKey, bool)> {
-        match &node.value {
-            NodeValue::MethodCall(mc) => {
-                // A unary `.defined?` send on an identifier.
-                if !mc.arguments.expressions.is_empty() {
-                    return None;
-                }
-                let idents = &mc.arguments.signature.identifiers;
-                if idents.len() != 1 || idents[0].name != "defined?" {
-                    return None;
-                }
-                let NodeValue::Identifier(recv) = &mc.subject.as_ref()?.value else {
-                    return None;
-                };
-                Some((NarrowKey::from_ident(recv)?, true))
-            }
-            NodeValue::BinaryOperator(op)
-                if matches!(
-                    op.operator,
-                    BinaryOperatorType::Eq | BinaryOperatorType::NotEq
-                ) =>
-            {
-                let key = Self::nil_comparison_key(&op.left, &op.right)?;
-                Some((key, op.operator == BinaryOperatorType::NotEq))
-            }
-            _ => None,
+        // `RECV.defined?` → a true result means RECV is non-nil.
+        if let Some((recv, "defined?")) = as_unary_send(node) {
+            return Some((as_path(recv)?, true));
         }
+        // `RECV == nil` (⇒ nil) / `RECV != nil` (⇒ non-nil), either operand order.
+        if let NodeValue::BinaryOperator(op) = &node.value
+            && matches!(
+                op.operator,
+                BinaryOperatorType::Eq | BinaryOperatorType::NotEq
+            )
+        {
+            return Some((
+                Self::nil_comparison_key(&op.left, &op.right)?,
+                op.operator == BinaryOperatorType::NotEq,
+            ));
+        }
+        None
     }
 
     /// One operand is the reserved `nil`, the other a narrowable path → that path.
     fn nil_comparison_key(a: &Node, b: &Node) -> Option<NarrowKey> {
-        let is_nil = |n: &Node| matches!(&n.value, NodeValue::Identifier(id) if id.name == "nil");
-        let path = |n: &Node| match &n.value {
-            NodeValue::Identifier(id) => NarrowKey::from_ident(id),
-            _ => None,
-        };
-        if is_nil(a) {
-            path(b)
-        } else if is_nil(b) {
-            path(a)
+        if is_nil_literal(a) {
+            as_path(b)
+        } else if is_nil_literal(b) {
+            as_path(a)
         } else {
             None
         }
