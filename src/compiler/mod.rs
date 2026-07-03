@@ -3056,5 +3056,4 @@ impl Compiler {
 }
 
 #[cfg(test)]
-#[path = "compiler_tests.rs"]
 mod tests;
