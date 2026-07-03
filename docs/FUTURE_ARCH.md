@@ -1,96 +1,131 @@
-# Future architecture — toward a dramatically faster VM
+# Future Architecture — where the VM performance work goes from here
 
-Captured from a big-picture discussion. The language is "fast enough for now"; this is the direction
-to revisit if/when raw speed becomes a goal. It deliberately preserves Quoin's dynamic feel as the
-*default* and makes speed *opt-in*. See `profiling/status.md` for the current perf state.
+Long-term performance roadmap, at `main` @ `fc362a6` (after the typed-devirt tier and the
+cheap-dispatch work merged). Companion to `docs/TYPED_DEVIRT_ARCH.md`. Grounded in the profiling
+under `profiling/post-cheap-dispatch/`.
 
-## Why this, why now
-The bounded, low-risk perf wins are **spent**: method-resolution cache, FxHash, mimalloc, borrow-not-
-clone in `step_internal`, per-Send allocation cleanups. The inline-cache experiment was *built and
-measured and ruled out* (parked on `experiment/inline-cache`) — confirming dispatch-resolution caching
-is exhausted. What remains is **structural/architectural**: the interpreter dispatch loop
-(`step_internal` ~30% inclusive) and per-call frame setup. Closing the next big chunk needs a different
-kind of project. Current standing: ~20-50× slower than Ruby 2.6 / ~9-44× slower than Python 3.9
-(interpreter-to-interpreter), worst on call/loop-bound code.
+## Lineage — the previous bet shipped
 
-## The core insight: types don't make a VM fast — *unboxing* and *devirtualization* do
-Static type annotations are necessary-but-not-sufficient. Adding `var x: Integer` today would change
-nothing — the VM would still store it as `Value::Int`. The win comes only from an architecture that
-*exploits* the types to do two things:
+The prior version of this doc (Jun 2026) argued that "types don't make a VM fast — *unboxing* and
+*devirtualization* do," and bet on typed locals + `sealed!` + unboxed/devirtualized arithmetic (for
+fib/sieve) and unboxed struct nodes (for trees), de-risked by a ceiling-screen first. **That bet was
+taken and largely shipped:**
 
-1. **Unbox.** `Value` is a tagged enum (`Int(i64)`, `Double(f64)`, `Object(Gc<…>)`, …); every op pays
-   a tag check + match. If `x: Integer` and `y: Integer` are known, `x + y` compiles to a **raw `i64`
-   add** — no enum, no tag, no match. For numeric code (fib/sieve) this kills boxing *and* per-op
-   dispatch at once. Plausibly **5-20×** there.
-2. **Devirtualize.** If the receiver type is known, `x + y` resolves to `Integer#+:` *at compile time*
-   — a direct call, no `lookup_method`, no cache, no `Callable`. That's the entire ~27% dispatch cost
-   gone for typed code.
+- The **typed-devirt tier** (PR #31) — sealed value types, compile-time type propagation, devirtualized
+  `Int`/`List` ops, control-flow inlining, step-batching. See `docs/TYPED_DEVIRT_ARCH.md`.
+- The **cheap-dispatch work** (PR #32, slices a1/b1/b2) — fused `Int` superinstructions, a flat inner
+  dispatch loop, and an `ip`-register hoist.
 
-## The blocker is exactly the dynamism we like
-Devirtualization needs to know `Integer#+:` **can't change**. But `Integer <-- { … }` can redefine it
-at runtime, and eigenclasses let instances diverge. **Runtime class extension is precisely what
-defeats static dispatch.** Two ways out:
+Net effect: cross-language parity went from ~9–44× CPython (that doc's starting point) to **~2.4–5.8×
+CPython** today. The unboxed-struct-node piece for trees is the one part of that bet still open (see
+Tier 0). This document picks up from there.
 
-- **Speculate + deopt** (V8 / LuaJIT / PyPy). Stay fully dynamic; assume the common method, guard on a
-  per-class version counter, de-optimize if extended. *No language change* — but it's a JIT, a bigger
-  project than the entire current VM.
-- **Seal — opt in to giving up dynamism locally.** `sealed!` (already a stubbed marker in QUOIN_TODO)
-  → the class's method table is frozen → calls devirtualize and arithmetic specializes. Default stays
-  dynamic; speed is opt-in where you don't need the dynamism. **This is the sweet spot** — "gradual
-  performance."
+## Where we are: the interpreter floor
 
-## The feature set to bet on (dynamism-preserving, opt-in)
-1. **Typed locals + typed ivars.** `var x: Integer = …` and types on instance vars. Enables unboxed
-   storage and is the input to specialization. (Method args already carry types — this completes the
-   picture.)
-2. **`sealed!` with teeth.** The escape hatch from runtime mutability that makes devirtualization
-   sound — the single most pivotal feature, because it's the thing currently blocking static dispatch.
-   (`abstract!`/`final` compose with it.)
-3. **Unboxed value/struct types.** A user-defined "struct": immutable, no eigenclass, flat typed
-   fields, **not GC-allocated**. The Binary-Trees lever: today every `TreeNode` is a
-   `Gc<RefLock<Object>>`; an unboxed struct node could live inline and skip the allocator + GC.
+The post-cheap-dispatch profile is decisive about the *shape* of what's left:
 
-What each targets: typed+sealed numerics → fib/sieve (unboxed arithmetic); unboxed structs → trees
-(no per-node allocation). I.e. exactly the slow benchmarks.
+| bucket | fib(20) | sieve(10000) | trees(10) |
+|---|--:|--:|--:|
+| dispatch / interpreter loop | **73.5%** | **83.7%** | 25.1% |
+| allocation + GC | 11.8% | 0.7% | 22.2% |
 
-## Foundations already in place
-- **Slot-based instance vars** (`Class.field_slots`) = the hidden-class/shape foundation. Typed slots
-  make them unboxed + smaller.
-- **Typed method arguments** already exist (dispatch scores by type-distance).
-- So two of the hard prerequisites most dynamic languages lack are already built.
+The two call/loop-bound benchmarks are **73–84% interpreter dispatch**. a1/b1/b2 made each bytecode
+cheap to *execute*, but you are still fetching → dispatching → executing one operation at a time.
+That is the **interpreter floor**. Optimizing the loop further (Tier 0) hits a ceiling, because the
+cost being paid is the interpretation itself.
 
-## Other doors worth considering
-- **`let` vs `var` (immutable bindings).** Cheap; enables registerization / hoisting / no-reload, and
-  good for the language regardless of speed.
-- **`abstract!` / `final`.** Compose with sealing for devirtualization (both stubbed in QUOIN_TODO).
+Past the floor, going meaningfully faster requires one of two things:
 
-## Honest cost
-Even the seal path (no JIT) is a **rearchitecture, not a session**: a typed/unboxed value
-representation, a typed-bytecode or specializing compiler tier that emits unboxed ops for typed+sealed
-regions, and *sound type-checks at the typed/untyped boundary* (guard on entry, trust inside — like
-Typed Racket's contracts). Untyped/unsealed code keeps running on today's interpreter. The
-no-language-change alternative (a speculative JIT) is even bigger.
+1. **Execute fewer operations** (a smarter compiler / IR) — Tier 1.
+2. **Execute them natively** (compilation) — Tier 2.
 
-## How to de-risk before committing: prototype-and-measure the ceiling
-Same discipline that cleanly ruled out the inline cache — measure before building the real thing.
+Everything below is that map.
 
-**Tier 1 — standalone ceiling screen (~half-day, ~4-6h focused).** A minimal *standalone* unboxed
-interpreter that runs `fib`: tiny instruction set (`PushInt`, `LoadIntLocal`, `IAdd`/`ISub`/`ILt`,
-conditional jump, recursive call), fib hand-assembled, a dispatch loop over raw `i64` with no `Value`
-enum and no method lookup. Time it like `qn benchmark`, compare to the current ~20ms.
-- Answers the go/no-go: a 2× ceiling kills it, a 15× ceiling justifies the rearchitecture.
-- **Caveat:** it *overstates* the ceiling (also drops the real VM's frame/call overhead a true tier
-  would keep) → treat the result as an **upper bound**. If even the upper bound is unimpressive, stop.
-- **Main risk / where it overruns:** the recursive unboxed call (needs a call stack of return-point +
-  unboxed locals). Timebox it; report the number or the blocker rather than grinding.
+## Tier 0 — remaining interpreter crumbs (near-term, bounded)
 
-**Tier 2 — integrated slice (~1.5-3 days, hold loosely).** Unboxed `Integer` local slots +
-devirtualized arithmetic in the *actual* VM (keeping real frames), through the fib path — the honest
-target-architecture number. Touches the value representation, new bytecode, the compiler, and the
-typed/untyped boundary. Only worth doing if Tier 1's ceiling is compelling. Unfamiliar-territory
-estimate → optimistic; expect surprises.
+Small, isolated, worth doing but each capped:
 
-## Decision when we return
-Run **Tier 1** first (cheap upper-bound number). If compelling → **Tier 2** for the realistic number →
-then decide on the full specializing tier. If not → the language is fast enough; the dynamic
-interpreter stays, and perf work yields to features / code-health.
+- **SipHash → FxHash** — a default-hasher `HashMap` is probed per node in the object/field path
+  (visible in the trees profile as `hash_one` + `sip::Hasher::write`, ~1.4%). Cheap freebie.
+- **Tree / struct allocation** — trees is the one allocation-bound benchmark (alloc+GC ~22% + object
+  construction). Unboxed struct nodes / a per-type arena is the lever; bounded ~1.2× (earlier estimate).
+  This is the unfinished part of the previous bet.
+
+Ruled-out/bounded levers (do not revisit — see `profiling/inline-cache`, `profiling/dispatch-cache`,
+and the `cheap-dispatch-progress` memory): per-call-site inline cache (regressed trees), frame/env
+pooling (~1.1×), `Frame` memcpy slimming and `Callable::call` skip (marginal).
+
+## Tier 1 — best-in-class interpreter (execute fewer ops)
+
+Real headroom without leaving the interpreter, in rough ROI order:
+
+1. **Method inlining — the big one.** Extend the control-flow inlining already shipped (Slice 2d
+   inlines `if:else:`/`whileDo:` into native jumps) to hot *user* methods. For fib the recursive calls
+   *are* the floor — inline a small monomorphic callee into its caller and the entire per-call cost
+   (frame alloc + dispatch + `exec_send`) evaporates. **Composes with typed devirt**: an inlined typed
+   method's body fully devirtualizes to native `Int`/`List` ops. Plausibly 2×+ on call-heavy code.
+2. **Register bytecode (Lua-style).** The current *stack* VM pays constant push/pop shuffling; a
+   register VM cuts instruction count ~30–50%. A larger compiler change.
+3. **Threaded dispatch (computed-goto).** The ~15–20% dispatch-*mechanism* win CPython gets. Rust-hard:
+   needs guaranteed tail calls (`become`, unstable) or an fn-pointer jump table. Deliberately skipped so
+   far because b1/b2 captured the structural dispatch wins without it.
+
+Together these reach **LuaJIT-interpreter / CPython-3.13 territory** — likely Python-parity-or-better
+across the board. Ceiling: still an interpreter.
+
+## Tier 2 — the leap: execute natively
+
+The only way to fundamentally break the floor. Two roads:
+
+- **Traditional JIT** — baseline (copy-and-patch, like CPython 3.13's) → optimizing/tracing JIT with
+  *runtime type feedback* (LuaJIT / PyPy / V8). The route dynamic languages are forced onto. Enormous:
+  a compiler backend + deopt + guards + the GC interaction.
+- **AOT-native compilation of the *typed subset* — Quoin's distinctive road** (below).
+
+### Why Quoin can take a road Python/Ruby cannot
+
+Quoin has a real static type system — sealed types + **compile-time type proof** (that is what
+devirtualization is underneath). Python and Ruby *cannot* AOT-compile: fully dynamic, they **need** a
+speculative JIT + type feedback to discover types at runtime. Quoin **proves** types at compile time.
+
+So typed methods can be **AOT-compiled to native code** (e.g. via Cranelift), with the interpreter kept
+only for genuinely-dynamic code: typed hot path → native, dynamic code → interpreted. And Tier 1 feeds
+straight in — a fully-inlined, fully-devirtualized typed method is already **a flat, straight-line
+sequence of native-typed ops**, which is exactly the input a native codegen backend wants.
+
+Open questions for the AOT path (to be worked out when it's on the table):
+- **GC interaction** — native frames holding `Gc` pointers vs the `gc_arena` yield model; likely forces
+  a rooting/stack-map scheme (and possibly revisits the collector — only warranted once execution is
+  native and allocation dominates).
+- **The typed/dynamic boundary** — calling conventions between native typed code and the interpreter,
+  and deopt when a "sealed" assumption is violated at a boundary (the same guard-on-entry/trust-inside
+  contract the typed tier already uses).
+- **Backend choice** — Cranelift (lean, JIT-and-AOT capable) vs LLVM (heavier, better optimizer).
+
+## The arc
+
+The type system was always the long-term bet:
+
+> **Devirtualization was the down-payment** — it made the interpreter faster and paid rent immediately.
+> **AOT native compilation is the jackpot** — proving types at compile time lets Quoin skip the entire
+> speculative-JIT machinery that dynamic languages are stuck building.
+
+Trajectory:
+
+```
+cheap interpreter (done) → method inlining → register VM → AOT-compile the typed subset to native
+```
+
+## Recommendation — highest-leverage next bet
+
+After the Tier-0 crumbs, **method inlining**. It is the rare lever that pays at *both* tiers: it
+extends proven work (2d control-flow inlining), it kills fib's actual floor (the recursive-call cost),
+and every bit of it de-risks the eventual AOT step by producing exactly the flat typed code a compiler
+backend consumes.
+
+## The honest part
+
+Each tier is a real step up in effort (inlining: weeks; register VM: weeks–months; a native backend:
+months) and there is a *lot* of runway — CPython-no-JIT is itself ~50× off C, so "beat Python" and
+"approach native" are very different destinations. How far to go is a product decision: a *fine*
+interpreter (≈ where we are), a *great* interpreter (Tier 1), or a *compiled language* (Tier 2 AOT).
