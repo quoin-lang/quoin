@@ -298,12 +298,19 @@ its designed "Phase 2 cache" was never built and is the ruled-out path — don't
   would return from the *caller's* method; no block ⇒ no `^^` ⇒ safe. A `MAX_INLINE_DEPTH` (=3) guard bounds
   recursive/fan-out expansion. Computed-self-send bench (`.bumped` in a 10M loop): **2.69s → 1.82s, ~1.48×**;
   corpus 1255/0/0 + GC-stress unchanged.
-- **5·3+ (next):** **exact-receiver** sends (`v.dot` where `v: SealedClass`) — the dominant `obj.method` pattern.
-  Blocked on: (a) a new `LoadFieldOf`-style instruction to read a field from an arbitrary object (`LoadField`
-  reads only `self`), since inlining `v.x` must read *v's* field; (b) callee-body access for receivers whose
-  class is another unit (body lives in the VM class object, not the AST) — a first cut can restrict to
-  in-unit/current-class receivers. Then **multi-statement / local-binding** bodies (need alpha-renaming) and the
-  arg-passing + bounded-unroll recursive/`fib` case. Also: **remove the no-op `CallSelfDirect`** (tracked below).
+- **5·3 — exact-receiver field-accessor inlining DONE** (`7b47db6`). New **`LoadFieldOf(name)`** instruction
+  (pop the TOS object, push its field — `LoadField` on an arbitrary object, not `self`; `field_of` factored
+  out). `v.x` where `v` is statically an instance of the *current* sealed class and `x` is a field accessor
+  (`x -> { @x }`) compiles to `<eval v>; LoadFieldOf(x)` — no dispatch, no frame. Sound: sealed ⇒ no subclass ⇒
+  `v` is exactly that class; a non-nullable typed receiver is never nil. `ClassCtx` gains its `name` (to match
+  receiver-class == current-class). Exact-receiver-accessor bench (`other.x` in a 10M loop): **1.71s → 0.95s,
+  ~1.8×**; corpus 1255/0/0 + GC-stress unchanged.
+- **5·3b+ (next):** broaden exact-receiver inlining to **any in-unit sealed class** (a compiler-wide
+  `class → selector → body` map, backward refs; cross-unit bodies live in the VM class object → later) and to
+  **non-field bodies** (needs general `self → v` rewriting of the spliced body). Then **multi-statement /
+  local-binding** bodies (alpha-renaming) and the arg-passing + bounded-unroll recursive/`fib` case. Also:
+  **remove the no-op `CallSelfDirect`** (tracked below) — its unfused sealed self-sends now sit alongside real
+  inlines.
 
 ## Deferred / follow-up tasks (tracked)
 - **Remove the `CallSelfDirect` instruction (likely a small perf win, not just cleanup).** It's a **no-op** —
