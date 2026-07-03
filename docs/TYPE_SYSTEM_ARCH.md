@@ -138,10 +138,19 @@ signatures never widen) + `static_type` extended to synthesize all literal types
 - **Numeric promotion is value-level, not type-level**: an `Integer` *literal* where a `Double` is
   expected is emitted as a `Double` (`^Double { 1 }` → `1.0`); a non-constant `Integer` → warning.
 
-**3b — cross-class checks** (needs a class-signature table — name → {selector → (params, return),
-parent, mixins, sealed}, threaded like `SeenTypes`): argument-type checks at call sites, compile-time
-**MNU** on a *sealed* receiver, `Instance` subtyping in `compatible_with`, and inline-block-arg checking
-(`{|a:Double|…}.value:1` — folded here since it needs the callee's param types / `Block` generics anyway).
+**3b — cross-class checks ✅ DONE** (VM `54be965` … `8e0b8ad`). A parallel `ClassTable`
+(`src/class_table.rs`: name → {parent, mixins, own selectors, sealed, per-method param types}), threaded
+like `SeenTypes`, populated from the current-unit AST **+ `introspect::describe_class`** for VM-resident
+classes (reuses the `$inspect` extraction; VM sigs are `from_vm` = authoritative — they include native
+methods + applied `Foo <-- {}` extensions). Resolution (`responds_to`) walks the *exact* dispatch order,
+so no drift; the corpus (0 false positives on thousands of real sends) + a checker-vs-VM cross-check test
+are the anti-drift guards.
+- **`Instance` subtyping** — in `check_type` via the parent/mixin chain (only ever *removes* false positives).
+- **Compile-time MNU** — a send to a selector the receiver's class can't answer.
+- **Argument-type checks + promotion** — args checked/promoted against the method's param types.
+
+MNU and arg-checks are gated on **`from_vm` + `sealed`** (an open class could gain the method/overload, so
+staying silent there is sound); missed check = fine, false positive = not. Inline-block-args still deferred.
 
 **3c — flow-sensitive nil** (deferred; hardest): narrow `T?`→`T` after a nil-guard; warn on a method
 send to an un-narrowed nullable receiver. Needs real flow analysis to avoid false positives.
