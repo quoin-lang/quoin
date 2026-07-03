@@ -1138,19 +1138,34 @@ impl Compiler {
             self.declare_local(name, mutable)?;
         }
 
-        self.compile_node(&decl.rvalue, bytecode)?;
+        // Phase 3a: an annotated `var x: T = expr` resolves `T` (flagging an unknown type) and
+        // checks/promotes the initializer against it; un-annotated decls compile plainly.
+        let annotated = decl
+            .type_hint
+            .as_ref()
+            .map(|h| self.resolve_annotation(&h.name));
+        match &annotated {
+            Some(expected) => self.compile_expecting(&decl.rvalue, expected, bytecode)?,
+            None => self.compile_node(&decl.rvalue, bytecode)?,
+        }
 
-        // Slice 2e/2f: infer the local's type from its initializer so its `at:`/`at:put:`/
-        // `add:` (List) and arithmetic (`Int`) devirtualize. Only `Int`/`List` are inferred
-        // — both devirt paths have a runtime fallback (`take_two_ints` / a non-list send), so
-        // an inferred type going stale on reassignment is harmless. `Bool` is deliberately
-        // excluded: the `if:else:` inline for a statically-`Bool` receiver has no fallback (a
-        // `Bool`-valued `var` still inlines via the guarded `Unknown` path, option C).
+        // Record the local's type for the checker + devirt. The annotation is authoritative (and
+        // matches a promoted initializer); otherwise infer `Int`/`List` from the initializer —
+        // both devirt paths have a runtime fallback, so a stale inferred type is harmless. `Bool`
+        // is excluded: the `if:else:` inline for a statically-`Bool` `var` has no fallback, so a
+        // reassigned `var` could go stale.
         if decl.lvalues.len() == 1
             && let NodeValue::IdentLValue(l) = &decl.lvalues[0].value
         {
-            let ty = self.static_type(&decl.rvalue);
-            if ty == Type::Int || ty == Type::List {
+            let record = match &annotated {
+                Some(t) if *t != Type::Bool && *t != Type::Any => Some(t.clone()),
+                Some(_) => None,
+                None => {
+                    let ty = self.static_type(&decl.rvalue);
+                    (ty == Type::Int || ty == Type::List).then_some(ty)
+                }
+            };
+            if let Some(ty) = record {
                 self.record_local_type(&l.identifier.name, ty);
             }
         }
@@ -2134,6 +2149,29 @@ mod tests {
         );
         // An explicit `^` return is checked too.
         assert!(diags("F <- { m -> { |^Integer| ^'x' } }")[0].contains("found `String`"));
+    }
+
+    #[test]
+    fn checker_flags_decl_mismatches() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics().to_vec()
+        }
+
+        assert!(diags("var x: Integer = 'hi'")[0].contains("expected `Integer`, found `String`"));
+        assert!(diags("var x: Integer = 5").is_empty());
+        // Numeric literal promotion applies to initializers too.
+        assert!(diags("var x: Double = 1").is_empty());
+        assert!(diags("var x: String = 'hi'").is_empty());
+        // Nullable: `nil` satisfies `T?`.
+        assert!(diags("var x: Integer? = nil").is_empty());
+        // A typed decl now resolves its annotation, so an unknown type is flagged.
+        assert!(diags("var x: Nope = 5")[0].contains("unknown type `Nope`"));
     }
 
     #[test]
