@@ -339,14 +339,6 @@ pub struct Compiler {
     diagnostics: Vec<String>,
 }
 
-/// Print the non-fatal Phase-2 type diagnostics collected by a `Compiler` (e.g.
-/// `unknown type Foo`) to stderr. Precise source locations are Phase 4.
-pub fn report_type_warnings(diagnostics: &[String]) {
-    for d in diagnostics {
-        eprintln!("warning: {d}");
-    }
-}
-
 impl Compiler {
     pub fn new() -> Self {
         Self {

@@ -1982,6 +1982,26 @@ fn test_vm_to_s() {
 }
 
 #[test]
+fn type_warnings_route_through_the_capture_sink() {
+    // Under the DAP adapter (`capture` on) a resolver warning must become a buffered
+    // OutputChunk (→ a DAP `output` event), not a raw fd-2 write the client never sees.
+    let mut arena =
+        Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
+    arena.mutate_root(|_mc, vm| {
+        vm.output.capture = true;
+        vm.report_type_warnings(&["unknown type `Widget`".to_string()]);
+        let chunks = vm.take_program_output();
+        assert_eq!(chunks.len(), 1, "expected one captured chunk");
+        assert_eq!(chunks[0].stream, StdStream::Err);
+        assert!(
+            String::from_utf8_lossy(&chunks[0].bytes).contains("unknown type `Widget`"),
+            "chunk = {:?}",
+            chunks[0].bytes
+        );
+    });
+}
+
+#[test]
 fn test_vm_options_at_runtime() {
     let options = VmOptions {
         arguments: vec!["foo".to_string(), "bar".to_string()],

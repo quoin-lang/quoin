@@ -412,6 +412,15 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Emit collected compile-time type diagnostics (Phase 2 `unknown type Foo` warnings) through
+    /// the stderr sink, so under the DAP adapter (`capture` on) they become `output` events
+    /// instead of leaking to the adapter's raw stderr. Best-effort; never fatal.
+    pub fn report_type_warnings(&mut self, diagnostics: &[String]) {
+        for d in diagnostics {
+            let _ = self.write_std(StdStream::Err, format!("warning: {d}\n").as_bytes());
+        }
+    }
+
     /// Drain the captured program output (the DAP driver calls this between resumes to emit
     /// `output` events). Empty when nothing was captured.
     pub fn take_program_output(&mut self) -> Vec<OutputChunk> {

@@ -175,7 +175,7 @@ fn compile_and_execute_source<'gc>(
     let static_block = compiler
         .compile_program_with(program_node, self_val.is_none())
         .map_err(|e| QuoinError::ParseError(format!("Compilation error: {}", e)))?;
-    crate::compiler::report_type_warnings(compiler.diagnostics());
+    vm.report_type_warnings(compiler.diagnostics());
     // Seed the bindings into a parent env the eval'd frame walks into.
     let parent_env = (!bindings.is_empty()).then(|| {
         let mut env = EnvFrame::new(None);

@@ -240,7 +240,7 @@ where
             Ok(sb) => sb,
             Err(e) => return Setup::CompileErr(format!("Compile error: {e}")),
         };
-        crate::compiler::report_type_warnings(compiler.diagnostics());
+        vm.report_type_warnings(compiler.diagnostics());
         let block = build_block(mc, &sb);
         let (base_frames, base_stack) = vm.begin_repl_line(block);
         install_main_task(mc, vm);
