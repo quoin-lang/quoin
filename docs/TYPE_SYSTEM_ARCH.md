@@ -126,13 +126,25 @@ reachable at compile time):
   stdlib types. Residual gap: a class the program itself `use`s (loaded during its *own* run) is unseen
   at its compile → a non-fatal warning.
 
-### Phase 3 — checker pass (best-effort, gradual; separate from codegen)
-- Bidirectional: check against annotations where present, infer where absent.
-- Compute expression types via **method return types, field types, literals**, and **control-flow
-  narrowing** (after a `.nil?` false-branch the value is non-nil).
-- Report the **high-value errors**: wrong argument type, wrong return type, **method-not-found on a
-  known type** (compile-time MNU), nil-misuse, unknown type name.
-- **Never speak on `Any`/dynamic** (gradual-friendly).
+### Phase 3 — checker pass (best-effort, gradual; **interleaved** into the compile pass)
+Bidirectional (check against annotations where present, infer where absent), gradual (never speak on
+`Any` or an unknown class), non-fatal warnings on the `diagnostics` channel. Staged:
+
+**3a — self-contained checks ✅ DONE** (VM `ca76d3e` + `65d8557`). `Type::compatible_with` (strict —
+signatures never widen) + `static_type` extended to synthesize all literal types.
+- **Return type**: a block/method's tail and `^`/`^^` returns checked against its declared `|args ^T|`.
+- **Typed decl**: `var x: T = expr` resolves `T` (also flags unknown types in decls), checks the
+  initializer, and records `T`.
+- **Numeric promotion is value-level, not type-level**: an `Integer` *literal* where a `Double` is
+  expected is emitted as a `Double` (`^Double { 1 }` → `1.0`); a non-constant `Integer` → warning.
+
+**3b — cross-class checks** (needs a class-signature table — name → {selector → (params, return),
+parent, mixins, sealed}, threaded like `SeenTypes`): argument-type checks at call sites, compile-time
+**MNU** on a *sealed* receiver, `Instance` subtyping in `compatible_with`, and inline-block-arg checking
+(`{|a:Double|…}.value:1` — folded here since it needs the callee's param types / `Block` generics anyway).
+
+**3c — flow-sensitive nil** (deferred; hardest): narrow `T?`→`T` after a nil-guard; warn on a method
+send to an un-narrowed nullable receiver. Needs real flow analysis to avoid false positives.
 
 ### Phase 4 — error ergonomics
 Reuse the existing span + caret renderer. Deliver:
