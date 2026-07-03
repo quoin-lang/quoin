@@ -41,9 +41,15 @@ impl Type {
     /// `Instance`. Diagnostics and validation against real classes are Phase 2.
     pub fn from_annotation_name(name: &str) -> Type {
         // The settled `Integer?` rule: `?` is an identifier char, so it arrives glued to the
-        // name; a trailing `?` in a type position means nullable.
+        // name; a trailing `?` in a type position means nullable. Nullable of the top type is
+        // still the top type (`Object?` ⇒ `Any`, not `Nullable(Any)`).
         if let Some(base) = name.strip_suffix('?') {
-            return Type::Nullable(Box::new(Type::from_annotation_name(base)));
+            let inner = Type::from_annotation_name(base);
+            return if matches!(inner, Type::Any) {
+                Type::Any
+            } else {
+                Type::Nullable(Box::new(inner))
+            };
         }
         match name {
             "Integer" => Type::Int,
@@ -55,6 +61,11 @@ impl Type {
             "Map" => Type::Map,
             "Set" => Type::Set,
             "Block" => Type::Block,
+            // `Object` is the universal supertype — as a static annotation it constrains nothing,
+            // so it resolves to the gradual top `Any` (never a concrete `Instance("Object")`, which
+            // would false-positive `expected Object, found …`). The `Object` *string* is still the
+            // runtime dispatch default; that path doesn't come through here.
+            "Object" => Type::Any,
             _ => Type::Instance(Arc::from(name)),
         }
     }

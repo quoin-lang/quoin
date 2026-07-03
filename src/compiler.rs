@@ -3265,6 +3265,32 @@ mod tests {
     }
 
     #[test]
+    fn object_annotation_is_the_top_type() {
+        // `Object` (and `Object?`) is the universal top → the gradual `Any`, never a concrete class.
+        assert_eq!(Type::from_annotation_name("Object"), Type::Any);
+        assert_eq!(Type::from_annotation_name("Object?"), Type::Any);
+
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics()
+                .iter()
+                .filter(|d| d.message.contains("type mismatch"))
+                .map(|d| d.message.clone())
+                .collect()
+        }
+        // `Object` constrains nothing — no false positive on a decl or a param reassignment.
+        assert!(diags("Foo <- { m -> { var x: Object = 5; x } }").is_empty());
+        assert!(diags("Foo <- { m -> { |x: Object| x = 'y'; x } }").is_empty());
+        // A real annotation still constrains.
+        assert!(!diags("Foo <- { m -> { var x: Integer = 'no'; x } }").is_empty());
+    }
+
+    #[test]
     fn checker_flags_nil_misuse() {
         fn diags(src: &str) -> Vec<String> {
             let node = crate::parser::parse_quoin_string(src);
