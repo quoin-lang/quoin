@@ -295,8 +295,6 @@ struct ClassCtx {
     name: String,
     /// Method selector → declared return `Type` (methods that annotate a return).
     returns: HashMap<String, Type>,
-    /// Every method selector defined directly in this class body.
-    methods: HashSet<String>,
     /// The class is compile-sealed: `sealed!` appears as a direct (unconditional) body
     /// statement, so its method table is frozen and same-class self-sends can be
     /// devirtualized (Slice 2b-B).
@@ -1181,7 +1179,6 @@ impl Compiler {
     /// definitions/extensions that carry a return type.
     fn collect_class_ctx(&mut self, name: &str, block: &BlockNode) -> ClassCtx {
         let mut returns = HashMap::new();
-        let mut methods = HashSet::new();
         let mut bodies = HashMap::new();
         let mut sealed = false;
         for stmt in &block.statements {
@@ -1197,7 +1194,6 @@ impl Compiler {
                 _ => continue,
             };
             if let Ok(selector) = self.reconstruct_selector(signature) {
-                methods.insert(selector.clone());
                 bodies.insert(selector.clone(), method_block.clone());
                 if let Some(rt) = &method_block.return_type {
                     returns.insert(selector, self.resolve_annotation(rt));
@@ -1207,7 +1203,6 @@ impl Compiler {
         ClassCtx {
             name: name.to_string(),
             returns,
-            methods,
             bodies,
             sealed,
         }
@@ -2100,20 +2095,12 @@ impl Compiler {
         Ok(())
     }
 
-    /// Emit a call instruction: `CallSelfDirect` for a self-send to a same-class method of
-    /// a compile-sealed class (devirtualizable — Slice 2b-B), else a normal `Send`.
-    fn emit_call(&self, bytecode: &mut CodeBlock, selector: &str, num_args: usize, is_self: bool) {
-        if is_self {
-            if let Some(ctx) = self.class_ctx.last() {
-                if ctx.sealed && ctx.methods.contains(selector) {
-                    bytecode.push(Instruction::CallSelfDirect(
-                        Symbol::intern(selector),
-                        num_args,
-                    ));
-                    return;
-                }
-            }
-        }
+    /// Emit a `Send`. (A sealed same-class self-send once emitted a distinct `CallSelfDirect`
+    /// marker, but it was a runtime no-op — its planned resolve-and-cache was the ruled-out
+    /// per-call-site inline cache — and, being unfused, was slightly *slower* than a plain `Send`,
+    /// which the peephole fuses into a `SendLocal`. A provably-fixed self-send is instead handled by
+    /// inlining, Phase 5.)
+    fn emit_call(&self, bytecode: &mut CodeBlock, selector: &str, num_args: usize) {
         bytecode.push(Instruction::Send(Symbol::intern(selector), num_args));
     }
 
@@ -2304,7 +2291,7 @@ impl Compiler {
                 bytecode.push(Instruction::LoadFieldOf(field));
                 return Ok(());
             }
-            self.emit_call(bytecode, &selector, 0, is_self);
+            self.emit_call(bytecode, &selector, 0);
             return Ok(());
         }
 
@@ -2397,7 +2384,7 @@ impl Compiler {
             return Ok(());
         }
 
-        self.emit_call(bytecode, &selector, num_components, is_self);
+        self.emit_call(bytecode, &selector, num_components);
         Ok(())
     }
 
@@ -2502,9 +2489,9 @@ impl Compiler {
         self.compile_block(then_blk, &mut cold_bc)?;
         if let Some(else_blk) = else_blk {
             self.compile_block(else_blk, &mut cold_bc)?;
-            self.emit_call(&mut cold_bc, "if:else:", 2, false);
+            self.emit_call(&mut cold_bc, "if:else:", 2);
         } else {
-            self.emit_call(&mut cold_bc, "if:", 1, false);
+            self.emit_call(&mut cold_bc, "if:", 1);
         }
 
         let h = hot_bc.len() as isize;
@@ -3572,41 +3559,6 @@ mod tests {
         assert!(e.contains("instance variable"), "{e}");
     }
 
-    /// Recursively check whether a static block (or any nested block) contains a
-    /// `CallSelfDirect` instruction.
-    fn has_call_self_direct(sb: &StaticBlock) -> bool {
-        sb.bytecode.0.iter().any(|inst| match inst {
-            Instruction::CallSelfDirect(..) => true,
-            Instruction::Push(Constant::Block(nested)) => has_call_self_direct(nested),
-            _ => false,
-        })
-    }
-
-    #[test]
-    fn sealed_self_send_emits_call_self_direct() {
-        fn compile_src(src: &str) -> StaticBlock {
-            let node = crate::parser::parse_quoin_string(src);
-            let NodeValue::Program(p) = &node.value else {
-                panic!("expected a program");
-            };
-            Compiler::new().compile_program(p).unwrap()
-        }
-
-        // A self-send to a same-class method of a SEALED class devirtualizes.
-        let sealed = compile_src("Foo <- { bar: -> { |n| .bar:(n) }; .sealed! }");
-        assert!(
-            has_call_self_direct(&sealed),
-            "sealed same-class self-send should emit CallSelfDirect"
-        );
-
-        // Without the seal it stays a normal dynamic Send.
-        let unsealed = compile_src("Foo <- { bar: -> { |n| .bar:(n) } }");
-        assert!(
-            !has_call_self_direct(&unsealed),
-            "un-sealed self-send must stay a Send"
-        );
-    }
-
     #[test]
     fn sealed_leaf_self_send_is_inlined() {
         fn compile_src(src: &str) -> StaticBlock {
@@ -3620,7 +3572,6 @@ mod tests {
         fn dispatches(sb: &StaticBlock, sel: Symbol) -> bool {
             sb.bytecode.0.iter().any(|inst| match inst {
                 Instruction::Send(s, _)
-                | Instruction::CallSelfDirect(s, _)
                 | Instruction::SendLocal(_, s, _)
                 | Instruction::SendConst(_, s, _)
                 | Instruction::SendField(_, s, _)
@@ -3675,10 +3626,11 @@ mod tests {
             panic!("expected a program");
         };
         let sb = Compiler::new().compile_program(p).unwrap();
-        // It compiled (didn't hang / overflow) and still contains a `loop` dispatch at the bottom.
+        // It compiled (didn't hang / overflow) and still dispatches `loop` at the bottom — as a
+        // `Send`, which the peephole fuses to `SendLocal` for a `self` receiver.
         fn dispatches(sb: &StaticBlock, sel: Symbol) -> bool {
             sb.bytecode.0.iter().any(|inst| match inst {
-                Instruction::Send(s, _) | Instruction::CallSelfDirect(s, _) => *s == sel,
+                Instruction::Send(s, _) | Instruction::SendLocal(_, s, _) => *s == sel,
                 Instruction::Push(Constant::Block(nested)) => dispatches(nested, sel),
                 _ => false,
             })
