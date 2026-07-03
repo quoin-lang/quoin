@@ -362,6 +362,32 @@ mod tests {
          Animal <- Dog <- { sound -> { 'woof' } fetch: -> { |item:String| item } }; \
          Spot = Animal.new;";
 
+    /// Anti-drift: the checker's `ClassTable::responds_to` must never say "does not respond" for a
+    /// selector the VM's own dispatch actually resolves. Cross-checks the compile-time table
+    /// (built via `populate_from_vm`) against the runtime dispatch view over a real hierarchy.
+    #[test]
+    fn class_table_never_false_when_dispatch_resolves() {
+        use crate::class_table::{ClassTable, populate_from_vm};
+        check(SRC, |_mc, vm| {
+            let table = ClassTable::new();
+            populate_from_vm(vm, &table);
+            let classes = ["Animal", "Dog", "Object", "String", "Integer"];
+            let selectors = ["sound", "legs", "fetch:", "s", "class", "nope", "zzz:"];
+            for class in classes {
+                let resolves: std::collections::HashSet<String> =
+                    find_selectors(vm, class, "", true).into_iter().collect();
+                for sel in selectors {
+                    if table.responds_to(class, sel) == Some(false) {
+                        assert!(
+                            !resolves.contains(sel),
+                            "{class}.{sel}: checker says no, but dispatch resolves it"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     #[test]
     fn describe_class_reads_parent_methods_and_ivars() {
         check(SRC, |_mc, vm| {

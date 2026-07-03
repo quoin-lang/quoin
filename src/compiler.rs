@@ -585,6 +585,53 @@ impl Compiler {
         }
     }
 
+    /// Compile-time MessageNotUnderstood: warn when a send targets a selector the receiver's class
+    /// provably doesn't respond to. Sound only for an authoritative (`from_vm`), `sealed`, catch-all-
+    /// free class — otherwise a future extension or dynamic handler could resolve it, so we stay
+    /// silent (a missed MNU is fine; a wrong one is not). Resolution reuses `responds_to`, which is
+    /// the VM's own dispatch walk.
+    fn check_mnu(&mut self, call: &MethodCallNode) {
+        let Some(class) = self.receiver_class(call) else {
+            return;
+        };
+        let Some(sig) = self.class_table.get(&class) else {
+            return;
+        };
+        if !sig.from_vm || !sig.sealed || sig.has_catch_all {
+            return;
+        }
+        let Some(selector) = Self::call_selector_simple(call) else {
+            return;
+        };
+        if self.class_table.responds_to(&class, &selector) == Some(false) {
+            self.diagnostics
+                .push(format!("`{class}` does not respond to `{selector}`"));
+        }
+    }
+
+    /// The receiver's concrete class name, if statically known. Only a user-class `Instance` —
+    /// builtins aren't `sealed` (so MNU never fires on them), and `Any`/nullable receivers skip.
+    fn receiver_class(&self, call: &MethodCallNode) -> Option<String> {
+        match self.static_type(call.subject.as_ref()?) {
+            Type::Instance(c) => Some(c.to_string()),
+            _ => None,
+        }
+    }
+
+    /// The canonical dispatched selector for a call — but only for the unambiguous shapes (unary, or
+    /// a single keyword with one argument). Multi-keyword and variadic runs (which fold to `name+:`)
+    /// return `None`, so MNU never reconstructs a selector that could differ from dispatch's.
+    fn call_selector_simple(call: &MethodCallNode) -> Option<String> {
+        let idents = &call.arguments.signature.identifiers;
+        if call.arguments.expressions.is_empty() {
+            return idents.first().map(|i| i.name.clone());
+        }
+        if idents.len() == 1 && call.arguments.expressions.len() == 1 {
+            return Some(format!("{}:", idents[0].name));
+        }
+        None
+    }
+
     /// The non-fatal type diagnostics collected during compilation (Phase 2 warnings).
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
@@ -1494,6 +1541,8 @@ impl Compiler {
         call: &MethodCallNode,
         bytecode: &mut CodeBlock,
     ) -> Result<(), String> {
+        // Phase 3b: compile-time MNU (a pure analysis, before any inlining/lowering).
+        self.check_mnu(call);
         let args = &call.arguments;
         // A self-send (no explicit receiver, or an explicit `self`) — eligible for
         // devirtualization when the enclosing class is sealed (see `emit_call`).
