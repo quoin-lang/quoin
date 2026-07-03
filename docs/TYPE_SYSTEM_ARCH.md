@@ -307,7 +307,18 @@ unboxed elements).
   ClassTable via `seed_native_object_returns` (called from `populate_from_vm`) rather than declared in bootstrap;
   one source feeds both object-rooted typing and covariance. `hash` is *not* native on `Object` and `class`
   returns a class object (needs a `Class` type) — both skipped. Further native contracts would follow the same
-  seed pattern (or wait for Fork-1b to carry native returns through introspection); each needs corpus 0-FP.
+  seed pattern until the TODO below lands.
+- **TODO — native-method return-type declarations (replaces the seed hardcoding).** Native methods already
+  declare *arg* types at registration — `typed_class_method(sel, &["Integer"], fn)` /
+  `sdk_typed_{instance,class}_method` in `src/value.rs`, threaded via `NativeMethodDef` → `introspect::ClassInfo`
+  → `ClassSig::from_class_info` (which fills `method_params`). **Extend the same path to a return type**: add an
+  optional return annotation to those builders (a `_ret` variant or an extra `&str`), carry it on
+  `NativeMethodDef`/the VM method variant, surface it in `introspect`, and populate `ClassSig.method_returns`
+  (currently hardcoded `HashMap::new()` for `from_vm` sigs). Then `Object#s`/`#pp` (and any native method)
+  declare `→ String` at their own registration site, and the checker picks it up via `from_vm` — deleting the
+  `seed_native_object_returns` special-case and generalizing beyond a hand-picked few. Straightforward (mirrors
+  the existing arg-type wiring); this is the *native-method half* of **Fork-1b** (compiler-declared returns are
+  the other half), so the two are best done together — both make `from_vm` sigs carry returns.
 
 ## Synergy with the perf roadmap
 
