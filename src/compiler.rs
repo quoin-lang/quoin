@@ -1082,7 +1082,10 @@ impl Compiler {
                 },
             },
             NodeValue::BinaryOperator(op) => self.binop_result_type(op),
-            NodeValue::MethodCall(call) => self.self_send_return_type(call),
+            NodeValue::MethodCall(call) => match self.self_send_return_type(call) {
+                Type::Any => self.object_rooted_return_type(call),
+                t => t,
+            },
             _ => Type::Any,
         }
     }
@@ -1117,6 +1120,25 @@ impl Compiler {
                 .collect::<String>()
         };
         ctx.returns.get(&selector).cloned().unwrap_or(Type::Any)
+    }
+
+    /// The static return type of a no-arg send whose selector is declared on `Object`, the
+    /// universal root — e.g. `x.defined?` → `Boolean`. Sound for *any* receiver because the
+    /// return-covariance check (Phase 3c·4b) guarantees every override returns a compatible type.
+    /// This is what lets narrowing/nil-misuse see through a `.defined?` guard and lets the guard
+    /// devirt-inline as a real Bool conditional (Phase 3c·4c). Only `Object`-rooted selectors
+    /// qualify, so it can't misjudge an unrelated same-named method on some other class.
+    fn object_rooted_return_type(&self, call: &MethodCallNode) -> Type {
+        if !call.arguments.expressions.is_empty() {
+            return Type::Any;
+        }
+        let [sel] = call.arguments.signature.identifiers.as_slice() else {
+            return Type::Any;
+        };
+        self.class_table
+            .get("Object")
+            .and_then(|s| s.method_returns.get(sel.name.as_str()).cloned())
+            .unwrap_or(Type::Any)
     }
 
     /// Selector → declared-return-`Type` map for a class body, from its method
@@ -2880,6 +2902,47 @@ mod tests {
         // Same scalar return is silent.
         let d = diags("A <- { n -> { |^String| 'x' } }; A <- B <- { n -> { |^String| 'y' } }");
         assert!(d.is_empty(), "{d:?}");
+    }
+
+    #[test]
+    fn defined_guard_inlines_directly_when_object_contract_is_known() {
+        fn bytecode(seed_object: bool) -> Vec<Instruction> {
+            let node = parse_quoin_string("var x = 5; x.defined?.if:{ 1 } else:{ 2 }");
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            if seed_object {
+                // Simulate the loaded bootstrap contract `Object#defined? : Boolean`.
+                let mut r = HashMap::new();
+                r.insert(Arc::from("defined?"), Type::Bool);
+                c.class_table.add_returns("Object", r);
+            }
+            c.compile_program(p)
+                .unwrap()
+                .bytecode
+                .0
+                .iter()
+                .cloned()
+                .collect()
+        }
+        let has_guard = |bc: &[Instruction]| {
+            bc.iter()
+                .any(|i| matches!(i, Instruction::BranchIfNotBool(_)))
+        };
+
+        // Without the contract `x.defined?` is `Any` → a *guarded* inline (a runtime Bool-check
+        // that falls back to the real send for a non-Bool receiver).
+        assert!(
+            has_guard(&bytecode(false)),
+            "expected a guarded inline without the Object contract"
+        );
+        // With `Object#defined? : Boolean` known, covariance makes `x.defined?` statically
+        // `Boolean`, so the guard devirt-inlines as a *direct* Bool conditional — no runtime check.
+        assert!(
+            !has_guard(&bytecode(true)),
+            "expected a direct inline with the Object contract"
+        );
     }
 
     #[test]

@@ -48,4 +48,11 @@ Warnings <- {
     narrowsWithAnd -> { |x: Integer?| x.defined? && (x + 1) }
 };
 
+"* return-type covariance (Phase 3c·4): an override must return a subtype of the
+"* method it overrides. `defined?` is `Boolean` on `Object`, so a `String` override
+"* breaks the contract — which is also what makes `x.defined?` soundly `Boolean`.
+BadOverride <- {
+    defined? -> { |^String| 'nope' }
+};
+
 'Defined Warnings — see the diagnostics printed above.'.print
