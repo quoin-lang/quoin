@@ -95,6 +95,53 @@ pub enum Constant {
     Block(StaticBlock),
 }
 
+impl Constant {
+    /// The integer value if this is an `Int` literal — for `IntBinLC`'s fast path.
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Constant::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+}
+
+/// The specific integer binary op carried by the fused `IntBinLL`/`IntBinLC`
+/// superinstructions (Slice a1) — mirrors the standalone `IntAdd`..`IntNe` ops, each mapping
+/// to its arithmetic/comparison result and its fallback send selector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntBinKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+}
+
+impl IntBinKind {
+    /// The keyword selector to fall back to when an operand isn't an `Int` at runtime.
+    pub fn selector(self) -> &'static str {
+        match self {
+            IntBinKind::Add => "+:",
+            IntBinKind::Sub => "-:",
+            IntBinKind::Mul => "*:",
+            IntBinKind::Div => "/:",
+            IntBinKind::Mod => "%:",
+            IntBinKind::Lt => "<:",
+            IntBinKind::Le => "<=:",
+            IntBinKind::Gt => ">:",
+            IntBinKind::Ge => ">=:",
+            IntBinKind::Eq => "==:",
+            IntBinKind::Ne => "!=:",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Collect, PartialEq)]
 #[collect(require_static)]
 pub enum Instruction {
@@ -152,6 +199,13 @@ pub enum Instruction {
     IntGe,
     IntEq,
     IntNe,
+    // Fused integer superinstructions (Slice a1): the peephole pass collapses
+    // `LoadLocal; <LoadLocal|Push>; IntXxx` — the two hottest arithmetic shapes (`i < n`,
+    // `n - 1`) — into one op that loads both operands and computes directly, saving two
+    // dispatch-loop steps. A non-Int operand falls back to the real send (same contract as
+    // the standalone `Int` ops above).
+    IntBinLL(Symbol, Symbol, IntBinKind),   // local, local, op
+    IntBinLC(Symbol, Constant, IntBinKind), // local, constant, op
     // Devirtualized List accessors (Slice 2e): emitted instead of `Send("at:", 1)` /
     // `Send("at:put:", 2)` / `Send("add:", 1)` when the receiver is statically a `List` (a
     // sealed value type — its access methods can't be redefined). Each pops the same
