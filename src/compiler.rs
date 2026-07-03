@@ -435,6 +435,8 @@ pub struct Compiler {
     /// The exit narrowing captured for `next_block_capture`'s key by the most recent arm
     /// `compile_block` — read by `compile_method_call` right after the arm compiles.
     captured_arm_exit: Option<Type>,
+    /// Current self-send inlining nesting depth (Phase 5·2), bounded by `MAX_INLINE_DEPTH`.
+    inline_depth: usize,
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
@@ -477,6 +479,7 @@ impl Compiler {
             next_block_narrowing: None,
             next_block_capture: None,
             captured_arm_exit: None,
+            inline_depth: 0,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -502,6 +505,7 @@ impl Compiler {
             next_block_narrowing: None,
             next_block_capture: None,
             captured_arm_exit: None,
+            inline_depth: 0,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -2104,13 +2108,17 @@ impl Compiler {
         bytecode.push(Instruction::Send(Symbol::intern(selector), num_args));
     }
 
-    /// A method body that can be spliced verbatim at a self-send call site (Phase 5·1): no params,
-    /// no local decls, no name, and a single statement that is a **trivial terminal** — a field load
-    /// (`@x`), `self`, a reserved literal (`nil`/`true`/`false`), or an `Int`/`Double`/`String`
-    /// constant. Such a body compiles to one load/push, with no dispatch, no sub-sends (so no
-    /// recursion), and no side effects — and, being a self-send, `self` is identical at the call
-    /// site, so a field load reads the same object. Returns the body expression to inline.
-    fn inlinable_leaf_body(block: &BlockNode) -> Option<&Node> {
+    /// How deep self-send inlining may nest (Phase 5·2). A body may itself self-send, so without a
+    /// bound a recursive or fan-out body would expand without limit at compile time; past the bound,
+    /// the send stays a normal dispatch.
+    const MAX_INLINE_DEPTH: usize = 3;
+
+    /// A method body that can be spliced verbatim at a self-send call site (Phase 5·1/5·2): no
+    /// params, no local decls, no name, and a single statement that is an **inline-safe expression**
+    /// (see `is_inline_safe_expr`). The body just evaluates to that expression, so at a self-send —
+    /// where `self` is identical on both sides — splicing it is behavior-identical to the call.
+    /// Returns the body expression to inline.
+    fn inlinable_body(block: &BlockNode) -> Option<&Node> {
         if !block.arguments.is_empty()
             || !block.decls.is_empty()
             || block.decl_block.is_some()
@@ -2121,28 +2129,52 @@ impl Compiler {
         let [stmt] = block.statements.as_slice() else {
             return None;
         };
-        match &stmt.value {
-            NodeValue::Integer(_) | NodeValue::Double(_) | NodeValue::Str(_) => Some(stmt),
-            NodeValue::Identifier(id) => {
-                let ok = id.identifier_type == IdentifierType::Instance
-                    || matches!(id.name.as_str(), "self" | "nil" | "true" | "false");
-                ok.then_some(stmt)
+        Self::is_inline_safe_expr(stmt).then_some(stmt)
+    }
+
+    /// Is `node` an expression that can be spliced at a self-send call site (Phase 5·2)? A terminal
+    /// (`@field`/`self`/global/literal — all resolve identically under the same `self`), an operator,
+    /// or a method call whose subject/args are themselves inline-safe. **Blocks are excluded**, which
+    /// is the soundness crux: a block is the only place a `^^` (return-from-*method*) can hide, and an
+    /// inlined `^^` would return from the *caller's* method, not the callee. No block ⇒ no `^^` ⇒
+    /// safe. (A sub-send that stays a real dispatch is fine — it runs in its own frame.)
+    fn is_inline_safe_expr(node: &Node) -> bool {
+        match &node.value {
+            NodeValue::Integer(_)
+            | NodeValue::Double(_)
+            | NodeValue::Str(_)
+            | NodeValue::Identifier(_) => true,
+            NodeValue::BinaryOperator(op) => {
+                Self::is_inline_safe_expr(&op.left) && Self::is_inline_safe_expr(&op.right)
             }
-            _ => None,
+            NodeValue::UnaryOperator(u) => Self::is_inline_safe_expr(&u.right),
+            NodeValue::MethodCall(mc) => {
+                mc.subject.as_deref().is_none_or(Self::is_inline_safe_expr)
+                    && mc
+                        .arguments
+                        .expressions
+                        .iter()
+                        .all(|e| Self::is_inline_safe_expr(e))
+            }
+            _ => false, // blocks (⇒ possible `^^`), declarations, returns, and anything unrecognized
         }
     }
 
-    /// Inline a no-arg self-send to a sealed class's own **leaf** method (Phase 5·1): splice the
-    /// callee's trivial body at the call site instead of pushing the receiver and dispatching. Sound
-    /// because a sealed class can't be subclassed, so `self.foo` provably resolves to this class's
-    /// `foo`; the receiver is `self` on both sides. Returns `true` if it inlined.
-    fn try_inline_leaf_self_send(
+    /// Inline a no-arg self-send to a sealed class's own method with an inline-safe body (Phase
+    /// 5·1/5·2): splice the callee's body at the call site instead of pushing the receiver and
+    /// dispatching. Sound because a sealed class can't be subclassed, so `self.foo` provably resolves
+    /// to this class's `foo`, and the receiver is `self` on both sides. A `MAX_INLINE_DEPTH` guard
+    /// bounds recursive/nested expansion (a body may itself self-send). Returns `true` if it inlined.
+    fn try_inline_self_send(
         &mut self,
         call: &MethodCallNode,
         is_self: bool,
         bytecode: &mut CodeBlock,
     ) -> Result<bool, String> {
-        if !is_self || !call.arguments.expressions.is_empty() {
+        if !is_self
+            || !call.arguments.expressions.is_empty()
+            || self.inline_depth >= Self::MAX_INLINE_DEPTH
+        {
             return Ok(false);
         }
         let idents = &call.arguments.signature.identifiers;
@@ -2157,10 +2189,15 @@ impl Compiler {
         let Some(body) = body else {
             return Ok(false);
         };
-        let Some(leaf) = Self::inlinable_leaf_body(&body) else {
+        let Some(expr) = Self::inlinable_body(&body) else {
             return Ok(false);
         };
-        self.compile_node(leaf, bytecode)?;
+        // The body may self-send further methods (each re-entering here); bound the nesting so a
+        // recursive or fan-out body can't blow up code size / loop forever at compile time.
+        self.inline_depth += 1;
+        let result = self.compile_node(expr, bytecode);
+        self.inline_depth -= 1;
+        result?;
         Ok(true)
     }
 
@@ -2190,9 +2227,10 @@ impl Compiler {
         if self.try_compile_inlined_while(call, bytecode)? {
             return Ok(());
         }
-        // Phase 5·1: inline a leaf self-send (`self.width` → the field load) — no receiver push,
-        // no dispatch. Before the receiver is evaluated, since the inline replaces it entirely.
-        if self.try_inline_leaf_self_send(call, is_self, bytecode)? {
+        // Phase 5·1/5·2: inline a self-send to a sealed class's own method with an inline-safe body
+        // (`self.width` → the field load; `self.area` → `.width * .height`) — no receiver push, no
+        // dispatch. Before the receiver is evaluated, since the inline replaces it entirely.
+        if self.try_inline_self_send(call, is_self, bytecode)? {
             return Ok(());
         }
 
@@ -3549,12 +3587,46 @@ mod tests {
             dispatches(&unsealed, width),
             "un-sealed leaf self-send must dispatch"
         );
-        // Sealed but a non-leaf body (a sub-send) is not inlined → still dispatched.
-        let nonleaf = compile_src("Foo <- { name -> { @n.upper }; getN -> { .name }; .sealed! }");
-        assert!(
-            dispatches(&nonleaf, Symbol::intern("name")),
-            "sealed non-leaf self-send must dispatch"
+        // Phase 5·2: a non-leaf but inline-safe body (a binop over self-sends) is also inlined; its
+        // inner leaf self-sends inline in turn, so neither the computed method nor its accessors
+        // dispatch.
+        let computed = compile_src(
+            "Foo <- { w -> { @w }; h -> { @h }; area -> { .w * .h }; go -> { .area }; .sealed! }",
         );
+        assert!(
+            !dispatches(&computed, Symbol::intern("area"))
+                && !dispatches(&computed, Symbol::intern("w")),
+            "sealed inline-safe non-leaf self-send should inline"
+        );
+
+        // A body that isn't inline-safe (contains a block ⇒ a possible `^^`) must NOT be inlined —
+        // splicing it could turn a callee return into a caller return. Stays a real dispatch.
+        let blocky =
+            compile_src("Foo <- { pick -> { @xs.detect:{ |x| x } }; run -> { .pick }; .sealed! }");
+        assert!(
+            dispatches(&blocky, Symbol::intern("pick")),
+            "a block-bearing body must dispatch (soundness: no inlined `^^`)"
+        );
+    }
+
+    #[test]
+    fn self_send_inlining_is_depth_bounded() {
+        // A self-recursive no-arg body would inline forever without the depth guard; compilation
+        // must terminate, and the recursion bottoms out in a real dispatch.
+        let node = crate::parser::parse_quoin_string("Foo <- { loop -> { .loop }; .sealed! }");
+        let NodeValue::Program(p) = &node.value else {
+            panic!("expected a program");
+        };
+        let sb = Compiler::new().compile_program(p).unwrap();
+        // It compiled (didn't hang / overflow) and still contains a `loop` dispatch at the bottom.
+        fn dispatches(sb: &StaticBlock, sel: Symbol) -> bool {
+            sb.bytecode.0.iter().any(|inst| match inst {
+                Instruction::Send(s, _) | Instruction::CallSelfDirect(s, _) => *s == sel,
+                Instruction::Push(Constant::Block(nested)) => dispatches(nested, sel),
+                _ => false,
+            })
+        }
+        assert!(dispatches(&sb, Symbol::intern("loop")));
     }
 
     fn binary(op: BinaryOperatorType, left: Node, right: Node) -> Node {
