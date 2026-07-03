@@ -439,6 +439,10 @@ pub struct Compiler {
     /// explicit-receiver `v.x` can inline against *any* in-unit sealed class, not just the one being
     /// compiled (Phase 5·3b). Backward references only; cross-unit bodies aren't available as AST.
     class_bodies: HashMap<String, HashMap<String, Arc<BlockNode>>>,
+    /// While splicing a computed method body at an *explicit-receiver* call site (Phase 5·3c), the
+    /// local holding the receiver: `self`/`@field`/implicit self-sends in the body are rebound to it
+    /// (`self` was the callee `v`, not the caller). `None` outside such a splice.
+    self_override: Option<Symbol>,
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
@@ -483,6 +487,7 @@ impl Compiler {
             captured_arm_exit: None,
             inline_depth: 0,
             class_bodies: HashMap::new(),
+            self_override: None,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -510,6 +515,7 @@ impl Compiler {
             captured_arm_exit: None,
             inline_depth: 0,
             class_bodies: HashMap::new(),
+            self_override: None,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -1510,7 +1516,14 @@ impl Compiler {
                             id.name
                         ));
                     }
-                    bytecode.push(Instruction::LoadField(id.name.clone()));
+                    // Phase 5·3c: inside a spliced computed body, `@x` reads the override receiver's
+                    // field, not the caller's `self`.
+                    if let Some(over) = self.self_override {
+                        bytecode.push(Instruction::LoadLocal(over));
+                        bytecode.push(Instruction::LoadFieldOf(id.name.clone()));
+                    } else {
+                        bytecode.push(Instruction::LoadField(id.name.clone()));
+                    }
                 } else if id.name == "nil" || id.name == "true" || id.name == "false" {
                     match id.name.as_str() {
                         "nil" => bytecode.push(Instruction::Push(Constant::Nil)),
@@ -1523,7 +1536,12 @@ impl Compiler {
                     let ns_name = NamespacedName::from_ast(id);
                     bytecode.push(Instruction::LoadGlobal(ns_name));
                 } else if self.is_local(&id.name) {
-                    bytecode.push(Instruction::LoadLocal(Symbol::intern(&(id.name.clone()))));
+                    // Phase 5·3c: inside a spliced computed body, a bare `self` is the override.
+                    let sym = match self.self_override {
+                        Some(over) if id.name == "self" => over,
+                        _ => Symbol::intern(&id.name),
+                    };
+                    bytecode.push(Instruction::LoadLocal(sym));
                 } else {
                     let ns_name = NamespacedName::new(Vec::new(), id.name.clone());
                     bytecode.push(Instruction::LoadGlobal(ns_name));
@@ -2177,7 +2195,11 @@ impl Compiler {
         is_self: bool,
         bytecode: &mut CodeBlock,
     ) -> Result<bool, String> {
+        // Under a `self_override` (5·3c), `self` is a rebound receiver, not the caller's `self`, so a
+        // bare self-send resolves against *that* class (handled by `try_inline_exact_receiver`), not
+        // the class being compiled — never self-inline here.
         if !is_self
+            || self.self_override.is_some()
             || !call.arguments.expressions.is_empty()
             || self.inline_depth >= Self::MAX_INLINE_DEPTH
         {
@@ -2229,25 +2251,63 @@ impl Compiler {
         }
     }
 
-    /// For a no-arg explicit-receiver send `v.x` whose receiver is statically an instance of the
-    /// (sealed) in-unit class, and whose selector is one of that class's field accessors: the field
-    /// to read. Inlining emits `<eval v>; LoadFieldOf(field)` — sound because a sealed class can't be
-    /// subclassed, so `v` is exactly that class and `v.x` reads its field (Phase 5·3b: any class
-    /// recorded in `class_bodies`, not just the one being compiled).
-    fn exact_receiver_field_accessor(&self, call: &MethodCallNode) -> Option<String> {
-        if !call.arguments.expressions.is_empty() {
-            return None;
+    /// Inline a no-arg explicit-receiver send `v.foo` to a sealed in-unit class (Phase 5·3/5·3b/5·3c).
+    /// Sound because a sealed class can't be subclassed, so `v` is exactly that class; a non-nullable
+    /// typed receiver is never nil. A **field accessor** reads `v`'s field directly (`<eval v>;
+    /// LoadFieldOf`); any other **inline-safe** body is spliced with `self`/`@field`/implicit-sends
+    /// rebound to `v` (evaluated once into a temp — the `self_override`). Returns `true` if it inlined.
+    fn try_inline_exact_receiver(
+        &mut self,
+        call: &MethodCallNode,
+        bytecode: &mut CodeBlock,
+    ) -> Result<bool, String> {
+        if !call.arguments.expressions.is_empty()
+            || call.arguments.signature.identifiers.len() != 1
+            || self.inline_depth >= Self::MAX_INLINE_DEPTH
+        {
+            return Ok(false);
         }
-        let [sel] = call.arguments.signature.identifiers.as_slice() else {
-            return None;
+        let Some(subject) = call.subject.as_deref() else {
+            return Ok(false); // implicit self-send — handled by try_inline_self_send
         };
-        let class = self.receiver_class(call)?;
-        // Sealed ⇒ `v` is exactly this class (the ClassTable's flag covers any in-unit class, not
-        // just the current one), and we must have its AST body recorded this unit.
+        let Some(class) = self.receiver_class(call) else {
+            return Ok(false);
+        };
         if self.class_table.get(&class).map(|s| s.sealed) != Some(true) {
-            return None;
+            return Ok(false);
         }
-        Self::field_accessor_field(self.class_bodies.get(&class)?.get(sel.name.as_str())?)
+        let selector = call.arguments.signature.identifiers[0].name.as_str();
+        let Some(body) = self
+            .class_bodies
+            .get(&class)
+            .and_then(|b| b.get(selector))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        // Field accessor: read the field directly off the receiver — no temp needed.
+        if let Some(field) = Self::field_accessor_field(&body) {
+            self.compile_node(subject, bytecode)?;
+            bytecode.push(Instruction::LoadFieldOf(field));
+            return Ok(true);
+        }
+        // Computed body: evaluate the receiver once into a temp, then splice the body with `self`
+        // rebound to it. `body` is an owned `Arc`, so `expr` doesn't borrow `self`.
+        let Some(expr) = Self::inlinable_body(&body) else {
+            return Ok(false);
+        };
+        self.compile_node(subject, bytecode)?;
+        let tmp = self.new_temp_var();
+        let tmp_sym = Symbol::intern(&tmp);
+        self.scopes.last_mut().unwrap().locals.insert(tmp);
+        bytecode.push(Instruction::DefineLocal(tmp_sym));
+        let saved = self.self_override.replace(tmp_sym);
+        self.inline_depth += 1;
+        let result = self.compile_node(expr, bytecode);
+        self.inline_depth -= 1;
+        self.self_override = saved;
+        result?;
+        Ok(true)
     }
 
     fn compile_method_call(
@@ -2282,12 +2342,21 @@ impl Compiler {
         if self.try_inline_self_send(call, is_self, bytecode)? {
             return Ok(());
         }
+        // Phase 5·3/5·3b/5·3c: inline an explicit-receiver `v.foo` (field accessor, or a computed
+        // body with `self` rebound to `v`) to a sealed in-unit class. Before the receiver push, since
+        // the inline evaluates `v` itself.
+        if self.try_inline_exact_receiver(call, bytecode)? {
+            return Ok(());
+        }
 
-        // Evaluate receiver
+        // Evaluate receiver. Inside a spliced computed body (5·3c), a bare self-send targets the
+        // override receiver, not the caller's `self`.
         if let Some(ref subject) = call.subject {
             self.compile_node(subject, bytecode)?;
         } else {
-            bytecode.push(Instruction::LoadLocal(Symbol::intern("self")));
+            bytecode.push(Instruction::LoadLocal(
+                self.self_override.unwrap_or_else(|| Symbol::intern("self")),
+            ));
         }
 
         // No-argument selector (unary / bang / symbol): a single component, no args.
@@ -2296,12 +2365,6 @@ impl Compiler {
                 return Err("No identifiers found in method call selector".to_string());
             }
             let selector = args.signature.identifiers[0].name.clone();
-            // Phase 5·3: an explicit-receiver field accessor on the current sealed class reads the
-            // field directly off the already-pushed receiver — no dispatch, no frame.
-            if let Some(field) = self.exact_receiver_field_accessor(call) {
-                bytecode.push(Instruction::LoadFieldOf(field));
-                return Ok(());
-            }
             self.emit_call(bytecode, &selector, 0);
             return Ok(());
         }
@@ -3695,6 +3758,47 @@ mod tests {
         assert!(
             !loads_field_of(&forward, "x"),
             "a forward-referenced class body isn't available yet → dispatch"
+        );
+    }
+
+    #[test]
+    fn exact_receiver_computed_body_is_inlined() {
+        fn compile_src(src: &str) -> StaticBlock {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            Compiler::new().compile_program(p).unwrap()
+        }
+        fn contains(sb: &StaticBlock, pred: &dyn Fn(&Instruction) -> bool) -> bool {
+            sb.bytecode.0.iter().any(|inst| {
+                pred(inst)
+                    || matches!(inst, Instruction::Push(Constant::Block(b)) if contains(b, pred))
+            })
+        }
+        // Phase 5·3c: a computed body (`@x * @y`) is spliced at the explicit-receiver `p.area`,
+        // with the fields read off the receiver via `LoadFieldOf` — the method never dispatches.
+        let sb = compile_src(
+            "Point <- { |@x @y| area -> { @x * @y }; .sealed! }; \
+             Reader <- { get: -> { |p: Point| p.area }; .sealed! }",
+        );
+        let area = Symbol::intern("area");
+        assert!(
+            !contains(
+                &sb,
+                &|i| matches!(i, Instruction::Send(s, _) | Instruction::SendLocal(_, s, _) if *s == area)
+            ),
+            "computed exact-receiver body should inline, not dispatch"
+        );
+        assert!(
+            contains(
+                &sb,
+                &|i| matches!(i, Instruction::LoadFieldOf(f) if f == "x")
+            ) && contains(
+                &sb,
+                &|i| matches!(i, Instruction::LoadFieldOf(f) if f == "y")
+            ),
+            "the body's @fields are read off the receiver via LoadFieldOf"
         );
     }
 
