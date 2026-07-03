@@ -424,6 +424,13 @@ pub struct Compiler {
     /// One-shot narrowing set right before compiling a guard arm block (Phase 3c); the next
     /// `compile_block` installs it into that arm's scope. Mirrors `next_block_is_init`.
     next_block_narrowing: Option<(NarrowKey, Type)>,
+    /// One-shot request set right before compiling a guard arm block: the key whose narrowed type
+    /// the arm's `compile_block` should snapshot at exit (into `captured_arm_exit`) so the join at
+    /// the conditional's end can merge the arms' exit states (Phase 3c join/merge).
+    next_block_capture: Option<NarrowKey>,
+    /// The exit narrowing captured for `next_block_capture`'s key by the most recent arm
+    /// `compile_block` — read by `compile_method_call` right after the arm compiles.
+    captured_arm_exit: Option<Type>,
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
@@ -464,6 +471,8 @@ impl Compiler {
             value_type_def_depth: 0,
             next_block_is_init: false,
             next_block_narrowing: None,
+            next_block_capture: None,
+            captured_arm_exit: None,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -487,6 +496,8 @@ impl Compiler {
             value_type_def_depth: 0,
             next_block_is_init: false,
             next_block_narrowing: None,
+            next_block_capture: None,
+            captured_arm_exit: None,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -902,28 +913,42 @@ impl Compiler {
         )
     }
 
-    /// After a guard send, if exactly one arm diverges the *other* arm's refinement holds for the
-    /// rest of the current scope (the `x.defined?.else:{ ^^… }` early-return idiom).
-    fn apply_post_guard_narrowing(&mut self, call: &MethodCallNode, g: &GuardInfo) {
+    /// After a guard send, merge the arms' exit states into the enclosing scope (Phase 3c
+    /// join/merge). The conditional has two paths — condition true (the `if:` block, or a straight
+    /// fall-through with the guard's true refinement when there's no `if:`) and condition false
+    /// (the `else:` block, or a fall-through with the false refinement). A path whose arm diverges
+    /// (`^^`/`^`) drops out; the guarded key's type afterward is the **join** of the surviving
+    /// paths' exit types (`if_exit`/`else_exit` are those arms' captured exits, defaulting to the
+    /// bare refinement). Both diverging ⇒ the code after is unreachable, so nothing is installed.
+    fn apply_guard_join(
+        &mut self,
+        call: &MethodCallNode,
+        g: &GuardInfo,
+        if_exit: Option<Type>,
+        else_exit: Option<Type>,
+    ) {
         let idents = &call.arguments.signature.identifiers;
-        let diverges = |kw: &str| -> bool {
-            idents
-                .iter()
-                .position(|i| i.name == kw)
-                .map(|k| Self::expr_diverges(&call.arguments.expressions[k]))
-                .unwrap_or(false)
+        let arm = |kw: &str| idents.iter().position(|i| i.name == kw);
+        let diverges = |k: usize| Self::expr_diverges(&call.arguments.expressions[k]);
+
+        let true_exit = match arm("if") {
+            Some(k) if diverges(k) => None,
+            Some(_) => Some(if_exit.unwrap_or_else(|| g.if_arm.clone())),
+            None => Some(g.if_arm.clone()), // no `if:` block ⇒ true path falls through
         };
-        let survivor = match (diverges("if"), diverges("else")) {
-            (true, false) => Some(g.else_arm.clone()),
-            (false, true) => Some(g.if_arm.clone()),
-            _ => None,
+        let false_exit = match arm("else") {
+            Some(k) if diverges(k) => None,
+            Some(_) => Some(else_exit.unwrap_or_else(|| g.else_arm.clone())),
+            None => Some(g.else_arm.clone()), // no `else:` block ⇒ false path falls through
         };
-        if let Some(ty) = survivor {
-            self.scopes
-                .last_mut()
-                .unwrap()
-                .narrowed
-                .insert(g.key.clone(), ty);
+
+        let joined = match (true_exit, false_exit) {
+            (Some(a), Some(b)) => Some(a.join(&b)),
+            (Some(t), None) | (None, Some(t)) => Some(t),
+            (None, None) => None,
+        };
+        if let Some(ty) = joined {
+            self.update_narrowing(g.key.clone(), ty);
         }
     }
 
@@ -2137,6 +2162,9 @@ impl Compiler {
         debug_assert_eq!(idents.len(), args.expressions.len());
         let mut selector = String::new();
         let mut num_components = 0usize;
+        // Phase 3c join/merge: each guard arm's captured exit narrowing for the guarded key.
+        let mut if_exit: Option<Type> = None;
+        let mut else_exit: Option<Type> = None;
         let mut i = 0;
         while i < idents.len() {
             // Extent of the run of the keyword at `i`.
@@ -2155,16 +2183,29 @@ impl Compiler {
                     self.next_block_is_init = true;
                 }
                 // Phase 3c: narrow the guarded path inside this arm's block (`if` → non-nil arm,
-                // `else` → nil arm). One-shot, consumed by the arm's `compile_block`.
-                if let Some(g) = &guard
+                // `else` → nil arm). One-shot, consumed by the arm's `compile_block`. Also request a
+                // snapshot of the arm's exit narrowing for the join/merge after the loop.
+                let capture_this_arm = if let Some(g) = &guard
                     && matches!(arg.value, NodeValue::Block(_))
                     && let Some(arm_ty) = g.arm_type(&idents[i].name)
                 {
                     self.next_block_narrowing = Some((g.key.clone(), arm_ty));
-                }
+                    self.next_block_capture = Some(g.key.clone());
+                    true
+                } else {
+                    false
+                };
                 match &param_types {
                     Some(params) => self.compile_expecting(arg, &params[i + j], bytecode)?,
                     None => self.compile_node(arg, bytecode)?,
+                }
+                if capture_this_arm {
+                    let exit = self.captured_arm_exit.take();
+                    match idents[i].name.as_str() {
+                        "if" => if_exit = exit,
+                        "else" => else_exit = exit,
+                        _ => {}
+                    }
                 }
             }
             if run > 1 {
@@ -2179,10 +2220,11 @@ impl Compiler {
             i += run;
         }
 
-        // Phase 3c: after a guard send, a diverging arm narrows the receiver for the rest of the
-        // enclosing scope (the `x.defined?.else:{ ^^… }` early-return idiom).
+        // Phase 3c: after a guard send, merge the arms' exit states into the enclosing scope —
+        // a diverging arm drops out (`x.defined?.else:{ ^^… }`), the surviving/fall-through paths
+        // join. Both diverging ⇒ unreachable, no narrowing.
         if let Some(g) = &guard {
-            self.apply_post_guard_narrowing(call, g);
+            self.apply_guard_join(call, g, if_exit, else_exit);
         }
 
         // Slice 2e: devirtualize `at:`/`at:put:`/`add:` when the receiver is statically a
@@ -2581,6 +2623,11 @@ impl Compiler {
         // Phase 3c: a guard arm's narrowing, installed into this block's scope below. Taken here
         // (one-shot) so nested blocks don't inherit it.
         let block_narrowing = std::mem::take(&mut self.next_block_narrowing);
+        // Phase 3c join/merge: the key whose exit narrowing this arm should snapshot. Taken at
+        // entry (bound to THIS block) and read from its scope just before `pop_scope`, so the
+        // snapshot reflects the arm's straight-line effect (guard refinement + top-level
+        // reassignments); nested blocks pop first and don't consume it.
+        let capture_key = std::mem::take(&mut self.next_block_capture);
         // A real block gets its own frame, so any enclosing inlined-region caret
         // redirection (Slice 2d) must not leak into it: a `^` here is a genuine
         // `BlockReturn` for this block. Cleared on entry, restored on exit.
@@ -2683,6 +2730,20 @@ impl Compiler {
         } else {
             None
         };
+
+        // Phase 3c join/merge: snapshot the guarded key's narrowed type at the arm's exit before
+        // its scope is discarded. Absent from the overlay ⇒ the arm widened it to `Any`.
+        if let Some(key) = &capture_key {
+            let exit = self
+                .scopes
+                .last()
+                .unwrap()
+                .narrowed
+                .get(key)
+                .cloned()
+                .unwrap_or(Type::Any);
+            self.captured_arm_exit = Some(exit);
+        }
 
         self.pop_scope();
 
@@ -3118,6 +3179,58 @@ mod tests {
             diags("Foo <- { m -> { var x: Integer? = nil; x = 5; var y: Integer = x } }")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn type_join_is_the_nil_lattice_lub() {
+        use Type::*;
+        let opt = |t: Type| Nullable(Box::new(t));
+        assert_eq!(Int.join(&Int), Int);
+        assert_eq!(Int.join(&Nil), opt(Int)); // T ⊔ Nil = T?
+        assert_eq!(Nil.join(&Int), opt(Int));
+        assert_eq!(Int.join(&opt(Int)), opt(Int)); // T ⊔ T? = T?
+        assert_eq!(opt(Int).join(&Nil), opt(Int));
+        assert_eq!(Nil.join(&Nil), Nil);
+        assert_eq!(Int.join(&Bool), Any); // two concrete cores, no union
+        assert_eq!(Int.join(&Any), Any); // Any absorbing
+        assert_eq!(Never.join(&Int), Int); // diverging path contributes nothing
+        assert_eq!(Int.join(&Never), Int);
+    }
+
+    #[test]
+    fn checker_joins_arm_exits_after_a_guard() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics()
+                .iter()
+                .filter(|d| d.message.contains("type mismatch"))
+                .map(|d| d.message.clone())
+                .collect()
+        }
+        // Every body opens with a declared-nullable local `x` (reassignment updates its narrowing).
+        let m = |body: &str| format!("Foo <- {{ m -> {{ var x: Integer? = nil; {body} }} }}");
+
+        // Both paths leave x non-nil (if-arm guard, else-arm reassignment) → Integer at the join.
+        assert!(diags(&m("x.defined?.if:{ } else:{ x = 0 }; var y: Integer = x")).is_empty());
+        // Both arms reassign to non-nil → non-nil after, regardless of the guard branch taken.
+        assert!(
+            diags(&m(
+                "x.defined?.if:{ x = 1 } else:{ x = 2 }; var y: Integer = x"
+            ))
+            .is_empty()
+        );
+        // A diverging arm drops out of the join → the surviving path's refinement holds after.
+        assert!(diags(&m("x.defined?.else:{ ^^0 }; var y: Integer = x")).is_empty());
+
+        // Empty else leaves x nil on the false path → x stays nullable, so the decl warns.
+        assert!(!diags(&m("x.defined?.if:{ } else:{ }; var y: Integer = x")).is_empty());
+        // `if:`-only: the condition-false fall-through leaves x nil → still nullable after.
+        assert!(!diags(&m("x.defined?.if:{ x = 7 }; var y: Integer = x")).is_empty());
     }
 
     #[test]

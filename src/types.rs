@@ -81,6 +81,44 @@ impl Type {
         }
     }
 
+    /// Least upper bound on the nil lattice — the type of a value that is `self` on one control-flow
+    /// path and `other` on another (a narrowing *join*, Phase 3c). `T ⊔ T = T`, `T ⊔ Nil = T?`,
+    /// `T ⊔ T? = T?`; two different concrete cores widen to `Any` (we have no general unions yet —
+    /// this *is* the union constructor, kept nil-scoped). `Any` is absorbing (unknown on either path
+    /// ⇒ unknown); `Never` (a diverging path) contributes nothing.
+    pub fn join(&self, other: &Type) -> Type {
+        match (self, other) {
+            (Type::Any, _) | (_, Type::Any) => return Type::Any,
+            (Type::Never, t) | (t, Type::Never) => return t.clone(),
+            _ => {}
+        }
+        if self == other {
+            return self.clone();
+        }
+        // Split each side into (non-nil core, may-be-nil?).
+        fn split(t: &Type) -> (Option<&Type>, bool) {
+            match t {
+                Type::Nil => (None, true),
+                Type::Nullable(inner) => (Some(inner), true),
+                other => (Some(other), false),
+            }
+        }
+        let (a, a_nil) = split(self);
+        let (b, b_nil) = split(other);
+        let nullable = a_nil || b_nil;
+        let core = match (a, b) {
+            (None, None) => None,
+            (Some(t), None) | (None, Some(t)) => Some(t.clone()),
+            (Some(x), Some(y)) if x == y => Some(x.clone()),
+            _ => return Type::Any, // two different concrete cores — no union available
+        };
+        match core {
+            None => Type::Nil,
+            Some(t) if nullable => Type::Nullable(Box::new(t)),
+            Some(t) => t,
+        }
+    }
+
     /// The Quoin-facing class name, for diagnostics (`Integer`, `Boolean`, `Foo?`, `Any`, …).
     pub fn name(&self) -> String {
         match self {
