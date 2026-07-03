@@ -284,11 +284,16 @@ unboxed elements).
 - **3c·3 loop back-edge widening** — the other Tier-2 half (arm-exit join/merge is done, `4fc8dd4`). Narrowing
   across a loop must conservatively widen at the back-edge (a value narrowed in one iteration may not hold on
   re-entry). Its own mechanism; zero corpus impact → deferred.
-- **Typed-param declared contracts** — a `|x: Integer?|` param is recorded via `record_local_type` (devirt hint)
-  not `record_declared_type`, so param *reassignment* isn't a checked contract *and* doesn't flow-update
-  narrowing (the join's reassignment case then works for `var` locals but not params). Switching params to
-  `record_declared_type` completes narrowing for the headline nullable-param case; needs its own corpus 0-FP
-  check (it also turns on the Phase 3a reassignment check for params).
+- **Typed-param declared contracts — DONE** (`6a5909c`): a `|x: T|` param now records via
+  `record_declared_type`, so its annotation is a contract — reassignment is checked *and* flow-updates
+  narrowing, completing the arm-exit join for nullable params. Corpus 1255/0/0. **Surfaced** the `Object`-as-top
+  gap below.
+- **`Object` annotation should be the top type (`Any`), not `Instance("Object")`** — `var x: Object = 5` (and
+  now `|x: Object|` reassignment) *false-positives* `type mismatch: expected Object, found Integer`, because
+  `from_annotation_name("Object")` yields a concrete `Instance("Object")` that only `compatible_with` an exact
+  `Object`. `Object` is the universal supertype ⇒ an annotation of it means "no constraint" ⇒ resolve it to
+  `Any`. Pre-existing (affects `var` locals too); **zero corpus impact** (nothing annotates `: Object`). Small
+  fix in `resolve_annotation`/`from_annotation_name`; verify no other caller relies on `Instance("Object")`.
 - **3c·4d — nullable-guard inline recovery** (see the 3c·4d slice above): per-arm narrowing spliced into the
   inline path so declared-`T?` guards inline *and* narrow. Opt-in, zero corpus impact → deferred.
 - **Fork-1b — persist return types into runtime introspection.** 3c·4a records declared returns into the
