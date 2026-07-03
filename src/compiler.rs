@@ -2663,15 +2663,16 @@ impl Compiler {
             self.scopes.last_mut().unwrap().narrowed.insert(key, ty);
         }
 
-        // Seed declared param types so arithmetic on a typed param devirtualizes. Dispatch only
-        // selects a typed method when the arg matches, so the param is provably that type inside
-        // the body — no runtime guard needed. Resolve the annotation (flagging unknown types).
-        // An *un-annotated* param is `Any` (gradual, unchecked), NOT `Object` — the `Object`
-        // default above is only the runtime dispatch signature, not a static type.
+        // Seed declared param types so arithmetic on a typed param devirtualizes, and so the
+        // annotation acts as a *contract*: a reassignment is checked against it and flow-updates the
+        // param's narrowing (Phase 3c), exactly like a `var x: T` local. Dispatch only selects a
+        // typed method when the arg matches, so the param is provably that type on entry — no runtime
+        // guard needed. An *un-annotated* param is `Any` (gradual, unchecked), NOT `Object` — the
+        // `Object` default above is only the runtime dispatch signature, not a static type.
         for arg in &block.arguments {
             if let Some(hint) = &arg.type_hint {
                 let ty = self.resolve_annotation(hint);
-                self.record_local_type(&arg.identifier.name, ty);
+                self.record_declared_type(&arg.identifier.name, ty);
             }
         }
 
@@ -3231,6 +3232,36 @@ mod tests {
         assert!(!diags(&m("x.defined?.if:{ } else:{ }; var y: Integer = x")).is_empty());
         // `if:`-only: the condition-false fall-through leaves x nil → still nullable after.
         assert!(!diags(&m("x.defined?.if:{ x = 7 }; var y: Integer = x")).is_empty());
+    }
+
+    #[test]
+    fn typed_param_is_a_declared_contract() {
+        fn diags(src: &str) -> Vec<String> {
+            let node = crate::parser::parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.diagnostics()
+                .iter()
+                .filter(|d| d.message.contains("type mismatch"))
+                .map(|d| d.message.clone())
+                .collect()
+        }
+
+        // A typed param's annotation is a reassignment contract, like a `var x: T` local:
+        // an incompatible reassignment warns…
+        assert!(!diags("Foo <- { m -> { |x: Integer| x = 'str'; x } }").is_empty());
+        // …a compatible one is silent.
+        assert!(diags("Foo <- { m -> { |x: Integer| x = x + 1; x } }").is_empty());
+        // Reassigning a nullable param to a concrete value narrows it non-nil.
+        assert!(diags("Foo <- { m -> { |x: Integer?| x = 5; var y: Integer = x; y } }").is_empty());
+        // The arm-exit join now works for a nullable *param* too (reassignment flow-updates it).
+        assert!(
+            diags("Foo <- { m -> { |x: Integer?| x.defined?.if:{ } else:{ x = 0 }; var y: Integer = x; y } }")
+                .is_empty()
+        );
     }
 
     #[test]
