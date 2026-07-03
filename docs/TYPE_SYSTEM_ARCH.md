@@ -193,8 +193,37 @@ the corpus's role here is to prove *narrowing* adds no regressions.
   un-narrowed receiver. Corpus 0 false positives + positive tests.
 - **3c·3 — join/merge + loops (Tier 2).** Merge arm exit-states at the join; conservative loop back-edge
   widening (no unsound narrowing); `&&` short-circuit narrowing if cheap.
-- **3c·4 — polish.** Provenance seed for Phase 4; bonus `static_type(x.defined?) → Bool` (also devirt-inlines
-  the guard); doc + memory; corpus + stress + fmt.
+- **3c·4 — return-type covariance (unlocks sound `defined? → Bool`).** The doc's original 3c·4 bonus —
+  `static_type(x.defined?) → Bool` — was *unsound as stated*: `defined?` is a plain overridable Quoin method
+  (`Object#defined? -> { true }`, `nil` → `false`; qnlib/core/00-bootstrap.qn), so a user class could reopen it
+  to return non-Bool → the inline path uses a *guarded* inline precisely to stay safe. The fix is the **Liskov
+  rule for returns**: an override may return a *subtype* of the base return, never a widened/unrelated type.
+  Enforce that on `Object#defined? : Bool` and no class can make `x.defined?` non-Bool → typing it `Bool` for
+  *any* receiver becomes sound, narrowing/nil-misuse see through it, and every untyped `x.defined?.if:` in the
+  corpus upgrades from a guarded to a **direct** inline (a corpus-wide codegen win). Also finally delivers the
+  long-deferred "persist return types" idea. Trust basis: the covariance check is a gradual *warning* (not a
+  hard error), so `defined? → Bool` is a contract-backed judgment on the *same* basis the VM already uses to
+  direct-inline `var b: Bool` — no new soundness class; corpus 0-FP stays the tripwire.
+  - **3c·4a** — `method_returns: HashMap<selector, Type>` on `ClassSig`; populate declared returns
+    (`block.return_type`) from the AST for **both** `ClassDefinition` (`Foo <- {}`) *and* `ClassExtension`
+    reopens of a simple class name (`Object <-- {}` — how the core classes add methods); make
+    `ClassTable::insert` **merge/preserve** `method_returns` so a later `populate_from_vm` (from_vm sigs carry
+    no returns today) doesn't clobber accumulated ones. No reader yet → corpus unchanged.
+  - **3c·4b** — declare `^Bool` on `Object#defined?` (+ `nil` override) in bootstrap (now formattable via the
+    return-only-header `qn fmt` fix); **covariance check**: an override's known return must be `compatible_with`
+    the nearest ancestor's declared return, else warn (`override of \`sel\` returns \`X\`, incompatible with
+    \`Y\` from \`Class\``, with span). Gradual: fires only when *both* returns are concrete (`Any` skips) →
+    0-FP. Verify corpus 0-FP.
+  - **3c·4c** — `static_type(RECV.sel) →` the declared return of an **Object-rooted** method (covariance makes
+    it sound for any receiver), giving `x.defined? → Bool`; feeds narrowing, nil-misuse, and the direct-inline
+    path. Verify the corpus-wide guarded→direct inline is behavior-preserving (full corpus + GC stress + output
+    diff). *Declares only `defined?` for now — other Object return contracts are follow-ups, each corpus-verified.*
+  - **3c·4d — DEFERRED (nullable-guard inline recovery).** The 3c·1 early-return keeps *declared-`T?`* guards on
+    the general (non-inlined) send path so their arms narrow; recovering the inline for them needs per-arm
+    narrowing spliced into the inline path (`emit_inline_conditional_body`/`inline_block_body` save-restore of
+    the `narrowed` overlay). Opt-in, **zero corpus impact today** (nothing annotates `T?`) → deferred. The
+    corpus-wide *untyped*-guard win (3c·4c) needs none of this.
+  - Provenance seed + doc/memory + corpus/stress/fmt land across 4b/4c.
 
 *Correctness guards.* Corpus 0 false positives is the tripwire (as in 3a/3b); gradual (silent on
 `Any`/unknown); a unit test per rule (arm polarity, divergence, reassignment-widen, merge, loop-conservatism,
@@ -236,6 +265,20 @@ Reuse the existing span + caret renderer. Deliver:
 ### Phase 5 — feed the optimizer
 Let devirt/inlining consume the richer `Type` (receiver's exact class → method inlining; `List<Int>` →
 unboxed elements).
+
+## Deferred / follow-up tasks (tracked)
+- **3c·4d — nullable-guard inline recovery** (see the 3c·4d slice above): per-arm narrowing spliced into the
+  inline path so declared-`T?` guards inline *and* narrow. Opt-in, zero corpus impact → deferred.
+- **Fork-1b — persist return types into runtime introspection.** 3c·4a records declared returns into the
+  *checker's* `ClassTable` from the AST. The runtime `MethodVariant`/`introspect::ClassInfo` still carry no
+  return type, so `from_vm` sigs contribute none and `$inspect`/`describe_class` can't show returns. The bigger
+  follow-up: have the compiler's accumulated return types flow into runtime introspection (compiler →
+  `MethodVariant`), so `$inspect` shows returns *and* cross-unit return contracts survive without relying on the
+  AST-recording + merge-preserve path. Cheap-ish once 3c·4a's accumulator exists; also lifts the
+  cross-class-return→`Any` limit noted in Phase 3b.
+- **Object return contracts beyond `defined?`** (3c·4c note): declaring `^T` on other universal `Object`
+  methods (`s : String`, `hash : Integer`, …) generalizes the Object-rooted `static_type` rule — each needs its
+  own corpus 0-FP verification before landing.
 
 ## Synergy with the perf roadmap
 

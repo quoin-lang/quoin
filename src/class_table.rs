@@ -43,6 +43,12 @@ pub struct ClassSig {
     /// (`Object`) parameter is omitted, so a checkable entry unambiguously fixes the arg types.
     /// Populated only for `from_vm` sigs (a VM sig's variant set is complete).
     pub method_params: HashMap<Arc<str>, Vec<Type>>,
+    /// Declared return types: `selector → Type`, from a method's `^Ret` header. Recorded from the
+    /// AST — both `Foo <- {}` definitions and `Foo <-- {}` reopens (how the core classes add
+    /// methods). `insert` *merges* these so a later `from_vm` overwrite (VM sigs carry no returns
+    /// today — see Fork-1b) doesn't drop them. Drives the return-covariance check and Object-rooted
+    /// send typing (Phase 3c·4).
+    pub method_returns: HashMap<Arc<str>, Type>,
 }
 
 impl ClassSig {
@@ -78,6 +84,8 @@ impl ClassSig {
             has_catch_all: false,
             from_vm: true,
             method_params,
+            // VM sigs carry no return types yet (Fork-1b); `insert` preserves any AST-recorded ones.
+            method_returns: HashMap::new(),
         }
     }
 }
@@ -115,8 +123,41 @@ impl ClassTable {
         ClassTable(Rc::new(RefCell::new(HashMap::new())))
     }
 
-    pub fn insert(&self, name: &str, sig: ClassSig) {
-        self.0.borrow_mut().insert(Arc::from(name), sig);
+    pub fn insert(&self, name: &str, mut sig: ClassSig) {
+        let mut map = self.0.borrow_mut();
+        // Return contracts accumulate across inserts: carry over any the new sig doesn't itself
+        // provide, so a later `from_vm` overwrite (VM sigs have none) doesn't drop AST-recorded
+        // returns. New wins per selector.
+        if let Some(existing) = map.get(name) {
+            for (sel, ty) in &existing.method_returns {
+                sig.method_returns
+                    .entry(sel.clone())
+                    .or_insert_with(|| ty.clone());
+            }
+        }
+        map.insert(Arc::from(name), sig);
+    }
+
+    /// Merge declared return types into `name`'s entry without disturbing the rest of its signature
+    /// — how a `Foo <-- {}` reopen contributes returns to an already-recorded (often `from_vm`)
+    /// class. Upserts a bare entry if the class isn't in the table yet (a later `insert` fills the
+    /// structural fields and preserves these returns).
+    pub fn add_returns(&self, name: &str, returns: HashMap<Arc<str>, Type>) {
+        if returns.is_empty() {
+            return;
+        }
+        let mut map = self.0.borrow_mut();
+        let entry = map.entry(Arc::from(name)).or_insert_with(|| ClassSig {
+            parent: None,
+            mixins: Vec::new(),
+            own_selectors: HashSet::new(),
+            sealed: false,
+            has_catch_all: false,
+            from_vm: false,
+            method_params: HashMap::new(),
+            method_returns: HashMap::new(),
+        });
+        entry.method_returns.extend(returns);
     }
 
     pub fn contains(&self, name: &str) -> bool {

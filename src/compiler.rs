@@ -1227,7 +1227,30 @@ impl Compiler {
             has_catch_all: false,
             from_vm: false,
             method_params: HashMap::new(),
+            method_returns: self.declared_method_returns(&class_def.block),
         }
+    }
+
+    /// Declared return types (`selector → Type`) for the methods written directly in a class body —
+    /// only those with a `^Ret` header. Pure (`&self`, no diagnostics): the return-type check
+    /// already warns on unknown annotations, so recording resolves names without re-warning. Feeds
+    /// `ClassSig::method_returns` for both `Foo <- {}` defs and `Foo <-- {}` reopens (Phase 3c·4).
+    fn declared_method_returns(&self, block: &BlockNode) -> HashMap<Arc<str>, Type> {
+        let mut out = HashMap::new();
+        for stmt in &block.statements {
+            let (sig, blk) = match &stmt.value {
+                NodeValue::MethodDefinition(m) => (&m.signature, &m.block),
+                NodeValue::MethodExtension(m) => (&m.signature, &m.block),
+                _ => continue,
+            };
+            if let (Ok(sel), Some(rt)) = (self.reconstruct_selector(sig), &blk.return_type) {
+                out.insert(
+                    Arc::from(sel.as_str()),
+                    Type::from_annotation_name(&rt.name),
+                );
+            }
+        }
+        out
     }
 
     /// Static result type of a binary operator. Comparison/equality operators yield `Bool`
@@ -1495,6 +1518,13 @@ impl Compiler {
                 bytecode.push(Instruction::ExecuteBlockWithSelf);
             }
             NodeValue::ClassExtension(class_ext) => {
+                // A `Foo <-- {}` reopen contributes its methods' declared returns to `Foo`'s
+                // signature — how the core classes (`Object <-- {}`, `nil <-- {}`, …) carry their
+                // return contracts, since they're reopened rather than defined with `<-` (Phase 3c·4).
+                if let NodeValue::Identifier(target) = &class_ext.expression.value {
+                    self.class_table
+                        .add_returns(&target.name, self.declared_method_returns(&class_ext.block));
+                }
                 self.compile_node(&class_ext.expression, bytecode)?;
                 let is_value_type = Self::is_value_type_target(&class_ext.expression);
                 if is_value_type {
@@ -2717,6 +2747,29 @@ mod tests {
         // A class defined anywhere in the unit is known — forward reference via the pre-scan.
         // (`^Widget?` so the `nil` body is a valid return, not a nil-misuse.)
         assert!(diags("Foo <- { make -> { |^Widget?| ^^ nil } }; Widget <- { }").is_empty());
+    }
+
+    #[test]
+    fn records_declared_method_returns_from_ast() {
+        // Compile `src` and return the recorded returns for class `name` (Phase 3c·4a).
+        fn returns_of(src: &str, name: &str) -> HashMap<Arc<str>, Type> {
+            let node = parse_quoin_string(src);
+            let NodeValue::Program(p) = &node.value else {
+                panic!("expected a program");
+            };
+            let mut c = Compiler::new();
+            c.compile_program(p).unwrap();
+            c.class_table.get(name).unwrap().method_returns
+        }
+
+        // A `^Ret` header on a `Foo <- {}` method is recorded; a header-less method is not.
+        let r = returns_of("Foo <- { make -> { |^Integer| 5 }; plain -> { 1 } }", "Foo");
+        assert_eq!(r.get("make"), Some(&Type::Int));
+        assert_eq!(r.get("plain"), None);
+
+        // A `Foo <-- {}` reopen contributes its declared returns too (how the core classes do it).
+        let r = returns_of("Foo <- { }; Foo <-- { grow -> { |^String| 'x' } }", "Foo");
+        assert_eq!(r.get("grow"), Some(&Type::String));
     }
 
     #[test]
