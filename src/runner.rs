@@ -210,6 +210,9 @@ pub enum VmRunnerMode {
     /// `qn fmt [--check|--dry-run|--diff] <path>…`: format Quoin source in place. The paths are
     /// carried in `VmRunnerOptions::vm_options.arguments`.
     Fmt,
+    /// `qn check <file>…`: type-check each file (report diagnostics) without running it. The paths
+    /// are carried in `VmRunnerOptions::vm_options.arguments`; exits non-zero if any diagnostic.
+    Check,
 }
 
 impl VmRunnerOptions {
@@ -297,6 +300,13 @@ impl VmRunnerOptions {
                         "--diff" => fmt_diff = true,
                         _ => vm_args.push(a.clone()),
                     }
+                }
+            } else if arg == "check" {
+                // `qn check <file>…`: type-check each file without running it. Every argument is a
+                // path (collected in `vm_args`, like `fmt`).
+                mode = VmRunnerMode::Check;
+                for a in &args[2..] {
+                    vm_args.push(a.clone());
                 }
             } else {
                 mode = VmRunnerMode::Run;
@@ -499,6 +509,64 @@ impl VmRunner {
                 self.run_fmt();
                 Ok(())
             }
+            VmRunnerMode::Check => {
+                self.run_check();
+                Ok(())
+            }
+        }
+    }
+
+    /// `qn check <file-or-dir>…`: type-check each file — reporting the checker's diagnostics —
+    /// without running it. A directory argument is searched recursively for `.qn` files (like
+    /// `fmt`). Exits non-zero if any file emitted a diagnostic, so it works as a CI gate.
+    fn run_check(&self) {
+        let args = &self.options.vm_options.arguments;
+        if args.is_empty() {
+            eprintln!("Usage: qn check <file-or-dir>…");
+            exit(2);
+        }
+        // Expand directory arguments to their `.qn` files, recursively (like `fmt`).
+        let mut files = Vec::new();
+        for p in args {
+            let path = Path::new(p);
+            if path.is_dir() {
+                collect_qn_files(path, &mut files);
+            } else {
+                files.push(path.to_path_buf());
+            }
+        }
+        if files.is_empty() {
+            eprintln!("qn check: no .qn files found in {}", args.join(" "));
+            exit(2);
+        }
+
+        // Parse each file WITHOUT panicking: a read or syntax error is reported and that file is
+        // skipped, so one bad file (common when checking a whole tree) doesn't abort the rest.
+        let mut had_error = false;
+        let mut asts = Vec::new();
+        for f in &files {
+            let name = f.display().to_string();
+            let source = match read_to_string(f) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{name}: {e}");
+                    had_error = true;
+                    continue;
+                }
+            };
+            let source = source.strip_prefix('\u{FEFF}').unwrap_or(&source);
+            match try_parse_quoin_string_named(source, &name) {
+                Ok(node) => asts.push(node),
+                Err(e) => {
+                    eprintln!("{name}: parse error: {e}");
+                    had_error = true;
+                }
+            }
+        }
+
+        let had_diagnostics = self.compile_and_check_asts(prelude_asts(), asts.into_iter());
+        if had_error || had_diagnostics {
+            exit(1);
         }
     }
 
@@ -968,6 +1036,110 @@ impl VmRunner {
 
         arena.finish_cycle();
         passed
+    }
+
+    /// `qn check FILE…`: run the prelude (so the checker sees the full stdlib class environment),
+    /// then compile each target — running the type checker, whose diagnostics are reported —
+    /// WITHOUT executing it. Returns whether any target emitted a diagnostic (→ non-zero exit).
+    fn compile_and_check_asts(
+        &self,
+        prelude: impl Iterator<Item = Node>,
+        targets: impl Iterator<Item = Node>,
+    ) -> bool {
+        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
+            let mut vm = VmState::new(mc, self.options.vm_options.clone());
+            register_builtins(mc, &mut vm);
+            vm
+        });
+        arena.metrics().set_pacing(crate::vm::gc_pacing());
+
+        // Execute the prelude so every stdlib class is registered for the checker to see.
+        for ast in prelude {
+            arena.mutate_root(|mc, vm| {
+                let program_node = match &ast.value {
+                    NodeValue::Program(p) => p,
+                    _ => panic!("Error: Root AST node is not a ProgramNode"),
+                };
+                let mut compiler = Compiler::new();
+                compiler.set_seen_types(vm.options.seen_types.clone());
+                compiler.set_class_table(vm.options.class_table.clone());
+                crate::class_table::populate_from_vm(vm, &vm.options.class_table);
+                let program = match compiler.compile_program(program_node) {
+                    Ok(p) => p,
+                    Err(e) => panic!("Compilation error: {}", e),
+                };
+                vm.report_type_warnings(compiler.diagnostics());
+                let decl_block = program.decl_block.as_ref().map(|db| {
+                    gc!(
+                        mc,
+                        Block {
+                            name: db.name.clone(),
+                            is_nested_block: db.is_nested_block,
+                            param_syms: db.param_syms.clone(),
+                            param_types: db.param_types.clone(),
+                            bytecode: db.bytecode.clone(),
+                            parent_env: None,
+                            enclosing_method_id: None,
+                            source_info: db.source_info.clone(),
+                            decl_block: None,
+                            source_map: db.source_map.clone(),
+                            inline_cache: RefLock::new(None),
+                        }
+                    )
+                });
+                let main_block = gc!(
+                    mc,
+                    Block {
+                        name: program.name.clone(),
+                        is_nested_block: program.is_nested_block,
+                        param_syms: program.param_syms.clone(),
+                        param_types: program.param_types.clone(),
+                        bytecode: program.bytecode.clone(),
+                        parent_env: None,
+                        enclosing_method_id: None,
+                        source_info: program.source_info.clone(),
+                        decl_block,
+                        source_map: program.source_map.clone(),
+                        inline_cache: RefLock::new(None),
+                    }
+                );
+                vm.start_block(mc, main_block, Vec::new(), None, None);
+                install_main_task(mc, vm);
+            });
+            if let Err(e) = drive_main_task(&mut arena) {
+                eprintln!("qn check: error loading the prelude: {}", e);
+                break;
+            }
+        }
+
+        // Compile-only each target: the checker runs (diagnostics reported), the program doesn't.
+        let mut had_diagnostics = false;
+        for ast in targets {
+            had_diagnostics |= arena.mutate_root(|_mc, vm| {
+                let program_node = match &ast.value {
+                    NodeValue::Program(p) => p,
+                    _ => panic!("Error: Root AST node is not a ProgramNode"),
+                };
+                let mut compiler = Compiler::new();
+                compiler.set_seen_types(vm.options.seen_types.clone());
+                compiler.set_class_table(vm.options.class_table.clone());
+                crate::class_table::populate_from_vm(vm, &vm.options.class_table);
+                match compiler.compile_program(program_node) {
+                    Ok(_) => {
+                        let had = !compiler.diagnostics().is_empty();
+                        vm.report_type_warnings(compiler.diagnostics());
+                        had
+                    }
+                    Err(e) => {
+                        eprintln!("Compilation error: {}", e);
+                        true
+                    }
+                }
+            });
+        }
+
+        arena.finish_cycle();
+        had_diagnostics
     }
 
     fn run_benchmark_iteration(
