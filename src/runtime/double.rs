@@ -1,4 +1,5 @@
 use crate::error::QuoinError;
+use crate::instruction::IntBinKind;
 use crate::recv;
 use crate::value::{NativeClassBuilder, Value};
 
@@ -16,27 +17,30 @@ fn whole_to_i64(f: f64) -> Result<i64, QuoinError> {
     }
 }
 
-/// Generate `[Integer]` and `[Double]` typed variants for a binary operator on a
-/// `Double` receiver. Simpler than `int_binop!` (integer.rs): a Double receiver
-/// makes *every* arithmetic result a `Double` (both operands coerce via `as_f64`),
-/// so the two variants share a body; `/:`/`%:` need no zero-guard under f64
-/// semantics. A non-numeric RHS matches no variant and (until the comparison
-/// natives are demoted) falls through to the rekeyed global fallback in native.rs.
+// A binary operator on a Double receiver, for the given `IntBinKind`. Both arg types coerce to
+// f64, so both variants share the `devirt_ops::double_bin` verb — the SAME function the
+// devirtualized `DoubleXxx` VM ops call, so native and devirt can't drift.
 macro_rules! double_binop {
-    ($b:expr, $sel:literal, arith $op:tt) => {
+    ($b:expr, $sel:literal, $kind:expr) => {
         $b.sdk_typed_instance_method($sel, &["Integer"], |host, receiver, args| {
-            Ok(host.new_double(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
+            match crate::devirt_ops::double_bin(
+                $kind,
+                receiver.as_f64().unwrap(),
+                args[0].as_f64().unwrap(),
+            ) {
+                crate::devirt_ops::DoubleBinOut::Double(d) => Ok(host.new_double(d)),
+                crate::devirt_ops::DoubleBinOut::Bool(b) => Ok(host.new_bool(b)),
+            }
         })
         .sdk_typed_instance_method($sel, &["Double"], |host, receiver, args| {
-            Ok(host.new_double(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
-        })
-    };
-    ($b:expr, $sel:literal, cmp $op:tt) => {
-        $b.sdk_typed_instance_method($sel, &["Integer"], |host, receiver, args| {
-            Ok(host.new_bool(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
-        })
-        .sdk_typed_instance_method($sel, &["Double"], |host, receiver, args| {
-            Ok(host.new_bool(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
+            match crate::devirt_ops::double_bin(
+                $kind,
+                receiver.as_f64().unwrap(),
+                args[0].as_f64().unwrap(),
+            ) {
+                crate::devirt_ops::DoubleBinOut::Double(d) => Ok(host.new_double(d)),
+                crate::devirt_ops::DoubleBinOut::Bool(b) => Ok(host.new_bool(b)),
+            }
         })
     };
 }
@@ -86,13 +90,21 @@ pub fn build_double_class() -> NativeClassBuilder {
         .sdk_instance_method("s", |host, receiver, _args| {
             let val = recv!(receiver, Double);
             Ok(host.new_string(format!("{val}")))
-        });
-    let b = double_binop!(b, "+:", arith+);
-    let b = double_binop!(b, "-:", arith -);
-    let b = double_binop!(b, "*:", arith *);
-    let b = double_binop!(b, "/:", arith /);
-    let b = double_binop!(b, "%:", arith %);
-    let b = double_binop!(b, "<:", cmp <);
+        })
+        // Class-side IEEE-754 constants — handy for tests and boundary math.
+        .sdk_class_method("inf", |host, _receiver, _args| {
+            Ok(host.new_double(f64::INFINITY))
+        })
+        .sdk_class_method(
+            "nan",
+            |host, _receiver, _args| Ok(host.new_double(f64::NAN)),
+        );
+    let b = double_binop!(b, "+:", IntBinKind::Add);
+    let b = double_binop!(b, "-:", IntBinKind::Sub);
+    let b = double_binop!(b, "*:", IntBinKind::Mul);
+    let b = double_binop!(b, "/:", IntBinKind::Div);
+    let b = double_binop!(b, "%:", IntBinKind::Mod);
+    let b = double_binop!(b, "<:", IntBinKind::Lt);
     // pow: — a Double base always yields a Double (both arg types coerce via `as_f64`).
     let b = b
         .sdk_typed_instance_method("pow:", &["Integer"], |host, receiver, args| {

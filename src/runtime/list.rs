@@ -1,4 +1,5 @@
 use crate::arg;
+use crate::devirt_ops;
 use crate::error::QuoinError;
 use crate::runtime::pretty::{PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
@@ -84,16 +85,12 @@ pub fn build_list_class() -> NativeClassBuilder {
         // (dispatch enforces the type instead of a hand-rolled TypeError).
         .typed_instance_method("at:", &["Integer"], |vm, mc, receiver, args| {
             let idx = arg!(args, Int, 0);
-            receiver
+            let got = receiver
                 .with_native_state::<NativeListState, _, _>(|l| {
-                    let vec = l.get_vec();
-                    if idx >= 0 && idx < vec.len() as i64 {
-                        Ok(vec[idx as usize])
-                    } else {
-                        Ok(vm.new_nil(mc))
-                    }
+                    devirt_ops::list_get(l.get_vec(), idx)
                 })
-                .map_err(|e| QuoinError::Other(e))?
+                .map_err(QuoinError::Other)?;
+            Ok(got.unwrap_or_else(|| vm.new_nil(mc)))
         })
         // Only the index is typed (`&["Integer"]`); the value (arg 2) is any type.
         .typed_instance_method("at:put:", &["Integer"], |_vm, mc, receiver, args| {
@@ -101,23 +98,9 @@ pub fn build_list_class() -> NativeClassBuilder {
             let val = args[1];
             receiver
                 .with_native_state_mut(mc, |l: &mut NativeListState| {
-                    let vec = l.get_vec_mut();
-                    if idx >= 0 && idx < vec.len() as i64 {
-                        vec[idx as usize] = val;
-                        Ok(())
-                    } else {
-                        Err(QuoinError::IndexError {
-                            index: idx,
-                            len: vec.len() as i64,
-                            msg: format!(
-                                "Index out of bounds: index is {}, but length is {}",
-                                idx,
-                                vec.len()
-                            ),
-                        })
-                    }
+                    devirt_ops::list_set(l.get_vec_mut(), idx, val)
                 })
-                .map_err(|e| QuoinError::Other(e))??;
+                .map_err(QuoinError::Other)??;
             Ok(receiver)
         })
         .typed_instance_method("sliceFrom:", &["Integer"], |vm, mc, receiver, args| {

@@ -1185,6 +1185,19 @@ fn test_compile_binary_unary_operators() {
     expected.push(Instruction::IntAdd);
     assert_eq!(res.bytecode, fused(expected));
 
+    // 1.5 + 2.5 — two Double literals devirtualize to a direct DoubleAdd (no method send).
+    let res = compile(vec![binary(
+        BinaryOperatorType::Add,
+        double(1.5),
+        double(2.5),
+    )])
+    .unwrap();
+    let mut expected = prefix_ops();
+    expected.push(Instruction::Push(Constant::Double(1.5)));
+    expected.push(Instruction::Push(Constant::Double(2.5)));
+    expected.push(Instruction::DoubleAdd);
+    assert_eq!(res.bytecode, fused(expected));
+
     // -x
     let res = compile(vec![unary(UnaryOperatorType::Sub, local_id("x"))]).unwrap();
     let mut expected = prefix_ops();

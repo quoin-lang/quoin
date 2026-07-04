@@ -103,6 +103,14 @@ impl Constant {
             _ => None,
         }
     }
+
+    /// The float value if this is a `Double` literal — for `DoubleBinLC`'s fast path.
+    pub fn as_double(&self) -> Option<f64> {
+        match self {
+            Constant::Double(d) => Some(*d),
+            _ => None,
+        }
+    }
 }
 
 /// The specific integer binary op carried by the fused `IntBinLL`/`IntBinLC`
@@ -200,6 +208,26 @@ pub enum Instruction {
     // the standalone `Int` ops above).
     IntBinLL(Symbol, Symbol, IntBinKind),   // local, local, op
     IntBinLC(Symbol, Constant, IntBinKind), // local, constant, op
+    // Devirtualized Double operators (mirror of the Integer ops above): emitted when both
+    // operands are statically `Double` (a sealed value type). Each pops two `Value::Double`s
+    // and computes directly. Semantics match Double's native ops exactly — plain IEEE-754
+    // f64: `/`/`%` yield inf/NaN on a zero divisor (they do NOT raise, unlike Integer); `==`
+    // is f64 equality (`NaN != NaN`); compares yield a Bool. A non-Double operand falls back
+    // to the real send. The fused `DoubleBinLL`/`DoubleBinLC` reuse `IntBinKind` (the operator
+    // kind is type-agnostic — same `+:`/`-:`/… selectors).
+    DoubleAdd,
+    DoubleSub,
+    DoubleMul,
+    DoubleDiv,
+    DoubleMod,
+    DoubleLt,
+    DoubleLe,
+    DoubleGt,
+    DoubleGe,
+    DoubleEq,
+    DoubleNe,
+    DoubleBinLL(Symbol, Symbol, IntBinKind), // local, local, op
+    DoubleBinLC(Symbol, Constant, IntBinKind), // local, constant, op
     // Devirtualized List accessors (Slice 2e): emitted instead of `Send("at:", 1)` /
     // `Send("at:put:", 2)` / `Send("add:", 1)` when the receiver is statically a `List` (a
     // sealed value type — its access methods can't be redefined). Each pops the same
@@ -210,6 +238,16 @@ pub enum Instruction {
     ListGet,
     ListSet,
     ListPush,
+    // Devirtualized Map accessors (mirror of the List ops): emitted when the receiver is
+    // statically a `Map` (a sealed value type). Map is `IndexMap<String, Value>` — its key must be
+    // a String at runtime (else fall back to the send, matching native `at:`). `MapGet` (`at:`) →
+    // value or nil; `MapSet` (`at:put:`) → the receiver. Each falls back to the real send if the
+    // receiver isn't a native map at runtime.
+    //
+    // Set has NO devirt op: native `Set#contains?:`/`add:` dispatch `==:` per element (structural
+    // for List/Map, custom for user classes), which a direct raw-equality op can't replicate.
+    MapGet,
+    MapSet,
     Return,
     Yeet,
     BlockReturn,

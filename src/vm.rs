@@ -17,7 +17,7 @@ use crate::value::{
     AnyCollect, Block, Class, EnvFrame, Fields, NamespacedName, NativeCall, NativeClass,
     NativeFunc, Object, ObjectPayload, Value,
 };
-use crate::{ansi_colorizer, gc, gcl};
+use crate::{ansi_colorizer, devirt_ops, gc, gcl};
 
 use gc_arena::metrics::Pacing;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
@@ -2666,33 +2666,39 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Like `take_two_ints`, but for the `Double` devirt arms: pops the top two values iff both
+    /// are `Value::Double`, else leaves the stack untouched so the caller can fall back to a send.
+    fn take_two_doubles(&mut self) -> Option<(f64, f64)> {
+        let n = self.stack.len();
+        if n < 2 {
+            return None;
+        }
+        if let (Value::Double(a), Value::Double(b)) = (self.stack[n - 2], self.stack[n - 1]) {
+            self.stack.truncate(n - 2);
+            Some((a, b))
+        } else {
+            None
+        }
+    }
+
     /// The fused-`Int`-op computation (Slice a1), shared by `IntBinLL`/`IntBinLC`. Matches the
     /// standalone `IntAdd`..`IntNe` arms exactly (arith wraps in release; `/`/`%` raise on a
     /// zero divisor; compares yield a Bool).
     fn int_bin_compute(kind: IntBinKind, a: i64, b: i64) -> Result<Value<'gc>, QuoinError> {
-        Ok(match kind {
-            IntBinKind::Add => Value::Int(a + b),
-            IntBinKind::Sub => Value::Int(a - b),
-            IntBinKind::Mul => Value::Int(a * b),
-            IntBinKind::Div => {
-                if b == 0 {
-                    return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
-                }
-                Value::Int(a / b)
-            }
-            IntBinKind::Mod => {
-                if b == 0 {
-                    return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
-                }
-                Value::Int(a % b)
-            }
-            IntBinKind::Lt => Value::Bool(a < b),
-            IntBinKind::Le => Value::Bool(a <= b),
-            IntBinKind::Gt => Value::Bool(a > b),
-            IntBinKind::Ge => Value::Bool(a >= b),
-            IntBinKind::Eq => Value::Bool(a == b),
-            IntBinKind::Ne => Value::Bool(a != b),
+        Ok(match devirt_ops::int_bin(kind, a, b)? {
+            devirt_ops::IntBinOut::Int(i) => Value::Int(i),
+            devirt_ops::IntBinOut::Bool(b) => Value::Bool(b),
         })
+    }
+
+    /// The fused-`Double`-op computation, shared by `DoubleBinLL`/`DoubleBinLC`. Plain IEEE-754
+    /// f64 — `/`/`%` yield inf/NaN on a zero divisor (never raise, unlike `int_bin_compute`), so
+    /// it returns a `Value` directly rather than a `Result`.
+    fn double_bin_compute(kind: IntBinKind, a: f64, b: f64) -> Value<'gc> {
+        match devirt_ops::double_bin(kind, a, b) {
+            devirt_ops::DoubleBinOut::Double(d) => Value::Double(d),
+            devirt_ops::DoubleBinOut::Bool(b) => Value::Bool(b),
+        }
     }
 
     /// Probe the executing `block`'s inline cache at `ip`: a hit requires a live epoch (method
@@ -3182,9 +3188,12 @@ impl<'gc> VmState<'gc> {
             // compares yield a Bool). A non-Int operand (a var whose inferred `Int` type went
             // stale, or an untyped operand) falls back to the real send — so `Int` can be
             // inferred optimistically rather than only trusted for annotated params.
+            // The standalone `Int` ops (stack operands — e.g. `1 + 2`). All compute through the
+            // shared `int_bin_compute` → `devirt_ops::int_bin`, so they can't drift from the fused
+            // ops or the native `Integer` methods. A non-Int operand falls back to the real send.
             Instruction::IntAdd => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Int(a + b));
+                    self.push(Self::int_bin_compute(IntBinKind::Add, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("+:"), 1);
@@ -3192,7 +3201,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntSub => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Int(a - b));
+                    self.push(Self::int_bin_compute(IntBinKind::Sub, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("-:"), 1);
@@ -3200,7 +3209,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntMul => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Int(a * b));
+                    self.push(Self::int_bin_compute(IntBinKind::Mul, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("*:"), 1);
@@ -3208,10 +3217,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntDiv => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    if b == 0 {
-                        return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
-                    }
-                    self.push(Value::Int(a / b));
+                    self.push(Self::int_bin_compute(IntBinKind::Div, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("/:"), 1);
@@ -3219,10 +3225,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntMod => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    if b == 0 {
-                        return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
-                    }
-                    self.push(Value::Int(a % b));
+                    self.push(Self::int_bin_compute(IntBinKind::Mod, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("%:"), 1);
@@ -3230,7 +3233,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntLt => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Bool(a < b));
+                    self.push(Self::int_bin_compute(IntBinKind::Lt, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("<:"), 1);
@@ -3238,7 +3241,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntLe => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Bool(a <= b));
+                    self.push(Self::int_bin_compute(IntBinKind::Le, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("<=:"), 1);
@@ -3246,7 +3249,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntGt => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Bool(a > b));
+                    self.push(Self::int_bin_compute(IntBinKind::Gt, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern(">:"), 1);
@@ -3254,7 +3257,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntGe => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Bool(a >= b));
+                    self.push(Self::int_bin_compute(IntBinKind::Ge, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern(">=:"), 1);
@@ -3262,7 +3265,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntEq => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Bool(a == b));
+                    self.push(Self::int_bin_compute(IntBinKind::Eq, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("==:"), 1);
@@ -3270,7 +3273,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::IntNe => {
                 if let Some((a, b)) = self.take_two_ints() {
-                    self.push(Value::Bool(a != b));
+                    self.push(Self::int_bin_compute(IntBinKind::Ne, a, b)?);
                     ip += 1;
                 } else {
                     return self.exec_send(mc, frame_idx, Symbol::intern("!=:"), 1);
@@ -3315,6 +3318,131 @@ impl<'gc> VmState<'gc> {
                     return self.exec_send(mc, frame_idx, Symbol::intern(kind.selector()), 1);
                 }
             }
+            // Devirtualized Double operators (mirror of the Integer arms). Plain IEEE-754 f64 —
+            // `/`/`%` do NOT check for zero (inf/NaN, matching native Double). A non-Double
+            // operand falls back to the real send.
+            Instruction::DoubleAdd => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Add, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("+:"), 1);
+                }
+            }
+            Instruction::DoubleSub => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Sub, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("-:"), 1);
+                }
+            }
+            Instruction::DoubleMul => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Mul, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("*:"), 1);
+                }
+            }
+            Instruction::DoubleDiv => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Div, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("/:"), 1);
+                }
+            }
+            Instruction::DoubleMod => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Mod, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("%:"), 1);
+                }
+            }
+            Instruction::DoubleLt => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Lt, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("<:"), 1);
+                }
+            }
+            Instruction::DoubleLe => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Le, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("<=:"), 1);
+                }
+            }
+            Instruction::DoubleGt => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Gt, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern(">:"), 1);
+                }
+            }
+            Instruction::DoubleGe => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Ge, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern(">=:"), 1);
+                }
+            }
+            Instruction::DoubleEq => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Eq, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("==:"), 1);
+                }
+            }
+            Instruction::DoubleNe => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Self::double_bin_compute(IntBinKind::Ne, a, b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("!=:"), 1);
+                }
+            }
+            Instruction::DoubleBinLL(a, b, kind) => {
+                let (a, b, kind) = (*a, *b, *kind);
+                let (va, vb) = {
+                    let frame = &self.frames[frame_idx];
+                    (EnvFrame::get(frame.env, a), EnvFrame::get(frame.env, b))
+                };
+                if let (Some(Value::Double(x)), Some(Value::Double(y))) = (va, vb) {
+                    self.push(Self::double_bin_compute(kind, x, y));
+                    ip += 1;
+                } else {
+                    let va = va.unwrap_or_else(|| self.new_nil(mc));
+                    let vb = vb.unwrap_or_else(|| self.new_nil(mc));
+                    self.push(va);
+                    self.push(vb);
+                    return self.exec_send(mc, frame_idx, Symbol::intern(kind.selector()), 1);
+                }
+            }
+            Instruction::DoubleBinLC(a, c, kind) => {
+                let (a, kind) = (*a, *kind);
+                let va = {
+                    let frame = &self.frames[frame_idx];
+                    EnvFrame::get(frame.env, a)
+                };
+                if let (Some(Value::Double(x)), Some(y)) = (va, c.as_double()) {
+                    self.push(Self::double_bin_compute(kind, x, y));
+                    ip += 1;
+                } else {
+                    let va = va.unwrap_or_else(|| self.new_nil(mc));
+                    self.push(va);
+                    let cv = self.materialize_constant(mc, c);
+                    self.push(cv);
+                    return self.exec_send(mc, frame_idx, Symbol::intern(kind.selector()), 1);
+                }
+            }
             // Devirtualized List accessors (Slice 2e). Operands are already on the stack in
             // send order; if the receiver isn't a native list (or the index isn't an
             // Integer, matching the typed native `at:`/`at:put:`), fall back to the real send.
@@ -3324,12 +3452,7 @@ impl<'gc> VmState<'gc> {
                 let receiver = self.stack[n - 2];
                 if let Value::Int(i) = index {
                     let got = receiver.with_native_state::<NativeListState, _, _>(|l| {
-                        let vec = l.get_vec();
-                        if i >= 0 && (i as usize) < vec.len() {
-                            Some(vec[i as usize])
-                        } else {
-                            None // out of bounds → nil (native `at:` semantics)
-                        }
+                        devirt_ops::list_get(l.get_vec(), i)
                     });
                     if let Ok(elem) = got {
                         self.stack.truncate(n - 2);
@@ -3348,21 +3471,7 @@ impl<'gc> VmState<'gc> {
                 let receiver = self.stack[n - 3];
                 if let Value::Int(i) = index {
                     let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
-                        let vec = l.get_vec_mut();
-                        if i >= 0 && (i as usize) < vec.len() {
-                            vec[i as usize] = value;
-                            Ok(())
-                        } else {
-                            Err(QuoinError::IndexError {
-                                index: i,
-                                len: vec.len() as i64,
-                                msg: format!(
-                                    "Index out of bounds: index is {}, but length is {}",
-                                    i,
-                                    vec.len()
-                                ),
-                            })
-                        }
+                        devirt_ops::list_set(l.get_vec_mut(), i, value)
                     });
                     if let Ok(inner) = res {
                         self.stack.truncate(n - 3);
@@ -3389,6 +3498,49 @@ impl<'gc> VmState<'gc> {
                     return Ok(VmStatus::Running);
                 }
                 return self.exec_send(mc, frame_idx, Symbol::intern("add:"), 1);
+            }
+            // Devirtualized Map accessors (mirror of List). Map is `IndexMap<String, Value>`, so
+            // the key must be a String at runtime; a non-String key (or non-Map receiver) falls
+            // back to the real send.
+            Instruction::MapGet => {
+                let n = self.stack.len();
+                let key = self.stack[n - 1];
+                let receiver = self.stack[n - 2];
+                if let Value::Object(o) = key
+                    && let ObjectPayload::String(s) = o.borrow().payload
+                {
+                    let got = receiver.with_native_state::<NativeMapState, _, _>(|m| {
+                        devirt_ops::map_get(m.get_map(), s.as_str())
+                    });
+                    if let Ok(v) = got {
+                        self.stack.truncate(n - 2);
+                        self.push(v.unwrap_or(Value::Nil)); // missing key → nil (native `at:`)
+                        self.frames[frame_idx].ip = ip + 1;
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("at:"), 1);
+            }
+            Instruction::MapSet => {
+                let n = self.stack.len();
+                let value = self.stack[n - 1];
+                let key = self.stack[n - 2];
+                let receiver = self.stack[n - 3];
+                if let Value::Object(o) = key
+                    && let ObjectPayload::String(s) = o.borrow().payload
+                {
+                    let key_str = s.to_string(); // the map owns String keys
+                    let res = receiver.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
+                        m.get_map_mut().insert(key_str, value);
+                    });
+                    if res.is_ok() {
+                        self.stack.truncate(n - 3);
+                        self.push(receiver); // `at:put:` evaluates to the receiver
+                        self.frames[frame_idx].ip = ip + 1;
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("at:put:"), 2);
             }
             Instruction::Send(selector, num_args) => {
                 let (selector, num_args) = (*selector, *num_args);
