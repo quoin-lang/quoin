@@ -55,6 +55,16 @@ pub struct Task<'gc> {
     pub native_args: Vec<NativeCall<'gc>>,
     pub current_fiber: Option<Value<'gc>>,
     pub resume_stack: Vec<Option<Value<'gc>>>,
+    /// The task-root execution context, stashed here while this task is parked
+    /// *inside* guest-fiber execution (its root frames live in the scheduler's
+    /// `main_saved_*` slot while a fiber runs). Those scheduler slots are shared,
+    /// so a parked task must carry its own copy across a task switch — otherwise
+    /// another task's fiber switch overwrites them, and this task's next fiber
+    /// yield would load an empty (or foreign) root context: a silently-completing
+    /// or frame-corrupted task.
+    pub saved_root_stack: Vec<Value<'gc>>,
+    pub saved_root_frames: Vec<Frame<'gc>>,
+    pub saved_root_native_args: Vec<NativeCall<'gc>>,
     /// Result to deliver when this task is next resumed (an I/O result, or a gather
     /// outcome). Stashed here while parked; moved into `Scheduler::wake` by
     /// `load_task_context`, then taken by `await_io`/`await_gather`.
@@ -821,13 +831,18 @@ impl<'gc> VmState<'gc> {
 
     /// Stash the live per-task context into `tasks[tid]` (the task is parking or
     /// being preempted). Mailboxes (`fiber_transfer`/`fiber_error`) are empty at
-    /// every switch boundary, so they are not saved.
+    /// every switch boundary, so they are not saved. The `main_saved_*` slots ARE
+    /// saved: they hold this task's root context whenever it parks mid-fiber, and
+    /// the next task's fiber switches would otherwise clobber them.
     pub fn save_task_context(&mut self, tid: TaskId) {
         let stack = std::mem::take(&mut self.stack);
         let frames = std::mem::take(&mut self.frames);
         let native_args = std::mem::take(&mut self.active_native_args);
         let current_fiber = self.sched.current_fiber.take();
         let resume_stack = std::mem::take(&mut self.sched.resume_stack);
+        let saved_root_stack = std::mem::take(&mut self.sched.main_saved_stack);
+        let saved_root_frames = std::mem::take(&mut self.sched.main_saved_frames);
+        let saved_root_native_args = std::mem::take(&mut self.sched.main_saved_native_args);
         let t = self.sched.tasks[tid.0]
             .as_mut()
             .expect("save_task_context: task slot is empty");
@@ -836,6 +851,9 @@ impl<'gc> VmState<'gc> {
         t.native_args = native_args;
         t.current_fiber = current_fiber;
         t.resume_stack = resume_stack;
+        t.saved_root_stack = saved_root_stack;
+        t.saved_root_frames = saved_root_frames;
+        t.saved_root_native_args = saved_root_native_args;
     }
 
     /// Make `tid` the current task and restore its context into `VmState`. The
@@ -864,6 +882,9 @@ impl<'gc> VmState<'gc> {
             self.active_native_args = std::mem::take(&mut t.native_args);
             self.sched.current_fiber = t.current_fiber.take();
             self.sched.resume_stack = std::mem::take(&mut t.resume_stack);
+            self.sched.main_saved_stack = std::mem::take(&mut t.saved_root_stack);
+            self.sched.main_saved_frames = std::mem::take(&mut t.saved_root_frames);
+            self.sched.main_saved_native_args = std::mem::take(&mut t.saved_root_native_args);
             self.sched.wake = t.wake.take();
         } else {
             // First activation: a fresh, empty live context, then start the block.
@@ -872,6 +893,9 @@ impl<'gc> VmState<'gc> {
             self.active_native_args = Vec::new();
             self.sched.current_fiber = None;
             self.sched.resume_stack = Vec::new();
+            self.sched.main_saved_stack = Vec::new();
+            self.sched.main_saved_frames = Vec::new();
+            self.sched.main_saved_native_args = Vec::new();
             self.sched.wake = None;
             let block = self.sched.tasks[tid.0]
                 .as_ref()
@@ -950,6 +974,9 @@ impl<'gc> VmState<'gc> {
             native_args: Vec::new(),
             current_fiber: None,
             resume_stack: Vec::new(),
+            saved_root_stack: Vec::new(),
+            saved_root_frames: Vec::new(),
+            saved_root_native_args: Vec::new(),
             wake: None,
             parent,
             gather: None,
