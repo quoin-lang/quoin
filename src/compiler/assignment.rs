@@ -128,7 +128,8 @@ impl Compiler {
                 // An explicit annotation is the local's declared type (the reassignment contract).
                 // `Bool` is excluded — its `if:else:` inline has no fallback for a stale `var`.
                 Some(t) if *t != Type::Bool && *t != Type::Any => {
-                    self.record_declared_type(&l.identifier.name, t.clone());
+                    let prov = Compiler::provenance_at(&decl.lvalues[0], "declared".to_string());
+                    self.record_declared_type(&l.identifier.name, t.clone(), prov);
                 }
                 Some(_) => {}
                 None => {
@@ -157,7 +158,12 @@ impl Compiler {
                         | Type::Never => false,
                     };
                     if has_devirt_path {
-                        self.record_local_type(&l.identifier.name, ty);
+                        let origin = match &decl.rvalue.value {
+                            NodeValue::Identifier(id) => format!("inferred from `{}`", id.name),
+                            _ => "inferred here".to_string(),
+                        };
+                        let prov = Compiler::provenance_at(&decl.lvalues[0], origin);
+                        self.record_local_type(&l.identifier.name, ty, prov);
                     }
                 }
             }

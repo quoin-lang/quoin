@@ -522,19 +522,100 @@ impl<'gc> VmState<'gc> {
     /// Each is rendered `file:line:col: warning: message` (the standard, editor-jumpable form) when
     /// a span is known, else bare `warning: message`. Best-effort; never fatal. (Phase 4.)
     pub fn report_type_warnings(&mut self, diagnostics: &[crate::compiler::Diagnostic]) {
-        for d in diagnostics {
-            let out = match &d.span {
+        // `file:line:col: <level>: <message>` header, the level keyword colored (yellow warning,
+        // gray note) like uncaught errors. `indent` shifts a provenance note under its warning.
+        fn header(
+            level: &str,
+            color: &str,
+            message: &str,
+            span: Option<&crate::value::SourceInfo>,
+            colorize: bool,
+            indent: bool,
+        ) -> String {
+            let pad = if indent { "  " } else { "" };
+            let label = if colorize {
+                ansi_colorizer::colorize(&format!("${color}[{level}$]"))
+            } else {
+                level.to_string()
+            };
+            match span {
                 Some(s) => format!(
-                    "{}:{}:{}: warning: {}\n",
+                    "{pad}{}:{}:{}: {label}: {message}\n",
                     s.filename,
                     s.line,
-                    s.column + 1,
-                    d.message
+                    s.column + 1
                 ),
-                None => format!("warning: {}\n", d.message),
-            };
-            let _ = self.write_std(StdStream::Err, out.as_bytes());
+                None => format!("{pad}{label}: {message}\n"),
+            }
         }
+
+        // The offending line under a gray `|` gutter with a caret beneath the span — the same
+        // visual language as an uncaught error's source block. `None` if the file can't be read.
+        fn source_block(span: &crate::value::SourceInfo, colorize: bool) -> Option<String> {
+            let content = fs::read_to_string(&span.filename).ok()?;
+            let line_text = content.lines().nth(span.line.saturating_sub(1))?;
+            let width = content
+                .get(span.start..span.end)
+                .map(|s| s.chars().count())
+                .unwrap_or(1)
+                .max(1);
+            let gutter = span.line.to_string();
+            let pad = " ".repeat(gutter.len());
+            let pipe = if colorize {
+                ansi_colorizer::colorize("$#808080[|$]")
+            } else {
+                "|".to_string()
+            };
+            let line_hl = if colorize {
+                highlight_to_ansi(line_text)
+            } else {
+                line_text.to_string()
+            };
+            let carets = format!("{}{}", " ".repeat(span.column), "^".repeat(width));
+            let carets = if colorize {
+                ansi_colorizer::colorize(&format!("$#ffcc00[{carets}$]"))
+            } else {
+                carets
+            };
+            Some(format!(
+                "  {pad} {pipe}\n  {gutter} {pipe} {line_hl}\n  {pad} {pipe} {carets}\n"
+            ))
+        }
+
+        let colorize = self.options.supports_color;
+        let mut out = String::new();
+        for d in diagnostics {
+            out.push_str(&header(
+                "warning",
+                "#ffcc00",
+                &d.message,
+                d.span.as_ref(),
+                colorize,
+                false,
+            ));
+            if let Some(s) = &d.span
+                && let Some(block) = source_block(s, colorize)
+            {
+                out.push_str(&block);
+            }
+            // Why-chain notes (Phase 4 provenance): each under its own span, indented.
+            for note in &d.notes {
+                out.push_str(&header(
+                    "note",
+                    "#808080",
+                    &note.message,
+                    note.span.as_ref(),
+                    colorize,
+                    true,
+                ));
+                if let Some(s) = &note.span
+                    && let Some(block) = source_block(s, colorize)
+                {
+                    out.push_str(&block);
+                }
+            }
+        }
+        let _ = self.write_std(StdStream::Err, out.as_bytes());
     }
 
     /// Drain the captured program output (the DAP driver calls this between resumes to emit

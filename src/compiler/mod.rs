@@ -336,6 +336,24 @@ struct ClassCtx {
 pub struct Diagnostic {
     pub message: String,
     pub span: Option<SourceInfo>,
+    /// Secondary "why-chain" notes (Phase 4 provenance): e.g. where a variable got the type that
+    /// caused this diagnostic. Rendered indented under the main message, each at its own span.
+    pub notes: Vec<Note>,
+}
+
+/// A secondary note attached to a [`Diagnostic`] — a message plus the span it points at.
+#[derive(Clone, Debug)]
+pub struct Note {
+    pub message: String,
+    pub span: Option<SourceInfo>,
+}
+
+/// Where a local's type came from (Phase 4 provenance), for the why-chain note: the declaration
+/// span plus a short origin phrase (`declared`, `` inferred from `name` ``, `parameter`).
+#[derive(Clone, Debug)]
+struct TypeProvenance {
+    span: SourceInfo,
+    origin: String,
 }
 
 /// Unary methods safe to send to `nil` — they don't dereference the receiver, so a possibly-nil
@@ -435,6 +453,9 @@ struct Scope {
     /// Flow-narrowed types active in this scope (Phase 3c) — a guard refines a local/field here;
     /// `narrowed_type` reads the innermost. Empty until 3c·1 installs the narrowing rules.
     narrowed: HashMap<NarrowKey, Type>,
+    /// Provenance of each local's recorded type (Phase 4 why-chain): where it was declared/inferred
+    /// and a short origin phrase. Keyed like `types`; read when a diagnostic blames the local.
+    provenance: HashMap<String, TypeProvenance>,
     /// True for the top-level scope of an object-initializer block (`X.new:{ … }`),
     /// where a bare `field = value` binds an instance field (no `var` required).
     is_init: bool,
@@ -508,6 +529,7 @@ impl Compiler {
                 types: HashMap::new(),
                 declared_types: HashMap::new(),
                 narrowed: HashMap::new(),
+                provenance: HashMap::new(),
                 is_init: false,
             }],
             temp_counter: 0,
@@ -537,6 +559,7 @@ impl Compiler {
                 types: HashMap::new(),
                 declared_types: HashMap::new(),
                 narrowed: HashMap::new(),
+                provenance: HashMap::new(),
                 is_init: false,
             }],
             temp_counter: 0,
@@ -608,6 +631,7 @@ impl Compiler {
             types: HashMap::new(),
             declared_types: HashMap::new(),
             narrowed: HashMap::new(),
+            provenance: HashMap::new(),
             is_init: false,
         });
     }
@@ -654,24 +678,47 @@ impl Compiler {
     }
 
     /// Record a known type for a local just declared in the innermost scope.
-    fn record_local_type(&mut self, name: &str, ty: Type) {
+    fn record_local_type(&mut self, name: &str, ty: Type, provenance: Option<TypeProvenance>) {
         if ty != Type::Any {
-            self.scopes
-                .last_mut()
-                .unwrap()
-                .types
-                .insert(name.to_string(), ty);
+            let scope = self.scopes.last_mut().unwrap();
+            scope.types.insert(name.to_string(), ty);
+            if let Some(p) = provenance {
+                scope.provenance.insert(name.to_string(), p);
+            }
         }
     }
 
     /// Record a local's *declared* (annotated) type — into both `types` (devirt) and
     /// `declared_types` (the reassignment check, which enforces only explicit contracts).
-    fn record_declared_type(&mut self, name: &str, ty: Type) {
+    fn record_declared_type(&mut self, name: &str, ty: Type, provenance: Option<TypeProvenance>) {
         if ty != Type::Any {
             let scope = self.scopes.last_mut().unwrap();
             scope.types.insert(name.to_string(), ty.clone());
             scope.declared_types.insert(name.to_string(), ty);
+            if let Some(p) = provenance {
+                scope.provenance.insert(name.to_string(), p);
+            }
         }
+    }
+
+    /// Build a [`TypeProvenance`] pointing at `node`'s span with origin phrase `origin`, or `None`
+    /// if `node` carries no source location (nothing useful to point at).
+    fn provenance_at(node: &Node, origin: String) -> Option<TypeProvenance> {
+        Self::provenance_from(node.source_info.clone(), origin)
+    }
+
+    /// Build a [`TypeProvenance`] from a raw span (e.g. a param's `IdentifierNode`), or `None`.
+    fn provenance_from(span: Option<SourceInfo>, origin: String) -> Option<TypeProvenance> {
+        span.map(|span| TypeProvenance { span, origin })
+    }
+
+    /// The provenance of a local's recorded type — where it was declared/inferred (Phase 4).
+    fn local_provenance(&self, name: &str) -> Option<&TypeProvenance> {
+        self.scopes
+            .iter()
+            .rev()
+            .find(|s| s.locals.contains(name))
+            .and_then(|s| s.provenance.get(name))
     }
 
     /// The explicitly-declared type of a local, if any — `None` for an untyped local even when a
@@ -712,9 +759,15 @@ impl Compiler {
     /// name still yields `Instance(name)` so lowering proceeds (gradual best-effort).
     /// Push a non-fatal type diagnostic, pointing at `span` when one is available (Phase 4).
     fn warn(&mut self, message: String, span: Option<&SourceInfo>) {
+        self.warn_with_notes(message, span, Vec::new());
+    }
+
+    /// Like [`warn`](Self::warn) but with secondary why-chain notes (Phase 4 provenance).
+    fn warn_with_notes(&mut self, message: String, span: Option<&SourceInfo>, notes: Vec<Note>) {
         self.diagnostics.push(Diagnostic {
             message,
             span: span.cloned(),
+            notes,
         });
     }
 
@@ -778,14 +831,32 @@ impl Compiler {
                 Some(false) => {}
             }
         }
-        self.warn(
+        let notes = self.mismatch_notes(node, &actual);
+        self.warn_with_notes(
             format!(
                 "type mismatch: expected `{}`, found `{}`",
                 expected.name(),
                 actual.name()
             ),
             node.source_info.as_ref(),
+            notes,
         );
+    }
+
+    /// Why-chain notes for a type mismatch (Phase 4 provenance): if the offending expression is a
+    /// local read, point back at where that local got its type (`` `x` is `String` (inferred from
+    /// `name`) ``). Empty for literals/other expressions — their type is self-evident at the site.
+    fn mismatch_notes(&self, node: &Node, actual: &Type) -> Vec<Note> {
+        if let NodeValue::Identifier(id) = &node.value
+            && let Some(NarrowKey::Local(name)) = NarrowKey::from_ident(id)
+            && let Some(prov) = self.local_provenance(&name)
+        {
+            return vec![Note {
+                message: format!("`{}` is `{}` ({})", name, actual.name(), prov.origin),
+                span: Some(prov.span.clone()),
+            }];
+        }
+        Vec::new()
     }
 
     /// Compile a returned value (`^expr` / `^^expr`), checked and promoted against the innermost
@@ -2058,7 +2129,11 @@ impl Compiler {
         for arg in &block.arguments {
             if let Some(hint) = &arg.type_hint {
                 let ty = self.resolve_annotation(hint);
-                self.record_declared_type(&arg.identifier.name, ty);
+                let prov = Self::provenance_from(
+                    arg.identifier.source_info.clone(),
+                    "parameter".to_string(),
+                );
+                self.record_declared_type(&arg.identifier.name, ty, prov);
             }
         }
 
