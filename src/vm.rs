@@ -2899,6 +2899,13 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    // GC-rooting: the only yield reachable from here is a *guarded* method's guard
+    // predicate (`lookup_method` -> `match_score` -> `execute_validation_block`), and
+    // that binds `receiver` as the guard's `self` and each `args` element as a guard
+    // parameter into the guard env frame before it steps — so both are rooted through
+    // any yield. `caller_block` is a copy of `self.frames[frame_idx].block`, rooted by
+    // the live frame stack. Nothing here is held across a yield unrooted.
+    #[allow(no_gc_across_yield)]
     fn exec_send(
         &mut self,
         mc: &Mutation<'gc>,

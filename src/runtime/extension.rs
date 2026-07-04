@@ -1108,6 +1108,11 @@ fn resolve_command(dir: &Path, command: &str) -> PathBuf {
 /// `ClassDecl` name is rejected), run the package's optional `init.qn` Quoin glue now that its
 /// classes exist, and cache the live `Extension` keyed by the canonical folder (idempotent: a
 /// repeat load returns the cached extension rather than re-spawning).
+// GC-rooting: `ext_val` is rooted by the classes installed from it (`install_ext_class`,
+// which performs no Quoin execution and cannot yield); the only later yield — running an
+// optional `init.qn` via `eval_string` — happens after those classes exist, so `ext_val`
+// is reachable through the globals for the duration. See the inline note below.
+#[allow(no_gc_across_yield)]
 fn load_package<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,

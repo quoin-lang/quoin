@@ -11,11 +11,18 @@ use std::collections::{HashMap, HashSet};
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// Checks for GC-managed values held in local variables across a fiber yield point.
+    /// Checks for GC-managed values held in `let`-bound locals across a fiber yield point.
     ///
     /// ### Why is this bad?
     /// The garbage collector cannot scan the native stacks of suspended fibers. If a GC-managed
     /// value is held on a suspended fiber stack, the GC may collect it, leading to dangling pointers.
+    ///
+    /// Function/closure **parameters are deliberately not flagged**: a parameter is the
+    /// caller's value, so an unrooted hold is reported at the caller where the value was
+    /// created — and in this codebase the callers root them by construction (a native
+    /// method's `(receiver, args)` are pinned in `active_native_args` for the whole call,
+    /// and anything passed *into* `execute_block`/`call_method` is reachable through the
+    /// callee frame for exactly the duration of its yields).
     ///
     /// ### Example
     /// ```rust
@@ -137,9 +144,12 @@ impl<'tcx, 'sym> rustc_hir::intravisit::Visitor<'tcx> for GcYieldVisitor<'tcx, '
     }
 }
 
+/// A generic-position match (`Value<…>` / `Gc<…>`, incl. wrappers like `Vec<Value<…>>`),
+/// not a bare substring one: plain-data types that merely *mention* the words — a
+/// `ValueInfo` of Strings, a `GcMetrics` — carry nothing collectable and must not match.
 fn contains_gc_lifetime(ty: rustc_middle::ty::Ty<'_>) -> bool {
     let ty_str = format!("{:?}", ty);
-    ty_str.contains("'gc") || ty_str.contains("Value") || ty_str.contains("Gc")
+    ty_str.contains("Value<") || ty_str.contains("Gc<")
 }
 
 impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
@@ -161,9 +171,9 @@ impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
             calls: Vec::new(),
         };
 
-        for param in body.params {
-            visitor.register_pat_bindings(param.pat, None);
-        }
+        // Parameters are NOT registered (see the lint docs): their rooting is the
+        // caller's contract — the hold is flagged where the value was created, and the
+        // conventional callers here root what they pass (`active_native_args`, frames).
 
         rustc_hir::intravisit::Visitor::visit_expr(&mut visitor, body.value);
 
