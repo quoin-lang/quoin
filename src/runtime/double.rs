@@ -86,7 +86,15 @@ pub fn build_double_class() -> NativeClassBuilder {
         .sdk_instance_method("s", |host, receiver, _args| {
             let val = recv!(receiver, Double);
             Ok(host.new_string(format!("{val}")))
-        });
+        })
+        // Class-side IEEE-754 constants — handy for tests and boundary math.
+        .sdk_class_method("inf", |host, _receiver, _args| {
+            Ok(host.new_double(f64::INFINITY))
+        })
+        .sdk_class_method(
+            "nan",
+            |host, _receiver, _args| Ok(host.new_double(f64::NAN)),
+        );
     let b = double_binop!(b, "+:", arith+);
     let b = double_binop!(b, "-:", arith -);
     let b = double_binop!(b, "*:", arith *);
