@@ -237,9 +237,11 @@ impl<'gc> VmState<'gc> {
                     Some(m)
                 } else {
                     let class_key = NamespacedName::new(Vec::new(), "Class".to_string());
-                    if let Some(Value::Class(class_class)) =
-                        self.globals.borrow().get(&class_key).copied()
-                    {
+                    // Hoisted out of the `if let` scrutinee: the hierarchy lookup below
+                    // can run guard blocks (yield-capable), and a scrutinee temporary —
+                    // here the globals borrow — would stay alive through the branch.
+                    let class_class = self.globals.borrow().get(&class_key).copied();
+                    if let Some(Value::Class(class_class)) = class_class {
                         if let Some(m) = self.lookup_method_in_class_hierarchy(
                             mc,
                             class_class,
@@ -269,9 +271,10 @@ impl<'gc> VmState<'gc> {
                     // "Class" class because Class methods (new, name, …) assume a
                     // real Class receiver.
                     let object_key = NamespacedName::new(Vec::new(), "Object".to_string());
-                    if let Some(Value::Class(object_class)) =
-                        self.globals.borrow().get(&object_key).copied()
-                    {
+                    // Hoisted like the Class fallback above (globals borrow must not
+                    // live through the yield-capable hierarchy lookup).
+                    let object_class = self.globals.borrow().get(&object_key).copied();
+                    if let Some(Value::Class(object_class)) = object_class {
                         if let Some(m) = self.lookup_method_in_class_hierarchy(
                             mc,
                             object_class,

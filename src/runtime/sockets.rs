@@ -564,6 +564,11 @@ fn accept_one<'gc>(
 /// by *propagating* a non-`Ok` from the block — a non-local return (`^^`), a throw, or a
 /// cancellation — which unwinds straight through this native loop. The accepted socket is
 /// closed before propagating, so resources are released on every exit path.
+///
+/// GC-rooting: `conn` is handed *into* `execute_block` (`vec![conn]`), so it is reachable
+/// through the callee frame for the whole block — including its yields; the following
+/// `reap_handle` does not suspend. So `conn` is never held across a yield unrooted.
+#[allow(no_gc_across_yield)]
 fn accept_loop<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,

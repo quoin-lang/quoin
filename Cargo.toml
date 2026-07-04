@@ -18,11 +18,13 @@ members = [
     "crates/quoin-ext",
     "crates/quoin-ext-proto",
     "lint/no_gc_across_yield",
+    "lint/no_borrow_across_yield",
 ]
 
 [workspace.metadata.dylint]
 libraries = [
-    { path = "lint/no_gc_across_yield" }
+    { path = "lint/no_gc_across_yield" },
+    { path = "lint/no_borrow_across_yield" },
 ]
 [profile.profiling]
 inherits = "release"

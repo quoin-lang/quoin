@@ -205,6 +205,10 @@ fn handler_type_names(handlers: &[Value<'_>]) -> Vec<String> {
 
 /// `{protected}.catch:…` / `catch+:` core: run `protected`; on a catchable throw, dispatch to the
 /// first matching handler, else re-raise. Cancellation is never caught.
+// GC-rooting: `res` is safe across the handler run — an `Ok` value crosses no yield
+// (it returns before any handler executes), and an `Err` is plain data whose thrown
+// Quoin value rides rooted in `vm.exceptions.active` until a handler consumes it.
+#[allow(no_gc_across_yield)]
 fn do_catch<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
@@ -250,6 +254,9 @@ fn do_catch<'gc>(
 /// `catch:finally:` / `catch+:finally:` core: like [`do_catch`], but `finally` always runs (on
 /// success, on a caught or re-raised throw, and on cancellation), and a `finally` error overrides
 /// the result it runs after.
+// GC-rooting: as in `do_catch` — plus every `Ok` value that must survive the `finally`
+// run is explicitly pushed onto the VM stack first (see the in-body comments).
+#[allow(no_gc_across_yield)]
 fn do_catch_finally<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,

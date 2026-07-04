@@ -310,11 +310,8 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
         })
         // eachLine:{|line| ...} -> run the block on each line to EOF; returns self.
         .instance_method("eachLine:", |vm, mc, receiver, args| {
-            let id = open_stream_id(receiver)?;
             let block = arg!(args, Block, 0);
-            while let Some(line) = read_line(vm, mc, receiver, id)? {
-                vm.execute_block(mc, block, vec![line], None)?;
-            }
+            each_line(vm, mc, receiver, block)?;
             Ok(receiver)
         })
         // read -> the largest valid-UTF-8 prefix of what's currently available, as a
@@ -503,6 +500,26 @@ fn scope_stream<'gc>(
     let result = vm.execute_block(mc, block, vec![handle], None);
     reap_stream_handle(vm, mc, handle);
     result
+}
+
+/// Drive `block` over each line of `receiver` to EOF (the body of `eachLine:`).
+///
+/// GC-rooting: `block` comes from `arg!`, which reads the receiver+args snapshot pinned in
+/// `active_native_args` for the whole native call, so it stays rooted; each `line` is handed
+/// *into* `execute_block` (`vec![line]`), reachable through the callee frame across its
+/// yields. Neither is held across a yield unrooted — hence the allow.
+#[allow(no_gc_across_yield)]
+fn each_line<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+    block: Gc<'gc, Block<'gc>>,
+) -> Result<(), QuoinError> {
+    let id = open_stream_id(receiver)?;
+    while let Some(line) = read_line(vm, mc, receiver, id)? {
+        vm.execute_block(mc, block, vec![line], None)?;
+    }
+    Ok(())
 }
 
 /// The `StreamId` of an open stream receiver, or a thrown error if it is closed.

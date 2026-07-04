@@ -1,0 +1,63 @@
+error: borrow guard is still alive at a yield point: a suspended task holding it panics any other borrow of the same cell
+  --> $DIR/main.rs:36:5
+   |
+LL |     y.suspend();
+   |     ^^^^^^^^^^^
+   |
+help: guard of type `Ref<'{erased}, Class>` declared here — drop it (or copy what you need out of it) before anything that can yield
+  --> $DIR/main.rs:35:9
+   |
+LL |     let g = cell.borrow();
+   |         ^
+   = note: `#[deny(no_borrow_across_yield)]` on by default
+
+error: borrow guard is still alive at a yield point: a suspended task holding it panics any other borrow of the same cell
+  --> $DIR/main.rs:59:5
+   |
+LL |     helper_that_yields(y);
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+help: guard of type `Ref<'{erased}, Class>` declared here — drop it (or copy what you need out of it) before anything that can yield
+  --> $DIR/main.rs:58:9
+   |
+LL |     let g = cell.borrow();
+   |         ^
+
+error: a scrutinee's temporary borrow guard is still alive at this yield point (scrutinee temporaries live through the branch)
+  --> $DIR/main.rs:67:9
+   |
+LL |         y.suspend();
+   |         ^^^^^^^^^^^
+   |
+help: the guard is created here; hoist this borrow into a `let` above the `if let`/`match` so it drops at the statement's end
+  --> $DIR/main.rs:66:23
+   |
+LL |     if let Some(_v) = cell.borrow().0.init {
+   |                       ^^^^^^^^^^^^^
+
+error: a scrutinee's temporary borrow guard is still alive at this yield point (scrutinee temporaries live through the branch)
+  --> $DIR/main.rs:81:20
+   |
+LL |         Some(_) => y.suspend(),
+   |                    ^^^^^^^^^^^
+   |
+help: the guard is created here; hoist this borrow into a `let` above the `if let`/`match` so it drops at the statement's end
+  --> $DIR/main.rs:80:11
+   |
+LL |     match cell.borrow().0.init {
+   |           ^^^^^^^^^^^^^
+
+error: temporary borrow guard is alive for the duration of a yield-capable call
+  --> $DIR/main.rs:97:25
+   |
+LL |     takes_and_yields(y, cell.borrow().0.init);
+   |                         ^^^^^^^^^^^^^
+   |
+help: this call can suspend while the guard is live; bind the borrowed data to a local first so the guard drops before the call
+  --> $DIR/main.rs:97:5
+   |
+LL |     takes_and_yields(y, cell.borrow().0.init);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 5 previous errors
+

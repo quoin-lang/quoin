@@ -19,11 +19,6 @@
 "* DETECTION (Run mode always exits 0, so check the output, not the exit code):
 "*   success -> a final "OK: N rounds passed" line and no failure line;
 "*   failure -> a "SOAK FAILED: ..." line per mismatch, and a final FAILED line.
-"*
-"* KNOWN: under QN_SCHED_STRESS this currently panics ('RefCell already
-"* borrowed' in ensure_field_layout) — a pre-existing borrow-across-yield
-"* hazard this soak exposes; see QUOIN_TODO.md. Plain and QN_GC_STRESS runs
-"* are green.
 "* ===========================================================================
 use std:net/http;
 use std:net/http_server;
