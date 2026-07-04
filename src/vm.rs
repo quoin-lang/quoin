@@ -50,6 +50,79 @@ pub fn gc_pacing() -> Pacing {
     pacing
 }
 
+/// Argument arity an inline-cache slot's guard can encode (larger sends bypass the IC).
+pub const IC_MAX_ARGS: usize = 2;
+
+/// A monomorphic inline-cache entry: a resolved method memoized at one call site. Lives in the
+/// executing [`Block`]'s per-`ip` cache array ([`Block::inline_cache`]), so the block+ip *is*
+/// the call-site identity — and because the executing block roots its own array, there is no
+/// pointer-reuse (ABA) to guard against. A hit still requires a live `epoch` (method tables
+/// unchanged) and matching receiver + argument type-shape guards `(kind, ptr)`; for immediates
+/// the `kind` alone fixes the class, so the probe reads a cheap `Value` discriminant instead of
+/// deriving it. `epoch == 0` is an empty slot. Only guard-free resolutions are stored.
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct ICSlot<'gc> {
+    #[collect(require_static)]
+    pub epoch: u64,
+    #[collect(require_static)]
+    pub recv_kind: u8,
+    #[collect(require_static)]
+    pub recv_ptr: usize,
+    #[collect(require_static)]
+    pub n_args: u8,
+    #[collect(require_static)]
+    pub arg_kinds: [u8; IC_MAX_ARGS],
+    #[collect(require_static)]
+    pub arg_ptrs: [usize; IC_MAX_ARGS],
+    pub callable: Option<Callable<'gc>>,
+}
+
+impl<'gc> std::fmt::Debug for ICSlot<'gc> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately does not recurse into `callable` (which would require `Callable: Debug`,
+        // and `Callable` holds a `Gc<Block>` → a `Block: Debug` cycle back through this field).
+        write!(
+            f,
+            "ICSlot {{ epoch: {}, cached: {} }}",
+            self.epoch,
+            self.callable.is_some()
+        )
+    }
+}
+
+impl<'gc> ICSlot<'gc> {
+    pub const fn empty() -> Self {
+        Self {
+            epoch: 0,
+            recv_kind: 0,
+            recv_ptr: 0,
+            n_args: 0,
+            arg_kinds: [0; IC_MAX_ARGS],
+            arg_ptrs: [0; IC_MAX_ARGS],
+            callable: None,
+        }
+    }
+}
+
+/// The `(kind, ptr)` type-shape guard for a value: `kind` is the `Value` discriminant
+/// (immediates distinguished down to `true`/`false`, so it alone fixes the class), `ptr` is
+/// the class pointer for objects/classes (`0` for immediates). Matches what
+/// `MethodCacheKey` keys on, so a guard match ⇒ the same dispatch result.
+#[inline]
+fn value_type_guard<'gc>(v: Value<'gc>) -> (u8, usize) {
+    match v {
+        Value::Int(_) => (0, 0),
+        Value::Double(_) => (1, 0),
+        Value::Bool(true) => (2, 0),
+        Value::Bool(false) => (3, 0),
+        Value::Nil => (4, 0),
+        Value::Object(o) => (5, Gc::as_ptr(o.borrow().class) as usize),
+        Value::Class(c) => (6, Gc::as_ptr(c) as usize),
+        Value::ClassMeta(c) => (7, Gc::as_ptr(c) as usize),
+    }
+}
+
 /// A method call queued to run when its frame completes normally (a "defer").
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
@@ -289,6 +362,10 @@ pub struct VmState<'gc> {
     pub output: OutputCapture,
     /// Memoized method resolution ([`DispatchCache`]).
     pub dispatch_cache: DispatchCache<'gc>,
+    /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts every
+    /// per-`Block` [`ICSlot`] at once, giving O(1) inline-cache invalidation.
+    #[collect(require_static)]
+    pub dispatch_epoch: u64,
     /// The session's async-I/O backend + the deferred resource-reap queues ([`Io`]).
     #[collect(require_static)]
     pub io: Io,
@@ -404,6 +481,8 @@ impl<'gc> VmState<'gc> {
                 entries: FxHashMap::default(),
                 uncacheable: false,
             },
+            // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
+            dispatch_epoch: 1,
             io: Io {
                 backend: crate::io_backend::SmolBackend::new(),
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -2519,6 +2598,7 @@ impl<'gc> VmState<'gc> {
                             source_info: db.source_info.clone(),
                             decl_block: None,
                             source_map: db.source_map.clone(),
+                            inline_cache: RefLock::new(None),
                         }
                     )
                 });
@@ -2533,6 +2613,7 @@ impl<'gc> VmState<'gc> {
                     source_info: sb.source_info.clone(),
                     decl_block,
                     source_map: sb.source_map.clone(),
+                    inline_cache: RefLock::new(None),
                 };
                 self.new_block(mc, block)
             }
@@ -2614,6 +2695,96 @@ impl<'gc> VmState<'gc> {
         })
     }
 
+    /// Probe the executing `block`'s inline cache at `ip`: a hit requires a live epoch (method
+    /// tables unchanged) and matching receiver + argument type-shape guards. Immediates match on
+    /// their cheap `Value` discriminant with no class derivation — the whole point. Sound with no
+    /// ABA guard: `block` is alive (it's executing), so its cache array is its own.
+    #[inline]
+    fn ic_probe(
+        &self,
+        block: Gc<'gc, Block<'gc>>,
+        ip: usize,
+        receiver: Value<'gc>,
+        args: &[Value<'gc>],
+    ) -> Option<Callable<'gc>> {
+        if args.len() > IC_MAX_ARGS {
+            return None;
+        }
+        let cache = block.inline_cache.borrow();
+        let slot = cache.as_ref()?.get(ip)?;
+        if slot.epoch != self.dispatch_epoch || slot.n_args as usize != args.len() {
+            return None;
+        }
+        let (rk, rp) = value_type_guard(receiver);
+        if slot.recv_kind != rk || slot.recv_ptr != rp {
+            return None;
+        }
+        for (i, a) in args.iter().enumerate() {
+            let (ak, ap) = value_type_guard(*a);
+            if slot.arg_kinds[i] != ak || slot.arg_ptrs[i] != ap {
+                return None;
+            }
+        }
+        slot.callable
+    }
+
+    /// Fill the executing `block`'s inline-cache slot at `ip` — but only for a **guard-free**
+    /// resolution, i.e. one the global cache also memoized (a guarded dispatch depends on
+    /// argument *values*, not just types, so it must never be inline-cached). The global-cache
+    /// lookup here is cold: it runs only on an IC miss, which for a monomorphic site happens
+    /// once. The block's per-`ip` array is allocated lazily (sized to its bytecode) on first fill.
+    fn ic_fill(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        ip: usize,
+        receiver: Value<'gc>,
+        selector: Symbol,
+        args: &[Value<'gc>],
+        callable: Callable<'gc>,
+    ) {
+        if args.len() > IC_MAX_ARGS {
+            return;
+        }
+        let class_side = matches!(receiver, Value::Class(_));
+        let Some(class_ref) = self.get_class_for_lookup(receiver) else {
+            return;
+        };
+        let Some(key) = self.method_cache_key(class_ref, selector, class_side, args) else {
+            return;
+        };
+        if !matches!(self.dispatch_cache.entries.get(&key), Some(Some(_))) {
+            return; // uncacheable (guarded) or not a hierarchy method — don't inline-cache
+        }
+        let epoch = self.dispatch_epoch;
+        let (recv_kind, recv_ptr) = value_type_guard(receiver);
+        let mut arg_kinds = [0u8; IC_MAX_ARGS];
+        let mut arg_ptrs = [0usize; IC_MAX_ARGS];
+        for (i, a) in args.iter().enumerate() {
+            let (ak, ap) = value_type_guard(*a);
+            arg_kinds[i] = ak;
+            arg_ptrs[i] = ap;
+        }
+        // Mutate the `RefLock` field via the GC write barrier (`Gc::write` + `unlock!`), then
+        // borrow it like a plain `RefCell` — the barrier has already fired.
+        let cache_cell = gc_arena::barrier::unlock!(Gc::write(mc, block), Block, inline_cache);
+        let mut cache = cache_cell.borrow_mut();
+        if cache.is_none() {
+            *cache = Some(vec![ICSlot::empty(); block.bytecode.len()].into_boxed_slice());
+        }
+        if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
+            *slot = ICSlot {
+                epoch,
+                recv_kind,
+                recv_ptr,
+                n_args: args.len() as u8,
+                arg_kinds,
+                arg_ptrs,
+                callable: Some(callable),
+            };
+        }
+    }
+
     fn exec_send(
         &mut self,
         mc: &Mutation<'gc>,
@@ -2628,6 +2799,10 @@ impl<'gc> VmState<'gc> {
         args.reverse();
 
         let receiver = self.pop()?;
+        // Call-site identity for the inline cache: the executing block + the Send's own `ip`,
+        // captured before we advance it.
+        let caller_block = self.frames[frame_idx].block;
+        let site_ip = self.frames[frame_idx].ip;
         self.frames[frame_idx].ip += 1; // Advance caller frame IP
 
         if let Value::Object(obj) = receiver
@@ -2637,6 +2812,12 @@ impl<'gc> VmState<'gc> {
                 self.start_block(mc, *block, args, Some(receiver), Some(selector));
                 return Ok(VmStatus::Running);
             }
+        }
+
+        // Inline-cache fast path: a hit skips `lookup_method`'s key-build + hash + hashmap.
+        if let Some(callable) = self.ic_probe(caller_block, site_ip, receiver, &args) {
+            callable.call(self, mc, Some(receiver), args, Some(selector))?;
+            return Ok(VmStatus::Running);
         }
 
         // `last_send_args` is read only by the stack-trace formatter, and only for an
@@ -2653,6 +2834,15 @@ impl<'gc> VmState<'gc> {
             }
         };
         if let Some(callable) = method_opt {
+            self.ic_fill(
+                mc,
+                caller_block,
+                site_ip,
+                receiver,
+                selector,
+                &args,
+                callable,
+            );
             callable.call(self, mc, Some(receiver), args, Some(selector))?;
         } else {
             // The selector may still exist with non-matching signatures; surface those

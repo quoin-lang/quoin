@@ -10,6 +10,7 @@ use crate::runtime::regex::NativeRegexState;
 use crate::value::{Block, NativeClassBuilder, ObjectPayload, Value};
 
 use gc_arena::Gc;
+use gc_arena::lock::RefLock;
 use std::collections::{HashMap, HashSet};
 
 pub fn build_string_class() -> NativeClassBuilder {
@@ -303,6 +304,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                                     source_info: db.source_info.clone(),
                                     decl_block: None,
                                     source_map: db.source_map.clone(),
+                                    inline_cache: RefLock::new(None),
                                 }
                             )
                         });
@@ -320,6 +322,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                                 source_info: compiled.source_info.clone(),
                                 decl_block,
                                 source_map: compiled.source_map.clone(),
+                                inline_cache: RefLock::new(None),
                             }
                         );
 

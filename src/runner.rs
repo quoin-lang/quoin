@@ -895,6 +895,7 @@ impl VmRunner {
                             source_info: db.source_info.clone(),
                             decl_block: None,
                             source_map: db.source_map.clone(),
+                            inline_cache: RefLock::new(None),
                         }
                     )
                 });
@@ -911,6 +912,7 @@ impl VmRunner {
                         source_info: program.source_info.clone(),
                         decl_block,
                         source_map: program.source_map.clone(),
+                        inline_cache: RefLock::new(None),
                     }
                 );
                 vm.start_block(mc, main_block, Vec::new(), None, None);
@@ -1147,6 +1149,7 @@ impl VmRunner {
                             source_info: db.source_info.clone(),
                             decl_block: None,
                             source_map: db.source_map.clone(),
+                            inline_cache: RefLock::new(None),
                         }
                     )
                 });
@@ -1163,6 +1166,7 @@ impl VmRunner {
                         source_info: program.source_info.clone(),
                         decl_block,
                         source_map: program.source_map.clone(),
+                        inline_cache: RefLock::new(None),
                     }
                 );
                 vm.start_block(mc, main_block, Vec::new(), None, None);

@@ -169,6 +169,7 @@ where
                 enclosing_method_id: None,
                 decl_block: None,
                 source_map: SharedSourceMap::from(Vec::new()),
+                inline_cache: RefLock::new(None),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
@@ -319,6 +320,7 @@ fn test_deferred_call_values_survive_collection() {
                 enclosing_method_id: None,
                 decl_block: None,
                 source_map: SharedSourceMap::from(Vec::new()),
+                inline_cache: RefLock::new(None),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
@@ -962,6 +964,7 @@ fn test_non_local_return_callback() {
             enclosing_method_id: None,
             decl_block: None,
             source_map: SharedSourceMap::from(Vec::new()),
+            inline_cache: RefLock::new(None),
         };
         let bar_block_val = vm.new_block(mc, bar_block);
         vm.globals.borrow_mut(mc).insert(
@@ -982,6 +985,7 @@ fn test_non_local_return_callback() {
                 enclosing_method_id: None,
                 decl_block: None,
                 source_map: SharedSourceMap::from(Vec::new()),
+                inline_cache: RefLock::new(None),
             }
         );
         vm.start_block(mc, foo_block, Vec::new(), None, None);
@@ -1499,6 +1503,7 @@ fn test_execute_block_helper() {
                 enclosing_method_id: None,
                 decl_block: None,
                 source_map: SharedSourceMap::from(Vec::new()),
+                inline_cache: RefLock::new(None),
             }
         );
 
@@ -1542,6 +1547,7 @@ fn test_execute_block_helper() {
                 enclosing_method_id: None,
                 decl_block: None,
                 source_map: SharedSourceMap::from(Vec::new()),
+                inline_cache: RefLock::new(None),
             }
         );
 
@@ -1719,6 +1725,7 @@ fn test_error_annotation_and_display() {
                     enclosing_method_id: None,
                     decl_block: None,
                     source_map: db.source_map.clone(),
+                    inline_cache: RefLock::new(None),
                 }
             )
         });
@@ -1735,6 +1742,7 @@ fn test_error_annotation_and_display() {
                 enclosing_method_id: None,
                 decl_block,
                 source_map: compiled.source_map.clone(),
+                inline_cache: RefLock::new(None),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
@@ -1796,6 +1804,7 @@ fn test_error_annotation_with_color() {
                     enclosing_method_id: None,
                     decl_block: None,
                     source_map: db.source_map.clone(),
+                    inline_cache: RefLock::new(None),
                 }
             )
         });
@@ -1812,6 +1821,7 @@ fn test_error_annotation_with_color() {
                 enclosing_method_id: None,
                 decl_block,
                 source_map: compiled.source_map.clone(),
+                inline_cache: RefLock::new(None),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
@@ -1875,6 +1885,7 @@ fn test_error_annotation_with_console_width() {
                 enclosing_method_id: None,
                 decl_block: None,
                 source_map: compiled.source_map.clone(),
+                inline_cache: RefLock::new(None),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
