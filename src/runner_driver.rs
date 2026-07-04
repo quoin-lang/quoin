@@ -392,6 +392,18 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                         if futures.is_empty() {
                             break; // nothing ready and nothing in flight
                         }
+                        // About to go idle: flush pending fd closes FIRST. A parked peer may
+                        // be waiting on exactly one of these closes (its read's EOF) for the
+                        // wakeup we are about to sleep for to ever arrive — leaving the reap
+                        // to the periodic (`step_count % 10`) drain below would deadlock an
+                        // idle scheduler whose only in-flight I/O waits on a closed-but-
+                        // unreaped fd.
+                        let reaped: Vec<StreamId> = arena.mutate_root(|_mc, vm| {
+                            vm.io.socket_reap.borrow_mut().drain(..).collect()
+                        });
+                        for id in reaped {
+                            backend.close(id);
+                        }
                         // The single reactor wait: park until some background future (I/O op
                         // or deadline timer) lands.
                         let (tid, wakeup) = futures.next().await.expect("futures is non-empty");
