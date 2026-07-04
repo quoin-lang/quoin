@@ -205,6 +205,9 @@ Error <- [HTTP]BodyTooLarge <- {};
         @stream = nil;
         ^@bytes
     };
+    "* Whether the body is already materialized (bytes-backed, or fully drained) —
+    "* i.e. reading it costs nothing and touches no stream.
+    drained? -> { @bytes.defined? };
     text -> { ^(.bytes).asStringLossy };  "* UTF-8; charset-aware decoding is a follow-up
     json -> { ^JSON.parse:(.text) };  "* parse-regardless; throws a catchable ParseError
     size -> { ^(.bytes).count };

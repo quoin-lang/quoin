@@ -26,12 +26,31 @@ use std:net/http_server;
     .test:
     wireBytesFramesByContentLength -> {
         var resp = ([HTTP]ServerResponse.new:{ var status = 200 }).body:'hi';
-        .is:{ ([HTTP]Server.wireBytesFor:resp).asStringLossy }
-            equalTo:'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi';
-        "* nil body -> Content-Length: 0; unregistered status -> bare status line.
+        var out = ([HTTP]Server.wireBytesFor:resp connection:'close').asStringLossy;
+        .isTrue:{ out.starts?:'HTTP/1.1 200 OK\r\n' };
+        .isTrue:{ out.contains?:'Content-Length: 2\r\n' };
+        .isTrue:{ out.contains?:'Connection: close\r\n' };
+        .isTrue:{ out.contains?:'Date: ' };
+        .isTrue:{ out.ends?:'\r\n\r\nhi' };
+        "* nil body -> Content-Length: 0; unregistered status -> bare status line;
+        "* nil connection (the HTTP/1.1 keep-alive default) -> no Connection header.
         var empty = [HTTP]ServerResponse.new:{ var status = 299 };
-        .is:{ ([HTTP]Server.wireBytesFor:empty).asStringLossy }
-            equalTo:'HTTP/1.1 299\r\nContent-Length: 0\r\nConnection: close\r\n\r\n';
+        var out2 = ([HTTP]Server.wireBytesFor:empty connection:nil).asStringLossy;
+        .isTrue:{ out2.starts?:'HTTP/1.1 299\r\n' };
+        .isTrue:{ out2.contains?:'Content-Length: 0\r\n' };
+        .isFalse:{ out2.contains?:'Connection:' };
+    };
+
+    .test:
+    httpDateFormatsRfc1123 -> {
+        "* The RFC 9110 example date, round-tripped through a parsed DateTime.
+        .is:{ [HTTP]Server.httpDateFor:(DateTime.parse:'1994-11-06T08:49:37Z[UTC]') }
+            equalTo:'Sun, 06 Nov 1994 08:49:37 GMT';
+        "* a caller-set Date wins over ours
+        var resp = ([HTTP]ServerResponse.new:{ var status = 200 })
+            .header:'Date' value:'Sun, 06 Nov 1994 08:49:37 GMT';
+        var out = ([HTTP]Server.wireBytesFor:resp connection:nil).asStringLossy;
+        .is:{ (out.splitString:'Date: ').count } equalTo:2;  "* exactly one
     };
 
     .test:
@@ -40,7 +59,7 @@ use std:net/http_server;
         var resp = (([HTTP]ServerResponse.new:{ var status = 404 })
             .header:'X-Trace' value:'abc')
             .header:'content-length' value:'0';
-        var out = ([HTTP]Server.wireBytesFor:resp).asStringLossy;
+        var out = ([HTTP]Server.wireBytesFor:resp connection:'close').asStringLossy;
         .isTrue:{ out.starts?:'HTTP/1.1 404 Not Found\r\n' };
         .isTrue:{ out.contains?:'X-Trace: abc\r\n' };
         .isFalse:{ out.contains?:'Content-Length:' };                "* ours suppressed
@@ -117,9 +136,10 @@ use std:net/http_server;
     .test:
     wireHeadStreamingFramesChunked -> {
         var resp = ([HTTP]ServerResponse.new:{ var status = 200 }).contentType:'text/event-stream';
-        var out = ([HTTP]Server.wireHeadFor:resp streaming:true).asStringLossy;
+        var out = ([HTTP]Server.wireHeadFor:resp streaming:true connection:nil).asStringLossy;
         .isTrue:{ out.contains?:'Transfer-Encoding: chunked\r\n' };
         .isFalse:{ out.contains?:'Content-Length' };
+        .isFalse:{ out.contains?:'Connection:' };
     };
 
     .test:
@@ -193,8 +213,8 @@ use std:net/http_server;
         server.start;
         var reply = Async.timeout:5000 do:{
             var c = TcpSocket.connect:('127.0.0.1:' + server.port);
-            c.writeAll:('POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n' +
-                '3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n').asBytes;
+            c.writeAll:('POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n'
+                + '3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n').asBytes;
             (ByteStream.over:c).readAll.asStringLossy
         };
         .isTrue:{ reply.starts?:'HTTP/1.1 200 OK\r\n' };
@@ -263,7 +283,8 @@ use std:net/http_server;
         var replies = Async.timeout:5000 do:{
             "* over: consumes the socket, so all I/O goes through the stream
             var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
-            s.writeAll:('POST / HTTP/1.1\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n').asBytes;
+            s.writeAll:('POST / HTTP/1.1\r\nContent-Length: 2\r\nExpect: 100-continue\r\n'
+                + 'Connection: close\r\n\r\n').asBytes;
             var interim = (s.readUntil:'\r\n\r\n').asStringLossy;
             s.writeAll:('hi'.asBytes);
             #( interim (s.readAll.asStringLossy) )
@@ -311,7 +332,7 @@ use std:net/http_server;
         server.start;
         var reply = Async.timeout:5000 do:{
             var c = TcpSocket.connect:('127.0.0.1:' + server.port);
-            c.writeAll:('HEAD / HTTP/1.1\r\n\r\n').asBytes;
+            c.writeAll:('HEAD / HTTP/1.1\r\nConnection: close\r\n\r\n').asBytes;
             (ByteStream.over:c).readAll.asStringLossy
         };
         .isTrue:{ reply.contains?:'Content-Length: 5\r\n' };
@@ -319,6 +340,231 @@ use std:net/http_server;
         server.stop;
         server.join;
         server.close;
+    };
+
+    .test:
+    keepAliveServesSequentialRequests -> {
+        var served = 0;
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                served = served + 1;
+                ([HTTP]ServerResponse.new:{ var status = 200 }).body:('r' + served + '.')
+            }
+        };
+        server.start;
+        var replies = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('GET /a HTTP/1.1\r\n\r\n').asBytes;
+            var h1 = (s.readUntil:'\r\n\r\n').asStringLossy;
+            var b1 = (s.readExactly:3).asString;
+            s.writeAll:('GET /b HTTP/1.1\r\n\r\n').asBytes;
+            var h2 = (s.readUntil:'\r\n\r\n').asStringLossy;
+            var b2 = (s.readExactly:3).asString;
+            s.close;
+            #( h1 b1 h2 b2 )
+        };
+        "* both served on ONE connection; a persistent HTTP/1.1 response carries
+        "* no Connection header, but always a Date.
+        .is:{ replies.at:1 } equalTo:'r1.';
+        .is:{ replies.at:3 } equalTo:'r2.';
+        .isFalse:{ (replies.at:0).contains?:'Connection:' };
+        .isTrue:{ (replies.at:0).contains?:'Date: ' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    connectionCloseIsHonored -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req| ([HTTP]ServerResponse.new:{ var status = 200 }).body:'x' }
+        };
+        server.start;
+        var reply = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('GET / HTTP/1.1\r\nConnection: close\r\n\r\n').asBytes;
+            s.readAll.asStringLossy  "* readAll returning proves the server closed
+        };
+        .isTrue:{ reply.contains?:'Connection: close\r\n' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    http10ClosesByDefaultAndPersistsOnRequest -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req| ([HTTP]ServerResponse.new:{ var status = 200 }).body:'ten' }
+        };
+        server.start;
+        var plain = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('GET / HTTP/1.0\r\n\r\n').asBytes;
+            s.readAll.asStringLossy
+        };
+        .isTrue:{ plain.contains?:'Connection: close\r\n' };
+        var kept = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n').asBytes;
+            var h1 = (s.readUntil:'\r\n\r\n').asStringLossy;
+            s.readExactly:3;
+            s.writeAll:('GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n').asBytes;
+            var h2 = (s.readUntil:'\r\n\r\n').asStringLossy;
+            s.close;
+            #( h1 h2 )
+        };
+        .isTrue:{ (kept.at:0).contains?:'Connection: keep-alive\r\n' };
+        .isTrue:{ (kept.at:1).starts?:'HTTP/1.1 200 OK\r\n' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    oversizedHeadGets431 -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var maxHeadBytes = 256;
+            var handler = { |req| [HTTP]ServerResponse.new:{ var status = 200 } }
+        };
+        server.start;
+        "* Oversized but well-formed header lines -> the accumulated-head cap.
+        var big = 'aaaaaaaaaaaaaaaa';
+        { big.length < 400 }.whileDo:{ big = big + big };
+        var lines = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('GET / HTTP/1.1\r\nX-Big: ' + big + '\r\n\r\n').asBytes;
+            s.readAll.asStringLossy
+        };
+        .isTrue:{ lines.starts?:'HTTP/1.1 431 Request Header Fields Too Large\r\n' };
+        "* A delimiter-less flood -> the native readUntil:limit: bound, no timeout
+        "* needed. (The flood exceeds the cap, so the server answers mid-write;
+        "* catch the possible broken-pipe on our final writes.)
+        var flood = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            { s.writeAll:('GET / HTTP/1.1\r\nX-Flood: ' + big + big).asBytes }.catch:{};
+            s.readAll.asStringLossy
+        };
+        .isTrue:{ flood.starts?:'HTTP/1.1 431' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    idleKeepAliveClosesQuietly -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var idleTimeoutMs = 60;
+            var handler = { |req| ([HTTP]ServerResponse.new:{ var status = 200 }).body:'x' }
+        };
+        server.start;
+        var tail = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('GET / HTTP/1.1\r\n\r\n').asBytes;
+            s.readUntil:'\r\n\r\n';
+            s.readExactly:1;
+            "* send nothing more: the idle timeout closes with no response owed
+            s.readAll.asStringLossy
+        };
+        .is:{ tail } equalTo:'';
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    stalledHeadGets408 -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var headTimeoutMs = 60;
+            var handler = { |req| [HTTP]ServerResponse.new:{ var status = 200 } }
+        };
+        server.start;
+        var reply = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('GET / HT').asBytes;  "* ...and never finish the head
+            s.readAll.asStringLossy
+        };
+        .isTrue:{ reply.starts?:'HTTP/1.1 408 Request Timeout\r\n' };
+        .isTrue:{ reply.contains?:'Connection: close\r\n' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    unreadBodyAutoDrains -> {
+        "* The handler ignores the request body; the server must drain it anyway
+        "* so the next request on the connection starts at a message boundary.
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req| ([HTTP]ServerResponse.new:{ var status = 200 }).body:'ok.' }
+        };
+        server.start;
+        var second = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('POST /up HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello').asBytes;
+            s.readUntil:'\r\n\r\n';
+            s.readExactly:3;
+            s.writeAll:('GET /next HTTP/1.1\r\n\r\n').asBytes;
+            var h2 = (s.readUntil:'\r\n\r\n').asStringLossy;
+            s.close;
+            h2
+        };
+        .isTrue:{ second.starts?:'HTTP/1.1 200 OK\r\n' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    overMaxConnectionsGets503 -> {
+        "* maxConnections 0 refuses every connection — degenerate, but it pins the
+        "* saturation path deterministically.
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var maxConnections = 0;
+            var handler = { |req| [HTTP]ServerResponse.new:{ var status = 200 } }
+        };
+        server.start;
+        var reply = Async.timeout:5000 do:{
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.readAll.asStringLossy
+        };
+        .isTrue:{ reply.starts?:'HTTP/1.1 503 Service Unavailable\r\n' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    readUntilLimitBoundsDelimiterlessInput -> {
+        "* Direct coverage of the ByteStream primitive the head reader leans on: a
+        "* delimiter within budget returns normally (even with more bytes buffered
+        "* behind it); a delimiter-less run past the limit throws #limitExceeded.
+        var listener = TcpListener.listen:'127.0.0.1:0';
+        var results = Async.timeout:5000 do:{
+            Async.gather:#(
+                { listener.acceptOnce:{ |conn|
+                    conn.writeAll:('line one\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx').asBytes }
+                }
+                {
+                    var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + listener.port.s));
+                    var first = (s.readUntil:'\r\n' limit:16).asString;
+                    var kind = nil;
+                    { s.readUntil:'\r\n' limit:16 }.catch:{ |e:IoError| kind = e.kind };
+                    s.close;
+                    #( first kind )
+                }
+            )
+        };
+        listener.close;
+        .is:{ (results.at:1).at:0 } equalTo:'line one\r\n';
+        .is:{ (results.at:1).at:1 } equalTo:#limitExceeded;
     };
 
     .test:

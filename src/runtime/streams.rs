@@ -171,6 +171,38 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 }
             }
         })
+        // readUntil:delim limit:n -> like readUntil:, but throws (IoError, kind
+        // #limitExceeded) once more than `n` bytes are buffered with no delimiter among
+        // them — bounding hostile delimiter-less input instead of buffering it without
+        // end. A delimiter found within the buffer returns normally (the caller enforces
+        // any policy on the returned line's length); EOF still returns the partial rest.
+        .instance_method("readUntil:limit:", |vm, mc, receiver, args| {
+            let delim = delim_bytes(&args, 0)?;
+            if delim.is_empty() {
+                return Err(QuoinError::ValueError(
+                    "ByteStream.readUntil:limit:: empty delimiter".to_string(),
+                ));
+            }
+            let limit = arg!(args, Int, 1).max(0) as usize;
+            let id = open_stream_id(receiver)?;
+            loop {
+                if let Some(end) = find_subsequence(receiver, &delim)? {
+                    let bytes = drain_up_to(mc, receiver, end)?;
+                    return Ok(vm.new_bytes(mc, bytes));
+                }
+                if buffered_len(receiver)? > limit {
+                    return Err(QuoinError::io(
+                        IoErrorKind::LimitExceeded,
+                        format!("ByteStream.readUntil:limit:: no delimiter within {limit} bytes"),
+                    ));
+                }
+                if fill_once(vm, mc, receiver, id)? {
+                    // EOF before the delimiter: hand back the partial remainder.
+                    let bytes = drain_up_to(mc, receiver, usize::MAX)?;
+                    return Ok(vm.new_bytes(mc, bytes));
+                }
+            }
+        })
         // readAll -> read until EOF, returning all remaining bytes as one Bytes.
         .instance_method("readAll", |vm, mc, receiver, _args| {
             let id = open_stream_id(receiver)?;
