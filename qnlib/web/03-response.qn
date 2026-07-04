@@ -1,0 +1,35 @@
+"* [Web]Response — the response handlers build: an [HTTP]ServerResponse with the
+"* builder conveniences. The threading setters (status:, header:value:,
+"* contentType:, body:) are inherited from the transport class, so a builder
+"* result chains further:
+"*
+"*   [Web]Response.json:user status:201
+"*   ([Web]Response.text:'hi').header:'X-Trace' value:tid
+[HTTP]ServerResponse <- [Web]Response <- {
+    "* Defaults for the bare-.new construction the builders use (guarded, so a
+    "* config-block construction that already set them wins).
+    init -> {
+        @status.defined?.else:{ @status = 200 };
+        @headers.defined?.else:{ @headers = #() }
+    };
+
+    .meta <-- {
+        text: -> { |s| ^([Web]Response.new.contentType:'text/plain; charset=utf-8').body:s };
+        html: -> { |s| ^([Web]Response.new.contentType:'text/html; charset=utf-8').body:s };
+        json: -> { |v| ^[Web]Response.json:v status:200 };
+        json:status: -> { |v code|
+            ^(([Web]Response.new.status:code).contentType:'application/json').body:(JSON.generate:v)
+        };
+        bytes: -> { |b| ^([Web]Response.new.contentType:'application/octet-stream').body:b };
+        status: -> { |code| ^[Web]Response.new.status:code };
+        noContent -> { ^[Web]Response.new.status:204 };
+        redirect: -> { |loc| ^[Web]Response.redirect:loc status:302 };
+        redirect:status: -> { |loc code|
+            ^([Web]Response.new.status:code).header:'Location' value:loc
+        };
+        "* A streaming (chunked) response; each Generator yield is one chunk on
+        "* the wire. The default content type fits server-sent events.
+        stream: -> { |gen| ^[Web]Response.stream:gen contentType:'text/event-stream' };
+        stream:contentType: -> { |gen ct| ^([Web]Response.new.contentType:ct).body:gen }
+    }
+}

@@ -1,0 +1,169 @@
+"* [Web]App: the pure core (handle:req -> response, no sockets), the respondTo:
+"* render conventions, middleware onion, HttpError mapping, and the request
+"* conveniences — plus one live round-trip driven by the [HTTP]Client.
+use std:net/http;
+use std:net/http_server;
+use std:web/*;
+
+"* A constructed request — the pure-core payoff: no sockets anywhere.
+[Test]WebReq <- {
+    .meta <-- {
+        get: -> { |target| ^[Test]WebReq.verb:'GET' target:target body:nil };
+        verb:target:body: -> { |verb target body|
+            ^[HTTP]ServerRequest.new:{
+                var method = verb;
+                target = target;
+                var version = 1;
+                var headers = #();
+                body = body
+            }
+        }
+    }
+};
+
+(TestSuite.new:{ var name = 'WebApp' }).add:{
+    .test:
+    respondToConventions -> {
+        var app = [Web]App.new;
+        app.get:'/text' do:{ 'plain' };
+        app.get:'/map' do:{ #{ 'n':1 } };
+        app.get:'/status' do:{ 418 };
+        app.get:'/resp' do:{ [Web]Response.html:'<b>hi</b>' };
+        app.get:'/nil' do:{ nil };
+
+        var t = app.handle:([Test]WebReq.get:'/text');
+        .is:{ t.status } equalTo:200;
+        .is:{ t.body.asString } equalTo:'plain';
+        .isTrue:{ ([HTTP]Response.find:(t.headers) named:'content-type').starts?:'text/plain' };
+
+        var m = app.handle:([Test]WebReq.get:'/map');
+        .is:{ m.body.asString } equalTo:'{"n":1}';
+        .is:{ [HTTP]Response.find:(m.headers) named:'content-type' }
+            equalTo:'application/json';
+
+        .is:{ (app.handle:([Test]WebReq.get:'/status')).status } equalTo:418;
+        .is:{ (app.handle:([Test]WebReq.get:'/resp')).body.asString } equalTo:'<b>hi</b>';
+        .is:{ (app.handle:([Test]WebReq.get:'/nil')).status } equalTo:404;
+    };
+
+    .test:
+    routingBindsParamsAndMapsMisses -> {
+        var app = [Web]App.new;
+        app.get:'/users/:id' do:{ |req| 'user ' + (req.param:'id') };
+        app.put:'/users/:id' do:{ 'put' };
+        app.get:'/files/*rest' do:{ .param:'rest' };  "* handler as self-style block
+
+        var hit = app.handle:([Test]WebReq.get:'/users/caf%C3%A9');
+        .is:{ hit.body.asString } equalTo:'user café';
+        .is:{ (app.handle:([Test]WebReq.get:'/files/a/b')).body.asString } equalTo:'a/b';
+        .is:{ (app.handle:([Test]WebReq.get:'/nope')).status } equalTo:404;
+
+        var miss = app.handle:([Test]WebReq.verb:'POST' target:'/users/1' body:nil);
+        .is:{ miss.status } equalTo:405;
+        .is:{ [HTTP]Response.find:(miss.headers) named:'allow' } equalTo:'GET, PUT';
+
+        "* HEAD reuses the GET route (the transport suppresses the body bytes)
+        .is:{ (app.handle:([Test]WebReq.verb:'HEAD' target:'/users/9' body:nil)).status }
+            equalTo:200;
+
+        "* a malformed percent escape in the path is the client's fault
+        .is:{ (app.handle:([Test]WebReq.get:'/users/%Zk')).status } equalTo:400;
+    };
+
+    .test:
+    middlewareOnionAndShortCircuit -> {
+        var order = #();
+        var app = [Web]App.new;
+        app.get:'/' do:{ order.add:'core'; 'ok' };
+        app.use:{ |req next|
+            order.add:'outer>';
+            var r = next.value:req;
+            order.add:'<outer';
+            r
+        };
+        app.use:{ |req next|
+            order.add:'inner>';
+            var r = next.value:req;
+            order.add:'<inner';
+            r
+        };
+        .is:{ (app.handle:([Test]WebReq.get:'/')).body.asString } equalTo:'ok';
+        .is:{ order } equalTo:#( 'outer>' 'inner>' 'core' '<inner' '<outer' );
+
+        "* short-circuit: returning without calling next skips everything inside,
+        "* and the return value still goes through respondTo:
+        var gate = [Web]App.new;
+        gate.get:'/' do:{ 'never' };
+        gate.use:{ |req next| 403 };
+        .is:{ (gate.handle:([Test]WebReq.get:'/')).status } equalTo:403;
+    };
+
+    .test:
+    httpErrorsMapToResponses -> {
+        var app = [Web]App.new;
+        app.get:'/auth' do:{ HttpError.throw:401 };
+        app.get:'/invalid' do:{ HttpError.throw:422 body:#{ 'error':'bad email' } };
+        app.get:'/boom' do:{ ValueError.throw:'secret detail' };
+
+        .is:{ (app.handle:([Test]WebReq.get:'/auth')).status } equalTo:401;
+        var inv = app.handle:([Test]WebReq.get:'/invalid');
+        .is:{ inv.status } equalTo:422;
+        .is:{ inv.body.asString } equalTo:'{"error":"bad email"}';
+
+        "* an uncaught handler error is a plain 500 — no detail leaks...
+        var boom = app.handle:([Test]WebReq.get:'/boom');
+        .is:{ boom.status } equalTo:500;
+        .isFalse:{ boom.body.defined? };
+        "* ...unless debug mode is on
+        app.debug:true;
+        .isTrue:{ (app.handle:([Test]WebReq.get:'/boom')).body.asString.contains?:'secret detail' };
+    };
+
+    .test:
+    requestConveniences -> {
+        var req = [Test]WebReq.get:'/search?q=caf%C3%A9&page=2&opt';
+        .is:{ req.path } equalTo:'/search';
+        .is:{ req.rawTarget } equalTo:'/search?q=caf%C3%A9&page=2&opt';
+        .is:{ req.query:'q' } equalTo:'café';
+        .is:{ req.query:'page' } equalTo:'2';
+        .is:{ req.query:'opt' } equalTo:'';
+        .is:{ ([Test]WebReq.get:'/plain').query } equalTo:#{};
+
+        var form = [Test]WebReq.verb:'POST' target:'/f'
+            body:([HTTP]Body.of:('name=Ada+Lovelace&x=%2B1'.asBytes)
+                contentType:'application/x-www-form-urlencoded');
+        .is:{ form.form } equalTo:#{ 'name':'Ada Lovelace' 'x':'+1' };
+        .is:{ form.mediaType } equalTo:'application/x-www-form-urlencoded';
+
+        var js = [Test]WebReq.verb:'POST' target:'/j'
+            body:([HTTP]Body.of:('{"n": 5}'.asBytes) contentType:'application/json');
+        .is:{ js.json.at:'n' } equalTo:5;
+    };
+
+    .test:
+    liveRoundTripThroughTheServer -> {
+        var app = [Web]App.new;
+        app.get:'/users/:id' do:{ |req| #{ 'id':(req.param:'id') 'q':(req.query:'v') } };
+        app.post:'/echo' do:{ |req| [Web]Response.json:(req.json) status:201 };
+        var server = app.start:'127.0.0.1:0';
+        var base = 'http://127.0.0.1:' + server.port;
+
+        var got = Async.timeout:5000 do:{ [HTTP]Client.get:(base + '/users/7?v=x') };
+        .is:{ got.status } equalTo:200;
+        .is:{ (got.body.json.at:'id') } equalTo:'7';
+        .is:{ (got.body.json.at:'q') } equalTo:'x';
+
+        var posted = Async.timeout:5000 do:{
+            [HTTP]Client.post:(base + '/echo') body:#{ 'msg':'hi' }
+        };
+        .is:{ posted.status } equalTo:201;
+        .is:{ posted.body.json.at:'msg' } equalTo:'hi';
+
+        var missing = Async.timeout:5000 do:{ [HTTP]Client.get:(base + '/nope') };
+        .is:{ missing.status } equalTo:404;
+
+        server.stop;
+        server.join;
+        server.close;
+    };
+}

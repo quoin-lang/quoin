@@ -36,7 +36,9 @@ Error <- [HTTP]HeadTooLarge <- {};
 "* so handlers never nil-check. `target` is the raw request-target as sent
 "* (undecoded — percent decoding is the [Web] layer's job); `version` is the
 "* HTTP/1.x minor (0 | 1).
-[HTTP]ServerRequest <- { | @method @target @version @headers @body |
+"* (@params is an inert slot here: the [Web] router binds route params into it
+"* through the reopened params:/param: conveniences.)
+[HTTP]ServerRequest <- { | @method @target @version @headers @body @params |
     init: -> { |method target version headers body|
         @method = method;
         @target = target;
