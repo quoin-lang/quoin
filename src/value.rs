@@ -12,7 +12,8 @@ use gc_arena::collect::Trace;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 
@@ -665,14 +666,14 @@ pub struct Class<'gc> {
     pub name: NamespacedName,
     pub parent: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub instance_vars: Vec<String>,
-    pub instance_methods: HashMap<String, Value<'gc>>,
-    pub class_methods: HashMap<String, Value<'gc>>,
+    pub instance_methods: FxHashMap<String, Value<'gc>>,
+    pub class_methods: FxHashMap<String, Value<'gc>>,
     pub mixin_classes: Vec<Gc<'gc, RefLock<Class<'gc>>>>,
     /// Memoized, append-only instance-variable layout: name -> absolute slot in an
     /// instance's `fields` array. Built lazily from the full hierarchy (own +
     /// mixins + parent) at first instantiation; new ivars only ever append, so
     /// existing slots stay stable across runtime mixins. `len()` is the field count.
-    pub field_slots: HashMap<String, usize>,
+    pub field_slots: FxHashMap<String, usize>,
     /// True only for per-instance *eigenclasses* (singletons synthesized by
     /// `get_target_class_for_def` for a `Value::Object` receiver). Named classes —
     /// including the `$TrueClass`/`$FalseClass` boolean singletons, which are

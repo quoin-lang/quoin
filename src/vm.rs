@@ -910,12 +910,12 @@ impl<'gc> VmState<'gc> {
         instance_selectors: &[String],
         class_selectors: &[String],
     ) {
-        let mut instance_methods: HashMap<String, Value<'gc>> = HashMap::new();
+        let mut instance_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
         for sel in instance_selectors {
             let node = self.new_ext_method(mc, sel.clone(), ext);
             instance_methods.insert(sel.clone(), node);
         }
-        let mut class_methods: HashMap<String, Value<'gc>> = HashMap::new();
+        let mut class_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
         for sel in class_selectors {
             let node = self.new_ext_method(mc, sel.clone(), ext);
             class_methods.insert(sel.clone(), node);
@@ -931,7 +931,7 @@ impl<'gc> VmState<'gc> {
                 instance_methods,
                 class_methods,
                 mixin_classes: Vec::new(),
-                field_slots: HashMap::new(),
+                field_slots: FxHashMap::default(),
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,
@@ -1048,10 +1048,10 @@ impl<'gc> VmState<'gc> {
                     name: ns_name.clone(),
                     parent,
                     instance_vars: Vec::new(),
-                    instance_methods: HashMap::new(),
-                    class_methods: HashMap::new(),
+                    instance_methods: FxHashMap::default(),
+                    class_methods: FxHashMap::default(),
                     mixin_classes: Vec::new(),
-                    field_slots: HashMap::new(),
+                    field_slots: FxHashMap::default(),
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
@@ -1098,7 +1098,7 @@ impl<'gc> VmState<'gc> {
         // Several defs may share a selector (typed multimethod variants); chain
         // them in declaration order so the scorer routes by argument type and ties
         // resolve to the first-declared.
-        let mut inst_methods: HashMap<String, Value<'gc>> = HashMap::new();
+        let mut inst_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
         for def in native_class.instance_methods() {
             let node = self.new_native_method(mc, def.selector.clone(), def.func, def.param_types);
             if let Some(head) = inst_methods.get(&def.selector).copied() {
@@ -1108,7 +1108,7 @@ impl<'gc> VmState<'gc> {
             }
         }
 
-        let mut cls_methods: HashMap<String, Value<'gc>> = HashMap::new();
+        let mut cls_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
         for def in native_class.class_methods() {
             let node = self.new_native_method(mc, def.selector.clone(), def.func, def.param_types);
             if let Some(head) = cls_methods.get(&def.selector).copied() {
@@ -1137,7 +1137,7 @@ impl<'gc> VmState<'gc> {
                     instance_methods: inst_methods,
                     class_methods: cls_methods,
                     mixin_classes: Vec::new(),
-                    field_slots: HashMap::new(),
+                    field_slots: FxHashMap::default(),
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
@@ -2016,10 +2016,10 @@ impl<'gc> VmState<'gc> {
                         name: ns.clone(),
                         parent: Some(boolean),
                         instance_vars: Vec::new(),
-                        instance_methods: HashMap::new(),
-                        class_methods: HashMap::new(),
+                        instance_methods: FxHashMap::default(),
+                        class_methods: FxHashMap::default(),
                         mixin_classes: Vec::new(),
-                        field_slots: HashMap::new(),
+                        field_slots: FxHashMap::default(),
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
@@ -2051,8 +2051,8 @@ impl<'gc> VmState<'gc> {
                             name: singleton_name,
                             parent: Some(class_ref),
                             instance_vars: Vec::new(),
-                            instance_methods: HashMap::new(),
-                            class_methods: HashMap::new(),
+                            instance_methods: FxHashMap::default(),
+                            class_methods: FxHashMap::default(),
                             mixin_classes: Vec::new(),
                             field_slots,
                             is_eigenclass: true,
@@ -3824,10 +3824,10 @@ impl<'gc> VmState<'gc> {
                         name: name.clone(),
                         parent,
                         instance_vars: instance_vars.clone(),
-                        instance_methods: HashMap::new(),
-                        class_methods: HashMap::new(),
+                        instance_methods: FxHashMap::default(),
+                        class_methods: FxHashMap::default(),
                         mixin_classes: Vec::new(),
-                        field_slots: HashMap::new(),
+                        field_slots: FxHashMap::default(),
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
