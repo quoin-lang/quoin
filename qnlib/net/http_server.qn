@@ -15,21 +15,26 @@
 "* is [HTTP]Parser.parseRequestHead: (the `httparse` head parser). Task per
 "* connection on the cooperative scheduler. See docs/WEB_ARCH.md.
 "*
-"* This slice is close-mode: one request per connection, Connection: close on
-"* every response, materialized Bytes bodies only. Request bodies, streaming
-"* responses, keep-alive, and the limit/timeout enforcement land in later slices.
+"* Close-mode for now: one request per connection, Connection: close on every
+"* response. Request bodies are framed like the client's responses (chunked
+"* transfer-encoding or Content-Length — RFC 7230 requests have no
+"* close-delimited bodies) and share [HTTP]Body; a Generator response body
+"* streams as chunked output. Keep-alive and the timeout/head-limit
+"* enforcement land in the next slice.
 use std:net/http;
 
-"* An inbound request: the parsed head plus (from slice 2 on) a stream-backed
-"* [HTTP]Body. `target` is the raw request-target as sent (undecoded — percent
-"* decoding is the [Web] layer's job); `version` is the HTTP/1.x minor (0 | 1).
+"* An inbound request: the parsed head plus the body as an [HTTP]Body —
+"* stream-backed while undrained, empty bytes-backed when the request has none,
+"* so handlers never nil-check. `target` is the raw request-target as sent
+"* (undecoded — percent decoding is the [Web] layer's job); `version` is the
+"* HTTP/1.x minor (0 | 1).
 [HTTP]ServerRequest <- { | @method @target @version @headers @body |
     init: -> { |method target version headers body|
         @method = method;
         @target = target;
         @version = version;
         @headers = headers.defined?.if:{ headers } else:{ #() };
-        @body = body
+        @body = body.defined?.if:{ body } else:{ [HTTP]Body.of:(Bytes.empty) }
     };
 
     method -> { @method };
@@ -45,7 +50,8 @@ use std:net/http;
 };
 
 "* An outbound response under construction: status, #(name value) header pairs,
-"* and a body (nil or Bytes for now; a String is converted for convenience).
+"* and a body — nil, Bytes (a String converts for convenience), or a Generator
+"* whose yields (String | Bytes) stream to the peer as chunked transfer-encoding.
 "* The setters return self so calls can be threaded. The [Web] layer aliases and
 "* reopens this class with its builder conveniences.
 [HTTP]ServerResponse <- { | @status @headers @body |
@@ -138,22 +144,53 @@ use std:net/http;
     };
 
     .meta <-- {
-        "* Serialize a response for the wire — a pure function, unit-testable
-        "* without a socket. The body must be materialized (nil = empty), so it is
-        "* framed by Content-Length unless the caller set that header themselves;
+        "* Serialize a response head (status line + headers + framing + blank line) —
+        "* a pure function, unit-testable without a socket. `streaming` selects
+        "* Transfer-Encoding: chunked; otherwise the materialized body (nil = empty)
+        "* is framed by Content-Length unless the caller set that header themselves.
         "* Connection: close is unconditional while the server is close-mode.
-        wireBytesFor: -> { |resp|
-            var body = resp.body.defined?.if:{ resp.body } else:{ Bytes.empty };
+        wireHeadFor:streaming: -> { |resp streaming|
             var head = 'HTTP/1.1 ' + resp.status.s;
             var reason = [HTTP]ServerResponse.reasonFor:resp.status;
             (reason == '').else:{ head = head + ' ' + reason };
             head = head + '\r\n';
             resp.headers.each:{ |pair| head = head + (pair.at:0) + ': ' + (pair.at:1) + '\r\n' };
-            (resp.headers.any?:{ |p| (p.at:0).lower == 'content-length' }).else:{
-                head = head + 'Content-Length: ' + body.count + '\r\n'
-            };
+            streaming
+                .if:{ head = head + 'Transfer-Encoding: chunked\r\n' }
+                 else:{
+                    (resp.headers.any?:{ |p| (p.at:0).lower == 'content-length' }).else:{
+                        var body = resp.body.defined?.if:{ resp.body } else:{ Bytes.empty };
+                        head = head + 'Content-Length: ' + body.count + '\r\n'
+                    }
+                };
             head = head + 'Connection: close\r\n\r\n';
-            ^(head.asBytes + body)
+            ^head.asBytes
+        };
+
+        "* A whole non-streaming response as one buffer: head + materialized body.
+        wireBytesFor: -> { |resp|
+            var body = resp.body.defined?.if:{ resp.body } else:{ Bytes.empty };
+            ^([HTTP]Server.wireHeadFor:resp streaming:false) + body
+        };
+
+        "* One frame of a chunked body (pure): hex size, CRLF, data, CRLF. The
+        "* caller must not frame empty data — a zero-size chunk is the terminator.
+        chunkFrame: -> { |chunk|
+            var data = (String ~ chunk).if:{ chunk.asBytes } else:{ chunk };
+            ^(([HTTP]Server.hexOf:(data.count)) + '\r\n').asBytes + data + ('\r\n'.asBytes)
+        };
+
+        "* Lowercase hex digits of a non-negative Integer (chunk-size lines).
+        hexOf: -> { |n|
+            (n == 0).if:{ ^^'0' };
+            var digits = #('0' '1' '2' '3' '4' '5' '6' '7' '8' '9' 'a' 'b' 'c' 'd' 'e' 'f');
+            var out = '';
+            var v = n;
+            { v > 0 }.whileDo:{
+                out = (digits.at:(v % 16)) + out;
+                v = v / 16
+            };
+            ^out
         }
     };
 
@@ -185,7 +222,8 @@ use std:net/http;
     "* Release the listening socket / bound port.
     close -> { @listener.close };
 
-    "* One connection, close-mode: read the head, dispatch, respond, close.
+    "* One connection, close-mode: read the head, frame the body, dispatch,
+    "* respond, close.
     serve: -> { |conn|
         var stream = ByteStream.over:conn;
         var head = stream.readUntil:'\r\n\r\n';
@@ -195,33 +233,94 @@ use std:net/http;
 
         var parsed = nil;
         { parsed = [HTTP]Parser.parseRequestHead:head }.catch:{ |e:ParseError|
-            ^^(.respond:([HTTP]ServerResponse.new:{ var status = 400 }) over:stream)
+            ^^(.respond:([HTTP]ServerResponse.new:{ var status = 400 }) over:stream suppress:false)
         };
         "* EOF mid-head (readUntil: returned a partial): the request never completed.
         (parsed == nil).if:{
-            ^^(.respond:([HTTP]ServerResponse.new:{ var status = 400 }) over:stream)
+            ^^(.respond:([HTTP]ServerResponse.new:{ var status = 400 }) over:stream suppress:false)
         };
+
+        var method = parsed.at:0;
+        var headers = parsed.at:3;
+
+        "* Frame the request body: chunked transfer-encoding, else Content-Length
+        "* (preflighting the ceiling -> 413 without invoking the handler), else no
+        "* body (RFC 7230 — requests have no close-delimited bodies). The body does
+        "* NOT own the stream: draining it must leave the connection writable for
+        "* the response. A chunked body enforces maxBodyBytes cumulatively instead.
+        var te = [HTTP]Response.find:headers named:'transfer-encoding';
+        var cl = [HTTP]Response.find:headers named:'content-length';
+        var ct = [HTTP]Response.find:headers named:'content-type';
+        var ce = [HTTP]Response.find:headers named:'content-encoding';
+        var reqBody = nil;
+        (te.defined? && (te.lower.contains?:'chunked'))
+            .if:{
+                reqBody = [HTTP]Body.over:stream framing:'chunked' length:nil contentType:ct
+                    encoding:ce ownsStream:false maxBytes:@maxBodyBytes
+            }
+             else:{
+                (cl.defined? && (cl.to_integer > 0)).if:{
+                    (cl.to_integer > @maxBodyBytes).if:{
+                        ^^(.respond:([HTTP]ServerResponse.new:{ var status = 413 })
+                            over:stream suppress:false)
+                    };
+                    reqBody = [HTTP]Body.over:stream framing:'length' length:(cl.to_integer)
+                        contentType:ct encoding:ce ownsStream:false maxBytes:nil
+                }
+            };
 
         var req = [HTTP]ServerRequest.new:{
             var method = parsed.at:0;
             var target = parsed.at:1;
             var version = parsed.at:2;
-            var headers = parsed.at:3
+            var headers = parsed.at:3;
+            var body = reqBody
+        };
+
+        "* Expect: 100-continue — acknowledge eagerly, before the handler runs.
+        var expect = [HTTP]Response.find:headers named:'expect';
+        (expect.defined? && (expect.lower.contains?:'100-continue')).if:{
+            { stream.writeAll:('HTTP/1.1 100 Continue\r\n\r\n'.asBytes) }.catch:{}
         };
 
         var resp = nil;
-        { resp = @handler.value:req }.catch:{ |e|
-            "* Uncaught handler throw -> 500. The [Web] layer catches first and maps
-            "* errors properly; this is the transport's backstop.
-            resp = [HTTP]ServerResponse.new:{ var status = 500 }
-        };
-        .respond:resp over:stream
+        { resp = @handler.value:req }
+            .catch:{ |e:[HTTP]BodyTooLarge|
+                "* the handler drained a chunked body past maxBodyBytes
+                resp = [HTTP]ServerResponse.new:{ var status = 413 }
+            }
+            catch:{ |e|
+                "* Uncaught handler throw -> 500. The [Web] layer catches first and
+                "* maps errors properly; this is the transport's backstop.
+                resp = [HTTP]ServerResponse.new:{ var status = 500 }
+            };
+        .respond:resp over:stream suppress:(method == 'HEAD')
     };
 
-    "* Write `resp` and close the connection. Write errors are swallowed — the
-    "* peer is already gone and there is nobody left to tell.
-    respond:over: -> { |resp stream|
-        { stream.writeAll:([HTTP]Server.wireBytesFor:resp) }.catch:{};
+    "* Write `resp` and close the connection. A Generator body streams as chunked
+    "* transfer-encoding, one frame per (non-empty) yield — this is what makes SSE
+    "* work; anything else goes out as one buffer framed by Content-Length.
+    "* `suppress` (HEAD) sends the entity headers but no body bytes. Write errors
+    "* are swallowed — the peer is already gone and there is nobody left to tell.
+    respond:over:suppress: -> { |resp stream suppress|
+        {
+            (Generator ~ (resp.body))
+                .if:{
+                    stream.writeAll:([HTTP]Server.wireHeadFor:resp streaming:true);
+                    suppress.else:{
+                        resp.body.each:{ |chunk|
+                            var data = (String ~ chunk).if:{ chunk.asBytes } else:{ chunk };
+                            (data.count > 0).if:{ stream.writeAll:([HTTP]Server.chunkFrame:data) }
+                        };
+                        stream.writeAll:('0\r\n\r\n'.asBytes)
+                    }
+                }
+                 else:{
+                    suppress
+                        .if:{ stream.writeAll:([HTTP]Server.wireHeadFor:resp streaming:false) }
+                         else:{ stream.writeAll:([HTTP]Server.wireBytesFor:resp) }
+                }
+        }.catch:{};
         stream.close;
         nil
     }

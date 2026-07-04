@@ -107,6 +107,221 @@ use std:net/http_server;
     };
 
     .test:
+    chunkFrameAndHex -> {
+        .is:{ [HTTP]Server.hexOf:0 } equalTo:'0';
+        .is:{ [HTTP]Server.hexOf:255 } equalTo:'ff';
+        .is:{ [HTTP]Server.hexOf:4096 } equalTo:'1000';
+        .is:{ ([HTTP]Server.chunkFrame:'abc').asStringLossy } equalTo:'3\r\nabc\r\n';
+    };
+
+    .test:
+    wireHeadStreamingFramesChunked -> {
+        var resp = ([HTTP]ServerResponse.new:{ var status = 200 }).contentType:'text/event-stream';
+        var out = ([HTTP]Server.wireHeadFor:resp streaming:true).asStringLossy;
+        .isTrue:{ out.contains?:'Transfer-Encoding: chunked\r\n' };
+        .isFalse:{ out.contains?:'Content-Length' };
+    };
+
+    .test:
+    postBodyRoundTrip -> {
+        "* A Content-Length request body drains through the shared [HTTP]Body —
+        "* and draining must NOT close the connection the response goes out on.
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                ([HTTP]ServerResponse.new:{ var status = 200 }).body:('got:' + req.body.text)
+            }
+        };
+        server.start;
+        var resp = Async.timeout:5000 do:{
+            [HTTP]Client.post:('http://127.0.0.1:' + server.port + '/in') body:'hello body'
+        };
+        .is:{ resp.status } equalTo:200;
+        .is:{ resp.body.text } equalTo:'got:hello body';
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    jsonBodyCarriesMediaType -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                ([HTTP]ServerResponse.new:{ var status = 200 })
+                    .body:(req.body.mediaType + ':' + ((req.body.json.at:'n') + 1))
+            }
+        };
+        server.start;
+        var resp = Async.timeout:5000 do:{
+            [HTTP]Client.post:('http://127.0.0.1:' + server.port + '/') body:#{ 'n':41 }
+        };
+        .is:{ resp.body.text } equalTo:'application/json:42';
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    bodylessRequestHasEmptyBody -> {
+        "* No CL/TE -> an empty bytes-backed body, so handlers never nil-check.
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                ([HTTP]ServerResponse.new:{ var status = 200 })
+                    .body:(req.body.empty?.if:{ 'empty' } else:{ 'not' })
+            }
+        };
+        server.start;
+        var resp = Async.timeout:5000 do:{
+            [HTTP]Client.get:('http://127.0.0.1:' + server.port + '/')
+        };
+        .is:{ resp.body.text } equalTo:'empty';
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    chunkedRequestBodyDrains -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                ([HTTP]ServerResponse.new:{ var status = 200 }).body:(req.body.text)
+            }
+        };
+        server.start;
+        var reply = Async.timeout:5000 do:{
+            var c = TcpSocket.connect:('127.0.0.1:' + server.port);
+            c.writeAll:('POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n' +
+                '3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n').asBytes;
+            (ByteStream.over:c).readAll.asStringLossy
+        };
+        .isTrue:{ reply.starts?:'HTTP/1.1 200 OK\r\n' };
+        .isTrue:{ reply.ends?:'\r\n\r\nabcdefg' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    contentLengthOverLimitGets413 -> {
+        "* The Content-Length preflight rejects before the handler ever runs.
+        var called = false;
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var maxBodyBytes = 4;
+            var handler = { |req|
+                called = true;
+                [HTTP]ServerResponse.new:{ var status = 200 }
+            }
+        };
+        server.start;
+        var resp = Async.timeout:5000 do:{
+            [HTTP]Client.post:('http://127.0.0.1:' + server.port + '/') body:'way too big'
+        };
+        .is:{ resp.status } equalTo:413;
+        .isFalse:{ called };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    chunkedBodyOverLimitGets413 -> {
+        "* No preflight exists for chunked framing — the ceiling trips while the
+        "* handler drains, and the server maps [HTTP]BodyTooLarge to 413.
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var maxBodyBytes = 4;
+            var handler = { |req|
+                ([HTTP]ServerResponse.new:{ var status = 200 }).body:(req.body.text)
+            }
+        };
+        server.start;
+        var reply = Async.timeout:5000 do:{
+            var c = TcpSocket.connect:('127.0.0.1:' + server.port);
+            c.writeAll:('POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n' +
+                '3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n').asBytes;
+            (ByteStream.over:c).readAll.asStringLossy
+        };
+        .isTrue:{ reply.starts?:'HTTP/1.1 413 Content Too Large\r\n' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    expectHeaderGets100Continue -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                ([HTTP]ServerResponse.new:{ var status = 200 }).body:('<' + req.body.text + '>')
+            }
+        };
+        server.start;
+        var replies = Async.timeout:5000 do:{
+            "* over: consumes the socket, so all I/O goes through the stream
+            var s = ByteStream.over:(TcpSocket.connect:('127.0.0.1:' + server.port));
+            s.writeAll:('POST / HTTP/1.1\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n').asBytes;
+            var interim = (s.readUntil:'\r\n\r\n').asStringLossy;
+            s.writeAll:('hi'.asBytes);
+            #( interim (s.readAll.asStringLossy) )
+        };
+        .is:{ replies.at:0 } equalTo:'HTTP/1.1 100 Continue\r\n\r\n';
+        .isTrue:{ (replies.at:1).starts?:'HTTP/1.1 200 OK\r\n' };
+        .isTrue:{ (replies.at:1).ends?:'\r\n\r\n<hi>' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    generatorBodyStreamsChunked -> {
+        "* A Generator body goes out as chunked transfer-encoding, one frame per
+        "* yield — the existing client decodes it from the other side for free.
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                ([HTTP]ServerResponse.new:{ var status = 200 })
+                    .body:(Generator.from:{ ^>'first '; ^>'second' })
+            }
+        };
+        server.start;
+        var resp = Async.timeout:5000 do:{
+            [HTTP]Client.get:('http://127.0.0.1:' + server.port + '/stream')
+        };
+        .is:{ (resp.header:'transfer-encoding') } equalTo:'chunked';
+        .is:{ resp.body.text } equalTo:'first second';
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    headSuppressesBodyKeepsHeaders -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                (([HTTP]ServerResponse.new:{ var status = 200 })
+                    .contentType:'text/plain')
+                    .body:'hello'
+            }
+        };
+        server.start;
+        var reply = Async.timeout:5000 do:{
+            var c = TcpSocket.connect:('127.0.0.1:' + server.port);
+            c.writeAll:('HEAD / HTTP/1.1\r\n\r\n').asBytes;
+            (ByteStream.over:c).readAll.asStringLossy
+        };
+        .isTrue:{ reply.contains?:'Content-Length: 5\r\n' };
+        .isTrue:{ reply.ends?:'\r\n\r\n' };  "* entity headers, no body bytes
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
     handlerThrowGets500 -> {
         var server = [HTTP]Server.new:{
             var address = '127.0.0.1:0';
