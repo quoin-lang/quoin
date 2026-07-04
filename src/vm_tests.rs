@@ -1,4 +1,5 @@
 use super::*;
+use rustc_hash::FxHashMap;
 use crate::instruction::{Constant, SharedBytecode, SharedSourceMap, StaticBlock};
 use crate::parser::ast::NodeValue;
 use crate::runtime::block::build_block_class;
@@ -1152,10 +1153,10 @@ fn test_class_method_lookup_fallback() {
                     name: NamespacedName::new(Vec::new(), "Point".to_string()),
                     parent: None,
                     instance_vars: Vec::new(),
-                    instance_methods: HashMap::new(),
-                    class_methods: HashMap::new(),
+                    instance_methods: FxHashMap::default(),
+                    class_methods: FxHashMap::default(),
                     mixin_classes: Vec::new(),
-                    field_slots: HashMap::new(),
+                    field_slots: FxHashMap::default(),
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
@@ -1408,7 +1409,7 @@ fn test_mixin_method_lookup_and_instance_vars() {
                 parent: None,
                 instance_vars: vec!["x".to_string(), "y".to_string()],
                 instance_methods: {
-                    let mut m = HashMap::new();
+                    let mut m = FxHashMap::default();
                     m.insert(
                         "name".to_string(),
                         vm.new_native_method(
@@ -1422,9 +1423,9 @@ fn test_mixin_method_lookup_and_instance_vars() {
                     );
                     m
                 },
-                class_methods: HashMap::new(),
+                class_methods: FxHashMap::default(),
                 mixin_classes: Vec::new(),
-                field_slots: HashMap::new(),
+                field_slots: FxHashMap::default(),
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,
@@ -1438,10 +1439,10 @@ fn test_mixin_method_lookup_and_instance_vars() {
                 name: NamespacedName::new(Vec::new(), "PType".to_string()),
                 parent: None,
                 instance_vars: vec!["z".to_string()],
-                instance_methods: HashMap::new(),
-                class_methods: HashMap::new(),
+                instance_methods: FxHashMap::default(),
+                class_methods: FxHashMap::default(),
                 mixin_classes: vec![point_class],
-                field_slots: HashMap::new(),
+                field_slots: FxHashMap::default(),
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,

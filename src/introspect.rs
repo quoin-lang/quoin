@@ -243,7 +243,7 @@ pub fn describe_value<'gc>(_vm: &VmState<'gc>, value: Value<'gc>) -> ValueInfo {
 /// selector.
 fn methods_of<'gc>(
     vm: &VmState<'gc>,
-    map: &std::collections::HashMap<String, Value<'gc>>,
+    map: &rustc_hash::FxHashMap<String, Value<'gc>>,
 ) -> Vec<MethodInfo> {
     let mut out: Vec<MethodInfo> = map
         .iter()
