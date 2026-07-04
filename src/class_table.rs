@@ -251,6 +251,17 @@ impl ClassTable {
         None
     }
 
+    /// The declared return type for `selector` on `class` — the class's *own* contract if it has
+    /// one, else the nearest inherited one (mixins, then the parent chain, which for built-ins
+    /// reaches `Object`). `None` when no ancestor in the chain declares a return. This is what
+    /// statically types a send to a known-class receiver (`list.count → Integer`); the universal
+    /// `Object`-rooted fallback for unknown-typed receivers stays a separate path.
+    pub fn declared_return(&self, class: &str, selector: &str) -> Option<Type> {
+        let mut visited = HashSet::new();
+        self.declared_return_rec(class, selector, &mut visited)
+            .map(|(t, _)| t)
+    }
+
     fn declared_return_rec(
         &self,
         class: &str,
