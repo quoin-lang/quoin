@@ -1,0 +1,481 @@
+"* ===========================================================================
+"* [HTTP]Server — the HTTP/1.1 protocol machine, pure Quoin over TcpListener.
+"*
+"*   use std:net/http_server;
+"*   var server = [HTTP]Server.new:{
+"*       var address = ':8080';
+"*       var handler = { |req|
+"*           ([HTTP]ServerResponse.new:{ var status = 200 }).body:'hello'
+"*       }
+"*   };
+"*   server.start;    "* accept in the background; stop / join / close to wind down
+"*
+"* No routing, no policy: the handler contract is *request in, response out* —
+"* the [Web] framework (qnlib/web/*) layers those on top. The only native pieces
+"* are [HTTP]Parser.parseRequestHead: (the `httparse` head parser) and
+"* ByteStream.readUntil:limit:. Task per connection on the cooperative
+"* scheduler; connections are keep-alive per HTTP/1.1 semantics. Request bodies
+"* frame like the client's responses (chunked transfer-encoding or
+"* Content-Length — RFC 7230 requests have no close-delimited bodies) and share
+"* [HTTP]Body; a Generator response body streams as chunked output.
+"*
+"* Limits and their over-limit behavior (see docs/WEB_ARCH.md):
+"*   maxHeadBytes (16 KiB)   -> 431, close
+"*   maxBodyBytes (8 MiB)    -> 413 (preflight on CL; cumulative on chunked), close
+"*   headTimeoutMs (30 s)    -> 408, close
+"*   idleTimeoutMs (60 s)    -> close quietly (keep-alive gap)
+"*   maxConnections (nil)    -> 503, close (nil = unlimited)
+use std:net/http;
+
+"* Thrown while reading a request head that exceeds maxHeadBytes; the connection
+"* loop maps it to 431 Request Header Fields Too Large.
+Error <- [HTTP]HeadTooLarge <- {};
+
+"* An inbound request: the parsed head plus the body as an [HTTP]Body —
+"* stream-backed while undrained, empty bytes-backed when the request has none,
+"* so handlers never nil-check. `target` is the raw request-target as sent
+"* (undecoded — percent decoding is the [Web] layer's job); `version` is the
+"* HTTP/1.x minor (0 | 1).
+"* (@params is an inert slot here: the [Web] router binds route params into it
+"* through the reopened params:/param: conveniences.)
+[HTTP]ServerRequest <- { | @method @target @version @headers @body @params |
+    init: -> { |method target version headers body|
+        @method = method;
+        @target = target;
+        @version = version;
+        @headers = headers.defined?.if:{ headers } else:{ #() };
+        @body = body.defined?.if:{ body } else:{ [HTTP]Body.of:(Bytes.empty) }
+    };
+
+    method -> { @method };
+    target -> { @target };
+    version -> { @version };
+    "* Headers as a #(name value) pair list, order- and duplicate-preserving.
+    headers -> { @headers };
+    "* Case-insensitive lookup of the first header named `name`, or nil.
+    header: -> { |name| [HTTP]Response.find:@headers named:name };
+    body -> { @body };
+
+    s -> { '[HTTP]ServerRequest(' + @method + ' ' + @target + ')' }
+};
+
+"* An outbound response under construction: status, #(name value) header pairs,
+"* and a body — nil, Bytes (a String converts for convenience), or a Generator
+"* whose yields (String | Bytes) stream to the peer as chunked transfer-encoding.
+"* The setters return self so calls can be threaded. The [Web] layer aliases and
+"* reopens this class with its builder conveniences.
+[HTTP]ServerResponse <- { | @status @headers @body |
+    init: -> { |status headers body|
+        @status = status.defined?.if:{ status } else:{ 200 };
+        @headers = headers.defined?.if:{ headers } else:{ #() };
+        @body = body
+    };
+
+    .meta <-- {
+        "* The canonical reason phrase for a status code ('' when unregistered —
+        "* the phrase is display-only and an empty one is legal on the wire).
+        reasonFor: -> { |status|
+            var phrases = #{
+                '100':'Continue'
+                '101':'Switching Protocols'
+                '200':'OK'
+                '201':'Created'
+                '202':'Accepted'
+                '204':'No Content'
+                '206':'Partial Content'
+                '301':'Moved Permanently'
+                '302':'Found'
+                '303':'See Other'
+                '304':'Not Modified'
+                '307':'Temporary Redirect'
+                '308':'Permanent Redirect'
+                '400':'Bad Request'
+                '401':'Unauthorized'
+                '403':'Forbidden'
+                '404':'Not Found'
+                '405':'Method Not Allowed'
+                '406':'Not Acceptable'
+                '408':'Request Timeout'
+                '409':'Conflict'
+                '410':'Gone'
+                '411':'Length Required'
+                '413':'Content Too Large'
+                '414':'URI Too Long'
+                '415':'Unsupported Media Type'
+                '422':'Unprocessable Content'
+                '429':'Too Many Requests'
+                '431':'Request Header Fields Too Large'
+                '500':'Internal Server Error'
+                '501':'Not Implemented'
+                '502':'Bad Gateway'
+                '503':'Service Unavailable'
+                '504':'Gateway Timeout'
+            };
+            var p = phrases.at:(status.s);
+            ^p.defined?.if:{ p } else:{ '' }
+        }
+    };
+
+    status -> { @status };
+    headers -> { @headers };
+    body -> { @body };
+
+    status: -> { |code| @status = code; self };
+    header:value: -> { |name val| @headers.add:#( name val ); self };
+    contentType: -> { |ct| .header:'Content-Type' value:ct };
+    body: -> { |b|
+        (String ~ b).if:{ @body = b.asBytes; ^^self };
+        @body = b;
+        self
+    };
+
+    s -> { '[HTTP]ServerResponse(' + @status.s + ')' }
+};
+
+"* The server: bind in init (so `port` works before `start`, including after an
+"* ephemeral ':0'), accept in a background Task, one Task per connection running
+"* the keep-alive loop. Termination is the caller's: `stop` cancels the accept
+"* loop (in-flight connections keep running), `join` drains them, `close`
+"* releases the port.
+[HTTP]Server <- { | @address @handler @maxHeadBytes @maxBodyBytes @headTimeoutMs
+                    @idleTimeoutMs @maxConnections @listener @tasks @acceptTask |
+    init: -> { |address handler maxHeadBytes maxBodyBytes headTimeoutMs idleTimeoutMs
+                maxConnections|
+        @address = address;
+        @handler = handler;
+        @maxHeadBytes = maxHeadBytes.defined?.if:{ maxHeadBytes } else:{ 16384 };
+        @maxBodyBytes = maxBodyBytes.defined?.if:{ maxBodyBytes } else:{ 8388608 };
+        @headTimeoutMs = headTimeoutMs.defined?.if:{ headTimeoutMs } else:{ 30000 };
+        @idleTimeoutMs = idleTimeoutMs.defined?.if:{ idleTimeoutMs } else:{ 60000 };
+        @maxConnections = maxConnections;
+        @tasks = #();
+        @listener = TcpListener.listen:@address
+    };
+
+    .meta <-- {
+        "* Serialize a response head (status line + headers + framing + blank line) —
+        "* a pure function apart from the Date header, unit-testable without a
+        "* socket. `streaming` selects Transfer-Encoding: chunked over Content-Length
+        "* framing of the materialized body (nil = empty). `connection` is the
+        "* Connection header value to emit, or nil for none (the HTTP/1.1 keep-alive
+        "* default needs no header). Caller-set Date / Content-Length / Connection
+        "* headers always win over ours.
+        wireHeadFor:streaming:connection: -> { |resp streaming connection|
+            var head = 'HTTP/1.1 ' + resp.status.s;
+            var reason = [HTTP]ServerResponse.reasonFor:resp.status;
+            (reason == '').else:{ head = head + ' ' + reason };
+            head = head + '\r\n';
+            resp.headers.each:{ |pair| head = head + (pair.at:0) + ': ' + (pair.at:1) + '\r\n' };
+            "* Date: an origin server with a clock MUST send one (RFC 9110 §6.6.1).
+            (resp.headers.any?:{ |p| (p.at:0).lower == 'date' }).else:{
+                head = head + 'Date: ' + ([HTTP]Server.httpDateFor:(DateTime.nowUtc)) + '\r\n'
+            };
+            streaming
+                .if:{ head = head + 'Transfer-Encoding: chunked\r\n' }
+                 else:{
+                    (resp.headers.any?:{ |p| (p.at:0).lower == 'content-length' }).else:{
+                        var body = resp.body.defined?.if:{ resp.body } else:{ Bytes.empty };
+                        head = head + 'Content-Length: ' + body.count + '\r\n'
+                    }
+                };
+            (connection.defined? &&
+                ((resp.headers.any?:{ |p| (p.at:0).lower == 'connection' }) == false))
+                .if:{ head = head + 'Connection: ' + connection + '\r\n' };
+            head = head + '\r\n';
+            ^head.asBytes
+        };
+
+        "* A whole non-streaming response as one buffer: head + materialized body.
+        wireBytesFor:connection: -> { |resp connection|
+            var body = resp.body.defined?.if:{ resp.body } else:{ Bytes.empty };
+            ^([HTTP]Server.wireHeadFor:resp streaming:false connection:connection) + body
+        };
+
+        "* One frame of a chunked body (pure): hex size, CRLF, data, CRLF. The
+        "* caller must not frame empty data — a zero-size chunk is the terminator.
+        chunkFrame: -> { |chunk|
+            var data = (String ~ chunk).if:{ chunk.asBytes } else:{ chunk };
+            ^(([HTTP]Server.hexOf:(data.count)) + '\r\n').asBytes + data + ('\r\n'.asBytes)
+        };
+
+        "* Lowercase hex digits of a non-negative Integer (chunk-size lines).
+        hexOf: -> { |n|
+            (n == 0).if:{ ^^'0' };
+            var digits = #('0' '1' '2' '3' '4' '5' '6' '7' '8' '9' 'a' 'b' 'c' 'd' 'e' 'f');
+            var out = '';
+            var v = n;
+            { v > 0 }.whileDo:{
+                out = (digits.at:(v % 16)) + out;
+                v = v / 16
+            };
+            ^out
+        };
+
+        "* RFC-1123 date (e.g. 'Sun, 06 Nov 1994 08:49:37 GMT') for a UTC DateTime.
+        httpDateFor: -> { |t|
+            var days = #{
+                'Monday':'Mon' 'Tuesday':'Tue' 'Wednesday':'Wed' 'Thursday':'Thu'
+                'Friday':'Fri' 'Saturday':'Sat' 'Sunday':'Sun'
+            };
+            var months = #('Jan' 'Feb' 'Mar' 'Apr' 'May' 'Jun'
+                'Jul' 'Aug' 'Sep' 'Oct' 'Nov' 'Dec');
+            var p2 = { |n| (n < 10).if:{ '0' + n } else:{ n.s } };
+            ^(days.at:(t.weekday)) + ', ' + (p2.value:(t.day)) + ' '
+                + (months.at:(t.month - 1)) + ' ' + (t.year.s) + ' '
+                + (p2.value:(t.hour)) + ':' + (p2.value:(t.minute)) + ':'
+                + (p2.value:(t.second)) + ' GMT'
+        }
+    };
+
+    "* The bound local port (e.g. after an ephemeral ':0' bind).
+    port -> { @listener.port };
+
+    "* Connection-task registry size (finished tasks are swept on each accept, so
+    "* a long-lived server stays bounded by its concurrency, not its history).
+    connections -> { @tasks.count };
+
+    "* Begin accepting in the background and return immediately. The accept loop
+    "* runs as its own Task so `stop` can cancel it — including a parked accept.
+    start -> {
+        @acceptTask = Task.spawn:{
+            { true }.whileDo:{
+                var conn = @listener.accept;
+                @tasks = @tasks.reject:{ |t| t.done? };
+                (@maxConnections.defined? && (@tasks.count >= @maxConnections))
+                    .if:{ @tasks.add:(Task.spawn:{ .refuse:conn }) }
+                     else:{ @tasks.add:(Task.spawn:{ .serve:conn }) }
+            }
+        };
+        self
+    };
+
+    "* Stop accepting: cancel the accept loop, which aborts its parked `accept`.
+    "* In-flight connection tasks keep running — drain them with `join`.
+    stop -> { @acceptTask.defined?.if:{ @acceptTask.cancel }; self };
+
+    "* Wait for the in-flight connection tasks to finish.
+    join -> {
+        { @acceptTask.join }.catch:{};
+        Async.joinAll:@tasks
+    };
+
+    "* Release the listening socket / bound port.
+    close -> { @listener.close };
+
+    "* One connection: run request/response exchanges until one of them decides
+    "* to close (Connection: close, HTTP/1.0 default, an error path, EOF, or the
+    "* idle timeout), then release the socket.
+    serve: -> { |conn|
+        var stream = ByteStream.over:conn;
+        var first = true;
+        var alive = true;
+        { alive }.whileDo:{
+            alive = .serveOne:stream first:first;
+            first = false
+        };
+        stream.close;
+        nil
+    };
+
+    "* Over maxConnections: tell the peer we are saturated, then close.
+    refuse: -> { |conn|
+        var stream = ByteStream.over:conn;
+        .respond:(.errorResponse:503) over:stream suppress:false connection:'close';
+        stream.close;
+        nil
+    };
+
+    "* One request/response exchange. Returns true to keep the connection open
+    "* for the next request, false to close. Error responses on this transport
+    "* level (400/408/413/431/500) always close.
+    serveOne:first: -> { |stream first|
+        "* Between keep-alive requests, wait for byte one under the idle timeout;
+        "* nothing arriving (or a clean EOF, or any socket error) closes quietly.
+        first.else:{
+            var b1 = nil;
+            { b1 = Async.timeout:@idleTimeoutMs do:{ stream.peek:1 } }.catch:{ |e| ^^false };
+            (b1.count == 0).if:{ ^^false }
+        };
+
+        "* Read the head under the head timeout: 408 for a peer that stalls
+        "* mid-head; 431 past maxHeadBytes (a delimiter-less flood trips the native
+        "* readUntil:limit: bound without waiting for the clock).
+        var head = nil;
+        { head = Async.timeout:@headTimeoutMs do:{ .readHeadFrom:stream } }
+            .catch:{ |e:TimeoutError|
+                .respond:(.errorResponse:408) over:stream suppress:false connection:'close';
+                ^^false
+            }
+            catch:{ |e:[HTTP]HeadTooLarge|
+                .respond:(.errorResponse:431) over:stream suppress:false connection:'close';
+                ^^false
+            }
+            catch:{ |e| ^^false };
+
+        "* Peer closed before (first request) or between heads: no response owed.
+        (head.count == 0).if:{ ^^false };
+
+        var parsed = nil;
+        { parsed = [HTTP]Parser.parseRequestHead:head }.catch:{ |e:ParseError|
+            .respond:(.errorResponse:400) over:stream suppress:false connection:'close';
+            ^^false
+        };
+        "* EOF mid-head (a partial came back): the request never completed.
+        (parsed == nil).if:{
+            .respond:(.errorResponse:400) over:stream suppress:false connection:'close';
+            ^^false
+        };
+
+        var method = parsed.at:0;
+        var version = parsed.at:2;
+        var headers = parsed.at:3;
+
+        "* Frame the request body: chunked transfer-encoding, else Content-Length
+        "* (preflighting the ceiling -> 413 without invoking the handler), else no
+        "* body (RFC 7230 — requests have no close-delimited bodies). The body does
+        "* NOT own the stream: draining it must leave the connection usable. A
+        "* chunked body enforces maxBodyBytes cumulatively instead of a preflight.
+        var te = [HTTP]Response.find:headers named:'transfer-encoding';
+        var cl = [HTTP]Response.find:headers named:'content-length';
+        var ct = [HTTP]Response.find:headers named:'content-type';
+        var ce = [HTTP]Response.find:headers named:'content-encoding';
+        var reqBody = nil;
+        (te.defined? && (te.lower.contains?:'chunked'))
+            .if:{
+                reqBody = [HTTP]Body.over:stream framing:'chunked' length:nil contentType:ct
+                    encoding:ce ownsStream:false maxBytes:@maxBodyBytes
+            }
+             else:{
+                (cl.defined? && (cl.to_integer > 0)).if:{
+                    (cl.to_integer > @maxBodyBytes).if:{
+                        .respond:(.errorResponse:413) over:stream suppress:false
+                            connection:'close';
+                        ^^false
+                    };
+                    reqBody = [HTTP]Body.over:stream framing:'length' length:(cl.to_integer)
+                        contentType:ct encoding:ce ownsStream:false maxBytes:nil
+                }
+            };
+
+        var req = [HTTP]ServerRequest.new:{
+            var method = parsed.at:0;
+            var target = parsed.at:1;
+            var version = parsed.at:2;
+            var headers = parsed.at:3;
+            var body = reqBody
+        };
+
+        "* Expect: 100-continue — acknowledge eagerly, before the handler runs.
+        var expect = [HTTP]Response.find:headers named:'expect';
+        (expect.defined? && (expect.lower.contains?:'100-continue')).if:{
+            { stream.writeAll:('HTTP/1.1 100 Continue\r\n\r\n'.asBytes) }.catch:{ |e| ^^false }
+        };
+
+        var resp = nil;
+        var errored = false;
+        { resp = @handler.value:req }
+            .catch:{ |e:[HTTP]BodyTooLarge|
+                "* the handler drained a chunked body past maxBodyBytes
+                resp = .errorResponse:413;
+                errored = true
+            }
+            catch:{ |e|
+                "* Uncaught handler throw -> 500. The [Web] layer catches first and
+                "* maps errors properly; this is the transport's backstop.
+                resp = .errorResponse:500;
+                errored = true
+            };
+
+        "* Keep-alive decision: HTTP/1.1 persists unless either side said close;
+        "* HTTP/1.0 closes unless the client asked for keep-alive. Error paths
+        "* always close (the request body's framing state is untrustworthy).
+        var reqConn = [HTTP]Response.find:headers named:'connection';
+        var reqConnL = reqConn.defined?.if:{ reqConn.lower } else:{ '' };
+        var respConn = [HTTP]Response.find:(resp.headers) named:'connection';
+        var wantsKeep = (version == 1)
+            .if:{ (reqConnL.contains?:'close') == false }
+             else:{ reqConnL.contains?:'keep-alive' };
+        var keep = wantsKeep && (errored == false)
+            && ((respConn.defined? && (respConn.lower.contains?:'close')) == false);
+
+        "* nil = the HTTP/1.1 default (persistent) needs no Connection header;
+        "* an HTTP/1.0 client that asked to persist is told we agreed.
+        var connHeader = keep
+            .if:{ (version == 0).if:{ 'keep-alive' } else:{ nil } }
+             else:{ 'close' };
+        (.respond:resp over:stream suppress:(method == 'HEAD') connection:connHeader)
+            .else:{ ^^false };
+
+        "* Auto-drain whatever of the request body the handler left unread, so the
+        "* next head starts at a message boundary. Bounded by maxBodyBytes (via the
+        "* body itself) and the head timeout; failing either closes instead.
+        (keep && (req.body.drained? == false)).if:{
+            { Async.timeout:@headTimeoutMs do:{ req.body.bytes } }.catch:{ |e| keep = false }
+        };
+        ^keep
+    };
+
+    "* Read one request head through the blank line, enforcing maxHeadBytes ->
+    "* [HTTP]HeadTooLarge (431). Returns the raw head bytes; empty or partial at
+    "* EOF parses to a quiet close or a 400 upstream.
+    readHeadFrom: -> { |stream|
+        var head = Bytes.empty;
+        var reading = true;
+        { reading }.whileDo:{
+            var line = nil;
+            { line = stream.readUntil:'\r\n' limit:(@maxHeadBytes + 2) }
+                .catch:{ |e:IoError|
+                    (e.kind == #limitExceeded).if:{
+                        [HTTP]HeadTooLarge.throw:'HTTP: request head line exceeds maxHeadBytes'
+                    };
+                    e.throw
+                };
+            (line.count == 0).if:{ ^^head };  "* EOF
+            head = head + line;
+            (head.count > @maxHeadBytes).if:{
+                [HTTP]HeadTooLarge.throw:'HTTP: request head exceeds maxHeadBytes'
+            };
+            (line.asString == '\r\n').if:{ reading = false }
+        };
+        ^head
+    };
+
+    "* A bare status-only response for transport-level errors.
+    errorResponse: -> { |status| ^[HTTP]ServerResponse.new:{ status = status } };
+
+    "* Write `resp`; returns whether the write succeeded (a false means the peer
+    "* is gone and the caller should close — there is nobody left to tell). A
+    "* Generator body streams as chunked transfer-encoding, one frame per
+    "* (non-empty) yield — this is what makes SSE work; anything else goes out as
+    "* one buffer framed by Content-Length. `suppress` (HEAD) sends the entity
+    "* headers but no body bytes.
+    respond:over:suppress:connection: -> { |resp stream suppress connection|
+        var ok = true;
+        {
+            (Generator ~ (resp.body))
+                .if:{
+                    stream.writeAll:([HTTP]Server.wireHeadFor:resp streaming:true
+                        connection:connection);
+                    suppress.else:{
+                        resp.body.each:{ |chunk|
+                            var data = (String ~ chunk).if:{ chunk.asBytes } else:{ chunk };
+                            (data.count > 0).if:{ stream.writeAll:([HTTP]Server.chunkFrame:data) }
+                        };
+                        stream.writeAll:('0\r\n\r\n'.asBytes)
+                    }
+                }
+                 else:{
+                    suppress
+                        .if:{
+                            stream.writeAll:([HTTP]Server.wireHeadFor:resp streaming:false
+                                connection:connection)
+                        }
+                         else:{
+                            stream.writeAll:([HTTP]Server.wireBytesFor:resp
+                                connection:connection)
+                        }
+                }
+        }.catch:{ |e| ok = false };
+        ok
+    }
+}

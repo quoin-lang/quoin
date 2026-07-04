@@ -309,8 +309,10 @@ impl SmolBackend {
 /// Look up and remove a stream from the registry so the op can own it by value for
 /// the duration of the await (no `RefCell` borrow is held across `.await`). A single
 /// stream is only ever used by one fiber, so removing it for the op is safe — and it
-/// structurally enforces "no concurrent ops on the same stream". The caller puts it
-/// back when the op succeeds; `Close` simply drops it.
+/// structurally enforces "no concurrent ops on the same stream". Only `TlsWrap` uses
+/// this raw form (the handshake genuinely consumes the stream, even on failure);
+/// abortable byte ops must lease via [`StreamLease`] instead, or a cancelled task
+/// would close the fd it was merely waiting on.
 fn take_stream(inner: &SmolInner, id: StreamId) -> Result<Box<dyn AsyncStream>, IoError> {
     inner
         .streams
@@ -320,6 +322,80 @@ fn take_stream(inner: &SmolInner, id: StreamId) -> Result<Box<dyn AsyncStream>, 
             kind: std::io::ErrorKind::NotFound,
             message: format!("unknown stream id {}", id.0),
         })
+}
+
+/// Own a stream for the duration of one op, returning it to the registry on drop —
+/// crucially also when the op's future is **aborted** mid-await (`Async.timeout:` /
+/// `cancel` on a task parked in a read or write). Cancellation must stop the wait,
+/// not destroy the stream: before this guard, the dropped future took the socket
+/// with it, so the peer saw an EOF and every later op on the id was "unknown stream".
+struct StreamLease {
+    inner: Rc<SmolInner>,
+    id: StreamId,
+    stream: Option<Box<dyn AsyncStream>>,
+}
+
+impl StreamLease {
+    fn take(inner: &Rc<SmolInner>, id: StreamId) -> Result<Self, IoError> {
+        let stream = take_stream(inner, id)?;
+        Ok(Self {
+            inner: inner.clone(),
+            id,
+            stream: Some(stream),
+        })
+    }
+
+    fn stream(&mut self) -> &mut Box<dyn AsyncStream> {
+        self.stream.as_mut().expect("stream is leased until drop")
+    }
+}
+
+impl Drop for StreamLease {
+    fn drop(&mut self) {
+        if let Some(s) = self.stream.take() {
+            self.inner.streams.borrow_mut().insert(self.id, s);
+        }
+    }
+}
+
+/// The listener analogue of [`StreamLease`]: a cancelled `accept` (server `stop`, or
+/// a timeout around it) must not tear down the listening socket.
+struct ListenerLease {
+    inner: Rc<SmolInner>,
+    id: StreamId,
+    listener: Option<async_net::TcpListener>,
+}
+
+impl ListenerLease {
+    fn take(inner: &Rc<SmolInner>, id: StreamId) -> Result<Self, IoError> {
+        let listener = inner
+            .listeners
+            .borrow_mut()
+            .remove(&id)
+            .ok_or_else(|| IoError {
+                kind: std::io::ErrorKind::NotFound,
+                message: format!("unknown listener id {}", id.0),
+            })?;
+        Ok(Self {
+            inner: inner.clone(),
+            id,
+            listener: Some(listener),
+        })
+    }
+
+    fn listener(&mut self) -> &async_net::TcpListener {
+        self.listener
+            .as_ref()
+            .expect("listener is leased until drop")
+    }
+}
+
+impl Drop for ListenerLease {
+    fn drop(&mut self) {
+        if let Some(l) = self.listener.take() {
+            self.inner.listeners.borrow_mut().insert(self.id, l);
+        }
+    }
 }
 
 impl IoBackend for SmolBackend {
@@ -348,13 +424,15 @@ impl IoBackend for SmolBackend {
             }),
 
             IoRequest::Read { id, max } => Box::pin(async move {
-                let mut stream = match take_stream(&inner, id) {
-                    Ok(s) => s,
+                // Leased, not taken: aborting a parked read (task cancel / timeout)
+                // must return the stream to the registry, not drop the fd.
+                let mut lease = match StreamLease::take(&inner, id) {
+                    Ok(l) => l,
                     Err(e) => return IoResult::Err(e),
                 };
                 let mut buf = vec![0u8; max];
-                let res = (&mut *stream).read(&mut buf).await;
-                inner.streams.borrow_mut().insert(id, stream);
+                let res = lease.stream().read(&mut buf).await;
+                drop(lease);
                 match res {
                     Ok(n) => {
                         buf.truncate(n);
@@ -365,17 +443,20 @@ impl IoBackend for SmolBackend {
             }),
 
             IoRequest::Write { id, bytes } => Box::pin(async move {
-                let mut stream = match take_stream(&inner, id) {
-                    Ok(s) => s,
+                // Leased like Read. An aborted write may leave the peer with a
+                // partial message — the canceller's problem — but the stream itself
+                // stays usable (and properly closeable).
+                let mut lease = match StreamLease::take(&inner, id) {
+                    Ok(l) => l,
                     Err(e) => return IoResult::Err(e),
                 };
                 let res = async {
-                    (&mut *stream).write_all(&bytes).await?;
-                    (&mut *stream).flush().await?;
+                    lease.stream().write_all(&bytes).await?;
+                    lease.stream().flush().await?;
                     Ok::<usize, std::io::Error>(bytes.len())
                 }
                 .await;
-                inner.streams.borrow_mut().insert(id, stream);
+                drop(lease);
                 match res {
                     Ok(n) => IoResult::Wrote(n),
                     Err(e) => IoResult::Err(e.into()),
@@ -404,20 +485,17 @@ impl IoBackend for SmolBackend {
             }),
 
             IoRequest::Accept { id } => Box::pin(async move {
-                // Take the listener out for the accept (no map borrow held across the
-                // await — one accept in flight per listener, like the byte ops), then put
-                // it back. The accepted stream drops into the shared `AsyncStream` registry.
-                let listener = match inner.listeners.borrow_mut().remove(&id) {
-                    Some(l) => l,
-                    None => {
-                        return IoResult::Err(IoError {
-                            kind: std::io::ErrorKind::NotFound,
-                            message: format!("unknown listener id {}", id.0),
-                        });
-                    }
+                // Leased for the accept (no map borrow held across the await — one
+                // accept in flight per listener, like the byte ops); the lease also
+                // survives an aborted accept (server `stop` cancels a parked one),
+                // which must not tear the listening socket down. The accepted stream
+                // drops into the shared `AsyncStream` registry.
+                let mut lease = match ListenerLease::take(&inner, id) {
+                    Ok(l) => l,
+                    Err(e) => return IoResult::Err(e),
                 };
-                let res = listener.accept().await;
-                inner.listeners.borrow_mut().insert(id, listener);
+                let res = lease.listener().accept().await;
+                drop(lease);
                 match res {
                     Ok((stream, _peer)) => IoResult::Connected(inner.insert(Box::new(stream))),
                     Err(e) => IoResult::Err(e.into()),

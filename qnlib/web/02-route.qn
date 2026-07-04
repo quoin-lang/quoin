@@ -1,0 +1,222 @@
+"* ===========================================================================
+"* [Web]Route + [Web]Router — most-specific-wins path routing, pure Quoin.
+"*
+"*   var r = [Web]Route.of:'/users/:id/files/*rest';
+"*   r ~ '/users/7/files/a/b'       "* true — routes implement the ~ protocol
+"*   r.bind:'/users/7/files/a/b'    "* #{ 'id':'7' 'rest':'a/b' } (nil = no match)
+"*
+"* Pattern syntax: static segments, ':name' (exactly one segment,
+"* percent-decoded), '*name' (the — possibly empty — rest of the path; must be
+"* last). Trailing slashes normalize away (except root '/'). Specificity is the
+"* per-segment kind vector (static=0, :param=1, *splat=2) compared
+"* lexicographically — registration order never matters, in the language's
+"* order-independent multimethod spirit; the only possible tie is a duplicate
+"* shape, which throws AT REGISTRATION (the router's AmbiguousMethodError
+"* analog). Percent-decoding happens per segment after splitting on '/', so an
+"* encoded %2F can never create a segment boundary. See docs/WEB_ARCH.md.
+"* ===========================================================================
+
+[Web]Route <- { | @pattern @segments @kinds |
+    "* Compile `pattern` (via [Web]Route.of:). Each segment becomes a
+    "* #( kindInt text ) pair: #(0 'users'), #(1 'id'), #(2 'rest').
+    init: -> { |pattern|
+        @pattern = pattern;
+        @segments = #();
+        @kinds = #();
+        var parts = [Web]Route.split:pattern;
+        var i = 0;
+        var n = parts.count;
+        { i < n }.whileDo:{
+            var seg = parts.at:i;
+            (seg.starts?:':')
+                .if:{
+                    var name = [Web]Route.nameOf:seg marker:':';
+                    @segments.add:#( 1 name );
+                    @kinds.add:1
+                }
+                 else:{
+                    (seg.starts?:'*')
+                        .if:{
+                            ((i + 1) == n).else:{
+                                ValueError.throw:('[Web]Route: *splat must be the last segment in \''
+                                    + pattern + '\'')
+                            };
+                            var name = [Web]Route.nameOf:seg marker:'*';
+                            @segments.add:#( 2 name );
+                            @kinds.add:2
+                        }
+                         else:{
+                            @segments.add:#( 0 seg );
+                            @kinds.add:0
+                        }
+                };
+            i = i + 1
+        }
+    };
+
+    .meta <-- {
+        of: -> { |pattern| ^[Web]Route.new:{ pattern = pattern } };
+
+        "* Path/pattern segments: split on '/', dropping the leading empty segment
+        "* and a trailing one (trailing-slash normalization; '/' -> no segments).
+        split: -> { |s|
+            var parts = #();
+            (s.splitString:'/').each:{ |p| (p == '').else:{ parts.add:p } };
+            ^parts
+        };
+
+        "* ':name' / '*name' -> 'name' (everything after the marker), rejecting an
+        "* empty one.
+        nameOf:marker: -> { |seg marker|
+            var name = ((seg.splitString:marker).drop:1).join:marker;
+            (name == '').if:{
+                ValueError.throw:('[Web]Route: empty parameter name in segment \'' + seg + '\'')
+            };
+            ^name
+        }
+    };
+
+    pattern -> { @pattern };
+    "* The specificity vector: one of 0 (static) / 1 (:param) / 2 (*splat) per segment.
+    kinds -> { @kinds };
+
+    "* The ~ match protocol: `route ~ path` (also composes with case:).
+    #'~:' -> { |path| (.bind:path).defined? };
+
+    "* Match `path` (query already stripped), binding params: a Map (possibly
+    "* empty) on a match, nil otherwise. Path segments are percent-decoded before
+    "* comparison and capture; a malformed escape throws ValueError (-> 400).
+    bind: -> { |path|
+        var parts = [Web]Route.split:path;
+        var params = #{};
+        var i = 0;
+        var np = @segments.count;
+        var n = parts.count;
+        { i < np }.whileDo:{
+            var seg = @segments.at:i;
+            var kind = seg.at:0;
+            (kind == 2).if:{
+                "* splat: the (possibly empty) decoded rest, rejoined with '/'
+                var rest = #();
+                var j = i;
+                { j < n }.whileDo:{
+                    rest.add:([Web]Url.decode:(parts.at:j));
+                    j = j + 1
+                };
+                params.at:(seg.at:1) put:(rest.join:'/');
+                ^^params
+            };
+            (i >= n).if:{ ^^nil };  "* path too short
+            var got = [Web]Url.decode:(parts.at:i);
+            (kind == 0)
+                .if:{ ((seg.at:1) == got).else:{ ^^nil } }
+                 else:{ params.at:(seg.at:1) put:got };
+            i = i + 1
+        };
+        "* every pattern segment consumed; the path must be exhausted too
+        ^(n == np).if:{ params } else:{ nil }
+    };
+
+    "* True when my kind vector sorts strictly before `other`'s, position by
+    "* position (static beats :param beats *splat). Two co-matching routes always
+    "* differ somewhere — except an equal shape, which registration rejects; when
+    "* one is a kind-prefix of the other (an exact route vs. one more trailing
+    "* empty-matching *splat), the shorter — exact — route wins.
+    moreSpecificThan: -> { |other|
+        var a = @kinds;
+        var b = other.kinds;
+        var n = (a.count).min:(b.count);
+        var i = 0;
+        { i < n }.whileDo:{
+            ((a.at:i) < (b.at:i)).if:{ ^^true };
+            ((a.at:i) > (b.at:i)).if:{ ^^false };
+            i = i + 1
+        };
+        ^a.count < b.count
+    };
+
+    "* Two routes conflict when their shapes are identical — same kinds and the
+    "* same static texts (param NAMES don't matter: '/a/:x' and '/a/:y' match
+    "* exactly the same paths). Such a pair could tie at dispatch, so it throws
+    "* at registration instead.
+    conflictsWith: -> { |other|
+        var a = @segments;
+        var b = other.segments;
+        ((a.count) == (b.count)).else:{ ^^false };
+        var i = 0;
+        var n = a.count;
+        { i < n }.whileDo:{
+            (((a.at:i).at:0) == ((b.at:i).at:0)).else:{ ^^false };
+            (((a.at:i).at:0) == 0).if:{
+                (((a.at:i).at:1) == ((b.at:i).at:1)).else:{ ^^false }
+            };
+            i = i + 1
+        };
+        ^true
+    };
+
+    segments -> { @segments };
+
+    s -> { '[Web]Route(' + @pattern + ')' }
+};
+
+"* Per-verb route tables with most-specific-wins dispatch. The router is pure
+"* data + matching — the [Web]App (and anyone else) drives it.
+[Web]Router <- { | @tables |
+    init -> { @tables = #{} };
+
+    "* Register `handler` for `verb` (e.g. 'GET') and `pattern`. A duplicate
+    "* shape under the same verb throws ValueError at registration.
+    add:pattern:handler: -> { |verb pattern handler|
+        var route = [Web]Route.of:pattern;
+        var table = @tables.at:verb;
+        table.defined?.else:{
+            table = #();
+            @tables.at:verb put:table
+        };
+        table.each:{ |entry|
+            ((entry.at:0).conflictsWith:route).if:{
+                ValueError.throw:('[Web]Router: duplicate route ' + verb + ' \'' + pattern
+                    + '\' conflicts with \'' + (entry.at:0).pattern + '\'')
+            }
+        };
+        table.add:#( route handler );
+        self
+    };
+
+    "* Dispatch `verb` + `path` (query already stripped). Returns a tagged list:
+    "*   #( #ok handler paramsMap )      — the most specific match
+    "*   #( #methodNotAllowed allowList ) — other verbs match this path (-> 405)
+    "*   #( #notFound )                   — nothing matches anywhere (-> 404)
+    "* HEAD falls back to the GET table (the transport suppresses the body).
+    dispatch:path: -> { |verb path|
+        var table = @tables.at:verb;
+        ((table.defined? == false) && (verb == 'HEAD')).if:{ table = @tables.at:'GET' };
+        table.defined?.if:{
+            var best = nil;
+            var bestParams = nil;
+            table.each:{ |entry|
+                var params = (entry.at:0).bind:path;
+                params.defined?.if:{
+                    ((best == nil) || ((entry.at:0).moreSpecificThan:(best.at:0))).if:{
+                        best = entry;
+                        bestParams = params
+                    }
+                }
+            };
+            best.defined?.if:{ ^^#( #ok (best.at:1) bestParams ) }
+        };
+        var allow = .allowFor:path;
+        ^(allow.count > 0).if:{ #( #methodNotAllowed allow ) } else:{ #( #notFound ) }
+    };
+
+    "* The verbs whose tables match `path` (for a 405's Allow header).
+    allowFor: -> { |path|
+        var allow = #();
+        @tables.each:{ |kv|
+            (kv.value.any?:{ |entry| ((entry.at:0).bind:path).defined? })
+                .if:{ allow.add:kv.key }
+        };
+        ^allow
+    }
+}

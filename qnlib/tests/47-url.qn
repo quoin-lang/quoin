@@ -1,0 +1,67 @@
+"* [Web]Url: the pure-Quoin percent codec — no network anywhere in this suite.
+use std:web/*;
+
+(TestSuite.new:{ var name = 'WebUrl' }).add:{
+    .test:
+    encodesReservedAndPassesUnreserved -> {
+        .is:{ [Web]Url.encode:'hello world' } equalTo:'hello%20world';
+        .is:{ [Web]Url.encode:'AZaz09-._~' } equalTo:'AZaz09-._~';
+        .is:{ [Web]Url.encode:'a/b?c&d=e+f#g' } equalTo:'a%2Fb%3Fc%26d%3De%2Bf%23g';
+        .is:{ [Web]Url.encode:'' } equalTo:'';
+    };
+
+    .test:
+    encodesUtf8PerByte -> {
+        .is:{ [Web]Url.encode:'héllo' } equalTo:'h%C3%A9llo';
+        .is:{ [Web]Url.encode:'日本' } equalTo:'%E6%97%A5%E6%9C%AC';
+    };
+
+    .test:
+    decodesEscapesAndUtf8 -> {
+        .is:{ [Web]Url.decode:'%41%42c' } equalTo:'ABc';
+        .is:{ [Web]Url.decode:'h%C3%A9llo' } equalTo:'héllo';
+        .is:{ [Web]Url.decode:'%e6%97%a5' } equalTo:'日';  "* lowercase hex too
+        .is:{ [Web]Url.decode:'plain' } equalTo:'plain';
+        .is:{ [Web]Url.decode:'a+b' } equalTo:'a+b';  "* '+' is form-only
+    };
+
+    .test:
+    decodeEncodeRoundTrips -> {
+        .is:{ [Web]Url.decode:([Web]Url.encode:'a b c') } equalTo:'a b c';
+        .is:{ [Web]Url.decode:([Web]Url.encode:'x=y&z') } equalTo:'x=y&z';
+        .is:{ [Web]Url.decode:([Web]Url.encode:'100%') } equalTo:'100%';
+        .is:{ [Web]Url.decode:([Web]Url.encode:'héllo 日本') } equalTo:'héllo 日本';
+        .is:{ [Web]Url.decode:([Web]Url.encode:'/path/to?q') } equalTo:'/path/to?q';
+    };
+
+    .test:
+    malformedEscapesThrow -> {
+        .does:{ [Web]Url.decode:'%G1' } throw:ValueError;
+        .does:{ [Web]Url.decode:'%2' } throw:ValueError;   "* truncated
+        .does:{ [Web]Url.decode:'abc%' } throw:ValueError; "* trailing
+    };
+
+    .test:
+    parsesQueryStrings -> {
+        var q = [Web]Url.queryParse:'a=1&b=two&flag';
+        .is:{ q.at:'a' } equalTo:'1';
+        .is:{ q.at:'b' } equalTo:'two';
+        .is:{ q.at:'flag' } equalTo:'';  "* bare key -> ''
+        .is:{ [Web]Url.queryParse:'' } equalTo:#{};
+        "* escapes decode; '=' after the first is part of the value; '+' is literal
+        var esc = [Web]Url.queryParse:'k%3Dey=a%26b&eq=x=y&plus=1+2';
+        .is:{ esc.at:'k=ey' } equalTo:'a&b';
+        .is:{ esc.at:'eq' } equalTo:'x=y';
+        .is:{ esc.at:'plus' } equalTo:'1+2';
+        "* a repeated key keeps the last value; empty segments are ignored
+        .is:{ ([Web]Url.queryParse:'a=1&&a=2').at:'a' } equalTo:'2';
+    };
+
+    .test:
+    decodesForms -> {
+        var f = [Web]Url.formDecode:'name=John+Doe&city=New+York%21&sym=a%2Bb';
+        .is:{ f.at:'name' } equalTo:'John Doe';
+        .is:{ f.at:'city' } equalTo:'New York!';
+        .is:{ f.at:'sym' } equalTo:'a+b';  "* %2B survives the '+'-to-space pass
+    };
+}

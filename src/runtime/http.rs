@@ -2,8 +2,8 @@ use crate::arg;
 use crate::error::QuoinError;
 use crate::value::{NativeClassBuilder, Value};
 
-/// Max response headers we'll parse. A response with more is rejected (thrown) rather
-/// than silently truncated — generous enough for real traffic.
+/// Max headers we'll parse in a head (either direction). A head with more is rejected
+/// (thrown) rather than silently truncated — generous enough for real traffic.
 const MAX_HEADERS: usize = 128;
 
 /// The plain-data result of parsing a response head — no VM/`Gc`, so it's unit-testable
@@ -45,11 +45,51 @@ pub fn parse_head(buf: &[u8]) -> Result<Option<ParsedHead>, String> {
     }
 }
 
-/// `[HTTP]Parser` — the one piece of the HTTP/1.1 client that isn't pure Quoin: a thin
-/// native wrapper over `httparse`. Everything else (URL parsing, request building, body
-/// framing, the `[HTTP]Client`/`Request`/`Response` classes) lives in
-/// `qnlib/net/http.qn` (loaded on demand via `use std:net/http`), driving
-/// `TcpSocket`/`TlsSocket` directly.
+/// The plain-data result of parsing a request head — the request-side mirror of
+/// [`ParsedHead`], for the server. `version` is the HTTP/1.x minor (0 or 1); `target`
+/// is the raw request-target as sent (no decoding or normalization here).
+#[derive(Debug, PartialEq)]
+pub struct ParsedRequestHead {
+    pub method: String,
+    pub target: String,
+    pub version: u8,
+    pub head_len: usize,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Parse an HTTP/1.1 request head from `buf`. Same contract as [`parse_head`]:
+/// `Ok(None)` = incomplete, `Err` = malformed (or too many headers). A thin wrapper
+/// over `httparse`.
+pub fn parse_request_head(buf: &[u8]) -> Result<Option<ParsedRequestHead>, String> {
+    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
+    let mut req = httparse::Request::new(&mut headers);
+    match req.parse(buf) {
+        Ok(httparse::Status::Complete(head_len)) => Ok(Some(ParsedRequestHead {
+            method: req.method.unwrap_or("").to_string(),
+            target: req.path.unwrap_or("").to_string(),
+            version: req.version.unwrap_or(1),
+            head_len,
+            headers: req
+                .headers
+                .iter()
+                .map(|h| {
+                    (
+                        h.name.to_string(),
+                        String::from_utf8_lossy(h.value).into_owned(),
+                    )
+                })
+                .collect(),
+        })),
+        Ok(httparse::Status::Partial) => Ok(None),
+        Err(e) => Err(format!("malformed request head: {e}")),
+    }
+}
+
+/// `[HTTP]Parser` — the one piece of the HTTP/1.1 client and server that isn't pure
+/// Quoin: a thin native wrapper over `httparse`. Everything else (URL parsing, request
+/// building, body framing, the `[HTTP]Client`/`Request`/`Response` classes and the
+/// `[HTTP]Server` in `qnlib/net/http_server.qn`) lives in `qnlib/net/*` (loaded on
+/// demand via `use std:net/...`), driving `TcpSocket`/`TlsSocket` directly.
 pub fn build_http_parser_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[HTTP]Parser", Some("Object"))
         // parseHead: bytes -> nil if the response head is not complete yet, else
@@ -78,6 +118,37 @@ pub fn build_http_parser_class() -> NativeClassBuilder {
                 }
                 Err(msg) => Err(QuoinError::ParseError(format!(
                     "[HTTP]Parser.parseHead:: {msg}"
+                ))),
+            }
+        })
+        // parseRequestHead: bytes -> nil if the request head is not complete yet, else
+        // #( methodStr targetStr versionInt headers ), where `versionInt` is the
+        // HTTP/1.x minor (0|1), `targetStr` is the raw request-target, and `headers`
+        // is the same order/duplicate-preserving list of #( nameStr valueStr ) pairs
+        // as parseHead:.
+        .sdk_typed_class_method("parseRequestHead:", &["Bytes"], |host, _receiver, args| {
+            let bytes = arg!(args, Bytes, 0);
+            let buf: &[u8] = &bytes;
+            match parse_request_head(buf) {
+                Ok(None) => Ok(host.new_nil()),
+                Ok(Some(head)) => {
+                    let header_vals: Vec<Value> = head
+                        .headers
+                        .into_iter()
+                        .map(|(name, value)| {
+                            let n = host.new_string(name);
+                            let v = host.new_string(value);
+                            host.new_list(vec![n, v])
+                        })
+                        .collect();
+                    let headers_list = host.new_list(header_vals);
+                    let method = host.new_string(head.method);
+                    let target = host.new_string(head.target);
+                    let version = host.new_int(head.version as i64);
+                    Ok(host.new_list(vec![method, target, version, headers_list]))
+                }
+                Err(msg) => Err(QuoinError::ParseError(format!(
+                    "[HTTP]Parser.parseRequestHead:: {msg}"
                 ))),
             }
         })
@@ -112,5 +183,66 @@ mod tests {
     #[test]
     fn malformed_head_errors() {
         assert!(parse_head(b"not http at all\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn complete_request_head() {
+        let raw =
+            b"POST /users?active=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello";
+        let head = parse_request_head(raw).unwrap().expect("complete");
+        assert_eq!(head.method, "POST");
+        assert_eq!(head.target, "/users?active=1");
+        assert_eq!(head.version, 1);
+        assert_eq!(head.head_len, raw.len() - 5); // body "hello" is the remainder
+        assert_eq!(
+            head.headers,
+            vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Content-Length".to_string(), "5".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn request_head_version_1_0() {
+        let head = parse_request_head(b"GET / HTTP/1.0\r\n\r\n")
+            .unwrap()
+            .expect("complete");
+        assert_eq!(head.version, 0);
+        assert_eq!(head.method, "GET");
+        assert_eq!(head.target, "/");
+        assert!(head.headers.is_empty());
+    }
+
+    #[test]
+    fn request_head_preserves_duplicate_headers_in_order() {
+        let raw = b"GET / HTTP/1.1\r\nAccept: text/html\r\nX-Tag: a\r\nX-Tag: b\r\n\r\n";
+        let head = parse_request_head(raw).unwrap().expect("complete");
+        assert_eq!(
+            head.headers,
+            vec![
+                ("Accept".to_string(), "text/html".to_string()),
+                ("X-Tag".to_string(), "a".to_string()),
+                ("X-Tag".to_string(), "b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_request_head_returns_none() {
+        // No terminating CRLF CRLF yet.
+        assert_eq!(
+            parse_request_head(b"GET /index HTTP/1.1\r\nHos").unwrap(),
+            None
+        );
+        // An empty buffer is just "read more".
+        assert_eq!(parse_request_head(b"").unwrap(), None);
+    }
+
+    #[test]
+    fn malformed_request_head_errors() {
+        // HTTP/0.9-style line (no version) is rejected, as is plain garbage.
+        assert!(parse_request_head(b"GET /\r\n\r\n").is_err());
+        assert!(parse_request_head(b"complete garbage\x01\r\n\r\n").is_err());
     }
 }

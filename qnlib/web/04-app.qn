@@ -1,0 +1,150 @@
+"* ===========================================================================
+"* [Web]App — the framework core: routing DSL, middleware onion, render
+"* conventions, and error mapping over a PURE handler pipeline.
+"*
+"*   use std:web/*;
+"*   var app = [Web]App.new;
+"*   app.get:'/' do:{ 'hello from Quoin' };
+"*   app.get:'/users/:id' do:{ |req| users.at:(req.param:'id') };  "* Map -> JSON
+"*   app.post:'/users' do:{ |req| [Web]Response.json:(req.json) status:201 };
+"*   app.use:{ |req next| next.value:req };  "* middleware (onion)
+"*   app.serve:':8080'                        "* start + join (blocks)
+"*
+"* `app.handle:req` is the whole app as a pure function — request in, response
+"* out, no sockets — so apps unit-test in-process; the [HTTP]Server is merely
+"* the transport driving it. Handler blocks may take the request as a
+"* parameter ({ |req| ... }) or address it as self ({ .param:'id' }); their
+"* return value is normalized by the respondTo: conventions below.
+"* See docs/WEB_ARCH.md.
+"* ===========================================================================
+
+"* The [Web] layer's request conveniences, layered onto the transport request
+"* by reopening — extension by <-- is the Quoin way to layer without wrappers.
+[HTTP]ServerRequest <-- {
+    "* Route bindings (set by the app's router before the handler runs).
+    params -> { @params.defined?.if:{ @params } else:{ #{} } };
+    params: -> { |m| @params = m; self };
+    param: -> { |name| .params.at:name };
+
+    "* The request path: the raw target with any query string stripped. Segments
+    "* stay percent-encoded — the router decodes per segment, so an encoded %2F
+    "* can't split the path; params/query values arrive decoded.
+    path -> { (@target.splitString:'?').at:0 };
+    rawTarget -> { @target };
+
+    "* The query string as a decoded Map ('+' stays literal), parsed on demand.
+    query -> {
+        var parts = @target.splitString:'?';
+        ^(parts.count > 1).if:{ [Web]Url.queryParse:((parts.drop:1).join:'?') } else:{ #{} }
+    };
+    query: -> { |name| .query.at:name };
+
+    "* Body views: JSON (throws a catchable ParseError on bad input) and
+    "* application/x-www-form-urlencoded.
+    json -> { ^.body.json };
+    form -> { ^[Web]Url.formDecode:(.body.text) };
+    mediaType -> { .body.mediaType }
+};
+
+[Web]App <- { | @router @middleware @debug |
+    init -> {
+        @router = [Web]Router.new;
+        @middleware = #();
+        @debug = false
+    };
+
+    "* -- routing DSL --------------------------------------------------------
+    get:do: -> { |pattern h| @router.add:'GET' pattern:pattern handler:h; self };
+    post:do: -> { |pattern h| @router.add:'POST' pattern:pattern handler:h; self };
+    put:do: -> { |pattern h| @router.add:'PUT' pattern:pattern handler:h; self };
+    patch:do: -> { |pattern h| @router.add:'PATCH' pattern:pattern handler:h; self };
+    delete:do: -> { |pattern h| @router.add:'DELETE' pattern:pattern handler:h; self };
+    "* any other verb
+    on:pattern:do: -> { |verb pattern h| @router.add:verb pattern:pattern handler:h; self };
+    router -> { @router };
+
+    "* -- middleware ---------------------------------------------------------
+    "* Onion model: the first use: is outermost. `mw` is called with
+    "* (req, next) — a two-param block, or anything responding to
+    "* valueWithArgs: — where `next` is a one-arg block producing the inner
+    "* response. Returning without calling next short-circuits; either way the
+    "* return value goes through the respondTo: conventions.
+    use: -> { |mw| @middleware.add:mw; self };
+
+    "* Include error detail in 500 bodies (a development aid — off by default).
+    debug: -> { |flag| @debug = flag; self };
+
+    "* -- the pure core ------------------------------------------------------
+    "* Middleware onion -> router -> handler -> respondTo: normalization, with
+    "* HttpError mapped to its status (+ optional body) and anything else to a
+    "* 500. Always returns an [HTTP]ServerResponse; never throws.
+    handle: -> { |req|
+        var me = self;
+        var chain = { |r| me.route:r };
+        var i = @middleware.count - 1;
+        { i >= 0 }.whileDo:{
+            var mw = @middleware.at:i;
+            var inner = chain;
+            chain = { |r| me.respondTo:(mw.valueWithArgs:#( r inner )) };
+            i = i - 1
+        };
+        var resp = nil;
+        { resp = chain.value:req }
+            .catch:{ |e:HttpError|
+                var r = e.body.defined?
+                    .if:{ .respondTo:(e.body) }
+                     else:{ [Web]Response.new };
+                resp = r.status:(e.status)
+            }
+            catch:{ |e|
+                resp = [Web]Response.new.status:500;
+                @debug.if:{ resp.body:(e.s) }
+            };
+        ^resp
+    };
+
+    "* One routed dispatch (the innermost layer of the onion): bind the most
+    "* specific route's params, run its handler, normalize. A path other verbs
+    "* serve -> 405 with Allow; an unroutable path -> 404; a malformed percent
+    "* escape in the path -> 400.
+    route: -> { |req|
+        var result = nil;
+        { result = @router.dispatch:(req.method) path:(req.path) }
+            .catch:{ |e:ValueError| ^^([Web]Response.new.status:400) };
+        ((result.at:0) == #ok).if:{
+            req.params:(result.at:2);
+            ^^(.respondTo:((result.at:1).valueWithSelfOrArg:req))
+        };
+        ((result.at:0) == #methodNotAllowed).if:{
+            ^^(([Web]Response.new.status:405).header:'Allow' value:((result.at:1).join:', '))
+        };
+        ^[Web]Response.new.status:404
+    };
+
+    "* -- render conventions --------------------------------------------------
+    "* Type-directed normalization of a handler's return value; add app-specific
+    "* variants by subclassing [Web]App and extending the multimethod.
+    respondTo: -> { |v:String| [Web]Response.text:v };
+    respondTo: --> { |v:Map| [Web]Response.json:v };
+    respondTo: --> { |v:List| [Web]Response.json:v };
+    respondTo: --> { |v:Integer| [Web]Response.status:v };
+    respondTo: --> { |v:Bytes| [Web]Response.bytes:v };
+    respondTo: --> { |v:Generator| [Web]Response.stream:v };
+    respondTo: --> { |v:[HTTP]ServerResponse| v };
+    respondTo: --> { |v|
+        v.defined?.if:{ [Web]Response.text:(v.s) } else:{ [Web]Response.status:404 }
+    };
+
+    "* -- serving --------------------------------------------------------------
+    "* start: binds and serves in the background, returning the [HTTP]Server
+    "* handle (port / stop / join / close — tests, graceful shutdown); serve:
+    "* blocks driving it.
+    start: -> { |address|
+        var me = self;
+        ^([HTTP]Server.new:{
+            address = address;
+            var handler = { |req| me.handle:req }
+        }).start
+    };
+    serve: -> { |address| (.start:address).join }
+}

@@ -24,6 +24,9 @@ pub enum IoErrorKind {
     UnexpectedEof,
     InvalidInput,
     InvalidData,
+    /// Synthetic (no OS errno): a bounded read exceeded its caller-imposed byte
+    /// ceiling (e.g. `ByteStream.readUntil:limit:` with no delimiter in budget).
+    LimitExceeded,
     Other,
 }
 
@@ -44,6 +47,7 @@ impl IoErrorKind {
             IoErrorKind::UnexpectedEof => "unexpectedEof",
             IoErrorKind::InvalidInput => "invalidInput",
             IoErrorKind::InvalidData => "invalidData",
+            IoErrorKind::LimitExceeded => "limitExceeded",
             IoErrorKind::Other => "other",
         }
     }

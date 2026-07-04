@@ -14,6 +14,10 @@
 "* gzip, and a streaming (per-chunk generator) body. See docs/ASYNC_ARCH.md.
 "* ===========================================================================
 
+"* Thrown while draining a body that exceeds a caller-imposed byte ceiling — the
+"* server's maxBodyBytes (the client never sets one). Catch it to answer 413.
+Error <- [HTTP]BodyTooLarge <- {};
+
 "* A request or response body — two backings, one interface. A *chunk* is just a
 "* bytes-backed body, so .chunks yields [HTTP]Body too (bytes + .text/.json/.meta views):
 "*  - bytes-backed: materialized Bytes + per-entity metadata (request bodies; a streamed
@@ -24,17 +28,24 @@
 "*    per pull). Content-Encoding is whole-entity: a non-encoded body streams its raw
 "*    transfer-chunks (each carrying its chunk extensions in .meta); a content-encoded body
 "*    drains+decodes and streams as a single decoded chunk (streaming decode is a follow-up).
-[HTTP]Body <- { | @bytes @stream @framing @length @mediaType @encoding @meta |
+"* Two server-side knobs on the stream backing: ownsStream=false leaves the stream open
+"* after a full drain (an [HTTP]Server request body must not close the connection the
+"* response goes out on), and maxBytes throws [HTTP]BodyTooLarge if a chunked body
+"* exceeds it cumulatively while draining (a length-framed body is preflighted instead).
+[HTTP]Body <- { | @bytes @stream @framing @length @mediaType @encoding @meta @ownsStream
+                  @maxBytes |
     .mix:Iterate;
 
-    init: -> { |bytes stream framing length mediaType encoding meta|
+    init: -> { |bytes stream framing length mediaType encoding meta ownsStream maxBytes|
         @bytes = bytes;
         @stream = stream;
         @framing = framing;
         @length = length;
         @mediaType = mediaType;
         @encoding = encoding;
-        @meta = meta
+        @meta = meta;
+        @ownsStream = ownsStream.defined?.if:{ ownsStream } else:{ true };
+        @maxBytes = maxBytes
     };
 
     .meta <-- {
@@ -61,13 +72,22 @@
 
         "* stream-backed: a live stream framed as 'chunked' | 'length' (with len) | 'close'
         over:framing:length:contentType:encoding: -> { |stream framing len ct enc|
+            ^[HTTP]Body.over:stream framing:framing length:len contentType:ct encoding:enc
+                ownsStream:true maxBytes:nil
+        };
+
+        "* stream-backed with the server-side knobs (see the class comment).
+        over:framing:length:contentType:encoding:ownsStream:maxBytes: ->
+        { |stream framing len ct enc owns max|
             ^[HTTP]Body.new:{
                 stream = stream;
                 framing = framing;
                 var length = len;
                 var mediaType = [HTTP]Body.mediaTypeOf:ct;
                 var encoding = enc;
-                var meta = #{}
+                var meta = #{};
+                var ownsStream = owns;
+                var maxBytes = max
             }
         }
     };
@@ -94,8 +114,11 @@
         var fr = @framing;
         var len = @length;
         var mt = @mediaType;
+        var owns = @ownsStream;
+        var max = @maxBytes;
         ^Generator.from:{
             (fr == 'chunked').if:{
+                var got = 0;
                 var reading = true;
                 { reading }.whileDo:{
                     var line = (((st.readUntil:'\r\n').asString).splitString:'\r\n').at:0;
@@ -110,6 +133,11 @@
                         }
                     }
                     else:{
+                        "* enforce the ceiling before buffering the oversize chunk
+                        got = got + size;
+                        (max.defined? && (got > max)).if:{
+                            [HTTP]BodyTooLarge.throw:('HTTP: chunked body exceeds ' + max + ' bytes')
+                        };
                         "* parse chunk extensions ('name=value' or valueless 'flag') into a Map
                         var exts = #{};
                         (parts.drop:1).each:{ |ext|
@@ -148,7 +176,7 @@
                     }
                 }
             };
-            st.close
+            owns.if:{ st.close }
         }
     };
 
@@ -177,6 +205,9 @@
         @stream = nil;
         ^@bytes
     };
+    "* Whether the body is already materialized (bytes-backed, or fully drained) —
+    "* i.e. reading it costs nothing and touches no stream.
+    drained? -> { @bytes.defined? };
     text -> { ^(.bytes).asStringLossy };  "* UTF-8; charset-aware decoding is a follow-up
     json -> { ^JSON.parse:(.text) };  "* parse-regardless; throws a catchable ParseError
     size -> { ^(.bytes).count };

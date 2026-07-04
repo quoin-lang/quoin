@@ -1,0 +1,153 @@
+"* ===========================================================================
+"* [Web] / [HTTP]Server soak: one in-process server under a concurrent swarm.
+"*
+"*   qn qnlib/stress/web_soak.qn
+"*
+"* Optionally under the stress knobs (see async_soak.qn for what they flush out):
+"*
+"*   QN_GC_STRESS=1  QN_SCHED_STRESS=1  qn qnlib/stress/web_soak.qn
+"*
+"* Every round runs, concurrently on one scheduler:
+"*   - client workers driving the [HTTP]Client (routing/params, JSON POST echo,
+"*     a chunked streaming response, an HttpError route),
+"*   - a raw keep-alive worker (three sequential requests on one connection),
+"*   - a slowloris trickler (partial head -> expects 408 via headTimeoutMs),
+"*   - an oversized head (-> 431 via maxHeadBytes, incl. the delimiter-less
+"*     readUntil:limit: path) and an oversized body (-> 413 via maxBodyBytes).
+"* Each result is checked against its expected value.
+"*
+"* DETECTION (Run mode always exits 0, so check the output, not the exit code):
+"*   success -> a final "OK: N rounds passed" line and no failure line;
+"*   failure -> a "SOAK FAILED: ..." line per mismatch, and a final FAILED line.
+"*
+"* KNOWN: under QN_SCHED_STRESS this currently panics ('RefCell already
+"* borrowed' in ensure_field_layout) — a pre-existing borrow-across-yield
+"* hazard this soak exposes; see QUOIN_TODO.md. Plain and QN_GC_STRESS runs
+"* are green.
+"* ===========================================================================
+use std:net/http;
+use std:net/http_server;
+use std:web/*;
+
+[Soak]Check <- { | @failures |
+    init -> { @failures = 0 };
+    is:equalTo:label: -> { |got expected label|
+        (got == expected).else:{
+            @failures = @failures + 1;
+            ('SOAK FAILED: ' + label + ': got [' + got.s + '] expected [' + expected.s + ']').print
+        }
+    };
+    failures -> { @failures }
+};
+
+var check = [Soak]Check.new;
+var rounds = 5;
+
+"* --- the app under test ----------------------------------------------------
+var app = [Web]App.new;
+app.get:'/hello' do:{ 'hi' };
+app.get:'/users/:id' do:{ |req| #{ 'id':(req.param:'id') } };
+app.post:'/echo' do:{ |req| [Web]Response.json:(req.json) status:201 };
+app.get:'/stream'
+do:{ [Web]Response.stream:(Generator.from:{ ^>'a'; ^>'bb'; ^>'ccc' }) contentType:'text/plain' };
+app.get:'/teapot' do:{ HttpError.throw:418 };
+
+"* Tight limits so the hostile clients trip them quickly.
+var server = [HTTP]Server.new:{
+    var address = '127.0.0.1:0';
+    var maxHeadBytes = 1024;
+    var maxBodyBytes = 2048;
+    var headTimeoutMs = 250;
+    var idleTimeoutMs = 400;
+    var handler = { |req| app.handle:req }
+};
+server.start;
+var base = 'http://127.0.0.1:' + server.port;
+var target = '127.0.0.1:' + server.port;
+
+"* a ~2 KiB filler for the oversized head / body probes
+var big = 'aaaaaaaaaaaaaaaa';
+{ big.length < 2048 }.whileDo:{ big = big + big };
+
+var round = 1;
+{ round <= rounds }.whileDo:{
+    var results = Async.timeout:15000 do:{
+        Async.gather:#(
+            "* -- three [HTTP]Client workers ---------------------------------
+            {
+                var r = [HTTP]Client.get:(base + '/users/' + round);
+                #( r.status (r.body.json.at:'id') )
+            }
+            {
+                var r = [HTTP]Client.post:(base + '/echo') body:#{ 'round':round };
+                #( r.status (r.body.json.at:'round') )
+            }
+            {
+                var r = [HTTP]Client.get:(base + '/stream');
+                #( (r.header:'transfer-encoding') r.body.text )
+            }
+            { ([HTTP]Client.get:(base + '/teapot')).status }
+            "* -- raw keep-alive worker: 3 requests, one connection ----------
+            {
+                var s = ByteStream.over:(TcpSocket.connect:target);
+                var bodies = '';
+                var n = 0;
+                { n < 3 }.whileDo:{
+                    s.writeAll:('GET /hello HTTP/1.1\r\n\r\n').asBytes;
+                    s.readUntil:'\r\n\r\n';
+                    bodies = bodies + (s.readExactly:2).asString;
+                    n = n + 1
+                };
+                s.close;
+                bodies
+            }
+            "* -- slowloris: a head that never finishes -> 408 ----------------
+            {
+                var s = ByteStream.over:(TcpSocket.connect:target);
+                s.writeAll:('GET /hello HT').asBytes;
+                ((s.readAll.asStringLossy.splitString:' ').at:1)
+            }
+            "* -- oversized (well-formed) head -> 431 -------------------------
+            {
+                var s = ByteStream.over:(TcpSocket.connect:target);
+                s.writeAll:('GET /hello HTTP/1.1\r\nX-Big: ' + big + '\r\n\r\n').asBytes;
+                ((s.readAll.asStringLossy.splitString:' ').at:1)
+            }
+            "* -- delimiter-less flood -> 431 without waiting for the clock ---
+            {
+                var s = ByteStream.over:(TcpSocket.connect:target);
+                { s.writeAll:('GET / HTTP/1.1\r\nX-Flood: ' + big + big).asBytes }.catch:{};
+                ((s.readAll.asStringLossy.splitString:' ').at:1)
+            }
+            "* -- oversized body -> 413 (the preflight refuses pre-dispatch) --
+            { ([HTTP]Client.post:(base + '/echo') body:(big + big)).status }
+        )
+    };
+
+    check.is:((results.at:0).at:0) equalTo:200 label:'param route status';
+    check.is:((results.at:0).at:1) equalTo:(round.s) label:'param route id';
+    check.is:((results.at:1).at:0) equalTo:201 label:'echo status';
+    check.is:((results.at:1).at:1) equalTo:round label:'echo body';
+    check.is:((results.at:2).at:0) equalTo:'chunked' label:'stream framing';
+    check.is:((results.at:2).at:1) equalTo:'abbccc' label:'stream body';
+    check.is:(results.at:3) equalTo:418 label:'HttpError status';
+    check.is:(results.at:4) equalTo:'hihihi' label:'keep-alive bodies';
+    check.is:(results.at:5) equalTo:'408' label:'slowloris';
+    check.is:(results.at:6) equalTo:'431' label:'oversized head';
+    check.is:(results.at:7) equalTo:'431' label:'delimiter-less flood';
+    check.is:(results.at:8) equalTo:413 label:'oversized body';
+    round = round + 1
+};
+
+server.stop;
+server.join;
+server.close;
+
+"* the registry must stay bounded by concurrency, not history
+(server.connections < 32).else:{
+    ('SOAK FAILED: connection registry leaked (' + server.connections + ' entries)').print
+};
+
+(check.failures == 0)
+    .if:{ ('OK: ' + rounds + ' rounds passed').print }
+     else:{ ('FAILED: ' + check.failures + ' checks failed').print }

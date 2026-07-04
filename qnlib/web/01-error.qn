@@ -1,0 +1,23 @@
+"* HttpError — throw a status (and optional body) from anywhere under a
+"* [Web]App; the dispatcher maps it onto the response:
+"*
+"*   (req.header:'authorization').defined?.else:{ HttpError.throw:401 };
+"*   HttpError.throw:422 body:#{ 'error':'bad email' };
+"*
+"* Root-level by convention, not constraint: it reads as a sibling of the
+"* built-in error family (IoError, ValueError, TimeoutError, ParseError).
+Error <- HttpError <- { | @status @body |
+    init: -> { |status body|
+        @status = status.defined?.if:{ status } else:{ 500 };
+        @body = body;
+        @message = 'HTTP ' + @status
+    };
+
+    status -> { @status };
+    body -> { @body };
+
+    .meta <-- {
+        throw: -> { |status| (HttpError.new:{ status = status }).throw };
+        throw:body: -> { |status body| (HttpError.new:{ status = status; body = body }).throw }
+    }
+}
