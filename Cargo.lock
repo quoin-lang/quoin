@@ -1374,6 +1374,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "no_borrow_across_yield"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+]
+
+[[package]]
 name = "no_gc_across_yield"
 version = "0.1.0"
 dependencies = [

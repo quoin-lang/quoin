@@ -372,7 +372,10 @@ across `init` execution, and `String %` held a map-state borrow while rendering
 values — any of which can cooperatively yield, parking the task with the guard
 alive on its suspended stack ("RefCell already borrowed" on the next collision;
 `Iterator`'s fiber-resuming `init` was the soak's trigger). Fixed on the follow-up
-branch (`tests/borrow_across_yield.rs`).
+branch (`tests/borrow_across_yield.rs`) and now guarded by a deny-level dylint,
+`lint/no_borrow_across_yield` — which on its first run over the codebase found
+(and led to fixing) two more of the same shape in `lookup_method`'s
+globals-borrowing fallbacks.
 
 ## Deferred (with sketches)
 
