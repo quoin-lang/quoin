@@ -19,6 +19,7 @@ use crate::value::{
 };
 use crate::{ansi_colorizer, gc, gcl};
 
+use gc_arena::metrics::Pacing;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
 use indexmap::IndexMap;
 use regex::Regex;
@@ -27,6 +28,27 @@ use std::collections::{HashMap, VecDeque};
 use std::mem::transmute;
 use std::path::Path;
 use std::{cmp, fs};
+
+/// GC pacing for a VM arena. `qn` programs are overwhelmingly batch runs where the heap is
+/// transient and only throughput matters, so the incremental collector sleeps far longer
+/// between cycles than gc_arena's memory-conservative default (`sleep_factor` 0.5) — 4.0
+/// trades ~2× peak heap for a large drop in collection overhead on allocation-heavy code
+/// (profiling/gc-pacing). `QN_GC_SLEEP=<f64>` overrides it (lower = less memory, higher =
+/// more throughput). Never affects results — looser pacing only collects less often.
+pub fn gc_pacing() -> Pacing {
+    let mut pacing = Pacing::DEFAULT;
+    // Under GC stress, keep gc_arena's conservative default sleep so collection stays
+    // aggressive — the stress harness exists to surface tracing bugs, which a loose
+    // throughput pacing would mask. The throughput override applies only to normal runs.
+    if crate::tuning::gc_stress() {
+        return pacing;
+    }
+    pacing.sleep_factor = std::env::var("QN_GC_SLEEP")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(4.0);
+    pacing
+}
 
 /// A method call queued to run when its frame completes normally (a "defer").
 #[derive(Clone, Collect)]

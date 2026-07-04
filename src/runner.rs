@@ -785,6 +785,7 @@ impl VmRunner {
             register_builtins(mc, &mut vm);
             vm
         });
+        arena.metrics().set_pacing(crate::vm::gc_pacing());
 
         // Load the core stdlib into the persistent VM (prelude `use core/*`).
         for ast in prelude_asts() {
@@ -852,6 +853,7 @@ impl VmRunner {
             }
             vm
         });
+        arena.metrics().set_pacing(crate::vm::gc_pacing());
 
         let mut aborted = false;
         for ast in ast_iter {
@@ -1103,6 +1105,7 @@ impl VmRunner {
             register_builtins(mc, &mut vm);
             vm
         });
+        arena.metrics().set_pacing(crate::vm::gc_pacing());
 
         let mut aborted = false;
         for ast in ast_iter {
