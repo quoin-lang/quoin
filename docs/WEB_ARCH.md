@@ -365,9 +365,14 @@ commit with a regression test:
    the 408 could never be written. Fixed with drop-guard leases that return the
    handle to the registry even when aborted (`tests/io_cancel_preserves_handles.rs`).
 
-Still open (pre-existing, logged in `QUOIN_TODO.md`): a `RefCell already borrowed`
-panic under `QN_SCHED_STRESS` that the soak exposes — a class borrow held across a
-cooperative yield somewhere outside the framework code.
+A fourth followed once the soak existed to expose it: **borrows held while Quoin
+runs** — `finalize_instantiation` kept the class borrow (an `if let` scrutinee
+temporary lives through the success branch) and the `new:{}` env borrow alive
+across `init` execution, and `String %` held a map-state borrow while rendering
+values — any of which can cooperatively yield, parking the task with the guard
+alive on its suspended stack ("RefCell already borrowed" on the next collision;
+`Iterator`'s fiber-resuming `init` was the soak's trigger). Fixed on the follow-up
+branch (`tests/borrow_across_yield.rs`).
 
 ## Deferred (with sketches)
 

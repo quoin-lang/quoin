@@ -118,24 +118,35 @@ pub fn build_string_class() -> NativeClassBuilder {
 
             let mut map_formatted_args = HashMap::new();
             let arg1 = vm.active_native_args.last().unwrap().args[0];
-            if let Value::Object(obj) = arg1
+            // Snapshot the map's pairs under a short borrow, THEN render: `.s` on a
+            // value runs arbitrary Quoin that can cooperatively yield, and a map-state
+            // borrow held across that suspend collides with any concurrent use of the
+            // same map (or a `s` that touches it) — "RefCell already borrowed".
+            let map_pairs: Vec<(String, Value)> = if let Value::Object(obj) = arg1
                 && let ObjectPayload::NativeState(state_cell) = &obj.borrow().payload
-                && state_cell.borrow().as_any().is::<NativeMapState>()
+                && let Some(map_state) = state_cell
+                    .borrow()
+                    .as_any()
+                    .downcast_ref::<NativeMapState>()
             {
-                let state_ref = state_cell.borrow();
-                if let Some(map_state) = state_ref.as_any().downcast_ref::<NativeMapState>() {
-                    for (k, &v) in map_state.get_map() {
-                        let val_str_val = vm.call_method(mc, v, "s", vec![])?;
-                        let val_str = match val_str_val {
-                            Value::Object(o) => match &o.borrow().payload {
-                                ObjectPayload::String(st) => st.to_string(),
-                                _ => format!("{}", val_str_val),
-                            },
-                            _ => format!("{}", val_str_val),
-                        };
-                        map_formatted_args.insert(k.clone(), val_str);
-                    }
-                }
+                map_state
+                    .get_map()
+                    .iter()
+                    .map(|(k, &v)| (k.clone(), v))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for (k, v) in map_pairs {
+                let val_str_val = vm.call_method(mc, v, "s", vec![])?;
+                let val_str = match val_str_val {
+                    Value::Object(o) => match &o.borrow().payload {
+                        ObjectPayload::String(st) => st.to_string(),
+                        _ => format!("{}", val_str_val),
+                    },
+                    _ => format!("{}", val_str_val),
+                };
+                map_formatted_args.insert(k, val_str);
             }
 
             let mut result = String::new();

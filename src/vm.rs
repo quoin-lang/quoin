@@ -1026,16 +1026,26 @@ impl<'gc> VmState<'gc> {
     }
 
     #[allow(no_gc_across_yield)]
+    /// NO borrow may be held while an initializer runs: `call_method_value` executes
+    /// arbitrary Quoin that can cooperatively yield (an `init` that resumes a fiber or
+    /// does I/O parks the whole task mid-call), and a Class/env borrow living on this
+    /// suspended stack collides with any other task touching the same cell — e.g.
+    /// `ensure_field_layout`'s `borrow_mut` when instantiating the same class
+    /// ("RefCell already borrowed"). So the env rides in as a `Gc` and is borrowed
+    /// transiently per lookup, and method lookups are hoisted OUT of `if let`
+    /// scrutinees (a scrutinee temporary lives through the success branch — even in
+    /// edition 2024, whose rescope only shortened the `else` path).
     fn finalize_instantiation(
         &mut self,
         mc: &Mutation<'gc>,
         obj: Gc<'gc, RefLock<Object<'gc>>>,
-        env_borrow: &EnvFrame<'gc>,
+        env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
     ) -> Result<(), QuoinError> {
         let class = obj.borrow().class;
         let vars = self.get_all_instance_vars(class);
         for var in &vars {
-            if let Some(val) = env_borrow.lookup_str(var)
+            let val = env.borrow().lookup_str(var);
+            if let Some(val) = val
                 && let Some(slot) = self.field_slot(class, var)
             {
                 obj.borrow_mut(mc).fields[slot] = val;
@@ -1059,14 +1069,18 @@ impl<'gc> VmState<'gc> {
                 let param_names = self.init_param_names(method_val).unwrap_or_default();
                 let mut init_args = Vec::new();
                 for param in &param_names {
-                    let val = env_borrow
+                    let val = env
+                        .borrow()
                         .lookup_str(param)
                         .unwrap_or_else(|| self.new_nil(mc));
                     init_args.push(val);
                 }
                 self.call_method_value(mc, receiver, method_val, "init:", init_args)?;
-            } else if let Some(method_val) = clz.borrow().instance_methods.get("init").copied() {
-                self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+            } else {
+                let init_plain = clz.borrow().instance_methods.get("init").copied();
+                if let Some(method_val) = init_plain {
+                    self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+                }
             }
         }
 
@@ -3709,8 +3723,7 @@ impl<'gc> VmState<'gc> {
                 self.stack.truncate(popped_frame.stack_base);
                 if let Some(obj) = popped_frame.instantiating_obj {
                     self.push(Value::Object(obj));
-                    let env_borrow = popped_frame.env.borrow();
-                    self.finalize_instantiation(mc, obj, &env_borrow)?;
+                    self.finalize_instantiation(mc, obj, popped_frame.env)?;
                     ret_val = self.pop()?;
                 } else if popped_frame.return_receiver {
                     if let Some(rx) = popped_frame.receiver {
@@ -3730,8 +3743,7 @@ impl<'gc> VmState<'gc> {
                         self.last_popped_env = Some(f.env);
                         if let Some(obj) = f.instantiating_obj {
                             self.push(Value::Object(obj));
-                            let env_borrow = f.env.borrow();
-                            self.finalize_instantiation(mc, obj, &env_borrow)?;
+                            self.finalize_instantiation(mc, obj, f.env)?;
                             ret_val = self.pop()?;
                         } else if f.return_receiver {
                             if let Some(rx) = f.receiver {
