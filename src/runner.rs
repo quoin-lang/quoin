@@ -516,17 +516,56 @@ impl VmRunner {
         }
     }
 
-    /// `qn check <file>…`: type-check each file — reporting the checker's diagnostics — without
-    /// running it. Exits non-zero if any file emitted a diagnostic, so it works as a CI gate.
+    /// `qn check <file-or-dir>…`: type-check each file — reporting the checker's diagnostics —
+    /// without running it. A directory argument is searched recursively for `.qn` files (like
+    /// `fmt`). Exits non-zero if any file emitted a diagnostic, so it works as a CI gate.
     fn run_check(&self) {
-        let files = &self.options.vm_options.arguments;
-        if files.is_empty() {
-            eprintln!("Usage: qn check <file>…");
+        let args = &self.options.vm_options.arguments;
+        if args.is_empty() {
+            eprintln!("Usage: qn check <file-or-dir>…");
             exit(2);
         }
-        let prelude = prelude_asts();
-        let targets = files.iter().map(|f| parse_quoin_file(&PathBuf::from(f)));
-        if self.compile_and_check_asts(prelude, targets) {
+        // Expand directory arguments to their `.qn` files, recursively (like `fmt`).
+        let mut files = Vec::new();
+        for p in args {
+            let path = Path::new(p);
+            if path.is_dir() {
+                collect_qn_files(path, &mut files);
+            } else {
+                files.push(path.to_path_buf());
+            }
+        }
+        if files.is_empty() {
+            eprintln!("qn check: no .qn files found in {}", args.join(" "));
+            exit(2);
+        }
+
+        // Parse each file WITHOUT panicking: a read or syntax error is reported and that file is
+        // skipped, so one bad file (common when checking a whole tree) doesn't abort the rest.
+        let mut had_error = false;
+        let mut asts = Vec::new();
+        for f in &files {
+            let name = f.display().to_string();
+            let source = match read_to_string(f) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{name}: {e}");
+                    had_error = true;
+                    continue;
+                }
+            };
+            let source = source.strip_prefix('\u{FEFF}').unwrap_or(&source);
+            match try_parse_quoin_string_named(source, &name) {
+                Ok(node) => asts.push(node),
+                Err(e) => {
+                    eprintln!("{name}: parse error: {e}");
+                    had_error = true;
+                }
+            }
+        }
+
+        let had_diagnostics = self.compile_and_check_asts(prelude_asts(), asts.into_iter());
+        if had_error || had_diagnostics {
             exit(1);
         }
     }
