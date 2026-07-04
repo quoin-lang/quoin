@@ -63,6 +63,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(e))?;
             Ok(vm.new_int(mc, len as i64))
         })
+        .returns("Integer")
         .instance_method("add:", |_vm, mc, receiver, args| {
             receiver
                 .with_native_state_mut::<NativeListState, _, _>(mc, |l| {

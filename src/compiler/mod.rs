@@ -1158,8 +1158,14 @@ impl Compiler {
                 },
             },
             NodeValue::BinaryOperator(op) => self.binop_result_type(op),
+            // A send's static type: a self-send to a current-class method, else the receiver's
+            // own/inherited declared return (known-typed receiver), else an Object-rooted return
+            // (universal, any receiver). Each is a safe miss → `Any`, so they layer by confidence.
             NodeValue::MethodCall(call) => match self.self_send_return_type(call) {
-                Type::Any => self.object_rooted_return_type(call),
+                Type::Any => match self.typed_receiver_return_type(call) {
+                    Type::Any => self.object_rooted_return_type(call),
+                    t => t,
+                },
                 t => t,
             },
             _ => Type::Any,
@@ -1180,22 +1186,50 @@ impl Compiler {
         let Some(ctx) = self.class_ctx.last() else {
             return Type::Any;
         };
-        let idents = &call.arguments.signature.identifiers;
-        if idents.is_empty() {
+        let Some(selector) = Self::reconstruct_send_selector(call) else {
             return Type::Any;
-        }
-        // Canonical selector: unary uses the bare name; a keyword send joins `name:` parts.
-        // A variadic run folds to `name+:` in dispatch, which we don't reconstruct here — so
-        // such a send simply stays Unknown rather than risking a mismatched selector.
-        let selector = if call.arguments.expressions.is_empty() {
-            idents[0].name.clone()
-        } else {
-            idents
-                .iter()
-                .map(|i| format!("{}:", i.name))
-                .collect::<String>()
         };
         ctx.returns.get(&selector).cloned().unwrap_or(Type::Any)
+    }
+
+    /// Reconstruct a send's selector from its arguments — the bare name for a unary send, the
+    /// joined `name:` parts for a keyword send. `None` for an empty signature. A variadic run
+    /// (a keyword repeated, dispatched as `name+:`) isn't reconstructed, so such a send simply
+    /// misses — a safe `Any` rather than a mismatched selector.
+    fn reconstruct_send_selector(call: &MethodCallNode) -> Option<String> {
+        let idents = &call.arguments.signature.identifiers;
+        if idents.is_empty() {
+            return None;
+        }
+        Some(if call.arguments.expressions.is_empty() {
+            idents[0].name.clone()
+        } else {
+            idents.iter().map(|i| format!("{}:", i.name)).collect()
+        })
+    }
+
+    /// The static return type of a send whose *receiver* has a known concrete type: the receiver
+    /// class's own or inherited declared return for the selector (`list.count` → `Integer`,
+    /// `d.floor` → `Integer`, `set.contains?:x` → `Boolean`). `Any` when the receiver's type is
+    /// unknown/nullable or no return is declared. Sound like the Object-rooted path — return
+    /// covariance guarantees any override returns a compatible type, so the declared return
+    /// bounds the actual one.
+    fn typed_receiver_return_type(&self, call: &MethodCallNode) -> Type {
+        let Some(subject) = &call.subject else {
+            return Type::Any;
+        };
+        // Only a receiver with a known concrete class qualifies; a nullable receiver's send is the
+        // nil-misuse check's concern, not typed here.
+        let class_name = match self.static_type(subject) {
+            Type::Any | Type::Never | Type::Nullable(_) => return Type::Any,
+            concrete => concrete.name(),
+        };
+        let Some(selector) = Self::reconstruct_send_selector(call) else {
+            return Type::Any;
+        };
+        self.class_table
+            .declared_return(&class_name, &selector)
+            .unwrap_or(Type::Any)
     }
 
     /// The static return type of a no-arg send whose selector is declared on `Object`, the

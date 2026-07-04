@@ -65,6 +65,7 @@ pub fn build_set_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(e))?;
             Ok(host.new_int(len as i64))
         })
+        .returns("Integer")
         .sdk_instance_method("add:", |host, receiver, args| {
             set_add(host, receiver, args[0])?;
             Ok(receiver)
@@ -77,6 +78,7 @@ pub fn build_set_class() -> NativeClassBuilder {
             let found = set_contains(host, receiver, args[0])?;
             Ok(host.new_bool(found))
         })
+        .returns("Boolean")
         .sdk_instance_method("each:", |host, receiver, args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
