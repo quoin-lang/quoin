@@ -178,7 +178,11 @@ impl Compiler {
     /// inline (value-on-stack like a block, but no frame and no trailing `Return`), with
     /// each top-level `^expr` redirected to a `Jump` past the body (patched here). `^^`
     /// (MethodReturn) is left untouched — it still returns from the enclosing method.
-    fn inline_block_body(&mut self, block: &BlockNode, out: &mut CodeBlock) -> Result<(), String> {
+    pub(super) fn inline_block_body(
+        &mut self,
+        block: &BlockNode,
+        out: &mut CodeBlock,
+    ) -> Result<(), String> {
         let saved = self.inline_carets.replace(Vec::new());
         let len = block.statements.len();
         for (idx, stmt) in block.statements.iter().enumerate() {

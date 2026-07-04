@@ -653,13 +653,22 @@ fn sealed_leaf_self_send_is_inlined() {
         "sealed inline-safe non-leaf self-send should inline"
     );
 
-    // A body that isn't inline-safe (contains a block ⇒ a possible `^^`) must NOT be inlined —
-    // splicing it could turn a callee return into a caller return. Stays a real dispatch.
+    // Phase 5·5: a block-bearing body with no `^^` now inlines (the block is spliced as an ordinary
+    // block-arg; its `^` returns from that block — sound).
     let blocky =
         compile_src("Foo <- { pick -> { @xs.detect:{ |x| x } }; run -> { .pick }; .sealed! }");
     assert!(
-        dispatches(&blocky, Symbol::intern("pick")),
-        "a block-bearing body must dispatch (soundness: no inlined `^^`)"
+        !dispatches(&blocky, Symbol::intern("pick")),
+        "a `^^`-free block-bearing body should inline (Phase 5·5)"
+    );
+
+    // But a body containing `^^` (return-from-method) must NOT be inlined — an inlined `^^` would
+    // return from the *caller's* method, not the callee.
+    let escaping =
+        compile_src("Foo <- { find -> { @xs.each:{ |x| ^^x } }; run -> { .find }; .sealed! }");
+    assert!(
+        dispatches(&escaping, Symbol::intern("find")),
+        "a body containing `^^` must dispatch (soundness)"
     );
 }
 
@@ -811,6 +820,41 @@ fn arg_passing_inlines_with_arg_methods() {
     assert!(
         !dispatches(&exact, scale),
         "exact-receiver with an arg should inline"
+    );
+}
+
+#[test]
+fn control_flow_body_is_inlined() {
+    fn compile_src(src: &str) -> StaticBlock {
+        let node = crate::parser::parse_quoin_string(src);
+        let NodeValue::Program(p) = &node.value else {
+            panic!("expected a program");
+        };
+        Compiler::new().compile_program(p).unwrap()
+    }
+    fn any(sb: &StaticBlock, pred: &dyn Fn(&Instruction) -> bool) -> bool {
+        sb.bytecode
+            .0
+            .iter()
+            .any(|i| pred(i) || matches!(i, Instruction::Push(Constant::Block(b)) if any(b, pred)))
+    }
+    // Phase 5·5: a body with control flow + `^` block-returns (`sign`) is inlined — its `if:else:`
+    // becomes native jumps (ElseJump), the `^`s redirect to the value, and `sign` never dispatches.
+    let sb = compile_src(
+        "Box <- { |@x| sign -> { (@x < 0).if:{ ^0 } else:{ ^1 } }; .sealed! }; \
+         R <- { go: -> { |b: Box| b.sign }; .sealed! }",
+    );
+    let sign = Symbol::intern("sign");
+    assert!(
+        !any(
+            &sb,
+            &|i| matches!(i, Instruction::Send(s, _) | Instruction::SendLocal(_, s, _) if *s == sign)
+        ),
+        "a control-flow method body should inline, not dispatch"
+    );
+    assert!(
+        any(&sb, &|i| matches!(i, Instruction::ElseJump(_))),
+        "the inlined body's if:else: is compiled to native jumps"
     );
 }
 
