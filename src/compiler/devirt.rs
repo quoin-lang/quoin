@@ -22,8 +22,8 @@ impl Compiler {
             (Type::List, "add:", 1) => Some(Instruction::ListPush),
             (Type::Map, "at:", 1) => Some(Instruction::MapGet),
             (Type::Map, "at:put:", 2) => Some(Instruction::MapSet),
-            (Type::Set, "add:", 1) => Some(Instruction::SetAdd),
-            (Type::Set, "contains?:", 1) => Some(Instruction::SetHas),
+            // Set has no devirt op — its native `contains?:`/`add:` dispatch `==:` per element
+            // (structural/custom equality), which a direct raw-equality op can't replicate.
             _ => None,
         }
     }

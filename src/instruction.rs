@@ -238,17 +238,16 @@ pub enum Instruction {
     ListGet,
     ListSet,
     ListPush,
-    // Devirtualized Map/Set accessors (mirror of the List ops): emitted when the receiver is
-    // statically `Map`/`Set` (both sealed value types). Map is `IndexMap<String, Value>` — its
-    // key must be a String at runtime (else fall back to the send, matching native `at:`).
-    // `MapGet` (`at:`) → value or nil; `MapSet` (`at:put:`) → the receiver. Set is `Vec<Value>`
-    // — `SetAdd` (`add:`) pushes iff absent (linear membership via `Value` ==) and evaluates to
-    // the receiver; `SetHas` (`contains?:`) → a Bool. Each falls back to the real send if the
-    // receiver isn't the expected native state at runtime.
+    // Devirtualized Map accessors (mirror of the List ops): emitted when the receiver is
+    // statically a `Map` (a sealed value type). Map is `IndexMap<String, Value>` — its key must be
+    // a String at runtime (else fall back to the send, matching native `at:`). `MapGet` (`at:`) →
+    // value or nil; `MapSet` (`at:put:`) → the receiver. Each falls back to the real send if the
+    // receiver isn't a native map at runtime.
+    //
+    // Set has NO devirt op: native `Set#contains?:`/`add:` dispatch `==:` per element (structural
+    // for List/Map, custom for user classes), which a direct raw-equality op can't replicate.
     MapGet,
     MapSet,
-    SetAdd,
-    SetHas,
     Return,
     Yeet,
     BlockReturn,

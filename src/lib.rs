@@ -7,6 +7,7 @@ pub mod coverage;
 pub mod dap;
 pub mod debug;
 pub mod debug_cli;
+pub mod devirt_ops;
 pub mod dispatch;
 pub mod error;
 pub mod ext_sdk;

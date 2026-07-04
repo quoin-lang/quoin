@@ -1,4 +1,5 @@
 use crate::arg;
+use crate::devirt_ops;
 use crate::error::QuoinError;
 use crate::runtime::pretty::{PpChild, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
@@ -77,13 +78,9 @@ pub fn build_map_class() -> NativeClassBuilder {
         })
         .instance_method("at:", |vm, mc, receiver, args| {
             let key = arg!(args, String, 0).to_string();
-            let value =
-                receiver.with_native_state(|m: &NativeMapState| m.get_map().get(&key).copied())?;
-            Ok(if let Some(v) = value {
-                v
-            } else {
-                vm.new_nil(mc)
-            })
+            let value = receiver
+                .with_native_state(|m: &NativeMapState| devirt_ops::map_get(m.get_map(), &key))?;
+            Ok(value.unwrap_or_else(|| vm.new_nil(mc)))
         })
         .instance_method("at:put:", |_vm, mc, receiver, args| {
             let key = arg!(args, String, 0).to_string();

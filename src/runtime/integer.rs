@@ -1,40 +1,34 @@
 use crate::error::QuoinError;
+use crate::instruction::IntBinKind;
 use crate::value::{NativeClassBuilder, Value};
 use crate::{arg, recv};
 
-/// Generate `[Integer]` and `[Double]` typed variants for a binary numeric
-/// operator on an `Integer` receiver. `Int op Int` stays `Int`; a `Double` RHS
-/// promotes the result to `Double` (`as_i64`/`as_f64` are the coercion helpers).
-/// `divop` additionally guards Integer division/modulo by zero. A non-numeric RHS
-/// matches no variant and falls through to the rekeyed global fallback in
-/// `native.rs`. (Receiver and arg are scorer-guaranteed, so the coercions are total.)
+// A binary operator on an Integer receiver, for the given `IntBinKind`. The Integer-arg variant
+// and the DoubleXxx-arg (coercing) variant both dispatch through the shared `devirt_ops` verbs —
+// the SAME functions the devirtualized `IntAdd`/`DoubleAdd` VM ops call — so the native and
+// devirt implementations can't drift (div-by-zero, wrap, IEEE semantics all live in one place).
 macro_rules! int_binop {
-    ($b:expr, $sel:literal, arith $op:tt) => {
+    ($b:expr, $sel:literal, $kind:expr) => {
         $b.sdk_typed_instance_method($sel, &["Integer"], |host, receiver, args| {
-            Ok(host.new_int(receiver.as_i64().unwrap() $op args[0].as_i64().unwrap()))
-        })
-        .sdk_typed_instance_method($sel, &["Double"], |host, receiver, args| {
-            Ok(host.new_double(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
-        })
-    };
-    ($b:expr, $sel:literal, divop $op:tt) => {
-        $b.sdk_typed_instance_method($sel, &["Integer"], |host, receiver, args| {
-            let divisor = args[0].as_i64().unwrap();
-            if divisor == 0 {
-                return Err(QuoinError::ArithmeticError("Division by zero".to_string()));
+            match crate::devirt_ops::int_bin(
+                $kind,
+                receiver.as_i64().unwrap(),
+                args[0].as_i64().unwrap(),
+            )? {
+                crate::devirt_ops::IntBinOut::Int(i) => Ok(host.new_int(i)),
+                crate::devirt_ops::IntBinOut::Bool(b) => Ok(host.new_bool(b)),
             }
-            Ok(host.new_int(receiver.as_i64().unwrap() $op divisor))
         })
+        // Integer op with a Double argument: both coerce to f64, so the result is a Double.
         .sdk_typed_instance_method($sel, &["Double"], |host, receiver, args| {
-            Ok(host.new_double(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
-        })
-    };
-    ($b:expr, $sel:literal, cmp $op:tt) => {
-        $b.sdk_typed_instance_method($sel, &["Integer"], |host, receiver, args| {
-            Ok(host.new_bool(receiver.as_i64().unwrap() $op args[0].as_i64().unwrap()))
-        })
-        .sdk_typed_instance_method($sel, &["Double"], |host, receiver, args| {
-            Ok(host.new_bool(receiver.as_f64().unwrap() $op args[0].as_f64().unwrap()))
+            match crate::devirt_ops::double_bin(
+                $kind,
+                receiver.as_f64().unwrap(),
+                args[0].as_f64().unwrap(),
+            ) {
+                crate::devirt_ops::DoubleBinOut::Double(d) => Ok(host.new_double(d)),
+                crate::devirt_ops::DoubleBinOut::Bool(b) => Ok(host.new_bool(b)),
+            }
         })
     };
 }
@@ -69,13 +63,13 @@ pub fn build_integer_class() -> NativeClassBuilder {
             let val = recv!(receiver, Int);
             Ok(host.new_string(val.to_string()))
         });
-    let b = int_binop!(b, "+:", arith+);
-    let b = int_binop!(b, "-:", arith -);
-    let b = int_binop!(b, "*:", arith *);
-    let b = int_binop!(b, "/:", divop /);
-    let b = int_binop!(b, "%:", divop %);
+    let b = int_binop!(b, "+:", IntBinKind::Add);
+    let b = int_binop!(b, "-:", IntBinKind::Sub);
+    let b = int_binop!(b, "*:", IntBinKind::Mul);
+    let b = int_binop!(b, "/:", IntBinKind::Div);
+    let b = int_binop!(b, "%:", IntBinKind::Mod);
     // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
-    let b = int_binop!(b, "<:", cmp <);
+    let b = int_binop!(b, "<:", IntBinKind::Lt);
     // pow: — Int**Int stays Integer but is *checked* (overflow -> ArithmeticError, since there is
     // no auto-promotion to BigInteger); a negative exponent leaves the integer domain and returns
     // a Double (`2.pow: -1` -> 0.5). A Double exponent always yields a Double.
