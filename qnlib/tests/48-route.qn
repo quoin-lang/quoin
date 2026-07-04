@@ -1,0 +1,122 @@
+"* [Web]Route / [Web]Router: pattern matching, the ~ protocol, most-specific-wins
+"* dispatch, 405 Allow data, and registration-time duplicate rejection. All pure —
+"* no sockets anywhere.
+use std:web/*;
+
+(TestSuite.new:{ var name = 'WebRoute' }).add:{
+    .test:
+    staticAndParamBinding -> {
+        var r = [Web]Route.of:'/users/:id';
+        .isTrue:{ r ~ '/users/7' };
+        .isFalse:{ r ~ '/users' };
+        .isFalse:{ r ~ '/users/7/files' };
+        .is:{ r.bind:'/users/7' } equalTo:#{ 'id':'7' };
+        .is:{ (r.bind:'/nope/7').defined? } equalTo:false;
+        "* multiple params
+        .is:{ ([Web]Route.of:'/a/:x/b/:y').bind:'/a/1/b/2' } equalTo:#{ 'x':'1' 'y':'2' };
+    };
+
+    .test:
+    rootAndTrailingSlashes -> {
+        var root = [Web]Route.of:'/';
+        .isTrue:{ root ~ '/' };
+        .isFalse:{ root ~ '/x' };
+        "* trailing slashes normalize away on both sides (except root itself)
+        .isTrue:{ ([Web]Route.of:'/users') ~ '/users/' };
+        .isTrue:{ ([Web]Route.of:'/users/') ~ '/users' };
+    };
+
+    .test:
+    splatBindsRest -> {
+        var r = [Web]Route.of:'/files/*path';
+        .is:{ (r.bind:'/files/a/b/c').at:'path' } equalTo:'a/b/c';
+        .is:{ (r.bind:'/files').at:'path' } equalTo:'';  "* empty rest matches
+        .is:{ (r.bind:'/files/one').at:'path' } equalTo:'one';
+    };
+
+    .test:
+    segmentsPercentDecode -> {
+        var r = [Web]Route.of:'/tags/:name';
+        .is:{ (r.bind:'/tags/caf%C3%A9').at:'name' } equalTo:'café';
+        "* an encoded slash decodes INSIDE the segment — it cannot split the path
+        .is:{ (r.bind:'/tags/a%2Fb').at:'name' } equalTo:'a/b';
+        "* static segments compare decoded too
+        .isTrue:{ ([Web]Route.of:'/x y/z') ~ '/x%20y/z' };
+        "* malformed escapes throw (the app maps this to a 400)
+        .does:{ r.bind:'/tags/%Zk' } throw:ValueError;
+    };
+
+    .test:
+    patternValidation -> {
+        .does:{ [Web]Route.of:'/a/*rest/b' } throw:ValueError;  "* splat not last
+        .does:{ [Web]Route.of:'/a/:' } throw:ValueError;        "* empty param name
+        .does:{ [Web]Route.of:'/a/*' } throw:ValueError;        "* empty splat name
+    };
+
+    .test:
+    specificityOrdersStaticParamSplat -> {
+        var stat = [Web]Route.of:'/a/b';
+        var param = [Web]Route.of:'/a/:x';
+        var splat = [Web]Route.of:'/a/*r';
+        .isTrue:{ stat.moreSpecificThan:param };
+        .isTrue:{ param.moreSpecificThan:splat };
+        .isTrue:{ stat.moreSpecificThan:splat };
+        .isFalse:{ splat.moreSpecificThan:param };
+        "* an exact route beats one more trailing empty-matching splat
+        .isTrue:{ ([Web]Route.of:'/files').moreSpecificThan:splat };
+    };
+
+    .test:
+    routerPicksMostSpecificRegardlessOfOrder -> {
+        "* least specific registered FIRST — order must not matter
+        var router = ((([Web]Router.new
+            .add:'GET' pattern:'/u/*rest' handler:'splat')
+            .add:'GET' pattern:'/u/:id' handler:'param')
+            .add:'GET' pattern:'/u/me' handler:'static');
+        var hit = router.dispatch:'GET' path:'/u/me';
+        .is:{ hit.at:0 } equalTo:#ok;
+        .is:{ hit.at:1 } equalTo:'static';
+        var p = router.dispatch:'GET' path:'/u/42';
+        .is:{ p.at:1 } equalTo:'param';
+        .is:{ (p.at:2).at:'id' } equalTo:'42';
+        var s = router.dispatch:'GET' path:'/u/a/b';
+        .is:{ s.at:1 } equalTo:'splat';
+        .is:{ (s.at:2).at:'rest' } equalTo:'a/b';
+    };
+
+    .test:
+    methodTablesAnd405 -> {
+        var router = ([Web]Router.new
+            .add:'GET' pattern:'/thing' handler:'get')
+            .add:'PUT' pattern:'/thing' handler:'put';
+        .is:{ (router.dispatch:'GET' path:'/thing').at:1 } equalTo:'get';
+        "* a path other verbs serve -> methodNotAllowed with the Allow list
+        var miss = router.dispatch:'POST' path:'/thing';
+        .is:{ miss.at:0 } equalTo:#methodNotAllowed;
+        .is:{ miss.at:1 } equalTo:#( 'GET' 'PUT' );
+        "* a path nothing serves -> notFound
+        .is:{ (router.dispatch:'GET' path:'/nope').at:0 } equalTo:#notFound;
+    };
+
+    .test:
+    headFallsBackToGet -> {
+        var router = [Web]Router.new.add:'GET' pattern:'/page' handler:'g';
+        var hit = router.dispatch:'HEAD' path:'/page';
+        .is:{ hit.at:0 } equalTo:#ok;
+        .is:{ hit.at:1 } equalTo:'g';
+    };
+
+    .test:
+    duplicateShapeThrowsAtRegistration -> {
+        var router = [Web]Router.new.add:'GET' pattern:'/a/:x' handler:'one';
+        "* same shape, different param name: matches exactly the same paths
+        .does:{ router.add:'GET' pattern:'/a/:y' handler:'two' } throw:ValueError;
+        .does:{ router.add:'GET' pattern:'/a/:x' handler:'again' } throw:ValueError;
+        "* same pattern under ANOTHER verb is fine
+        router.add:'PUT' pattern:'/a/:x' handler:'put';
+        .is:{ (router.dispatch:'PUT' path:'/a/1').at:1 } equalTo:'put';
+        "* different statics don't conflict
+        router.add:'GET' pattern:'/b/:x' handler:'three';
+        .is:{ (router.dispatch:'GET' path:'/b/9').at:1 } equalTo:'three';
+    };
+}
