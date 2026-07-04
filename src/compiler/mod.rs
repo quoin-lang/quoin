@@ -115,6 +115,25 @@ fn int_bin_kind(inst: &Instruction) -> Option<IntBinKind> {
     })
 }
 
+/// The `IntBinKind` for a devirtualized `Double` op, for the fused `DoubleBinLL`/`LC` peephole
+/// (the operator kind is type-agnostic — shared with the Integer path).
+fn double_bin_kind(inst: &Instruction) -> Option<IntBinKind> {
+    Some(match inst {
+        Instruction::DoubleAdd => IntBinKind::Add,
+        Instruction::DoubleSub => IntBinKind::Sub,
+        Instruction::DoubleMul => IntBinKind::Mul,
+        Instruction::DoubleDiv => IntBinKind::Div,
+        Instruction::DoubleMod => IntBinKind::Mod,
+        Instruction::DoubleLt => IntBinKind::Lt,
+        Instruction::DoubleLe => IntBinKind::Le,
+        Instruction::DoubleGt => IntBinKind::Gt,
+        Instruction::DoubleGe => IntBinKind::Ge,
+        Instruction::DoubleEq => IntBinKind::Eq,
+        Instruction::DoubleNe => IntBinKind::Ne,
+        _ => return None,
+    })
+}
+
 /// Peephole pass: fuse hot adjacent instructions into single superinstructions, saving a
 /// dispatch-loop step each. Two families:
 /// - `<operand-load>; Send` → `SendLocal`/`SendConst`/`SendField` (the send's last operand
@@ -221,18 +240,22 @@ pub(crate) fn fuse_bytecode(
             }
         }
 
-        // 3-instruction Int op (Slice a1): fuse `LoadLocal; <LoadLocal|Push>; IntXxx` into a
-        // single `IntBinLL`/`IntBinLC` — same shape as the send triple above, but the terminal
-        // is a devirtualized `Int` op. Collapses both operand-loads into the arithmetic op.
+        // 3-instruction Int/Double op (Slice a1): fuse `LoadLocal; <LoadLocal|Push>; {Int,Double}Xxx`
+        // into a single `{Int,Double}BinLL`/`BinLC` — same shape as the send triple above, but the
+        // terminal is a devirtualized numeric op. Collapses both operand-loads into the op.
         if i + 2 < n
             && !is_target[i + 1]
             && !is_target[i + 2]
             && let Instruction::LoadLocal(a) = &bytecode[i]
-            && let Some(kind) = int_bin_kind(&bytecode[i + 2])
+            && let Some((kind, is_double)) = int_bin_kind(&bytecode[i + 2])
+                .map(|k| (k, false))
+                .or_else(|| double_bin_kind(&bytecode[i + 2]).map(|k| (k, true)))
         {
-            let three = match &bytecode[i + 1] {
-                Instruction::LoadLocal(b) => Some(Instruction::IntBinLL(*a, *b, kind)),
-                Instruction::Push(c) => Some(Instruction::IntBinLC(*a, c.clone(), kind)),
+            let three = match (&bytecode[i + 1], is_double) {
+                (Instruction::LoadLocal(b), false) => Some(Instruction::IntBinLL(*a, *b, kind)),
+                (Instruction::LoadLocal(b), true) => Some(Instruction::DoubleBinLL(*a, *b, kind)),
+                (Instruction::Push(c), false) => Some(Instruction::IntBinLC(*a, c.clone(), kind)),
+                (Instruction::Push(c), true) => Some(Instruction::DoubleBinLC(*a, c.clone(), kind)),
                 _ => None,
             };
             if let Some(three) = three {
@@ -1277,6 +1300,12 @@ impl Compiler {
             {
                 Type::Int
             }
+            Add | Sub | Mul | Div | Mod
+                if self.static_type(&op.left) == Type::Double
+                    && self.static_type(&op.right) == Type::Double =>
+            {
+                Type::Double
+            }
             _ => Type::Any,
         }
     }
@@ -1296,6 +1325,26 @@ impl Compiler {
             GtEq => Instruction::IntGe,
             Eq => Instruction::IntEq,
             NotEq => Instruction::IntNe,
+            _ => return None,
+        })
+    }
+
+    /// The devirtualized Double instruction for a binary operator, if it has one (the f64 mirror
+    /// of `int_devirt_op`).
+    fn double_devirt_op(operator: &BinaryOperatorType) -> Option<Instruction> {
+        use BinaryOperatorType::*;
+        Some(match operator {
+            Add => Instruction::DoubleAdd,
+            Sub => Instruction::DoubleSub,
+            Mul => Instruction::DoubleMul,
+            Div => Instruction::DoubleDiv,
+            Mod => Instruction::DoubleMod,
+            Lt => Instruction::DoubleLt,
+            LtEq => Instruction::DoubleLe,
+            Gt => Instruction::DoubleGt,
+            GtEq => Instruction::DoubleGe,
+            Eq => Instruction::DoubleEq,
+            NotEq => Instruction::DoubleNe,
             _ => return None,
         })
     }
@@ -1840,17 +1889,25 @@ impl Compiler {
         // instead of a method send. Computed from the AST before compiling the operands
         // (no side effects). Integer is a sealed value type (see prelude.qn), so its
         // arithmetic operators can't be redefined — this is sound.
-        let devirt =
-            self.static_type(&op.left) == Type::Int && self.static_type(&op.right) == Type::Int;
+        // Integer and Double are sealed value types (prelude.qn), so their arithmetic operators
+        // can't be redefined — devirt to a direct op when both operands are statically that same
+        // type. Types computed from the AST before compiling the operands (no side effects); a
+        // runtime type mismatch (stale inference) falls back to the real send.
+        let (lt, rt) = (self.static_type(&op.left), self.static_type(&op.right));
 
         self.compile_node(&op.left, bytecode)?;
         self.compile_node(&op.right, bytecode)?;
 
-        if devirt {
-            if let Some(op_instr) = Self::int_devirt_op(&op.operator) {
-                bytecode.push(op_instr);
-                return Ok(());
-            }
+        let devirt_op = if lt == Type::Int && rt == Type::Int {
+            Self::int_devirt_op(&op.operator)
+        } else if lt == Type::Double && rt == Type::Double {
+            Self::double_devirt_op(&op.operator)
+        } else {
+            None
+        };
+        if let Some(op_instr) = devirt_op {
+            bytecode.push(op_instr);
+            return Ok(());
         }
 
         let selector = match op.operator {

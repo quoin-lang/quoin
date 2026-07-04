@@ -2666,6 +2666,21 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Like `take_two_ints`, but for the `Double` devirt arms: pops the top two values iff both
+    /// are `Value::Double`, else leaves the stack untouched so the caller can fall back to a send.
+    fn take_two_doubles(&mut self) -> Option<(f64, f64)> {
+        let n = self.stack.len();
+        if n < 2 {
+            return None;
+        }
+        if let (Value::Double(a), Value::Double(b)) = (self.stack[n - 2], self.stack[n - 1]) {
+            self.stack.truncate(n - 2);
+            Some((a, b))
+        } else {
+            None
+        }
+    }
+
     /// The fused-`Int`-op computation (Slice a1), shared by `IntBinLL`/`IntBinLC`. Matches the
     /// standalone `IntAdd`..`IntNe` arms exactly (arith wraps in release; `/`/`%` raise on a
     /// zero divisor; compares yield a Bool).
@@ -2693,6 +2708,25 @@ impl<'gc> VmState<'gc> {
             IntBinKind::Eq => Value::Bool(a == b),
             IntBinKind::Ne => Value::Bool(a != b),
         })
+    }
+
+    /// The fused-`Double`-op computation, shared by `DoubleBinLL`/`DoubleBinLC`. Plain IEEE-754
+    /// f64 — `/`/`%` yield inf/NaN on a zero divisor (never raise, unlike `int_bin_compute`), so
+    /// it returns a `Value` directly rather than a `Result`.
+    fn double_bin_compute(kind: IntBinKind, a: f64, b: f64) -> Value<'gc> {
+        match kind {
+            IntBinKind::Add => Value::Double(a + b),
+            IntBinKind::Sub => Value::Double(a - b),
+            IntBinKind::Mul => Value::Double(a * b),
+            IntBinKind::Div => Value::Double(a / b),
+            IntBinKind::Mod => Value::Double(a % b),
+            IntBinKind::Lt => Value::Bool(a < b),
+            IntBinKind::Le => Value::Bool(a <= b),
+            IntBinKind::Gt => Value::Bool(a > b),
+            IntBinKind::Ge => Value::Bool(a >= b),
+            IntBinKind::Eq => Value::Bool(a == b),
+            IntBinKind::Ne => Value::Bool(a != b),
+        }
     }
 
     /// Probe the executing `block`'s inline cache at `ip`: a hit requires a live epoch (method
@@ -3306,6 +3340,131 @@ impl<'gc> VmState<'gc> {
                 if let (Some(Value::Int(x)), Some(y)) = (va, c.as_int()) {
                     let res = Self::int_bin_compute(kind, x, y)?;
                     self.push(res);
+                    ip += 1;
+                } else {
+                    let va = va.unwrap_or_else(|| self.new_nil(mc));
+                    self.push(va);
+                    let cv = self.materialize_constant(mc, c);
+                    self.push(cv);
+                    return self.exec_send(mc, frame_idx, Symbol::intern(kind.selector()), 1);
+                }
+            }
+            // Devirtualized Double operators (mirror of the Integer arms). Plain IEEE-754 f64 —
+            // `/`/`%` do NOT check for zero (inf/NaN, matching native Double). A non-Double
+            // operand falls back to the real send.
+            Instruction::DoubleAdd => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Double(a + b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("+:"), 1);
+                }
+            }
+            Instruction::DoubleSub => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Double(a - b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("-:"), 1);
+                }
+            }
+            Instruction::DoubleMul => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Double(a * b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("*:"), 1);
+                }
+            }
+            Instruction::DoubleDiv => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Double(a / b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("/:"), 1);
+                }
+            }
+            Instruction::DoubleMod => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Double(a % b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("%:"), 1);
+                }
+            }
+            Instruction::DoubleLt => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Bool(a < b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("<:"), 1);
+                }
+            }
+            Instruction::DoubleLe => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Bool(a <= b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("<=:"), 1);
+                }
+            }
+            Instruction::DoubleGt => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Bool(a > b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern(">:"), 1);
+                }
+            }
+            Instruction::DoubleGe => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Bool(a >= b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern(">=:"), 1);
+                }
+            }
+            Instruction::DoubleEq => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Bool(a == b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("==:"), 1);
+                }
+            }
+            Instruction::DoubleNe => {
+                if let Some((a, b)) = self.take_two_doubles() {
+                    self.push(Value::Bool(a != b));
+                    ip += 1;
+                } else {
+                    return self.exec_send(mc, frame_idx, Symbol::intern("!=:"), 1);
+                }
+            }
+            Instruction::DoubleBinLL(a, b, kind) => {
+                let (a, b, kind) = (*a, *b, *kind);
+                let (va, vb) = {
+                    let frame = &self.frames[frame_idx];
+                    (EnvFrame::get(frame.env, a), EnvFrame::get(frame.env, b))
+                };
+                if let (Some(Value::Double(x)), Some(Value::Double(y))) = (va, vb) {
+                    self.push(Self::double_bin_compute(kind, x, y));
+                    ip += 1;
+                } else {
+                    let va = va.unwrap_or_else(|| self.new_nil(mc));
+                    let vb = vb.unwrap_or_else(|| self.new_nil(mc));
+                    self.push(va);
+                    self.push(vb);
+                    return self.exec_send(mc, frame_idx, Symbol::intern(kind.selector()), 1);
+                }
+            }
+            Instruction::DoubleBinLC(a, c, kind) => {
+                let (a, kind) = (*a, *kind);
+                let va = {
+                    let frame = &self.frames[frame_idx];
+                    EnvFrame::get(frame.env, a)
+                };
+                if let (Some(Value::Double(x)), Some(y)) = (va, c.as_double()) {
+                    self.push(Self::double_bin_compute(kind, x, y));
                     ip += 1;
                 } else {
                     let va = va.unwrap_or_else(|| self.new_nil(mc));

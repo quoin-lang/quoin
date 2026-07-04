@@ -132,10 +132,31 @@ impl Compiler {
                 }
                 Some(_) => {}
                 None => {
-                    // No annotation: infer Int/List from the initializer for devirt only (a hint,
-                    // not a contract — an untyped `var` may be reassigned to any type).
+                    // No annotation: record the initializer's type as a *devirt hint* (not a
+                    // contract — an untyped `var` may be reassigned to any type; every devirt op
+                    // has a runtime fallback, so a stale hint is harmless). Only types with a
+                    // devirtualized op path are worth recording — a hint no gate consumes is dead.
+                    //
+                    // The match is deliberately exhaustive: adding a devirtualized type (a new
+                    // `*_devirt_op`) must move its variant here, and a new `Type` variant won't
+                    // compile until it's classified — so this can't be silently overlooked.
                     let ty = self.static_type(&decl.rvalue);
-                    if ty == Type::Int || ty == Type::List {
+                    let has_devirt_path = match &ty {
+                        Type::Int | Type::Double | Type::List => true,
+                        // `Bool` is excluded even though `if:else:` inlines it — that inline has no
+                        // runtime fallback, so a stale `Bool` hint would be unsound.
+                        Type::Bool
+                        | Type::String
+                        | Type::Nil
+                        | Type::Map
+                        | Type::Set
+                        | Type::Block
+                        | Type::Instance(_)
+                        | Type::Nullable(_)
+                        | Type::Any
+                        | Type::Never => false,
+                    };
+                    if has_devirt_path {
                         self.record_local_type(&l.identifier.name, ty);
                     }
                 }
