@@ -686,6 +686,120 @@ pub struct Class<'gc> {
     pub is_abstract: bool,
 }
 
+/// How many instance fields an `Object` stores inline before spilling to the heap.
+/// Small structs (points, pairs, tree nodes — `TreeNode` has 3) fit inline, so
+/// constructing one is a *single* GC allocation instead of two (the object plus a
+/// separate boxed field slice). Tunable; 4 covers the common small-struct sizes.
+const INLINE_FIELD_CAP: usize = 3;
+
+/// Instance-variable storage for an `Object`, indexed by the class's slot layout
+/// (`Class::field_slots`). Small field counts live inline in the object itself
+/// (`Inline`) — no separate allocation; larger ones spill to a boxed slice (`Boxed`).
+/// The count is fixed at construction (a class's slot layout never shrinks), so the
+/// variant is chosen once. `Index`/`get`/`len` present a uniform slice view over both.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub enum Fields<'gc> {
+    Inline {
+        len: u8,
+        slots: [Value<'gc>; INLINE_FIELD_CAP],
+    },
+    Boxed(Box<[Value<'gc>]>),
+}
+
+impl<'gc> Fields<'gc> {
+    /// Storage for `count` fields, all initialized to `nil`. Inline when it fits.
+    pub fn new(count: usize, nil: Value<'gc>) -> Self {
+        if count <= INLINE_FIELD_CAP {
+            let mut slots = [Value::Nil; INLINE_FIELD_CAP];
+            for slot in slots.iter_mut().take(count) {
+                *slot = nil;
+            }
+            Fields::Inline {
+                len: count as u8,
+                slots,
+            }
+        } else {
+            Fields::Boxed(vec![nil; count].into_boxed_slice())
+        }
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[Value<'gc>] {
+        match self {
+            Fields::Inline { len, slots } => &slots[..*len as usize],
+            Fields::Boxed(b) => b,
+        }
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [Value<'gc>] {
+        match self {
+            Fields::Inline { len, slots } => &mut slots[..*len as usize],
+            Fields::Boxed(b) => b,
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<&Value<'gc>> {
+        self.as_slice().get(i)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            Fields::Inline { len, .. } => *len as usize,
+            Fields::Boxed(b) => b.len(),
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<'_, Value<'gc>> {
+        self.as_slice().iter()
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Value<'gc>> {
+        self.as_mut_slice().iter_mut()
+    }
+}
+
+impl<'gc> Default for Fields<'gc> {
+    fn default() -> Self {
+        Fields::Inline {
+            len: 0,
+            slots: [Value::Nil; INLINE_FIELD_CAP],
+        }
+    }
+}
+
+impl<'gc> std::ops::Index<usize> for Fields<'gc> {
+    type Output = Value<'gc>;
+    #[inline]
+    fn index(&self, i: usize) -> &Value<'gc> {
+        &self.as_slice()[i]
+    }
+}
+
+impl<'gc> std::ops::IndexMut<usize> for Fields<'gc> {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut Value<'gc> {
+        &mut self.as_mut_slice()[i]
+    }
+}
+
+impl<'gc> std::fmt::Debug for Fields<'gc> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Present as a plain slice (unchanged from the old `Box<[Value]>` debug output).
+        std::fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
+
 #[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Object<'gc> {
@@ -693,7 +807,7 @@ pub struct Object<'gc> {
     /// Instance-variable storage, indexed by the class's slot layout
     /// (`Class::field_slots`). Sized at construction to the class's field count;
     /// immediate value types have no fields and never allocate an `Object`.
-    pub fields: Box<[Value<'gc>]>,
+    pub fields: Fields<'gc>,
     pub payload: ObjectPayload<'gc>,
 }
 

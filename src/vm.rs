@@ -14,8 +14,8 @@ use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
 use crate::symbol::{Symbol, self_symbol};
 use crate::value::{
-    AnyCollect, Block, Class, EnvFrame, NamespacedName, NativeCall, NativeClass, NativeFunc,
-    Object, ObjectPayload, Value,
+    AnyCollect, Block, Class, EnvFrame, Fields, NamespacedName, NativeCall, NativeClass,
+    NativeFunc, Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, gc, gcl};
 
@@ -449,7 +449,7 @@ impl<'gc> VmState<'gc> {
     ) -> Gc<'gc, RefLock<Object<'gc>>> {
         let count = self.ensure_field_layout(mc, class_obj);
         let nil_val = self.new_nil(mc);
-        let fields = vec![nil_val; count].into_boxed_slice();
+        let fields = Fields::new(count, nil_val);
         gcl!(
             mc,
             Object {
@@ -509,7 +509,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class: class_obj,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload,
             }
         );
@@ -541,7 +541,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::String(gc!(mc, s)),
             }
         ))
@@ -555,7 +555,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::Bytes(gc!(mc, bytes)),
             }
         ))
@@ -574,7 +574,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::Symbol(gc!(mc, name.clone())),
             }
         ));
@@ -608,7 +608,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -622,7 +622,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -635,7 +635,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -715,7 +715,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -728,7 +728,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::Block(gc!(mc, block)),
             }
         ))
@@ -748,7 +748,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -770,7 +770,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
@@ -791,7 +791,7 @@ impl<'gc> VmState<'gc> {
             mc,
             Object {
                 class,
-                fields: Box::default(),
+                fields: Fields::default(),
                 payload: ObjectPayload::NativeState(gc!(mc, RefLock::new(boxed_state))),
             }
         ))
