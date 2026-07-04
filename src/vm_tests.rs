@@ -2030,6 +2030,47 @@ fn type_warnings_route_through_the_capture_sink() {
 }
 
 #[test]
+fn type_warnings_render_source_block_and_provenance_note() {
+    // A source file so the renderer can show the offending line + a caret (like an uncaught error).
+    let path = std::env::temp_dir().join(format!("qn-warn-{}.qn", std::process::id()));
+    std::fs::write(&path, "var n = 42\n").unwrap();
+    let span = crate::value::SourceInfo {
+        filename: path.display().to_string(),
+        line: 1,
+        column: 4, // the `n`
+        start: 4,
+        end: 5,
+        source_text: None,
+    };
+    let note = crate::compiler::Note {
+        message: "`n` is `Integer` (declared)".to_string(),
+        span: Some(span.clone()),
+    };
+    let mut arena =
+        Arena::<Rootable![VmState<'_>]>::new(|mc| VmState::new(mc, VmOptions::default()));
+    arena.mutate_root(|_mc, vm| {
+        vm.options.supports_color = false;
+        vm.output.capture = true;
+        vm.report_type_warnings(&[crate::compiler::Diagnostic {
+            message: "type mismatch".to_string(),
+            span: Some(span.clone()),
+            notes: vec![note.clone()],
+        }]);
+        let text = String::from_utf8_lossy(&vm.take_program_output()[0].bytes).to_string();
+        assert!(
+            text.contains("| var n = 42"),
+            "expected a source-pipe block: {text}"
+        );
+        assert!(text.contains('^'), "expected a caret: {text}");
+        assert!(
+            text.contains("`n` is `Integer` (declared)"),
+            "expected the provenance note: {text}"
+        );
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn test_vm_options_at_runtime() {
     let options = VmOptions {
         arguments: vec!["foo".to_string(), "bar".to_string()],
