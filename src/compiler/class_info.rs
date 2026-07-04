@@ -56,8 +56,9 @@ impl Compiler {
             && call.arguments.signature.identifiers[0].name == "sealed!"
     }
 
-    /// The class name in a `.mix:X` self-send (a mixin application), if this call is one.
-    fn mixin_target(call: &MethodCallNode) -> Option<&str> {
+    /// The class name in a `.mix:X` self-send (a mixin application), if this call is one —
+    /// in the qualified form (`[Ns]Name`) the class table is keyed by.
+    fn mixin_target(call: &MethodCallNode) -> Option<String> {
         let is_self = match &call.subject {
             None => true,
             Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
@@ -70,7 +71,7 @@ impl Compiler {
             return None;
         }
         match &call.arguments.expressions[0].value {
-            NodeValue::Identifier(id) => Some(id.name.as_str()),
+            NodeValue::Identifier(id) => Some(annotation_name(id)),
             _ => None,
         }
     }
@@ -98,7 +99,7 @@ impl Compiler {
                 NodeValue::MethodCall(call) if Self::is_sealed_marker(call) => sealed = true,
                 NodeValue::MethodCall(call) => {
                     if let Some(mixin) = Self::mixin_target(call) {
-                        mixins.push(Arc::from(mixin));
+                        mixins.push(Arc::from(mixin.as_str()));
                     }
                 }
                 _ => {}
@@ -108,7 +109,7 @@ impl Compiler {
             parent: class_def
                 .parent_identifier
                 .as_ref()
-                .map(|p| Arc::from(p.name.as_str())),
+                .map(|p| Arc::from(annotation_name(p).as_str())),
             mixins,
             own_selectors,
             sealed,
@@ -134,7 +135,7 @@ impl Compiler {
             if let (Ok(sel), Some(rt)) = (self.reconstruct_selector(sig), &blk.return_type) {
                 out.insert(
                     Arc::from(sel.as_str()),
-                    Type::from_annotation_name(&rt.name),
+                    Type::from_annotation_name(&annotation_name(rt)),
                 );
             }
         }

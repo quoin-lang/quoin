@@ -86,7 +86,7 @@ decl              = { (var_kw | let_kw) ~ decl_body ~ "=" ~ expr }
 var_kw            = @{ "var" ~ !IDENT_REST }
 let_kw            = @{ "let" ~ !IDENT_REST }
 decl_body         = { typed_decl_target | lvalue+ }
-typed_decl_target = { ident_lvalue ~ ":" ~ ident }
+typed_decl_target = { ident_lvalue ~ ":" ~ type_ref }
 
 lvalue = {
     splat_ignored_lvalue
@@ -229,6 +229,11 @@ namespaced_ident = { namespace ~ ident }
 instance_ident   = { "@" ~ ident }
 local_ident      = { ident }
 
+// A type-annotation reference: an optionally namespaced class name (`Integer`,
+// `[Web]Halt`, `[A/B]Thing?`). Shared by every type position (`var x: T`, `|x:T|`,
+// `|a - x:T|`, `^T`), and the seam where generics (`List(T)`) land later.
+type_ref = { namespace? ~ ident }
+
 namespace = {
     root_ns
   | full_ns
@@ -256,7 +261,7 @@ block_decls = {
 }
 // The block's return type: `^Type`, after the args. Single `^` (the block's own return —
 // `^^` is the non-local return, a control-flow marker, never a type).
-block_ret = { "^" ~ ident }
+block_ret = { "^" ~ type_ref }
 
 block_arg = {
     block_arg_ignored
@@ -264,14 +269,14 @@ block_arg = {
   | block_arg_untyped
 }
 block_arg_ignored = { "_" }
-block_arg_typed   = { arg_ident ~ ":" ~ ident }
+block_arg_typed   = { arg_ident ~ ":" ~ type_ref }
 block_arg_untyped = { arg_ident }
 
 block_decl = {
     block_decl_typed
   | block_decl_untyped
 }
-block_decl_typed   = { arg_ident ~ ":" ~ ident }
+block_decl_typed   = { arg_ident ~ ":" ~ type_ref }
 block_decl_untyped = { arg_ident }
 
 arg_ident = {

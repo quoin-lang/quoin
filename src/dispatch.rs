@@ -858,19 +858,18 @@ impl<'gc> VmState<'gc> {
         }
         let val_class = self.get_class_for_lookup(val)?;
         // Resolve the hint to a class so we can match by identity; fall back to
-        // matching by name when it isn't a known global (mirrors matches_type).
-        let target = match self
-            .globals
-            .borrow()
-            .get(&NamespacedName::new(Vec::new(), hint.to_string()))
-            .copied()
-        {
+        // matching by name when it isn't a known global. The hint is a rendered
+        // `NamespacedName` (`Foo`, `[Web]Halt`), so parse it back for the lookup:
+        // a bare hint means the root namespace, never a leaf-name match against
+        // some `[X]Foo` (annotations resolve exactly like expression-position names).
+        let hint_name = NamespacedName::parse(hint);
+        let target = match self.globals.borrow().get(&hint_name).copied() {
             Some(Value::Class(c)) => Some(c),
             _ => None,
         };
         let matches = |clz: Gc<'gc, RefLock<Class<'gc>>>| match target {
             Some(t) => Gc::ptr_eq(clz, t),
-            None => clz.borrow().name.name == hint,
+            None => clz.borrow().name == hint_name,
         };
         let mut curr = Some(val_class);
         let mut dist: i64 = 0;
