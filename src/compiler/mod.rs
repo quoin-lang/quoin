@@ -1835,7 +1835,7 @@ impl Compiler {
         // Slice 2e: devirtualize `at:`/`at:put:`/`add:` when the receiver is statically a
         // `List`. The operands a send would consume are already on the stack in send order,
         // so the op is a drop-in replacement.
-        if let Some(op) = self.list_devirt_op(call, &selector, num_components) {
+        if let Some(op) = self.collection_devirt_op(call, &selector, num_components) {
             bytecode.push(op);
             return Ok(());
         }

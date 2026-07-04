@@ -6,20 +6,24 @@ use super::*;
 impl Compiler {
     /// The devirtualized `List` op for a keyword send whose receiver is statically a `List`
     /// (Slice 2e), or `None` to fall through to a normal send.
-    pub(super) fn list_devirt_op(
+    pub(super) fn collection_devirt_op(
         &self,
         call: &MethodCallNode,
         selector: &str,
         num_args: usize,
     ) -> Option<Instruction> {
         let subject = call.subject.as_ref()?;
-        if self.static_type(subject) != Type::List {
-            return None;
-        }
-        match (selector, num_args) {
-            ("at:", 1) => Some(Instruction::ListGet),
-            ("at:put:", 2) => Some(Instruction::ListSet),
-            ("add:", 1) => Some(Instruction::ListPush),
+        // List/Map/Set are sealed value types (prelude.qn), so their access methods can't be
+        // redefined — devirt to a direct op when the receiver is statically that collection. Each
+        // op falls back to the real send if the runtime receiver isn't the expected native state.
+        match (self.static_type(subject), selector, num_args) {
+            (Type::List, "at:", 1) => Some(Instruction::ListGet),
+            (Type::List, "at:put:", 2) => Some(Instruction::ListSet),
+            (Type::List, "add:", 1) => Some(Instruction::ListPush),
+            (Type::Map, "at:", 1) => Some(Instruction::MapGet),
+            (Type::Map, "at:put:", 2) => Some(Instruction::MapSet),
+            (Type::Set, "add:", 1) => Some(Instruction::SetAdd),
+            (Type::Set, "contains?:", 1) => Some(Instruction::SetHas),
             _ => None,
         }
     }

@@ -142,14 +142,12 @@ impl Compiler {
                     // compile until it's classified — so this can't be silently overlooked.
                     let ty = self.static_type(&decl.rvalue);
                     let has_devirt_path = match &ty {
-                        Type::Int | Type::Double | Type::List => true,
+                        Type::Int | Type::Double | Type::List | Type::Map | Type::Set => true,
                         // `Bool` is excluded even though `if:else:` inlines it — that inline has no
                         // runtime fallback, so a stale `Bool` hint would be unsound.
                         Type::Bool
                         | Type::String
                         | Type::Nil
-                        | Type::Map
-                        | Type::Set
                         | Type::Block
                         | Type::Instance(_)
                         | Type::Nullable(_)

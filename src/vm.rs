@@ -3549,6 +3549,84 @@ impl<'gc> VmState<'gc> {
                 }
                 return self.exec_send(mc, frame_idx, Symbol::intern("add:"), 1);
             }
+            // Devirtualized Map accessors (mirror of List). Map is `IndexMap<String, Value>`, so
+            // the key must be a String at runtime; a non-String key (or non-Map receiver) falls
+            // back to the real send.
+            Instruction::MapGet => {
+                let n = self.stack.len();
+                let key = self.stack[n - 1];
+                let receiver = self.stack[n - 2];
+                if let Value::Object(o) = key
+                    && let ObjectPayload::String(s) = o.borrow().payload
+                {
+                    let got = receiver.with_native_state::<NativeMapState, _, _>(|m| {
+                        m.get_map().get(s.as_str()).copied()
+                    });
+                    if let Ok(v) = got {
+                        self.stack.truncate(n - 2);
+                        self.push(v.unwrap_or(Value::Nil)); // missing key → nil (native `at:`)
+                        self.frames[frame_idx].ip = ip + 1;
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("at:"), 1);
+            }
+            Instruction::MapSet => {
+                let n = self.stack.len();
+                let value = self.stack[n - 1];
+                let key = self.stack[n - 2];
+                let receiver = self.stack[n - 3];
+                if let Value::Object(o) = key
+                    && let ObjectPayload::String(s) = o.borrow().payload
+                {
+                    let key_str = s.to_string(); // the map owns String keys
+                    let res = receiver.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
+                        m.get_map_mut().insert(key_str, value);
+                    });
+                    if res.is_ok() {
+                        self.stack.truncate(n - 3);
+                        self.push(receiver); // `at:put:` evaluates to the receiver
+                        self.frames[frame_idx].ip = ip + 1;
+                        return Ok(VmStatus::Running);
+                    }
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("at:put:"), 2);
+            }
+            // Devirtualized Set accessors. Set is `Vec<Value>`; membership is a linear scan by
+            // `Value` equality (matching the native `set_add`/`set_contains`).
+            Instruction::SetAdd => {
+                let n = self.stack.len();
+                let value = self.stack[n - 1];
+                let receiver = self.stack[n - 2];
+                let res = receiver.with_native_state_mut::<NativeSetState, _, _>(mc, |s| {
+                    let vec = s.get_vec_mut();
+                    if !vec.iter().any(|e| *e == value) {
+                        vec.push(value); // add iff absent
+                    }
+                });
+                if res.is_ok() {
+                    self.stack.truncate(n - 2);
+                    self.push(receiver); // `add:` evaluates to the receiver
+                    self.frames[frame_idx].ip = ip + 1;
+                    return Ok(VmStatus::Running);
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("add:"), 1);
+            }
+            Instruction::SetHas => {
+                let n = self.stack.len();
+                let value = self.stack[n - 1];
+                let receiver = self.stack[n - 2];
+                let found = receiver.with_native_state::<NativeSetState, _, _>(|s| {
+                    s.get_vec().iter().any(|e| *e == value)
+                });
+                if let Ok(found) = found {
+                    self.stack.truncate(n - 2);
+                    self.push(Value::Bool(found));
+                    self.frames[frame_idx].ip = ip + 1;
+                    return Ok(VmStatus::Running);
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("contains?:"), 1);
+            }
             Instruction::Send(selector, num_args) => {
                 let (selector, num_args) = (*selector, *num_args);
                 return self.exec_send(mc, frame_idx, selector, num_args);
