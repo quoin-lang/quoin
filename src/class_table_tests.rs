@@ -143,6 +143,37 @@ fn inherited_return_finds_nearest_ancestor_then_object_fallback() {
 }
 
 #[test]
+fn declared_return_prefers_own_then_walks_the_chain_to_object() {
+    let t = ClassTable::new();
+    t.add_returns("Object", returns(&[("defined?", Type::Bool)]));
+    t.insert(
+        "Animal",
+        sig(Some("Object"), &[], &["make", "legs"], false, false),
+    );
+    t.add_returns(
+        "Animal",
+        returns(&[
+            ("make", Type::Instance(Arc::from("Animal"))),
+            ("legs", Type::Int),
+        ]),
+    );
+    t.insert("Dog", sig(Some("Animal"), &[], &["legs"], false, false));
+    t.add_returns("Dog", returns(&[("legs", Type::String)])); // Dog's OWN override of `legs`
+
+    // Own return wins — unlike `inherited_return`, `declared_return` starts at the class itself.
+    assert_eq!(t.declared_return("Dog", "legs"), Some(Type::String));
+    // No own return → the nearest ancestor's.
+    assert_eq!(
+        t.declared_return("Dog", "make"),
+        Some(Type::Instance(Arc::from("Animal")))
+    );
+    // Reaches the universal `Object` contract through the parent chain (`list.s → String`).
+    assert_eq!(t.declared_return("Dog", "defined?"), Some(Type::Bool));
+    // Unknown selector → None (a safe miss → `Any` at the call site).
+    assert!(t.declared_return("Dog", "fly").is_none());
+}
+
+#[test]
 fn insert_preserves_accumulated_returns_across_a_returnless_overwrite() {
     let t = ClassTable::new();
     // AST-recorded returns land first…
