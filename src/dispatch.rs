@@ -689,6 +689,18 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// The declared checker return type of a candidate, or `None`. Native methods carry it via
+    /// `.returns(..)` (Fork-1b native half); user blocks return `None` here — their declared
+    /// returns reach the checker via the AST-recording path, not runtime introspection (the
+    /// compiler half of Fork-1b, still deferred).
+    pub(crate) fn candidate_ret_type(&self, method_val: Value<'gc>) -> Option<String> {
+        if self.get_block_from_method(method_val).is_some() {
+            None
+        } else {
+            self.native_method_ret_type(method_val)
+        }
+    }
+
     /// A guarded variant's guard for display: its syntax-highlighted source (e.g.
     /// `{x > 5}`), or a colorized `{...}` placeholder when source text is absent.
     /// `None` for an unguarded variant.
@@ -819,6 +831,13 @@ impl<'gc> VmState<'gc> {
     fn native_method_param_types(&self, method_val: Value<'gc>) -> Option<Vec<String>> {
         method_val
             .with_native_state::<NativeMethodState, _, _>(|m| m.native_param_types())
+            .ok()
+            .flatten()
+    }
+
+    fn native_method_ret_type(&self, method_val: Value<'gc>) -> Option<String> {
+        method_val
+            .with_native_state::<NativeMethodState, _, _>(|m| m.native_ret_type())
             .ok()
             .flatten()
     }

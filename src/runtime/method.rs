@@ -17,6 +17,9 @@ pub enum MethodBody {
         /// `None` = untyped/legacy native method (scored as a fallback); `Some` =
         /// scored by these declared parameter types like a user method.
         param_types: Option<Vec<String>>,
+        /// Declared checker return type (Fork-1b native half), e.g. `Some("String")`. Compile-time
+        /// only — never consulted at dispatch; surfaced via `introspect` for the type checker.
+        ret_type: Option<String>,
     },
     /// An extension-backed method (Phase 3): the selector dispatches over the socket to `ext`
     /// (the owning `Extension` instance, kept GC-rooted via the method table). Whether the send
@@ -51,10 +54,15 @@ impl NativeMethodState {
         selector: String,
         func: NativeFunc,
         param_types: Option<Vec<String>>,
+        ret_type: Option<String>,
     ) -> Self {
         Self {
             selector,
-            body: MethodBody::Native { func, param_types },
+            body: MethodBody::Native {
+                func,
+                param_types,
+                ret_type,
+            },
             is_extension: false,
             next: None,
         }
@@ -108,6 +116,15 @@ impl NativeMethodState {
     pub fn native_param_types(&self) -> Option<Vec<String>> {
         match &self.body {
             MethodBody::Native { param_types, .. } => param_types.clone(),
+            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
+        }
+    }
+
+    /// Declared checker return type for a native method (Fork-1b), or `None` for a user block,
+    /// an extension body, or a native method that didn't declare one via `.returns(..)`.
+    pub fn native_ret_type(&self) -> Option<String> {
+        match &self.body {
+            MethodBody::Native { ret_type, .. } => ret_type.clone(),
             MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
         }
     }

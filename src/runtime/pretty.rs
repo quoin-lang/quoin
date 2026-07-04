@@ -620,6 +620,7 @@ fn variant_signature(m: &NativeMethodState) -> String {
         &m.selector,
         &MethodVariant {
             param_types,
+            ret_type: None,
             guarded,
             native,
             source: None,

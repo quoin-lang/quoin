@@ -1,5 +1,4 @@
 use super::*;
-use rustc_hash::FxHashMap;
 use crate::instruction::{Constant, SharedBytecode, SharedSourceMap, StaticBlock};
 use crate::parser::ast::NodeValue;
 use crate::runtime::block::build_block_class;
@@ -16,6 +15,7 @@ use crate::runtime::regex::build_regex_class;
 use crate::runtime::string::build_string_class;
 use crate::value::{NativeClassBuilder, OpaqueState};
 use gc_arena::{Arena, Rootable};
+use rustc_hash::FxHashMap;
 
 fn native_add<'gc>(
     vm: &mut VmState<'gc>,
@@ -141,8 +141,13 @@ where
         }
 
         // Register standard native functions we might need
-        let native_val =
-            vm.new_native_method(mc, "+".to_string(), NativeFunc::Legacy(native_add), None);
+        let native_val = vm.new_native_method(
+            mc,
+            "+".to_string(),
+            NativeFunc::Legacy(native_add),
+            None,
+            None,
+        );
         vm.globals
             .borrow_mut(mc)
             .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);
@@ -472,6 +477,7 @@ fn test_native_methods_are_chainable() {
             mc,
             "can?:".to_string(),
             NativeFunc::Legacy(|vm, mc, _receiver, _args| Ok(vm.new_nil(mc))),
+            None,
             None,
         );
         VmState::append_method_to_chain(mc, native_method, appended)
@@ -1419,6 +1425,7 @@ fn test_mixin_method_lookup_and_instance_vars() {
                                 Ok(vm.new_string(mc, "Point".to_string()))
                             }),
                             None,
+                            None,
                         ),
                     );
                     m
@@ -1509,8 +1516,13 @@ fn test_execute_block_helper() {
         );
 
         // Register standard native functions we need (+ operator)
-        let native_val =
-            vm.new_native_method(mc, "+".to_string(), NativeFunc::Legacy(native_add), None);
+        let native_val = vm.new_native_method(
+            mc,
+            "+".to_string(),
+            NativeFunc::Legacy(native_add),
+            None,
+            None,
+        );
         vm.globals
             .borrow_mut(mc)
             .insert(NamespacedName::new(Vec::new(), "+".to_string()), native_val);

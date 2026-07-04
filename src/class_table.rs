@@ -63,8 +63,9 @@ impl ClassSig {
             .map(|m| Arc::from(m.selector.as_str()))
             .collect();
         let mut method_params = HashMap::new();
+        let mut method_returns = HashMap::new();
         for m in info.instance_methods.iter().chain(&info.class_methods) {
-            // A single variant with every parameter typed fixes the arg types unambiguously.
+            // A single variant fixes the arg types (all typed) and/or the return unambiguously.
             if let [variant] = m.variants.as_slice() {
                 if variant.param_types.iter().all(Option::is_some) {
                     let types = variant
@@ -73,6 +74,14 @@ impl ClassSig {
                         .map(|p| Type::from_annotation_name(p.as_deref().unwrap()))
                         .collect();
                     method_params.insert(Arc::from(m.selector.as_str()), types);
+                }
+                // Native return declared via `.returns(..)` (Fork-1b native half). `insert`'s
+                // per-selector merge lets these coexist with AST-recorded returns.
+                if let Some(ret) = &variant.ret_type {
+                    method_returns.insert(
+                        Arc::from(m.selector.as_str()),
+                        Type::from_annotation_name(ret),
+                    );
                 }
             }
         }
@@ -84,8 +93,7 @@ impl ClassSig {
             has_catch_all: false,
             from_vm: true,
             method_params,
-            // VM sigs carry no return types yet (Fork-1b); `insert` preserves any AST-recorded ones.
-            method_returns: HashMap::new(),
+            method_returns,
         }
     }
 }
@@ -111,25 +119,6 @@ pub fn populate_from_vm<'gc>(vm: &crate::vm::VmState<'gc>, table: &ClassTable) {
             table.insert(&g.name, ClassSig::from_class_info(&info));
         }
     }
-    seed_native_object_returns(table);
-}
-
-/// Native `Object` methods have no `^Ret` AST header (they're Rust), so their universal return
-/// contracts are recorded here — one source shared by both the return-covariance check and
-/// object-rooted send typing (`x.s → String`). The Rust impls always return these; a Quoin override
-/// that *declares* an incompatible return is caught by covariance, and an undeclared one is a
-/// best-effort miss (false-negative only), per the gradual contract. `add_returns` merges, so this
-/// is idempotent across the per-compile-site calls and never clobbers structural sig fields.
-fn seed_native_object_returns(table: &ClassTable) {
-    table.add_returns(
-        "Object",
-        [
-            (Arc::from("s"), Type::String),
-            (Arc::from("pp"), Type::String),
-        ]
-        .into_iter()
-        .collect(),
-    );
 }
 
 /// A shared, mutable map `class name → ClassSig`, threaded through every `Compiler` a run spawns
