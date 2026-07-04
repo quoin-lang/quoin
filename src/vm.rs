@@ -50,28 +50,19 @@ pub fn gc_pacing() -> Pacing {
     pacing
 }
 
-/// Number of direct-mapped inline-cache slots (power of two).
-const INLINE_CACHE_SIZE: usize = 8192;
 /// Argument arity an inline-cache slot's guard can encode (larger sends bypass the IC).
-const IC_MAX_ARGS: usize = 2;
+pub const IC_MAX_ARGS: usize = 2;
 
-/// A monomorphic inline-cache entry: a resolved method memoized at a specific call site,
-/// keyed by the executing bytecode pointer + `ip` and guarded so a hit is provably the same
-/// resolution. The guard captures the exact dispatch inputs the global cache keys on — the
-/// receiver and each argument's *type shape* `(kind, ptr)` — but for immediates the `kind`
-/// alone determines the class, so the probe reads a cheap `Value` discriminant instead of
-/// deriving the class. `epoch` self-evicts the slot when the method tables change; `bc_len`
-/// guards against a collected block's bytecode pointer being reused (ABA). `bc_ptr == 0` is
-/// an empty slot. Only guard-free resolutions (those the global cache also caches) are stored.
+/// A monomorphic inline-cache entry: a resolved method memoized at one call site. Lives in the
+/// executing [`Block`]'s per-`ip` cache array ([`Block::inline_cache`]), so the block+ip *is*
+/// the call-site identity — and because the executing block roots its own array, there is no
+/// pointer-reuse (ABA) to guard against. A hit still requires a live `epoch` (method tables
+/// unchanged) and matching receiver + argument type-shape guards `(kind, ptr)`; for immediates
+/// the `kind` alone fixes the class, so the probe reads a cheap `Value` discriminant instead of
+/// deriving it. `epoch == 0` is an empty slot. Only guard-free resolutions are stored.
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct ICSlot<'gc> {
-    #[collect(require_static)]
-    pub bc_ptr: usize,
-    #[collect(require_static)]
-    pub bc_len: u32,
-    #[collect(require_static)]
-    pub ip: u32,
     #[collect(require_static)]
     pub epoch: u64,
     #[collect(require_static)]
@@ -87,12 +78,22 @@ pub struct ICSlot<'gc> {
     pub callable: Option<Callable<'gc>>,
 }
 
+impl<'gc> std::fmt::Debug for ICSlot<'gc> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately does not recurse into `callable` (which would require `Callable: Debug`,
+        // and `Callable` holds a `Gc<Block>` → a `Block: Debug` cycle back through this field).
+        write!(
+            f,
+            "ICSlot {{ epoch: {}, cached: {} }}",
+            self.epoch,
+            self.callable.is_some()
+        )
+    }
+}
+
 impl<'gc> ICSlot<'gc> {
-    const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
-            bc_ptr: 0,
-            bc_len: 0,
-            ip: 0,
             epoch: 0,
             recv_kind: 0,
             recv_ptr: 0,
@@ -361,13 +362,10 @@ pub struct VmState<'gc> {
     pub output: OutputCapture,
     /// Memoized method resolution ([`DispatchCache`]).
     pub dispatch_cache: DispatchCache<'gc>,
-    /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts an
-    /// [`ICSlot`], giving O(1) invalidation of the whole inline cache.
+    /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts every
+    /// per-`Block` [`ICSlot`] at once, giving O(1) inline-cache invalidation.
     #[collect(require_static)]
     pub dispatch_epoch: u64,
-    /// Direct-mapped monomorphic inline cache ([`ICSlot`]), indexed by call site
-    /// (`bytecode ptr` + `ip`). Skips the global cache's key-build + hash on a hit.
-    pub inline_cache: Vec<ICSlot<'gc>>,
     /// The session's async-I/O backend + the deferred resource-reap queues ([`Io`]).
     #[collect(require_static)]
     pub io: Io,
@@ -485,7 +483,6 @@ impl<'gc> VmState<'gc> {
             },
             // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
             dispatch_epoch: 1,
-            inline_cache: vec![ICSlot::empty(); INLINE_CACHE_SIZE],
             io: Io {
                 backend: crate::io_backend::SmolBackend::new(),
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -2601,6 +2598,7 @@ impl<'gc> VmState<'gc> {
                             source_info: db.source_info.clone(),
                             decl_block: None,
                             source_map: db.source_map.clone(),
+                            inline_cache: RefLock::new(None),
                         }
                     )
                 });
@@ -2615,6 +2613,7 @@ impl<'gc> VmState<'gc> {
                     source_info: sb.source_info.clone(),
                     decl_block,
                     source_map: sb.source_map.clone(),
+                    inline_cache: RefLock::new(None),
                 };
                 self.new_block(mc, block)
             }
@@ -2696,38 +2695,24 @@ impl<'gc> VmState<'gc> {
         })
     }
 
-    /// Direct-mapped index for a call site (`INLINE_CACHE_SIZE` is a power of two).
-    #[inline]
-    fn ic_index(bc_ptr: usize, ip: u32) -> usize {
-        (bc_ptr
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(ip as usize))
-            & (INLINE_CACHE_SIZE - 1)
-    }
-
-    /// Probe the inline cache for a resolved method at call site (`bc_ptr`, `ip`): a hit
-    /// requires a live epoch, an exact site match (guarding block-pointer reuse via `bc_len`),
-    /// and matching receiver + argument type-shape guards. Immediates match on their cheap
-    /// `Value` discriminant with no class derivation — the whole point.
+    /// Probe the executing `block`'s inline cache at `ip`: a hit requires a live epoch (method
+    /// tables unchanged) and matching receiver + argument type-shape guards. Immediates match on
+    /// their cheap `Value` discriminant with no class derivation — the whole point. Sound with no
+    /// ABA guard: `block` is alive (it's executing), so its cache array is its own.
     #[inline]
     fn ic_probe(
         &self,
-        bc_ptr: usize,
-        bc_len: u32,
-        ip: u32,
+        block: Gc<'gc, Block<'gc>>,
+        ip: usize,
         receiver: Value<'gc>,
         args: &[Value<'gc>],
     ) -> Option<Callable<'gc>> {
         if args.len() > IC_MAX_ARGS {
             return None;
         }
-        let slot = &self.inline_cache[Self::ic_index(bc_ptr, ip)];
-        if slot.bc_ptr != bc_ptr
-            || slot.ip != ip
-            || slot.bc_len != bc_len
-            || slot.epoch != self.dispatch_epoch
-            || slot.n_args as usize != args.len()
-        {
+        let cache = block.inline_cache.borrow();
+        let slot = cache.as_ref()?.get(ip)?;
+        if slot.epoch != self.dispatch_epoch || slot.n_args as usize != args.len() {
             return None;
         }
         let (rk, rp) = value_type_guard(receiver);
@@ -2743,15 +2728,16 @@ impl<'gc> VmState<'gc> {
         slot.callable
     }
 
-    /// Fill a call site's inline-cache slot — but only for a **guard-free** resolution, i.e.
-    /// one the global cache also memoized (a guarded dispatch depends on argument *values*, not
-    /// just types, so it must never be inline-cached). The global-cache lookup here is cold: it
-    /// runs only on an IC miss, which for a monomorphic site happens once.
+    /// Fill the executing `block`'s inline-cache slot at `ip` — but only for a **guard-free**
+    /// resolution, i.e. one the global cache also memoized (a guarded dispatch depends on
+    /// argument *values*, not just types, so it must never be inline-cached). The global-cache
+    /// lookup here is cold: it runs only on an IC miss, which for a monomorphic site happens
+    /// once. The block's per-`ip` array is allocated lazily (sized to its bytecode) on first fill.
     fn ic_fill(
         &mut self,
-        bc_ptr: usize,
-        bc_len: u32,
-        ip: u32,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        ip: usize,
         receiver: Value<'gc>,
         selector: Symbol,
         args: &[Value<'gc>],
@@ -2770,6 +2756,7 @@ impl<'gc> VmState<'gc> {
         if !matches!(self.dispatch_cache.entries.get(&key), Some(Some(_))) {
             return; // uncacheable (guarded) or not a hierarchy method — don't inline-cache
         }
+        let epoch = self.dispatch_epoch;
         let (recv_kind, recv_ptr) = value_type_guard(receiver);
         let mut arg_kinds = [0u8; IC_MAX_ARGS];
         let mut arg_ptrs = [0usize; IC_MAX_ARGS];
@@ -2778,19 +2765,24 @@ impl<'gc> VmState<'gc> {
             arg_kinds[i] = ak;
             arg_ptrs[i] = ap;
         }
-        let idx = Self::ic_index(bc_ptr, ip);
-        self.inline_cache[idx] = ICSlot {
-            bc_ptr,
-            bc_len,
-            ip,
-            epoch: self.dispatch_epoch,
-            recv_kind,
-            recv_ptr,
-            n_args: args.len() as u8,
-            arg_kinds,
-            arg_ptrs,
-            callable: Some(callable),
-        };
+        // Mutate the `RefLock` field via the GC write barrier (`Gc::write` + `unlock!`), then
+        // borrow it like a plain `RefCell` — the barrier has already fired.
+        let cache_cell = gc_arena::barrier::unlock!(Gc::write(mc, block), Block, inline_cache);
+        let mut cache = cache_cell.borrow_mut();
+        if cache.is_none() {
+            *cache = Some(vec![ICSlot::empty(); block.bytecode.len()].into_boxed_slice());
+        }
+        if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
+            *slot = ICSlot {
+                epoch,
+                recv_kind,
+                recv_ptr,
+                n_args: args.len() as u8,
+                arg_kinds,
+                arg_ptrs,
+                callable: Some(callable),
+            };
+        }
     }
 
     fn exec_send(
@@ -2807,16 +2799,10 @@ impl<'gc> VmState<'gc> {
         args.reverse();
 
         let receiver = self.pop()?;
-        // Call-site identity for the inline cache: the Send's own `ip`, captured before we
-        // advance it. `bc_ptr` + `bc_len` identify (and ABA-guard) the executing bytecode.
-        let (bc_ptr, bc_len) = {
-            let b = self.frames[frame_idx].block;
-            (
-                std::rc::Rc::as_ptr(&b.bytecode.0) as usize,
-                b.bytecode.len() as u32,
-            )
-        };
-        let site_ip = self.frames[frame_idx].ip as u32;
+        // Call-site identity for the inline cache: the executing block + the Send's own `ip`,
+        // captured before we advance it.
+        let caller_block = self.frames[frame_idx].block;
+        let site_ip = self.frames[frame_idx].ip;
         self.frames[frame_idx].ip += 1; // Advance caller frame IP
 
         if let Value::Object(obj) = receiver
@@ -2829,7 +2815,7 @@ impl<'gc> VmState<'gc> {
         }
 
         // Inline-cache fast path: a hit skips `lookup_method`'s key-build + hash + hashmap.
-        if let Some(callable) = self.ic_probe(bc_ptr, bc_len, site_ip, receiver, &args) {
+        if let Some(callable) = self.ic_probe(caller_block, site_ip, receiver, &args) {
             callable.call(self, mc, Some(receiver), args, Some(selector))?;
             return Ok(VmStatus::Running);
         }
@@ -2848,7 +2834,15 @@ impl<'gc> VmState<'gc> {
             }
         };
         if let Some(callable) = method_opt {
-            self.ic_fill(bc_ptr, bc_len, site_ip, receiver, selector, &args, callable);
+            self.ic_fill(
+                mc,
+                caller_block,
+                site_ip,
+                receiver,
+                selector,
+                &args,
+                callable,
+            );
             callable.call(self, mc, Some(receiver), args, Some(selector))?;
         } else {
             // The selector may still exist with non-matching signatures; surface those

@@ -97,6 +97,7 @@ pub(crate) fn build_block_with_env<'gc>(
                 enclosing_method_id: None,
                 decl_block: None,
                 source_map: db.source_map.clone(),
+                inline_cache: RefLock::new(None),
             }
         )
     });
@@ -114,6 +115,7 @@ pub(crate) fn build_block_with_env<'gc>(
             enclosing_method_id: None,
             decl_block,
             source_map: static_block.source_map.clone(),
+            inline_cache: RefLock::new(None),
         }
     )
 }

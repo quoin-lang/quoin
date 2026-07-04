@@ -6,7 +6,7 @@ use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
 use crate::symbol::Symbol;
-use crate::vm::VmState;
+use crate::vm::{ICSlot, VmState};
 
 use gc_arena::collect::Trace;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
@@ -571,6 +571,12 @@ pub struct Block<'gc> {
     pub source_info: Option<SourceInfo>,
     pub decl_block: Option<Gc<'gc, Block<'gc>>>,
     pub source_map: SharedSourceMap,
+    /// Per-call-site monomorphic inline cache, indexed by `ip` (one slot per instruction). A bare
+    /// `RefLock` (not a separate `Gc` alloc) so an uncached block — e.g. a `new:{…}` init block —
+    /// costs nothing beyond the inline `None`; the slot array is allocated on the first cacheable
+    /// send. Because the executing block roots this array, a cached entry can never be confused
+    /// with another block's (no ABA).
+    pub inline_cache: RefLock<Option<Box<[ICSlot<'gc>]>>>,
 }
 
 #[derive(Collect, Debug)]
