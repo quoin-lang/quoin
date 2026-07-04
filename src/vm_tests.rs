@@ -2016,6 +2016,7 @@ fn type_warnings_route_through_the_capture_sink() {
         vm.report_type_warnings(&[crate::compiler::Diagnostic {
             message: "unknown type `Widget`".to_string(),
             span: None,
+            notes: vec![],
         }]);
         let chunks = vm.take_program_output();
         assert_eq!(chunks.len(), 1, "expected one captured chunk");

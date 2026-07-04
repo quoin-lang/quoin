@@ -534,6 +534,20 @@ impl<'gc> VmState<'gc> {
                 None => format!("warning: {}\n", d.message),
             };
             let _ = self.write_std(StdStream::Err, out.as_bytes());
+            // Why-chain notes (Phase 4 provenance), indented under the warning, each at its span.
+            for note in &d.notes {
+                let note_out = match &note.span {
+                    Some(s) => format!(
+                        "  {}:{}:{}: note: {}\n",
+                        s.filename,
+                        s.line,
+                        s.column + 1,
+                        note.message
+                    ),
+                    None => format!("  note: {}\n", note.message),
+                };
+                let _ = self.write_std(StdStream::Err, note_out.as_bytes());
+            }
         }
     }
 

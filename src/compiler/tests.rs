@@ -264,6 +264,32 @@ fn checker_flags_decl_mismatches() {
 }
 
 #[test]
+fn provenance_note_points_at_declaration_site() {
+    let node = crate::parser::parse_quoin_string("F <- { m -> { |^String| var n = 42; n } }");
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    c.compile_program(p).unwrap();
+    let d = c
+        .diagnostics()
+        .iter()
+        .find(|d| d.message.contains("type mismatch"))
+        .expect("expected a type-mismatch diagnostic");
+    // The why-chain note points back at where `n` got its type (Phase 4 provenance).
+    assert_eq!(d.notes.len(), 1, "expected one provenance note");
+    assert!(
+        d.notes[0].message.contains("`n` is `Integer`") && d.notes[0].message.contains("inferred"),
+        "unexpected note: {}",
+        d.notes[0].message
+    );
+    assert!(
+        d.notes[0].span.is_some(),
+        "note should point at the declaration"
+    );
+}
+
+#[test]
 fn checker_subtyping_via_class_table() {
     fn diags(src: &str) -> Vec<String> {
         let node = crate::parser::parse_quoin_string(src);
