@@ -1,0 +1,125 @@
+"* [HTTP]Server slice 1: network-free coverage of the response serializer and
+"* reason-phrase table, plus live close-mode round trips driven by the [HTTP]Client
+"* and a raw socket — client and server on the same scheduler, so the tests are
+"* self-contained (ephemeral 127.0.0.1:0 binds; Async.timeout: guards hangs).
+use std:net/http;
+use std:net/http_server;
+
+(TestSuite.new:{ var name = 'HTTPServer' }).add:{
+    .test:
+    reasonPhrases -> {
+        .is:{ [HTTP]ServerResponse.reasonFor:200 } equalTo:'OK';
+        .is:{ [HTTP]ServerResponse.reasonFor:431 } equalTo:'Request Header Fields Too Large';
+        .is:{ [HTTP]ServerResponse.reasonFor:299 } equalTo:'';  "* unregistered
+    };
+
+    .test:
+    responseSettersThread -> {
+        var resp = (([HTTP]ServerResponse.new:{ var status = 201 })
+            .contentType:'text/plain')
+            .body:'x';
+        .is:{ resp.status } equalTo:201;
+        .is:{ resp.headers } equalTo:#( #('Content-Type' 'text/plain') );
+        .is:{ resp.body.asString } equalTo:'x';  "* String body converts to Bytes
+    };
+
+    .test:
+    wireBytesFramesByContentLength -> {
+        var resp = ([HTTP]ServerResponse.new:{ var status = 200 }).body:'hi';
+        .is:{ ([HTTP]Server.wireBytesFor:resp).asStringLossy }
+            equalTo:'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi';
+        "* nil body -> Content-Length: 0; unregistered status -> bare status line.
+        var empty = [HTTP]ServerResponse.new:{ var status = 299 };
+        .is:{ ([HTTP]Server.wireBytesFor:empty).asStringLossy }
+            equalTo:'HTTP/1.1 299\r\nContent-Length: 0\r\nConnection: close\r\n\r\n';
+    };
+
+    .test:
+    wireBytesKeepsCallerHeaders -> {
+        "* Caller headers ride through; a caller-set Content-Length suppresses ours.
+        var resp = (([HTTP]ServerResponse.new:{ var status = 404 })
+            .header:'X-Trace' value:'abc')
+            .header:'content-length' value:'0';
+        var out = ([HTTP]Server.wireBytesFor:resp).asStringLossy;
+        .isTrue:{ out.starts?:'HTTP/1.1 404 Not Found\r\n' };
+        .isTrue:{ out.contains?:'X-Trace: abc\r\n' };
+        .isFalse:{ out.contains?:'Content-Length:' };                "* ours suppressed
+        .is:{ (out.splitString:'content-length').count } equalTo:2;  "* theirs, exactly once
+    };
+
+    .test:
+    roundTripAgainstClient -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                (([HTTP]ServerResponse.new:{ var status = 200 })
+                    .contentType:'text/plain')
+                    .body:(req.method + ' ' + req.target + ' 1.' + req.version)
+            }
+        };
+        server.start;
+        var resp = Async.timeout:5000 do:{
+            [HTTP]Client.get:('http://127.0.0.1:' + server.port + '/hello?x=1')
+        };
+        .is:{ resp.status } equalTo:200;
+        .is:{ resp.body.text } equalTo:'GET /hello?x=1 1.1';
+        .is:{ resp.header:'content-type' } equalTo:'text/plain';
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    requestHeaderLookupIsCaseInsensitive -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req|
+                ([HTTP]ServerResponse.new:{ var status = 200 }).body:(req.header:'X-PROBE')
+            }
+        };
+        server.start;
+        var resp = Async.timeout:5000 do:{
+            [HTTP]Client.get:('http://127.0.0.1:' + server.port + '/')
+                headers:#( #('x-probe' 'seen') )
+        };
+        .is:{ resp.body.text } equalTo:'seen';
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    malformedRequestGets400 -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req| [HTTP]ServerResponse.new:{ var status = 200 } }
+        };
+        server.start;
+        var reply = Async.timeout:5000 do:{
+            var c = TcpSocket.connect:('127.0.0.1:' + server.port);
+            c.writeAll:'BOGUS\r\n\r\n'.asBytes;
+            (ByteStream.over:c).readAll.asStringLossy
+        };
+        .isTrue:{ reply.starts?:'HTTP/1.1 400 Bad Request\r\n' };
+        server.stop;
+        server.join;
+        server.close;
+    };
+
+    .test:
+    handlerThrowGets500 -> {
+        var server = [HTTP]Server.new:{
+            var address = '127.0.0.1:0';
+            var handler = { |req| ValueError.throw:'boom' }
+        };
+        server.start;
+        var resp = Async.timeout:5000 do:{
+            [HTTP]Client.get:('http://127.0.0.1:' + server.port + '/')
+        };
+        .is:{ resp.status } equalTo:500;
+        .is:{ resp.body.text } equalTo:'';
+        server.stop;
+        server.join;
+        server.close;
+    };
+}

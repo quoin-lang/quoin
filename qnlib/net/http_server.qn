@@ -1,0 +1,228 @@
+"* ===========================================================================
+"* [HTTP]Server — the HTTP/1.1 protocol machine, pure Quoin over TcpListener.
+"*
+"*   use std:net/http_server;
+"*   var server = [HTTP]Server.new:{
+"*       var address = ':8080';
+"*       var handler = { |req|
+"*           ([HTTP]ServerResponse.new:{ var status = 200 }).body:'hello'
+"*       }
+"*   };
+"*   server.start;    "* accept in the background; stop / join / close to wind down
+"*
+"* No routing, no policy: the handler contract is *request in, response out* —
+"* the [Web] framework (qnlib/web/*) layers those on top. The only native piece
+"* is [HTTP]Parser.parseRequestHead: (the `httparse` head parser). Task per
+"* connection on the cooperative scheduler. See docs/WEB_ARCH.md.
+"*
+"* This slice is close-mode: one request per connection, Connection: close on
+"* every response, materialized Bytes bodies only. Request bodies, streaming
+"* responses, keep-alive, and the limit/timeout enforcement land in later slices.
+use std:net/http;
+
+"* An inbound request: the parsed head plus (from slice 2 on) a stream-backed
+"* [HTTP]Body. `target` is the raw request-target as sent (undecoded — percent
+"* decoding is the [Web] layer's job); `version` is the HTTP/1.x minor (0 | 1).
+[HTTP]ServerRequest <- { | @method @target @version @headers @body |
+    init: -> { |method target version headers body|
+        @method = method;
+        @target = target;
+        @version = version;
+        @headers = headers.defined?.if:{ headers } else:{ #() };
+        @body = body
+    };
+
+    method -> { @method };
+    target -> { @target };
+    version -> { @version };
+    "* Headers as a #(name value) pair list, order- and duplicate-preserving.
+    headers -> { @headers };
+    "* Case-insensitive lookup of the first header named `name`, or nil.
+    header: -> { |name| [HTTP]Response.find:@headers named:name };
+    body -> { @body };
+
+    s -> { '[HTTP]ServerRequest(' + @method + ' ' + @target + ')' }
+};
+
+"* An outbound response under construction: status, #(name value) header pairs,
+"* and a body (nil or Bytes for now; a String is converted for convenience).
+"* The setters return self so calls can be threaded. The [Web] layer aliases and
+"* reopens this class with its builder conveniences.
+[HTTP]ServerResponse <- { | @status @headers @body |
+    init: -> { |status headers body|
+        @status = status.defined?.if:{ status } else:{ 200 };
+        @headers = headers.defined?.if:{ headers } else:{ #() };
+        @body = body
+    };
+
+    .meta <-- {
+        "* The canonical reason phrase for a status code ('' when unregistered —
+        "* the phrase is display-only and an empty one is legal on the wire).
+        reasonFor: -> { |status|
+            var phrases = #{
+                '100':'Continue'
+                '101':'Switching Protocols'
+                '200':'OK'
+                '201':'Created'
+                '202':'Accepted'
+                '204':'No Content'
+                '206':'Partial Content'
+                '301':'Moved Permanently'
+                '302':'Found'
+                '303':'See Other'
+                '304':'Not Modified'
+                '307':'Temporary Redirect'
+                '308':'Permanent Redirect'
+                '400':'Bad Request'
+                '401':'Unauthorized'
+                '403':'Forbidden'
+                '404':'Not Found'
+                '405':'Method Not Allowed'
+                '406':'Not Acceptable'
+                '408':'Request Timeout'
+                '409':'Conflict'
+                '410':'Gone'
+                '411':'Length Required'
+                '413':'Content Too Large'
+                '414':'URI Too Long'
+                '415':'Unsupported Media Type'
+                '422':'Unprocessable Content'
+                '429':'Too Many Requests'
+                '431':'Request Header Fields Too Large'
+                '500':'Internal Server Error'
+                '501':'Not Implemented'
+                '502':'Bad Gateway'
+                '503':'Service Unavailable'
+                '504':'Gateway Timeout'
+            };
+            var p = phrases.at:(status.s);
+            ^p.defined?.if:{ p } else:{ '' }
+        }
+    };
+
+    status -> { @status };
+    headers -> { @headers };
+    body -> { @body };
+
+    status: -> { |code| @status = code; self };
+    header:value: -> { |name val| @headers.add:#( name val ); self };
+    contentType: -> { |ct| .header:'Content-Type' value:ct };
+    body: -> { |b|
+        (String ~ b).if:{ @body = b.asBytes; ^^self };
+        @body = b;
+        self
+    };
+
+    s -> { '[HTTP]ServerResponse(' + @status.s + ')' }
+};
+
+"* The server: bind in init (so `port` works before `start`, including after an
+"* ephemeral ':0'), accept in a background Task, one Task per connection.
+"* Termination is the caller's: `stop` cancels the accept loop (in-flight
+"* connections keep running), `join` drains them, `close` releases the port.
+[HTTP]Server <- { | @address @handler @maxHeadBytes @maxBodyBytes @headTimeoutMs
+                    @idleTimeoutMs @maxConnections @listener @tasks @acceptTask |
+    init: -> { |address handler maxHeadBytes maxBodyBytes headTimeoutMs idleTimeoutMs
+                maxConnections|
+        @address = address;
+        @handler = handler;
+        "* Accepted now so configurations are stable; enforced in a later slice
+        "* (see docs/WEB_ARCH.md, slices 2–3).
+        @maxHeadBytes = maxHeadBytes.defined?.if:{ maxHeadBytes } else:{ 16384 };
+        @maxBodyBytes = maxBodyBytes.defined?.if:{ maxBodyBytes } else:{ 8388608 };
+        @headTimeoutMs = headTimeoutMs.defined?.if:{ headTimeoutMs } else:{ 30000 };
+        @idleTimeoutMs = idleTimeoutMs.defined?.if:{ idleTimeoutMs } else:{ 60000 };
+        @maxConnections = maxConnections;
+        @tasks = #();
+        @listener = TcpListener.listen:@address
+    };
+
+    .meta <-- {
+        "* Serialize a response for the wire — a pure function, unit-testable
+        "* without a socket. The body must be materialized (nil = empty), so it is
+        "* framed by Content-Length unless the caller set that header themselves;
+        "* Connection: close is unconditional while the server is close-mode.
+        wireBytesFor: -> { |resp|
+            var body = resp.body.defined?.if:{ resp.body } else:{ Bytes.empty };
+            var head = 'HTTP/1.1 ' + resp.status.s;
+            var reason = [HTTP]ServerResponse.reasonFor:resp.status;
+            (reason == '').else:{ head = head + ' ' + reason };
+            head = head + '\r\n';
+            resp.headers.each:{ |pair| head = head + (pair.at:0) + ': ' + (pair.at:1) + '\r\n' };
+            (resp.headers.any?:{ |p| (p.at:0).lower == 'content-length' }).else:{
+                head = head + 'Content-Length: ' + body.count + '\r\n'
+            };
+            head = head + 'Connection: close\r\n\r\n';
+            ^(head.asBytes + body)
+        }
+    };
+
+    "* The bound local port (e.g. after an ephemeral ':0' bind).
+    port -> { @listener.port };
+
+    "* Begin accepting in the background and return immediately. The accept loop
+    "* runs as its own Task so `stop` can cancel it — including a parked accept.
+    start -> {
+        @acceptTask = Task.spawn:{
+            { true }.whileDo:{
+                var conn = @listener.accept;
+                @tasks.add:(Task.spawn:{ .serve:conn })
+            }
+        };
+        self
+    };
+
+    "* Stop accepting: cancel the accept loop, which aborts its parked `accept`.
+    "* In-flight connection tasks keep running — drain them with `join`.
+    stop -> { @acceptTask.defined?.if:{ @acceptTask.cancel }; self };
+
+    "* Wait for the in-flight connection tasks to finish.
+    join -> {
+        { @acceptTask.join }.catch:{};
+        Async.joinAll:@tasks
+    };
+
+    "* Release the listening socket / bound port.
+    close -> { @listener.close };
+
+    "* One connection, close-mode: read the head, dispatch, respond, close.
+    serve: -> { |conn|
+        var stream = ByteStream.over:conn;
+        var head = stream.readUntil:'\r\n\r\n';
+
+        "* Peer closed without sending anything: no response owed.
+        (head.count == 0).if:{ stream.close; ^^nil };
+
+        var parsed = nil;
+        { parsed = [HTTP]Parser.parseRequestHead:head }.catch:{ |e:ParseError|
+            ^^(.respond:([HTTP]ServerResponse.new:{ var status = 400 }) over:stream)
+        };
+        "* EOF mid-head (readUntil: returned a partial): the request never completed.
+        (parsed == nil).if:{
+            ^^(.respond:([HTTP]ServerResponse.new:{ var status = 400 }) over:stream)
+        };
+
+        var req = [HTTP]ServerRequest.new:{
+            var method = parsed.at:0;
+            var target = parsed.at:1;
+            var version = parsed.at:2;
+            var headers = parsed.at:3
+        };
+
+        var resp = nil;
+        { resp = @handler.value:req }.catch:{ |e|
+            "* Uncaught handler throw -> 500. The [Web] layer catches first and maps
+            "* errors properly; this is the transport's backstop.
+            resp = [HTTP]ServerResponse.new:{ var status = 500 }
+        };
+        .respond:resp over:stream
+    };
+
+    "* Write `resp` and close the connection. Write errors are swallowed — the
+    "* peer is already gone and there is nobody left to tell.
+    respond:over: -> { |resp stream|
+        { stream.writeAll:([HTTP]Server.wireBytesFor:resp) }.catch:{};
+        stream.close;
+        nil
+    }
+}
