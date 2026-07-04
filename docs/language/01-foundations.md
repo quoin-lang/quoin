@@ -146,7 +146,7 @@ statement.
 > - **Declare a local with `var` (mutable) or `let` (immutable)**, always with an initializer: `var x = 5`, `let pi = 3.14`. A plain `name = expr` **reassigns** an already-declared local — assigning an *undeclared* name, or reassigning a `let`, is a compile error. (`var`/`let` are soft keywords, like `use`: `variable`/`letter` are still ordinary identifiers.)
 > - Declaration/assignment is a **statement, not an expression** — you cannot nest it (`b = (a = 5)` is a parse error) or use it as a condition.
 > - Scope is **lexical**; blocks are closures that capture the enclosing scope. `var`/`let` may **shadow** an outer binding but cannot redeclare a name in the same scope. A recursive reference works — `var f = { … f … }` sees its own name.
-> - A single-target declaration may carry a **type**: `var n: Integer = 5` (drives the typed/unboxed tier). Destructuring targets are untyped.
+> - A single-target declaration may carry a **type**: `var n: Integer = 5` (drives the typed/unboxed tier). The type may be namespaced — `var f: [IO]File = …`; a bare name means the root namespace. Destructuring targets are untyped.
 > - `_` discards a value on the left-hand side.
 > - **Destructuring**: `var` declares multiple targets from a list — `var a b c = #(1 2 3)`. One splat `*rest` (or `*_`) may appear in **any** position; sub-patterns nest with `( … )`. Plain (keyword-less) `a b c = …` reassigns already-declared targets.
 > - `@name` is an **instance variable** (only meaningful inside class/method bodies — Part III; declared in the class header). `[Ns]name` / `[/]name` are namespaced globals (§20).

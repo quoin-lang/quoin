@@ -334,11 +334,11 @@ fn parse_decl(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
     let first = body_inner.next().unwrap();
     let lvalues: Vec<Arc<Node>> = match first.as_rule() {
         Rule::typed_decl_target => {
-            // ident_lvalue ~ ":" ~ ident  (single typed target)
+            // ident_lvalue ~ ":" ~ type_ref  (single typed target)
             let mut ti = first.into_inner();
             let ident_lv = ti.next().unwrap(); // Rule::ident_lvalue
-            let ty = ti.next().unwrap(); // Rule::ident
-            type_hint = Some(Arc::new(parse_ident(ty, filename, source_text)));
+            let ty = ti.next().unwrap(); // Rule::type_ref
+            type_hint = Some(Arc::new(parse_type_ref(ty, filename, source_text)));
             let lv_si = extract_source_info(ident_lv.as_span(), filename, source_text);
             let nsvar = ident_lv.into_inner().next().unwrap();
             vec![Arc::new(Node {
@@ -813,7 +813,7 @@ fn parse_block_decls(
             }
             Rule::block_ret => {
                 let ty = inner.into_inner().next().unwrap();
-                return_type = Some(Arc::new(parse_ident(ty, filename, source_text)));
+                return_type = Some(Arc::new(parse_type_ref(ty, filename, source_text)));
             }
             Rule::block => {
                 let blk = parse_block(inner, filename, source_text);
@@ -851,7 +851,11 @@ fn parse_block_arg(pair: Pair<Rule>, filename: &str, source_text: &str) -> Block
             let type_hint_id = inner_pairs.next().unwrap();
             BlockArgNode {
                 identifier: Arc::new(parse_arg_ident(arg_id, filename, source_text)),
-                type_hint: Some(Arc::new(parse_ident(type_hint_id, filename, source_text))),
+                type_hint: Some(Arc::new(parse_type_ref(
+                    type_hint_id,
+                    filename,
+                    source_text,
+                ))),
             }
         }
         Rule::block_arg_untyped => {
@@ -874,7 +878,11 @@ fn parse_block_decl(pair: Pair<Rule>, filename: &str, source_text: &str) -> Bloc
             let type_hint_id = inner_pairs.next().unwrap();
             BlockDeclNode {
                 identifier: Arc::new(parse_arg_ident(arg_id, filename, source_text)),
-                type_hint: Some(Arc::new(parse_ident(type_hint_id, filename, source_text))),
+                type_hint: Some(Arc::new(parse_type_ref(
+                    type_hint_id,
+                    filename,
+                    source_text,
+                ))),
             }
         }
         Rule::block_decl_untyped => {
@@ -927,6 +935,29 @@ fn parse_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> Identifie
         namespace: None,
         name,
         identifier_type,
+    }
+}
+
+/// A `type_ref` — an optionally namespaced type-annotation name (`Integer`, `[Web]Halt`).
+/// Mirrors `parse_nsvarident`'s namespaced arm so a namespaced type carries the same
+/// `namespace` + `IdentifierType::Namespaced` shape as an expression-position reference.
+fn parse_type_ref(pair: Pair<Rule>, filename: &str, source_text: &str) -> IdentifierNode {
+    let source_info = extract_source_info(pair.as_span(), filename, source_text);
+    let mut inner = pair.into_inner();
+    let first = inner.next().unwrap();
+    match first.as_rule() {
+        Rule::namespace => {
+            let ns_node = parse_namespace(first, filename, source_text);
+            let id = parse_ident(inner.next().unwrap(), filename, source_text);
+            IdentifierNode {
+                source_info,
+                namespace: Some(Arc::new(ns_node)),
+                name: id.name,
+                identifier_type: IdentifierType::Namespaced,
+            }
+        }
+        Rule::ident => parse_ident(first, filename, source_text),
+        _ => unreachable!(),
     }
 }
 
@@ -2300,6 +2331,138 @@ mod tests {
                 })),
                 statements: vec![integer(1)],
             }))],
+        }));
+        assert_eq!(ast, expected);
+    }
+
+    /// A namespaced type node as `parse_type_ref` builds it: `[Web]Halt`, `[A/B]Gadget`,
+    /// or the explicit root `[/]Thing` (empty path).
+    fn ns_type(path: &[&str], name: &str) -> Arc<IdentifierNode> {
+        Arc::new(IdentifierNode {
+            source_info: None,
+            namespace: Some(Arc::new(NamespaceNode {
+                source_info: None,
+                identifiers: path
+                    .iter()
+                    .map(|p| {
+                        Arc::new(IdentifierNode {
+                            source_info: None,
+                            namespace: None,
+                            name: p.to_string(),
+                            identifier_type: IdentifierType::Local,
+                        })
+                    })
+                    .collect(),
+            })),
+            name: name.to_string(),
+            identifier_type: IdentifierType::Namespaced,
+        })
+    }
+
+    fn block_with(
+        arguments: Vec<Arc<BlockArgNode>>,
+        return_type: Option<Arc<IdentifierNode>>,
+        decls: Vec<Arc<BlockDeclNode>>,
+    ) -> Arc<Node> {
+        arc_node(NodeValue::Block(BlockNode {
+            source_info: None,
+            name: None,
+            arguments,
+            decls,
+            return_type,
+            decl_block: None,
+            statements: vec![integer(1)],
+        }))
+    }
+
+    #[test]
+    fn test_parse_namespaced_type_annotations() {
+        // Typed block arg: { |e:[Web]Halt| 1; }
+        let ast = parse("{ |e:[Web]Halt| 1; };");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![Arc::new(BlockArgNode {
+                    identifier: ident_node("e", IdentifierType::Local),
+                    type_hint: Some(ns_type(&["Web"], "Halt")),
+                })],
+                None,
+                vec![],
+            )],
+        }));
+        assert_eq!(ast, expected);
+
+        // Block return type: { |x ^[Web]Halt| 1; } — with a nullable multi-segment
+        // variant ([A/B]Gadget?) on the block-local side below.
+        let ast = parse("{ |x ^[Web]Halt| 1; };");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![block_arg("x", IdentifierType::Local, None)],
+                Some(ns_type(&["Web"], "Halt")),
+                vec![],
+            )],
+        }));
+        assert_eq!(ast, expected);
+
+        // Typed block-local, multi-segment namespace + nullable: { | - g:[A/B]Gadget?| 1; }
+        let ast = parse("{ | - g:[A/B]Gadget?| 1; };");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![],
+                None,
+                vec![Arc::new(BlockDeclNode {
+                    identifier: ident_node("g", IdentifierType::Local),
+                    type_hint: Some(ns_type(&["A", "B"], "Gadget?")),
+                })],
+            )],
+        }));
+        assert_eq!(ast, expected);
+
+        // Explicit-root namespace in type position: { |x:[/]Thing| 1; } (empty path).
+        let ast = parse("{ |x:[/]Thing| 1; };");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![Arc::new(BlockArgNode {
+                    identifier: ident_node("x", IdentifierType::Local),
+                    type_hint: Some(ns_type(&[], "Thing")),
+                })],
+                None,
+                vec![],
+            )],
+        }));
+        assert_eq!(ast, expected);
+
+        // Typed declaration: var x: [IO]File = 1;
+        let ast = parse("var x: [IO]File = 1;");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![arc_node(NodeValue::Declaration(DeclarationNode {
+                kind: DeclKind::Var,
+                lvalues: vec![arc_node(NodeValue::IdentLValue(IdentLValueNode {
+                    identifier: ident_node("x", IdentifierType::Local),
+                }))],
+                type_hint: Some(ns_type(&["IO"], "File")),
+                rvalue: integer(1),
+            }))],
+        }));
+        assert_eq!(ast, expected);
+
+        // A bare type still parses exactly as before (namespace: None).
+        let ast = parse("{ |x:Integer| 1; };");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![block_arg(
+                    "x",
+                    IdentifierType::Local,
+                    Some(ident_node("Integer", IdentifierType::Local)),
+                )],
+                None,
+                vec![],
+            )],
         }));
         assert_eq!(ast, expected);
     }

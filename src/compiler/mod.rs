@@ -20,6 +20,14 @@ mod class_info;
 mod devirt;
 mod inlining;
 
+/// Canonical string form of a type-annotation (or class-name) identifier — bare for a
+/// root name (`Integer`, `Foo?`), bracket-qualified when namespaced (`[Web]Halt`).
+/// Must agree with `NamespacedName`'s `Display`, which keys `globals`, runtime dispatch
+/// hints, and `populate_from_vm`'s class-table entries.
+pub(crate) fn annotation_name(ident: &IdentifierNode) -> String {
+    NamespacedName::from_ast(ident).to_string()
+}
+
 pub struct CodeBlock {
     pub bytecode: Vec<Instruction>,
     pub source_map: Vec<Option<SourceInfo>>,
@@ -747,9 +755,9 @@ impl Compiler {
     fn prescan_class_defs(&self, program: &ProgramNode) {
         for expr in &program.expressions {
             if let NodeValue::ClassDefinition(cd) = &expr.value {
-                self.seen_types.insert(&cd.identifier.name);
-                self.class_table
-                    .insert(&cd.identifier.name, self.class_sig_from_def(cd));
+                let name = annotation_name(&cd.identifier);
+                self.seen_types.insert(&name);
+                self.class_table.insert(&name, self.class_sig_from_def(cd));
             }
         }
     }
@@ -772,7 +780,7 @@ impl Compiler {
     }
 
     fn resolve_annotation(&mut self, ident: &IdentifierNode) -> Type {
-        let ty = Type::from_annotation_name(&ident.name);
+        let ty = Type::from_annotation_name(&annotation_name(ident));
         // `T?` is unknown iff its base `T` is unknown.
         let base = match &ty {
             Type::Nullable(inner) => inner.as_ref(),
@@ -1344,7 +1352,7 @@ impl Compiler {
             else {
                 continue;
             };
-            let over = Type::from_annotation_name(&rt.name);
+            let over = Type::from_annotation_name(&annotation_name(rt));
             if self.override_return_violates(&over, &base) {
                 self.warn(
                     format!(
@@ -1654,12 +1662,15 @@ impl Compiler {
             }
             NodeValue::ClassDefinition(class_def) => {
                 let name = NamespacedName::from_ast(&class_def.identifier);
+                // Checker/class-table key: the qualified form (`[Web]Halt`), matching the
+                // `populate_from_vm` keying so AST- and VM-sourced sigs can't diverge.
+                let class_name = name.to_string();
                 // Record the class as known as soon as it's defined — covers classes in nested
                 // blocks the top-level pre-scan can't reach (a def-before-use in any scope).
-                self.seen_types.insert(&name.name);
+                self.seen_types.insert(&class_name);
                 self.class_table
-                    .insert(&name.name, self.class_sig_from_def(class_def));
-                self.check_return_covariance(&name.name, &class_def.block);
+                    .insert(&class_name, self.class_sig_from_def(class_def));
+                self.check_return_covariance(&class_name, &class_def.block);
                 let parent_name = class_def
                     .parent_identifier
                     .as_ref()
@@ -1668,15 +1679,16 @@ impl Compiler {
                 for arg in &class_def.block.arguments {
                     instance_vars.push(arg.identifier.name.clone());
                 }
-                let is_value_type =
-                    matches!(name.name.as_str(), "Integer" | "Double" | "Boolean" | "Nil");
+                let is_value_type = matches!(
+                    class_name.as_str(),
+                    "Integer" | "Double" | "Boolean" | "Nil"
+                );
                 if is_value_type && !instance_vars.is_empty() {
                     return Err(format!(
                         "value type '{}' cannot declare instance variables (@{})",
-                        name.name, instance_vars[0]
+                        class_name, instance_vars[0]
                     ));
                 }
-                let class_name = name.name.clone();
                 bytecode.push(Instruction::DefineClass {
                     name,
                     parent_name,
@@ -1700,9 +1712,10 @@ impl Compiler {
                 // signature — how the core classes (`Object <-- {}`, `nil <-- {}`, …) carry their
                 // return contracts, since they're reopened rather than defined with `<-` (Phase 3c·4).
                 if let NodeValue::Identifier(target) = &class_ext.expression.value {
+                    let target_name = annotation_name(target);
                     self.class_table
-                        .add_returns(&target.name, self.declared_method_returns(&class_ext.block));
-                    self.check_return_covariance(&target.name, &class_ext.block);
+                        .add_returns(&target_name, self.declared_method_returns(&class_ext.block));
+                    self.check_return_covariance(&target_name, &class_ext.block);
                 }
                 self.compile_node(&class_ext.expression, bytecode)?;
                 let is_value_type = Self::is_value_type_target(&class_ext.expression);
@@ -1721,10 +1734,10 @@ impl Compiler {
                     self.value_type_def_depth += 1;
                 }
                 let ext_name = match &class_ext.expression.value {
-                    NodeValue::Identifier(id) => id.name.as_str(),
-                    _ => "",
+                    NodeValue::Identifier(id) => annotation_name(id),
+                    _ => String::new(),
                 };
-                let ctx = self.collect_class_ctx(ext_name, &class_ext.block);
+                let ctx = self.collect_class_ctx(&ext_name, &class_ext.block);
                 self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_ext.block, bytecode);
                 self.class_ctx.pop();
@@ -2101,7 +2114,7 @@ impl Compiler {
             let type_name = arg
                 .type_hint
                 .as_ref()
-                .map(|id| id.name.clone())
+                .map(|id| annotation_name(id))
                 .unwrap_or_else(|| "Object".to_string());
             param_types.push(type_name);
             locals.insert(name);
@@ -2149,7 +2162,7 @@ impl Compiler {
         let expected_ret = block
             .return_type
             .as_ref()
-            .map(|rt| Type::from_annotation_name(&rt.name));
+            .map(|rt| Type::from_annotation_name(&annotation_name(rt)));
         self.return_type_stack.push(expected_ret.clone());
 
         let len = block.statements.len();

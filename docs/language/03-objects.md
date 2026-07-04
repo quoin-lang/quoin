@@ -139,7 +139,7 @@ Widget.new.hello       "* 'hi from Widget'   (found via the mixin)
 > - A selector can have several definitions distinguished by argument **type** and/or a **guard block**; dispatch picks the most specific matching one at call time.
 > - Candidates are ranked by **specificity**: a more specific parameter type wins (`Integer` beats `Object`, and an unannotated parameter counts as `:Object`), and a **guard refines** specificity — a guarded variant outranks an otherwise-equal *unguarded* one.
 > - **Definition order is not a tiebreaker.** Two distinct candidates that are equally specific *and* both match are ambiguous → `AmbiguousMethodError` (which lists the tied candidates). Keep guards mutually exclusive or distinguish by type; for *ordered* "first match wins" semantics use `case`/`~` instead.
-> - Typed parameter: `|x:Integer|`. Guard block: `|x { x > 5 }|` or `|x:Type { … }|` — the guard must return a truthy value to match. Inside a guard the arguments are bound **by name** and `self` is the **receiver**, so a guard can also use the class's instance variables and other methods.
+> - Typed parameter: `|x:Integer|` — namespaced classes work too (`|e:[Web]Halt|`), and a bare name always means the **root** namespace (it never matches some `[X]Name` by leaf name). Guard block: `|x { x > 5 }|` or `|x:Type { … }|` — the guard must return a truthy value to match. Inside a guard the arguments are bound **by name** and `self` is the **receiver**, so a guard can also use the class's instance variables and other methods.
 > - No matching variant → `MessageNotUnderstood` — and if the selector *does* exist with non-matching argument types, the error lists those filtered-out variants as a hint.
 
 ```quoin

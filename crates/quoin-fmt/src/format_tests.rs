@@ -412,3 +412,17 @@ fn long_set_wraps_one_element_per_line() {
     );
     assert!(out.ends_with("\n>\n"));
 }
+
+#[test]
+fn namespaced_type_annotations_round_trip() {
+    // Namespaced types in every annotation position survive formatting (block headers
+    // slice the source verbatim; the invariant that matters is the fmt() round-trip:
+    // same AST after the grammar learned `namespace? ~ ident` in type positions).
+    let out = fmt("run = { |e:[Web]Halt ^[A/B]Gadget - g:[IO]File| e }");
+    assert!(out.contains("e:[Web]Halt"), "{out}");
+    assert!(out.contains("^[A/B]Gadget"), "{out}");
+    assert!(out.contains("g:[IO]File"), "{out}");
+
+    let out = fmt("var x: [IO]File = openIt.value");
+    assert!(out.contains("var x: [IO]File"), "{out}");
+}

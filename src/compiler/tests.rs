@@ -103,6 +103,59 @@ fn resolver_flags_unknown_types() {
 }
 
 #[test]
+fn resolver_keys_namespaced_types_by_qualified_name() {
+    fn diags(src: &str) -> Vec<String> {
+        let node = crate::parser::parse_quoin_string(src);
+        let NodeValue::Program(p) = &node.value else {
+            panic!("expected a program");
+        };
+        let mut c = Compiler::new();
+        c.compile_program(p).unwrap();
+        c.diagnostics().iter().map(|d| d.message.clone()).collect()
+    }
+
+    // A namespaced class defined in the unit resolves silently in every type position.
+    assert!(diags("[Web]Halt <- { }; Foo <- { take -> { |h:[Web]Halt| ^^ h } }").is_empty());
+    assert!(diags("[Web]Halt <- { }; Foo <- { mk -> { |^[Web]Halt?| ^^ nil } }").is_empty());
+    assert!(diags("[A/B]Db <- { }; var x: [A/B]Db = [A/B]Db.new").is_empty());
+
+    // An unknown namespaced type is flagged with its qualified name.
+    let d = diags("Foo <- { take -> { |g:[Web]Gone| ^^ g } }");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].contains("unknown type `[Web]Gone`"), "{d:?}");
+
+    // Same-leaf classes in different namespaces are distinct: defining [Web]Thing
+    // does not make bare `Thing` known, and vice versa.
+    assert!(
+        diags("[Web]Thing <- { }; Foo <- { t -> { |x:Thing| ^^ x } }")[0]
+            .contains("unknown type `Thing`")
+    );
+    assert!(
+        diags("Thing <- { }; Foo <- { t -> { |x:[Web]Thing| ^^ x } }")[0]
+            .contains("unknown type `[Web]Thing`")
+    );
+
+    // `[/]Name` is the explicit root — canonicalized to the bare name, so it
+    // resolves against a root class without any diagnostic.
+    assert!(diags("Thing <- { }; Foo <- { t -> { |x:[/]Thing| ^^ x } }").is_empty());
+
+    // The class table is keyed by the qualified name: declared returns of a
+    // namespaced class are recorded (and retrievable) under `[Ns]Name`.
+    let node = parse_quoin_string("[Web]Svc <- { run -> { |^Integer| 5 } }");
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    c.compile_program(p).unwrap();
+    let returns = c.class_table.get("[Web]Svc").unwrap().method_returns;
+    assert_eq!(returns.get("run"), Some(&Type::Int));
+    assert!(
+        c.class_table.get("Svc").is_none(),
+        "bare-leaf key must not exist"
+    );
+}
+
+#[test]
 fn records_declared_method_returns_from_ast() {
     // Compile `src` and return the recorded returns for class `name` (Phase 3c·4a).
     fn returns_of(src: &str, name: &str) -> HashMap<Arc<str>, Type> {

@@ -10,7 +10,7 @@ Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-ob
 ## 7. Blocks & closures
 
 > **Rules**
-> - A block is `{ … }`. Parameters: `{ |a b| … }`; type hints (optional): `{ |a:Integer b| … }`; ignore a param with `_`.
+> - A block is `{ … }`. Parameters: `{ |a b| … }`; type hints (optional): `{ |a:Integer b| … }` — a hint may be namespaced (`{ |e:[Web]Halt| … }`); ignore a param with `_`.
 > - **Block-locals**: names after a `-` in the header are locals initialized to `nil` — `{ |a b - x y| … }` declares params `a b` and locals `x y`.
 > - **Named block**: `{ #name |…| … }` attaches a debug name, readable via `.name`.
 > - **Invoke**: `.value` (0 args), `.value:arg` (1 arg), `.valueWithArgs:#(…)` (N args). Also `.arity` (param count) and `.args` (param names).

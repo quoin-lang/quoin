@@ -55,6 +55,14 @@ ergonomics, opt-in, never nagging on dynamic code.
 
 Three type-syntax decisions, locked before building the parser/resolver around them:
 
+**Namespaced type names — `[Ns]Name` allowed in every type position.** All four annotation
+positions (`|x:T|`, `var x: T`, `^T`, block-local `- x:T`) share one grammar rule,
+`type_ref = namespace? ~ ident`, so `|e:[Web]Halt|` and `var f: [IO]File` parse. An annotation
+resolves exactly like an expression-position global: bare `Name` = the root namespace (never a
+leaf-name match against some `[X]Name`), `[/]Name` = explicit root (canonicalized to bare).
+Checker/`SeenTypes`/`ClassTable` keys and runtime dispatch hints all use the rendered
+`NamespacedName` form (`[Web]Halt`), matching `populate_from_vm`'s keying.
+
 **Nullable — `Integer?`.** `?` is an identifier character (so `nil?`/`empty?` are single tokens),
 which means `Integer?` lexes as *one* identifier. So nullability is a **resolver** rule, not a
 grammar change: a type-position identifier ending in `?` → `Nullable(base)`. Unambiguous because

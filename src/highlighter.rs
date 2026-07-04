@@ -186,6 +186,22 @@ mod tests {
     }
 
     #[test]
+    fn namespaced_type_annotation_is_tagged() {
+        // A namespaced type in annotation position gets the same namespace hue as an
+        // expression-position reference — in a block arg and in a `var x: T` decl.
+        let spans = highlight("{ |e:[Web]Halt| e };");
+        assert!(
+            types(&spans).contains(&HighlightType::Namespace),
+            "{spans:?}"
+        );
+        let spans = highlight("var x: [IO]File = 1;");
+        assert!(
+            types(&spans).contains(&HighlightType::Namespace),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
     fn use_with_package_tags_keyword_package_path() {
         let src = "use std:io/file;";
         let spans = highlight(src);

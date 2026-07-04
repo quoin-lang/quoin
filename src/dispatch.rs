@@ -848,25 +848,28 @@ impl<'gc> VmState<'gc> {
     fn type_distance(&self, val: Value<'gc>, hint: &str) -> Option<i64> {
         // Fast path / exact match. Also the only thing that matches a `Class` or
         // `ClassMeta` value (whose `get_class_for_lookup` returns the class itself,
-        // not a class named "Class") — mirrors matches_type's `type_name == hint`.
-        if val.type_name() == hint {
+        // not a class named "Class"). `Object` is exempt: `type_name()` reports
+        // "Object" for every plain user object, so taking this shortcut would score
+        // an untyped catch-all (`|x|` ⇒ `:Object`) at 0 — tying with, instead of
+        // losing to, an exact class match. Let the walk below rank `Object` by its
+        // real distance (or the universal fallback).
+        if val.type_name() == hint && hint != "Object" {
             return Some(0);
         }
         let val_class = self.get_class_for_lookup(val)?;
         // Resolve the hint to a class so we can match by identity; fall back to
-        // matching by name when it isn't a known global (mirrors matches_type).
-        let target = match self
-            .globals
-            .borrow()
-            .get(&NamespacedName::new(Vec::new(), hint.to_string()))
-            .copied()
-        {
+        // matching by name when it isn't a known global. The hint is a rendered
+        // `NamespacedName` (`Foo`, `[Web]Halt`), so parse it back for the lookup:
+        // a bare hint means the root namespace, never a leaf-name match against
+        // some `[X]Foo` (annotations resolve exactly like expression-position names).
+        let hint_name = NamespacedName::parse(hint);
+        let target = match self.globals.borrow().get(&hint_name).copied() {
             Some(Value::Class(c)) => Some(c),
             _ => None,
         };
         let matches = |clz: Gc<'gc, RefLock<Class<'gc>>>| match target {
             Some(t) => Gc::ptr_eq(clz, t),
-            None => clz.borrow().name.name == hint,
+            None => clz.borrow().name == hint_name,
         };
         let mut curr = Some(val_class);
         let mut dist: i64 = 0;
