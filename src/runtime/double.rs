@@ -58,20 +58,25 @@ pub fn build_double_class() -> NativeClassBuilder {
             }
             Ok(host.new_double(val.sqrt()))
         })
+        .returns("Double")
         // Rounding to a whole number yields an Integer (range-guarded). `round` is
         // half-away-from-zero (`f64::round`); `truncate` drops the fraction toward zero.
         .sdk_instance_method("floor", |host, receiver, _args| {
             Ok(host.new_int(whole_to_i64(recv!(receiver, Double).floor())?))
         })
+        .returns("Integer")
         .sdk_instance_method("ceil", |host, receiver, _args| {
             Ok(host.new_int(whole_to_i64(recv!(receiver, Double).ceil())?))
         })
+        .returns("Integer")
         .sdk_instance_method("round", |host, receiver, _args| {
             Ok(host.new_int(whole_to_i64(recv!(receiver, Double).round())?))
         })
+        .returns("Integer")
         .sdk_instance_method("truncate", |host, receiver, _args| {
             Ok(host.new_int(whole_to_i64(recv!(receiver, Double).trunc())?))
         })
+        .returns("Integer")
         // -1.0 / 0.0 / 1.0 by sign (NaN -> NaN; `f64::signum` would call +0.0 positive).
         .sdk_instance_method("sign", |host, receiver, _args| {
             let val = recv!(receiver, Double);
@@ -86,6 +91,7 @@ pub fn build_double_class() -> NativeClassBuilder {
             };
             Ok(host.new_double(s))
         })
+        .returns("Double")
         // Human string form. Explicit so `.s` never routes through the Rust Display impl.
         .sdk_instance_method("s", |host, receiver, _args| {
             let val = recv!(receiver, Double);

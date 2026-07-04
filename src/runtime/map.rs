@@ -76,6 +76,7 @@ pub fn build_map_class() -> NativeClassBuilder {
             let b = receiver.with_native_state(|m: &NativeMapState| m.map.contains_key(&key))?;
             Ok(vm.new_bool(mc, b))
         })
+        .returns("Boolean")
         .instance_method("at:", |vm, mc, receiver, args| {
             let key = arg!(args, String, 0).to_string();
             let value = receiver
@@ -96,6 +97,7 @@ pub fn build_map_class() -> NativeClassBuilder {
                 receiver.with_native_state(|m: &NativeMapState| m.get_map().len())? as i64,
             ))
         })
+        .returns("Integer")
         .instance_method("keys", |vm, mc, receiver, _args| {
             let keys_vec = receiver.with_native_state(|m: &NativeMapState| {
                 m.get_map()

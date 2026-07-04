@@ -46,17 +46,23 @@ pub fn build_integer_class() -> NativeClassBuilder {
             }
             Ok(host.new_double((val as f64).sqrt()))
         })
+        .returns("Double")
         // `floor`/`ceil`/`round`/`truncate` are identities on a whole number — return the
         // receiver unchanged, so the surface matches Double's (where they round to Integer).
         .sdk_instance_method("floor", |_host, receiver, _args| Ok(receiver))
+        .returns("Integer")
         .sdk_instance_method("ceil", |_host, receiver, _args| Ok(receiver))
+        .returns("Integer")
         .sdk_instance_method("round", |_host, receiver, _args| Ok(receiver))
+        .returns("Integer")
         .sdk_instance_method("truncate", |_host, receiver, _args| Ok(receiver))
+        .returns("Integer")
         // -1 / 0 / 1 by sign.
         .sdk_instance_method("sign", |host, receiver, _args| {
             let val = recv!(receiver, Int);
             Ok(host.new_int(val.signum()))
         })
+        .returns("Integer")
         // Human string form — the decimal digits. Explicit so `.s` never routes through the
         // Rust Display impl (which is the default `Object.s` fallback this replaces).
         .sdk_instance_method("s", |host, receiver, _args| {
