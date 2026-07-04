@@ -3,6 +3,22 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the Quoin standard library (`qnlib`) files and test suites.
 
 ## Misc
+- [ ] Fix a `RefCell already borrowed` panic under `QN_SCHED_STRESS` on the web soak.
+  `QN_SCHED_STRESS=<any seed> qn qnlib/stress/web_soak.qn` panics at
+  `VmState::ensure_field_layout` (`class.borrow_mut` during `new_object` in a child
+  task's dispatch): some *suspended* coroutine holds that class's `borrow()` across a
+  cooperative-yield boundary, and stress-mode preemption (which parks tasks at every
+  such yield, including the nested `execute_block`/`call_method` step loops) widens
+  the window enough to collide. Deterministic per workload, seed-independent; the full
+  `qn test` suite (1432 tests, incl. live-server web tests) passes under the same
+  seeds, so it needs the soak's heavier task/fiber/instantiation mix. Pre-existing —
+  the borrow is held somewhere outside the web-framework code; hunt for a
+  `Class` borrow held while calling back into Quoin (a guard/validation path, a
+  native holding a borrow across `execute_block`, or similar).
+- [ ] `.is:`/`.isTrue:` assertions inside an `each:` block wedge the `qn test`
+  harness (the suite stops at that test with no failure reported). No suite uses the
+  pattern today — found writing `47-url.qn`, worked around by unrolling. Either
+  support it or fail loudly.
 - [ ] Harden the "value types have no instance variables" check. Today the compiler
   rejects `@x` in a value-type extension whose target is *statically* a value type
   (`Integer <-- …`, `5 <-- …`, `true <-- …`). A **computed** target slips through —

@@ -1,8 +1,10 @@
 # HTTP Web Framework Architecture — `[Web]` over `[HTTP]Server`
 
-Status: **design — nothing implemented yet**. Companion to `ASYNC_ARCH.md` (the I/O
-substrate) and `qnlib/net/http.qn` (the client, whose body/framing machinery this
-design reuses). See the *Staged plan* at the bottom.
+Status: **implemented — all slices landed** (see the *Staged plan* at the bottom for
+what each contains and the *Notes from implementation*). Companion to `ASYNC_ARCH.md`
+(the I/O substrate) and `qnlib/net/http.qn` (the client, whose body/framing machinery
+the server reuses). A self-driving demo lives at
+`qnlib/presentation/25-web-framework.qn`; the soak at `qnlib/stress/web_soak.qn`.
 
 ## Decision
 
@@ -67,10 +69,10 @@ the accept loop; `join` drains in-flight connections; `close` releases the port.
   `method` uppercase String, `target` the raw request-target, `versionInt` 0|1,
   `headers` the same order/duplicate-preserving `#(name value)` pair list the client
   uses.
-- **Slice-3 hardening (optional):** `ByteStream.readUntil:delim limit:n` — same as
-  `readUntil:` but throws once `n` bytes are buffered without the delimiter. Without
+- `ByteStream.readUntil:delim limit:n` — same as `readUntil:` but throws (`IoError`,
+  kind `#limitExceeded`) once `n` bytes are buffered without the delimiter. Without
   it a single header *line* of hostile length buffers unboundedly (the head timeout
-  bounds wall-clock, not memory). Small addition to `src/runtime/streams.rs`.
+  bounds wall-clock, not memory). In `src/runtime/streams.rs`.
 
 ## Layer 1 — `[HTTP]Server` (`qnlib/net/http_server.qn`)
 
@@ -129,13 +131,21 @@ Per accepted socket, wrapped in a `ByteStream`, loop:
 
 - `[HTTP]ServerRequest` — `method`, `target` (raw), `version`, `headers` (pair
   list), `header:` (case-insensitive first match, same helper shape as
-  `[HTTP]Response.find:named:`), `body` (an `[HTTP]Body`). The framework *reopens*
-  this class with conveniences (`param:`, `query:`, `json`, …) — extension by
-  `<--` is the Quoin way to layer without wrappers.
+  `[HTTP]Response.find:named:`), `body` (an `[HTTP]Body`; empty bytes-backed when
+  the request has none, so handlers never nil-check), plus an inert `@params` slot
+  the routing layer binds into. The framework *reopens* this class with
+  conveniences (`param:`, `query:`, `json`, …) — extension by `<--` is the Quoin
+  way to layer without wrappers.
 - `[HTTP]ServerResponse` — `status`, `headers`, `body` (nil | Bytes | Generator),
-  threading setters (`status:`, `header:value:`, `contentType:` returning self).
-  Layer 2 aliases it as `[Web]Response <- [HTTP]ServerResponse` and reopens it with
-  the builder conveniences, so users only ever see `[Web]Response`.
+  threading setters (`status:`, `header:value:`, `contentType:`, `body:` returning
+  self). Layer 2's `[Web]Response` is a *subclass* carrying the builder
+  conveniences (a subclass rather than an alias, so the builders live on its meta
+  while everything an `[HTTP]ServerResponse` consumer needs is inherited).
+- Request bodies that don't own their stream: `[HTTP]Body` grew `ownsStream`
+  (draining a request body must not close the connection the response goes out on)
+  and `maxBytes` (a chunked body past it throws `[HTTP]BodyTooLarge` → 413; a
+  length-framed one is preflighted instead), plus `drained?` so the auto-drain can
+  skip materialized bodies.
 
 ## Layer 2 — the `[Web]` framework (`qnlib/web/*`)
 
@@ -170,7 +180,12 @@ app.serve:':8080'                               "* start + join (blocks)
 
 `app.start:':8080'` returns the `[HTTP]Server` handle instead (for `stop`/`join` —
 tests, graceful shutdown). `app.handle:req` is the pure core: middleware onion →
-router → render normalization → error mapping, no sockets involved.
+router → render normalization → error mapping, no sockets involved. Handler blocks
+may take the request as a parameter (`{ |req| … }`) or address it as self
+(`{ .param:'id' }`). For non-default server limits, compose manually — `app.start:`
+covers the common case; anything else is
+`([HTTP]Server.new:{ var address = …; var maxBodyBytes = …;
+var handler = { |req| app.handle:req } }).start`.
 
 ### Routing (`[Web]Route`)
 
@@ -201,9 +216,13 @@ respondTo: --> { |v:List|      [Web]Response.json:v };
 respondTo: --> { |v:Integer|   [Web]Response.status:v };
 respondTo: --> { |v:Bytes|     [Web]Response.bytes:v };
 respondTo: --> { |v:Generator| [Web]Response.stream:v };
-respondTo: --> { |v:[Web]Response| v };                    "* already a response
+respondTo: --> { |v:[HTTP]ServerResponse| v };             "* already a response
 respondTo: --> { |v| v.defined?.if:{ [Web]Response.text:v.s } else:{ [Web]Response.status:404 } }
 ```
+
+(The pass-through variant is typed on the *parent* class, so a hand-built
+`[HTTP]ServerResponse` passes too — a `[Web]Response` matches it one hierarchy hop
+away, still far ahead of the untyped catch-all.)
 
 Builders: `text:`, `html:`, `json:` / `json:status:`, `bytes:`, `status:`,
 `redirect:` / `redirect:status:`, `stream:` / `stream:contentType:` (default
@@ -211,11 +230,15 @@ Builders: `text:`, `html:`, `json:` / `json:status:`, `bytes:`, `status:`,
 
 ### Middleware
 
-Onion model. `app.use:` appends anything callable with `(req, next)` — a two-arg
-block, or an object with a matching `value:value:`-shaped method (duck typing, no
-interface machinery). `next` is a one-arg callable. A middleware may short-circuit
-by returning without calling `next`; its return value goes through the same
-`respondTo:` normalization.
+Onion model; the first `use:` is outermost. `app.use:` appends anything callable
+with `(req, next)` — a two-arg block, or any object responding to `valueWithArgs:`
+(that is the invocation the onion uses; there is no native `value:value:` — a
+repeated `value:` keyword folds into the variadic `value+:`, which `Block` doesn't
+implement). `next` is a one-arg block producing the inner response. A middleware
+may short-circuit by returning without calling `next`; its return value goes
+through the same `respondTo:` normalization. An error thrown inside unwinds the
+whole onion to the app's error mapping (outer middleware post-processing does not
+run — catch around `next` if it must).
 
 ### Errors — `HttpError`
 
@@ -239,8 +262,10 @@ reason phrase unless `app.debug:true`, which includes `e.message`).
 
 ### Request conveniences (reopening `[HTTP]ServerRequest`)
 
-- `path` — decoded path, query stripped; `rawTarget` preserved.
-- `query` — lazily parsed query-string Map; `query:'k'` single value.
+- `path` — query stripped, segments still percent-encoded (the router decodes *per
+  segment*, so an encoded `%2F` can't split the path — decoded values arrive via
+  `param:`/`query:`); `rawTarget` preserved.
+- `query` — query-string Map, parsed on demand; `query:'k'` single value.
 - `param:'id'` / `params` — route bindings (set by the router).
 - `json` — `body.json` (throws catchable `ParseError`).
 - `form` — `application/x-www-form-urlencoded` body → Map (`+` as space).
@@ -262,58 +287,87 @@ unit-testable with no network.
 | `idleTimeoutMs` (keep-alive) | 60 s | close quietly |
 | `maxConnections` | unlimited | accept → 503, close |
 
-Known v1 gap: a single delimiter-less line can buffer past `maxHeadBytes` until the
-head timeout fires — fixed by the optional `readUntil:limit:` primitive (slice 3).
+(A single delimiter-less line is bounded too: `readUntil:limit:` throws
+`#limitExceeded` → 431 without waiting for the clock.)
 
 ## Testing strategy
 
-- **No-network unit tests** (`qnlib/tests/`): `[Web]Url` codec vectors; router
-  specificity/405/params; `app.handle:` with constructed `[HTTP]ServerRequest`s —
-  the pure-core payoff.
-- **Round-trip tests**: the `tests/24-server.qn` idiom — bind `127.0.0.1:0`,
-  `Async.gather:` the server plus `[HTTP]Client` calls, `Async.timeout:` as hang
-  guard. The existing client exercises the server's chunked output and keep-alive
-  from the other side for free.
-- **Rust side**: unit tests for `parseRequestHead:` (and `readUntil:limit:` if
-  added), mirroring the existing parser tests.
-- **Soak**: a `qnlib/stress/` script — many concurrent keep-alive connections,
-  slowloris-style trickle, oversized heads/bodies.
+- **No-network unit tests** (`qnlib/tests/47-url.qn`, `48-route.qn`, and the
+  `handle:`-with-constructed-requests half of `49-webapp.qn`): the pure-core payoff.
+- **Round-trip tests** (`qnlib/tests/46-http-server.qn`, the live half of
+  `49-webapp.qn`): bind `127.0.0.1:0`, drive with the `[HTTP]Client` and raw
+  sockets, `Async.timeout:` as hang guard. The existing client exercises the
+  server's chunked output and keep-alive from the other side for free.
+- **Rust side**: unit tests for `parseRequestHead:` in `src/runtime/http.rs`.
+- **Soak**: `qnlib/stress/web_soak.qn` — concurrent client swarm + keep-alive +
+  slowloris trickle + oversized heads/bodies, every result checked.
 
 ## Staged plan
 
-Each slice lands green (tests + `cargo fmt` + `qn fmt`) and is independently useful.
+All landed, one commit per slice on `feat/web-framework`; each lands green
+(tests + `cargo fmt` + `qn fmt`) and is independently useful.
 
 - **Slice 0 — native request parser.** `[HTTP]Parser.parseRequestHead:` + Rust unit
-  tests.
+  tests. ✅
 - **Slice 1 — minimal `[HTTP]Server`.** Close-mode (no keep-alive), bytes bodies
   only, request object, response serializer, reason-phrase table; first round-trip
-  test against `[HTTP]Client`.
+  test against `[HTTP]Client`. ✅
 - **Slice 2 — body framing.** Request CL + chunked bodies via `[HTTP]Body`,
   100-continue, 413; response streaming (chunked from a Generator), HEAD
-  suppression.
+  suppression. ✅
 - **Slice 3 — keep-alive & limits.** Persistent connections, auto-drain, head/idle
   timeouts, 400/408/431 paths, `Date:` header, task-reaping registry,
-  stop/join/close; optional `readUntil:limit:` hardening.
-- **Slice 4 — `[Web]Url`.** Percent/query/form codec + no-network tests.
+  stop/join/close; `readUntil:limit:` hardening. ✅
+- **Slice 4 — `[Web]Url`.** Percent/query/form codec + no-network tests. ✅
 - **Slice 5 — router.** `[Web]Route` (`~` protocol, `bind:`), specificity dispatch,
-  405 + `Allow`, duplicate-registration error.
+  405 + `Allow`, duplicate-registration error. ✅
 - **Slice 6 — `[Web]App`.** Middleware onion, `respondTo:` conventions, `HttpError`
-  mapping, request conveniences, `handle:` pure-core tests, `serve:`/`start:`.
-- **Slice 7 — polish.** Example app, stress soak, docs pass.
+  mapping, request conveniences, `handle:` pure-core tests, `serve:`/`start:`. ✅
+- **Slice 7 — polish.** Example app, stress soak, docs pass. ✅
 
 ### File layout
 
 ```
-src/runtime/http.rs            "* + parseRequestHead:            (slice 0)
-src/runtime/streams.rs         "* + readUntil:limit: (optional)  (slice 3)
+src/runtime/http.rs            "* + parseRequestHead:             (slice 0)
+src/runtime/streams.rs         "* + readUntil:limit:              (slice 3)
 qnlib/net/http_server.qn       "* [HTTP]Server{,Request,Response} (slices 1–3)
 qnlib/web/00-url.qn            "* [Web]Url                        (slice 4)
 qnlib/web/01-error.qn          "* HttpError (root-level)          (slice 6)
-qnlib/web/02-route.qn          "* [Web]Route + router             (slice 5)
-qnlib/web/03-response.qn       "* [Web]Response alias + builders  (slice 6)
-qnlib/web/04-app.qn            "* [Web]App                        (slice 6)
-qnlib/tests/46-url.qn …        "* per-slice suites
+qnlib/web/02-route.qn          "* [Web]Route + [Web]Router        (slice 5)
+qnlib/web/03-response.qn       "* [Web]Response subclass+builders (slice 6)
+qnlib/web/04-app.qn            "* [Web]App + request conveniences (slice 6)
+qnlib/tests/46-http-server.qn  "* transport suite     (slices 1–3)
+qnlib/tests/47-url.qn … 49-webapp.qn                 "* per-slice suites
+qnlib/presentation/25-web-framework.qn               "* the demo
+qnlib/stress/web_soak.qn                             "* the soak
 ```
+
+### Notes from implementation
+
+Building the server flushed out **three latent VM bugs**, each fixed in its own
+commit with a regression test:
+
+1. **Socket reaps vs. an idle scheduler** (`runner_driver.rs`): closes were only
+   *enqueued*, and the drain ran every 10 driver steps — never before parking on
+   the reactor. Close-then-idle deadlocked (the peer waits for an EOF whose reap
+   needs a driver step that never comes); step batching made the miss routine and
+   code-shape-dependent. Fixed by flushing `socket_reap` before the reactor wait
+   (`tests/socket_close_reap.rs`).
+2. **Task-root context clobbering** (`vm_scheduler.rs`): a task parking on I/O
+   *inside* a guest fiber left its root frames in the shared `main_saved_*` slot,
+   where any other task's fiber switch overwrote them — tasks then completed
+   silently with foreign/empty contexts. Two tasks concurrently inside fiber
+   execution (client draining a chunked body while the server streamed one) was the
+   trigger. Fixed by carrying the slot per task (`tests/fiber_task_context.rs`).
+3. **Aborted I/O destroying handles** (`io_backend.rs`): the backend owned the
+   stream/listener by value across each op's await; cancelling a parked op
+   (`Async.timeout:do:` — e.g. the server's own head timeout) dropped the fd, so
+   the 408 could never be written. Fixed with drop-guard leases that return the
+   handle to the registry even when aborted (`tests/io_cancel_preserves_handles.rs`).
+
+Still open (pre-existing, logged in `QUOIN_TODO.md`): a `RefCell already borrowed`
+panic under `QN_SCHED_STRESS` that the soak exposes — a class borrow held across a
+cooperative yield somewhere outside the framework code.
 
 ## Deferred (with sketches)
 
