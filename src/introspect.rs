@@ -54,6 +54,8 @@ pub struct MethodVariant {
     /// Declared parameter types; `None` is an untyped param (the VM stores untyped as
     /// `"Object"`; normalized here).
     pub param_types: Vec<Option<String>>,
+    /// Declared return type (Fork-1b native half), or `None`; native methods via `.returns(..)`.
+    pub ret_type: Option<String>,
     pub guarded: bool,
     pub native: bool,
     pub source: Option<SourceLoc>,
@@ -274,6 +276,7 @@ fn method_info<'gc>(vm: &VmState<'gc>, selector: &str, head: Value<'gc>) -> Meth
             });
         variants.push(MethodVariant {
             param_types,
+            ret_type: vm.candidate_ret_type(method_val),
             guarded,
             native: block.is_none(),
             source,
@@ -519,6 +522,7 @@ mod tests {
     fn signature_formatting() {
         let typed = |t: &str| MethodVariant {
             param_types: vec![Some(t.to_string())],
+            ret_type: None,
             guarded: false,
             native: false,
             source: None,
@@ -528,6 +532,7 @@ mod tests {
                 "sound",
                 &MethodVariant {
                     param_types: vec![],
+                    ret_type: None,
                     guarded: false,
                     native: false,
                     source: None
@@ -541,6 +546,7 @@ mod tests {
                 "at:put:",
                 &MethodVariant {
                     param_types: vec![Some("Integer".into()), None],
+                    ret_type: None,
                     guarded: false,
                     native: false,
                     source: None
@@ -553,6 +559,7 @@ mod tests {
                 "g:",
                 &MethodVariant {
                     param_types: vec![None],
+                    ret_type: None,
                     guarded: true,
                     native: false,
                     source: None

@@ -863,9 +863,10 @@ impl<'gc> VmState<'gc> {
         selector: String,
         func: NativeFunc,
         param_types: Option<Vec<String>>,
+        ret_type: Option<String>,
     ) -> Value<'gc> {
         let class = self.get_or_create_builtin_class(mc, "Method");
-        let state = NativeMethodState::new_native(selector, func, param_types);
+        let state = NativeMethodState::new_native(selector, func, param_types, ret_type);
         let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
             mc,
@@ -1100,7 +1101,13 @@ impl<'gc> VmState<'gc> {
         // resolve to the first-declared.
         let mut inst_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
         for def in native_class.instance_methods() {
-            let node = self.new_native_method(mc, def.selector.clone(), def.func, def.param_types);
+            let node = self.new_native_method(
+                mc,
+                def.selector.clone(),
+                def.func,
+                def.param_types,
+                def.ret_type,
+            );
             if let Some(head) = inst_methods.get(&def.selector).copied() {
                 let _ = Self::append_method_to_chain(mc, head, node);
             } else {
@@ -1110,7 +1117,13 @@ impl<'gc> VmState<'gc> {
 
         let mut cls_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
         for def in native_class.class_methods() {
-            let node = self.new_native_method(mc, def.selector.clone(), def.func, def.param_types);
+            let node = self.new_native_method(
+                mc,
+                def.selector.clone(),
+                def.func,
+                def.param_types,
+                def.ret_type,
+            );
             if let Some(head) = cls_methods.get(&def.selector).copied() {
                 let _ = Self::append_method_to_chain(mc, head, node);
             } else {

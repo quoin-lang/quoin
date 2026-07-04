@@ -17,6 +17,7 @@ pub fn build_object_class() -> NativeClassBuilder {
             // Methods return plain text; color is a REPL display concern (the `=>` path).
             Ok(host.new_string(pretty::render(receiver, width, false)))
         })
+        .returns("String")
         // `pp` — a structural, canonical dump of the value graph for debugging/inspection
         // (escaped strings, instance vars, intrinsic collections). Width-aware: defaults to the
         // console width; `pp:` takes an explicit width. Never calls `.s`.
@@ -29,6 +30,7 @@ pub fn build_object_class() -> NativeClassBuilder {
             // Methods return plain text; color is a REPL display concern (the `=>` path).
             Ok(host.new_string(pretty::render(receiver, width, false)))
         })
+        .returns("String")
         .sdk_instance_method("pp:", |host, receiver, args| {
             let width = match args.first() {
                 Some(Value::Int(w)) if *w > 0 => *w as usize,

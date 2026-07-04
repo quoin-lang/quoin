@@ -10,9 +10,9 @@ use crate::vm::{ICSlot, VmState};
 
 use gc_arena::collect::Trace;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
+use rustc_hash::FxHashMap;
 use std::any::Any;
 use std::cell::RefCell;
-use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -835,6 +835,18 @@ pub struct NativeMethodDef {
     pub selector: String,
     pub func: NativeFunc,
     pub param_types: Option<Vec<String>>,
+    /// Declared checker return type (Fork-1b native half), e.g. `Some("String")`. A pure
+    /// compile-time annotation — the VM never reads it; it flows to `ClassSig.method_returns`
+    /// via `describe_class`. Set opt-in through the `.returns(..)` builder modifier.
+    pub ret_type: Option<String>,
+}
+
+/// Which method table a builder call last appended to — so `.returns(..)` knows whose
+/// most-recently-registered method to annotate.
+#[derive(Clone, Copy)]
+enum LastSide {
+    Instance,
+    Class,
 }
 
 pub trait NativeClass {
@@ -849,6 +861,7 @@ pub struct NativeClassBuilder {
     name: &'static str,
     class_methods: Vec<NativeMethodDef>,
     instance_methods: Vec<NativeMethodDef>,
+    last_side: Option<LastSide>,
 }
 
 type NativeFn = for<'a> fn(
@@ -869,34 +882,62 @@ impl NativeClassBuilder {
             name,
             class_methods: Vec::new(),
             instance_methods: Vec::new(),
+            last_side: None,
         }
     }
 
-    pub fn class_method(mut self, selector: &str, f: NativeFn) -> Self {
+    /// Append a class-side method def and remember the side for a following `.returns(..)`.
+    fn add_class(&mut self, selector: &str, func: NativeFunc, param_types: Option<Vec<String>>) {
         self.class_methods.push(NativeMethodDef {
             selector: selector.to_string(),
-            func: NativeFunc::Legacy(f),
-            param_types: None,
+            func,
+            param_types,
+            ret_type: None,
         });
+        self.last_side = Some(LastSide::Class);
+    }
+
+    /// Append an instance-side method def and remember the side for a following `.returns(..)`.
+    fn add_instance(&mut self, selector: &str, func: NativeFunc, param_types: Option<Vec<String>>) {
+        self.instance_methods.push(NativeMethodDef {
+            selector: selector.to_string(),
+            func,
+            param_types,
+            ret_type: None,
+        });
+        self.last_side = Some(LastSide::Instance);
+    }
+
+    /// Declare the checker return type of the most-recently-registered method (the native half of
+    /// Fork-1b). A pure compile-time annotation — the VM ignores it; it flows to
+    /// `ClassSig.method_returns` via `describe_class`. Composes with any builder, typed or not
+    /// (a return is orthogonal to arg-typing: `Object#s` has untyped args but a `String` return).
+    /// No-op if no method was registered yet.
+    pub fn returns(mut self, ret_type: &str) -> Self {
+        let last = match self.last_side {
+            Some(LastSide::Instance) => self.instance_methods.last_mut(),
+            Some(LastSide::Class) => self.class_methods.last_mut(),
+            None => None,
+        };
+        if let Some(def) = last {
+            def.ret_type = Some(ret_type.to_string());
+        }
+        self
+    }
+
+    pub fn class_method(mut self, selector: &str, f: NativeFn) -> Self {
+        self.add_class(selector, NativeFunc::Legacy(f), None);
         self
     }
 
     /// A class-side native method with a declared type signature (scored by type).
     pub fn typed_class_method(mut self, selector: &str, param_types: &[&str], f: NativeFn) -> Self {
-        self.class_methods.push(NativeMethodDef {
-            selector: selector.to_string(),
-            func: NativeFunc::Legacy(f),
-            param_types: type_hints(param_types),
-        });
+        self.add_class(selector, NativeFunc::Legacy(f), type_hints(param_types));
         self
     }
 
     pub fn instance_method(mut self, selector: &str, f: NativeFn) -> Self {
-        self.instance_methods.push(NativeMethodDef {
-            selector: selector.to_string(),
-            func: NativeFunc::Legacy(f),
-            param_types: None,
-        });
+        self.add_instance(selector, NativeFunc::Legacy(f), None);
         self
     }
 
@@ -907,11 +948,7 @@ impl NativeClassBuilder {
         param_types: &[&str],
         f: NativeFn,
     ) -> Self {
-        self.instance_methods.push(NativeMethodDef {
-            selector: selector.to_string(),
-            func: NativeFunc::Legacy(f),
-            param_types: type_hints(param_types),
-        });
+        self.add_instance(selector, NativeFunc::Legacy(f), type_hints(param_types));
         self
     }
 
@@ -922,11 +959,7 @@ impl NativeClassBuilder {
     // legacy `NativeFn` builders above are deleted.
 
     pub fn sdk_class_method(mut self, selector: &str, f: crate::ext_sdk::SdkFn) -> Self {
-        self.class_methods.push(NativeMethodDef {
-            selector: selector.to_string(),
-            func: NativeFunc::Sdk(f),
-            param_types: None,
-        });
+        self.add_class(selector, NativeFunc::Sdk(f), None);
         self
     }
 
@@ -936,20 +969,12 @@ impl NativeClassBuilder {
         param_types: &[&str],
         f: crate::ext_sdk::SdkFn,
     ) -> Self {
-        self.class_methods.push(NativeMethodDef {
-            selector: selector.to_string(),
-            func: NativeFunc::Sdk(f),
-            param_types: type_hints(param_types),
-        });
+        self.add_class(selector, NativeFunc::Sdk(f), type_hints(param_types));
         self
     }
 
     pub fn sdk_instance_method(mut self, selector: &str, f: crate::ext_sdk::SdkFn) -> Self {
-        self.instance_methods.push(NativeMethodDef {
-            selector: selector.to_string(),
-            func: NativeFunc::Sdk(f),
-            param_types: None,
-        });
+        self.add_instance(selector, NativeFunc::Sdk(f), None);
         self
     }
 
@@ -959,11 +984,7 @@ impl NativeClassBuilder {
         param_types: &[&str],
         f: crate::ext_sdk::SdkFn,
     ) -> Self {
-        self.instance_methods.push(NativeMethodDef {
-            selector: selector.to_string(),
-            func: NativeFunc::Sdk(f),
-            param_types: type_hints(param_types),
-        });
+        self.add_instance(selector, NativeFunc::Sdk(f), type_hints(param_types));
         self
     }
 }
