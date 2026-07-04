@@ -848,8 +848,12 @@ impl<'gc> VmState<'gc> {
     fn type_distance(&self, val: Value<'gc>, hint: &str) -> Option<i64> {
         // Fast path / exact match. Also the only thing that matches a `Class` or
         // `ClassMeta` value (whose `get_class_for_lookup` returns the class itself,
-        // not a class named "Class") — mirrors matches_type's `type_name == hint`.
-        if val.type_name() == hint {
+        // not a class named "Class"). `Object` is exempt: `type_name()` reports
+        // "Object" for every plain user object, so taking this shortcut would score
+        // an untyped catch-all (`|x|` ⇒ `:Object`) at 0 — tying with, instead of
+        // losing to, an exact class match. Let the walk below rank `Object` by its
+        // real distance (or the universal fallback).
+        if val.type_name() == hint && hint != "Object" {
             return Some(0);
         }
         let val_class = self.get_class_for_lookup(val)?;
