@@ -1,0 +1,102 @@
+"* ===========================================================================
+"* [Web]Url — the percent codec, pure Quoin (no network, fully unit-testable).
+"*
+"*   [Web]Url.encode:'a b'            "* 'a%20b'   (component encoding)
+"*   [Web]Url.decode:'h%C3%A9llo'     "* 'héllo'   (%XX + UTF-8)
+"*   [Web]Url.queryParse:'a=1&b=2'    "* #{ 'a':'1' 'b':'2' }
+"*   [Web]Url.formDecode:'q=a+b'      "* #{ 'q':'a b' }  ('+' means space)
+"*
+"* Used by the [Web] router (per-segment path decoding) and the request
+"* conveniences (query / form). See docs/WEB_ARCH.md.
+"* ===========================================================================
+
+[Web]Url <- {
+    .meta <-- {
+        "* Percent-encode `s` as a URL component: unreserved characters (RFC 3986
+        "* ALPHA / DIGIT / '-' / '.' / '_' / '~') pass through, every other UTF-8
+        "* byte becomes %XX (uppercase hex).
+        encode: -> { |s|
+            var digits = #('0' '1' '2' '3' '4' '5' '6' '7' '8' '9' 'A' 'B' 'C' 'D' 'E' 'F');
+            var out = '';
+            s.asBytes.each:{ |b|
+                (.unreserved?:b)
+                    .if:{ out = out + (Bytes.of:#( b )).asString }
+                     else:{ out = out + '%' + (digits.at:(b / 16)) + (digits.at:(b % 16)) }
+            };
+            ^out
+        };
+
+        "* Decode %XX escapes (case-insensitive hex); every other byte passes
+        "* through, and the result is read as UTF-8. '+' is NOT special here —
+        "* that is form decoding (formDecode:). A truncated or non-hex escape,
+        "* or invalid UTF-8, throws ValueError.
+        decode: -> { |s|
+            var src = s.asBytes;
+            var n = src.count;
+            var out = #();
+            var i = 0;
+            { i < n }.whileDo:{
+                var b = src.at:i;
+                (b == 37)
+                    .if:{
+                        ((i + 2) >= n).if:{
+                            ValueError.throw:('[Web]Url: truncated percent escape in \'' + s + '\'')
+                        };
+                        out.add:(((.hexDigit:(src.at:(i + 1))) * 16) + (.hexDigit:(src.at:(i + 2))));
+                        i = i + 3
+                    }
+                     else:{
+                        out.add:b;
+                        i = i + 1
+                    }
+            };
+            ^(Bytes.of:out).asString
+        };
+
+        "* Parse a query string ('a=1&b=two&flag') into a Map: keys and values
+        "* percent-decoded, a bare key mapping to '', a repeated key keeping the
+        "* LAST value, empty segments ignored. '+' stays a literal plus.
+        queryParse: -> { |s| ^[Web]Url.parse:s plusAsSpace:false };
+
+        "* application/x-www-form-urlencoded: like queryParse:, but '+' decodes
+        "* to a space (in keys and values both).
+        formDecode: -> { |s| ^[Web]Url.parse:s plusAsSpace:true };
+
+        parse:plusAsSpace: -> { |s plus|
+            var out = #{};
+            (s == '').if:{ ^^out };
+            (s.splitString:'&').each:{ |pair|
+                (pair == '').else:{
+                    var kv = pair.splitString:'=';
+                    var k = [Web]Url.decodeComponent:(kv.at:0) plusAsSpace:plus;
+                    var v = (kv.count > 1)
+                        .if:{ [Web]Url.decodeComponent:((kv.drop:1).join:'=') plusAsSpace:plus }
+                         else:{ '' };
+                    out.at:k put:v
+                }
+            };
+            ^out
+        };
+
+        "* Decode one query/form component: '+' -> space first (when asked — so
+        "* an escaped %2B still decodes to a literal plus), then the %XX pass.
+        decodeComponent:plusAsSpace: -> { |s plus|
+            ^[Web]Url.decode:(plus.if:{ (s.splitString:'+').join:' ' } else:{ s })
+        };
+
+        "* RFC 3986 unreserved byte?
+        unreserved?: -> { |b|
+            ((b >= 65) && (b <= 90)) || ((b >= 97) && (b <= 122))
+                || ((b >= 48) && (b <= 57))
+                || (b == 45) || (b == 46) || (b == 95) || (b == 126)
+        };
+
+        "* The value of one hex-digit byte; a non-hex byte throws ValueError.
+        hexDigit: -> { |b|
+            ((b >= 48) && (b <= 57)).if:{ ^^(b - 48) };
+            ((b >= 65) && (b <= 70)).if:{ ^^(b - 55) };
+            ((b >= 97) && (b <= 102)).if:{ ^^(b - 87) };
+            ValueError.throw:'[Web]Url: invalid percent escape'
+        }
+    }
+}
