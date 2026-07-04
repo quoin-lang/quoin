@@ -45,7 +45,8 @@ pub struct MethodCacheKey {
 /// pointer). The callable is transient — built by `lookup_method` and consumed by
 /// `call` within a single `Send` step — so it is never stored in a traced struct
 /// and needs no `Collect` impl (matching the `Box<dyn Callable>` it replaced).
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Collect)]
+#[collect(no_drop)]
 pub enum Callable<'gc> {
     /// A user method (a block run as a method on the receiver).
     Block(Gc<'gc, Block<'gc>>),
@@ -346,12 +347,15 @@ impl<'gc> VmState<'gc> {
     /// resolutions in *derived* classes too.
     pub fn invalidate_method_cache(&mut self) {
         self.dispatch_cache.entries.clear();
+        // Bumping the epoch invalidates every inline-cache slot at once (a slot is used
+        // only when its stored epoch matches the current one), so they self-evict.
+        self.dispatch_epoch = self.dispatch_epoch.wrapping_add(1);
     }
 
     /// Build the cache key for a lookup, or `None` if the lookup must not be cached:
     /// an eigenclass is involved (transient pointer → unsafe to key on), an argument
     /// has no dispatch class, or there are more arguments than the key encodes.
-    fn method_cache_key(
+    pub(crate) fn method_cache_key(
         &self,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
         selector: Symbol,
