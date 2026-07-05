@@ -1,6 +1,11 @@
 # AOT native compilation of the typed subset (Tier 2)
 
-*Status: v0.0–v0.2 SHIPPED behind `QN_AOT=1` (default off). v0.0/v0.1:
+*Status: v0.0–v0.3 SHIPPED — **AOT is ON by default** as of v0.3 (the
+soak); `QN_AOT=0` is the kill switch, always safe (the registry is a pure
+overlay and the interpreter path is untouched). Default-on costs ~1–2ms of
+startup on a candidate-free program; the default bench experience is
+fib_typed ~0.026s and sieve ~0.123s with everything else at baseline.
+History: v0.0–v0.2 shipped behind `QN_AOT=1` (then default off). v0.0/v0.1:
 candidate collection, Cranelift codegen (`src/codegen/`), the registry +
 `Callable::AotCall`, fuel checkpoints (prologue + loop back-edges), depth
 guard, per-task counters — fib_typed 0.654s → 0.023s (~28×). v0.2 (revised
