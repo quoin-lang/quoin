@@ -158,7 +158,12 @@ Error <- [HTTP]BodyTooLarge <- {};
                     { remaining > 0 }.whileDo:{
                         var want = (remaining < 8192).if:{ remaining } else:{ 8192 };
                         var data = st.read:want;
-                        (data.count == 0).if:{ remaining = 0 }
+                        "* EOF before the promised length is a truncated body, not success —
+                        "* silently returning a short body is indistinguishable from a good 200.
+                        (data.count == 0).if:{
+                            IoError.throw:('HTTP: connection closed with ' + remaining
+                                + ' of ' + len + ' Content-Length bytes unread') kind:#unexpectedEof
+                        }
                         else:{
                             ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt);
                             remaining = remaining - data.count
