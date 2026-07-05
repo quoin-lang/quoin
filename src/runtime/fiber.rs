@@ -3,6 +3,7 @@ use crate::fiber::{Fiber, run_vm_loop};
 use crate::gc;
 use crate::value::{AnyCollect, NativeCall, NativeClassBuilder, Value};
 use crate::vm::Frame;
+use crate::vm_scheduler::TaskId;
 
 use gc_arena::Gc;
 use gc_arena::collect::{DynCollect, Trace};
@@ -54,6 +55,15 @@ pub struct NativeFiberState {
     /// This coroutine's `Yielder`, stored as a raw address. The scheduler loads
     /// it into `VmState.yielder` before resuming this fiber. Not GC data.
     yielder: Option<usize>,
+    /// The task this fiber is currently live inside — as its current fiber or an
+    /// ancestor on its resume chain — set at `do_resume_switch`, cleared when the
+    /// fiber yields or completes. While set, the fiber's real execution context is
+    /// live in (or stashed with) that task, not in this state's `stack`/`frames`,
+    /// so resuming it from any other task must be refused (`fiber_resume`): it
+    /// would load an empty context and re-enter the coroutine at a foreign suspend
+    /// point, corrupting both tasks and ultimately aborting the process. Plain
+    /// data, not GC state.
+    pub owner: Option<TaskId>,
 }
 
 impl NativeFiberState {
@@ -69,6 +79,7 @@ impl NativeFiberState {
             result: None,
             error: None,
             yielder: None,
+            owner: None,
         }
     }
 

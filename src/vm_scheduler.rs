@@ -293,7 +293,8 @@ impl<'gc> VmState<'gc> {
             }
             _ => {}
         }
-        // The only Running fiber is the current one; ancestors are Suspended.
+        // Within the current task, the only Running fiber is the current one and
+        // ancestors are Suspended — these two checks cover the current task's chain.
         if self.sched.current_fiber == Some(fiber_val) {
             return Err(self.raise_fiber_error(mc, "a Fiber cannot resume itself"));
         }
@@ -307,6 +308,24 @@ impl<'gc> VmState<'gc> {
                 mc,
                 "cannot resume a Fiber that is currently resuming this one (would deadlock)",
             ));
+        }
+        // Cross-task: a fiber live inside ANOTHER task (its current fiber, or an
+        // ancestor on its resume chain — that task may be parked mid-fiber on I/O,
+        // or preempted) has its real context live in or stashed with that task,
+        // not in its own state. Re-entering it from here would load an empty
+        // context and resume its coroutine at a foreign suspend point — corrupting
+        // both tasks, failing the fiber, and aborting the whole process when the
+        // owning task later re-resumes the now-completed coroutine.
+        if let Some(owner) = fiber_val
+            .with_native_state::<NativeFiberState, _, _>(|s| s.owner)
+            .map_err(QuoinError::Other)?
+        {
+            if owner != self.sched.current_task {
+                return Err(self.raise_fiber_error(
+                    mc,
+                    "cannot resume a Fiber that is running in another task",
+                ));
+            }
         }
 
         if let Some(yielder) = unsafe { self.get_yielder() } {
@@ -645,6 +664,13 @@ impl<'gc> VmState<'gc> {
             fiber_val.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.status = status);
     }
 
+    /// Record which task `fiber_val` is live inside (`None` = not in any task's
+    /// resume chain). Set on resume, cleared on yield/completion; `fiber_resume`
+    /// refuses a cross-task resume while it is set.
+    fn set_fiber_owner(&self, mc: &Mutation<'gc>, fiber_val: Value<'gc>, owner: Option<TaskId>) {
+        let _ = fiber_val.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.owner = owner);
+    }
+
     /// Save the live VM execution context into the slot for `who` (`None` = main).
     fn save_fiber_context(
         &mut self,
@@ -734,6 +760,9 @@ impl<'gc> VmState<'gc> {
                 .map_err(QuoinError::Other)?;
         }
         self.set_fiber_status(mc, fiber_val, FiberStatus::Running);
+        // The incoming fiber joins this task's resume chain. The outgoing one (now
+        // Suspended, an ancestor on the chain) keeps its owner — it is still live here.
+        self.set_fiber_owner(mc, fiber_val, Some(self.sched.current_task));
         Ok(())
     }
 
@@ -747,6 +776,9 @@ impl<'gc> VmState<'gc> {
         self.save_fiber_context(mc, outgoing)?;
         if let Some(of) = outgoing {
             self.set_fiber_status(mc, of, FiberStatus::Suspended);
+            // A yield removes the fiber from this task's resume chain: its context
+            // is back in its own state, so any task may legally resume it now.
+            self.set_fiber_owner(mc, of, None);
         }
         let resumer = self.sched.resume_stack.pop().unwrap_or(None);
         self.sched.current_fiber = resumer;
@@ -787,6 +819,7 @@ impl<'gc> VmState<'gc> {
                     });
                 }
             }
+            self.set_fiber_owner(mc, finished, None);
         }
         // The finished fiber's execution context is discarded.
         self.stack.clear();

@@ -8,7 +8,8 @@ buggy vs. correct behavior; run any of them from the repo root:
 
 These are *repros*, not tests — several demonstrate bugs that are still open, so
 this directory is not part of `qn test`. The fixed ones are additionally wired
-into `tests/park_identity.rs` as self-checking cargo regression tests.
+into `tests/park_identity.rs` and `tests/fiber_ownership.rs` as self-checking
+cargo regression tests.
 
 ## sched/ — scheduler & task-identity
 
@@ -21,9 +22,9 @@ into `tests/park_identity.rs` as self-checking cargo regression tests.
 | `nested_timeout_min.qn` | minimal 2-statement form: nested `Async.timeout:` blames an outer deadline (`ms=22222`) instead of the inner `ms=2` | **FIXED** (global `park_seq`) |
 | `nested_timeout_matrix.qn` | depth matrix 0–7 enclosing timeouts, bare and `onCancel:` forms (pre-fix failed at n=3,5,6) | **FIXED** (global `park_seq`) |
 | `cancel_woken_joiner.qn` | cancelling a joiner already woken by the joined task's completion double-enqueues it → "task slot is empty" panic | **FIXED** (`wake.is_none()` guard) |
-| `cross_task_fiber.qn` | resuming a fiber that is suspended inside another *parked* task corrupts it, then aborts the process ("attempt to resume a completed coroutine") | OPEN |
-| `resume_while_parked.qn` | same abort, minimal 2-task form, 100% without stress | OPEN |
-| `shared_fiber_resume.qn` | same abort, yield-suspended variant (~29/50 stress seeds) | OPEN |
+| `cross_task_fiber.qn` | resuming a fiber that is suspended inside another *parked* task corrupts it, then aborts the process ("attempt to resume a completed coroutine") | **FIXED** (fiber owner guard) |
+| `resume_while_parked.qn` | same abort, minimal 2-task form, 100% without stress | **FIXED** (fiber owner guard) |
+| `shared_fiber_resume.qn` | same abort, yield-suspended variant (~29/50 stress seeds; 0/50 post-fix) | **FIXED** (fiber owner guard) |
 | `empty_gather.qn` | `Async.gather:#()` parks the caller forever; program exits 0 with the rest unexecuted | OPEN |
 | `deadlock_exit.qn` | a globally deadlocked program exits silently with status 0 — indistinguishable from success | OPEN |
 | `lost_value_on_cancel.qn` | a committed channel handoff is dropped when the receiver is cancelled before running (send already reported success) | OPEN |
