@@ -87,7 +87,7 @@ impl Compiler {
 
     /// The class name in a `.mix:X` self-send (a mixin application), if this call is one —
     /// in the qualified form (`[Ns]Name`) the class table is keyed by.
-    fn mixin_target(call: &MethodCallNode) -> Option<String> {
+    pub(super) fn mixin_target(call: &MethodCallNode) -> Option<String> {
         let is_self = match &call.subject {
             None => true,
             Some(s) => matches!(&s.value, NodeValue::Identifier(id) if id.name == "self"),
@@ -156,15 +156,11 @@ impl Compiler {
     }
 
     /// Declared return types (`selector → Type`) for the methods written directly in a class body —
-    /// only those with a `^Ret` header. Pure (`&self`, no diagnostics): the return-type check
-    /// already warns on unknown annotations, so recording resolves names without re-warning. Feeds
-    /// `ClassSig::method_returns` for both `Foo <- {}` defs and `Foo <-- {}` reopens (Phase 3c·4).
-    pub(super) fn declared_method_returns(&self, block: &BlockNode) -> HashMap<Arc<str>, Type> {
-        self.declared_method_returns_with_vars(block, &[])
-    }
-
-    /// `declared_method_returns` with the class header's type parameters in
-    /// scope, so `^T` records as `Var("T")` rather than an unknown instance.
+    /// only those with a `^Ret` header, with the class's type parameters in scope so `^T` records
+    /// as `Var("T")` rather than an unknown instance. Pure (`&self`, no diagnostics): the
+    /// return-type check already warns on unknown annotations, so recording resolves names without
+    /// re-warning. Feeds `ClassSig::method_returns` for both `Foo <- {}` defs and `Foo <-- {}`
+    /// reopens (Phase 3c·4; reopens pull the vars from the class table).
     pub(super) fn declared_method_returns_with_vars(
         &self,
         block: &BlockNode,

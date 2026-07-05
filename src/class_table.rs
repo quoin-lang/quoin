@@ -79,6 +79,18 @@ impl ClassSig {
             "Map" => vec![Arc::from("V")],
             _ => Vec::new(),
         };
+        // A native method whose CHECKER signature can't ride its dispatch
+        // hints: `Block(T ^Any)` as a hint string would make the method
+        // dispatch-unreachable (G0's erasure lesson), so the checker-only
+        // shape is seeded here, like the collections' `type_params` above.
+        // Set's `each:` is the one native the Iterate mixin rides on
+        // (List/Map/Range define theirs in qnlib — GENERICS_ARCH.md §11.4).
+        if info.name == "Set" {
+            method_params.insert(
+                Arc::from("each:"),
+                vec![Type::parse_annotation_str("Block(T ^Any)", &type_params)],
+            );
+        }
         for m in info.instance_methods.iter().chain(&info.class_methods) {
             // A single variant fixes the arg types (all typed) and/or the return unambiguously.
             if let [variant] = m.variants.as_slice() {
@@ -123,6 +135,11 @@ pub fn populate_from_vm<'gc>(vm: &crate::vm::VmState<'gc>, table: &ClassTable) {
         if !matches!(g.kind, crate::introspect::GlobalKind::Class) {
             continue;
         }
+        // Every VM-known class is a KNOWN type name — native classes (e.g.
+        // `KeyValuePair`) must not draw `unknown type` when used in an
+        // annotation. Idempotent set insert; runs before the authoritative
+        // skip below so it covers every class on every compile.
+        vm.options.seen_types.insert(&g.name);
         let already_authoritative = table
             .0
             .borrow()
@@ -158,15 +175,27 @@ impl ClassTable {
                     .entry(sel.clone())
                     .or_insert_with(|| ty.clone());
             }
-            // Type params and AST-recorded generic method params survive a
-            // from_vm overwrite the same way returns do.
+            // Type params survive a from_vm overwrite the same way returns do.
             if sig.type_params.is_empty() && !existing.type_params.is_empty() {
                 sig.type_params = existing.type_params.clone();
             }
-            for (sel, ps) in &existing.method_params {
-                sig.method_params
-                    .entry(sel.clone())
-                    .or_insert_with(|| ps.clone());
+            if sig.from_vm {
+                // A `populate_from_vm` refresh: its param entries derive from runtime
+                // dispatch hints — the ERASED signature (`Block(T ^U)` → `"Block"`),
+                // strictly poorer than any AST recording already present. Existing wins
+                // per selector (found the hard way: `collect:`'s `U` stopped binding
+                // after populate shadowed the rich entry). A from_vm entry is never
+                // re-populated (the authoritative skip), so this can't go stale.
+                for (sel, ps) in &existing.method_params {
+                    sig.method_params.insert(sel.clone(), ps.clone());
+                }
+            } else {
+                // An AST (re)definition: new wins per selector; carry over the rest.
+                for (sel, ps) in &existing.method_params {
+                    sig.method_params
+                        .entry(sel.clone())
+                        .or_insert_with(|| ps.clone());
+                }
             }
         }
         map.insert(Arc::from(name), sig);
@@ -193,6 +222,55 @@ impl ClassTable {
             type_params: Vec::new(),
         });
         entry.method_returns.extend(returns);
+    }
+
+    /// Merge declared param types into `name`'s entry — the params-side twin
+    /// of `add_returns`, for `Foo <-- {}` reopens (how the core collections
+    /// carry their typed `each:` signatures, GENERICS_ARCH.md §11.4).
+    pub fn add_params(&self, name: &str, params: HashMap<Arc<str>, Vec<Type>>) {
+        if params.is_empty() {
+            return;
+        }
+        let mut map = self.0.borrow_mut();
+        let entry = map.entry(Arc::from(name)).or_insert_with(|| ClassSig {
+            parent: None,
+            mixins: Vec::new(),
+            own_selectors: HashSet::new(),
+            sealed: false,
+            has_catch_all: false,
+            from_vm: false,
+            method_params: HashMap::new(),
+            method_returns: HashMap::new(),
+            type_params: Vec::new(),
+        });
+        entry.method_params.extend(params);
+    }
+
+    /// Merge mixin names into `name`'s entry. A `Foo <-- { .mix:Bar }` reopen runs its
+    /// `.mix:` at RUNTIME, after the from_vm snapshot was taken — so the reopen's compile
+    /// records the mixin here, or the hierarchy walk (typed returns/params on Iterate
+    /// methods, GENERICS_ARCH.md §11.3) could never reach the mixin from the receiver.
+    pub fn add_mixins(&self, name: &str, mixins: Vec<Arc<str>>) {
+        if mixins.is_empty() {
+            return;
+        }
+        let mut map = self.0.borrow_mut();
+        let entry = map.entry(Arc::from(name)).or_insert_with(|| ClassSig {
+            parent: None,
+            mixins: Vec::new(),
+            own_selectors: HashSet::new(),
+            sealed: false,
+            has_catch_all: false,
+            from_vm: false,
+            method_params: HashMap::new(),
+            method_returns: HashMap::new(),
+            type_params: Vec::new(),
+        });
+        for m in mixins {
+            if !entry.mixins.contains(&m) {
+                entry.mixins.push(m);
+            }
+        }
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -316,6 +394,44 @@ impl ClassTable {
             .borrow()
             .get(class)
             .and_then(|s| s.method_params.get(selector).cloned())
+    }
+
+    /// The declared param types for `selector` on `class` or its nearest
+    /// ancestor (mixins, then the parent chain), paired with the DEFINING
+    /// class — the scope whose type parameters variables in those params
+    /// belong to. The params-side twin of `declared_return_with_source`,
+    /// feeding the block-literal expectation channel (GENERICS_ARCH.md §11.3).
+    pub fn declared_params_with_source(
+        &self,
+        class: &str,
+        selector: &str,
+    ) -> Option<(Vec<Type>, Arc<str>)> {
+        let mut visited = HashSet::new();
+        self.declared_params_rec(class, selector, &mut visited)
+    }
+
+    fn declared_params_rec(
+        &self,
+        class: &str,
+        selector: &str,
+        visited: &mut HashSet<Arc<str>>,
+    ) -> Option<(Vec<Type>, Arc<str>)> {
+        if !visited.insert(Arc::from(class)) {
+            return None;
+        }
+        let sig = self.get(class)?;
+        if let Some(p) = sig.method_params.get(selector) {
+            return Some((p.clone(), Arc::from(class)));
+        }
+        for mixin in &sig.mixins {
+            if let Some(found) = self.declared_params_rec(mixin, selector, visited) {
+                return Some(found);
+            }
+        }
+        match &sig.parent {
+            Some(parent) => self.declared_params_rec(parent, selector, visited),
+            None => None,
+        }
     }
 
     fn declared_return_rec(

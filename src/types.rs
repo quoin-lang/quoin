@@ -119,8 +119,12 @@ impl Type {
             // flagging an opaque block against a shaped param would warn about
             // code that runs perfectly (GENERICS_ARCH.md §11.2).
             (Type::BlockOf { .. }, Type::Block) | (Type::Block, Type::BlockOf { .. }) => true,
-            // Shape vs shape: arity-exact, params contravariant (a block
-            // accepting wider arguments serves), return covariant.
+            // Shape vs shape: params contravariant over the SHARED PREFIX (a
+            // block accepting wider arguments serves), return covariant. Arity
+            // is deliberately gradual: `value:` zip-binds (missing → nil,
+            // extras dropped) and `valueWithSelfOrArg:` adapts by inspection,
+            // so a 0-arg block where `Block(T ^Any)` is expected is idiomatic
+            // working code (`xs.each:{ 'hi'.print }`), not a mismatch.
             (
                 Type::BlockOf {
                     params: ap,
@@ -130,11 +134,7 @@ impl Type {
                     params: ep,
                     ret: er,
                 },
-            ) => {
-                ap.len() == ep.len()
-                    && ep.iter().zip(ap).all(|(e, a)| e.compatible_with(a))
-                    && ar.compatible_with(er)
-            }
+            ) => ep.iter().zip(ap).all(|(e, a)| e.compatible_with(a)) && ar.compatible_with(er),
             // Bottom: a diverging expression satisfies any expected type.
             (Type::Never, _) => true,
             // `T?` expected: `nil` fits, else the actual (unwrapped) must fit the inner type.
@@ -285,6 +285,32 @@ impl Type {
                 params.iter().any(|p| p.contains_var()) || ret.contains_var()
             }
             _ => false,
+        }
+    }
+
+    /// Like `substitute`, but an unbound variable stays a variable instead of
+    /// widening to `Any` — PARTIAL instantiation, e.g. binding `T` from the
+    /// receiver in `Block(T ^U)` while `U` awaits block-return inference
+    /// (GENERICS_ARCH.md §11.3).
+    pub fn substitute_bound(&self, bindings: &std::collections::HashMap<Arc<str>, Type>) -> Type {
+        match self {
+            Type::Var(n) => bindings.get(n).cloned().unwrap_or_else(|| self.clone()),
+            Type::Nullable(t) => match t.substitute_bound(bindings) {
+                Type::Any => Type::Any,
+                Type::Nullable(inner) => Type::Nullable(inner),
+                inner => Type::Nullable(Box::new(inner)),
+            },
+            Type::ListOf(t) => Type::ListOf(Box::new(t.substitute_bound(bindings))),
+            Type::MapOf(t) => Type::MapOf(Box::new(t.substitute_bound(bindings))),
+            Type::SetOf(t) => Type::SetOf(Box::new(t.substitute_bound(bindings))),
+            Type::BlockOf { params, ret } => Type::BlockOf {
+                params: params
+                    .iter()
+                    .map(|p| p.substitute_bound(bindings))
+                    .collect(),
+                ret: Box::new(ret.substitute_bound(bindings)),
+            },
+            other => other.clone(),
         }
     }
 

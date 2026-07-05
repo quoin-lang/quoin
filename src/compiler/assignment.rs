@@ -61,6 +61,19 @@ impl Compiler {
             self.update_narrowing(NarrowKey::Local(l.identifier.name.clone()), rt);
         } else {
             self.compile_node(&assign.rvalue, bytecode)?;
+            // G4b: an assignment to an UNDECLARED target dissolves any narrowing for it, in
+            // EVERY scope — inferred block-param beliefs and guard narrowing must not go stale
+            // across a reassignment. Widening only ever removes claims, never adds one, so this
+            // can silence a warning but never mint a false positive (§11.1).
+            for lval in &assign.lvalues {
+                if let NodeValue::IdentLValue(l) = &lval.value
+                    && let Some(key) = NarrowKey::from_ident(&l.identifier)
+                {
+                    for s in &mut self.scopes {
+                        s.narrowed.remove(&key);
+                    }
+                }
+            }
         }
 
         if assign.lvalues.len() == 1 {

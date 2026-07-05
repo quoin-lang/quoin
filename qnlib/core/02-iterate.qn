@@ -8,7 +8,7 @@ iterable) - is derived from `each:`. No `next`/`reset` cursor, so iteration is
 re-entrant and `nil` is a perfectly valid element.
 "
 
-Mixin <- Iterate(T) <- {
+Mixin <- Iterate(T U) <- {
     "* The accumulator for element-preserving combinators (the species idea,
     "* GENERICS_ARCH.md 4.5): a fresh list-shaped collector. List overrides it
     "* with .emptyLike and Set with a tag-carrying list, so select:/take:/...
@@ -16,24 +16,24 @@ Mixin <- Iterate(T) <- {
     "* use it - its elements are whatever the block returns.
     collector -> { |^List| #() };
 
-    collect: -> { |collectBlock:Block ^List|
+    collect: -> { |collectBlock: Block(T ^U) ^List(U)|
         var l = #();
         .each:{ |collectItem| l.add:collectBlock.valueWithSelfOrArg:collectItem };
         ^l
     };
 
-    select: -> { |selectBlock:Block ^List(T)|
+    select: -> { |selectBlock: Block(T ^Boolean) ^List(T)|
         var l = .collector;
         .each:{ |x| (selectBlock.valueWithSelfOrArg:x).if:{ l.add:x } };
         ^l
     };
 
-    all?: -> { |allBlock:Block|
+    all?: -> { |allBlock: Block(T ^Boolean)|
         .each:{ |x| (allBlock.valueWithSelfOrArg:x).else:{ ^^false } };
         ^true
     };
 
-    none?: -> { |block:Block|
+    none?: -> { |block: Block(T ^Boolean)|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^false } };
         ^true
     };
@@ -43,7 +43,7 @@ Mixin <- Iterate(T) <- {
         ^false
     };
 
-    any?: -> { |block:Block|
+    any?: -> { |block: Block(T ^Boolean)|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^true } };
         ^false
     };
@@ -54,13 +54,13 @@ Mixin <- Iterate(T) <- {
         ^n
     };
 
-    count: -> { |block:Block|
+    count: -> { |block: Block(T ^Boolean)|
         var n = 0;
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ n = n + 1 } };
         ^n
     };
 
-    detect: -> { |block ^T?|
+    detect: -> { |block: Block(T ^Boolean) ^T?|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^x } };
         ^nil
     };
@@ -100,12 +100,12 @@ Mixin <- Iterate(T) <- {
 
     "* Lazy variants return a Generator instead of a materialized list, so they
     "* compose into pipelines and work on infinite sources (consume with take:)."
-    lazyCollect: -> { |f|
+    lazyCollect: -> { |f: Block(T ^U)|
         var src = self;
         Generator.from:{ src.each:{ |x| ^>(f.valueWithSelfOrArg:x) } }
     };
 
-    lazySelect: -> { |p|
+    lazySelect: -> { |p: Block(T ^Boolean)|
         var src = self;
         Generator.from:{ src.each:{ |x| (p.valueWithSelfOrArg:x).if:{ ^>x } } }
     };
@@ -116,7 +116,7 @@ Mixin <- Iterate(T) <- {
         ^l
     };
 
-    groupBy: -> { |block:Block|
+    groupBy: -> { |block: Block(T)|
         var map = #{};
         .each:{ |x|
             var key = block.valueWithSelfOrArg:x;
@@ -137,7 +137,7 @@ Mixin <- Iterate(T) <- {
         ^false
     };
 
-    reduce: -> { |block:Block|
+    reduce: -> { |block: Block(T T ^T) ^T?|
         var sum = nil;
         .each:{ |x|
             sum.defined?.else:{ sum = (block.valueWithArgs:#(x x)).class.default };
@@ -146,7 +146,7 @@ Mixin <- Iterate(T) <- {
         ^sum
     };
 
-    reduce:into: -> { |block:Block start|
+    reduce:into: -> { |block: Block(U T ^U) start: U ^U|
         var sum = start;
         .each:{ |x| sum = block.valueWithArgs:#( sum x ) };
         ^sum
@@ -154,7 +154,7 @@ Mixin <- Iterate(T) <- {
 
     sum -> { .sum:{ |x| x } };
 
-    sum: -> { |block:Block|
+    sum: -> { |block: Block(T)|
         var sum = nil;
         .each:{ |x|
             sum.defined?.else:{ sum = (block.valueWithSelfOrArg:x).class.default };
@@ -164,7 +164,7 @@ Mixin <- Iterate(T) <- {
         ^sum
     };
 
-    max: -> { |block:Block ^T?|
+    max: -> { |block: Block(T T ^Boolean) ^T?|
         var max = nil;
         .each:{ |x|
             max.defined?.if:{ (block.valueWithArgs:#(max x)).else:{ max = x } } else:{ max = x }
@@ -174,7 +174,7 @@ Mixin <- Iterate(T) <- {
 
     max -> { |^T?| .max:{ |a b| a > b } };
 
-    min: -> { |block:Block ^T?|
+    min: -> { |block: Block(T T ^Boolean) ^T?|
         var min = nil;
         .each:{ |x|
             min.defined?.if:{ (block.valueWithArgs:#(min x)).if:{ min = x } } else:{ min = x }
@@ -184,7 +184,7 @@ Mixin <- Iterate(T) <- {
 
     min -> { |^T?| .min:{ |a b| a > b } };
 
-    partition: -> { |block:Block ^List|
+    partition: -> { |block: Block(T ^Boolean) ^List|
         var trueValues = .collector;
         var falseValues = .collector;
 
@@ -197,7 +197,7 @@ Mixin <- Iterate(T) <- {
         #( trueValues falseValues )
     };
 
-    reject: -> { |block:Block ^List(T)|
+    reject: -> { |block: Block(T ^Boolean) ^List(T)|
         var l = .collector;
         .each:{ |x| (block.valueWithSelfOrArg:x).else:{ l.add:x } };
         ^l
@@ -232,7 +232,7 @@ Mixin <- Iterate(T) <- {
         ^result
     };
 
-    sort: -> { |block ^List(T)| .list.sort:block };
+    sort: -> { |block: Block(T T ^Boolean) ^List(T)| .list.sort:block };
     sort -> { |^List(T)| .list.sort };
 
     list -> { |^List(T)| self.select:{ true } }
@@ -298,8 +298,9 @@ Map <-- {
         fromPairs: -> { |pairs| pairs.reduce:{ |m kvp| m.at:kvp.key put:kvp.value } into:#{} }
     };
 
-    "* Iterate in insertion order (the Map preserves it)."
-    each: -> { |b|
+    "* Iterate in insertion order (the Map preserves it). The iteration
+    "* element is a key/value PAIR, not the value type (GENERICS_ARCH 4.4)."
+    each: -> { |b: Block(KeyValuePair)|
         var src = self;
         .keys.each:{ |k|
             b.valueWithSelfOrArg:(KeyValuePair.new:{ var key = k; var value = src.at:k })
@@ -316,7 +317,7 @@ List <-- {
 
     collector -> { |^List| .emptyLike };
 
-    each: -> { |b|
+    each: -> { |b: Block(T)|
         var i = 0;
         var n = .count;
         { i < n }.whileDo:{

@@ -2081,9 +2081,12 @@ fn block_type_lattice_rules() {
     // backing; flagging an opaque block would warn about working code).
     assert!(int_to_bool.compatible_with(&Type::Block));
     assert!(Type::Block.compatible_with(&int_to_bool));
-    // Shape vs shape: arity-exact; params contravariant, return covariant.
+    // Shape vs shape: shared-prefix contravariant params, covariant return. Arity is
+    // GRADUAL — `value:` zip-binds and `valueWithSelfOrArg:` adapts, so a 0-arg block
+    // where `Block(T)` is expected is idiomatic working code (`xs.each:{ 'hi'.print }`).
     assert!(int_to_bool.compatible_with(&int_to_bool.clone()));
-    assert!(!int_to_bool.compatible_with(&block_of(vec![Type::Int, Type::Int], Type::Bool)));
+    assert!(int_to_bool.compatible_with(&block_of(vec![Type::Int, Type::Int], Type::Bool)));
+    assert!(block_of(vec![], Type::Bool).compatible_with(&int_to_bool));
     let any_to_bool = block_of(vec![Type::Any], Type::Bool);
     assert!(any_to_bool.compatible_with(&int_to_bool)); // wider param serves
     let int_to_never = block_of(vec![Type::Int], Type::Never);
@@ -2143,6 +2146,83 @@ fn block_type_var_machinery() {
             block_of(vec![Type::Int], Type::Bool)
         )
     );
+}
+
+// A self-contained generic mixin exercising the §11.3 inference chain without qnlib:
+// `T` binds from the receiver, the literal's params seed, its return harvests, `U` binds.
+const PIPE_MIXIN: &str = "
+    Mixin <- Pipe(T U) <- {
+        through: -> { |b: Block(T ^U) ^List(U)| #() };
+        feed: -> { |b: Block(T)| nil }
+    };
+    List <-- { .mix:Pipe };
+";
+
+#[test]
+fn block_literal_inference_binds_call_site_variables() {
+    // U binds from the literal's harvested return (params seeded from T := Integer),
+    // proven by the deliberate mismatch naming the fully-substituted type.
+    let d = all_diags(&format!(
+        "{PIPE_MIXIN}
+        Probe <- {{ m -> {{
+            var xs: List(Integer) = #(1 2 3);
+            var bad: Set(String) = xs.through:{{ |x| x * 2 }};
+            0
+        }} }}"
+    ));
+    assert!(
+        d.iter()
+            .any(|m| m.contains("expected `Set(String)`, found `List(Integer)`")),
+        "{d:?}"
+    );
+}
+
+#[test]
+fn block_param_seeding_is_a_dissolvable_belief() {
+    // An unannotated param seeds as `T` (narrowing-grade): a bad insert through it warns…
+    let d = all_diags(&format!(
+        "{PIPE_MIXIN}
+        Probe <- {{ m -> {{
+            var xs: List(Integer) = #(1 2 3);
+            var strs: List(String) = #();
+            xs.feed:{{ |x| strs.add:x }};
+            0
+        }} }}"
+    ));
+    assert!(
+        d.iter().any(|m| m.contains("rejects a `Integer` element")),
+        "{d:?}"
+    );
+    // …and any reassignment dissolves the belief (never a stale claim, never a contract).
+    let d = all_diags(&format!(
+        "{PIPE_MIXIN}
+        Probe <- {{ m -> {{
+            var xs: List(Integer) = #(1 2 3);
+            var strs: List(String) = #();
+            xs.feed:{{ |x| x = 'now a string'; strs.add:x }};
+            0
+        }} }}"
+    ));
+    assert!(
+        !d.iter().any(|m| m.contains("rejects")),
+        "belief must dissolve on reassignment: {d:?}"
+    );
+}
+
+#[test]
+fn annotated_literal_sharpens_and_checks() {
+    // A literal with an annotated header carries its shape outward — a declared block
+    // var with an incompatible return warns, naming the sharpened literal type.
+    let d = all_diags("Probe <- { m -> { var f: Block(^Boolean) = { |x: Integer| x * 2 }; f } }");
+    assert!(
+        d.iter()
+            .any(|m| m.contains("expected `Block(^Boolean)`, found `Block(Integer ^Integer)`")),
+        "{d:?}"
+    );
+    // An UNANNOTATED literal stays honest: its param is `Any`, so its return is
+    // unknowable and nothing is claimed (bare `Block` satisfies any shape).
+    let d = all_diags("Probe <- { m -> { var f: Block(^Boolean) = { |x| x * 2 }; f } }");
+    assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]

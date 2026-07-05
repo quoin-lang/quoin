@@ -28,15 +28,23 @@ nil→MNU stub (the cold path is never translated, deleting the
 capturing-block refusal), `TagCollection` compiles, and Nil/SelfRef box
 across block boundaries. **Sieve, with its two annotations, compiles end
 to end: 0.97s → 0.12s (~7.9×), checksums identical in both modes — the
-acceptance test passes.** G4a SHIPPED: `Block(args ^Ret)` parses in
-every type position (one generalized `type_args` grammar, resolver
-diagnostics for non-Block uses), `Type::BlockOf` in the lattice
-(bare-satisfies-shaped gradualism, contravariant params/covariant
-return, joins widen to bare), full dispatch erasure with
-shape-is-not-variant-identity semantics; plugin mirror PR filed. G4b
-(block-literal inference + qnlib signatures) in progress — §11.
-Runtime block enforcement analyzed and recorded as a future arc (§12),
-not scheduled.
+acceptance test passes.** G4 SHIPPED (§11): G4a — `Block(args ^Ret)`
+parses in every type position (one generalized `type_args` grammar,
+resolver diagnostics for non-Block uses), `Type::BlockOf` in the
+lattice, full dispatch erasure with shape-is-not-variant-identity
+semantics; plugin mirror PR filed. G4b — block-literal inference:
+expectation-seeded params (narrowing-grade beliefs, dissolved by
+reassignment), harvested returns, call-site `U`-binding
+(`xs.collect:{ |x| x * 2 }` types `List(Integer)`), typed Block
+signatures across Iterate + the concrete `each:` definitions. Shipping
+G4b surfaced and fixed three latent table gaps: `populate_from_vm`
+shadowed AST-recorded params with dispatch-erased hints (merge policy:
+existing wins on a from_vm refresh), reopen `.mix:` targets were
+invisible to the hierarchy walk (recorded at compile time now), and
+native class names drew `unknown type` (seen_types seeded from VM
+globals). Arity in block-shape compatibility is GRADUAL as shipped —
+see §11.2. Runtime block enforcement analyzed and recorded as a future
+arc (§12), not scheduled.
 Design revisions from review: real type variables replace the earlier
 implicit-`Element` idea; `emptyLike` chosen over extending `default`;
 `collect:as:` dropped as redundant with inference + `ensure:`. The settled generics syntax
@@ -533,12 +541,16 @@ checker machinery, period, exactly as §4.4 drew the line. Concretely:
   parens marker so `Block()` ≠ `Block`.
 - **Lattice**: `Type::BlockOf { params: Vec<Type>, ret: Box<Type> }`.
   Width subtyping `BlockOf ⊆ Block` (a shaped block is a block).
-  Between shapes: arity-exact, params contravariant, return covariant —
-  the sound direction costs nothing extra to write, and the existing
-  `contains_var` gate keeps any var-involved comparison gradual. Joins
-  of differing shapes widen to bare `Block`, as differing tags widen to
-  the bare collection. Recurses through `substitute`/`unify_into`/
-  `parse_annotation_str` so natives can declare block signatures too.
+  Between shapes: params contravariant over the SHARED PREFIX, return
+  covariant, and — revised in G4b — **arity is gradual**: `value:`
+  zip-binds (missing → nil, extras dropped) and `valueWithSelfOrArg:`
+  adapts by inspection, so a 0-arg literal where `Block(T)` is expected
+  is idiomatic working code (`xs.each:{ 'hi'.print }`), not a mismatch.
+  The `contains_var` gate keeps any var-involved comparison gradual.
+  Joins of differing shapes widen to bare `Block`, as differing tags
+  widen to the bare collection. Recurses through `substitute`/
+  `unify_into`/`parse_annotation_str` so natives can declare block
+  signatures too (Set's native `each:` is seeded `Block(T)`).
 - **Dispatch: full erasure.** `|b: Block(T ^Boolean)|` dispatches
   exactly as `|b: Block|` (which *is* an enforceable hint —
   `type_name() == "Block"`). Unlike element tags, block shapes are
@@ -574,15 +586,36 @@ A bare literal with a declared header (`{ |x: Integer ^Boolean| … }`)
 sharpens its own static type from `Block` to
 `Block(Integer ^Boolean)` the same way.
 
+As-shipped mechanics (G4b): the expectation rides a one-shot channel
+into `compile_block` (the `next_block_narrowing` pattern), computed
+from the class-table params walk (`declared_params_with_source`, the
+params twin of the returns walk) with the receiver's element type bound
+by PARTIAL substitution (`substitute_bound` — unbound variables stay
+variables, so `U` survives to be inferred). Seeds are narrowing
+entries; an assignment to any undeclared target now dissolves its
+narrowing in every scope — widening only, so it can silence a warning
+but never mint one. Sharpened literal types live in an address-keyed
+side table consulted by `static_type`; before a literal compiles it is
+bare `Block` (gradual, a safe miss). `^` returns join the harvest only
+when they compile as real `BlockReturn`s — an inlined-arm `^` is the
+conditional's value, not a block return.
+
 ### 11.4 qnlib signatures (the generality proof)
 
 `Iterate(T)` becomes `Iterate(T U)`; the §4.4 signatures land as
 written (`collect:` = `|b: Block(T ^U) ^List(U)|`, the predicate family
-`Block(T ^Boolean)`, `reduce:` = `Block(T T ^T)`, `sort:`'s comparator
-`Block(T T ^Boolean)`), and the concrete `each:` definitions take
-`Block(T ^Any)`. Map keeps the G2 nuance: its iteration element is a
-pair, not its value type, so Map's Iterate methods bind no `T`.
-Corpus-zero-warnings remains the gate.
+`Block(T ^Boolean)`, `reduce:` = `Block(T T ^T)`,
+`reduce:into:` = `|b: Block(U T ^U) start: U ^U|` — the textbook fold,
+its `U` bound from the seed argument — `sort:`/`min:`/`max:`
+comparators `Block(T T ^Boolean)`), and the concrete `each:`
+definitions take `Block(T)` (no `^`-tail — bare IS the `Any` return;
+`^Any` would also draw `unknown type`, since `Any` is spelled `Object`
+at the surface). Map keeps the G2 nuance — its iteration element is a
+pair — so its `each:` is honestly `Block(KeyValuePair)`; Set's `each:`
+is native, seeded in `from_class_info` (a dispatch hint string can't
+carry `Block(T)` — the G0 erasure lesson); NumberRange's `each:` stays
+untyped (its elements are Integers OR Doubles — a concrete tag would
+be a false belief). Corpus-zero-warnings remains the gate.
 
 ## 12. Future arc: runtime block enforcement (recorded, not scheduled)
 
