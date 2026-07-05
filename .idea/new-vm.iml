@@ -9,6 +9,9 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/quoin-ext-proto/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/quoin-ext/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/sdk/python" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/quoin-fmt/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/quoin-fmt/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/lint/no_borrow_across_yield/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
