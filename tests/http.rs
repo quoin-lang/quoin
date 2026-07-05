@@ -16,7 +16,7 @@ use futures_rustls::rustls::{self, ServerConfig};
 
 /// Read one HTTP/1.1 request (request line + headers + Content-Length body) and return
 /// `(path, body)`. `reader` is a buffered view over the connection.
-fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
+fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>, String) {
     let mut request_line = String::new();
     let _ = reader.read_line(&mut request_line);
     let path = request_line
@@ -25,6 +25,7 @@ fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
         .unwrap_or("/")
         .to_string();
     let mut content_length = 0usize;
+    let mut host = String::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -37,18 +38,30 @@ fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
         if let Some(v) = lower.strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
         }
+        if let Some(v) = lower.strip_prefix("host:") {
+            host = v.trim().to_string();
+        }
     }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         let _ = reader.read_exact(&mut body);
     }
-    (path, body)
+    (path, body, host)
 }
 
 /// The canned response for a given request path. `/close` is Content-Length-less (the
 /// body is delimited by the connection close), `/chunked` is `Transfer-Encoding: chunked`,
 /// the others carry Content-Length.
-fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
+fn response_for(path: &str, req_body: &[u8], host: &str) -> Vec<u8> {
+    if path == "/host" {
+        // Echo the Host header the client actually sent (RFC 7230 §5.4 check).
+        return format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+            host.len(),
+            host
+        )
+        .into_bytes();
+    }
     if path == "/chunked" {
         // "Hello, world!" as two chunks ("Hello, " = 0x7, "world!" = 0x6) + the 0 terminator.
         return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
@@ -84,8 +97,7 @@ fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
     }
     if path == "/chunked-eof" {
         // Chunked framing cut off after the first complete chunk (no next size line).
-        return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nHello, \r\n"
-            .to_vec();
+        return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nHello, \r\n".to_vec();
     }
     if path == "/redirect" {
         // 302 to a root-relative target on the same server.
@@ -202,9 +214,9 @@ fn http_get_post_and_close() {
         for conn in listener.incoming().flatten() {
             thread::spawn(move || {
                 let mut reader = BufReader::new(conn.try_clone().unwrap());
-                let (path, body) = read_request(&mut reader);
+                let (path, body, host) = read_request(&mut reader);
                 let mut conn = conn;
-                let _ = conn.write_all(&response_for(&path, &body));
+                let _ = conn.write_all(&response_for(&path, &body, &host));
                 let _ = conn.flush();
                 // For /close we just drop `conn` (EOF signals the body end).
             });
@@ -264,6 +276,10 @@ var r5c = [HTTP]Client.get: base + '/gzip-chunked';
 var r5d = [HTTP]Client.get: base + '/gzip-chunked';
 ((r5d.body.chunks.collect:{{ |c| c.text }}) == #( 'hello gzip world' )).else:{{ ok = false }};
 
+"* Host header carries the (non-default) port — RFC 7230 §5.4
+var rh = [HTTP]Client.get: base + '/host';
+(rh.body.text == ('127.0.0.1:' + '{port}')).else:{{ ok = false; ('FAIL host: ' + rh.body.text).print }};
+
 "* zstd Content-Encoding (transparently decoded)
 var r6 = [HTTP]Client.get: base + '/zstd';
 (r6.body.text == 'hello zstd world').else:{{ ok = false }};
@@ -317,8 +333,8 @@ fn https_get_insecure() {
                 };
                 let mut tls = rustls::Stream::new(&mut sc, &mut tcp);
                 let mut reader = BufReader::new(&mut tls);
-                let (path, body) = read_request(&mut reader);
-                let resp = response_for(&path, &body);
+                let (path, body, host) = read_request(&mut reader);
+                let resp = response_for(&path, &body, &host);
                 let _ = tls.write_all(&resp);
                 let _ = tls.flush();
             });
@@ -372,9 +388,9 @@ fn truncated_bodies_error_instead_of_silent_success() {
         for conn in listener.incoming().flatten() {
             thread::spawn(move || {
                 let mut reader = BufReader::new(conn.try_clone().unwrap());
-                let (path, body) = read_request(&mut reader);
+                let (path, body, host) = read_request(&mut reader);
                 let mut conn = conn;
-                let _ = conn.write_all(&response_for(&path, &body));
+                let _ = conn.write_all(&response_for(&path, &body, &host));
                 let _ = conn.flush();
             });
         }

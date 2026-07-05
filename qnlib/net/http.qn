@@ -393,7 +393,10 @@ Error <- [HTTP]BodyTooLarge <- {};
         }
         else:{ TcpSocket.connect:target };
 
-        sock.writeAll:(.requestBytes:host path:path);
+        "* RFC 7230 §5.4: Host carries the port unless it is the scheme default.
+        var defaultPort = (scheme == 'https').if:{ '443' } else:{ '80' };
+        var hostHeader = (port == defaultPort).if:{ host } else:{ host + ':' + port };
+        sock.writeAll:(.requestBytes:hostHeader path:path);
 
         "* Non-scoped stream (consumes the socket; no auto-close). Read the head; on any
         "* error before we hand the stream to the body, close it and re-raise.
