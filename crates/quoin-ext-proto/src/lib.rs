@@ -159,6 +159,13 @@ pub enum Msg {
     },
 }
 
+/// Upper bound on one length-prefixed frame's payload, enforced by both ends before
+/// allocating toward the declared length. The u32 prefix alone permits ~4 GiB, so a
+/// corrupt or hostile length would otherwise drive a multi-GB allocation / OOM from a
+/// few bytes. 256 MiB is far above any realistic control frame or bulk Arrow column
+/// yet bounds the blast radius of a bad prefix. Shared so host and SDK agree.
+pub const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
+
 /// Encode one `Msg` as a complete FlatBuffers `Envelope` buffer (no length prefix —
 /// the transport frames it).
 pub fn encode(msg: &Msg) -> Vec<u8> {

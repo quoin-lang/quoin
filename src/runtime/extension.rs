@@ -294,6 +294,14 @@ fn read_reply_frame<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>,
         buf.extend_from_slice(&chunk);
     }
     let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if len > quoin_ext_proto::MAX_FRAME_LEN {
+        // A corrupt/hostile length would otherwise drive unbounded accumulation. Refuse
+        // before growing `buf`; the connection is desynced, so this is a hard error.
+        return Err(QuoinError::Other(format!(
+            "Extension call: reply frame length {len} exceeds the {} byte limit",
+            quoin_ext_proto::MAX_FRAME_LEN
+        )));
+    }
     while buf.len() < 4 + len {
         let chunk = read_chunk(vm, id)?;
         if chunk.is_empty() {
@@ -302,6 +310,17 @@ fn read_reply_frame<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>,
             ));
         }
         buf.extend_from_slice(&chunk);
+    }
+    // The protocol is strict request/response (one frame in flight per direction), so a
+    // read that pulled in bytes past this frame means a pipelining/desync bug — silently
+    // dropping them (as the old `buf[4..4+len]` slice did) would lose the next frame and
+    // mask the fault. The SDK reads with `read_exact`; hold the host to the same
+    // discipline and surface the extra bytes as an error.
+    if buf.len() > 4 + len {
+        return Err(QuoinError::Other(format!(
+            "Extension call: {} trailing byte(s) after a {len}-byte reply frame (protocol desync)",
+            buf.len() - (4 + len)
+        )));
     }
     Ok(buf[4..4 + len].to_vec())
 }

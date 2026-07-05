@@ -45,7 +45,7 @@ cargo regression tests.
 |---|---|---|
 | `concurrent.qn` / `concurrent_catch.qn` | two tasks calling one extension concurrently desync the connection ("unknown stream id"; a host-reach yield can kill the extension's serve loop) | OPEN |
 | `spawn_silent.qn` | handshake has no timeout: an extension that accepts but never answers `GetManifest` hangs the VM forever | OPEN |
-| `deep.qn` | deeply nested `DataValue` reply overflows the host stack — uncatchable `Bus error: 10`, defeating crash isolation | OPEN |
+| `deep.qn` | deeply nested `DataValue` reply overflows the host stack — uncatchable `Bus error: 10`, defeating crash isolation | **FIXED** (decode depth cap = 64) |
 
 ## top level
 
