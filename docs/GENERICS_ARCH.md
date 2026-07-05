@@ -28,10 +28,15 @@ nil→MNU stub (the cold path is never translated, deleting the
 capturing-block refusal), `TagCollection` compiles, and Nil/SelfRef box
 across block boundaries. **Sieve, with its two annotations, compiles end
 to end: 0.97s → 0.12s (~7.9×), checksums identical in both modes — the
-acceptance test passes.** G4 (Block types, §11) designed and in
-progress: G4a = grammar + lattice, G4b = block-literal inference + qnlib
-signatures. Runtime block enforcement analyzed and recorded as a future
-arc (§12), not scheduled.
+acceptance test passes.** G4a SHIPPED: `Block(args ^Ret)` parses in
+every type position (one generalized `type_args` grammar, resolver
+diagnostics for non-Block uses), `Type::BlockOf` in the lattice
+(bare-satisfies-shaped gradualism, contravariant params/covariant
+return, joins widen to bare), full dispatch erasure with
+shape-is-not-variant-identity semantics; plugin mirror PR filed. G4b
+(block-literal inference + qnlib signatures) in progress — §11.
+Runtime block enforcement analyzed and recorded as a future arc (§12),
+not scheduled.
 Design revisions from review: real type variables replace the earlier
 implicit-`Element` idea; `emptyLike` chosen over extending `default`;
 `collect:as:` dropped as redundant with inference + `ensure:`. The settled generics syntax
@@ -511,8 +516,11 @@ checker machinery, period, exactly as §4.4 drew the line. Concretely:
 - Nothing new reaches the runtime: `StaticBlock` is untouched,
   `collect:` stays runtime-untagged (`ensure:` remains the bridge), and
   `ElemTag::from_type(BlockOf) = None` — a `List(Block(Integer ^Integer))`
-  tag degrades to `List(Block)`… i.e. to base `List` with a warning,
-  like any nested generic (§8).
+  element records no tag at all, silently, exactly like `List(Block)`
+  and `List(T)` today (`ElemTag` has no Block form, so there is no
+  enforceable base to degrade to; the annotation still informs the
+  checker). The nested-generic *warning* is reserved for elements where
+  a base tag IS recorded (§8's partial-enforcement honesty).
 
 ### 11.2 Grammar, AST, lattice (G4a)
 
