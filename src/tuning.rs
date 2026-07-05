@@ -92,3 +92,18 @@ pub fn batch_stats() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| env_flag("QN_BATCH_STATS"))
 }
+
+/// `QN_EXT_HANDSHAKE_TIMEOUT_MS`: how long to wait for an extension's `GetManifest`
+/// reply at spawn time before failing the spawn (default 10000). A silent extension
+/// would otherwise park the spawning task forever — the handshake runs before any
+/// user `Async.timeout:` can wrap it. Lowered in tests to exercise the timeout fast.
+pub fn ext_handshake_timeout_ms() -> u64 {
+    static MS: OnceLock<u64> = OnceLock::new();
+    *MS.get_or_init(|| {
+        std::env::var("QN_EXT_HANDSHAKE_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(10_000)
+    })
+}

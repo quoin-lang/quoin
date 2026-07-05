@@ -917,12 +917,66 @@ pub fn dispatch_ext_method<'gc>(
     finish_outcome(vm, mc, ext, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
+/// Read one length-prefixed reply frame, but fail with a `TimedOut` error if the whole
+/// read takes longer than `timeout_ms`. Like [`read_reply_frame`], but each `Read` park
+/// carries the *remaining* budget (via `IoRequest::ReadTimed`), so a peer that accepts
+/// the socket and then goes silent cannot hang the caller.
+fn read_reply_frame_timed<'gc>(
+    vm: &mut VmState<'gc>,
+    id: StreamId,
+    timeout_ms: u64,
+) -> Result<Vec<u8>, QuoinError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut buf: Vec<u8> = Vec::new();
+    let read_more = |vm: &mut VmState<'gc>, buf: &mut Vec<u8>| -> Result<(), QuoinError> {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(QuoinError::Io {
+                kind: crate::error::IoErrorKind::TimedOut,
+                message: format!("extension handshake timed out after {timeout_ms}ms"),
+            });
+        }
+        match vm.await_io(IoRequest::ReadTimed {
+            id,
+            max: 4096,
+            ms: remaining.as_millis() as u64,
+        })? {
+            IoResult::Read(chunk) if chunk.is_empty() => Err(QuoinError::Other(
+                "Extension handshake: connection closed before manifest".to_string(),
+            )),
+            IoResult::Read(chunk) => {
+                buf.extend_from_slice(&chunk);
+                Ok(())
+            }
+            IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+            other => Err(QuoinError::Other(format!(
+                "Extension handshake: unexpected read result {other:?}"
+            ))),
+        }
+    };
+    while buf.len() < 4 {
+        read_more(vm, &mut buf)?;
+    }
+    let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if len > quoin_ext_proto::MAX_FRAME_LEN {
+        return Err(QuoinError::Other(format!(
+            "Extension handshake: manifest frame length {len} exceeds the {} byte limit",
+            quoin_ext_proto::MAX_FRAME_LEN
+        )));
+    }
+    while buf.len() < 4 + len {
+        read_more(vm, &mut buf)?;
+    }
+    Ok(buf[4..4 + len].to_vec())
+}
+
 /// Fetch an extension's class manifest right after connect (Phase 3): send `GetManifest` and read
 /// the single `ManifestReturn`. An extension that provides no classes returns an empty list, so the
-/// generic `call:with:` extensions stay backward-compatible.
+/// generic `call:with:` extensions stay backward-compatible. The read is time-bounded so a silent
+/// extension fails the spawn instead of hanging the VM.
 fn fetch_manifest<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<ClassDecl>, QuoinError> {
     write_msg(vm, id, &Msg::GetManifest)?;
-    let frame = read_reply_frame(vm, id)?;
+    let frame = read_reply_frame_timed(vm, id, crate::tuning::ext_handshake_timeout_ms())?;
     match quoin_ext_proto::decode_envelope(&frame)
         .map_err(|e| QuoinError::Other(format!("Extension manifest: malformed frame: {e}")))?
     {
@@ -995,7 +1049,16 @@ fn spawn_and_connect<'gc>(
 
     // Fetch the class manifest (Phase 3) before creating the value: the fetch parks the fiber (a GC
     // point), so no GC value may be held across it. A generic extension returns an empty manifest.
-    let manifest = fetch_manifest(vm, id)?;
+    // On any handshake failure (including the timeout) the child isn't owned by an `Extension` value
+    // yet, so kill it here rather than orphan it.
+    let manifest = match fetch_manifest(vm, id) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = std::fs::remove_file(&sock_path);
+            return Err(e);
+        }
+    };
 
     let class = vm.get_or_create_builtin_class(mc, "Extension");
     let ext_val = vm.new_native_state(

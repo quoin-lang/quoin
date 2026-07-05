@@ -227,6 +227,37 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 }
 
 #[test]
+fn extension_silent_handshake_times_out() {
+    // Regression (audit): the spawn-time GetManifest read was unbounded, so an
+    // extension that binds+accepts the socket but never answers the handshake parked
+    // the spawning task forever. `ext_silent` does exactly that; with a short
+    // handshake budget the spawn must fail catchably (not hang), and no orphan child
+    // survives (the failed spawn kills it).
+    let ext_bin = env!("CARGO_BIN_EXE_ext_silent");
+    let script = format!(
+        r#"
+{{ Extension.spawn:'{ext_bin}'; 'FAIL: silent extension spawned'.print }}
+    .catch:{{ |e:IoError| (e.kind == #timedOut).if:{{ 'PASS'.print }} else:{{ ('FAIL kind: ' + e.kind.s).print }} }}
+    catch:{{ |e| ('FAIL class: ' + e.s).print }};
+"#
+    );
+    let path = std::env::temp_dir().join("qn_ext_silent_test.qn");
+    std::fs::write(&path, &script).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&path)
+        .env("QN_EXT_HANDSHAKE_TIMEOUT_MS", "800")
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_file(&path);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PASS") && !stdout.contains("FAIL"),
+        "silent-handshake test did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn extension_timeout() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_crash");
     let script = format!(

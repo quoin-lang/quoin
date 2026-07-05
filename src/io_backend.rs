@@ -74,6 +74,11 @@ pub enum IoRequest {
     ConnectUnix { path: String },
     /// Read up to `max` bytes. An empty result means EOF.
     Read { id: StreamId, max: usize },
+    /// Like `Read`, but the op fails with a `TimedOut` error if no bytes arrive within
+    /// `ms` milliseconds. Used to bound reads that have no surrounding `Async.timeout:`
+    /// (e.g. the extension handshake, which runs at spawn time), so a peer that accepts
+    /// the socket but never replies cannot park the caller forever.
+    ReadTimed { id: StreamId, max: usize, ms: u64 },
     /// Write all of `bytes`.
     Write { id: StreamId, bytes: Vec<u8> },
     /// Close and deregister the stream.
@@ -493,6 +498,51 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
+            IoRequest::ReadTimed { id, max, ms } => Box::pin(async move {
+                // Leased like Read, plus a wall-clock deadline: whichever of the read or
+                // the timer resolves first wins. On timeout the lease drops (returning
+                // the stream to the registry — the caller decides whether to close it).
+                let lease = match StreamLease::take(&inner, id) {
+                    Ok(l) => l,
+                    Err(e) => return IoResult::Err(e),
+                };
+                let (abort, reg) = AbortHandle::new_pair();
+                inner.op_aborts.borrow_mut().insert(id, abort);
+                let read = Abortable::new(
+                    async move {
+                        let mut lease = lease;
+                        let mut buf = vec![0u8; max];
+                        let r = lease.stream().read(&mut buf).await;
+                        drop(lease);
+                        (r, buf)
+                    },
+                    reg,
+                );
+                let timeout = async {
+                    Timer::after(Duration::from_millis(ms)).await;
+                };
+                match futures_lite::future::or(async { Some(read.await) }, async {
+                    timeout.await;
+                    None
+                })
+                .await
+                {
+                    Some(Ok((Ok(n), mut buf))) => {
+                        buf.truncate(n);
+                        IoResult::Read(buf)
+                    }
+                    Some(Ok((Err(e), _))) => IoResult::Err(e.into()),
+                    Some(Err(_aborted)) => IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::NotConnected,
+                        message: "stream closed while a read was in flight".to_string(),
+                    }),
+                    None => IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::TimedOut,
+                        message: format!("read timed out after {ms}ms"),
+                    }),
+                }
+            }),
+
             IoRequest::Write { id, bytes } => Box::pin(async move {
                 // Leased like Read. An aborted write may leave the peer with a
                 // partial message — the canceller's problem — but the stream itself
@@ -687,7 +737,7 @@ impl IoBackend for MockBackend {
                 self.next_id.set(self.next_id.get() + 1);
                 IoResult::Connected(id)
             }
-            IoRequest::Read { max, .. } => {
+            IoRequest::Read { max, .. } | IoRequest::ReadTimed { max, .. } => {
                 let mut buf = self.reads.borrow_mut().pop_front().unwrap_or_default();
                 buf.truncate(max);
                 IoResult::Read(buf)
