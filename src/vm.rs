@@ -54,6 +54,11 @@ pub fn gc_pacing() -> Pacing {
 /// Argument arity an inline-cache slot's guard can encode (larger sends bypass the IC).
 pub const IC_MAX_ARGS: usize = 2;
 
+/// The shared (or private) per-template inline-cache cell: one lazily-allocated
+/// per-`ip` slot array. Hoisted into `Frame` at push time so the per-send probe
+/// reads it off the hot frame instead of chasing `Block::inline_cache`.
+pub type InlineCacheCell<'gc> = Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>;
+
 /// `ICSlot::recv_kind` value marking a *field-slot* entry (the `LoadField`/`StoreField`
 /// family) rather than a send entry: `recv_ptr` holds the receiver's class pointer and
 /// `arg_ptrs[0]` the field's slot index. Send and field instructions never share an `ip`,
@@ -148,6 +153,9 @@ pub struct Frame<'gc> {
     pub is_nested_block: bool,
     pub enclosing_method_id: Option<usize>,
     pub block: Gc<'gc, Block<'gc>>,
+    /// `block.inline_cache`, hoisted at frame push: the probe on every send/field
+    /// reads the cell without the extra hop through the (template-thin) `Block`.
+    pub ic: InlineCacheCell<'gc>,
     pub ip: usize,
     pub env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
     pub instantiating_obj: Option<Gc<'gc, RefLock<Object<'gc>>>>,
@@ -1654,6 +1662,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block: false,
             enclosing_method_id: Some(frame_id),
             block,
+            ic: block.inline_cache,
             ip: 0,
             env,
             instantiating_obj: None,
@@ -1724,6 +1733,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block: block.template.is_nested_block,
             enclosing_method_id: Some(frame_id),
             block,
+            ic: block.inline_cache,
             ip: 0,
             env: env_ref,
             instantiating_obj: None,
@@ -2006,6 +2016,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block,
             enclosing_method_id,
             block,
+            ic: block.inline_cache,
             ip: 0,
             env: env_ref,
             instantiating_obj: None,
@@ -2054,6 +2065,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block,
             enclosing_method_id,
             block,
+            ic: block.inline_cache,
             ip: 0,
             env: env_ref,
             instantiating_obj: None,
@@ -2098,6 +2110,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block,
             enclosing_method_id,
             block,
+            ic: block.inline_cache,
             ip: 0,
             env: env_ref,
             instantiating_obj: Some(obj),
@@ -2834,8 +2847,9 @@ impl<'gc> VmState<'gc> {
     ) -> Value<'gc> {
         let frame = &self.frames[frame_idx];
         let block = frame.block;
+        let ic = frame.ic;
         let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-        self.field_of(mc, block, cache_ip, self_val, name)
+        self.field_of(mc, block, ic, cache_ip, self_val, name)
     }
 
     /// Read instance field `name` off an arbitrary object value (the body of `LoadFieldOf`, and
@@ -2845,6 +2859,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         block: Gc<'gc, Block<'gc>>,
+        ic: InlineCacheCell<'gc>,
         cache_ip: Option<usize>,
         obj_val: Value<'gc>,
         name: &str,
@@ -2855,7 +2870,7 @@ impl<'gc> VmState<'gc> {
             let borrowed = obj.borrow();
             let class = borrowed.class;
             if let Some(ip) = cache_ip
-                && let Some(slot) = self.field_probe(block, ip, Gc::as_ptr(class) as usize)
+                && let Some(slot) = self.field_probe(ic, ip, Gc::as_ptr(class) as usize)
             {
                 let val = borrowed.fields.get(slot).copied();
                 drop(borrowed);
@@ -3006,13 +3021,8 @@ impl<'gc> VmState<'gc> {
     /// the same `Gc<Block>` for every subclass, and the same field name maps to a
     /// *different* slot per class, so the guard is load-bearing.
     #[inline]
-    fn field_probe(
-        &self,
-        block: Gc<'gc, Block<'gc>>,
-        ip: usize,
-        class_ptr: usize,
-    ) -> Option<usize> {
-        let cache = block.inline_cache.borrow();
+    fn field_probe(&self, ic: InlineCacheCell<'gc>, ip: usize, class_ptr: usize) -> Option<usize> {
+        let cache = ic.borrow();
         let slot = cache.as_ref()?.get(ip)?;
         if slot.epoch != self.dispatch_epoch
             || slot.recv_kind != IC_FIELD_KIND
@@ -3068,7 +3078,7 @@ impl<'gc> VmState<'gc> {
     #[inline]
     fn ic_probe(
         &self,
-        block: Gc<'gc, Block<'gc>>,
+        ic: InlineCacheCell<'gc>,
         ip: usize,
         receiver: Value<'gc>,
         args: &[Value<'gc>],
@@ -3076,7 +3086,7 @@ impl<'gc> VmState<'gc> {
         if args.len() > IC_MAX_ARGS {
             return None;
         }
-        let cache = block.inline_cache.borrow();
+        let cache = ic.borrow();
         let slot = cache.as_ref()?.get(ip)?;
         if slot.epoch != self.dispatch_epoch || slot.n_args as usize != args.len() {
             return None;
@@ -3175,6 +3185,7 @@ impl<'gc> VmState<'gc> {
         // Call-site identity for the inline cache: the executing block + the Send's own `ip`,
         // captured before we advance it.
         let caller_block = self.frames[frame_idx].block;
+        let caller_ic = self.frames[frame_idx].ic;
         let site_ip = self.frames[frame_idx].ip;
         self.frames[frame_idx].ip += 1; // Advance caller frame IP
 
@@ -3188,7 +3199,7 @@ impl<'gc> VmState<'gc> {
         }
 
         // Inline-cache fast path: a hit skips `lookup_method`'s key-build + hash + hashmap.
-        if let Some(callable) = self.ic_probe(caller_block, site_ip, receiver, &args) {
+        if let Some(callable) = self.ic_probe(caller_ic, site_ip, receiver, &args) {
             callable.call(self, mc, Some(receiver), args, Some(selector))?;
             return Ok(VmStatus::Running);
         }
@@ -3292,13 +3303,14 @@ impl<'gc> VmState<'gc> {
     ) -> Result<(), QuoinError> {
         let frame = &self.frames[frame_idx];
         let block = frame.block;
+        let ic = frame.ic;
         let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
         if let Value::Object(obj) = self_val {
             let class = obj.borrow().class;
             // Fast path: cached slot for this exact class at this call site. A hit
             // implies the field is declared; the length guard below still applies
             // (an instance can predate a later-added ivar).
-            if let Some(slot) = self.field_probe(block, ip, Gc::as_ptr(class) as usize)
+            if let Some(slot) = self.field_probe(ic, ip, Gc::as_ptr(class) as usize)
                 && slot < obj.borrow().fields.len()
             {
                 obj.borrow_mut(mc).fields[slot] = val;
@@ -4380,7 +4392,8 @@ impl<'gc> VmState<'gc> {
             Instruction::LoadFieldOf(name) => {
                 let obj = self.pop()?;
                 let block = self.frames[frame_idx].block;
-                let val = self.field_of(mc, block, Some(ip), obj, name);
+                let ic = self.frames[frame_idx].ic;
+                let val = self.field_of(mc, block, ic, Some(ip), obj, name);
                 self.push(val);
                 ip += 1;
             }

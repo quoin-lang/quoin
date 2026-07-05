@@ -44,11 +44,12 @@ entries carry conditions.
 min of 5): 1a = ~24% average (PGO dominant); 1b = btrees −15.7%, richards
 −6.0%; 1c = richards −4.6%, btrees −2.2%; 1d = neutral-to-positive
 (byte-hash probe gone from the profile). Cumulative over the LTO baseline:
-btrees −17.3%, richards −7.6%; loop benches (fib/sieve) carry a small
-+2–4% cost — first suspect is 1b's extra pointer hop on the IC probe
-(shared `Gc<RefLock>` cell vs the old inline field). Candidate micro-fix:
-hoist the cache-array pointer into `Frame` at push time (one deref per
-call, not per send). Two methodology findings now govern all A/Bs: fat-LTO
+btrees −17.3%, richards −7.6%; loop benches (fib/sieve) showed a
+small +2–4% delta vs branch start — investigated and resolved: the
+IC-probe indirection was the suspect, the Frame-hoisted cache cell
+(shipped) measured neutral, and under PGO every build of the branch
+converges — the delta was persistent code-layout noise, which PGO
+recovers, not an algorithmic cost. Two methodology findings now govern all A/Bs: fat-LTO
 rebuilds of identical source differ ±1.3% per bench, and PGO-training
 variance is ±2–8% — so plain-LTO A/B + same-source control is the
 standard, PGO corroboration only. One durable design lesson: per-ip caches
