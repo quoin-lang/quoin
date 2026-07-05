@@ -1,7 +1,7 @@
 use crate::arg;
 use crate::devirt_ops;
 use crate::error::QuoinError;
-use crate::runtime::elem_tag::{ElemTag, check_insert, elem_type_error};
+use crate::runtime::elem_tag::{ElemTag, check_insert};
 use crate::runtime::pretty::{PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
