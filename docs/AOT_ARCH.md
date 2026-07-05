@@ -342,6 +342,20 @@ minimizes how often hot paths cross it.
 6. **The collector revisit.** Deferred exactly as FUTURE_ARCH says: only
    when native execution makes allocation dominate. v1's spill rule is
    designed so the collector question stays orthogonal.
+7. **VM statistics surface (wanted eventually, wider than AOT).** Expose
+   the engine's own behavior as *fast* always-on counters — plain `u64`s
+   bumped on the relevant paths, near-zero cost, no sampling: GC
+   (collections, debt cycles, bytes/objects allocated, pacing), dispatch
+   (IC hits/misses, global-cache hits, megamorphic sites), compile-time
+   decisions (methods inlined, devirt ops emitted), and AOT (candidates
+   found/compiled/refused + why, fuel yields, depth-guard trips,
+   registry size). Surfaced to Quoin as a native class (e.g. `VM.stats`
+   returning a Map, in the `introspect` spirit of docs/INTROSPECTION.md)
+   so programs, tests, and benchmarks can export or track them — a
+   regression test could assert "this method compiled" or "zero
+   megamorphic sites", and `bench/run.py` could collect them per run.
+   AOT should land its counters from v0.0 rather than retrofitting;
+   the full surface is its own small design pass.
 
 ## 10. Expected wins, bounded honestly
 
