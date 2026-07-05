@@ -16,8 +16,9 @@ use crate::runtime::{
     integer, io, json, list, map, math, method, msgpack, nil, object, pretty, regex, runtime, set,
     sockets, streams, string, symbol, task, time_zone, timer, timestamp, toml_fmt, yaml,
 };
-use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
+use crate::value::{EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
+use std::rc::Rc;
 
 use corosensei::CoroutineResult;
 use futures_lite::StreamExt;
@@ -385,7 +386,7 @@ pub(crate) fn install_dap_program(
         // Capture output as DAP `output` events from here on — crucially before the compile, so
         // the resolver's type warnings below reach the client instead of the adapter's raw stderr.
         vm.output.capture = true;
-        let mut compiler = Compiler::new();
+        let mut compiler = Compiler::new().with_template_ids();
         compiler.set_seen_types(vm.options.seen_types.clone());
         compiler.set_class_table(vm.options.class_table.clone());
         crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -739,7 +740,7 @@ impl VmRunner {
             let NodeValue::Program(p) = &node.value else {
                 return false;
             };
-            let mut compiler = Compiler::new();
+            let mut compiler = Compiler::new().with_template_ids();
             compiler.set_seen_types(vm.options.seen_types.clone());
             compiler.set_class_table(vm.options.class_table.clone());
             crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -862,7 +863,7 @@ impl VmRunner {
                 let NodeValue::Program(p) = &ast.value else {
                     return;
                 };
-                match Compiler::new().compile_program(p) {
+                match Compiler::new().with_template_ids().compile_program(p) {
                     Ok(sb) => {
                         let block = build_block(mc, &sb);
                         if let Err(e) = vm.execute_block(mc, block, Vec::new(), None) {
@@ -937,7 +938,7 @@ impl VmRunner {
                     }
                 };
 
-                let mut compiler = Compiler::new();
+                let mut compiler = Compiler::new().with_template_ids();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -949,40 +950,7 @@ impl VmRunner {
                 };
                 vm.report_type_warnings(compiler.diagnostics());
 
-                let decl_block = program.decl_block.as_ref().map(|db| {
-                    gc!(
-                        mc,
-                        Block {
-                            name: db.name.clone(),
-                            is_nested_block: db.is_nested_block,
-                            param_syms: db.param_syms.clone(),
-                            param_types: db.param_types.clone(),
-                            bytecode: db.bytecode.clone(),
-                            parent_env: None,
-                            enclosing_method_id: None,
-                            source_info: db.source_info.clone(),
-                            decl_block: None,
-                            source_map: db.source_map.clone(),
-                            inline_cache: RefLock::new(None),
-                        }
-                    )
-                });
-                let main_block = gc!(
-                    mc,
-                    Block {
-                        name: program.name.clone(),
-                        is_nested_block: program.is_nested_block,
-                        param_syms: program.param_syms.clone(),
-                        param_types: program.param_types.clone(),
-                        bytecode: program.bytecode.clone(),
-                        parent_env: None,
-                        enclosing_method_id: None,
-                        source_info: program.source_info.clone(),
-                        decl_block,
-                        source_map: program.source_map.clone(),
-                        inline_cache: RefLock::new(None),
-                    }
-                );
+                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 // Run this program unit as scheduler task #0; driven to completion below.
                 install_main_task(mc, vm);
@@ -1060,7 +1028,7 @@ impl VmRunner {
                     NodeValue::Program(p) => p,
                     _ => panic!("Error: Root AST node is not a ProgramNode"),
                 };
-                let mut compiler = Compiler::new();
+                let mut compiler = Compiler::new().with_template_ids();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -1069,40 +1037,7 @@ impl VmRunner {
                     Err(e) => panic!("Compilation error: {}", e),
                 };
                 vm.report_type_warnings(compiler.diagnostics());
-                let decl_block = program.decl_block.as_ref().map(|db| {
-                    gc!(
-                        mc,
-                        Block {
-                            name: db.name.clone(),
-                            is_nested_block: db.is_nested_block,
-                            param_syms: db.param_syms.clone(),
-                            param_types: db.param_types.clone(),
-                            bytecode: db.bytecode.clone(),
-                            parent_env: None,
-                            enclosing_method_id: None,
-                            source_info: db.source_info.clone(),
-                            decl_block: None,
-                            source_map: db.source_map.clone(),
-                            inline_cache: RefLock::new(None),
-                        }
-                    )
-                });
-                let main_block = gc!(
-                    mc,
-                    Block {
-                        name: program.name.clone(),
-                        is_nested_block: program.is_nested_block,
-                        param_syms: program.param_syms.clone(),
-                        param_types: program.param_types.clone(),
-                        bytecode: program.bytecode.clone(),
-                        parent_env: None,
-                        enclosing_method_id: None,
-                        source_info: program.source_info.clone(),
-                        decl_block,
-                        source_map: program.source_map.clone(),
-                        inline_cache: RefLock::new(None),
-                    }
-                );
+                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 install_main_task(mc, vm);
             });
@@ -1120,7 +1055,7 @@ impl VmRunner {
                     NodeValue::Program(p) => p,
                     _ => panic!("Error: Root AST node is not a ProgramNode"),
                 };
-                let mut compiler = Compiler::new();
+                let mut compiler = Compiler::new().with_template_ids();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -1295,7 +1230,7 @@ impl VmRunner {
                     }
                 };
 
-                let mut compiler = Compiler::new();
+                let mut compiler = Compiler::new().with_template_ids();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -1307,40 +1242,7 @@ impl VmRunner {
                 };
                 vm.report_type_warnings(compiler.diagnostics());
 
-                let decl_block = program.decl_block.as_ref().map(|db| {
-                    gc!(
-                        mc,
-                        Block {
-                            name: db.name.clone(),
-                            is_nested_block: db.is_nested_block,
-                            param_syms: db.param_syms.clone(),
-                            param_types: db.param_types.clone(),
-                            bytecode: db.bytecode.clone(),
-                            parent_env: None,
-                            enclosing_method_id: None,
-                            source_info: db.source_info.clone(),
-                            decl_block: None,
-                            source_map: db.source_map.clone(),
-                            inline_cache: RefLock::new(None),
-                        }
-                    )
-                });
-                let main_block = gc!(
-                    mc,
-                    Block {
-                        name: program.name.clone(),
-                        is_nested_block: program.is_nested_block,
-                        param_syms: program.param_syms.clone(),
-                        param_types: program.param_types.clone(),
-                        bytecode: program.bytecode.clone(),
-                        parent_env: None,
-                        enclosing_method_id: None,
-                        source_info: program.source_info.clone(),
-                        decl_block,
-                        source_map: program.source_map.clone(),
-                        inline_cache: RefLock::new(None),
-                    }
-                );
+                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
             });
 

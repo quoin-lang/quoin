@@ -526,6 +526,12 @@ pub struct Compiler {
     /// last. A `^`/`^^` return or a block's tail expression is checked (and numeric literals
     /// promoted) against the top entry; `None` = no declared return → not checked. Phase 3a.
     return_type_stack: Vec<Option<Type>>,
+    /// Mint a `template_id` for every compiled block literal, so all its closures
+    /// share one inline-cache array (`VmState::ic_registry`). Only the runner's
+    /// once-per-unit compiles opt in (`with_template_ids`); eval/REPL/interpolation
+    /// compile per evaluation, and per-compile ids would grow the registry without
+    /// bound. Default: off.
+    mint_template_ids: bool,
 }
 
 impl Compiler {
@@ -556,7 +562,14 @@ impl Compiler {
             class_table: ClassTable::new(),
             diagnostics: Vec::new(),
             return_type_stack: Vec::new(),
+            mint_template_ids: false,
         }
+    }
+
+    /// Opt this compile into template-id minting (shared inline-cache arrays).
+    pub fn with_template_ids(mut self) -> Self {
+        self.mint_template_ids = true;
+        self
     }
 
     pub fn new_with_locals(locals: HashSet<String>) -> Self {
@@ -586,6 +599,7 @@ impl Compiler {
             class_table: ClassTable::new(),
             diagnostics: Vec::new(),
             return_type_stack: Vec::new(),
+            mint_template_ids: false,
         }
     }
 
@@ -1514,6 +1528,9 @@ impl Compiler {
             source_info: program.source_info.clone(),
             decl_block: None,
             source_map: SharedSourceMap(Rc::new(source_map)),
+            template_id: self
+                .mint_template_ids
+                .then(crate::instruction::fresh_template_id),
         })
     }
 
@@ -2198,7 +2215,7 @@ impl Compiler {
             db_bytecode.current_source = db.source_info.clone();
             self.compile_block(db, &mut db_bytecode)?;
             if let Some(Instruction::Push(Constant::Block(sb))) = db_bytecode.pop() {
-                Some(Box::new(sb))
+                Some(sb)
             } else {
                 None
             }
@@ -2235,9 +2252,13 @@ impl Compiler {
             source_info: block.source_info.clone(),
             decl_block,
             source_map: SharedSourceMap(Rc::new(fused_source_map)),
+            // Every closure of this literal shares one inline-cache array via this id.
+            template_id: self
+                .mint_template_ids
+                .then(crate::instruction::fresh_template_id),
         };
 
-        bytecode.push(Instruction::Push(Constant::Block(static_block)));
+        bytecode.push(Instruction::Push(Constant::Block(Rc::new(static_block))));
         self.inline_carets = saved_inline;
         Ok(())
     }

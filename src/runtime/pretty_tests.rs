@@ -4,6 +4,7 @@
 
 use super::{best, bracket, render, text};
 use crate::parser::NodeValue;
+use crate::symbol::Symbol;
 use crate::value::{ObjectPayload, Value};
 use crate::vm::{VmOptions, VmState};
 use gc_arena::{Arena, Mutation, Rootable};
@@ -242,7 +243,12 @@ fn pp_methods_show_variant_signatures() {
         let Value::Class(c) = foo else {
             panic!("Foo is not a class");
         };
-        let method = |sel: &str| *c.borrow().instance_methods.get(sel).expect(sel);
+        let method = |sel: &str| {
+            *c.borrow()
+                .instance_methods
+                .get(&Symbol::intern(sel))
+                .expect(sel)
+        };
 
         // A unary user method.
         assert_eq!(render(method("greet"), 80, false), "Method(greet)");
@@ -266,7 +272,11 @@ fn pp_methods_show_variant_signatures() {
         let Value::Class(oc) = object else {
             panic!("Object is not a class");
         };
-        let pp_method = *oc.borrow().instance_methods.get("pp").expect("Object#pp");
+        let pp_method = *oc
+            .borrow()
+            .instance_methods
+            .get(&Symbol::intern("pp"))
+            .expect("Object#pp");
         assert_eq!(render(pp_method, 80, false), "Method(pp (native))");
     });
 }

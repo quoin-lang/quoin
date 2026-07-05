@@ -1,0 +1,13 @@
+"Untyped recursive Fibonacci - the dispatch-heavy path. No annotations, so
+every `+`/`-`/`<=` and the recursive send goes through full dynamic dispatch
+(inline cache + method cache), not the devirtualized ops.
+Run whole-process: `qn bench/qn/fib_untyped.qn` from the repo root."
+
+Fib <- {
+    .meta <-- {
+        value: -> { |n| (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) } }
+    }
+};
+
+var r = Fib.value:30;
+(r == 832040).if:{ 'fib_untyped: ok'.print } else:{ ('fib_untyped: FAIL got ' + r).print }

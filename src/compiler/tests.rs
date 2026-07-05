@@ -1379,9 +1379,10 @@ fn test_compile_blocks() {
         source_info: None,
         decl_block: None,
         source_map: SharedSourceMap(Rc::new(inner_sm)),
+        template_id: None,
     };
     let mut expected = prefix_ops();
-    expected.push(Instruction::Push(Constant::Block(inner_static)));
+    expected.push(Instruction::Push(Constant::block(inner_static)));
     assert_eq!(res.bytecode, fused(expected));
 }
 
@@ -1518,6 +1519,7 @@ fn test_compile_class_and_method_definitions() {
         source_info: None,
         decl_block: None,
         source_map: SharedSourceMap(Rc::new(vec![None; 2])),
+        template_id: None,
     };
     let mut expected = prefix_ops();
     expected.push(Instruction::DefineClass {
@@ -1525,7 +1527,7 @@ fn test_compile_class_and_method_definitions() {
         parent_name: Some(ns("Object")),
         instance_vars: vec!["a".to_string(), "b".to_string()],
     });
-    expected.push(Instruction::Push(Constant::Block(expected_block)));
+    expected.push(Instruction::Push(Constant::block(expected_block)));
     expected.push(Instruction::ExecuteBlockWithSelf);
     assert_eq!(res.bytecode, fused(expected));
 }

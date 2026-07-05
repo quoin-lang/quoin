@@ -16,6 +16,7 @@ use crate::runtime::string::build_string_class;
 use crate::value::{NativeClassBuilder, OpaqueState};
 use gc_arena::{Arena, Rootable};
 use rustc_hash::FxHashMap;
+use std::rc::Rc;
 
 fn native_add<'gc>(
     vm: &mut VmState<'gc>,
@@ -86,7 +87,7 @@ fn to_spec(val: Value<'_>) -> ValueSpec {
                     });
                     res.unwrap_or_else(|_| ValueSpec::Instance("Regex".to_string()))
                 }
-                ObjectPayload::Block(b) => ValueSpec::Block(b.name.clone()),
+                ObjectPayload::Block(b) => ValueSpec::Block(b.template.name.clone()),
                 ObjectPayload::Bytes(_) => ValueSpec::Instance("Bytes".to_string()),
                 ObjectPayload::Instance | ObjectPayload::NativeState(_) => {
                     ValueSpec::Instance(borrowed.class.borrow().name.to_string())
@@ -161,21 +162,16 @@ where
             bytecode: instructions.into(),
             decl_block: None,
             source_map: SharedSourceMap::from(Vec::new()),
+            template_id: None,
         };
         let block = gc!(
             mc,
             Block {
-                source_info: None,
-                name: static_block.name.clone(),
-                is_nested_block: static_block.is_nested_block,
-                param_syms: static_block.param_syms.clone(),
-                param_types: static_block.param_types.clone(),
-                bytecode: static_block.bytecode.clone(),
+                template: Rc::new(static_block.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-                source_map: SharedSourceMap::from(Vec::new()),
-                inline_cache: RefLock::new(None),
+                inline_cache: Gc::new(mc, RefLock::new(None)),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
@@ -312,21 +308,16 @@ fn test_deferred_call_values_survive_collection() {
             bytecode: Vec::<Instruction>::new().into(),
             decl_block: None,
             source_map: SharedSourceMap::from(Vec::new()),
+            template_id: None,
         };
         let block = gc!(
             mc,
             Block {
-                source_info: None,
-                name: static_block.name.clone(),
-                is_nested_block: static_block.is_nested_block,
-                param_syms: static_block.param_syms.clone(),
-                param_types: static_block.param_types.clone(),
-                bytecode: static_block.bytecode.clone(),
+                template: Rc::new(static_block.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-                source_map: SharedSourceMap::from(Vec::new()),
-                inline_cache: RefLock::new(None),
+                inline_cache: Gc::new(mc, RefLock::new(None)),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
@@ -459,7 +450,7 @@ fn test_native_methods_are_chainable() {
         let native_method = obj_class
             .borrow()
             .instance_methods
-            .get("can?:")
+            .get(&Symbol::intern("can?:"))
             .copied()
             .expect("Object should have a native can?: method");
 
@@ -784,11 +775,12 @@ fn test_block_execution_and_returns() {
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     run_test_steps(
         vec![
-            Instruction::Push(Constant::Block(block_static)),
+            Instruction::Push(Constant::block(block_static)),
             Instruction::Push(Constant::Int(41)),
             // Send "value:" with 1 arg
             Instruction::Send(Symbol::intern("value:"), 1),
@@ -801,7 +793,10 @@ fn test_block_execution_and_returns() {
             // Send -> starts block frame -> [Block]
             vm.step(mc).unwrap();
             assert_eq!(vm.frames.len(), 2);
-            assert_eq!(vm.frames[1].block.name, Some("test_block".to_string()));
+            assert_eq!(
+                vm.frames[1].block.template.name,
+                Some("test_block".to_string())
+            );
 
             // Inside block: LoadLocal("x") -> push 41 -> [41]
             vm.step(mc).unwrap();
@@ -859,6 +854,7 @@ fn test_method_return() {
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     // Block 1: method
@@ -870,18 +866,19 @@ fn test_method_return() {
         param_syms: Vec::new(),
         param_types: Vec::new(),
         bytecode: SharedBytecode::from(vec![
-            Instruction::Push(Constant::Block(block_nested)),
+            Instruction::Push(Constant::block(block_nested)),
             Instruction::Send(Symbol::intern("value"), 0),
             Instruction::Push(Constant::Int(100)), // this should be skipped due to MethodReturn
             Instruction::Return,
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     run_test_steps(
         vec![
-            Instruction::Push(Constant::Block(block_method)),
+            Instruction::Push(Constant::block(block_method)),
             Instruction::Send(Symbol::intern("value"), 0),
         ],
         |vm, mc| {
@@ -921,6 +918,7 @@ fn test_non_local_return_callback() {
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     // block_bar: blk.value, Push(111), Return
@@ -938,6 +936,7 @@ fn test_non_local_return_callback() {
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     // block_foo: bar.value: block_nested, Push(222), Return
@@ -949,29 +948,24 @@ fn test_non_local_return_callback() {
         param_types: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "bar_func".to_string())),
-            Instruction::Push(Constant::Block(block_nested)),
+            Instruction::Push(Constant::block(block_nested)),
             Instruction::Send(Symbol::intern("value:"), 1),
             Instruction::Push(Constant::Int(222)),
             Instruction::Return,
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc, VmOptions::default());
         let bar_block = Block {
-            source_info: None,
-            name: block_bar.name.clone(),
-            is_nested_block: block_bar.is_nested_block,
-            param_syms: block_bar.param_syms.clone(),
-            param_types: block_bar.param_types.clone(),
-            bytecode: block_bar.bytecode.clone(),
+            template: Rc::new(block_bar.clone()),
             parent_env: None,
             enclosing_method_id: None,
             decl_block: None,
-            source_map: SharedSourceMap::from(Vec::new()),
-            inline_cache: RefLock::new(None),
+            inline_cache: Gc::new(mc, RefLock::new(None)),
         };
         let bar_block_val = vm.new_block(mc, bar_block);
         vm.globals.borrow_mut(mc).insert(
@@ -982,17 +976,11 @@ fn test_non_local_return_callback() {
         let foo_block = gc!(
             mc,
             Block {
-                source_info: None,
-                name: block_foo.name.clone(),
-                is_nested_block: block_foo.is_nested_block,
-                param_syms: block_foo.param_syms.clone(),
-                param_types: block_foo.param_types.clone(),
-                bytecode: block_foo.bytecode.clone(),
+                template: Rc::new(block_foo.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-                source_map: SharedSourceMap::from(Vec::new()),
-                inline_cache: RefLock::new(None),
+                inline_cache: Gc::new(mc, RefLock::new(None)),
             }
         );
         vm.start_block(mc, foo_block, Vec::new(), None, None);
@@ -1007,14 +995,14 @@ fn test_non_local_return_callback() {
         // Step 3: Inside foo: Send(value:) -> starts block_bar frame
         vm.step(mc).unwrap();
         assert_eq!(vm.frames.len(), 2);
-        assert_eq!(vm.frames[1].block.name, Some("bar".to_string()));
+        assert_eq!(vm.frames[1].block.template.name, Some("bar".to_string()));
 
         // Step 4: Inside bar: LoadLocal(blk)
         vm.step(mc).unwrap();
         // Step 5: Inside bar: Send(value) -> starts block_nested frame
         vm.step(mc).unwrap();
         assert_eq!(vm.frames.len(), 3);
-        assert_eq!(vm.frames[2].block.name, Some("nested".to_string()));
+        assert_eq!(vm.frames[2].block.template.name, Some("nested".to_string()));
 
         // Step 6: Inside nested: Push(777)
         vm.step(mc).unwrap();
@@ -1037,7 +1025,7 @@ fn test_class_and_method_definition_vm() {
         param_types: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             // 1. Define inst method x
-            Instruction::Push(Constant::Block(StaticBlock {
+            Instruction::Push(Constant::block(StaticBlock {
                 source_info: None,
                 name: Some("x".to_string()),
                 is_nested_block: false,
@@ -1050,10 +1038,11 @@ fn test_class_and_method_definition_vm() {
                 .into(),
                 decl_block: None,
                 source_map: Vec::new().into(),
+                template_id: None,
             })),
             Instruction::DefineMethod("x".to_string()),
             // 2. Override inst method x
-            Instruction::Push(Constant::Block(StaticBlock {
+            Instruction::Push(Constant::block(StaticBlock {
                 source_info: None,
                 name: Some("x".to_string()),
                 is_nested_block: false,
@@ -1062,12 +1051,14 @@ fn test_class_and_method_definition_vm() {
                 bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return].into(),
                 decl_block: None,
                 source_map: Vec::new().into(),
+                template_id: None,
             })),
             Instruction::OverrideMethod("x".to_string()),
             Instruction::Return,
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     run_test_steps(
@@ -1079,7 +1070,7 @@ fn test_class_and_method_definition_vm() {
                 instance_vars: vec!["x".to_string(), "y".to_string()],
             },
             // Push class block
-            Instruction::Push(Constant::Block(class_block)),
+            Instruction::Push(Constant::block(class_block)),
             // Execute block with Point as self
             Instruction::ExecuteBlockWithSelf,
             // Send "meta" to Point
@@ -1117,7 +1108,11 @@ fn test_class_and_method_definition_vm() {
 
             // Verify method x exists in instance_methods
             if let Value::Class(c) = class_val {
-                assert!(c.borrow().instance_methods.contains_key("x"));
+                assert!(
+                    c.borrow()
+                        .instance_methods
+                        .contains_key(&Symbol::intern("x"))
+                );
             }
 
             // Inside class_block: Push(override_x_block)
@@ -1198,6 +1193,7 @@ fn test_primitive_methods_and_overrides() {
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     let class_extension_block = StaticBlock {
@@ -1207,13 +1203,14 @@ fn test_primitive_methods_and_overrides() {
         param_syms: Vec::new(),
         param_types: Vec::new(),
         bytecode: SharedBytecode::from(vec![
-            Instruction::Push(Constant::Block(custom_true_method)),
+            Instruction::Push(Constant::block(custom_true_method)),
             Instruction::DefineMethod("custom_true".to_string()),
             Instruction::Push(Constant::Nil),
             Instruction::Return,
         ]),
         decl_block: None,
         source_map: SharedSourceMap::from(Vec::new()),
+        template_id: None,
     };
 
     run_test_steps(
@@ -1221,7 +1218,7 @@ fn test_primitive_methods_and_overrides() {
             Instruction::Push(Constant::Bool(true)),
             Instruction::Send(Symbol::intern("class"), 0),
             Instruction::Push(Constant::Bool(true)),
-            Instruction::Push(Constant::Block(class_extension_block)),
+            Instruction::Push(Constant::block(class_extension_block)),
             Instruction::ExecuteBlockWithSelf,
             Instruction::Push(Constant::Bool(true)),
             Instruction::Send(Symbol::intern("class"), 0),
@@ -1417,7 +1414,7 @@ fn test_mixin_method_lookup_and_instance_vars() {
                 instance_methods: {
                     let mut m = FxHashMap::default();
                     m.insert(
-                        "name".to_string(),
+                        Symbol::intern("name"),
                         vm.new_native_method(
                             mc,
                             "name".to_string(),
@@ -1491,27 +1488,31 @@ fn test_execute_block_helper() {
         let block = gc!(
             mc,
             Block {
-                source_info: None,
-                name: Some("test_block".to_string()),
-                is_nested_block: false,
-                param_syms: crate::value::intern_param_syms(&vec![
-                    "a".to_string(),
-                    "b".to_string()
-                ]),
-                param_types: vec!["Object".to_string(), "Object".to_string()],
-                bytecode: SharedBytecode::from(vec![
-                    Instruction::LoadLocal(Symbol::intern("self")),
-                    Instruction::LoadLocal(Symbol::intern("a")),
-                    Instruction::Send(Symbol::intern("+"), 1),
-                    Instruction::LoadLocal(Symbol::intern("b")),
-                    Instruction::Send(Symbol::intern("+"), 1),
-                    Instruction::Return,
-                ]),
+                template: Rc::new(StaticBlock {
+                    source_info: None,
+                    name: Some("test_block".to_string()),
+                    is_nested_block: false,
+                    param_syms: crate::value::intern_param_syms(&vec![
+                        "a".to_string(),
+                        "b".to_string()
+                    ]),
+                    param_types: vec!["Object".to_string(), "Object".to_string()],
+                    bytecode: SharedBytecode::from(vec![
+                        Instruction::LoadLocal(Symbol::intern("self")),
+                        Instruction::LoadLocal(Symbol::intern("a")),
+                        Instruction::Send(Symbol::intern("+"), 1),
+                        Instruction::LoadLocal(Symbol::intern("b")),
+                        Instruction::Send(Symbol::intern("+"), 1),
+                        Instruction::Return,
+                    ]),
+                    decl_block: None,
+                    source_map: SharedSourceMap::from(Vec::new()),
+                    template_id: None,
+                }),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-                source_map: SharedSourceMap::from(Vec::new()),
-                inline_cache: RefLock::new(None),
+                inline_cache: Gc::new(mc, RefLock::new(None)),
             }
         );
 
@@ -1542,25 +1543,29 @@ fn test_execute_block_helper() {
         let block2 = gc!(
             mc,
             Block {
-                source_info: None,
-                name: Some("test_block_no_self".to_string()),
-                is_nested_block: false,
-                param_syms: crate::value::intern_param_syms(&vec![
-                    "a".to_string(),
-                    "b".to_string()
-                ]),
-                param_types: vec!["Object".to_string(), "Object".to_string()],
-                bytecode: SharedBytecode::from(vec![
-                    Instruction::LoadLocal(Symbol::intern("a")),
-                    Instruction::LoadLocal(Symbol::intern("b")),
-                    Instruction::Send(Symbol::intern("+"), 1),
-                    Instruction::Return,
-                ]),
+                template: Rc::new(StaticBlock {
+                    source_info: None,
+                    name: Some("test_block_no_self".to_string()),
+                    is_nested_block: false,
+                    param_syms: crate::value::intern_param_syms(&vec![
+                        "a".to_string(),
+                        "b".to_string()
+                    ]),
+                    param_types: vec!["Object".to_string(), "Object".to_string()],
+                    bytecode: SharedBytecode::from(vec![
+                        Instruction::LoadLocal(Symbol::intern("a")),
+                        Instruction::LoadLocal(Symbol::intern("b")),
+                        Instruction::Send(Symbol::intern("+"), 1),
+                        Instruction::Return,
+                    ]),
+                    decl_block: None,
+                    source_map: SharedSourceMap::from(Vec::new()),
+                    template_id: None,
+                }),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-                source_map: SharedSourceMap::from(Vec::new()),
-                inline_cache: RefLock::new(None),
+                inline_cache: Gc::new(mc, RefLock::new(None)),
             }
         );
 
@@ -1594,7 +1599,7 @@ fn test_cannot_extend_non_existent_class() {
     run_test_steps(
         vec![
             Instruction::Push(Constant::Nil),
-            Instruction::Push(Constant::Block(StaticBlock {
+            Instruction::Push(Constant::block(StaticBlock {
                 source_info: None,
                 name: Some("ext_block".to_string()),
                 is_nested_block: false,
@@ -1606,6 +1611,7 @@ fn test_cannot_extend_non_existent_class() {
                 ]),
                 decl_block: None,
                 source_map: SharedSourceMap::from(Vec::new()),
+                template_id: None,
             })),
             Instruction::ExecuteBlockWithSelf,
         ],
@@ -1728,34 +1734,22 @@ fn test_error_annotation_and_display() {
             gc!(
                 mc,
                 Block {
-                    source_info: db.source_info.clone(),
-                    name: db.name.clone(),
-                    is_nested_block: db.is_nested_block,
-                    param_syms: db.param_syms.clone(),
-                    param_types: db.param_types.clone(),
-                    bytecode: db.bytecode.clone(),
+                    template: db.clone(),
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
-                    source_map: db.source_map.clone(),
-                    inline_cache: RefLock::new(None),
+                    inline_cache: Gc::new(mc, RefLock::new(None)),
                 }
             )
         });
         let block = gc!(
             mc,
             Block {
-                source_info: compiled.source_info.clone(),
-                name: compiled.name.clone(),
-                is_nested_block: compiled.is_nested_block,
-                param_syms: compiled.param_syms.clone(),
-                param_types: compiled.param_types.clone(),
-                bytecode: compiled.bytecode.clone(),
+                template: Rc::new(compiled.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block,
-                source_map: compiled.source_map.clone(),
-                inline_cache: RefLock::new(None),
+                inline_cache: Gc::new(mc, RefLock::new(None)),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
@@ -1807,34 +1801,22 @@ fn test_error_annotation_with_color() {
             gc!(
                 mc,
                 Block {
-                    source_info: db.source_info.clone(),
-                    name: db.name.clone(),
-                    is_nested_block: db.is_nested_block,
-                    param_syms: db.param_syms.clone(),
-                    param_types: db.param_types.clone(),
-                    bytecode: db.bytecode.clone(),
+                    template: db.clone(),
                     parent_env: None,
                     enclosing_method_id: None,
                     decl_block: None,
-                    source_map: db.source_map.clone(),
-                    inline_cache: RefLock::new(None),
+                    inline_cache: Gc::new(mc, RefLock::new(None)),
                 }
             )
         });
         let block = gc!(
             mc,
             Block {
-                source_info: compiled.source_info.clone(),
-                name: compiled.name.clone(),
-                is_nested_block: compiled.is_nested_block,
-                param_syms: compiled.param_syms.clone(),
-                param_types: compiled.param_types.clone(),
-                bytecode: compiled.bytecode.clone(),
+                template: Rc::new(compiled.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block,
-                source_map: compiled.source_map.clone(),
-                inline_cache: RefLock::new(None),
+                inline_cache: Gc::new(mc, RefLock::new(None)),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);
@@ -1888,17 +1870,11 @@ fn test_error_annotation_with_console_width() {
         let block = gc!(
             mc,
             Block {
-                source_info: compiled.source_info.clone(),
-                name: compiled.name.clone(),
-                is_nested_block: compiled.is_nested_block,
-                param_syms: compiled.param_syms.clone(),
-                param_types: compiled.param_types.clone(),
-                bytecode: compiled.bytecode.clone(),
+                template: Rc::new(compiled.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-                source_map: compiled.source_map.clone(),
-                inline_cache: RefLock::new(None),
+                inline_cache: Gc::new(mc, RefLock::new(None)),
             }
         );
         vm.start_block(mc, block, Vec::new(), None, None);

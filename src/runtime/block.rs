@@ -11,13 +11,14 @@ pub fn build_block_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Block", Some("Object"))
         .instance_method("arity", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
-            Ok(vm.new_int(mc, block.param_syms.len() as i64))
+            Ok(vm.new_int(mc, block.template.param_syms.len() as i64))
         })
         .instance_method("args", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
             Ok(vm.new_list(
                 mc,
                 block
+                    .template
                     .param_syms
                     .iter()
                     .map(|s| vm.new_string(mc, s.as_str().to_string()))
@@ -26,7 +27,7 @@ pub fn build_block_class() -> NativeClassBuilder {
         })
         .instance_method("name", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
-            if let Some(name) = &block.name {
+            if let Some(name) = &block.template.name {
                 Ok(vm.new_symbol(mc, name.clone()))
             } else {
                 Ok(vm.new_nil(mc))
@@ -34,7 +35,7 @@ pub fn build_block_class() -> NativeClassBuilder {
         })
         .instance_method("code", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
-            if let Some(source_info) = &block.source_info
+            if let Some(source_info) = &block.template.source_info
                 && let Some(text) = &source_info.source_text
             {
                 Ok(vm.new_string(mc, text.clone()))
@@ -48,7 +49,7 @@ pub fn build_block_class() -> NativeClassBuilder {
         // reporter to point a failed assertion at its source location.
         .instance_method("source", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
-            if let Some(si) = &block.source_info {
+            if let Some(si) = &block.template.source_info {
                 let file = vm.new_string(mc, si.filename.clone());
                 let line = vm.new_int(mc, si.line as i64);
                 let column = vm.new_int(mc, si.column as i64);
@@ -151,7 +152,7 @@ fn handler_parts<'gc>(v: Value<'gc>) -> Option<(Gc<'gc, Block<'gc>>, Option<Stri
     if let Value::Object(o) = v
         && let ObjectPayload::Block(blk) = &o.borrow().payload
     {
-        return Some((*blk, blk.param_types.first().cloned()));
+        return Some((*blk, blk.template.param_types.first().cloned()));
     }
     None
 }

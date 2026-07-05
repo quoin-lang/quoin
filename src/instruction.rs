@@ -69,18 +69,50 @@ impl PartialEq<SharedSourceMap> for Vec<Option<SourceInfo>> {
     }
 }
 
-#[derive(Clone, Debug, Collect, PartialEq)]
+#[derive(Clone, Debug, Collect)]
 #[collect(require_static)]
 pub struct StaticBlock {
     pub name: Option<String>,
     pub is_nested_block: bool,
-    /// Parameter names interned at compile time; copied into the runtime `Block`.
+    /// Parameter names interned at compile time; the runtime `Block` reads them
+    /// through its shared `template` reference.
     pub param_syms: Vec<Symbol>,
     pub param_types: Vec<String>,
     pub bytecode: SharedBytecode,
     pub source_info: Option<SourceInfo>,
-    pub decl_block: Option<Box<StaticBlock>>,
+    pub decl_block: Option<Rc<StaticBlock>>,
     pub source_map: SharedSourceMap,
+    /// Compiler-minted unique id for this block literal. Every closure
+    /// materialized from the same literal shares one inline-cache array keyed by
+    /// this id (`VmState::ic_registry`), so call sites stay warm across
+    /// re-materialization. `None` — runtime-built blocks (eval, string
+    /// interpolation, runner entry) — keeps a private per-closure cache, since a
+    /// per-evaluation compile would otherwise grow the registry without bound.
+    pub template_id: Option<u32>,
+}
+
+/// Mint a globally unique template id (compile time only; ids are never reused,
+/// so a registry entry keyed by one is a stable call-site identity forever).
+pub fn fresh_template_id() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+// Manual PartialEq: `template_id` is identity metadata, not structure — two
+// otherwise-identical literals from different compiles should still compare
+// equal (compiler tests build expected bytecode by hand).
+impl PartialEq for StaticBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.is_nested_block == other.is_nested_block
+            && self.param_syms == other.param_syms
+            && self.param_types == other.param_types
+            && self.bytecode == other.bytecode
+            && self.source_info == other.source_info
+            && self.decl_block == other.decl_block
+            && self.source_map == other.source_map
+    }
 }
 
 #[derive(Clone, Debug, Collect, PartialEq)]
@@ -92,10 +124,16 @@ pub enum Constant {
     Double(f64),
     String(String),
     Symbol(String),
-    Block(StaticBlock),
+    Block(Rc<StaticBlock>),
 }
 
 impl Constant {
+    /// Wrap a [`StaticBlock`] into a `Constant::Block` (the variant carries an `Rc`
+    /// so materialization is a refcount bump). Convenience for tests/builders.
+    pub fn block(sb: StaticBlock) -> Constant {
+        Constant::Block(Rc::new(sb))
+    }
+
     /// The integer value if this is an `Int` literal — for `IntBinLC`'s fast path.
     pub fn as_int(&self) -> Option<i64> {
         match self {

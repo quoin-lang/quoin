@@ -2,7 +2,7 @@ use crate::dispatch::{Callable, MethodCacheKey};
 use crate::error::QuoinError;
 use crate::fiber::{VMYielder, YieldReason};
 use crate::highlighter::{HighlightSpan, format_ansi, highlight_resilient, highlight_to_ansi};
-use crate::instruction::{Constant, Instruction, IntBinKind, SharedBytecode};
+use crate::instruction::{Constant, Instruction, IntBinKind, SharedBytecode, StaticBlock};
 use crate::io_backend::StreamId;
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
 use crate::runtime::fiber::NativeFiberState;
@@ -12,12 +12,13 @@ use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
-use crate::symbol::{Symbol, self_symbol};
+use crate::symbol::{Symbol, init_colon_symbol, init_symbol, self_symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, Fields, NamespacedName, NativeCall, NativeClass,
     NativeFunc, Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, devirt_ops, gc, gcl};
+use std::rc::Rc;
 
 use gc_arena::metrics::Pacing;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
@@ -52,6 +53,18 @@ pub fn gc_pacing() -> Pacing {
 
 /// Argument arity an inline-cache slot's guard can encode (larger sends bypass the IC).
 pub const IC_MAX_ARGS: usize = 2;
+
+/// The shared (or private) per-template inline-cache cell: one lazily-allocated
+/// per-`ip` slot array. Hoisted into `Frame` at push time so the per-send probe
+/// reads it off the hot frame instead of chasing `Block::inline_cache`.
+pub type InlineCacheCell<'gc> = Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>;
+
+/// `ICSlot::recv_kind` value marking a *field-slot* entry (the `LoadField`/`StoreField`
+/// family) rather than a send entry: `recv_ptr` holds the receiver's class pointer and
+/// `arg_ptrs[0]` the field's slot index. Send and field instructions never share an `ip`,
+/// so one per-template array serves both; a field entry can never satisfy `ic_probe`
+/// (its `callable` is `None`), and `value_type_guard` kinds are tiny, far from this.
+pub const IC_FIELD_KIND: u8 = u8::MAX;
 
 /// A monomorphic inline-cache entry: a resolved method memoized at one call site. Lives in the
 /// executing [`Block`]'s per-`ip` cache array ([`Block::inline_cache`]), so the block+ip *is*
@@ -140,6 +153,9 @@ pub struct Frame<'gc> {
     pub is_nested_block: bool,
     pub enclosing_method_id: Option<usize>,
     pub block: Gc<'gc, Block<'gc>>,
+    /// `block.inline_cache`, hoisted at frame push: the probe on every send/field
+    /// reads the cell without the extra hop through the (template-thin) `Block`.
+    pub ic: InlineCacheCell<'gc>,
     pub ip: usize,
     pub env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
     pub instantiating_obj: Option<Gc<'gc, RefLock<Object<'gc>>>>,
@@ -325,7 +341,10 @@ pub struct Instrumentation {
 pub struct VmState<'gc> {
     pub stack: Vec<Value<'gc>>,
     pub frames: Vec<Frame<'gc>>,
-    pub globals: Gc<'gc, RefLock<HashMap<NamespacedName, Value<'gc>>>>,
+    /// FxHash, not SipHash: `LoadGlobal` probes this once per instantiation
+    /// (`TreeNode` etc. resolve here before every `.new:`), the last
+    /// default-hasher map on the allocation path.
+    pub globals: Gc<'gc, RefLock<FxHashMap<NamespacedName, Value<'gc>>>>,
     /// Intern pool for symbols: one canonical `Symbol` value per name, so symbols
     /// compare by identity. Rooted here and traced as part of `VmState`.
     pub symbol_table: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
@@ -372,6 +391,12 @@ pub struct VmState<'gc> {
     pub output: OutputCapture,
     /// Memoized method resolution ([`DispatchCache`]).
     pub dispatch_cache: DispatchCache<'gc>,
+    /// Shared inline-cache arrays keyed by block-literal template id: every closure
+    /// materialized from the same literal gets the same cell, so its call sites stay
+    /// warm across re-materialization. Rooted here for the VM's lifetime and ids are
+    /// never reused, so `(template_id, ip)` is a stable call-site identity (no ABA);
+    /// stale entries self-evict via `dispatch_epoch`.
+    pub ic_registry: FxHashMap<u32, Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>>,
     /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts every
     /// per-`Block` [`ICSlot`] at once, giving O(1) inline-cache invalidation.
     #[collect(require_static)]
@@ -448,7 +473,7 @@ impl<'gc> VmState<'gc> {
         Self {
             stack: Vec::new(),
             frames: Vec::new(),
-            globals: gcl!(mc, HashMap::new()),
+            globals: gcl!(mc, FxHashMap::default()),
             symbol_table: gcl!(mc, HashMap::new()),
             pending_class_def: None,
             next_frame_id: 1,
@@ -489,6 +514,7 @@ impl<'gc> VmState<'gc> {
                 capture: false,
                 chunks: Vec::new(),
             },
+            ic_registry: FxHashMap::default(),
             dispatch_cache: DispatchCache {
                 entries: FxHashMap::default(),
                 uncacheable: false,
@@ -1004,15 +1030,15 @@ impl<'gc> VmState<'gc> {
         instance_selectors: &[String],
         class_selectors: &[String],
     ) {
-        let mut instance_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
+        let mut instance_methods: FxHashMap<Symbol, Value<'gc>> = FxHashMap::default();
         for sel in instance_selectors {
             let node = self.new_ext_method(mc, sel.clone(), ext);
-            instance_methods.insert(sel.clone(), node);
+            instance_methods.insert(Symbol::intern(sel), node);
         }
-        let mut class_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
+        let mut class_methods: FxHashMap<Symbol, Value<'gc>> = FxHashMap::default();
         for sel in class_selectors {
             let node = self.new_ext_method(mc, sel.clone(), ext);
-            class_methods.insert(sel.clone(), node);
+            class_methods.insert(Symbol::intern(sel), node);
         }
         let parent = self.get_or_create_builtin_class(mc, "Object");
         let ns_name = NamespacedName::parse(name);
@@ -1076,7 +1102,11 @@ impl<'gc> VmState<'gc> {
 
         let receiver = Value::Object(obj);
         for clz in classes {
-            let init_colon = clz.borrow().instance_methods.get("init:").copied();
+            let init_colon = clz
+                .borrow()
+                .instance_methods
+                .get(&init_colon_symbol())
+                .copied();
             if let Some(method_val) = init_colon {
                 let param_names = self.init_param_names(method_val).unwrap_or_default();
                 let mut init_args = Vec::new();
@@ -1089,7 +1119,7 @@ impl<'gc> VmState<'gc> {
                 }
                 self.call_method_value(mc, receiver, method_val, "init:", init_args)?;
             } else {
-                let init_plain = clz.borrow().instance_methods.get("init").copied();
+                let init_plain = clz.borrow().instance_methods.get(&init_symbol()).copied();
                 if let Some(method_val) = init_plain {
                     self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
                 }
@@ -1109,7 +1139,8 @@ impl<'gc> VmState<'gc> {
         let io_ref = io.borrow();
         match &io_ref.payload {
             ObjectPayload::Block(b) => Some(
-                b.param_syms
+                b.template
+                    .param_syms
                     .iter()
                     .map(|s| s.as_str().to_string())
                     .collect(),
@@ -1122,7 +1153,8 @@ impl<'gc> VmState<'gc> {
                     && let ObjectPayload::Block(b) = &block_obj.borrow().payload
                 {
                     Some(
-                        b.param_syms
+                        b.template
+                            .param_syms
                             .iter()
                             .map(|s| s.as_str().to_string())
                             .collect(),
@@ -1206,8 +1238,9 @@ impl<'gc> VmState<'gc> {
         // Several defs may share a selector (typed multimethod variants); chain
         // them in declaration order so the scorer routes by argument type and ties
         // resolve to the first-declared.
-        let mut inst_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
+        let mut inst_methods: FxHashMap<Symbol, Value<'gc>> = FxHashMap::default();
         for def in native_class.instance_methods() {
+            let sym = Symbol::intern(&def.selector);
             let node = self.new_native_method(
                 mc,
                 def.selector.clone(),
@@ -1215,15 +1248,16 @@ impl<'gc> VmState<'gc> {
                 def.param_types,
                 def.ret_type,
             );
-            if let Some(head) = inst_methods.get(&def.selector).copied() {
+            if let Some(head) = inst_methods.get(&sym).copied() {
                 let _ = Self::append_method_to_chain(mc, head, node);
             } else {
-                inst_methods.insert(def.selector, node);
+                inst_methods.insert(sym, node);
             }
         }
 
-        let mut cls_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
+        let mut cls_methods: FxHashMap<Symbol, Value<'gc>> = FxHashMap::default();
         for def in native_class.class_methods() {
+            let sym = Symbol::intern(&def.selector);
             let node = self.new_native_method(
                 mc,
                 def.selector.clone(),
@@ -1231,10 +1265,10 @@ impl<'gc> VmState<'gc> {
                 def.param_types,
                 def.ret_type,
             );
-            if let Some(head) = cls_methods.get(&def.selector).copied() {
+            if let Some(head) = cls_methods.get(&sym).copied() {
                 let _ = Self::append_method_to_chain(mc, head, node);
             } else {
-                cls_methods.insert(def.selector, node);
+                cls_methods.insert(sym, node);
             }
         }
 
@@ -1543,7 +1577,7 @@ impl<'gc> VmState<'gc> {
 
         let receiver = Value::Object(obj);
         for clz in classes {
-            let method_opt = clz.borrow().instance_methods.get("init").copied();
+            let method_opt = clz.borrow().instance_methods.get(&init_symbol()).copied();
             if let Some(method_val) = method_opt {
                 self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
             }
@@ -1628,6 +1662,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block: false,
             enclosing_method_id: Some(frame_id),
             block,
+            ic: block.inline_cache,
             ip: 0,
             env,
             instantiating_obj: None,
@@ -1695,9 +1730,10 @@ impl<'gc> VmState<'gc> {
 
         self.frames.push(Frame {
             id: frame_id,
-            is_nested_block: block.is_nested_block,
+            is_nested_block: block.template.is_nested_block,
             enclosing_method_id: Some(frame_id),
             block,
+            ic: block.inline_cache,
             ip: 0,
             env: env_ref,
             instantiating_obj: None,
@@ -1823,12 +1859,12 @@ impl<'gc> VmState<'gc> {
             && let Some(new_block_val) =
                 new_method.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?
         {
-            let new_param_types = nb.param_types.clone();
+            let new_param_types = nb.template.param_types.clone();
             let mut curr = Some(chain_start);
             while let Some(node) = curr {
                 let is_match = self
                     .get_block_from_method(node)
-                    .map(|eb| eb.decl_block.is_none() && eb.param_types == new_param_types)
+                    .map(|eb| eb.decl_block.is_none() && eb.template.param_types == new_param_types)
                     .unwrap_or(false);
                 if is_match {
                     if let Value::Object(obj) = node {
@@ -1857,6 +1893,8 @@ impl<'gc> VmState<'gc> {
         selector: &str,
         class_side: bool,
     ) -> Option<Value<'gc>> {
+        // Intern once at the boundary; the recursive walk probes by Symbol.
+        let selector = Symbol::intern(selector);
         let mut visited = Vec::new();
         self.lookup_in_class_hierarchy_rec(class_ref, selector, class_side, &mut visited)
     }
@@ -1864,7 +1902,7 @@ impl<'gc> VmState<'gc> {
     fn lookup_in_class_hierarchy_rec(
         &self,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
-        selector: &str,
+        selector: Symbol,
         class_side: bool,
         visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
     ) -> Option<Value<'gc>> {
@@ -1879,7 +1917,7 @@ impl<'gc> VmState<'gc> {
         } else {
             &class_borrow.instance_methods
         };
-        if let Some(method) = methods.get(selector).copied() {
+        if let Some(method) = methods.get(&selector).copied() {
             return Some(method);
         }
         for mixin in &class_borrow.mixin_classes {
@@ -1961,12 +1999,12 @@ impl<'gc> VmState<'gc> {
 
         let mut env_frame = EnvFrame::new(block.parent_env);
         // Bind parameters
-        for (sym, val) in block.param_syms.iter().zip(args.iter().copied()) {
+        for (sym, val) in block.template.param_syms.iter().zip(args.iter().copied()) {
             env_frame.bind(*sym, val);
         }
         let env_ref = gcl!(mc, env_frame);
 
-        let is_nested_block = block.is_nested_block;
+        let is_nested_block = block.template.is_nested_block;
         let enclosing_method_id = if is_nested_block {
             block.enclosing_method_id
         } else {
@@ -1978,6 +2016,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block,
             enclosing_method_id,
             block,
+            ic: block.inline_cache,
             ip: 0,
             env: env_ref,
             instantiating_obj: None,
@@ -2007,12 +2046,12 @@ impl<'gc> VmState<'gc> {
         // Bind self
         env_frame.bind(self_symbol(), receiver);
         // Bind parameters
-        for (sym, val) in block.param_syms.iter().zip(args.iter().copied()) {
+        for (sym, val) in block.template.param_syms.iter().zip(args.iter().copied()) {
             env_frame.bind(*sym, val);
         }
         let env_ref = gcl!(mc, env_frame);
 
-        let is_nested_block = block.is_nested_block;
+        let is_nested_block = block.template.is_nested_block;
         let enclosing_method_id = if is_method_call {
             Some(frame_id)
         } else if is_nested_block {
@@ -2026,6 +2065,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block,
             enclosing_method_id,
             block,
+            ic: block.inline_cache,
             ip: 0,
             env: env_ref,
             instantiating_obj: None,
@@ -2058,7 +2098,7 @@ impl<'gc> VmState<'gc> {
         let env_frame = EnvFrame::new(block.parent_env);
         let env_ref = gcl!(mc, env_frame);
 
-        let is_nested_block = block.is_nested_block;
+        let is_nested_block = block.template.is_nested_block;
         let enclosing_method_id = if is_nested_block {
             block.enclosing_method_id
         } else {
@@ -2070,6 +2110,7 @@ impl<'gc> VmState<'gc> {
             is_nested_block,
             enclosing_method_id,
             block,
+            ic: block.inline_cache,
             ip: 0,
             env: env_ref,
             instantiating_obj: Some(obj),
@@ -2262,10 +2303,11 @@ impl<'gc> VmState<'gc> {
             let active_ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
             let active_source_info = frame
                 .block
+                .template
                 .source_map
                 .get(active_ip)
                 .and_then(|opt| opt.as_ref())
-                .or(frame.block.source_info.as_ref())
+                .or(frame.block.template.source_info.as_ref())
                 .cloned();
             if let Some(source_info) = active_source_info {
                 let supports_color = self.options.supports_color;
@@ -2295,15 +2337,16 @@ impl<'gc> VmState<'gc> {
 
                     let si_opt = f
                         .block
+                        .template
                         .source_map
                         .get(frame_ip)
                         .and_then(|opt| opt.as_ref())
-                        .or(f.block.source_info.as_ref())
+                        .or(f.block.template.source_info.as_ref())
                         .cloned();
 
                     // The failing instruction is a send — plain or a fused superinstruction;
                     // pull `(selector, num_args)` from whichever form it is.
-                    let send_at_ip = match f.block.bytecode.get(frame_ip) {
+                    let send_at_ip = match f.block.template.bytecode.get(frame_ip) {
                         Some(Instruction::Send(s, n))
                         | Some(Instruction::SendLocal(_, s, n))
                         | Some(Instruction::SendConst(_, s, n))
@@ -2409,10 +2452,11 @@ impl<'gc> VmState<'gc> {
                     };
                     let si_opt = first_frame
                         .block
+                        .template
                         .source_map
                         .get(first_ip)
                         .and_then(|opt| opt.as_ref())
-                        .or(first_frame.block.source_info.as_ref())
+                        .or(first_frame.block.template.source_info.as_ref())
                         .cloned();
 
                     let formatted_selector = colorize_simple("(top)");
@@ -2758,38 +2802,30 @@ impl<'gc> VmState<'gc> {
             Constant::String(s) => self.new_string(mc, s.clone()),
             Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
             Constant::Block(sb) => {
+                // A closure is its shared template (Rc bump) plus the captured
+                // runtime state — no deep clone of the param vectors.
                 let parent_env = self.frames.last().map(|f| f.env);
                 let enclosing_method_id = self.frames.last().and_then(|f| f.enclosing_method_id);
                 let decl_block = sb.decl_block.as_ref().map(|db| {
+                    let inline_cache = self.ic_cell_for(mc, db);
                     gc!(
                         mc,
                         Block {
-                            name: db.name.clone(),
-                            is_nested_block: db.is_nested_block,
-                            param_syms: db.param_syms.clone(),
-                            param_types: db.param_types.clone(),
-                            bytecode: db.bytecode.clone(),
+                            template: db.clone(),
                             parent_env,
                             enclosing_method_id,
-                            source_info: db.source_info.clone(),
                             decl_block: None,
-                            source_map: db.source_map.clone(),
-                            inline_cache: RefLock::new(None),
+                            inline_cache,
                         }
                     )
                 });
+                let inline_cache = self.ic_cell_for(mc, sb);
                 let block = Block {
-                    name: sb.name.clone(),
-                    is_nested_block: sb.is_nested_block,
-                    param_syms: sb.param_syms.clone(),
-                    param_types: sb.param_types.clone(),
-                    bytecode: sb.bytecode.clone(),
+                    template: sb.clone(),
                     parent_env,
                     enclosing_method_id,
-                    source_info: sb.source_info.clone(),
                     decl_block,
-                    source_map: sb.source_map.clone(),
-                    inline_cache: RefLock::new(None),
+                    inline_cache,
                 };
                 self.new_block(mc, block)
             }
@@ -2799,22 +2835,63 @@ impl<'gc> VmState<'gc> {
     /// Read instance field `name` off `self` in the current frame. The body of the
     /// `LoadField` handler, shared with the fused `SendField` superinstruction.
     /// Missing/undeclared field (or a non-object `self`) reads as nil.
-    fn load_field(&mut self, mc: &Mutation<'gc>, frame_idx: usize, name: &str) -> Value<'gc> {
+    /// `cache_ip`: the call site for the field-slot cache, or `None` to skip caching —
+    /// `SendField` must pass `None`, because its *send* entry lives at the same `ip`
+    /// (one fused instruction) and a field entry there would thrash the slot.
+    fn load_field(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        cache_ip: Option<usize>,
+        name: &str,
+    ) -> Value<'gc> {
         let frame = &self.frames[frame_idx];
+        let block = frame.block;
+        let ic = frame.ic;
         let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-        self.field_of(mc, self_val, name)
+        self.field_of(mc, block, ic, cache_ip, self_val, name)
     }
 
     /// Read instance field `name` off an arbitrary object value (the body of `LoadFieldOf`, and
     /// shared by `load_field` with `self`). Missing/undeclared field, or a non-object value => nil.
-    fn field_of(&mut self, mc: &Mutation<'gc>, obj_val: Value<'gc>, name: &str) -> Value<'gc> {
+    /// `(block, ip)` is the executing call site, for the field-slot cache.
+    fn field_of(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        ic: InlineCacheCell<'gc>,
+        cache_ip: Option<usize>,
+        obj_val: Value<'gc>,
+        name: &str,
+    ) -> Value<'gc> {
         if let Value::Object(obj) = obj_val {
-            let class = obj.borrow().class;
+            // Fast path: one object borrow, one cache probe, direct index — no class
+            // borrow, no field-name hash.
+            let borrowed = obj.borrow();
+            let class = borrowed.class;
+            if let Some(ip) = cache_ip
+                && let Some(slot) = self.field_probe(ic, ip, Gc::as_ptr(class) as usize)
+            {
+                let val = borrowed.fields.get(slot).copied();
+                drop(borrowed);
+                return val.unwrap_or_else(|| self.new_nil(mc));
+            }
+            drop(borrowed);
             // No slot (undeclared) or a slot past this instance's array (declared on the
             // class after this object was created) => nil.
-            self.field_slot(class, name)
-                .and_then(|slot| obj.borrow().fields.get(slot).copied())
-                .unwrap_or_else(|| self.new_nil(mc))
+            match self.field_slot(class, name) {
+                Some(slot) => {
+                    if let Some(ip) = cache_ip {
+                        self.field_fill(mc, block, ip, class, slot);
+                    }
+                    obj.borrow()
+                        .fields
+                        .get(slot)
+                        .copied()
+                        .unwrap_or_else(|| self.new_nil(mc))
+                }
+                None => self.new_nil(mc),
+            }
         } else {
             self.new_nil(mc)
         }
@@ -2877,14 +2954,131 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Materialize a runtime closure from a compiled template: the thin
+    /// `{template, captured state}` pair plus the (possibly registry-shared)
+    /// inline-cache cell. Shared by the runner entry points, eval, and string
+    /// interpolation; `materialize_constant` inlines the same shape.
+    pub fn block_from_template(
+        &mut self,
+        mc: &Mutation<'gc>,
+        template: Rc<StaticBlock>,
+        parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+        enclosing_method_id: Option<usize>,
+    ) -> Gc<'gc, Block<'gc>> {
+        let decl_block = template.decl_block.as_ref().map(|db| {
+            let inline_cache = self.ic_cell_for(mc, db);
+            gc!(
+                mc,
+                Block {
+                    template: db.clone(),
+                    parent_env,
+                    enclosing_method_id,
+                    decl_block: None,
+                    inline_cache,
+                }
+            )
+        });
+        let inline_cache = self.ic_cell_for(mc, &template);
+        gc!(
+            mc,
+            Block {
+                template,
+                parent_env,
+                enclosing_method_id,
+                decl_block,
+                inline_cache,
+            }
+        )
+    }
+
+    /// The inline-cache cell for a closure materialized from `template`: the shared
+    /// per-template cell from `ic_registry` when the template has an id (so every
+    /// closure of one literal warms the same call sites), or a fresh private cell
+    /// for id-less runtime-built blocks.
+    fn ic_cell_for(
+        &mut self,
+        mc: &Mutation<'gc>,
+        template: &Rc<StaticBlock>,
+    ) -> Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>> {
+        match template.template_id {
+            Some(id) => {
+                if let Some(cell) = self.ic_registry.get(&id) {
+                    *cell
+                } else {
+                    let cell = gcl!(mc, None);
+                    self.ic_registry.insert(id, cell);
+                    cell
+                }
+            }
+            None => gcl!(mc, None),
+        }
+    }
+
+    /// Probe the executing `block`'s inline cache at `ip` for a *field-slot* entry
+    /// (see [`IC_FIELD_KIND`]): a hit returns the receiver-class's slot index for the
+    /// field named at this instruction, skipping the `field_slots` hash lookup and
+    /// the class borrow. Guarded on the exact class pointer — inherited methods run
+    /// the same `Gc<Block>` for every subclass, and the same field name maps to a
+    /// *different* slot per class, so the guard is load-bearing.
+    #[inline]
+    fn field_probe(&self, ic: InlineCacheCell<'gc>, ip: usize, class_ptr: usize) -> Option<usize> {
+        let cache = ic.borrow();
+        let slot = cache.as_ref()?.get(ip)?;
+        if slot.epoch != self.dispatch_epoch
+            || slot.recv_kind != IC_FIELD_KIND
+            || slot.recv_ptr != class_ptr
+        {
+            return None;
+        }
+        Some(slot.arg_ptrs[0])
+    }
+
+    /// Memoize `class`'s slot index for the field read/written at `(block, ip)`.
+    /// Eigenclasses are never cached (transient pointers — same ABA rule as the
+    /// dispatch cache); their accesses just re-run the hash lookup. Slot indices are
+    /// append-only per class (see `Class::field_slots`), so a cached entry can't go
+    /// stale; the epoch guard is belt-and-braces and gives O(1) invalidation anyway.
+    fn field_fill(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        ip: usize,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+        slot_idx: usize,
+    ) {
+        if class.borrow().is_eigenclass {
+            return;
+        }
+        let epoch = self.dispatch_epoch;
+        let mut cache = block.inline_cache.borrow_mut(mc);
+        if cache.is_none() {
+            *cache = Some(vec![ICSlot::empty(); block.template.bytecode.len()].into_boxed_slice());
+        }
+        if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
+            *slot = ICSlot {
+                epoch,
+                recv_kind: IC_FIELD_KIND,
+                recv_ptr: Gc::as_ptr(class) as usize,
+                n_args: 0,
+                arg_kinds: [0; IC_MAX_ARGS],
+                arg_ptrs: [slot_idx, 0],
+                callable: None,
+            };
+        }
+    }
+
     /// Probe the executing `block`'s inline cache at `ip`: a hit requires a live epoch (method
     /// tables unchanged) and matching receiver + argument type-shape guards. Immediates match on
     /// their cheap `Value` discriminant with no class derivation — the whole point. Sound with no
-    /// ABA guard: `block` is alive (it's executing), so its cache array is its own.
+    /// ABA guard: the cache cell is shared per *template*, rooted in `ic_registry` for the VM's
+    /// lifetime, and template ids are never reused — `(template, ip)` is a stable call-site
+    /// identity. Entries are guard-free resolutions keyed only on receiver/arg type-shape +
+    /// epoch, so sharing one array across every closure (and concurrent activation) of the same
+    /// literal is sound.
     #[inline]
     fn ic_probe(
         &self,
-        block: Gc<'gc, Block<'gc>>,
+        ic: InlineCacheCell<'gc>,
         ip: usize,
         receiver: Value<'gc>,
         args: &[Value<'gc>],
@@ -2892,7 +3086,7 @@ impl<'gc> VmState<'gc> {
         if args.len() > IC_MAX_ARGS {
             return None;
         }
-        let cache = block.inline_cache.borrow();
+        let cache = ic.borrow();
         let slot = cache.as_ref()?.get(ip)?;
         if slot.epoch != self.dispatch_epoch || slot.n_args as usize != args.len() {
             return None;
@@ -2947,12 +3141,12 @@ impl<'gc> VmState<'gc> {
             arg_kinds[i] = ak;
             arg_ptrs[i] = ap;
         }
-        // Mutate the `RefLock` field via the GC write barrier (`Gc::write` + `unlock!`), then
-        // borrow it like a plain `RefCell` — the barrier has already fired.
-        let cache_cell = gc_arena::barrier::unlock!(Gc::write(mc, block), Block, inline_cache);
-        let mut cache = cache_cell.borrow_mut();
+        // The cache cell is its own `Gc<RefLock<…>>` (shared across every closure of
+        // the same template via `ic_registry`), so mutate it directly through the
+        // write barrier, same idiom as `globals`.
+        let mut cache = block.inline_cache.borrow_mut(mc);
         if cache.is_none() {
-            *cache = Some(vec![ICSlot::empty(); block.bytecode.len()].into_boxed_slice());
+            *cache = Some(vec![ICSlot::empty(); block.template.bytecode.len()].into_boxed_slice());
         }
         if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
             *slot = ICSlot {
@@ -2991,6 +3185,7 @@ impl<'gc> VmState<'gc> {
         // Call-site identity for the inline cache: the executing block + the Send's own `ip`,
         // captured before we advance it.
         let caller_block = self.frames[frame_idx].block;
+        let caller_ic = self.frames[frame_idx].ic;
         let site_ip = self.frames[frame_idx].ip;
         self.frames[frame_idx].ip += 1; // Advance caller frame IP
 
@@ -3004,7 +3199,7 @@ impl<'gc> VmState<'gc> {
         }
 
         // Inline-cache fast path: a hit skips `lookup_method`'s key-build + hash + hashmap.
-        if let Some(callable) = self.ic_probe(caller_block, site_ip, receiver, &args) {
+        if let Some(callable) = self.ic_probe(caller_ic, site_ip, receiver, &args) {
             callable.call(self, mc, Some(receiver), args, Some(selector))?;
             return Ok(VmStatus::Running);
         }
@@ -3102,15 +3297,28 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         frame_idx: usize,
+        ip: usize,
         name: &str,
         val: Value<'gc>,
     ) -> Result<(), QuoinError> {
         let frame = &self.frames[frame_idx];
+        let block = frame.block;
+        let ic = frame.ic;
         let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
         if let Value::Object(obj) = self_val {
             let class = obj.borrow().class;
+            // Fast path: cached slot for this exact class at this call site. A hit
+            // implies the field is declared; the length guard below still applies
+            // (an instance can predate a later-added ivar).
+            if let Some(slot) = self.field_probe(ic, ip, Gc::as_ptr(class) as usize)
+                && slot < obj.borrow().fields.len()
+            {
+                obj.borrow_mut(mc).fields[slot] = val;
+                return Ok(());
+            }
             match self.field_slot(class, name) {
                 Some(slot) if slot < obj.borrow().fields.len() => {
+                    self.field_fill(mc, block, ip, class, slot);
                     obj.borrow_mut(mc).fields[slot] = val;
                 }
                 Some(_) => {
@@ -3175,7 +3383,11 @@ impl<'gc> VmState<'gc> {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
             return Ok(VmStatus::Finished(ret));
         }
-        let bytecode = self.frames[self.frames.len() - 1].block.bytecode.clone();
+        let bytecode = self.frames[self.frames.len() - 1]
+            .block
+            .template
+            .bytecode
+            .clone();
         self.dispatch_one(mc, &bytecode)
     }
 
@@ -3206,7 +3418,7 @@ impl<'gc> VmState<'gc> {
             let flen = self.frames.len();
             if flen != cached_len {
                 cached_len = flen;
-                bytecode = Some(self.frames[flen - 1].block.bytecode.clone());
+                bytecode = Some(self.frames[flen - 1].block.template.bytecode.clone());
             }
             let bc = bytecode.as_ref().unwrap();
             match self.dispatch_one(mc, bc) {
@@ -3746,7 +3958,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::SendField(field, selector, num_args) => {
                 let (selector, num_args) = (*selector, *num_args);
-                let val = self.load_field(mc, frame_idx, field);
+                let val = self.load_field(mc, frame_idx, None, field);
                 self.push(val);
                 return self.exec_send(mc, frame_idx, selector, num_args);
             }
@@ -4066,40 +4278,32 @@ impl<'gc> VmState<'gc> {
                     self.ensure_not_sealed(target_class)?;
 
                     let method_obj = self.new_method(mc, selector.clone(), block_val, false);
+                    let sel_sym = Symbol::intern(selector);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
                     if is_class_side {
-                        if target_class.borrow().class_methods.contains_key(selector) {
-                            let existing_val = target_class
-                                .borrow()
-                                .class_methods
-                                .get(selector)
-                                .copied()
-                                .unwrap();
+                        if let Some(existing_val) =
+                            target_class.borrow().class_methods.get(&sel_sym).copied()
+                        {
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
                                 .class_methods
-                                .insert(selector.clone(), method_obj);
+                                .insert(sel_sym, method_obj);
                         }
                     } else {
-                        if target_class
+                        if let Some(existing_val) = target_class
                             .borrow()
                             .instance_methods
-                            .contains_key(selector)
+                            .get(&sel_sym)
+                            .copied()
                         {
-                            let existing_val = target_class
-                                .borrow()
-                                .instance_methods
-                                .get(selector)
-                                .copied()
-                                .unwrap();
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
                                 .instance_methods
-                                .insert(selector.clone(), method_obj);
+                                .insert(sel_sym, method_obj);
                         }
                     }
                     // The class's method table just changed — drop memoized resolutions.
@@ -4139,39 +4343,31 @@ impl<'gc> VmState<'gc> {
                         )));
                     }
 
+                    let sel_sym = Symbol::intern(selector);
                     if is_class_side {
-                        if target_class.borrow().class_methods.contains_key(selector) {
-                            let existing_val = target_class
-                                .borrow()
-                                .class_methods
-                                .get(selector)
-                                .copied()
-                                .unwrap();
+                        if let Some(existing_val) =
+                            target_class.borrow().class_methods.get(&sel_sym).copied()
+                        {
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
                                 .class_methods
-                                .insert(selector.clone(), method_obj);
+                                .insert(sel_sym, method_obj);
                         }
                     } else {
-                        if target_class
+                        if let Some(existing_val) = target_class
                             .borrow()
                             .instance_methods
-                            .contains_key(selector)
+                            .get(&sel_sym)
+                            .copied()
                         {
-                            let existing_val = target_class
-                                .borrow()
-                                .instance_methods
-                                .get(selector)
-                                .copied()
-                                .unwrap();
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
                                 .instance_methods
-                                .insert(selector.clone(), method_obj);
+                                .insert(sel_sym, method_obj);
                         }
                     }
                     // The class's method table just changed — drop memoized resolutions.
@@ -4188,25 +4384,27 @@ impl<'gc> VmState<'gc> {
             }
 
             Instruction::LoadField(name) => {
-                let val = self.load_field(mc, frame_idx, name);
+                let val = self.load_field(mc, frame_idx, Some(ip), name);
                 self.push(val);
                 ip += 1;
             }
             // Phase 5·3: read a field off the object on top of the stack (an inlined `v.x`).
             Instruction::LoadFieldOf(name) => {
                 let obj = self.pop()?;
-                let val = self.field_of(mc, obj, name);
+                let block = self.frames[frame_idx].block;
+                let ic = self.frames[frame_idx].ic;
+                let val = self.field_of(mc, block, ic, Some(ip), obj, name);
                 self.push(val);
                 ip += 1;
             }
             Instruction::StoreField(name) => {
                 let val = self.pop()?;
-                self.store_field_value(mc, frame_idx, name, val)?;
+                self.store_field_value(mc, frame_idx, ip, name, val)?;
                 ip += 1;
             }
             Instruction::StoreFieldKeep(name) => {
                 let val = self.peek()?;
-                self.store_field_value(mc, frame_idx, name, val)?;
+                self.store_field_value(mc, frame_idx, ip, name, val)?;
                 ip += 1;
             }
             Instruction::Use {

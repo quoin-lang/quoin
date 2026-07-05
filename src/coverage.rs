@@ -320,14 +320,14 @@ impl<'gc> VmState<'gc> {
     /// call. Cheap: a no-op for non-line-start instructions, otherwise one map bump.
     pub(crate) fn coverage_tick(&mut self, frame_idx: usize, ip: usize) {
         let block = self.frames[frame_idx].block;
-        let map = &block.source_map;
+        let map = &block.template.source_map;
         if !is_line_start(map, ip) {
             return;
         }
         let Some(Some(si)) = map.get(ip) else {
             return;
         };
-        let Some(bsi) = &block.source_info else {
+        let Some(bsi) = &block.template.source_info else {
             return; // no block span to attribute the hit to
         };
         let line = si.line as u32;
@@ -365,7 +365,7 @@ impl<'gc> VmState<'gc> {
                 .instance_methods
                 .iter()
                 .chain(class_ref.class_methods.iter())
-                .map(|(selector, method)| (selector.clone(), *method))
+                .map(|(selector, method)| (selector.as_str().to_string(), *method))
                 .collect();
             drop(class_ref);
 
@@ -375,7 +375,7 @@ impl<'gc> VmState<'gc> {
                 let Some(block) = self.get_block_from_method(method) else {
                     continue;
                 };
-                let Some(bsi) = &block.source_info else {
+                let Some(bsi) = &block.template.source_info else {
                     continue; // no span to attribute hits to
                 };
                 let span = span_of(bsi);
@@ -385,9 +385,15 @@ impl<'gc> VmState<'gc> {
                     &class_name,
                     &selector,
                     span,
-                    &block.source_map,
+                    &block.template.source_map,
                 );
-                walk_code(&mut report, hits, span, &block.source_map, &block.bytecode);
+                walk_code(
+                    &mut report,
+                    hits,
+                    span,
+                    &block.template.source_map,
+                    &block.template.bytecode,
+                );
             }
         }
         report
