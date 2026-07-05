@@ -40,6 +40,22 @@ entries carry conditions.
 
 ## Tier 1 — bounded wins not yet tried (days each)
 
+*Status update: ALL FOUR SHIPPED on this branch. Measured (plain-LTO A/B,
+min of 5): 1a = ~24% average (PGO dominant); 1b = btrees −15.7%, richards
+−6.0%; 1c = richards −4.6%, btrees −2.2%; 1d = neutral-to-positive
+(byte-hash probe gone from the profile). Cumulative over the LTO baseline:
+btrees −17.3%, richards −7.6%; loop benches (fib/sieve) carry a small
++2–4% cost — first suspect is 1b's extra pointer hop on the IC probe
+(shared `Gc<RefLock>` cell vs the old inline field). Candidate micro-fix:
+hoist the cache-array pointer into `Frame` at push time (one deref per
+call, not per send). Two methodology findings now govern all A/Bs: fat-LTO
+rebuilds of identical source differ ±1.3% per bench, and PGO-training
+variance is ±2–8% — so plain-LTO A/B + same-source control is the
+standard, PGO corroboration only. One durable design lesson: per-ip caches
+and instruction fusion interact — `SendField` (field load + send in one
+instruction) can host only one cache entry per ip (details in
+`profiling/field-slot-cache/notes.md`).*
+
 ### 1a. Build pipeline: fat LTO + codegen-units=1 + PGO  ← this branch
 
 The release profile was stock (no LTO, 16 codegen units). Dispatch-heavy
@@ -206,3 +222,19 @@ bench suite via `scripts/build-pgo.sh`.
 Held-out validation (a workload PGO never trained on): `qn test` — 1432
 tests all pass on the PGO binary, ~9% faster wall. Raw data + binaries in
 `profiling/pgo-lto/` (local, gitignored).
+
+### Branch total (baseline @ `bfdf478` → all of Tier 1, PGO build)
+
+| bench | baseline | final | Δ |
+|---|---|---|---|
+| btrees | 1.507s | 0.893s | −40.7% |
+| combinators | 0.729s | 0.553s | −24.2% |
+| fib_typed | 0.646s | 0.450s | −30.4% |
+| fib_untyped | 0.717s | 0.533s | −25.6% |
+| json | 0.321s | 0.242s | −24.6% |
+| maps | 0.411s | 0.299s | −27.1% |
+| richards | 0.817s | 0.509s | −37.8% |
+| sieve | 0.923s | 0.559s | −39.4% |
+| strings | 0.374s | 0.290s | −22.5% |
+
+Average ≈ −30% whole-process, min of 5, every checksum verified.
