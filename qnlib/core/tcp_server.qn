@@ -17,9 +17,21 @@ TcpServer <- { |@address @listener @tasks @acceptTask|
     "* The accept loop runs as its own Task so `stop` can cancel it — including a parked accept.
     start: -> { |block|
         @acceptTask = Task.spawn:{
-            { true }.whileDo:{
-                var conn = @listener.accept;
-                @tasks.add:Task.spawn:{ var result = block.value:conn; conn.close; result }
+            var accepting = true;
+            { accepting }.whileDo:{
+                var conn = nil;
+                "* A closed listener ends the loop cleanly; any other accept failure
+                "* (fd exhaustion, transient network error) backs off and retries — one
+                "* bad accept must not silently kill the server. Cancellation (`stop`)
+                "* passes through catch: untouched.
+                { conn = @listener.accept }.catch:{ |e:IoError|
+                    ((e.kind == #closed) || (e.kind == #notFound))
+                        .if:{ accepting = false }
+                         else:{ Async.sleep:10 }
+                };
+                conn.defined?.if:{
+                    @tasks.add:Task.spawn:{ var result = block.value:conn; conn.close; result }
+                }
             }
         }
     };

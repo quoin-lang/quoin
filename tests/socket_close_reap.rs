@@ -164,3 +164,36 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
         "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+#[test]
+fn closing_the_listener_ends_the_accept_loop_cleanly() {
+    // Regression (audit): one accept error silently killed the accept task while
+    // the server object looked healthy. With close now aborting a parked accept
+    // (see close_wakes_a_parked_reader_and_closes_the_fd), the loop must treat
+    // the #closed error as clean shutdown — join returns instead of surfacing an
+    // uncaught IoError or hanging.
+    let script = r#"
+var srv = TcpServer.new:{ var address = '127.0.0.1:0' };
+srv.start:{ |conn| conn.read:10 };
+Async.sleep:20;
+srv.close;
+Async.timeout:3000 do:{ srv.join };
+'PASS'.print;
+"#;
+    let dir = std::env::temp_dir();
+    let path = dir.join("qn_listener_close_ends_accept.qn");
+    std::fs::write(&path, script).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&path)
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_file(&path);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PASS"),
+        "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
