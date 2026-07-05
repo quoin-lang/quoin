@@ -1,9 +1,15 @@
 # AOT native compilation of the typed subset (Tier 2)
 
-*Status: DESIGN — no code yet. Follows `docs/PERF_ROADMAP.md` Tier 2; builds
-on the typed-devirt tier (`docs/TYPED_DEVIRT_ARCH.md`) and the
-closure-template/`template_id` infrastructure from the `perf/next-tier`
-branch. Line references are to that branch's tip.*
+*Status: v0.0 + v0.1 SHIPPED behind `QN_AOT=1` (default off) — candidate
+collection, Cranelift codegen (`src/codegen/`), the registry +
+`Callable::AotCall`, fuel checkpoints (prologue + loop back-edges), depth
+guard, per-task counters. fib_typed: 0.654s → 0.023s (~28×), corpus + both
+stress modes green in both modes, differential tests in
+`src/codegen/tests.rs`, standing parity suite in
+`qnlib/tests/40-aot-parity.qn`. Open: v0.2 (List/Map helper calls → sieve),
+v0.3 (default-on soak). Follows `docs/PERF_ROADMAP.md` Tier 2; builds on
+the typed-devirt tier (`docs/TYPED_DEVIRT_ARCH.md`) and the
+closure-template/`template_id` infrastructure.*
 
 ## 1. Why, and why Quoin can
 

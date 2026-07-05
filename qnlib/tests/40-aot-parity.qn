@@ -1,0 +1,47 @@
+"* AOT parity (docs/AOT_ARCH.md): this file must pass identically with and
+"* without `QN_AOT=1`. `AotSpin` is a v0 compile candidate (sealed, all-scalar
+"* params/returns), so under AOT these methods run as native code — asserting
+"* that arithmetic results, error identity (division by zero), scheduling
+"* order (run-to-block), and cancellation of a compute-wedged task are
+"* indistinguishable from the interpreter.
+
+AotSpin <- {
+    .meta <-- {
+        spin: -> { |n: Integer ^Integer|
+            var i = 0;
+            { i < n }.whileDo:{ i = i + 1 };
+            i
+        };
+
+        fib: -> { |n: Integer ^Integer|
+            (n <= 1).if:{ ^n } else:{ ^(.fib:(n - 1)) + (.fib:(n - 2)) }
+        };
+
+        div:by: -> { |a: Integer b: Integer ^Integer| a / b }
+    };
+    .sealed!
+};
+
+(TestSuite.new:{ var name = 'AotParity' }).add:{
+    .test:scalarResultsMatchInterpreter -> {
+        .is:{ AotSpin.fib:20 } equalTo:6765;
+        .is:{ AotSpin.spin:100000 } equalTo:100000;
+        .is:{ AotSpin.div:7 by:-2 } equalTo:-3
+    };
+
+    "* Division by zero raises the same catchable ArithmeticError in native
+    "* code as in the interpreter (same message, same catchability).
+    .test:divisionByZeroIsCatchable -> {
+        .is:{ ({ AotSpin.div:1 by:0 }.catch:{ |e| e.message }) } equalTo:'Division by zero'
+    };
+
+    "* A task cancelled while queued dies at its first checkpoint even when its
+    "* body is a compiled loop that would otherwise spin for hours — the fuel
+    "* checkpoint delivers cancellation exactly like the interpreter's
+    "* per-instruction check (coarser granularity, same contract).
+    .test:cancelledCompiledLoopDiesAtFirstCheckpoint -> {
+        var t = Task.spawn:{ AotSpin.spin:100000000000 };
+        t.cancel;
+        .is:{ { t.join; 'joined' }.catch:{ |e| 'cancelled' } } equalTo:'cancelled'
+    }
+}

@@ -9,6 +9,7 @@ impl Compiler {
     pub(super) fn collect_class_ctx(&mut self, name: &str, block: &BlockNode) -> ClassCtx {
         let mut returns = HashMap::new();
         let mut bodies = HashMap::new();
+        let mut multi = HashSet::new();
         let mut sealed = false;
         for stmt in &block.statements {
             let (signature, method_block) = match &stmt.value {
@@ -23,7 +24,12 @@ impl Compiler {
                 _ => continue,
             };
             if let Ok(selector) = self.reconstruct_selector(signature) {
-                bodies.insert(selector.clone(), method_block.clone());
+                if bodies
+                    .insert(selector.clone(), method_block.clone())
+                    .is_some()
+                {
+                    multi.insert(selector.clone());
+                }
                 if let Some(rt) = &method_block.return_type {
                     returns.insert(selector, self.resolve_annotation(rt));
                 }
@@ -37,7 +43,11 @@ impl Compiler {
                 .or_default()
                 .extend(bodies.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
+        self.class_ctx_counter += 1;
         ClassCtx {
+            id: self.class_ctx_counter,
+            name: name.to_string(),
+            multi,
             returns,
             bodies,
             sealed,
