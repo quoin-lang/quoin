@@ -9,6 +9,7 @@ use crate::runtime::map::NativeMapState;
 use crate::symbol::Symbol;
 use crate::value::{Block, EnvFrame, NativeClassBuilder, Value};
 use crate::vm::VmState;
+use std::rc::Rc;
 
 use gc_arena::lock::RefLock;
 use gc_arena::{Gc, Mutation};
@@ -83,21 +84,17 @@ pub(crate) fn build_block_with_env<'gc>(
     static_block: &StaticBlock,
     parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 ) -> Gc<'gc, Block<'gc>> {
+    // Eval-path templates carry no id (their compiles don't mint them), so the
+    // inline-cache cells are private — matching the one-shot nature of the blocks.
     let decl_block = static_block.decl_block.as_ref().map(|db| {
         crate::gc!(
             mc,
             Block {
-                source_info: db.source_info.clone(),
-                name: db.name.clone(),
-                is_nested_block: db.is_nested_block,
-                param_syms: db.param_syms.clone(),
-                param_types: db.param_types.clone(),
-                bytecode: db.bytecode.clone(),
+                template: db.clone(),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
-                source_map: db.source_map.clone(),
-                inline_cache: RefLock::new(None),
+                inline_cache: crate::gcl!(mc, None),
             }
         )
     });
@@ -105,17 +102,11 @@ pub(crate) fn build_block_with_env<'gc>(
     crate::gc!(
         mc,
         Block {
-            source_info: static_block.source_info.clone(),
-            name: static_block.name.clone(),
-            is_nested_block: static_block.is_nested_block,
-            param_syms: static_block.param_syms.clone(),
-            param_types: static_block.param_types.clone(),
-            bytecode: static_block.bytecode.clone(),
+            template: Rc::new(static_block.clone()),
             parent_env,
             enclosing_method_id: None,
             decl_block,
-            source_map: static_block.source_map.clone(),
-            inline_cache: RefLock::new(None),
+            inline_cache: crate::gcl!(mc, None),
         }
     )
 }

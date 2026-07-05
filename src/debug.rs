@@ -197,7 +197,7 @@ impl<'gc> VmState<'gc> {
     ) -> Result<(), QuoinError> {
         let depth = self.frames.len();
         let block = self.frames[frame_idx].block;
-        let map = &block.source_map;
+        let map = &block.template.source_map;
         let pos = map
             .get(ip)
             .and_then(|o| o.as_ref())
@@ -308,6 +308,7 @@ impl<'gc> VmState<'gc> {
         let ip = self.frame_display_ip(idx);
         self.frames[idx]
             .block
+            .template
             .source_map
             .get(ip)
             .and_then(|o| o.as_ref())
@@ -354,13 +355,14 @@ impl<'gc> VmState<'gc> {
         let frame = self.frames.get(idx)?;
         let si = frame
             .block
+            .template
             .source_map
             .get(self.frame_display_ip(idx))
             .and_then(|o| o.as_ref())?;
         let label = frame
             .selector
             .map(|s| s.as_str().to_string())
-            .or_else(|| frame.block.name.clone())
+            .or_else(|| frame.block.template.name.clone())
             .unwrap_or_else(|| "<block>".to_string());
         Some((si.filename.clone(), si.line, label))
     }
@@ -684,6 +686,7 @@ impl<'gc> VmState<'gc> {
         let frame = self.frames.get(idx)?;
         let si = frame
             .block
+            .template
             .source_map
             .get(self.frame_display_ip(idx))
             .and_then(|o| o.as_ref())?;

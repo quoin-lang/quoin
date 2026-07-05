@@ -340,7 +340,7 @@ fn object_doc<'gc>(
             ObjectPayload::Bytes(by) => {
                 Payload::Bytes(by.iter().take(16).copied().collect(), by.len())
             }
-            ObjectPayload::Block(blk) => Payload::Block(blk.name.clone()),
+            ObjectPayload::Block(blk) => Payload::Block(blk.template.name.clone()),
             ObjectPayload::Instance => {
                 // Instance vars in slot (declaration) order, mirroring `introspect::describe_value`.
                 let cls = b.class.borrow();
@@ -602,7 +602,7 @@ fn variant_signature(m: &NativeMethodState) -> String {
             let b = o.borrow();
             if let ObjectPayload::Block(blk) = &b.payload {
                 (
-                    blk.param_types.iter().map(untyped).collect(),
+                    blk.template.param_types.iter().map(untyped).collect(),
                     blk.decl_block.is_some(),
                     false,
                 )

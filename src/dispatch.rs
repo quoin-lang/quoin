@@ -554,7 +554,7 @@ impl<'gc> VmState<'gc> {
                 });
             }
         };
-        let param_score = match self.score_param_types(&block.param_types, args) {
+        let param_score = match self.score_param_types(&block.template.param_types, args) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -568,8 +568,13 @@ impl<'gc> VmState<'gc> {
             // (or a failing-guard early return) still disables caching, and so it
             // holds regardless of which candidate ultimately wins.
             self.dispatch_cache.uncacheable = true;
-            let res =
-                self.execute_validation_block(mc, decl_block, receiver, &block.param_syms, args)?;
+            let res = self.execute_validation_block(
+                mc,
+                decl_block,
+                receiver,
+                &block.template.param_syms,
+                args,
+            )?;
             if !res.is_true() {
                 return Ok(None);
             }
@@ -685,7 +690,7 @@ impl<'gc> VmState<'gc> {
     /// directly; a native method via its signature, empty if signatureless).
     pub(crate) fn candidate_param_types(&self, method_val: Value<'gc>) -> Vec<String> {
         if let Some(block) = self.get_block_from_method(method_val) {
-            block.param_types.clone()
+            block.template.param_types.clone()
         } else {
             self.native_method_param_types(method_val)
                 .unwrap_or_default()
@@ -717,6 +722,7 @@ impl<'gc> VmState<'gc> {
         // `source_info.source_text` is the node's own text (the guard span), so it
         // already holds the guard source — no slicing needed.
         let src = decl
+            .template
             .source_info
             .as_ref()
             .and_then(|si| si.source_text.as_ref())

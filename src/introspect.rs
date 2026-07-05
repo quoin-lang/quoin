@@ -273,7 +273,7 @@ fn method_info<'gc>(vm: &VmState<'gc>, selector: &str, head: Value<'gc>) -> Meth
             .collect();
         let guarded = block.map(|b| b.decl_block.is_some()).unwrap_or(false);
         let source = block
-            .and_then(|b| b.source_info.clone())
+            .and_then(|b| b.template.source_info.clone())
             .map(|si| SourceLoc {
                 file: si.filename,
                 line: si.line,

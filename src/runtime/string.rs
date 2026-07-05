@@ -7,10 +7,9 @@ use crate::recv;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::regex::NativeRegexState;
-use crate::value::{Block, NativeClassBuilder, ObjectPayload, Value};
+use crate::value::{NativeClassBuilder, ObjectPayload, Value};
+use std::rc::Rc;
 
-use gc_arena::Gc;
-use gc_arena::lock::RefLock;
 use std::collections::{HashMap, HashSet};
 
 pub fn build_string_class() -> NativeClassBuilder {
@@ -301,40 +300,11 @@ pub fn build_string_class() -> NativeClassBuilder {
                             .map_err(|e| QuoinError::Other(e))?;
                         vm.report_type_warnings(compiler.diagnostics());
 
-                        let decl_block = compiled.decl_block.as_ref().map(|db| {
-                            crate::gc!(
-                                mc,
-                                Block {
-                                    name: db.name.clone(),
-                                    is_nested_block: db.is_nested_block,
-                                    param_syms: db.param_syms.clone(),
-                                    param_types: db.param_types.clone(),
-                                    bytecode: db.bytecode.clone(),
-                                    parent_env: Some(caller_env),
-                                    enclosing_method_id,
-                                    source_info: db.source_info.clone(),
-                                    decl_block: None,
-                                    source_map: db.source_map.clone(),
-                                    inline_cache: RefLock::new(None),
-                                }
-                            )
-                        });
-
-                        let block = crate::gc!(
+                        let block = vm.block_from_template(
                             mc,
-                            Block {
-                                name: compiled.name.clone(),
-                                is_nested_block: compiled.is_nested_block,
-                                param_syms: compiled.param_syms.clone(),
-                                param_types: compiled.param_types.clone(),
-                                bytecode: compiled.bytecode.clone(),
-                                parent_env: Some(caller_env),
-                                enclosing_method_id,
-                                source_info: compiled.source_info.clone(),
-                                decl_block,
-                                source_map: compiled.source_map.clone(),
-                                inline_cache: RefLock::new(None),
-                            }
+                            Rc::new(compiled),
+                            Some(caller_env),
+                            enclosing_method_id,
                         );
 
                         let val = vm.execute_block(mc, block, Vec::new(), caller_receiver)?;

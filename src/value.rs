@@ -1,5 +1,5 @@
 use crate::error::QuoinError;
-use crate::instruction::{SharedBytecode, SharedSourceMap};
+use crate::instruction::StaticBlock;
 use crate::parser::ast::IdentifierNode;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::{NativeKeyValuePairState, NativeMapState};
@@ -7,6 +7,7 @@ use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
 use crate::symbol::Symbol;
 use crate::vm::{ICSlot, VmState};
+use std::rc::Rc;
 
 use gc_arena::collect::Trace;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
@@ -385,7 +386,7 @@ impl<'gc> fmt::Debug for Value<'gc> {
                             write!(f, "KeyValuePair(...)")
                         }
                     }
-                    ObjectPayload::Block(b) => write!(f, "Block({:?})", b.name),
+                    ObjectPayload::Block(b) => write!(f, "Block({:?})", b.template.name),
                     _ => {
                         let name = o_borrow.class.borrow().name.clone();
                         write!(f, "Object({}, {{{:?}}})", name, o_borrow.fields)
@@ -523,7 +524,7 @@ impl<'gc> fmt::Display for Value<'gc> {
                         }
                     }
                     ObjectPayload::Block(b) => {
-                        if let Some(ref name) = b.name {
+                        if let Some(ref name) = b.template.name {
                             write!(f, "<block {}>", name)
                         } else {
                             write!(f, "<block>")
@@ -560,24 +561,23 @@ impl<'gc> fmt::Display for Value<'gc> {
 #[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Block<'gc> {
-    pub name: Option<String>,
-    pub is_nested_block: bool,
-    /// Parameter names, interned. `Symbol` is the single representation everywhere;
-    /// stringify via `as_str()` only for display (`Block#args`, signature output).
-    pub param_syms: Vec<Symbol>,
-    pub param_types: Vec<String>,
-    pub bytecode: SharedBytecode,
+    /// The immutable compile-time half (name, params, bytecode, source map),
+    /// shared by every closure materialized from the same block literal — a
+    /// closure creation is an `Rc` bump plus the captured runtime state below,
+    /// not a deep clone of the param vectors.
+    #[collect(require_static)]
+    pub template: Rc<StaticBlock>,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     pub enclosing_method_id: Option<usize>,
-    pub source_info: Option<SourceInfo>,
     pub decl_block: Option<Gc<'gc, Block<'gc>>>,
-    pub source_map: SharedSourceMap,
-    /// Per-call-site monomorphic inline cache, indexed by `ip` (one slot per instruction). A bare
-    /// `RefLock` (not a separate `Gc` alloc) so an uncached block — e.g. a `new:{…}` init block —
-    /// costs nothing beyond the inline `None`; the slot array is allocated on the first cacheable
-    /// send. Because the executing block roots this array, a cached entry can never be confused
-    /// with another block's (no ABA).
-    pub inline_cache: RefLock<Option<Box<[ICSlot<'gc>]>>>,
+    /// Per-call-site monomorphic inline cache, indexed by `ip` (one slot per
+    /// instruction), allocated lazily on the first cacheable send. When the
+    /// template has an id this cell is shared via `VmState::ic_registry`, so call
+    /// sites stay warm across re-materialization of the same literal; the registry
+    /// roots it for the VM's lifetime and ids are never reused, so
+    /// `(template_id, ip)` is a stable call-site identity (no ABA). Id-less
+    /// (runtime-built) blocks get a private cell.
+    pub inline_cache: Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>,
 }
 
 #[derive(Collect, Debug)]

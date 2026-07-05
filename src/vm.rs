@@ -2,7 +2,7 @@ use crate::dispatch::{Callable, MethodCacheKey};
 use crate::error::QuoinError;
 use crate::fiber::{VMYielder, YieldReason};
 use crate::highlighter::{HighlightSpan, format_ansi, highlight_resilient, highlight_to_ansi};
-use crate::instruction::{Constant, Instruction, IntBinKind, SharedBytecode};
+use crate::instruction::{Constant, Instruction, IntBinKind, SharedBytecode, StaticBlock};
 use crate::io_backend::StreamId;
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
 use crate::runtime::fiber::NativeFiberState;
@@ -18,6 +18,7 @@ use crate::value::{
     NativeFunc, Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, devirt_ops, gc, gcl};
+use std::rc::Rc;
 
 use gc_arena::metrics::Pacing;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
@@ -372,6 +373,12 @@ pub struct VmState<'gc> {
     pub output: OutputCapture,
     /// Memoized method resolution ([`DispatchCache`]).
     pub dispatch_cache: DispatchCache<'gc>,
+    /// Shared inline-cache arrays keyed by block-literal template id: every closure
+    /// materialized from the same literal gets the same cell, so its call sites stay
+    /// warm across re-materialization. Rooted here for the VM's lifetime and ids are
+    /// never reused, so `(template_id, ip)` is a stable call-site identity (no ABA);
+    /// stale entries self-evict via `dispatch_epoch`.
+    pub ic_registry: FxHashMap<u32, Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>>,
     /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts every
     /// per-`Block` [`ICSlot`] at once, giving O(1) inline-cache invalidation.
     #[collect(require_static)]
@@ -489,6 +496,7 @@ impl<'gc> VmState<'gc> {
                 capture: false,
                 chunks: Vec::new(),
             },
+            ic_registry: FxHashMap::default(),
             dispatch_cache: DispatchCache {
                 entries: FxHashMap::default(),
                 uncacheable: false,
@@ -1113,7 +1121,8 @@ impl<'gc> VmState<'gc> {
         let io_ref = io.borrow();
         match &io_ref.payload {
             ObjectPayload::Block(b) => Some(
-                b.param_syms
+                b.template
+                    .param_syms
                     .iter()
                     .map(|s| s.as_str().to_string())
                     .collect(),
@@ -1126,7 +1135,8 @@ impl<'gc> VmState<'gc> {
                     && let ObjectPayload::Block(b) = &block_obj.borrow().payload
                 {
                     Some(
-                        b.param_syms
+                        b.template
+                            .param_syms
                             .iter()
                             .map(|s| s.as_str().to_string())
                             .collect(),
@@ -1701,7 +1711,7 @@ impl<'gc> VmState<'gc> {
 
         self.frames.push(Frame {
             id: frame_id,
-            is_nested_block: block.is_nested_block,
+            is_nested_block: block.template.is_nested_block,
             enclosing_method_id: Some(frame_id),
             block,
             ip: 0,
@@ -1829,12 +1839,12 @@ impl<'gc> VmState<'gc> {
             && let Some(new_block_val) =
                 new_method.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?
         {
-            let new_param_types = nb.param_types.clone();
+            let new_param_types = nb.template.param_types.clone();
             let mut curr = Some(chain_start);
             while let Some(node) = curr {
                 let is_match = self
                     .get_block_from_method(node)
-                    .map(|eb| eb.decl_block.is_none() && eb.param_types == new_param_types)
+                    .map(|eb| eb.decl_block.is_none() && eb.template.param_types == new_param_types)
                     .unwrap_or(false);
                 if is_match {
                     if let Value::Object(obj) = node {
@@ -1969,12 +1979,12 @@ impl<'gc> VmState<'gc> {
 
         let mut env_frame = EnvFrame::new(block.parent_env);
         // Bind parameters
-        for (sym, val) in block.param_syms.iter().zip(args.iter().copied()) {
+        for (sym, val) in block.template.param_syms.iter().zip(args.iter().copied()) {
             env_frame.bind(*sym, val);
         }
         let env_ref = gcl!(mc, env_frame);
 
-        let is_nested_block = block.is_nested_block;
+        let is_nested_block = block.template.is_nested_block;
         let enclosing_method_id = if is_nested_block {
             block.enclosing_method_id
         } else {
@@ -2015,12 +2025,12 @@ impl<'gc> VmState<'gc> {
         // Bind self
         env_frame.bind(self_symbol(), receiver);
         // Bind parameters
-        for (sym, val) in block.param_syms.iter().zip(args.iter().copied()) {
+        for (sym, val) in block.template.param_syms.iter().zip(args.iter().copied()) {
             env_frame.bind(*sym, val);
         }
         let env_ref = gcl!(mc, env_frame);
 
-        let is_nested_block = block.is_nested_block;
+        let is_nested_block = block.template.is_nested_block;
         let enclosing_method_id = if is_method_call {
             Some(frame_id)
         } else if is_nested_block {
@@ -2066,7 +2076,7 @@ impl<'gc> VmState<'gc> {
         let env_frame = EnvFrame::new(block.parent_env);
         let env_ref = gcl!(mc, env_frame);
 
-        let is_nested_block = block.is_nested_block;
+        let is_nested_block = block.template.is_nested_block;
         let enclosing_method_id = if is_nested_block {
             block.enclosing_method_id
         } else {
@@ -2270,10 +2280,11 @@ impl<'gc> VmState<'gc> {
             let active_ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
             let active_source_info = frame
                 .block
+                .template
                 .source_map
                 .get(active_ip)
                 .and_then(|opt| opt.as_ref())
-                .or(frame.block.source_info.as_ref())
+                .or(frame.block.template.source_info.as_ref())
                 .cloned();
             if let Some(source_info) = active_source_info {
                 let supports_color = self.options.supports_color;
@@ -2303,15 +2314,16 @@ impl<'gc> VmState<'gc> {
 
                     let si_opt = f
                         .block
+                        .template
                         .source_map
                         .get(frame_ip)
                         .and_then(|opt| opt.as_ref())
-                        .or(f.block.source_info.as_ref())
+                        .or(f.block.template.source_info.as_ref())
                         .cloned();
 
                     // The failing instruction is a send — plain or a fused superinstruction;
                     // pull `(selector, num_args)` from whichever form it is.
-                    let send_at_ip = match f.block.bytecode.get(frame_ip) {
+                    let send_at_ip = match f.block.template.bytecode.get(frame_ip) {
                         Some(Instruction::Send(s, n))
                         | Some(Instruction::SendLocal(_, s, n))
                         | Some(Instruction::SendConst(_, s, n))
@@ -2417,10 +2429,11 @@ impl<'gc> VmState<'gc> {
                     };
                     let si_opt = first_frame
                         .block
+                        .template
                         .source_map
                         .get(first_ip)
                         .and_then(|opt| opt.as_ref())
-                        .or(first_frame.block.source_info.as_ref())
+                        .or(first_frame.block.template.source_info.as_ref())
                         .cloned();
 
                     let formatted_selector = colorize_simple("(top)");
@@ -2766,38 +2779,30 @@ impl<'gc> VmState<'gc> {
             Constant::String(s) => self.new_string(mc, s.clone()),
             Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
             Constant::Block(sb) => {
+                // A closure is its shared template (Rc bump) plus the captured
+                // runtime state — no deep clone of the param vectors.
                 let parent_env = self.frames.last().map(|f| f.env);
                 let enclosing_method_id = self.frames.last().and_then(|f| f.enclosing_method_id);
                 let decl_block = sb.decl_block.as_ref().map(|db| {
+                    let inline_cache = self.ic_cell_for(mc, db);
                     gc!(
                         mc,
                         Block {
-                            name: db.name.clone(),
-                            is_nested_block: db.is_nested_block,
-                            param_syms: db.param_syms.clone(),
-                            param_types: db.param_types.clone(),
-                            bytecode: db.bytecode.clone(),
+                            template: db.clone(),
                             parent_env,
                             enclosing_method_id,
-                            source_info: db.source_info.clone(),
                             decl_block: None,
-                            source_map: db.source_map.clone(),
-                            inline_cache: RefLock::new(None),
+                            inline_cache,
                         }
                     )
                 });
+                let inline_cache = self.ic_cell_for(mc, sb);
                 let block = Block {
-                    name: sb.name.clone(),
-                    is_nested_block: sb.is_nested_block,
-                    param_syms: sb.param_syms.clone(),
-                    param_types: sb.param_types.clone(),
-                    bytecode: sb.bytecode.clone(),
+                    template: sb.clone(),
                     parent_env,
                     enclosing_method_id,
-                    source_info: sb.source_info.clone(),
                     decl_block,
-                    source_map: sb.source_map.clone(),
-                    inline_cache: RefLock::new(None),
+                    inline_cache,
                 };
                 self.new_block(mc, block)
             }
@@ -2885,10 +2890,74 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Materialize a runtime closure from a compiled template: the thin
+    /// `{template, captured state}` pair plus the (possibly registry-shared)
+    /// inline-cache cell. Shared by the runner entry points, eval, and string
+    /// interpolation; `materialize_constant` inlines the same shape.
+    pub fn block_from_template(
+        &mut self,
+        mc: &Mutation<'gc>,
+        template: Rc<StaticBlock>,
+        parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+        enclosing_method_id: Option<usize>,
+    ) -> Gc<'gc, Block<'gc>> {
+        let decl_block = template.decl_block.as_ref().map(|db| {
+            let inline_cache = self.ic_cell_for(mc, db);
+            gc!(
+                mc,
+                Block {
+                    template: db.clone(),
+                    parent_env,
+                    enclosing_method_id,
+                    decl_block: None,
+                    inline_cache,
+                }
+            )
+        });
+        let inline_cache = self.ic_cell_for(mc, &template);
+        gc!(
+            mc,
+            Block {
+                template,
+                parent_env,
+                enclosing_method_id,
+                decl_block,
+                inline_cache,
+            }
+        )
+    }
+
+    /// The inline-cache cell for a closure materialized from `template`: the shared
+    /// per-template cell from `ic_registry` when the template has an id (so every
+    /// closure of one literal warms the same call sites), or a fresh private cell
+    /// for id-less runtime-built blocks.
+    fn ic_cell_for(
+        &mut self,
+        mc: &Mutation<'gc>,
+        template: &Rc<StaticBlock>,
+    ) -> Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>> {
+        match template.template_id {
+            Some(id) => {
+                if let Some(cell) = self.ic_registry.get(&id) {
+                    *cell
+                } else {
+                    let cell = gcl!(mc, None);
+                    self.ic_registry.insert(id, cell);
+                    cell
+                }
+            }
+            None => gcl!(mc, None),
+        }
+    }
+
     /// Probe the executing `block`'s inline cache at `ip`: a hit requires a live epoch (method
     /// tables unchanged) and matching receiver + argument type-shape guards. Immediates match on
     /// their cheap `Value` discriminant with no class derivation — the whole point. Sound with no
-    /// ABA guard: `block` is alive (it's executing), so its cache array is its own.
+    /// ABA guard: the cache cell is shared per *template*, rooted in `ic_registry` for the VM's
+    /// lifetime, and template ids are never reused — `(template, ip)` is a stable call-site
+    /// identity. Entries are guard-free resolutions keyed only on receiver/arg type-shape +
+    /// epoch, so sharing one array across every closure (and concurrent activation) of the same
+    /// literal is sound.
     #[inline]
     fn ic_probe(
         &self,
@@ -2955,12 +3024,12 @@ impl<'gc> VmState<'gc> {
             arg_kinds[i] = ak;
             arg_ptrs[i] = ap;
         }
-        // Mutate the `RefLock` field via the GC write barrier (`Gc::write` + `unlock!`), then
-        // borrow it like a plain `RefCell` — the barrier has already fired.
-        let cache_cell = gc_arena::barrier::unlock!(Gc::write(mc, block), Block, inline_cache);
-        let mut cache = cache_cell.borrow_mut();
+        // The cache cell is its own `Gc<RefLock<…>>` (shared across every closure of
+        // the same template via `ic_registry`), so mutate it directly through the
+        // write barrier, same idiom as `globals`.
+        let mut cache = block.inline_cache.borrow_mut(mc);
         if cache.is_none() {
-            *cache = Some(vec![ICSlot::empty(); block.bytecode.len()].into_boxed_slice());
+            *cache = Some(vec![ICSlot::empty(); block.template.bytecode.len()].into_boxed_slice());
         }
         if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
             *slot = ICSlot {
@@ -3183,7 +3252,11 @@ impl<'gc> VmState<'gc> {
             let ret = self.pop().unwrap_or_else(|_| self.new_nil(mc));
             return Ok(VmStatus::Finished(ret));
         }
-        let bytecode = self.frames[self.frames.len() - 1].block.bytecode.clone();
+        let bytecode = self.frames[self.frames.len() - 1]
+            .block
+            .template
+            .bytecode
+            .clone();
         self.dispatch_one(mc, &bytecode)
     }
 
@@ -3214,7 +3287,7 @@ impl<'gc> VmState<'gc> {
             let flen = self.frames.len();
             if flen != cached_len {
                 cached_len = flen;
-                bytecode = Some(self.frames[flen - 1].block.bytecode.clone());
+                bytecode = Some(self.frames[flen - 1].block.template.bytecode.clone());
             }
             let bc = bytecode.as_ref().unwrap();
             match self.dispatch_one(mc, bc) {
