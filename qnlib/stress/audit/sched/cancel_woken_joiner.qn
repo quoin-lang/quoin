@@ -1,0 +1,18 @@
+"* Cancel a joiner that has already been woken by the joined task's completion
+"* (wake set, but not yet scheduled): request_cancel's join branch re-enqueues it,
+"* leaving a stale second entry in `ready` for a task slot that will be freed.
+var t = Task.spawn:{ Async.sleep:30; 42 };
+Async.sleep:1;  "* let T park in its sleep
+
+var j = Task.spawn:{ { t.join }.catch:{ |_| nil } };
+"* J is ready but has not run; main joins T NOW so main registers as waiter first
+"* and is woken ahead of J when T completes.
+var r = t.join;
+
+"* Here both main and J were just woken by T's completion; FIFO ran main first.
+"* J is in `ready` with wake=Joined and joining still set -> the cancel takes the
+"* join branch and pushes J into `ready` a second time.
+j.cancel;
+Async.sleep:50;  "* let the driver drain ready: J runs, completes,
+"* then its stale second entry is loaded -> ?
+('result: ' + r.s + '; completed without panic').print

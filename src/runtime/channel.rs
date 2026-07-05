@@ -37,10 +37,13 @@ pub struct NativeChannelState {
     pub closed: bool,
     /// Queued values awaiting a receiver (FIFO), up to `cap`.
     pub buffer: VecDeque<Value<'static>>,
-    /// Tasks parked in `receive` waiting for a value (FIFO).
-    pub recv_waiters: VecDeque<TaskId>,
-    /// Tasks parked in `send:` with the value they are trying to deliver (FIFO).
-    pub send_waiters: VecDeque<(TaskId, Value<'static>)>,
+    /// Tasks parked in `receive` waiting for a value (FIFO), each with the park
+    /// epoch captured when it enqueued — the entry is live only while the task is
+    /// still parked at that exact epoch (see `channel_waiter_live`).
+    pub recv_waiters: VecDeque<(TaskId, u64)>,
+    /// Tasks parked in `send:` with their park epoch and the value they are trying
+    /// to deliver (FIFO).
+    pub send_waiters: VecDeque<(TaskId, u64, Value<'static>)>,
 }
 
 impl NativeChannelState {
@@ -58,7 +61,7 @@ impl NativeChannelState {
         unsafe { transmute(&mut self.buffer) }
     }
 
-    pub(crate) fn send_waiters_mut<'gc>(&mut self) -> &mut VecDeque<(TaskId, Value<'gc>)> {
+    pub(crate) fn send_waiters_mut<'gc>(&mut self) -> &mut VecDeque<(TaskId, u64, Value<'gc>)> {
         unsafe { transmute(&mut self.send_waiters) }
     }
 }
@@ -75,7 +78,7 @@ impl AnyCollect for NativeChannelState {
             let val_gc: &Value<'gc> = unsafe { transmute(val) };
             val_gc.dyn_trace(cc);
         }
-        for (_, val) in &self.send_waiters {
+        for (_, _, val) in &self.send_waiters {
             let val_gc: &Value<'gc> = unsafe { transmute(val) };
             val_gc.dyn_trace(cc);
         }
@@ -122,15 +125,32 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    /// True if `id` is still parked on a channel and not cancelled — i.e. a live waiter,
-    /// not a stale ("ghost") queue entry left by a task that was cancelled or already woken.
-    fn channel_waiter_live(&self, id: TaskId) -> bool {
+    /// True if `id` is still parked on a channel *at the same park epoch the entry was
+    /// enqueued with* and not cancelled — i.e. a live waiter, not a stale ("ghost")
+    /// queue entry left by a task that was cancelled or already woken. The epoch match
+    /// is what makes this exact: `parked_on_channel` alone says the slot is parked on
+    /// *some* channel, but after a cancel (or slot reuse — epochs are scheduler-global,
+    /// so a recycled slot never repeats one) that can be a different channel than the
+    /// one holding this entry, and delivering to it would misroute the value.
+    fn channel_waiter_live(&self, id: TaskId, epoch: u64) -> bool {
         self.sched
             .tasks
             .get(id.0)
             .and_then(|t| t.as_ref())
-            .map(|t| t.parked_on_channel && !t.cancel_requested)
+            .map(|t| t.parked_on_channel && t.park_epoch == epoch && !t.cancel_requested)
             .unwrap_or(false)
+    }
+
+    /// The current task's park epoch, captured alongside its waiter-queue entry so a
+    /// counterpart can later tell this park apart from any other (see
+    /// `channel_waiter_live`).
+    fn current_park_epoch(&self) -> u64 {
+        self.sched
+            .tasks
+            .get(self.sched.current_task.0)
+            .and_then(|t| t.as_ref())
+            .map(|t| t.park_epoch)
+            .unwrap_or(0)
     }
 
     /// Deliver `wake` to a parked channel task: clear its park flag and enqueue it ready.
@@ -156,7 +176,7 @@ impl<'gc> VmState<'gc> {
                 .map_err(QuoinError::Other)?;
             match id {
                 None => return Ok(None),
-                Some(id) if self.channel_waiter_live(id) => return Ok(Some(id)),
+                Some((id, epoch)) if self.channel_waiter_live(id, epoch) => return Ok(Some(id)),
                 Some(_) => {} // ghost — skip
             }
         }
@@ -177,7 +197,9 @@ impl<'gc> VmState<'gc> {
                 .map_err(QuoinError::Other)?;
             match entry {
                 None => return Ok(None),
-                Some((id, value)) if self.channel_waiter_live(id) => return Ok(Some((id, value))),
+                Some((id, epoch, value)) if self.channel_waiter_live(id, epoch) => {
+                    return Ok(Some((id, value)));
+                }
                 Some(_) => {} // ghost — skip (its value is discarded)
             }
         }
@@ -223,9 +245,10 @@ impl<'gc> VmState<'gc> {
         }
         // Full (or unbuffered with no receiver waiting): park as a sender.
         let me = self.sched.current_task;
+        let epoch = self.current_park_epoch();
         receiver
             .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {
-                ch.send_waiters_mut().push_back((me, value));
+                ch.send_waiters_mut().push_back((me, epoch, value));
             })
             .map_err(QuoinError::Other)?;
         if let Some(t) = self.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
@@ -275,9 +298,10 @@ impl<'gc> VmState<'gc> {
             return Ok(None);
         }
         let me = self.sched.current_task;
+        let epoch = self.current_park_epoch();
         receiver
             .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {
-                ch.recv_waiters.push_back(me)
+                ch.recv_waiters.push_back((me, epoch))
             })
             .map_err(QuoinError::Other)?;
         if let Some(t) = self.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
@@ -299,21 +323,25 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         receiver: Value<'gc>,
     ) -> Result<(), QuoinError> {
-        let (recvs, sends): (Vec<TaskId>, Vec<TaskId>) = receiver
+        let (recvs, sends): (Vec<(TaskId, u64)>, Vec<(TaskId, u64)>) = receiver
             .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {
                 ch.closed = true;
                 let recvs = ch.recv_waiters.drain(..).collect();
-                let sends = ch.send_waiters.drain(..).map(|(id, _)| id).collect();
+                let sends = ch
+                    .send_waiters
+                    .drain(..)
+                    .map(|(id, ep, _)| (id, ep))
+                    .collect();
                 (recvs, sends)
             })
             .map_err(QuoinError::Other)?;
-        for id in recvs {
-            if self.channel_waiter_live(id) {
+        for (id, epoch) in recvs {
+            if self.channel_waiter_live(id, epoch) {
                 self.wake_channel_task(id, Wake::ChannelClosed);
             }
         }
-        for id in sends {
-            if self.channel_waiter_live(id) {
+        for (id, epoch) in sends {
+            if self.channel_waiter_live(id, epoch) {
                 self.wake_channel_task(id, Wake::ChannelClosed);
             }
         }

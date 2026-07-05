@@ -223,6 +223,12 @@ fn complete_current_task<'gc>(
 /// every top-level unit runs under the scheduler.
 pub(crate) fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
     let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
+    // Stamp a fresh park epoch: the main task runs (and can park) before its first
+    // `load_task_context`, and the REPL reinstalls task #0 every line — a fixed epoch
+    // here could collide with a ghost waiter entry left in a channel that outlived
+    // the previous line. `park_seq` itself survives reinstalls, so epochs stay unique.
+    vm.sched.park_seq += 1;
+    let epoch = vm.sched.park_seq;
     vm.sched.tasks = vec![Some(Task {
         coro: gc!(mc, fiber),
         root_yielder: None,
@@ -244,7 +250,7 @@ pub(crate) fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
         cancel_requested: false,
         abort_handle: None,
         joining: None,
-        park_epoch: 0,
+        park_epoch: epoch,
         deadline_abort: None,
         parked_on_channel: false,
     })];

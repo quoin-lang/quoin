@@ -1,0 +1,8 @@
+"* Resume a fiber while another task is parked INSIDE it (no stress knob needed?).
+var f = Fiber.new:{ Async.sleep:30; 'done' };
+var a = Task.spawn:{ { f.resume.s }.catch:{ |e| 'errA:' + e.s } };
+Async.sleep:5;
+var b = Task.spawn:{ { f.resume.s }.catch:{ |e| 'errB:' + e.s } };
+('a=' + a.join.s).print;
+('b=' + b.join.s).print;
+'RPW DONE'.print

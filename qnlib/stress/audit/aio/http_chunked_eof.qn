@@ -1,0 +1,20 @@
+"* HTTP client: chunked response truncated by EOF right after a complete chunk
+"* (no terminal 0-chunk). What does the client report?
+use std:net/http;
+
+var listener = TcpListener.listen:'127.0.0.1:0';
+var port = listener.port;
+Task.spawn:{
+    listener.acceptOnce:{ |conn|
+        conn.read:4096;
+        conn.writeAll:(('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n'
+            + '5\r\nhello\r\n').asBytes)
+        "* connection closes here: EOF where the next chunk-size line should be
+    }
+};
+
+{
+    var resp = [HTTP]Client.get:('http://127.0.0.1:' + port + '/');
+    var body = resp.body.text;
+    ('SILENT: got body <' + body + '> with no error').print
+}.catch:{ |e| ('client threw: ' + e.s).print }

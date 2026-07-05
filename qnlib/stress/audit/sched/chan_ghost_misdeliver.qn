@@ -1,0 +1,32 @@
+"* Ghost channel waiter + task-slot reuse: a value sent on ch1 is delivered to a
+"* task that is parked on ch2 (cross-channel misdelivery).
+var ch1 = Channel.new;
+var ch2 = Channel.new;
+
+"* 1. Park a receiver on ch1, then cancel it -> leaves a ghost entry in
+"*    ch1.recv_waiters holding its TaskId.
+var entered = #();
+var h = Task.spawn:{ entered.add:1; ch1.receive };
+{ entered.count == 0 }.whileDo:{ Async.sleep:1 };
+h.cancel;
+{ h.join }.catch:{ |_| nil };
+
+"* 2. Spawn a new task -> reuses the freed task slot (same TaskId). Park it on ch2.
+var got = #();
+var entered2 = #();
+var h2 = Task.spawn:{ entered2.add:1; got.add:(ch2.receive) };
+{ entered2.count == 0 }.whileDo:{ Async.sleep:1 };
+Async.sleep:20;
+
+"* 3. Send on ch1. Correct: no live receiver on ch1 -> the send parks forever.
+"*    Bug: the ghost TaskId now looks 'live' (h2 is parked on a channel), so the
+"*    ch1 value is delivered to h2's ch2.receive.
+var sent = #();
+Task.spawn:{ ch1.send:'fromCh1'; sent.add:1 };
+Async.sleep:80;
+
+('h2 received on ch2: ' + got.s).print;
+('ch1 send completed: ' + sent.s).print;
+((got.count > 0) && ((got.at:0) == 'fromCh1'))
+    .if:{ 'BUG CONFIRMED: ch1 value delivered to a receiver parked on ch2'.print }
+     else:{ 'no misdelivery observed'.print }

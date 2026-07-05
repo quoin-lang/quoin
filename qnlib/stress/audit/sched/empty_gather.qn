@@ -1,0 +1,4 @@
+'before'.print;
+var r = Async.gather:#();
+'after'.print;
+r.print

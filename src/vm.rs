@@ -461,6 +461,7 @@ impl<'gc> VmState<'gc> {
                 fiber_error: None,
                 wake: None,
                 cancel_current: false,
+                park_seq: 0,
             },
             exceptions: Exceptions {
                 active: None,

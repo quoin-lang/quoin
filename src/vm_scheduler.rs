@@ -99,10 +99,13 @@ pub struct Task<'gc> {
     /// joiner from that target's waiter list and wake it. Cleared on becoming current.
     #[collect(require_static)]
     pub joining: Option<TaskId>,
-    /// Park generation, bumped each time this task becomes current (`load_task_context`).
-    /// A `JoinTimed` deadline timer captures the epoch at park time; a stale timer whose
-    /// epoch no longer matches (the task was resumed and re-parked, possibly on a reused
-    /// slot id) is ignored. This is what makes the deadline-vs-completion race exact.
+    /// Park identity, stamped from the *global* `Scheduler::park_seq` each time this
+    /// task becomes current (`load_task_context`). A `JoinTimed` deadline timer and a
+    /// channel waiter-queue entry capture the epoch at park time; a stale capture whose
+    /// epoch no longer matches is ignored. Global (not per-task) allocation is what makes
+    /// this exact across slot reuse: a fresh task in a recycled slot can never repeat an
+    /// epoch the previous occupant parked at, so a ghost timer/queue entry can never
+    /// impersonate the new occupant.
     #[collect(require_static)]
     pub park_epoch: u64,
     /// While parked in `JoinTimed`: aborts the in-flight deadline timer, so a normal
@@ -252,6 +255,12 @@ pub struct Scheduler<'gc> {
     /// `Cancelled`, so the ensuing `finally` unwind is not itself re-cancelled.
     #[collect(require_static)]
     pub cancel_current: bool,
+    /// Monotonic allocator for [`Task::park_epoch`]: bumped and stamped onto a task
+    /// each time it becomes current. Scheduler-global so epochs are unique across all
+    /// tasks and all slot reuses — never reset (not even by `reset_scheduler`), so a
+    /// channel entry or deadline timer surviving a REPL line stays inert too.
+    #[collect(require_static)]
+    pub park_seq: u64,
 }
 
 impl<'gc> VmState<'gc> {
@@ -863,15 +872,17 @@ impl<'gc> VmState<'gc> {
         self.sched.current_task = tid;
         {
             // Becoming current: surface any pending cancel, drop the join park-state
-            // (no longer waiting on anything), bump the park generation, and clear any
-            // deadline-timer handle (a `JoinTimed` park is over once we run).
+            // (no longer waiting on anything), stamp a fresh globally-unique park
+            // epoch, and clear any deadline-timer handle (a `JoinTimed` park is over
+            // once we run).
+            self.sched.park_seq += 1;
             let t = self.sched.tasks[tid.0]
                 .as_mut()
                 .expect("load_task_context: task slot is empty");
             self.sched.cancel_current = t.cancel_requested;
             t.joining = None;
             t.parked_on_channel = false;
-            t.park_epoch = t.park_epoch.wrapping_add(1);
+            t.park_epoch = self.sched.park_seq;
             t.deadline_abort = None;
         }
         let started = self.sched.tasks[tid.0].as_ref().unwrap().started;
@@ -1117,6 +1128,10 @@ impl<'gc> VmState<'gc> {
                 if let Some(ah) = t.deadline_abort.take() {
                     ah.abort();
                 }
+                // No longer waiting on anything: clear the join park-state now (not
+                // just at `load_task_context`), so a `cancel` landing before this
+                // waiter runs cannot take the join branch and enqueue it a second time.
+                t.joining = None;
                 t.wake = Some(wake);
                 self.sched.ready.push_back(w);
             }
@@ -1138,6 +1153,12 @@ impl<'gc> VmState<'gc> {
         }
         if let Some(ah) = t.abort_handle.take() {
             ah.abort(); // parked on I/O: the aborted future wakes it
+        } else if t.wake.is_some() {
+            // Already woken and enqueued (a completion delivered its wake while this
+            // task sat un-run in `ready`): it observes the cancel flag at its next
+            // checkpoint. Enqueueing it again here would double-resume the slot — a
+            // "task slot is empty" panic after it completes, or a spurious resume of
+            // whatever task reuses the slot first.
         } else if let Some(joined) = t.joining.take() {
             // parked on (timed) join: disarm any deadline timer, dequeue from the
             // target's waiters, and make this task runnable so it sees the cancel.

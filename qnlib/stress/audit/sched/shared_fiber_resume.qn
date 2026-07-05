@@ -1,0 +1,6 @@
+"* Minimal: one suspended fiber, two tasks each resume it once, under QN_SCHED_STRESS.
+var f = Fiber.new:{ var n = 0; { true }.whileDo:{ ^> n; n = n + 1 } };
+var a = Task.spawn:{ { f.resume.s }.catch:{ |e| 'errA' } };
+var b = Task.spawn:{ { f.resume.s }.catch:{ |e| 'errB' } };
+('a=' + a.join.s + ' b=' + b.join.s).print;
+'SHARED-FIBER DONE'.print

@@ -1,0 +1,31 @@
+"* Full matrix: N enclosing timeouts (distinct deadlines 10001,10002,...) around
+"* an inner 2ms timeout, in both bare and onCancel forms, N = 0..7.
+"* Prints one line per case: form N -> result (instantly; a real outer deadline
+"* would take >10s so any outer-threw here is a misfire).
+
+Wrap <- {
+    .meta <-- {
+        outers:around: -> { |n blk|
+            (n == 0).if:{ ^^blk.value };
+            Wrap.outers:(n - 1) around:{ Async.timeout:(10000 + n) do:{ blk.value } }
+        }
+    }
+};
+
+(0..8).each:{ |n|
+    var rBare = { Wrap.outers:n around:{ Async.timeout:2 do:{ Async.sleep:100000; 'no' } } }.catch:{ |ex|
+        (TimeoutError ~ ex).if:{ 'threw-ms:' + ex.ms.s } else:{ 'weird:' + ex.s }
+    };
+    var okB = (rBare == 'threw-ms:2').if:{ 'ok' } else:{ 'BUG' };
+    ('bare    n=' + n.s + ' -> ' + rBare + '   ' + okB).print
+};
+
+(0..8).each:{ |n|
+    var rOC = { Wrap.outers:n around:{
+            Async.timeout:2 do:{ Async.sleep:100000; 'no' } onCancel:{ 'fired' } } }
+        .catch:{ |ex| (TimeoutError ~ ex).if:{ 'threw-ms:' + ex.ms.s } else:{ 'weird:' + ex.s } };
+    var okC = (rOC == 'fired').if:{ 'ok' } else:{ 'BUG' };
+    ('onCancel n=' + n.s + ' -> ' + rOC + '   ' + okC).print
+};
+
+'MATRIX DONE'.print
