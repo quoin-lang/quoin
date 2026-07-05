@@ -3,7 +3,7 @@ Run whole-process: `qn bench/qn/sieve.qn` from the repo root."
 
 Sieve <- {
     .meta <-- {
-        primesUpTo: -> { |limit: Integer|
+        primesUpTo: -> { |limit: Integer ^List|
             var isPrime = #();
             var i = 0;
             { i <= limit }.whileDo:{
@@ -34,7 +34,8 @@ Sieve <- {
             };
             ^primes
         }
-    }
+    };
+    .sealed!
 };
 
 var total = 0;

@@ -375,6 +375,13 @@ pub struct VmState<'gc> {
     pub aot_fuel: i64,
     #[collect(require_static)]
     pub aot_depth: i64,
+    /// Error channel for compiled code (docs/AOT_ARCH.md v0.2): helpers store a
+    /// full `QuoinError` here and return `TAG_ERR`; `codegen::invoke` takes it.
+    /// A thrown Quoin *value* needs no slot here — it travels as
+    /// `QuoinError::Thrown` with the value GC-rooted in `exceptions.active`,
+    /// exactly as across any native boundary.
+    #[collect(require_static)]
+    pub aot_pending_error: Option<QuoinError>,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
@@ -491,6 +498,7 @@ impl<'gc> VmState<'gc> {
             native_reentry_depth: 0,
             aot_fuel: 0,
             aot_depth: 0,
+            aot_pending_error: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
             last_popped_env: None,

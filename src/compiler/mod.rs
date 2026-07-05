@@ -630,7 +630,7 @@ impl Compiler {
                 return; // not a plain method parameter list
             }
             let Some(hint) = &arg.type_hint else { return };
-            let Some(k) = crate::codegen::AotKind::from_annotation(&annotation_name(hint)) else {
+            let Some(k) = crate::codegen::AotParam::from_annotation(&annotation_name(hint)) else {
                 return;
             };
             params.push(k);
@@ -638,7 +638,7 @@ impl Compiler {
         let Some(rt) = &block_node.return_type else {
             return;
         };
-        let Some(ret) = crate::codegen::AotKind::from_annotation(&annotation_name(rt)) else {
+        let Some(ret) = crate::codegen::AotRet::from_annotation(&annotation_name(rt)) else {
             return;
         };
         // `compile_block` just pushed the compiled body as a block constant.

@@ -49,11 +49,15 @@ fn run_raw(entry: &AotEntry, args: &[i64]) -> Result<i64, u8> {
     let mut fuel: i64 = i64::MAX / 2;
     let mut depth: i64 = 0;
     let mut ret: i64 = 0;
+    // vm/mc are never dereferenced on scalar-pure paths (the checkpoint is the
+    // only consumer, and fuel never runs out here).
     let tag = unsafe {
         (entry.raw)(
             std::ptr::dangling_mut(),
+            std::ptr::dangling(),
             &mut fuel,
             &mut depth,
+            0,
             args.as_ptr(),
             &mut ret,
         )

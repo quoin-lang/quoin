@@ -1,15 +1,33 @@
 # AOT native compilation of the typed subset (Tier 2)
 
-*Status: v0.0 + v0.1 SHIPPED behind `QN_AOT=1` (default off) — candidate
-collection, Cranelift codegen (`src/codegen/`), the registry +
+*Status: v0.0–v0.2 SHIPPED behind `QN_AOT=1` (default off). v0.0/v0.1:
+candidate collection, Cranelift codegen (`src/codegen/`), the registry +
 `Callable::AotCall`, fuel checkpoints (prologue + loop back-edges), depth
-guard, per-task counters. fib_typed: 0.654s → 0.023s (~28×), corpus + both
-stress modes green in both modes, differential tests in
-`src/codegen/tests.rs`, standing parity suite in
-`qnlib/tests/40-aot-parity.qn`. Open: v0.2 (List/Map helper calls → sieve),
-v0.3 (default-on soak). Follows `docs/PERF_ROADMAP.md` Tier 2; builds on
-the typed-devirt tier (`docs/TYPED_DEVIRT_ARCH.md`) and the
-closure-template/`template_id` infrastructure.*
+guard, per-task counters — fib_typed 0.654s → 0.023s (~28×). v0.2 (revised
+scope, wider than the original sketch): slot-window frames (every GC value
+lives on `vm.stack`, rooted by construction — registers stay scalar),
+object params/returns (List/Map/String), List helper ops, string constants,
+`LoadGlobal`, truthiness lowering for dynamic conditions, checked Dyn→scalar
+narrowing (returns and accumulators), and **outcalls** — dynamic sends
+leaving the compiled world through `call_method` native re-entry
+(depth-guarded, suspension-safe, thrown-value-transparent). Scalar-pure
+siblings keep the direct-call fast path (translation-verified, since direct
+callees share the caller's slot base). Corpus + both stress modes green in
+both modes; differential tests in `src/codegen/tests.rs`; parity suites in
+`qnlib/tests/40-aot-parity.qn`.*
+
+*The honest v0.2 finding: sieve as written does NOT compile — its
+`(list.at:p).if:{…}` lowers to `BranchIfNotBool` whose cold path
+re-materializes the arm as a **capturing closure** (`SendConst(Block…)`),
+and materializing an env-capturing block from a compiled frame is
+deopt-grade machinery this design forswears. The method is refused with an
+actionable message and stays interpreted. This is the concrete motivation
+for checked generic collections: a proven `List(Boolean)` element type
+removes the dynamic branch (and its cold block) at the compiler level, and
+sieve then compiles with no new runtime machinery. Open: v0.3 (default-on
+soak), checked generics (own design pass). Follows `docs/PERF_ROADMAP.md`
+Tier 2; builds on the typed-devirt tier and the closure-template
+infrastructure.*
 
 ## 1. Why, and why Quoin can
 

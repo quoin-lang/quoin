@@ -18,6 +18,7 @@
 //! frames hold only scalars, so suspending needs no rooting (the resume-segment GC
 //! rule — gc-arena collects only between coroutine resumes).
 
+mod helpers;
 mod translate;
 
 #[cfg(test)]
@@ -37,7 +38,8 @@ use crate::instruction::StaticBlock;
 use crate::value::Value;
 use crate::vm::VmState;
 
-/// The scalar kinds the v0 subset compiles. `Boolean` is 0/1 in an i64 lane.
+/// The scalar kinds the compiled subset carries in registers. `Boolean` is
+/// 0/1 in an i64 lane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AotKind {
     Int,
@@ -56,6 +58,47 @@ impl AotKind {
     }
 }
 
+/// A compiled method's parameter shape: scalars ride in registers; objects
+/// (List/Map/String — any dispatch-guaranteed class annotation) live in the
+/// frame's slot window on `vm.stack` and are addressed by index (v0.2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AotParam {
+    Scalar(AotKind),
+    Obj,
+}
+
+impl AotParam {
+    pub fn from_annotation(name: &str) -> Option<AotParam> {
+        if let Some(k) = AotKind::from_annotation(name) {
+            return Some(AotParam::Scalar(k));
+        }
+        match name {
+            "List" | "Map" | "String" => Some(AotParam::Obj),
+            _ => None,
+        }
+    }
+}
+
+/// A compiled method's return shape. `Obj` returns the value via a slot (the
+/// raw `ret` lane carries the absolute slot index).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AotRet {
+    Scalar(AotKind),
+    Obj,
+}
+
+impl AotRet {
+    pub fn from_annotation(name: &str) -> Option<AotRet> {
+        if let Some(k) = AotKind::from_annotation(name) {
+            return Some(AotRet::Scalar(k));
+        }
+        match name {
+            "List" | "Map" | "String" => Some(AotRet::Obj),
+            _ => None,
+        }
+    }
+}
+
 /// A method the compiler proved eligible for native compilation: sealed owner,
 /// all-scalar params and return, unguarded, single-variant selector. `group_id`
 /// identifies the class-body (or `.meta` extension) context it was defined in, so
@@ -64,18 +107,24 @@ pub struct AotCandidate {
     pub group_id: u32,
     pub selector: String,
     pub block: Rc<StaticBlock>,
-    pub params: Vec<AotKind>,
-    pub ret: AotKind,
+    pub params: Vec<AotParam>,
+    pub ret: AotRet,
 }
 
 /// Raw ABI of a compiled trampoline. `args`/`ret` carry bit patterns (`f64` via
 /// `to_bits`, bool as 0/1). Returns a tag: 0 ok, 1 division by zero, 2 compiled
 /// call depth exceeded, 3 cancelled. `vm` is the erased `*mut VmState` (used only
 /// by the fuel checkpoint); `fuel`/`depth` point at the per-task counters.
+/// `slot_base` is the absolute index of this frame's slot window on
+/// `vm.stack` (slot 0 = receiver, then object params, then scratch); `args`
+/// carries one lane per declared parameter — scalar bits, or the absolute
+/// slot index for `Obj` params.
 pub type AotRawFn = unsafe extern "C" fn(
     vm: *mut c_void,
+    mc: *const c_void,
     fuel: *mut i64,
     depth: *mut i64,
+    slot_base: i64,
     args: *const i64,
     ret: *mut i64,
 ) -> u8;
@@ -84,6 +133,9 @@ pub const TAG_OK: u8 = 0;
 pub const TAG_DIV_ZERO: u8 = 1;
 pub const TAG_DEPTH: u8 = 2;
 pub const TAG_CANCELLED: u8 = 3;
+/// The helper stored a full `QuoinError` in `VmState::aot_pending_error`
+/// (outcall errors, IndexError, thrown values via `QuoinError::Thrown`, …).
+pub const TAG_ERR: u8 = 4;
 
 /// Compiled recursion consumes the real coroutine stack (1 MiB) and bypasses
 /// `MAX_NATIVE_REENTRY`, so every compiled prologue counts call depth and bails
@@ -95,8 +147,10 @@ pub const AOT_MAX_CALL_DEPTH: i64 = 2000;
 /// is intentionally never dropped — same append-only lifetime as the interner).
 pub struct AotEntry {
     pub raw: AotRawFn,
-    pub params: Box<[AotKind]>,
-    pub ret: AotKind,
+    pub params: Box<[AotParam]>,
+    pub ret: AotRet,
+    /// Scratch slots (beyond receiver + object params) the frame needs.
+    pub n_scratch: u32,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -142,7 +196,7 @@ pub fn compile_candidates(cands: Vec<AotCandidate>) -> CompileStats {
         return stats;
     }
     // Sibling signature map for direct self-calls: (group, selector) -> sig.
-    let mut siblings: HashMap<(u32, String), (Vec<AotKind>, AotKind, u32)> = HashMap::new();
+    let mut siblings: HashMap<(u32, String), (Vec<AotParam>, AotRet, u32)> = HashMap::new();
     for c in &cands {
         if let Some(id) = c.block.template_id {
             siblings.insert(
@@ -181,40 +235,70 @@ pub enum AotOutcome<'gc> {
     Err(QuoinError),
 }
 
-/// Unbox the (dispatch-guaranteed) scalar args, run the compiled body, box the
-/// result. Fuel is reset at top-level entry only, so nested direct calls share
-/// one budget like interpreted steps do.
+/// Unbox the (dispatch-guaranteed) args, reserve this frame's slot window on
+/// `vm.stack` (slot 0 = receiver, then object params, then nil-initialized
+/// scratch — all GC-rooted by construction), run the compiled body, and box
+/// the result. Fuel is reset at top-level entry only, so nested direct calls
+/// share one budget like interpreted steps do.
 pub fn invoke<'gc>(
     vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
     entry: &'static AotEntry,
+    receiver: Value<'gc>,
     args: &[Value<'gc>],
 ) -> AotOutcome<'gc> {
     if args.len() != entry.params.len() {
         return AotOutcome::Bail;
     }
+    let base = vm.stack.len();
+    vm.stack.push(receiver); // slot 0
     let mut raw: Vec<i64> = Vec::with_capacity(args.len());
     for (a, k) in args.iter().zip(entry.params.iter()) {
         let bits = match (k, a) {
-            (AotKind::Int, Value::Int(i)) => *i,
-            (AotKind::Double, Value::Double(d)) => d.to_bits() as i64,
-            (AotKind::Bool, Value::Bool(b)) => *b as i64,
-            _ => return AotOutcome::Bail,
+            (AotParam::Scalar(AotKind::Int), Value::Int(i)) => *i,
+            (AotParam::Scalar(AotKind::Double), Value::Double(d)) => d.to_bits() as i64,
+            (AotParam::Scalar(AotKind::Bool), Value::Bool(b)) => *b as i64,
+            (AotParam::Obj, v @ Value::Object(_)) => {
+                let idx = vm.stack.len() as i64;
+                vm.stack.push(*v);
+                idx
+            }
+            _ => {
+                vm.stack.truncate(base);
+                return AotOutcome::Bail;
+            }
         };
         raw.push(bits);
+    }
+    for _ in 0..entry.n_scratch {
+        vm.stack.push(Value::Nil);
     }
     if vm.aot_depth == 0 {
         vm.aot_fuel = i64::from(crate::tuning::step_batch());
     }
+    vm.aot_pending_error = None;
     let fuel_ptr = &raw mut vm.aot_fuel;
     let depth_ptr = &raw mut vm.aot_depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
+    let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
     let mut ret: i64 = 0;
-    let tag = unsafe { (entry.raw)(vm_ptr, fuel_ptr, depth_ptr, raw.as_ptr(), &mut ret) };
-    match tag {
+    let tag = unsafe {
+        (entry.raw)(
+            vm_ptr,
+            mc_ptr,
+            fuel_ptr,
+            depth_ptr,
+            base as i64,
+            raw.as_ptr(),
+            &mut ret,
+        )
+    };
+    let outcome = match tag {
         TAG_OK => AotOutcome::Value(match entry.ret {
-            AotKind::Int => Value::Int(ret),
-            AotKind::Double => Value::Double(f64::from_bits(ret as u64)),
-            AotKind::Bool => Value::Bool(ret != 0),
+            AotRet::Scalar(AotKind::Int) => Value::Int(ret),
+            AotRet::Scalar(AotKind::Double) => Value::Double(f64::from_bits(ret as u64)),
+            AotRet::Scalar(AotKind::Bool) => Value::Bool(ret != 0),
+            AotRet::Obj => vm.stack[ret as usize],
         }),
         TAG_DIV_ZERO => {
             AotOutcome::Err(QuoinError::ArithmeticError("Division by zero".to_string()))
@@ -223,10 +307,15 @@ pub fn invoke<'gc>(
             "Maximum compiled-call depth exceeded (recursion too deep for native code)".to_string(),
         )),
         TAG_CANCELLED => AotOutcome::Err(vm.take_cancellation()),
+        TAG_ERR => AotOutcome::Err(vm.aot_pending_error.take().unwrap_or_else(|| {
+            QuoinError::Other("AOT: TAG_ERR with no pending error".to_string())
+        })),
         other => AotOutcome::Err(QuoinError::Other(format!(
             "AOT: compiled method returned unknown tag {other}"
         ))),
-    }
+    };
+    vm.stack.truncate(base);
+    outcome
 }
 
 /// Fuel checkpoint, called from compiled code when the fuel counter hits zero.
