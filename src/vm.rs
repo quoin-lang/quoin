@@ -1529,37 +1529,8 @@ impl<'gc> VmState<'gc> {
             let initial_frame_count = self.frames.len();
             method.call(self, mc, Some(receiver), args, Some(sel))?;
 
-            // let the VM catch up
-            if self.frames.len() > initial_frame_count {
-                while self.frames.len() > initial_frame_count {
-                    match self.step_internal(mc) {
-                        Ok(VmStatus::Running) => {
-                            if let Some(yielder) = unsafe { self.get_yielder() } {
-                                yielder.suspend(YieldReason::CooperativeYield);
-                            }
-                        }
-                        Ok(VmStatus::Finished(_)) => {
-                            break;
-                        }
-                        Ok(VmStatus::Yeeted(val)) => {
-                            return Err(QuoinError::Other(format!(
-                                "Uncaught exception during method call: {}",
-                                val
-                            )));
-                        }
-                        Err(QuoinError::NonLocalReturn) => {
-                            if self.frames.len() > initial_frame_count {
-                                continue;
-                            } else if self.frames.len() == initial_frame_count {
-                                break;
-                            } else {
-                                return Err(QuoinError::NonLocalReturn);
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
+            // let the VM catch up (batched — B0)
+            self.run_nested(mc, initial_frame_count, "method call")?;
 
             Ok(self.pop()?)
         } else {
@@ -1630,37 +1601,8 @@ impl<'gc> VmState<'gc> {
                 Some(Symbol::intern(selector)),
             )?;
 
-            // let the VM catch up
-            if self.frames.len() > initial_frame_count {
-                while self.frames.len() > initial_frame_count {
-                    match self.step_internal(mc) {
-                        Ok(VmStatus::Running) => {
-                            if let Some(yielder) = unsafe { self.get_yielder() } {
-                                yielder.suspend(YieldReason::CooperativeYield);
-                            }
-                        }
-                        Ok(VmStatus::Finished(_)) => {
-                            break;
-                        }
-                        Ok(VmStatus::Yeeted(val)) => {
-                            return Err(QuoinError::Other(format!(
-                                "Uncaught exception during method call: {}",
-                                val
-                            )));
-                        }
-                        Err(QuoinError::NonLocalReturn) => {
-                            if self.frames.len() > initial_frame_count {
-                                continue;
-                            } else if self.frames.len() == initial_frame_count {
-                                break;
-                            } else {
-                                return Err(QuoinError::NonLocalReturn);
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
+            // let the VM catch up (batched — B0)
+            self.run_nested(mc, initial_frame_count, "method call")?;
 
             Ok(self.pop()?)
         } else {
@@ -1724,6 +1666,70 @@ impl<'gc> VmState<'gc> {
         Ok(())
     }
 
+    /// Drive nested execution (a native-initiated block or method call) until the frame
+    /// stack returns to `initial_frame_count` — the BATCHED form (B0,
+    /// docs/BLOCK_AOT_ARCH.md §3). One flat loop with the current frame's bytecode `Rc`
+    /// hoisted exactly like `run_dispatch` (re-cloned only when the frame stack changes),
+    /// yielding to the driver every `step_batch()` instructions instead of after every
+    /// one. This gives nested block bodies — every `each:`-family combinator element —
+    /// the same observable scheduling granularity as top-level code; before B0 they paid
+    /// a full coroutine suspend→driver→resume round-trip plus a bytecode-`Rc` clone per
+    /// instruction. Under the stress modes `step_batch()` is 1, so their per-instruction
+    /// coverage is unchanged. Errors are returned raw (un-annotated), exactly as the
+    /// per-step loops returned them; `context` names the caller in the uncaught-throw
+    /// message, byte-identical to the old per-site strings.
+    #[allow(no_gc_across_yield)]
+    fn run_nested(
+        &mut self,
+        mc: &Mutation<'gc>,
+        initial_frame_count: usize,
+        context: &str,
+    ) -> Result<(), QuoinError> {
+        let budget = crate::tuning::step_batch();
+        let mut steps: u32 = 0;
+        let mut cached_len = usize::MAX;
+        let mut bytecode: Option<SharedBytecode> = None;
+        while self.frames.len() > initial_frame_count {
+            // The cancellation check `step_internal` performed per step — including
+            // immediately after a resume from the suspend below.
+            if self.sched.cancel_current {
+                return Err(self.take_cancellation());
+            }
+            let flen = self.frames.len();
+            if flen != cached_len {
+                cached_len = flen;
+                bytecode = Some(self.frames[flen - 1].block.template.bytecode.clone());
+            }
+            match self.dispatch_one(mc, bytecode.as_ref().unwrap()) {
+                Ok(VmStatus::Running) => {}
+                // A `^`/`^^` unwound frames: below the baseline it belongs to an
+                // enclosing loop; at/above it, the loop head re-evaluates. Counted
+                // as a step, like `run_dispatch`.
+                Err(QuoinError::NonLocalReturn) => {
+                    if self.frames.len() < initial_frame_count {
+                        return Err(QuoinError::NonLocalReturn);
+                    }
+                }
+                Ok(VmStatus::Finished(_)) => break,
+                Ok(VmStatus::Yeeted(val)) => {
+                    return Err(QuoinError::Other(format!(
+                        "Uncaught exception during {}: {}",
+                        context, val
+                    )));
+                }
+                Err(e) => return Err(e),
+            }
+            steps += 1;
+            if steps >= budget {
+                steps = 0;
+                if let Some(yielder) = unsafe { self.get_yielder() } {
+                    yielder.suspend(YieldReason::CooperativeYield);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn execute_block(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1745,36 +1751,7 @@ impl<'gc> VmState<'gc> {
             self.start_block(mc, block, args, None, None);
         }
 
-        if self.frames.len() > initial_frame_count {
-            while self.frames.len() > initial_frame_count {
-                match self.step_internal(mc) {
-                    Ok(VmStatus::Running) => {
-                        if let Some(yielder) = unsafe { self.get_yielder() } {
-                            yielder.suspend(YieldReason::CooperativeYield);
-                        }
-                    }
-                    Ok(VmStatus::Finished(_)) => {
-                        break;
-                    }
-                    Ok(VmStatus::Yeeted(val)) => {
-                        return Err(QuoinError::Other(format!(
-                            "Uncaught exception during block execution: {}",
-                            val
-                        )));
-                    }
-                    Err(QuoinError::NonLocalReturn) => {
-                        if self.frames.len() > initial_frame_count {
-                            continue;
-                        } else if self.frames.len() == initial_frame_count {
-                            break;
-                        } else {
-                            return Err(QuoinError::NonLocalReturn);
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
+        self.run_nested(mc, initial_frame_count, "block execution")?;
 
         Ok(self.pop()?)
     }
@@ -1885,36 +1862,7 @@ impl<'gc> VmState<'gc> {
             unregister_on_defer_failure: None,
         });
 
-        if self.frames.len() > initial_frame_count {
-            while self.frames.len() > initial_frame_count {
-                match self.step_internal(mc) {
-                    Ok(VmStatus::Running) => {
-                        if let Some(yielder) = unsafe { self.get_yielder() } {
-                            yielder.suspend(YieldReason::CooperativeYield);
-                        }
-                    }
-                    Ok(VmStatus::Finished(_)) => {
-                        break;
-                    }
-                    Ok(VmStatus::Yeeted(val)) => {
-                        return Err(QuoinError::Other(format!(
-                            "Uncaught exception during validation block execution: {}",
-                            val
-                        )));
-                    }
-                    Err(QuoinError::NonLocalReturn) => {
-                        if self.frames.len() > initial_frame_count {
-                            continue;
-                        } else if self.frames.len() == initial_frame_count {
-                            break;
-                        } else {
-                            return Err(QuoinError::NonLocalReturn);
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
+        self.run_nested(mc, initial_frame_count, "validation block execution")?;
 
         Ok(self.pop()?)
     }

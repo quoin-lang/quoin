@@ -1,10 +1,13 @@
 # Block-template AOT: compiling the combinator tier
 
-*Status: designed, approved. Slices: B0 (interpreter batching) → B1 (fused
-`each:` in compiled methods) → B2 (compiled Iterate combinator bodies) →
-B3 (block-template compilation). The arc GENERICS_ARCH.md §12 and
-AOT_ARCH.md §9.8 recorded, now scheduled. Acceptance: the `combinators`
-bench (0.67s whole-process baseline), checksums identical in both modes,
+*Status: B0 SHIPPED — batched nested block-execution loops:
+combinators −27.9% (0.700→0.505s), maps −26.0%, strings −18.9%, rest at
+noise; the driver-stepping profile category eliminated outright
+(`profiling/block-template-aot/notes.md`). Audit repro corpus green
+(cancellation/starvation family). Next: B1 (fused `each:` in compiled
+methods) → B2 (compiled Iterate combinator bodies) → B3 (block-template
+compilation). The arc GENERICS_ARCH.md §12 and AOT_ARCH.md §9.8 recorded.
+Acceptance: the `combinators` bench, checksums identical in both modes,
 corpus + stress green per slice; ≥3× is the target for the full arc.*
 
 ## 1. Why: the measured shape of combinator cost
