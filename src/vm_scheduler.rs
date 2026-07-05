@@ -958,6 +958,16 @@ impl<'gc> VmState<'gc> {
         let parent = self.sched.current_task;
         self.save_task_context(parent);
         let n = blocks.len();
+        if n == 0 {
+            // No children means nothing will ever call `complete_child`, whose
+            // pending==0 check is the only delivery path — deliver the empty result
+            // now, or the parent parks forever (and the program "succeeds" silently).
+            let list = self.new_list(mc, Vec::new());
+            let pt = self.sched.tasks[parent.0].as_mut().unwrap();
+            pt.wake = Some(Wake::Gather { list });
+            self.sched.ready.push_back(parent);
+            return;
+        }
         self.sched.tasks[parent.0].as_mut().unwrap().gather = Some(GatherState {
             pending: n,
             results: vec![None; n],
