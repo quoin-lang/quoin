@@ -16,6 +16,7 @@ fn sig(
         from_vm: false,
         method_params: HashMap::new(),
         method_returns: HashMap::new(),
+        type_params: Vec::new(),
     }
 }
 

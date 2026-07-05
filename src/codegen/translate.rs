@@ -34,6 +34,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::instruction::{Constant, Instruction, IntBinKind};
+use crate::runtime::elem_tag::ElemTag;
 use crate::symbol::{Symbol, self_symbol};
 
 use super::helpers::{KIND_BOOL, KIND_DOUBLE, KIND_INT, KIND_NIL, KIND_SLOT};
@@ -218,6 +219,8 @@ struct Helpers {
     outcall: FuncId,
     narrow_error: FuncId,
     load_global: FuncId,
+    tag_collection: FuncId,
+    nil_mnu: FuncId,
 }
 
 fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String> {
@@ -247,6 +250,8 @@ fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String>
     let oc = sig(&[ptr, ptr, i, i, ptr, i, ptr, ptr, i], &[types::I8]);
     let ne = sig(&[ptr, ptr, i, i], &[types::I8]);
     let lg = sig(&[ptr, ptr, ptr, i], &[types::I8]);
+    let tc = sig(&[ptr, ptr, i, i], &[types::I8]);
+    let nm = sig(&[ptr, ptr, i, i, ptr, i], &[types::I8]);
     Ok(Helpers {
         checkpoint: d(module, "qn_aot_checkpoint", &cp)?,
         fmod: d(module, "qn_aot_fmod", &fm)?,
@@ -261,6 +266,8 @@ fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String>
         outcall: d(module, "qn_aot_outcall", &oc)?,
         narrow_error: d(module, "qn_aot_narrow_error", &ne)?,
         load_global: d(module, "qn_aot_load_global", &lg)?,
+        tag_collection: d(module, "qn_aot_tag_collection", &tc)?,
+        nil_mnu: d(module, "qn_aot_nil_mnu", &nm)?,
     })
 }
 
@@ -329,6 +336,7 @@ fn compile_group(
                 helpers: &helpers,
                 is_pure: pure.contains(&tid),
                 next_scratch: 0,
+                proofs: HashMap::new(),
                 sym_consts: Vec::new(),
                 name_consts: Vec::new(),
             };
@@ -489,8 +497,20 @@ fn bkind_type(k: BKind) -> Type {
 #[derive(Clone, Copy)]
 enum VarSlot {
     Scalar(Variable, AotKind),
-    /// Scratch-slot number in the frame window.
-    Obj(u32),
+    /// Scratch-slot number in the frame window, plus what the translator can
+    /// PROVE about the value it holds (tag-backed; docs/GENERICS_ARCH.md §8).
+    Obj(u32, Option<DynProof>),
+}
+
+/// A guarantee the translator carries for a slot-resident dynamic value —
+/// only from sources the runtime enforces (a `TagCollection` it emitted, or
+/// an element read from such a collection). Never from checker beliefs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DynProof {
+    /// A collection whose element tag is enforced.
+    CollectionOf(ElemTag),
+    /// An element read from such a collection: proven tag-or-nil.
+    ElemOrNil(ElemTag),
 }
 
 struct Translator<'a> {
@@ -504,6 +524,12 @@ struct Translator<'a> {
     /// touch the slot window, because direct callers pass their own base.
     is_pure: bool,
     next_scratch: u32,
+    /// Proofs for in-flight `AV::Dyn` values, keyed by their SSA index value.
+    /// Values that cross a control-flow join (block params) drop their proofs
+    /// — a sound degradation; the load-bearing flows (element read → inlined
+    /// conditional) stay within one block, and locals carry proofs in
+    /// `VarSlot::Obj` across blocks.
+    proofs: HashMap<CVal, DynProof>,
     /// Leaked `Symbol`/`NamespacedName` boxes for outcall selectors and
     /// global references (live for the process, like the code).
     sym_consts: Vec<&'static Symbol>,
@@ -733,8 +759,9 @@ impl<'a> Translator<'a> {
                     return Err("fell off the end of bytecode".to_string());
                 }
                 if ip != start_ip && leaders.binary_search(&ip).is_ok() {
-                    let (bl, _) = self.block_for(b, &mut blocks, &mut work, ip, &stack)?;
-                    let args = Self::stack_args(&stack)?;
+                    let nstack = self.norm_stack(b, &fx, &stack)?;
+                    let (bl, _) = self.block_for(b, &mut blocks, &mut work, ip, &nstack)?;
+                    let args = Self::stack_args(&nstack)?;
                     b.ins().jump(bl, &args);
                     break 'block;
                 }
@@ -920,6 +947,10 @@ impl<'a> Translator<'a> {
                     Instruction::ListGet => {
                         let idx = Self::pop_kind(&mut stack, AotKind::Int)?;
                         let recv = stack.pop().ok_or("stack underflow")?;
+                        let recv_proof = match &recv {
+                            AV::Dyn(ri) => self.proofs.get(ri).copied(),
+                            _ => None,
+                        };
                         let recv_idx = self.obj_index(b, &fx, recv, "ListGet receiver")?;
                         let out = self.alloc_scratch()?;
                         let out_idx = self.abs_slot(b, &fx, out);
@@ -927,7 +958,30 @@ impl<'a> Translator<'a> {
                         let call = b.ins().call(f, &[fx.vm, fx.mc, recv_idx, idx, out_idx]);
                         let tag = b.inst_results(call)[0];
                         self.tag_check(b, &fx, tag);
+                        if let Some(DynProof::CollectionOf(t)) = recv_proof {
+                            // Tag-enforced source: the element is PROVEN t-or-nil.
+                            self.proofs.insert(out_idx, DynProof::ElemOrNil(t));
+                        }
                         stack.push(AV::Dyn(out_idx));
+                    }
+                    Instruction::TagCollection(tag) => {
+                        // Verify + stamp the fresh literal on top of the stack
+                        // (same helper contract as the interpreter arm), and
+                        // record the PROOF — this is a tag the runtime enforces.
+                        let AV::Dyn(idx) = *stack.last().ok_or("stack underflow")? else {
+                            return Err("TagCollection on a non-slot value".into());
+                        };
+                        let Some(code) = tag.code() else {
+                            return Err("user-class element tags in compiled literals are not \
+                                 supported yet"
+                                .into());
+                        };
+                        let code_v = b.ins().iconst(types::I64, code);
+                        let f = self.func_ref(b, self.helpers.tag_collection);
+                        let call = b.ins().call(f, &[fx.vm, fx.mc, idx, code_v]);
+                        let t = b.inst_results(call)[0];
+                        self.tag_check(b, &fx, t);
+                        self.proofs.insert(idx, DynProof::CollectionOf(*tag));
                     }
                     Instruction::ListSet => {
                         let val = stack.pop().ok_or("stack underflow")?;
@@ -959,11 +1013,12 @@ impl<'a> Translator<'a> {
                     }
                     Instruction::Jump(off) => {
                         let target = (ip as isize + off) as usize;
+                        let mut nstack = self.norm_stack(b, &fx, &stack)?;
                         if target <= ip {
-                            stack = self.emit_fuel_tick(b, &fx, &stack)?;
+                            nstack = self.emit_fuel_tick(b, &fx, &nstack)?;
                         }
-                        let (bl, _) = self.block_for(b, &mut blocks, &mut work, target, &stack)?;
-                        let args = Self::stack_args(&stack)?;
+                        let (bl, _) = self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                        let args = Self::stack_args(&nstack)?;
                         b.ins().jump(bl, &args);
                         break 'block;
                     }
@@ -990,14 +1045,17 @@ impl<'a> Translator<'a> {
                             }
                         };
                         let target = (ip as isize + off) as usize;
+                        let mut nstack = self.norm_stack(b, &fx, &stack)?;
                         if target <= ip {
                             // Conditional back-edge: tick before the branch
                             // (loops must stay preemptible and cancellable).
-                            stack = self.emit_fuel_tick(b, &fx, &stack)?;
+                            nstack = self.emit_fuel_tick(b, &fx, &nstack)?;
                         }
-                        let (tbl, _) = self.block_for(b, &mut blocks, &mut work, target, &stack)?;
-                        let (fbl, _) = self.block_for(b, &mut blocks, &mut work, ip + 1, &stack)?;
-                        let args = Self::stack_args(&stack)?;
+                        let (tbl, _) =
+                            self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                        let (fbl, _) =
+                            self.block_for(b, &mut blocks, &mut work, ip + 1, &nstack)?;
+                        let args = Self::stack_args(&nstack)?;
                         if matches!(insts[ip], Instruction::IfJump(_)) {
                             b.ins().brif(cond, tbl, &args, fbl, &args);
                         } else {
@@ -1011,15 +1069,14 @@ impl<'a> Translator<'a> {
                             AV::C(_, AotKind::Bool) => {} // statically Bool: fall through
                             AV::C(..) | AV::Nil | AV::SelfRef => {
                                 // Statically not a Bool: always the cold path.
+                                let nstack = self.norm_stack(b, &fx, &stack)?;
                                 let (bl, _) =
-                                    self.block_for(b, &mut blocks, &mut work, target, &stack)?;
-                                let args = Self::stack_args(&stack)?;
+                                    self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                                let args = Self::stack_args(&nstack)?;
                                 b.ins().jump(bl, &args);
                                 break 'block;
                             }
                             AV::Dyn(idx) => {
-                                // Runtime narrow: Bool → hot path with the top
-                                // replaced by the scalar; anything else → cold.
                                 let f = self.func_ref(b, self.helpers.slot_peek);
                                 let oa = b.ins().stack_addr(types::I64, fx.peek_out, 0);
                                 let call = b.ins().call(f, &[fx.vm, fx.mc, idx, oa]);
@@ -1027,15 +1084,47 @@ impl<'a> Translator<'a> {
                                 let is_bool = b.ins().icmp_imm(IntCC::Equal, kind, KIND_BOOL);
                                 let bits = b.ins().stack_load(types::I64, fx.peek_out, 0);
                                 let as_bool = b.ins().icmp_imm(IntCC::NotEqual, bits, 0);
-                                let mut hot_stack = stack.clone();
+                                let mut hot_stack = self.norm_stack(b, &fx, &stack)?;
                                 hot_stack.pop();
                                 hot_stack.push(AV::C(as_bool, AotKind::Bool));
                                 let (hot, _) =
                                     self.block_for(b, &mut blocks, &mut work, ip + 1, &hot_stack)?;
-                                let (cold, _) =
-                                    self.block_for(b, &mut blocks, &mut work, target, &stack)?;
                                 let hot_args = Self::stack_args(&hot_stack)?;
-                                let cold_args = Self::stack_args(&stack)?;
+                                if self.proofs.get(&idx).copied()
+                                    == Some(DynProof::ElemOrNil(ElemTag::Bool))
+                                {
+                                    // PROVEN Boolean-or-nil (a checked List(Boolean)
+                                    // element read): the only non-Bool is nil, whose
+                                    // sealed class has no `if:` — raise the exact
+                                    // interpreter MNU instead of jumping to the cold
+                                    // path. Nothing jumps there, so its capturing
+                                    // block re-materialization is never translated:
+                                    // this deletes the sieve refusal
+                                    // (GENERICS_ARCH.md §7, AOT_ARCH.md §9).
+                                    let (sel, argc) = Self::cold_send(insts, target);
+                                    let mnu_bl = b.create_block();
+                                    b.ins().brif(is_bool, hot, &hot_args, mnu_bl, &[]);
+                                    b.switch_to_block(mnu_bl);
+                                    let sel_ptr = b.ins().iconst(
+                                        types::I64,
+                                        Box::leak(Box::new(sel)) as *const Symbol as i64,
+                                    );
+                                    let argc_v = b.ins().iconst(types::I64, argc);
+                                    let nf = self.func_ref(b, self.helpers.nil_mnu);
+                                    let call = b
+                                        .ins()
+                                        .call(nf, &[fx.vm, fx.mc, kind, bits, sel_ptr, argc_v]);
+                                    let etag = b.inst_results(call)[0];
+                                    let zero = self.zero_of(b, fx.ret);
+                                    b.ins().jump(fx.exit, &[etag.into(), zero.into()]);
+                                    break 'block;
+                                }
+                                // Unproven: Bool → hot; anything else → the cold
+                                // path's real send.
+                                let nstack = self.norm_stack(b, &fx, &stack)?;
+                                let (cold, _) =
+                                    self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                                let cold_args = Self::stack_args(&nstack)?;
                                 b.ins().brif(is_bool, hot, &hot_args, cold, &cold_args);
                                 break 'block;
                             }
@@ -1167,7 +1256,13 @@ impl<'a> Translator<'a> {
         }
         match vars.get(&sym) {
             Some(&VarSlot::Scalar(var, k)) => Ok(AV::C(b.use_var(var), k)),
-            Some(&VarSlot::Obj(slot)) => Ok(AV::Dyn(self.abs_slot(b, fx, slot))),
+            Some(&VarSlot::Obj(slot, proof)) => {
+                let idx = self.abs_slot(b, fx, slot);
+                if let Some(pr) = proof {
+                    self.proofs.insert(idx, pr);
+                }
+                Ok(AV::Dyn(idx))
+            }
             None => Err(format!(
                 "read of unknown/uninitialized local '{}' at ip {ip}",
                 sym.as_str()
@@ -1215,7 +1310,7 @@ impl<'a> Translator<'a> {
                     b.def_var(var, cv);
                     Ok(())
                 }
-                Some(VarSlot::Obj(_)) => Err(format!("local '{}' changes kind", sym.as_str())),
+                Some(VarSlot::Obj(..)) => Err(format!("local '{}' changes kind", sym.as_str())),
                 None => {
                     let var = b.declare_var(kind_type(k));
                     b.def_var(var, cv);
@@ -1234,14 +1329,22 @@ impl<'a> Translator<'a> {
                 return Ok(());
             }
             AV::Dyn(_) | AV::Nil | AV::SelfRef => {
+                let vproof = match &v {
+                    AV::Dyn(idx) => self.proofs.get(idx).copied(),
+                    _ => None,
+                };
                 let slot = match vars.get(&sym) {
-                    Some(&VarSlot::Obj(slot)) => slot,
+                    Some(&VarSlot::Obj(slot, _)) => {
+                        // Reassignment: the slot's proof becomes the new value's.
+                        vars.insert(sym, VarSlot::Obj(slot, vproof));
+                        slot
+                    }
                     Some(VarSlot::Scalar(..)) => {
                         return Err(format!("local '{}' changes kind", sym.as_str()));
                     }
                     None => {
                         let slot = self.alloc_scratch()?;
-                        vars.insert(sym, VarSlot::Obj(slot));
+                        vars.insert(sym, VarSlot::Obj(slot, vproof));
                         slot
                     }
                 };
@@ -1254,6 +1357,25 @@ impl<'a> Translator<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// The selector + block-arg count of the cold path's re-materialized send
+    /// (the real `if:`/`if:else:` an inlined conditional falls back to) — what
+    /// the proven-nil MNU stub must name to match the interpreter exactly.
+    fn cold_send(insts: &[Instruction], target: usize) -> (Symbol, i64) {
+        for inst in insts.iter().skip(target).take(8) {
+            match inst {
+                Instruction::Send(sel, n)
+                | Instruction::SendLocal(_, sel, n)
+                | Instruction::SendConst(_, sel, n)
+                | Instruction::SendLocalLocal(_, _, sel, n)
+                | Instruction::SendLocalConst(_, _, sel, n) => {
+                    return (*sel, *n as i64);
+                }
+                _ => {}
+            }
+        }
+        (Symbol::intern("if:"), 1)
     }
 
     /// Fill the lane buffers with encoded AVs.
@@ -1435,6 +1557,36 @@ impl<'a> Translator<'a> {
             Some(_) => Err("non-scalar operand where a scalar was proven".to_string()),
             None => Err("stack underflow".to_string()),
         }
+    }
+
+    /// Box `Nil`/`SelfRef` stack entries into slots so they can cross a block
+    /// boundary as jump arguments (a statement-position inlined `if:` joins an
+    /// arm value with the nil of the not-taken path). Scalars and slot values
+    /// pass through untouched.
+    fn norm_stack(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        stack: &[AV],
+    ) -> Result<Vec<AV>, String> {
+        let mut out = Vec::with_capacity(stack.len());
+        for v in stack {
+            match v {
+                AV::C(..) | AV::Dyn(_) => out.push(*v),
+                AV::SelfRef => out.push(AV::Dyn(self.abs_slot(b, fx, 0))),
+                AV::Nil => {
+                    let slot = self.alloc_scratch()?;
+                    let dst = self.abs_slot(b, fx, slot);
+                    let (k, bits) = self.encode(b, fx, AV::Nil);
+                    let f = self.func_ref(b, self.helpers.slot_set);
+                    let call = b.ins().call(f, &[fx.vm, fx.mc, dst, k, bits]);
+                    let tag = b.inst_results(call)[0];
+                    self.tag_check(b, fx, tag);
+                    out.push(AV::Dyn(dst));
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn stack_args(stack: &[AV]) -> Result<Vec<BlockArg>, String> {

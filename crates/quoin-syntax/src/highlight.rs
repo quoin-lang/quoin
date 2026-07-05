@@ -9,7 +9,8 @@
 //! and reads [`colors_for`] to generate a matching theme.
 
 use crate::ast::{
-    BlockNode, IdentifierNode, IdentifierType, MethodCallNode, Node, NodeValue, UseNode,
+    BlockNode, IdentifierNode, IdentifierType, MethodCallNode, Node, NodeValue, TypeRefNode,
+    UseNode,
 };
 use crate::source_info::SourceInfo;
 
@@ -213,7 +214,7 @@ impl<'a> HighlightParser<'a> {
                     s.extend(self.highlight_lvalue(lv, depth));
                 }
                 if let Some(hint) = &d.type_hint {
-                    s.extend(self.highlight_identifier(hint, depth));
+                    s.extend(self.highlight_type_ref(hint, depth));
                 }
                 s.extend(self.highlight_expression(&d.rvalue, depth));
                 s
@@ -564,13 +565,13 @@ impl<'a> HighlightParser<'a> {
         for arg in &block.arguments {
             spans.extend(self.highlight_identifier(&arg.identifier, depth));
             if let Some(type_hint) = &arg.type_hint {
-                spans.extend(self.highlight_identifier(type_hint, depth));
+                spans.extend(self.highlight_type_ref(type_hint, depth));
             }
         }
 
         // The `^Type` return-type annotation in the header, coloured like a param type.
         if let Some(rt) = &block.return_type {
-            spans.extend(self.highlight_identifier(rt, depth));
+            spans.extend(self.highlight_type_ref(rt, depth));
         }
 
         if let Some(decl_block) = &block.decl_block {
@@ -596,6 +597,16 @@ impl<'a> HighlightParser<'a> {
         self.depth_stack.pop();
 
         fill_in_gaps(self.source, start, end, spans, depth)
+    }
+
+    /// Highlight a type annotation: the base identifier plus any generic
+    /// arguments (`List(Integer)`), all as type-position identifiers.
+    fn highlight_type_ref(&mut self, tr: &TypeRefNode, depth: usize) -> Vec<HighlightSpan> {
+        let mut spans = self.highlight_identifier(&tr.ident, depth);
+        for a in &tr.args {
+            spans.extend(self.highlight_type_ref(a, depth));
+        }
+        spans
     }
 
     fn highlight_identifier_node(

@@ -49,6 +49,13 @@ pub struct ClassSig {
     /// today — see Fork-1b) doesn't drop them. Drives the return-covariance check and Object-rooted
     /// send typing (Phase 3c·4).
     pub method_returns: HashMap<Arc<str>, Type>,
+    /// Declared class/mixin-header type parameters (`Iterate(T U)`), in order.
+    /// The first parameter is the one a tagged-collection receiver binds
+    /// (GENERICS_ARCH.md §4.4). AST-recorded; the runtime Class carries none,
+    /// so `insert` merges these across a later `from_vm` overwrite. The
+    /// builtin collections are seeded (`List(T)`/`Set(T)`/`Map(V)`) — they ARE
+    /// the runtime-backed generic classes.
+    pub type_params: Vec<Arc<str>>,
 }
 
 impl ClassSig {
@@ -64,6 +71,14 @@ impl ClassSig {
             .collect();
         let mut method_params = HashMap::new();
         let mut method_returns = HashMap::new();
+        // The generic builtin collections' type parameters (GENERICS_ARCH.md
+        // §3.3): List(T)/Set(T) elements, Map(V) values (keys pinned String).
+        // Their native `.returns("T?")`-style declarations parse against these.
+        let type_params: Vec<Arc<str>> = match info.name.as_str() {
+            "List" | "Set" => vec![Arc::from("T")],
+            "Map" => vec![Arc::from("V")],
+            _ => Vec::new(),
+        };
         for m in info.instance_methods.iter().chain(&info.class_methods) {
             // A single variant fixes the arg types (all typed) and/or the return unambiguously.
             if let [variant] = m.variants.as_slice() {
@@ -71,7 +86,7 @@ impl ClassSig {
                     let types = variant
                         .param_types
                         .iter()
-                        .map(|p| Type::from_annotation_name(p.as_deref().unwrap()))
+                        .map(|p| Type::parse_annotation_str(p.as_deref().unwrap(), &type_params))
                         .collect();
                     method_params.insert(Arc::from(m.selector.as_str()), types);
                 }
@@ -80,7 +95,7 @@ impl ClassSig {
                 if let Some(ret) = &variant.ret_type {
                     method_returns.insert(
                         Arc::from(m.selector.as_str()),
-                        Type::from_annotation_name(ret),
+                        Type::parse_annotation_str(ret, &type_params),
                     );
                 }
             }
@@ -94,6 +109,7 @@ impl ClassSig {
             from_vm: true,
             method_params,
             method_returns,
+            type_params,
         }
     }
 }
@@ -142,6 +158,16 @@ impl ClassTable {
                     .entry(sel.clone())
                     .or_insert_with(|| ty.clone());
             }
+            // Type params and AST-recorded generic method params survive a
+            // from_vm overwrite the same way returns do.
+            if sig.type_params.is_empty() && !existing.type_params.is_empty() {
+                sig.type_params = existing.type_params.clone();
+            }
+            for (sel, ps) in &existing.method_params {
+                sig.method_params
+                    .entry(sel.clone())
+                    .or_insert_with(|| ps.clone());
+            }
         }
         map.insert(Arc::from(name), sig);
     }
@@ -164,6 +190,7 @@ impl ClassTable {
             from_vm: false,
             method_params: HashMap::new(),
             method_returns: HashMap::new(),
+            type_params: Vec::new(),
         });
         entry.method_returns.extend(returns);
     }
@@ -260,6 +287,35 @@ impl ClassTable {
         let mut visited = HashSet::new();
         self.declared_return_rec(class, selector, &mut visited)
             .map(|(t, _)| t)
+    }
+
+    /// Like `declared_return`, but also names the DEFINING class — the scope
+    /// whose type parameters a variable in the return type belongs to.
+    pub fn declared_return_with_source(
+        &self,
+        class: &str,
+        selector: &str,
+    ) -> Option<(Type, Arc<str>)> {
+        let mut visited = HashSet::new();
+        self.declared_return_rec(class, selector, &mut visited)
+    }
+
+    /// The defining class's declared type parameters (empty if none/unknown).
+    pub fn type_params_of(&self, class: &str) -> Vec<Arc<str>> {
+        self.0
+            .borrow()
+            .get(class)
+            .map(|s| s.type_params.clone())
+            .unwrap_or_default()
+    }
+
+    /// `class`'s OWN declared param types for `selector` (no hierarchy walk —
+    /// pass the defining class from `declared_return_with_source`).
+    pub fn own_method_params_of(&self, class: &str, selector: &str) -> Option<Vec<Type>> {
+        self.0
+            .borrow()
+            .get(class)
+            .and_then(|s| s.method_params.get(selector).cloned())
     }
 
     fn declared_return_rec(

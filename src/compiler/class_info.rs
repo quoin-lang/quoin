@@ -6,7 +6,25 @@ use super::*;
 impl Compiler {
     /// Selector → declared-return-`Type` map for a class body, from its method
     /// definitions/extensions that carry a return type.
-    pub(super) fn collect_class_ctx(&mut self, name: &str, block: &BlockNode) -> ClassCtx {
+    pub(super) fn collect_class_ctx(
+        &mut self,
+        name: &str,
+        block: &BlockNode,
+        type_params: Vec<String>,
+    ) -> ClassCtx {
+        // Push a stub ctx so the header's type parameters are in scope while the
+        // declared returns below resolve (`^T` must be a variable, not an
+        // unknown class); the caller pushes the real ctx right after.
+        self.class_ctx_counter += 1;
+        self.class_ctx.push(ClassCtx {
+            id: self.class_ctx_counter,
+            name: name.to_string(),
+            multi: HashSet::new(),
+            type_params: type_params.clone(),
+            returns: HashMap::new(),
+            bodies: HashMap::new(),
+            sealed: false,
+        });
         let mut returns = HashMap::new();
         let mut bodies = HashMap::new();
         let mut multi = HashSet::new();
@@ -43,11 +61,12 @@ impl Compiler {
                 .or_default()
                 .extend(bodies.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
-        self.class_ctx_counter += 1;
+        let stub = self.class_ctx.pop().expect("stub ctx pushed above");
         ClassCtx {
-            id: self.class_ctx_counter,
+            id: stub.id,
             name: name.to_string(),
             multi,
+            type_params,
             returns,
             bodies,
             sealed,
@@ -81,7 +100,7 @@ impl Compiler {
             return None;
         }
         match &call.arguments.expressions[0].value {
-            NodeValue::Identifier(id) => Some(annotation_name(id)),
+            NodeValue::Identifier(id) => Some(ident_name(id)),
             _ => None,
         }
     }
@@ -119,14 +138,20 @@ impl Compiler {
             parent: class_def
                 .parent_identifier
                 .as_ref()
-                .map(|p| Arc::from(annotation_name(p).as_str())),
+                .map(|p| Arc::from(ident_name(p).as_str())),
             mixins,
             own_selectors,
             sealed,
             has_catch_all: false,
             from_vm: false,
-            method_params: HashMap::new(),
-            method_returns: self.declared_method_returns(&class_def.block),
+            method_params: self.declared_method_params(&class_def.block, &class_def.type_params),
+            method_returns: self
+                .declared_method_returns_with_vars(&class_def.block, &class_def.type_params),
+            type_params: class_def
+                .type_params
+                .iter()
+                .map(|p| Arc::from(p.as_str()))
+                .collect(),
         }
     }
 
@@ -135,6 +160,16 @@ impl Compiler {
     /// already warns on unknown annotations, so recording resolves names without re-warning. Feeds
     /// `ClassSig::method_returns` for both `Foo <- {}` defs and `Foo <-- {}` reopens (Phase 3c·4).
     pub(super) fn declared_method_returns(&self, block: &BlockNode) -> HashMap<Arc<str>, Type> {
+        self.declared_method_returns_with_vars(block, &[])
+    }
+
+    /// `declared_method_returns` with the class header's type parameters in
+    /// scope, so `^T` records as `Var("T")` rather than an unknown instance.
+    pub(super) fn declared_method_returns_with_vars(
+        &self,
+        block: &BlockNode,
+        vars: &[String],
+    ) -> HashMap<Arc<str>, Type> {
         let mut out = HashMap::new();
         for stmt in &block.statements {
             let (sig, blk) = match &stmt.value {
@@ -143,12 +178,55 @@ impl Compiler {
                 _ => continue,
             };
             if let (Ok(sel), Some(rt)) = (self.reconstruct_selector(sig), &blk.return_type) {
-                out.insert(
-                    Arc::from(sel.as_str()),
-                    Type::from_annotation_name(&annotation_name(rt)),
-                );
+                out.insert(Arc::from(sel.as_str()), type_from_ref_with_vars(rt, vars));
             }
         }
         out
+    }
+
+    /// Declared param types per selector, for call-site argument unification
+    /// and arg checks: recorded only when a selector has exactly ONE variant
+    /// with EVERY parameter annotated (the same rule the VM-side sig uses).
+    pub(super) fn declared_method_params(
+        &self,
+        block: &BlockNode,
+        vars: &[String],
+    ) -> HashMap<Arc<str>, Vec<Type>> {
+        let mut out: HashMap<Arc<str>, Option<Vec<Type>>> = HashMap::new();
+        for stmt in &block.statements {
+            let (sig, blk) = match &stmt.value {
+                NodeValue::MethodDefinition(m) => (&m.signature, &m.block),
+                NodeValue::MethodExtension(m) => (&m.signature, &m.block),
+                _ => continue,
+            };
+            let Ok(sel) = self.reconstruct_selector(sig) else {
+                continue;
+            };
+            let all_typed: Option<Vec<Type>> = blk
+                .arguments
+                .iter()
+                .map(|a| {
+                    a.type_hint
+                        .as_ref()
+                        .map(|tr| type_from_ref_with_vars(tr, vars))
+                })
+                .collect();
+            let entry = match (all_typed, blk.arguments.is_empty()) {
+                (Some(types), false) => Some(types),
+                _ => None,
+            };
+            // A repeated selector (multimethod) is ambiguous — drop it.
+            match out.entry(Arc::from(sel.as_str())) {
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    o.insert(None);
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(entry);
+                }
+            }
+        }
+        out.into_iter()
+            .filter_map(|(k, v)| v.map(|types| (k, types)))
+            .collect()
     }
 }

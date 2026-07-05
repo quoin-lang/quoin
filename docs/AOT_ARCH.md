@@ -16,7 +16,13 @@ callees share the caller's slot base). Corpus + both stress modes green in
 both modes; differential tests in `src/codegen/tests.rs`; parity suites in
 `qnlib/tests/40-aot-parity.qn`.*
 
-*The honest v0.2 finding: sieve as written does NOT compile — its
+*(G3 update: with checked generic collections shipped, sieve now COMPILES —
+`List(Boolean)` proves the element read Boolean-or-nil, the dynamic branch
+compiles to a nil→MNU stub, and the cold path below is never translated.
+0.97s → 0.12s, ~7.9×. The paragraph below is kept as the original
+motivation record.)*
+
+*The honest v0.2 finding: sieve as written did NOT compile — its
 `(list.at:p).if:{…}` lowers to `BranchIfNotBool` whose cold path
 re-materializes the arm as a **capturing closure** (`SendConst(Block…)`),
 and materializing an env-capturing block from a compiled frame is

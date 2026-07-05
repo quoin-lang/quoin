@@ -4,7 +4,7 @@ Run whole-process: `qn bench/qn/sieve.qn` from the repo root."
 Sieve <- {
     .meta <-- {
         primesUpTo: -> { |limit: Integer ^List|
-            var isPrime = #();
+            var isPrime: List(Boolean) = #();
             var i = 0;
             { i <= limit }.whileDo:{
                 isPrime.add:true;
@@ -26,7 +26,7 @@ Sieve <- {
                 p = p + 1
             };
 
-            var primes = #();
+            var primes: List(Integer) = #();
             i = 2;
             { i <= limit }.whileDo:{
                 (isPrime.at:i).if:{ primes.add:i };

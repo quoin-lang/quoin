@@ -112,6 +112,21 @@ impl Compiler {
         // checks/promotes the initializer against it; un-annotated decls compile plainly.
         let annotated = decl.type_hint.as_ref().map(|h| self.resolve_annotation(h));
         match &annotated {
+            // Annotation-driven tagged literals (docs/GENERICS_ARCH.md §4.2): a
+            // collection LITERAL initializing a generic-annotated decl constructs
+            // tagged — elements verified, tag stamped — instead of being checked
+            // against the annotation (which would always mismatch: the bare
+            // literal is honestly untagged until this lowering runs).
+            Some(expected) if Self::generic_literal_decl(expected, &decl.rvalue) => {
+                self.compile_node(&decl.rvalue, bytecode)?;
+                let inner = match expected {
+                    Type::ListOf(t) | Type::MapOf(t) | Type::SetOf(t) => t,
+                    _ => unreachable!("gated by generic_literal_decl"),
+                };
+                if let Some(tag) = self.enforceable_elem_tag_of_type(inner, decl) {
+                    bytecode.push(Instruction::TagCollection(tag));
+                }
+            }
             Some(expected) => self.compile_expecting(&decl.rvalue, expected, bytecode)?,
             None => self.compile_node(&decl.rvalue, bytecode)?,
         }
@@ -143,17 +158,27 @@ impl Compiler {
                     // compile until it's classified — so this can't be silently overlooked.
                     let ty = self.static_type(&decl.rvalue);
                     let has_devirt_path = match &ty {
-                        Type::Int | Type::Double | Type::List | Type::Map => true,
+                        // Checked collections are their bare type at runtime, so the
+                        // same List/Map devirt ops apply.
+                        Type::Int
+                        | Type::Double
+                        | Type::List
+                        | Type::Map
+                        | Type::ListOf(_)
+                        | Type::MapOf(_) => true,
                         // `Bool` is excluded even though `if:else:` inlines it — that inline has no
                         // runtime fallback, so a stale `Bool` hint would be unsound. `Set` has no
                         // devirt op (its `contains?:`/`add:` dispatch `==:` per element).
+                        // Type variables are gradual until G2 binding.
                         Type::Bool
                         | Type::String
                         | Type::Nil
                         | Type::Set
+                        | Type::SetOf(_)
                         | Type::Block
                         | Type::Instance(_)
                         | Type::Nullable(_)
+                        | Type::Var(_)
                         | Type::Any
                         | Type::Never => false,
                     };

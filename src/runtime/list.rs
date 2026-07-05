@@ -1,8 +1,11 @@
 use crate::arg;
 use crate::devirt_ops;
 use crate::error::QuoinError;
+use crate::runtime::elem_tag::{ElemTag, check_insert, elem_type_error};
 use crate::runtime::pretty::{PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
+use crate::vm::VmState;
+use gc_arena::Mutation as GcMutation;
 
 use gc_arena::Mutation;
 use gc_arena::collect::{DynCollect, Trace};
@@ -12,12 +15,18 @@ use std::mem::transmute;
 #[derive(Debug)]
 pub struct NativeListState {
     pub vec: Vec<Value<'static>>,
+    /// Checked element type (docs/GENERICS_ARCH.md). `None` — every list the
+    /// pre-existing world builds — means no checks anywhere.
+    pub elem: Option<ElemTag>,
 }
 
 impl NativeListState {
     pub fn new(vec: Vec<Value<'_>>) -> Self {
         let vec_static: Vec<Value<'static>> = unsafe { transmute(vec) };
-        Self { vec: vec_static }
+        Self {
+            vec: vec_static,
+            elem: None,
+        }
     }
 
     pub fn get_vec<'gc>(&self) -> &[Value<'gc>] {
@@ -54,6 +63,21 @@ impl AnyCollect for NativeListState {
             val_gc.dyn_trace(cc);
         }
     }
+}
+
+/// A fresh List value carrying an element tag (`List.of:`, `ensure:`,
+/// tag-propagating copies like `sliceFrom:`).
+pub fn new_list_with_tag<'gc>(
+    vm: &VmState<'gc>,
+    mc: &GcMutation<'gc>,
+    vec: Vec<Value<'gc>>,
+    tag: Option<ElemTag>,
+) -> Value<'gc> {
+    let v = vm.new_list(mc, vec);
+    if tag.is_some() {
+        let _ = v.with_native_state_mut::<NativeListState, _, _>(mc, |l| l.elem = tag);
+    }
+    v
 }
 
 /// Fetch `list[idx]` during an in-place sort as a catchable failure — never a Rust
@@ -99,7 +123,61 @@ pub fn build_list_class() -> NativeClassBuilder {
             Ok(vm.new_int(mc, len as i64))
         })
         .returns("Integer")
-        .instance_method("add:", |_vm, mc, receiver, args| {
+        // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6) ---
+        // `List.of:Integer` — a fresh empty list tagged with the element class.
+        .class_method("of:", |vm, mc, _receiver, args| {
+            let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
+                expected: "Class".to_string(),
+                got: args[0].type_name().to_string(),
+                msg: "List.of: expects an element class (e.g. `List.of:Integer`)".to_string(),
+            })?;
+            Ok(new_list_with_tag(vm, mc, Vec::new(), Some(tag)))
+        })
+        // `ensure:` — verify every element, return a NEW tagged list (a copy:
+        // retagging an aliased list in place is spooky action; GENERICS_ARCH §4.2).
+        .instance_method("ensure:", |vm, mc, receiver, args| {
+            let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
+                expected: "Class".to_string(),
+                got: args[0].type_name().to_string(),
+                msg: "ensure: expects an element class (e.g. `xs.ensure:Integer`)".to_string(),
+            })?;
+            let vec: Vec<Value> = receiver
+                .with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
+                .map_err(QuoinError::Other)?;
+            for (i, v) in vec.iter().enumerate() {
+                check_insert(Some(tag), "List", v, Some(i as i64), |v, n| {
+                    vm.value_matches_type(*v, n)
+                })?;
+            }
+            Ok(new_list_with_tag(vm, mc, vec, Some(tag)))
+        })
+        // `emptyLike` — the species protocol (GENERICS_ARCH.md §4.5): a fresh
+        // empty collection LIKE the receiver, element tag included. Iterate's
+        // default is `self.class.default`; the natives override to carry tags.
+        .instance_method("emptyLike", |vm, mc, receiver, _args| {
+            let tag = receiver
+                .with_native_state::<NativeListState, _, _>(|l| l.elem)
+                .map_err(QuoinError::Other)?;
+            Ok(new_list_with_tag(vm, mc, Vec::new(), tag))
+        })
+        .returns("List(T)") // emptyLike: same shape, same tag, empty
+        // The element tag as a Symbol (`#Integer`), or nil when untagged.
+        .instance_method("elementType", |vm, mc, receiver, _args| {
+            let tag = receiver
+                .with_native_state::<NativeListState, _, _>(|l| l.elem)
+                .map_err(QuoinError::Other)?;
+            Ok(match tag {
+                Some(t) => vm.new_symbol(mc, t.name().to_string()),
+                None => Value::Nil,
+            })
+        })
+        .instance_method("add:", |vm, mc, receiver, args| {
+            let tag = receiver
+                .with_native_state::<NativeListState, _, _>(|l| l.elem)
+                .map_err(QuoinError::Other)?;
+            check_insert(tag, "List", &args[0], None, |v, n| {
+                vm.value_matches_type(*v, n)
+            })?;
             receiver
                 .with_native_state_mut::<NativeListState, _, _>(mc, |l| {
                     let vec = l.get_vec_mut();
@@ -108,7 +186,13 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(e))?;
             Ok(receiver)
         })
-        .instance_method("push:", |_vm, mc, receiver, args| {
+        .instance_method("push:", |vm, mc, receiver, args| {
+            let tag = receiver
+                .with_native_state::<NativeListState, _, _>(|l| l.elem)
+                .map_err(QuoinError::Other)?;
+            check_insert(tag, "List", &args[0], None, |v, n| {
+                vm.value_matches_type(*v, n)
+            })?;
             receiver
                 .with_native_state_mut::<NativeListState, _, _>(mc, |l| {
                     let vec = l.get_vec_mut();
@@ -128,10 +212,20 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(got.unwrap_or_else(|| vm.new_nil(mc)))
         })
+        // Element-typed read: on a `List(Integer)` receiver the checker binds
+        // T and sees `Integer?` (out-of-bounds is nil). `T` is the seeded
+        // type parameter of the builtin List (class_table.rs).
+        .returns("T?")
         // Only the index is typed (`&["Integer"]`); the value (arg 2) is any type.
-        .typed_instance_method("at:put:", &["Integer"], |_vm, mc, receiver, args| {
+        .typed_instance_method("at:put:", &["Integer"], |vm, mc, receiver, args| {
             let idx = arg!(args, Int, 0);
             let val = args[1];
+            let tag = receiver
+                .with_native_state::<NativeListState, _, _>(|l| l.elem)
+                .map_err(QuoinError::Other)?;
+            check_insert(tag, "List", &val, Some(idx), |v, n| {
+                vm.value_matches_type(*v, n)
+            })?;
             receiver
                 .with_native_state_mut(mc, |l: &mut NativeListState| {
                     devirt_ops::list_set(l.get_vec_mut(), idx, val)
@@ -150,10 +244,12 @@ pub fn build_list_class() -> NativeClassBuilder {
                     } else {
                         Vec::new()
                     };
-                    Ok(vm.new_list(mc, sliced))
+                    // A slice's elements are already checked — carry the tag.
+                    Ok(new_list_with_tag(vm, mc, sliced, l.elem))
                 })
                 .map_err(|e| QuoinError::Other(e))?
         })
+        .returns("List(T)") // sliceFrom: carries the receiver's tag
         .instance_method("s", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())

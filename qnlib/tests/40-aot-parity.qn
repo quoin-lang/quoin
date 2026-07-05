@@ -108,4 +108,60 @@ AotLists <- {
     .test:indexErrorFromCompiledListSet -> {
         .is:{ { AotLists.writeOob:(AotLists.buildTo:3) }.catch:{ |e| 'caught' } } equalTo:'caught'
     }
+};
+
+"* Checked-generics enforcement holds INSIDE compiled code: the AOT ListPush/
+"* ListSet helpers gate on the tag exactly like the interpreter arms, and the
+"* error crosses the compiled frame as a catchable TypeError.
+
+AotGenerics <- {
+    .meta <-- {
+        fillInto:count: -> { |l: List n: Integer ^Integer|
+            var i = 0;
+            { i < n }.whileDo:{ l.add:i; i = i + 1 };
+            i
+        }
+    };
+    .sealed!
+};
+
+(TestSuite.new:{ var name = 'AotParityGenerics' }).add:{
+    .test:
+    compiledPushRespectsTags -> {
+        "an Integer-tagged destination accepts the compiled fill"
+        .is:{ AotGenerics.fillInto:(List.of:Integer) count:4 } equalTo:4;
+        "a String-tagged destination rejects it, catchably, in BOTH modes"
+        .is:{ { AotGenerics.fillInto:(List.of:String) count:4 }.catch:{ |e| 'caught' } }
+            equalTo:'caught';
+    };
+};
+
+"* G3: the proven Boolean?-if lowering. A checked List(Boolean) element read
+"* feeding if: compiles to a direct branch with a nil->MNU stub (no capturing
+"* cold path). The nil case must raise the EXACT interpreter MNU, catchable,
+"* identical in both modes.
+
+AotNilIf <- {
+    .meta <-- {
+        flagAt: -> { |n: Integer ^Integer|
+            var flags: List(Boolean) = #();
+            flags.add:true;
+            flags.add:false;
+            (flags.at:n).if:{ ^^1 };
+            0
+        }
+    };
+    .sealed!
+};
+
+(TestSuite.new:{ var name = 'AotParityNilIf' }).add:{
+    .test:provenBoolIfBranches -> {
+        .is:{ AotNilIf.flagAt:0 } equalTo:1;
+        .is:{ AotNilIf.flagAt:1 } equalTo:0
+    };
+
+    .test:outOfBoundsNilRaisesTheExactMnu -> {
+        var m = { AotNilIf.flagAt:99 }.catch:{ |e| e.message };
+        .is:{ m } equalTo:'no method \'if:\' for Nil'
+    }
 }

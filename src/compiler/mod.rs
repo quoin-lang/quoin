@@ -5,8 +5,9 @@ use crate::instruction::{
 use crate::parser::ast::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, ClassDefinitionNode,
     DeclKind, DeclarationNode, IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode,
-    Node, NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType,
+    Node, NodeValue, ProgramNode, TypeRefNode, UnaryOperatorNode, UnaryOperatorType,
 };
+use crate::runtime::elem_tag::ElemTag;
 use crate::symbol::Symbol;
 use crate::types::{SeenTypes, Type};
 use crate::value::{NamespacedName, SourceInfo};
@@ -24,8 +25,57 @@ mod inlining;
 /// root name (`Integer`, `Foo?`), bracket-qualified when namespaced (`[Web]Halt`).
 /// Must agree with `NamespacedName`'s `Display`, which keys `globals`, runtime dispatch
 /// hints, and `populate_from_vm`'s class-table entries.
-pub(crate) fn annotation_name(ident: &IdentifierNode) -> String {
+pub(crate) fn annotation_name(tr: &TypeRefNode) -> String {
+    let base = NamespacedName::from_ast(&tr.ident).to_string();
+    if tr.args.is_empty() {
+        base
+    } else {
+        let args: Vec<String> = tr.args.iter().map(|a| annotation_name(a)).collect();
+        format!("{}({})", base, args.join(" "))
+    }
+}
+
+/// A plain identifier's rendered name (parent classes, mixin targets — the
+/// non-type-annotation positions).
+pub(crate) fn ident_name(ident: &IdentifierNode) -> String {
     NamespacedName::from_ast(ident).to_string()
+}
+
+/// Pure structural `Type` of an annotation — no diagnostics, no type-variable
+/// scope (the resolver's `resolve_annotation` layers those on top). Unknown
+/// bases become `Instance`; malformed generic arity degrades to the bare base.
+pub(crate) fn type_from_ref(tr: &TypeRefNode) -> Type {
+    type_from_ref_with_vars(tr, &[])
+}
+
+/// `type_from_ref` with the enclosing class's declared type parameters in
+/// scope: a bare matching name resolves to `Var` (signature recording for the
+/// class table, where the compiler's ctx stack isn't available).
+pub(crate) fn type_from_ref_with_vars(tr: &TypeRefNode, vars: &[String]) -> Type {
+    let base = NamespacedName::from_ast(&tr.ident).to_string();
+    if tr.args.is_empty() {
+        if tr.ident.namespace.is_none() {
+            let (core, nullable) = match base.strip_suffix('?') {
+                Some(b) => (b, true),
+                None => (base.as_str(), false),
+            };
+            if vars.iter().any(|v| v == core) {
+                let v = Type::Var(Arc::from(core));
+                return if nullable {
+                    Type::Nullable(Box::new(v))
+                } else {
+                    v
+                };
+            }
+        }
+        return Type::from_annotation_name(&base);
+    }
+    match (base.as_str(), tr.args.len()) {
+        ("List", 1) => Type::ListOf(Box::new(type_from_ref_with_vars(&tr.args[0], vars))),
+        ("Set", 1) => Type::SetOf(Box::new(type_from_ref_with_vars(&tr.args[0], vars))),
+        ("Map", 2) => Type::MapOf(Box::new(type_from_ref_with_vars(&tr.args[1], vars))),
+        _ => Type::from_annotation_name(&base),
+    }
 }
 
 pub struct CodeBlock {
@@ -338,6 +388,9 @@ struct ClassCtx {
     /// variants) — excluded from AOT candidacy, since a direct call would bypass
     /// the runtime variant scoring.
     multi: HashSet<String>,
+    /// Class/mixin-header type parameters (`Iterate(T U)`) — the type variables
+    /// this body's method signatures may use (checker-only).
+    type_params: Vec<String>,
     /// Method selector → declared return `Type` (methods that annotate a return).
     returns: HashMap<String, Type>,
     /// The class is compile-sealed: `sealed!` appears as a direct (unconditional) body
@@ -378,7 +431,7 @@ struct TypeProvenance {
 
 /// Unary methods safe to send to `nil` — they don't dereference the receiver, so a possibly-nil
 /// receiver isn't flagged for these (Phase 3c nil-misuse check).
-const NIL_SAFE_SELECTORS: &[&str] = &["defined?", "s", "pp", "class", "hash"];
+const NIL_SAFE_SELECTORS: &[&str] = &["defined?", "s", "pp", "class", "hash", "print"];
 
 /// A flow-narrowable path — what a guard (Phase 3c) can refine the type of. Only locals and
 /// instance fields (`@name`) narrow; global, namespaced, and reserved reads do not.
@@ -867,7 +920,7 @@ impl Compiler {
     fn prescan_class_defs(&self, program: &ProgramNode) {
         for expr in &program.expressions {
             if let NodeValue::ClassDefinition(cd) = &expr.value {
-                let name = annotation_name(&cd.identifier);
+                let name = ident_name(&cd.identifier);
                 self.seen_types.insert(&name);
                 self.class_table.insert(&name, self.class_sig_from_def(cd));
             }
@@ -891,8 +944,67 @@ impl Compiler {
         });
     }
 
-    fn resolve_annotation(&mut self, ident: &IdentifierNode) -> Type {
-        let ty = Type::from_annotation_name(&annotation_name(ident));
+    fn resolve_annotation(&mut self, tr: &TypeRefNode) -> Type {
+        // A bare name that matches a declared class/mixin-header type parameter
+        // is a type variable (`T?` rides the nullable suffix inside the ident,
+        // like every annotation).
+        if tr.args.is_empty() && tr.ident.namespace.is_none() {
+            let (base, nullable) = match tr.ident.name.strip_suffix('?') {
+                Some(b) => (b, true),
+                None => (tr.ident.name.as_str(), false),
+            };
+            if self.declared_type_var(base) {
+                let v = Type::Var(Arc::from(base));
+                return if nullable {
+                    Type::Nullable(Box::new(v))
+                } else {
+                    v
+                };
+            }
+        }
+        if !tr.args.is_empty() {
+            let base = ident_name(&tr.ident);
+            match (base.as_str(), tr.args.len()) {
+                ("List", 1) | ("Set", 1) => {}
+                ("Map", 2) => {
+                    let key = annotation_name(&tr.args[0]);
+                    if key != "String" {
+                        self.warn(
+                            format!(
+                                "Map keys are String (got `Map({} …)`); only the value \
+                                 type is generic for now",
+                                key
+                            ),
+                            tr.ident.source_info.as_ref(),
+                        );
+                    }
+                }
+                ("List", n) | ("Set", n) => {
+                    self.warn(
+                        format!("`{base}` takes 1 type argument, got {n}"),
+                        tr.ident.source_info.as_ref(),
+                    );
+                }
+                ("Map", n) => {
+                    self.warn(
+                        format!("`Map` takes 2 type arguments (`Map(String V)`), got {n}"),
+                        tr.ident.source_info.as_ref(),
+                    );
+                }
+                _ => {
+                    self.warn(
+                        format!("type `{base}` does not take generic arguments"),
+                        tr.ident.source_info.as_ref(),
+                    );
+                }
+            }
+            for a in &tr.args {
+                // Resolve arguments for their own diagnostics (unknown names etc.).
+                let _ = self.resolve_annotation(a);
+            }
+            return type_from_ref_with_vars(tr, &self.ctx_type_params());
+        }
+        let ty = Type::from_annotation_name(&ident_name(&tr.ident));
         // `T?` is unknown iff its base `T` is unknown.
         let base = match &ty {
             Type::Nullable(inner) => inner.as_ref(),
@@ -902,11 +1014,136 @@ impl Compiler {
             if !self.seen_types.contains(class) {
                 self.warn(
                     format!("unknown type `{}`", class),
-                    ident.source_info.as_ref(),
+                    tr.ident.source_info.as_ref(),
                 );
             }
         }
         ty
+    }
+
+    /// Is `name` a type parameter declared by any enclosing class/mixin header?
+    fn declared_type_var(&self, name: &str) -> bool {
+        self.class_ctx
+            .iter()
+            .any(|c| c.type_params.iter().any(|p| p == name))
+    }
+
+    /// Every type parameter in scope (all enclosing class/mixin headers).
+    fn ctx_type_params(&self) -> Vec<String> {
+        self.class_ctx
+            .iter()
+            .flat_map(|c| c.type_params.iter().cloned())
+            .collect()
+    }
+
+    /// The element-tag *requirement* a generic param annotation places on
+    /// dispatch: `|l: List(Integer)|` matches only Integer-tagged lists
+    /// (GENERICS_ARCH.md §5). `None` = no requirement (bare or unenforceable).
+    fn param_elem_tag(&mut self, tr: &TypeRefNode) -> Option<ElemTag> {
+        if tr.args.is_empty() {
+            return None;
+        }
+        let inner = match (ident_name(&tr.ident).as_str(), tr.args.len()) {
+            ("List", 1) | ("Set", 1) => &tr.args[0],
+            ("Map", 2) => &tr.args[1],
+            _ => return None,
+        };
+        self.enforceable_elem_tag_of_ref(inner)
+    }
+
+    /// Is this decl a collection literal whose declared type is generic —
+    /// the tagged-literal construction pattern?
+    pub(super) fn generic_literal_decl(expected: &Type, rvalue: &Node) -> bool {
+        matches!(
+            (expected, &rvalue.value),
+            (Type::ListOf(_), NodeValue::List(_))
+                | (Type::MapOf(_), NodeValue::Map(_))
+                | (Type::SetOf(_), NodeValue::Set(_))
+        )
+    }
+
+    /// `enforceable_elem_tag_of_ref`, but from a resolved `Type` (the decl
+    /// path, where the annotation is already resolved). Same honesty rules.
+    pub(super) fn enforceable_elem_tag_of_type(
+        &mut self,
+        inner: &Type,
+        decl: &DeclarationNode,
+    ) -> Option<ElemTag> {
+        match ElemTag::from_type(inner) {
+            Some(tag) => Some(tag),
+            None => {
+                let base = match inner {
+                    Type::ListOf(_) => Some(ElemTag::List),
+                    Type::MapOf(_) => Some(ElemTag::Map),
+                    Type::SetOf(_) => Some(ElemTag::Set),
+                    _ => None, // Var/Any/…: checker-only, no tag
+                };
+                if let Some(b) = base {
+                    self.warn(
+                        format!(
+                            "nested element types are checker-only; `{}` is enforced as \
+                             `{}` at runtime",
+                            inner.name(),
+                            b.name(),
+                        ),
+                        decl.rvalue.source_info.as_ref(),
+                    );
+                }
+                base
+            }
+        }
+    }
+
+    /// The runtime-enforceable tag for an element annotation, with the
+    /// guarantee-honesty degradations: a nested generic degrades to its base
+    /// (with a warning — `List(List(Integer))` is enforced as `List(List)`),
+    /// and a type variable or `Any` yields no tag at all (checker-only).
+    fn enforceable_elem_tag_of_ref(&mut self, tr: &TypeRefNode) -> Option<ElemTag> {
+        if tr.args.is_empty() && tr.ident.namespace.is_none() {
+            let base = tr.ident.name.strip_suffix('?').unwrap_or(&tr.ident.name);
+            if self.declared_type_var(base) {
+                return None;
+            }
+        }
+        let t = type_from_ref(tr);
+        match ElemTag::from_type(&t) {
+            Some(tag) => Some(tag),
+            None => {
+                let base = match t {
+                    Type::ListOf(_) => Some(ElemTag::List),
+                    Type::MapOf(_) => Some(ElemTag::Map),
+                    Type::SetOf(_) => Some(ElemTag::Set),
+                    _ => None,
+                };
+                if let Some(b) = base {
+                    self.warn(
+                        format!(
+                            "nested element types are checker-only; `{}` is enforced as \
+                             `{}` at runtime",
+                            annotation_name(tr),
+                            b.name(),
+                        ),
+                        tr.ident.source_info.as_ref(),
+                    );
+                }
+                base
+            }
+        }
+    }
+
+    /// The runtime dispatch signature for a param annotation: generic arguments
+    /// erase to the base class (the tag requirement rides separately in
+    /// `param_elem_tags`), and a declared
+    /// type variable erases to `Object` (variables never dispatch;
+    /// GENERICS_ARCH.md §4.4/§5).
+    fn dispatch_type_name(&self, tr: &TypeRefNode) -> String {
+        if tr.args.is_empty() && tr.ident.namespace.is_none() {
+            let base = tr.ident.name.strip_suffix('?').unwrap_or(&tr.ident.name);
+            if self.declared_type_var(base) {
+                return "Object".to_string();
+            }
+        }
+        ident_name(&tr.ident)
     }
 
     /// Compile `node` in a position that expects `expected`. A numeric *literal* promotes to
@@ -1206,6 +1443,52 @@ impl Compiler {
         }
     }
 
+    /// G2: warn when an insertion into a statically-checked collection would
+    /// raise the runtime tag TypeError — `xs.add:'s'` where `xs: List(Integer)`.
+    /// Mirrors the runtime check exactly: nil always passes (the element
+    /// position is honestly `T?`), and a variable-typed element claims nothing.
+    fn check_generic_insertion(&mut self, call: &MethodCallNode) {
+        let Some(subject) = call.subject.as_deref() else {
+            return;
+        };
+        let Some(selector) = Self::reconstruct_send_selector(call) else {
+            return;
+        };
+        let recv_t = self.static_type(subject);
+        let (elem, arg_idx) = match (&recv_t, selector.as_str()) {
+            (Type::ListOf(e), "add:" | "push:") => ((**e).clone(), 0),
+            (Type::ListOf(e), "at:put:") => ((**e).clone(), 1),
+            (Type::SetOf(e), "add:") => ((**e).clone(), 0),
+            (Type::MapOf(e), "at:put:") => ((**e).clone(), 1),
+            _ => return,
+        };
+        if elem.contains_var() {
+            return;
+        }
+        let Some(arg) = call.arguments.expressions.get(arg_idx) else {
+            return;
+        };
+        let actual = self.static_type(arg);
+        let allowed = Type::Nullable(Box::new(elem.clone()));
+        if actual.compatible_with(&allowed) {
+            return;
+        }
+        // Instance subtyping may rescue (a Circle into List(Shape)).
+        if let (Type::Instance(sub), Type::Instance(sup)) = (&actual, &elem) {
+            if self.class_table.is_subtype(sub, sup) != Some(false) {
+                return;
+            }
+        }
+        self.warn(
+            format!(
+                "`{}` rejects a `{}` element — this raises a TypeError at runtime",
+                recv_t.name(),
+                actual.name(),
+            ),
+            arg.source_info.as_ref(),
+        );
+    }
+
     /// Phase 3c: warn on a non-nil-safe send to a receiver whose current (narrowed) type is
     /// confidently `Nullable(T)` — `nil.<sel>` would fail at runtime. Gated to explicit `T?` /
     /// narrowed paths (silent on `Any`), so it speaks only on opt-in nullable annotations, and a
@@ -1353,8 +1636,11 @@ impl Compiler {
             // own/inherited declared return (known-typed receiver), else an Object-rooted return
             // (universal, any receiver). Each is a safe miss → `Any`, so they layer by confidence.
             NodeValue::MethodCall(call) => match self.self_send_return_type(call) {
-                Type::Any => match self.typed_receiver_return_type(call) {
-                    Type::Any => self.object_rooted_return_type(call),
+                Type::Any => match self.construction_return_type(call) {
+                    Type::Any => match self.typed_receiver_return_type(call) {
+                        Type::Any => self.object_rooted_return_type(call),
+                        t => t,
+                    },
                     t => t,
                 },
                 t => t,
@@ -1410,17 +1696,111 @@ impl Compiler {
             return Type::Any;
         };
         // Only a receiver with a known concrete class qualifies; a nullable receiver's send is the
-        // nil-misuse check's concern, not typed here.
-        let class_name = match self.static_type(subject) {
+        // nil-misuse check's concern, not typed here. A checked collection looks up under its BASE
+        // class and carries its element type into type-variable binding (GENERICS_ARCH.md §4.4).
+        let recv_t = self.static_type(subject);
+        let (class_name, recv_elem) = match &recv_t {
             Type::Any | Type::Never | Type::Nullable(_) => return Type::Any,
-            concrete => concrete.name(),
+            Type::ListOf(e) => ("List".to_string(), Some((**e).clone())),
+            Type::MapOf(e) => ("Map".to_string(), Some((**e).clone())),
+            Type::SetOf(e) => ("Set".to_string(), Some((**e).clone())),
+            concrete => (concrete.name(), None),
         };
         let Some(selector) = Self::reconstruct_send_selector(call) else {
             return Type::Any;
         };
-        self.class_table
-            .declared_return(&class_name, &selector)
-            .unwrap_or(Type::Any)
+        let Some((ret, defining)) = self
+            .class_table
+            .declared_return_with_source(&class_name, &selector)
+        else {
+            return Type::Any;
+        };
+        if !ret.contains_var() {
+            return ret;
+        }
+        // Bind the defining class's variables at this call site: the receiver's
+        // element type binds the FIRST header parameter; declared param types
+        // (if recorded) unify structurally against the arguments' static types.
+        let def_params = self.class_table.type_params_of(&defining);
+        let mut bindings: std::collections::HashMap<Arc<str>, Type> =
+            std::collections::HashMap::new();
+        // A Map's tag is its VALUE type, but its ITERATION element is a
+        // key/value pair — so a MapOf receiver binds only methods Map itself
+        // defines (`at:` → V?); an inherited/mixin method (Iterate's
+        // combinators) must not claim the value type for pair elements.
+        let elem_binds = !(matches!(recv_t, Type::MapOf(_)) && defining.as_ref() != "Map");
+        if let (true, Some(elem), Some(p0)) = (elem_binds, recv_elem, def_params.first()) {
+            bindings.insert(p0.clone(), elem);
+        }
+        if let Some(decl_params) = self.class_table.own_method_params_of(&defining, &selector) {
+            let args = &call.arguments.expressions;
+            for (decl, arg) in decl_params.iter().zip(args.iter()) {
+                Type::unify_into(decl, &self.static_type(arg), &mut bindings);
+            }
+        }
+        Self::normalize_any_elems(ret.substitute(&bindings))
+    }
+
+    /// `List(Any)` (an unbound variable after substitution) is just `List` —
+    /// don't let inference mint element claims out of nothing.
+    fn normalize_any_elems(t: Type) -> Type {
+        match t {
+            Type::ListOf(e) if *e == Type::Any => Type::List,
+            Type::MapOf(e) if *e == Type::Any => Type::Map,
+            Type::SetOf(e) if *e == Type::Any => Type::Set,
+            Type::Nullable(inner) => match Self::normalize_any_elems(*inner) {
+                Type::Any => Type::Any,
+                t => Type::Nullable(Box::new(t)),
+            },
+            other => other,
+        }
+    }
+
+    /// Construction inference for the checked-conversion surface: `List.of:X`,
+    /// `Map.of:X`, `Set.of:X`, and `recv.ensure:X` — the element class is a
+    /// statically-visible Identifier argument, so the result types as the
+    /// checked collection (GENERICS_ARCH.md §7.1's static sources).
+    fn construction_return_type(&self, call: &MethodCallNode) -> Type {
+        let Some(selector) = Self::reconstruct_send_selector(call) else {
+            return Type::Any;
+        };
+        if selector != "of:" && selector != "ensure:" {
+            return Type::Any;
+        }
+        let Some(subject) = &call.subject else {
+            return Type::Any;
+        };
+        let [arg] = call.arguments.expressions.as_slice() else {
+            return Type::Any;
+        };
+        let NodeValue::Identifier(elem_id) = &arg.value else {
+            return Type::Any;
+        };
+        let elem = Type::from_annotation_name(&ident_name(elem_id));
+        if matches!(elem, Type::Any | Type::Nil | Type::Never) {
+            return Type::Any;
+        }
+        let base = if selector == "of:" {
+            // `List.of:X` — the receiver is the collection class itself.
+            match &subject.value {
+                NodeValue::Identifier(id) => ident_name(id),
+                _ => return Type::Any,
+            }
+        } else {
+            // `xs.ensure:X` — the receiver is a collection value.
+            match self.static_type(subject) {
+                Type::List | Type::ListOf(_) => "List".to_string(),
+                Type::Map | Type::MapOf(_) => "Map".to_string(),
+                Type::Set | Type::SetOf(_) => "Set".to_string(),
+                _ => return Type::Any,
+            }
+        };
+        match base.as_str() {
+            "List" => Type::ListOf(Box::new(elem)),
+            "Map" => Type::MapOf(Box::new(elem)),
+            "Set" => Type::SetOf(Box::new(elem)),
+            _ => Type::Any,
+        }
     }
 
     /// The static return type of a no-arg send whose selector is declared on `Object`, the
@@ -1464,7 +1844,7 @@ impl Compiler {
             else {
                 continue;
             };
-            let over = Type::from_annotation_name(&annotation_name(rt));
+            let over = type_from_ref_with_vars(rt, &self.ctx_type_params());
             if self.override_return_violates(&over, &base) {
                 self.warn(
                     format!(
@@ -1474,7 +1854,7 @@ impl Compiler {
                         base.name(),
                         from,
                     ),
-                    rt.source_info.as_ref(),
+                    rt.ident.source_info.as_ref(),
                 );
             }
         }
@@ -1622,6 +2002,7 @@ impl Compiler {
             is_nested_block: false,
             param_syms: Vec::new(),
             param_types: Vec::new(),
+            param_elem_tags: Vec::new(),
             bytecode: SharedBytecode(Rc::new(bytecode)),
             source_info: program.source_info.clone(),
             decl_block: None,
@@ -1812,7 +2193,11 @@ impl Compiler {
                 if is_value_type {
                     self.value_type_def_depth += 1;
                 }
-                let ctx = self.collect_class_ctx(&class_name, &class_def.block);
+                let ctx = self.collect_class_ctx(
+                    &class_name,
+                    &class_def.block,
+                    class_def.type_params.clone(),
+                );
                 self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_def.block, bytecode);
                 self.class_ctx.pop();
@@ -1827,7 +2212,7 @@ impl Compiler {
                 // signature — how the core classes (`Object <-- {}`, `nil <-- {}`, …) carry their
                 // return contracts, since they're reopened rather than defined with `<-` (Phase 3c·4).
                 if let NodeValue::Identifier(target) = &class_ext.expression.value {
-                    let target_name = annotation_name(target);
+                    let target_name = ident_name(target);
                     self.class_table
                         .add_returns(&target_name, self.declared_method_returns(&class_ext.block));
                     self.check_return_covariance(&target_name, &class_ext.block);
@@ -1849,10 +2234,16 @@ impl Compiler {
                     self.value_type_def_depth += 1;
                 }
                 let ext_name = match &class_ext.expression.value {
-                    NodeValue::Identifier(id) => annotation_name(id),
+                    NodeValue::Identifier(id) => ident_name(id),
                     _ => String::new(),
                 };
-                let ctx = self.collect_class_ctx(&ext_name, &class_ext.block);
+                let ext_params: Vec<String> = self
+                    .class_table
+                    .type_params_of(&ext_name)
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect();
+                let ctx = self.collect_class_ctx(&ext_name, &class_ext.block, ext_params);
                 self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_ext.block, bytecode);
                 self.class_ctx.pop();
@@ -1935,6 +2326,7 @@ impl Compiler {
         self.check_mnu(call);
         // Phase 3c: a non-nil-safe send to a confidently-nullable, un-narrowed receiver.
         self.check_nil_misuse(call);
+        self.check_generic_insertion(call);
         let args = &call.arguments;
         // A self-send (no explicit receiver, or an explicit `self`) — eligible for
         // devirtualization when the enclosing class is sealed (see `emit_call`).
@@ -2220,6 +2612,7 @@ impl Compiler {
         let saved_inline = self.inline_carets.take();
         let mut param_names = Vec::new();
         let mut param_types = Vec::new();
+        let mut param_elem_tags: Vec<Option<ElemTag>> = Vec::new();
         let mut locals = HashSet::new();
 
         for arg in &block.arguments {
@@ -2230,10 +2623,22 @@ impl Compiler {
             let type_name = arg
                 .type_hint
                 .as_ref()
-                .map(|id| annotation_name(id))
+                .map(|tr| self.dispatch_type_name(tr))
                 .unwrap_or_else(|| "Object".to_string());
             param_types.push(type_name);
+            param_elem_tags.push(
+                arg.type_hint
+                    .as_ref()
+                    .and_then(|tr| self.param_elem_tag(tr)),
+            );
             locals.insert(name);
+        }
+
+        // All-None normalizes to empty: legacy blocks share one shape, dispatch
+        // scoring skips tag work entirely on `is_empty`, and variant identity
+        // compares equal across pre- and post-generics compiles.
+        if param_elem_tags.iter().all(Option::is_none) {
+            param_elem_tags.clear();
         }
 
         let mut decls_names = Vec::new();
@@ -2278,7 +2683,7 @@ impl Compiler {
         let expected_ret = block
             .return_type
             .as_ref()
-            .map(|rt| Type::from_annotation_name(&annotation_name(rt)));
+            .map(|rt| type_from_ref_with_vars(rt, &self.ctx_type_params()));
         self.return_type_stack.push(expected_ret.clone());
 
         let len = block.statements.len();
@@ -2347,6 +2752,7 @@ impl Compiler {
             is_nested_block: true,
             param_syms: crate::value::intern_param_syms(&param_names),
             param_types,
+            param_elem_tags,
             bytecode: SharedBytecode(Rc::new(fused_bytecode)),
             source_info: block.source_info.clone(),
             decl_block,

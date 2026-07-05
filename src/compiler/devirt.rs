@@ -16,12 +16,15 @@ impl Compiler {
         // List/Map/Set are sealed value types (prelude.qn), so their access methods can't be
         // redefined — devirt to a direct op when the receiver is statically that collection. Each
         // op falls back to the real send if the runtime receiver isn't the expected native state.
+        // A checked collection (`List(Integer)`) is its bare type at runtime; the
+        // ops' interpreter arms carry the tag gate, so tagged receivers keep the
+        // fast path (docs/GENERICS_ARCH.md §6).
         match (self.static_type(subject), selector, num_args) {
-            (Type::List, "at:", 1) => Some(Instruction::ListGet),
-            (Type::List, "at:put:", 2) => Some(Instruction::ListSet),
-            (Type::List, "add:", 1) => Some(Instruction::ListPush),
-            (Type::Map, "at:", 1) => Some(Instruction::MapGet),
-            (Type::Map, "at:put:", 2) => Some(Instruction::MapSet),
+            (Type::List | Type::ListOf(_), "at:", 1) => Some(Instruction::ListGet),
+            (Type::List | Type::ListOf(_), "at:put:", 2) => Some(Instruction::ListSet),
+            (Type::List | Type::ListOf(_), "add:", 1) => Some(Instruction::ListPush),
+            (Type::Map | Type::MapOf(_), "at:", 1) => Some(Instruction::MapGet),
+            (Type::Map | Type::MapOf(_), "at:put:", 2) => Some(Instruction::MapSet),
             // Set has no devirt op — its native `contains?:`/`add:` dispatch `==:` per element
             // (structural/custom equality), which a direct raw-equality op can't replicate.
             _ => None,
@@ -71,7 +74,7 @@ impl Compiler {
         // falls back to the real send for a non-Bool receiver.
         let guarded = match self.static_type(subject) {
             Type::Bool => false,
-            Type::Int | Type::List => return Ok(false),
+            Type::Int | Type::List | Type::ListOf(_) => return Ok(false),
             _ => true,
         };
 

@@ -78,6 +78,11 @@ pub struct StaticBlock {
     /// through its shared `template` reference.
     pub param_syms: Vec<Symbol>,
     pub param_types: Vec<String>,
+    /// Per-param element-tag requirement for tag-aware dispatch: a
+    /// `List(Integer)` param matches only Integer-tagged lists (the base class
+    /// lives in `param_types`; docs/GENERICS_ARCH.md §5). Empty = no
+    /// requirements (every pre-generics block).
+    pub param_elem_tags: Vec<Option<crate::runtime::elem_tag::ElemTag>>,
     pub bytecode: SharedBytecode,
     pub source_info: Option<SourceInfo>,
     pub decl_block: Option<Rc<StaticBlock>>,
@@ -302,6 +307,10 @@ pub enum Instruction {
     NewList(usize), // num_elements
     NewMap(usize),  // num_pairs (key/value count)
     NewSet(usize),  // num_elements
+    /// Verify every element of the fresh collection literal on top of the
+    /// stack against the tag, then stamp the tag (annotation-driven tagged
+    /// literals: `var x: List(Integer) = #(...)` — docs/GENERICS_ARCH.md §4.2).
+    TagCollection(crate::runtime::elem_tag::ElemTag),
     NewRegex,
     DefineClass {
         name: NamespacedName,

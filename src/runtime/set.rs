@@ -1,5 +1,6 @@
 use crate::error::QuoinError;
 use crate::ext_sdk::{Host, HostExt};
+use crate::runtime::elem_tag::{ElemTag, check_insert};
 use crate::runtime::pretty::{PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 
@@ -13,12 +14,17 @@ use std::mem::transmute;
 #[derive(Debug)]
 pub struct NativeSetState {
     pub vec: Vec<Value<'static>>,
+    /// Checked element type (docs/GENERICS_ARCH.md). `None` = untagged.
+    pub elem: Option<ElemTag>,
 }
 
 impl NativeSetState {
     pub fn new(vec: Vec<Value<'_>>) -> Self {
         let vec_static: Vec<Value<'static>> = unsafe { transmute(vec) };
-        Self { vec: vec_static }
+        Self {
+            vec: vec_static,
+            elem: None,
+        }
     }
 
     pub fn get_vec<'gc>(&self) -> &[Value<'gc>] {
@@ -67,8 +73,85 @@ pub fn build_set_class() -> NativeClassBuilder {
         })
         .returns("Integer")
         .sdk_instance_method("add:", |host, receiver, args| {
+            let tag = receiver
+                .with_native_state::<NativeSetState, _, _>(|s| s.elem)
+                .map_err(QuoinError::Other)?;
+            check_insert(tag, "Set", &args[0], None, |v, n| {
+                host.value_matches_type(*v, n)
+            })?;
             set_add(host, receiver, args[0])?;
             Ok(receiver)
+        })
+        // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6) ---
+        .sdk_class_method("of:", |host, _receiver, args| {
+            let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
+                expected: "Class".to_string(),
+                got: args[0].type_name().to_string(),
+                msg: "Set.of: expects an element class (e.g. `Set.of:String`)".to_string(),
+            })?;
+            let v = host.new_native_state(
+                host.get_or_create_builtin_class("Set"),
+                NativeSetState::new(Vec::new()),
+            );
+            host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
+            Ok(v)
+        })
+        .sdk_instance_method("ensure:", |host, receiver, args| {
+            let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
+                expected: "Class".to_string(),
+                got: args[0].type_name().to_string(),
+                msg: "ensure: expects an element class (e.g. `s.ensure:String`)".to_string(),
+            })?;
+            let vec: Vec<Value> = receiver
+                .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().to_vec())
+                .map_err(QuoinError::Other)?;
+            for (i, v) in vec.iter().enumerate() {
+                check_insert(Some(tag), "Set", v, Some(i as i64), |v, n| {
+                    host.value_matches_type(*v, n)
+                })?;
+            }
+            let v = host.new_native_state(
+                host.get_or_create_builtin_class("Set"),
+                NativeSetState::new(vec),
+            );
+            host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
+            Ok(v)
+        })
+        .sdk_instance_method("collector", |host, receiver, _args| {
+            let tag = receiver
+                .with_native_state::<NativeSetState, _, _>(|s| s.elem)
+                .map_err(QuoinError::Other)?;
+            let v = host.new_list(Vec::new());
+            if tag.is_some() {
+                host.with_native_state_mut(v, |l: &mut crate::runtime::list::NativeListState| {
+                    l.elem = tag;
+                });
+            }
+            Ok(v)
+        })
+        .returns("List(T)")
+        .sdk_instance_method("emptyLike", |host, receiver, _args| {
+            let tag = receiver
+                .with_native_state::<NativeSetState, _, _>(|s| s.elem)
+                .map_err(QuoinError::Other)?;
+            let v = host.new_native_state(
+                host.get_or_create_builtin_class("Set"),
+                NativeSetState::new(Vec::new()),
+            );
+            if tag.is_some() {
+                host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = tag);
+            }
+            Ok(v)
+        })
+        .returns("Set(T)") // emptyLike: same shape, same tag, empty
+        .sdk_instance_method("elementType", |host, receiver, _args| {
+            let tag = receiver
+                .with_native_state::<NativeSetState, _, _>(|s| s.elem)
+                .map_err(QuoinError::Other)?;
+            Ok(match tag {
+                Some(t) => host.new_symbol(t.name().to_string()),
+                None => host.new_nil(),
+            })
         })
         .sdk_instance_method("remove:", |host, receiver, args| {
             set_remove(host, receiver, args[0])?;

@@ -14,6 +14,7 @@ pub mod data_value;
 pub mod date_time;
 pub mod double;
 pub mod duration;
+pub mod elem_tag;
 pub mod extension;
 pub mod fiber;
 pub mod http;

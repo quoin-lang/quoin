@@ -795,7 +795,7 @@ fn parse_block_decls(
     source_text: &str,
 ) -> (
     Vec<Arc<BlockArgNode>>,
-    Option<Arc<IdentifierNode>>,
+    Option<Arc<TypeRefNode>>,
     Vec<Arc<BlockDeclNode>>,
     Option<Arc<BlockNode>>,
 ) {
@@ -941,24 +941,45 @@ fn parse_ident(pair: Pair<Rule>, filename: &str, source_text: &str) -> Identifie
 /// A `type_ref` — an optionally namespaced type-annotation name (`Integer`, `[Web]Halt`).
 /// Mirrors `parse_nsvarident`'s namespaced arm so a namespaced type carries the same
 /// `namespace` + `IdentifierType::Namespaced` shape as an expression-position reference.
-fn parse_type_ref(pair: Pair<Rule>, filename: &str, source_text: &str) -> IdentifierNode {
+fn parse_type_ref(pair: Pair<Rule>, filename: &str, source_text: &str) -> TypeRefNode {
     let source_info = extract_source_info(pair.as_span(), filename, source_text);
     let mut inner = pair.into_inner();
     let first = inner.next().unwrap();
-    match first.as_rule() {
+    let (ident, rest) = match first.as_rule() {
         Rule::namespace => {
             let ns_node = parse_namespace(first, filename, source_text);
             let id = parse_ident(inner.next().unwrap(), filename, source_text);
-            IdentifierNode {
-                source_info,
-                namespace: Some(Arc::new(ns_node)),
-                name: id.name,
-                identifier_type: IdentifierType::Namespaced,
-            }
+            (
+                IdentifierNode {
+                    source_info,
+                    namespace: Some(Arc::new(ns_node)),
+                    name: id.name,
+                    identifier_type: IdentifierType::Namespaced,
+                },
+                inner.next(),
+            )
         }
-        Rule::ident => parse_ident(first, filename, source_text),
+        Rule::ident => (parse_ident(first, filename, source_text), inner.next()),
         _ => unreachable!(),
+    };
+    let args = match rest {
+        Some(ta) if ta.as_rule() == Rule::type_args => ta
+            .into_inner()
+            .map(|t| Arc::new(parse_type_ref(t, filename, source_text)))
+            .collect(),
+        _ => Vec::new(),
+    };
+    TypeRefNode {
+        ident: Arc::new(ident),
+        args,
     }
+}
+
+/// Class-header type parameters (`Iterate(T U)`): bare names.
+fn parse_type_params(pair: Pair<Rule>, filename: &str, source_text: &str) -> Vec<String> {
+    pair.into_inner()
+        .map(|id| parse_ident(id, filename, source_text).name)
+        .collect()
 }
 
 fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
@@ -969,8 +990,15 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
             let mut pairs = inner.into_inner();
             let parent_id = parse_nsvarident(pairs.next().unwrap(), filename, source_text);
             let child_id = parse_nsvarident(pairs.next().unwrap(), filename, source_text);
-            let block_pair = pairs.next().unwrap();
-            let block_node = match parse_block(block_pair, filename, source_text).value {
+            let mut next = pairs.next().unwrap();
+            let type_params = if next.as_rule() == Rule::type_params {
+                let tp = parse_type_params(next, filename, source_text);
+                next = pairs.next().unwrap();
+                tp
+            } else {
+                Vec::new()
+            };
+            let block_node = match parse_block(next, filename, source_text).value {
                 Block(b) => b,
                 _ => unreachable!(),
             };
@@ -979,6 +1007,7 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
                 value: ClassDefinition(ClassDefinitionNode {
                     identifier: Arc::new(child_id),
                     parent_identifier: Some(Arc::new(parent_id)),
+                    type_params,
                     block: Arc::new(block_node),
                 }),
             }
@@ -986,8 +1015,15 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
         Rule::class_def => {
             let mut pairs = inner.into_inner();
             let child_id = parse_nsvarident(pairs.next().unwrap(), filename, source_text);
-            let block_pair = pairs.next().unwrap();
-            let block_node = match parse_block(block_pair, filename, source_text).value {
+            let mut next = pairs.next().unwrap();
+            let type_params = if next.as_rule() == Rule::type_params {
+                let tp = parse_type_params(next, filename, source_text);
+                next = pairs.next().unwrap();
+                tp
+            } else {
+                Vec::new()
+            };
+            let block_node = match parse_block(next, filename, source_text).value {
                 Block(b) => b,
                 _ => unreachable!(),
             };
@@ -996,6 +1032,7 @@ fn parse_definition_expr(pair: Pair<Rule>, filename: &str, source_text: &str) ->
                 value: ClassDefinition(ClassDefinitionNode {
                     identifier: Arc::new(child_id),
                     parent_identifier: None,
+                    type_params,
                     block: Arc::new(block_node),
                 }),
             }
@@ -1477,7 +1514,7 @@ mod tests {
     fn block_arg(
         name: &str,
         identifier_type: IdentifierType,
-        type_hint: Option<Arc<IdentifierNode>>,
+        type_hint: Option<Arc<TypeRefNode>>,
     ) -> Arc<BlockArgNode> {
         Arc::new(BlockArgNode {
             identifier: Arc::new(IdentifierNode {
@@ -1493,7 +1530,7 @@ mod tests {
     fn block_decl(
         name: &str,
         identifier_type: IdentifierType,
-        type_hint: Option<Arc<IdentifierNode>>,
+        type_hint: Option<Arc<TypeRefNode>>,
     ) -> Arc<BlockDeclNode> {
         Arc::new(BlockDeclNode {
             identifier: Arc::new(IdentifierNode {
@@ -1758,6 +1795,7 @@ mod tests {
                     identifier_type: IdentifierType::Local,
                 }),
                 parent_identifier: None,
+                type_params: vec![],
                 block: Arc::new(BlockNode {
                     source_info: None,
                     name: None,
@@ -1788,6 +1826,7 @@ mod tests {
                     name: "ParentClass".to_string(),
                     identifier_type: IdentifierType::Local,
                 })),
+                type_params: vec![],
                 block: Arc::new(BlockNode {
                     source_info: None,
                     name: None,
@@ -2231,7 +2270,7 @@ mod tests {
                 arguments: vec![block_arg(
                     "x",
                     IdentifierType::Local,
-                    Some(ident_node("Int", IdentifierType::Local)),
+                    Some(flat_type("Int")),
                 )],
                 decls: vec![],
                 return_type: None,
@@ -2301,7 +2340,7 @@ mod tests {
                 decls: vec![block_decl(
                     "x",
                     IdentifierType::Local,
-                    Some(ident_node("Int", IdentifierType::Local)),
+                    Some(flat_type("Int")),
                 )],
                 return_type: None,
                 decl_block: None,
@@ -2337,7 +2376,30 @@ mod tests {
 
     /// A namespaced type node as `parse_type_ref` builds it: `[Web]Halt`, `[A/B]Gadget`,
     /// or the explicit root `[/]Thing` (empty path).
-    fn ns_type(path: &[&str], name: &str) -> Arc<IdentifierNode> {
+    fn ns_type(path: &[&str], name: &str) -> Arc<TypeRefNode> {
+        Arc::new(TypeRefNode {
+            args: Vec::new(),
+            ident: ns_ident(path, name),
+        })
+    }
+
+    /// A generic type annotation node: `base(args…)`.
+    fn generic_type(name: &str, args: Vec<Arc<TypeRefNode>>) -> Arc<TypeRefNode> {
+        Arc::new(TypeRefNode {
+            ident: ident_node(name, IdentifierType::Local),
+            args,
+        })
+    }
+
+    /// A flat (argument-less) type annotation node, as tests spell `x: Int`.
+    fn flat_type(name: &str) -> Arc<TypeRefNode> {
+        Arc::new(TypeRefNode {
+            ident: ident_node(name, IdentifierType::Local),
+            args: Vec::new(),
+        })
+    }
+
+    fn ns_ident(path: &[&str], name: &str) -> Arc<IdentifierNode> {
         Arc::new(IdentifierNode {
             source_info: None,
             namespace: Some(Arc::new(NamespaceNode {
@@ -2361,7 +2423,7 @@ mod tests {
 
     fn block_with(
         arguments: Vec<Arc<BlockArgNode>>,
-        return_type: Option<Arc<IdentifierNode>>,
+        return_type: Option<Arc<TypeRefNode>>,
         decls: Vec<Arc<BlockDeclNode>>,
     ) -> Arc<Node> {
         arc_node(NodeValue::Block(BlockNode {
@@ -2373,6 +2435,79 @@ mod tests {
             decl_block: None,
             statements: vec![integer(1)],
         }))
+    }
+
+    #[test]
+    fn test_parse_generic_type_annotations() {
+        // `|l: List(Integer)|` — one generic argument.
+        let ast = parse("{ |l: List(Integer)| 1; };");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![block_arg(
+                    "l",
+                    IdentifierType::Local,
+                    Some(generic_type("List", vec![flat_type("Integer")])),
+                )],
+                None,
+                vec![],
+            )],
+        }));
+        assert_eq!(ast, expected);
+
+        // Nested, space-separated: `^Map(String List(Integer))`.
+        let ast = parse("{ |^Map(String List(Integer))| 1; };");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![],
+                Some(generic_type(
+                    "Map",
+                    vec![
+                        flat_type("String"),
+                        generic_type("List", vec![flat_type("Integer")]),
+                    ],
+                )),
+                vec![],
+            )],
+        }));
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn test_parse_class_header_type_params() {
+        // `Iterate(T U) <- { 1 };` — declared type variables on the header.
+        let ast = parse("Iterate(T U) <- { 1 };");
+        let NodeValue::Program(p) = &ast.value else {
+            panic!("not a program");
+        };
+        let NodeValue::ClassDefinition(cd) = &p.expressions[0].value else {
+            panic!("not a class definition");
+        };
+        assert_eq!(cd.identifier.name, "Iterate");
+        assert_eq!(cd.type_params, vec!["T".to_string(), "U".to_string()]);
+
+        // With a parent: `Mixin <- Iterate(T) <- { 1 };`
+        let ast = parse("Mixin <- Iterate(T) <- { 1 };");
+        let NodeValue::Program(p) = &ast.value else {
+            panic!("not a program");
+        };
+        let NodeValue::ClassDefinition(cd) = &p.expressions[0].value else {
+            panic!("not a class definition");
+        };
+        assert_eq!(cd.identifier.name, "Iterate");
+        assert_eq!(cd.parent_identifier.as_ref().unwrap().name, "Mixin");
+        assert_eq!(cd.type_params, vec!["T".to_string()]);
+
+        // Plain definitions carry no params.
+        let ast = parse("Plain <- { 1 };");
+        let NodeValue::Program(p) = &ast.value else {
+            panic!("not a program");
+        };
+        let NodeValue::ClassDefinition(cd) = &p.expressions[0].value else {
+            panic!("not a class definition");
+        };
+        assert!(cd.type_params.is_empty());
     }
 
     #[test]
@@ -2458,7 +2593,7 @@ mod tests {
                 vec![block_arg(
                     "x",
                     IdentifierType::Local,
-                    Some(ident_node("Integer", IdentifierType::Local)),
+                    Some(flat_type("Integer")),
                 )],
                 None,
                 vec![],
