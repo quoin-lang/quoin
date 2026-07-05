@@ -326,6 +326,18 @@ pub(crate) fn fuse_bytecode(
 /// on a stack while compiling a class def / extension; used to type self-sends by their
 /// callee's declared return type and to devirtualize self-sends in a sealed class.
 struct ClassCtx {
+    /// Unique id for this class-body/extension context within the process — the
+    /// AOT sibling-group key (self-calls compile to direct calls only among
+    /// methods that share it, i.e. the same method table + receiver shape).
+    id: u32,
+    /// The class name for a named definition/extension; empty for anonymous
+    /// extension targets (e.g. `.meta <-- { … }`), whose sealedness is looked up
+    /// through to the nearest named enclosing context.
+    name: String,
+    /// Selectors defined more than once in this body (typed multimethod
+    /// variants) — excluded from AOT candidacy, since a direct call would bypass
+    /// the runtime variant scoring.
+    multi: HashSet<String>,
     /// Method selector → declared return `Type` (methods that annotate a return).
     returns: HashMap<String, Type>,
     /// The class is compile-sealed: `sealed!` appears as a direct (unconditional) body
@@ -526,6 +538,13 @@ pub struct Compiler {
     /// last. A `^`/`^^` return or a block's tail expression is checked (and numeric literals
     /// promoted) against the top entry; `None` = no declared return → not checked. Phase 3a.
     return_type_stack: Vec<Option<Type>>,
+    /// Collect AOT candidates (docs/AOT_ARCH.md) while compiling: methods of
+    /// sealed classes with all-scalar params and return. Only the runner's
+    /// once-per-unit compiles opt in, and only when `QN_AOT=1`.
+    collect_aot: bool,
+    aot_candidates: Vec<crate::codegen::AotCandidate>,
+    /// Source of `ClassCtx::id`.
+    class_ctx_counter: u32,
     /// Mint a `template_id` for every compiled block literal, so all its closures
     /// share one inline-cache array (`VmState::ic_registry`). Only the runner's
     /// once-per-unit compiles opt in (`with_template_ids`); eval/REPL/interpolation
@@ -563,6 +582,9 @@ impl Compiler {
             diagnostics: Vec::new(),
             return_type_stack: Vec::new(),
             mint_template_ids: false,
+            collect_aot: false,
+            aot_candidates: Vec::new(),
+            class_ctx_counter: 0,
         }
     }
 
@@ -570,6 +592,79 @@ impl Compiler {
     pub fn with_template_ids(mut self) -> Self {
         self.mint_template_ids = true;
         self
+    }
+
+    /// AOT candidacy (docs/AOT_ARCH.md §3): a method of a sealed class whose
+    /// params and return are all scalar, unguarded, and single-variant. The
+    /// authoritative bytecode walk happens in `codegen::translate` — this is the
+    /// cheap proof-of-eligibility filter; refusal there is silent and safe.
+    /// Sealedness looks through anonymous extension contexts (`.meta <-- {…}`)
+    /// to the nearest named enclosing class body: the class body (including its
+    /// meta extension) runs to completion — sealing both tables — before any
+    /// external caller can dispatch, the same argument Phase 5 inlining trusts.
+    fn maybe_collect_aot_candidate(
+        &mut self,
+        selector: &str,
+        block_node: &BlockNode,
+        bytecode: &CodeBlock,
+    ) {
+        if !self.collect_aot || !self.mint_template_ids {
+            return;
+        }
+        let Some(imm) = self.class_ctx.last() else {
+            return;
+        };
+        let sealed = imm.sealed
+            || self
+                .class_ctx
+                .iter()
+                .rev()
+                .find(|c| !c.name.is_empty())
+                .is_some_and(|c| c.sealed);
+        if !sealed || imm.multi.contains(selector) || block_node.decl_block.is_some() {
+            return;
+        }
+        let mut params = Vec::new();
+        for arg in &block_node.arguments {
+            if arg.identifier.identifier_type == IdentifierType::Instance {
+                return; // not a plain method parameter list
+            }
+            let Some(hint) = &arg.type_hint else { return };
+            let Some(k) = crate::codegen::AotParam::from_annotation(&annotation_name(hint)) else {
+                return;
+            };
+            params.push(k);
+        }
+        let Some(rt) = &block_node.return_type else {
+            return;
+        };
+        let Some(ret) = crate::codegen::AotRet::from_annotation(&annotation_name(rt)) else {
+            return;
+        };
+        // `compile_block` just pushed the compiled body as a block constant.
+        let Some(Instruction::Push(Constant::Block(rc))) = bytecode.bytecode.last() else {
+            return;
+        };
+        let group_id = imm.id;
+        self.aot_candidates.push(crate::codegen::AotCandidate {
+            group_id,
+            selector: selector.to_string(),
+            block: rc.clone(),
+            params,
+            ret,
+        });
+    }
+
+    /// Opt this compile into AOT-candidate collection (implies nothing at
+    /// runtime by itself — the runner hands the candidates to codegen).
+    pub fn with_aot(mut self) -> Self {
+        self.collect_aot = true;
+        self
+    }
+
+    /// The AOT candidates collected during compilation (drained).
+    pub fn take_aot_candidates(&mut self) -> Vec<crate::codegen::AotCandidate> {
+        std::mem::take(&mut self.aot_candidates)
     }
 
     pub fn new_with_locals(locals: HashSet<String>) -> Self {
@@ -600,6 +695,9 @@ impl Compiler {
             diagnostics: Vec::new(),
             return_type_stack: Vec::new(),
             mint_template_ids: false,
+            collect_aot: false,
+            aot_candidates: Vec::new(),
+            class_ctx_counter: 0,
         }
     }
 
@@ -1767,6 +1865,7 @@ impl Compiler {
             NodeValue::MethodDefinition(method_def) => {
                 let selector = self.reconstruct_selector(&method_def.signature)?;
                 self.compile_block(&method_def.block, bytecode)?;
+                self.maybe_collect_aot_candidate(&selector, &method_def.block, bytecode);
                 bytecode.push(Instruction::DefineMethod(selector));
             }
             NodeValue::MethodExtension(method_ext) => {

@@ -126,6 +126,9 @@ pub struct Task<'gc> {
     /// block that awaits) must not leak its depth into whichever task runs next.
     #[collect(require_static)]
     pub native_reentry_depth: usize,
+    /// This task's AOT fuel/depth counters (see `VmState::aot_fuel`).
+    pub aot_fuel: i64,
+    pub aot_depth: i64,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -878,6 +881,8 @@ impl<'gc> VmState<'gc> {
         // A REPL line that errored mid-native-call may have unwound past the paired
         // decrement; start each new line at re-entry depth zero.
         self.native_reentry_depth = 0;
+        self.aot_fuel = 0;
+        self.aot_depth = 0;
     }
 
     /// Stash the live per-task context into `tasks[tid]` (the task is parking or
@@ -906,6 +911,8 @@ impl<'gc> VmState<'gc> {
         t.saved_root_frames = saved_root_frames;
         t.saved_root_native_args = saved_root_native_args;
         t.native_reentry_depth = self.native_reentry_depth;
+        t.aot_fuel = self.aot_fuel;
+        t.aot_depth = self.aot_depth;
     }
 
     /// Make `tid` the current task and restore its context into `VmState`. The
@@ -941,6 +948,8 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_native_args = std::mem::take(&mut t.saved_root_native_args);
             self.sched.wake = t.wake.take();
             self.native_reentry_depth = t.native_reentry_depth;
+            self.aot_fuel = t.aot_fuel;
+            self.aot_depth = t.aot_depth;
         } else {
             // First activation: a fresh, empty live context, then start the block.
             self.stack = Vec::new();
@@ -953,6 +962,10 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_native_args = Vec::new();
             self.sched.wake = None;
             self.native_reentry_depth = 0;
+            self.aot_fuel = 0;
+            self.aot_depth = 0;
+            self.aot_fuel = 0;
+            self.aot_depth = 0;
             let block = self.sched.tasks[tid.0]
                 .as_ref()
                 .unwrap()
@@ -1055,6 +1068,8 @@ impl<'gc> VmState<'gc> {
             deadline_abort: None,
             parked_on_channel: false,
             native_reentry_depth: 0,
+            aot_fuel: 0,
+            aot_depth: 0,
         }
     }
 

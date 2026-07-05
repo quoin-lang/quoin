@@ -107,3 +107,11 @@ pub fn ext_handshake_timeout_ms() -> u64 {
             .unwrap_or(10_000)
     })
 }
+
+/// `QN_AOT=1` compiles the sealed/typed subset to native code at unit compile
+/// (docs/AOT_ARCH.md). Default OFF for v0; the interpreter path is untouched
+/// either way (the registry is a pure overlay), so this is also the kill switch.
+pub fn aot_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("QN_AOT").is_ok_and(|v| v == "1"))
+}

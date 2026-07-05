@@ -46,6 +46,24 @@ pub(crate) fn prelude_asts() -> impl Iterator<Item = Node> {
 
 /// Register every native (Rust-backed) class on a fresh `VmState`. Shared by all runner
 /// modes (run/test/benchmark/repl) so the builtin set can't drift between them.
+/// The once-per-unit compiler: template ids for shared inline caches, plus AOT
+/// candidate collection when `QN_AOT=1` (docs/AOT_ARCH.md).
+fn unit_compiler() -> Compiler {
+    let c = Compiler::new().with_template_ids();
+    if crate::tuning::aot_enabled() {
+        c.with_aot()
+    } else {
+        c
+    }
+}
+
+/// Compile and register this unit's AOT candidates (no-op unless `QN_AOT=1`).
+fn compile_unit_aot(compiler: &mut Compiler) {
+    if crate::tuning::aot_enabled() {
+        crate::codegen::compile_candidates(compiler.take_aot_candidates());
+    }
+}
+
 pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
     vm.register_native_class(mc, object::build_object_class());
     vm.register_native_class(mc, class::build_class_class());
@@ -386,7 +404,7 @@ pub(crate) fn install_dap_program(
         // Capture output as DAP `output` events from here on — crucially before the compile, so
         // the resolver's type warnings below reach the client instead of the adapter's raw stderr.
         vm.output.capture = true;
-        let mut compiler = Compiler::new().with_template_ids();
+        let mut compiler = unit_compiler();
         compiler.set_seen_types(vm.options.seen_types.clone());
         compiler.set_class_table(vm.options.class_table.clone());
         crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -398,6 +416,7 @@ pub(crate) fn install_dap_program(
             }
         };
         vm.report_type_warnings(compiler.diagnostics());
+        compile_unit_aot(&mut compiler);
         let block = build_block(mc, &sb);
         // Run to a breakpoint (`stopOnEntry` is honored at `launch`). Program output is captured
         // and re-emitted as DAP `output` events rather than written to fd 1/2.
@@ -740,7 +759,7 @@ impl VmRunner {
             let NodeValue::Program(p) = &node.value else {
                 return false;
             };
-            let mut compiler = Compiler::new().with_template_ids();
+            let mut compiler = unit_compiler();
             compiler.set_seen_types(vm.options.seen_types.clone());
             compiler.set_class_table(vm.options.class_table.clone());
             crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -752,6 +771,7 @@ impl VmRunner {
                 }
             };
             vm.report_type_warnings(compiler.diagnostics());
+            compile_unit_aot(&mut compiler);
             let block = build_block(mc, &sb);
             // Stop at entry: an armed `StepInto` halts at the first line start. Source is
             // shown at each pause by default ($source off to silence). `--break-on-throw` types
@@ -938,7 +958,7 @@ impl VmRunner {
                     }
                 };
 
-                let mut compiler = Compiler::new().with_template_ids();
+                let mut compiler = unit_compiler();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -949,6 +969,7 @@ impl VmRunner {
                     }
                 };
                 vm.report_type_warnings(compiler.diagnostics());
+                compile_unit_aot(&mut compiler);
 
                 let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
@@ -1028,7 +1049,7 @@ impl VmRunner {
                     NodeValue::Program(p) => p,
                     _ => panic!("Error: Root AST node is not a ProgramNode"),
                 };
-                let mut compiler = Compiler::new().with_template_ids();
+                let mut compiler = unit_compiler();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -1037,6 +1058,7 @@ impl VmRunner {
                     Err(e) => panic!("Compilation error: {}", e),
                 };
                 vm.report_type_warnings(compiler.diagnostics());
+                compile_unit_aot(&mut compiler);
                 let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 install_main_task(mc, vm);
@@ -1055,7 +1077,7 @@ impl VmRunner {
                     NodeValue::Program(p) => p,
                     _ => panic!("Error: Root AST node is not a ProgramNode"),
                 };
-                let mut compiler = Compiler::new().with_template_ids();
+                let mut compiler = unit_compiler();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -1063,6 +1085,7 @@ impl VmRunner {
                     Ok(_) => {
                         let had = !compiler.diagnostics().is_empty();
                         vm.report_type_warnings(compiler.diagnostics());
+                        compile_unit_aot(&mut compiler);
                         had
                     }
                     Err(e) => {
@@ -1230,7 +1253,7 @@ impl VmRunner {
                     }
                 };
 
-                let mut compiler = Compiler::new().with_template_ids();
+                let mut compiler = unit_compiler();
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
@@ -1241,6 +1264,7 @@ impl VmRunner {
                     }
                 };
                 vm.report_type_warnings(compiler.diagnostics());
+                compile_unit_aot(&mut compiler);
 
                 let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);

@@ -2,6 +2,7 @@
 
 pub mod ansi_colorizer;
 pub mod class_table;
+pub mod codegen;
 pub mod compiler;
 pub mod coverage;
 pub mod dap;

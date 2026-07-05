@@ -1,0 +1,111 @@
+"* AOT parity (docs/AOT_ARCH.md): this file must pass identically with and
+"* without `QN_AOT=1`. `AotSpin` is a v0 compile candidate (sealed, all-scalar
+"* params/returns), so under AOT these methods run as native code — asserting
+"* that arithmetic results, error identity (division by zero), scheduling
+"* order (run-to-block), and cancellation of a compute-wedged task are
+"* indistinguishable from the interpreter.
+
+AotSpin <- {
+    .meta <-- {
+        spin: -> { |n: Integer ^Integer|
+            var i = 0;
+            { i < n }.whileDo:{ i = i + 1 };
+            i
+        };
+
+        fib: -> { |n: Integer ^Integer|
+            (n <= 1).if:{ ^n } else:{ ^(.fib:(n - 1)) + (.fib:(n - 2)) }
+        };
+
+        div:by: -> { |a: Integer b: Integer ^Integer| a / b }
+    };
+    .sealed!
+};
+
+(TestSuite.new:{ var name = 'AotParity' }).add:{
+    .test:scalarResultsMatchInterpreter -> {
+        .is:{ AotSpin.fib:20 } equalTo:6765;
+        .is:{ AotSpin.spin:100000 } equalTo:100000;
+        .is:{ AotSpin.div:7 by:-2 } equalTo:-3
+    };
+
+    "* Division by zero raises the same catchable ArithmeticError in native
+    "* code as in the interpreter (same message, same catchability).
+    .test:divisionByZeroIsCatchable -> {
+        .is:{ ({ AotSpin.div:1 by:0 }.catch:{ |e| e.message }) } equalTo:'Division by zero'
+    };
+
+    "* A task cancelled while queued dies at its first checkpoint even when its
+    "* body is a compiled loop that would otherwise spin for hours — the fuel
+    "* checkpoint delivers cancellation exactly like the interpreter's
+    "* per-instruction check (coarser granularity, same contract).
+    .test:cancelledCompiledLoopDiesAtFirstCheckpoint -> {
+        var t = Task.spawn:{ AotSpin.spin:100000000000 };
+        t.cancel;
+        .is:{ { t.join; 'joined' }.catch:{ |e| 'cancelled' } } equalTo:'cancelled'
+    }
+};
+
+"* v0.2 shapes: slot-window frames — object params/locals, list ops, string
+"* constants, and outcalls (dynamic sends leaving the compiled world through
+"* the native re-entry machinery). AotHelper stays unsealed on purpose: every
+"* call to it from AotLists is an outcall into interpreted code.
+
+AotHelper <- {
+    .meta <-- {
+        twice: -> { |x| x * 2 };
+        explode: -> { |x| 'kaboom'.throw }
+    }
+};
+
+AotLists <- {
+    .meta <-- {
+        buildTo: -> { |n: Integer ^List|
+            var l = #();
+            var i = 0;
+            { i < n }.whileDo:{ l.add:(i * 3); i = i + 1 };
+            l
+        };
+
+        sum:count: -> { |l: List n: Integer ^Integer|
+            var total = 0;
+            var i = 0;
+            { i < n }.whileDo:{ total = total + (l.at:i); i = i + 1 };
+            total
+        };
+
+        describe: -> { |x: Integer ^String| 'value: ' + (AotHelper.twice:x) };
+
+        boom: -> { |x: Integer ^Integer| AotHelper.explode:x };
+
+        writeOob: -> { |l: List ^Integer| l.at:99 put:5; 0 }
+    };
+    .sealed!
+};
+
+(TestSuite.new:{ var name = 'AotParityV2' }).add:{
+    .test:listBuildAndReadBack -> {
+        .is:{ (AotLists.buildTo:5).at:3 } equalTo:9;
+        .is:{ (AotLists.buildTo:0).count } equalTo:0
+    };
+
+    "* Per-element dynamic sends: the accumulator narrows outcall results back
+    "* into a scalar local, checked.
+    .test:sumThroughOutcalls -> {
+        .is:{ AotLists.sum:(AotLists.buildTo:100) count:100 } equalTo:14850
+    };
+
+    "* String constants + cross-class outcalls to interpreted code.
+    .test:stringsAndCrossClassCalls -> { .is:{ AotLists.describe:21 } equalTo:'value: 42' };
+
+    "* A thrown Quoin VALUE crosses a compiled frame intact (QuoinError::Thrown
+    "* + the rooted active-exception slot — the native-boundary contract).
+    .test:thrownValueCrossesCompiledFrame -> {
+        .is:{ { AotLists.boom:1 }.catch:{ |e| e } } equalTo:'kaboom'
+    };
+
+    "* devirt_ops IndexError semantics through the compiled ListSet helper.
+    .test:indexErrorFromCompiledListSet -> {
+        .is:{ { AotLists.writeOob:(AotLists.buildTo:3) }.catch:{ |e| 'caught' } } equalTo:'caught'
+    }
+}

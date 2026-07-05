@@ -106,6 +106,12 @@ already proved this path matters (~21% fib from the hasher swap alone).
 
 ## Tier 2 — the marquee bet: AOT-compile the typed subset
 
+*Full design now in `docs/AOT_ARCH.md` (grounded in the current runtime:
+candidate selection in the compiler, `template_id`-keyed code registry,
+`Callable::AotFn`, fuel checkpoints via the established native-suspend
+mechanism, and the resume-segment GC rule). The sketch below is the
+original scoping, kept for context.*
+
 FUTURE_ARCH's endgame, sharpened. Python/Ruby need speculative JITs because
 they must *discover* types at runtime; Quoin *proves* them at compile time —
 typed params are guaranteed by dispatch (no entry guards), sealed classes are

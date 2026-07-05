@@ -62,6 +62,31 @@ pub enum Callable<'gc> {
     /// owning `Extension` instance). The class and class-vs-instance side are derived from the
     /// receiver at call time; `selector` is the message to forward.
     ExtMethod { ext: Value<'gc>, selector: Symbol },
+    /// An AOT-compiled user method (docs/AOT_ARCH.md): `entry` is the native
+    /// code, `block` the ordinary interpreter body it overlays (the fallback if
+    /// the argument shapes ever fail to unbox — which dispatch's typed-variant
+    /// selection should make impossible).
+    AotCall {
+        block: Gc<'gc, Block<'gc>>,
+        entry: crate::codegen::AotFnRef,
+    },
+}
+
+impl<'gc> Callable<'gc> {
+    /// The callable for a resolved user-method block: the compiled overlay when
+    /// this block's template is registered (probed only on this cold path — the
+    /// dispatch/inline caches memoize the result), else the interpreted block.
+    fn for_block(block: Gc<'gc, Block<'gc>>) -> Callable<'gc> {
+        if let Some(id) = block.template.template_id
+            && let Some(entry) = crate::codegen::lookup(id)
+        {
+            return Callable::AotCall {
+                block,
+                entry: crate::codegen::AotFnRef(entry),
+            };
+        }
+        Callable::Block(block)
+    }
 }
 
 impl<'gc> Callable<'gc> {
@@ -166,6 +191,39 @@ impl<'gc> Callable<'gc> {
                 let ret = ret?;
                 vm.push(ret);
                 Ok(())
+            }
+            Callable::AotCall { block, entry } => {
+                let receiver = receiver.ok_or_else(|| {
+                    QuoinError::Other("Method call is missing a receiver".to_string())
+                })?;
+                // Root (receiver, args) exactly like the Native arm: the compiled
+                // body may suspend at a fuel checkpoint, and the rooted snapshot is
+                // what makes the shim's locals safe across it (scalars carry no Gc,
+                // the receiver stays reachable here).
+                vm.active_native_args.push(NativeCall {
+                    receiver,
+                    args: args.clone(),
+                });
+                let outcome = crate::codegen::invoke(vm, mc, entry.0, receiver, &args);
+                if matches!(outcome, crate::codegen::AotOutcome::Err(_)) {
+                    if let Some(call) = vm.active_native_args.last() {
+                        vm.exceptions.last_send_args = call.args.clone();
+                    }
+                }
+                vm.active_native_args.pop();
+                match outcome {
+                    crate::codegen::AotOutcome::Value(v) => {
+                        vm.push(v);
+                        Ok(())
+                    }
+                    crate::codegen::AotOutcome::Err(e) => Err(e),
+                    // Unboxing mismatch (shouldn't happen: dispatch selected the
+                    // typed variant) — run the ordinary interpreted body.
+                    crate::codegen::AotOutcome::Bail => {
+                        vm.start_block_as_method(mc, block, receiver, args, selector, true);
+                        Ok(())
+                    }
+                }
             }
             Callable::ExtMethod { ext, selector } => {
                 let receiver = receiver.ok_or_else(|| {
@@ -315,7 +373,7 @@ impl<'gc> VmState<'gc> {
 
         match method_val {
             Value::Object(obj) => match &obj.borrow().payload {
-                ObjectPayload::Block(block) => Ok(Some(Callable::Block(*block))),
+                ObjectPayload::Block(block) => Ok(Some(Callable::for_block(*block))),
                 ObjectPayload::NativeState(state_cell) => {
                     let state_ref = state_cell.borrow();
                     let any_ref = (**state_ref).as_any();
@@ -327,7 +385,7 @@ impl<'gc> VmState<'gc> {
                         } else if let Some(Value::Object(block_obj)) = method_state.get_block()
                             && let ObjectPayload::Block(block) = &block_obj.borrow().payload
                         {
-                            Ok(Some(Callable::Block(*block)))
+                            Ok(Some(Callable::for_block(*block)))
                         } else {
                             Ok(None)
                         }

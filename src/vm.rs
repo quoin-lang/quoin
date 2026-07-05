@@ -365,6 +365,24 @@ pub struct VmState<'gc> {
     #[collect(require_static)]
     pub native_reentry_depth: usize,
 
+    /// AOT fuel/depth counters (docs/AOT_ARCH.md §5): compiled code decrements
+    /// `aot_fuel` in every prologue and checkpoints (cancellation + cooperative
+    /// yield) at zero; `aot_depth` caps compiled-call recursion on the real
+    /// coroutine stack (which bypasses `MAX_NATIVE_REENTRY`). Per-task state —
+    /// saved/restored with the task context, since another task may run while
+    /// this one is suspended at a checkpoint.
+    #[collect(require_static)]
+    pub aot_fuel: i64,
+    #[collect(require_static)]
+    pub aot_depth: i64,
+    /// Error channel for compiled code (docs/AOT_ARCH.md v0.2): helpers store a
+    /// full `QuoinError` here and return `TAG_ERR`; `codegen::invoke` takes it.
+    /// A thrown Quoin *value* needs no slot here — it travels as
+    /// `QuoinError::Thrown` with the value GC-rooted in `exceptions.active`,
+    /// exactly as across any native boundary.
+    #[collect(require_static)]
+    pub aot_pending_error: Option<QuoinError>,
+
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
@@ -478,6 +496,9 @@ impl<'gc> VmState<'gc> {
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
+            aot_fuel: 0,
+            aot_depth: 0,
+            aot_pending_error: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
             last_popped_env: None,
