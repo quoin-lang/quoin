@@ -21,8 +21,14 @@ devirt. G2 findings: a Map's ITERATION element is a pair, not its value
 type, so MapOf receivers bind only Map's own methods; a type mentioning an
 unbound variable is gradual in `compatible_with` (adjudicates nothing);
 `collect:`'s result typing needs `Block(args ^Ret)` annotations — deferred
-with that grammar, `ensure:` covers the runtime need. G3 (optimizer/AOT +
-the sieve acceptance test) remains.
+with that grammar, `ensure:` covers the runtime need. G3 SHIPPED: the translator
+tracks tag-backed proofs (`CollectionOf`/`ElemOrNil` — never checker
+beliefs), a proven `Boolean?`-if compiles to a direct branch with a
+nil→MNU stub (the cold path is never translated, deleting the
+capturing-block refusal), `TagCollection` compiles, and Nil/SelfRef box
+across block boundaries. **Sieve, with its two annotations, compiles end
+to end: 0.97s → 0.12s (~7.9×), checksums identical in both modes — the
+acceptance test passes.**
 Design revisions from review: real type variables replace the earlier
 implicit-`Element` idea; `emptyLike` chosen over extending `default`;
 `collect:as:` dropped as redundant with inference + `ensure:`. The settled generics syntax
