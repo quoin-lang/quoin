@@ -216,6 +216,20 @@ impl Drop for NativeExtResource {
 }
 
 impl NativeExtension {
+    /// Tear the extension down *now* rather than lingering until GC drop: mark it dead and
+    /// kill + reap the child and remove the socket file. Called when a call leaves the
+    /// connection permanently unusable (a timeout / cancel desyncs the framed conversation),
+    /// so a wedged or slow child does not keep running — holding a process slot and its
+    /// socket file — until the `Extension` value is eventually collected (which may be much
+    /// later, or never if the program keeps the handle). Idempotent and mirrors `Drop`; the
+    /// host-side fd + handle reap still happen in `Drop`.
+    fn kill_now(&mut self) {
+        self.dead = true;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.sock_path);
+    }
+
     /// If a call's I/O failed *because* the child exited, mark the extension dead and return a
     /// short description of how it exited; otherwise `None` (the failure was something else).
     /// `try_wait` is non-blocking, so this is cheap and only runs on the error path.
@@ -774,8 +788,10 @@ fn finish_outcome<'gc>(
         // combinator still turns it into a catchable `TimeoutError`. The peer is now unusable; the
         // program spawns a fresh `Extension` to retry.
         Err(QuoinError::Cancelled) => {
+            // The peer is unusable (desynced) — tear its child + socket down promptly rather
+            // than let a slow/wedged process linger until this `Extension` value is collected.
             let _ = ext_receiver
-                .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.dead = true);
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.kill_now());
             vm.handle_table.release_for_ext(ext_id);
             Err(QuoinError::Cancelled)
         }
