@@ -29,6 +29,30 @@ fn assert_pass(file_stem: &str, script: &str) {
 }
 
 #[test]
+fn global_deadlock_reports_an_error_instead_of_silent_success() {
+    // Pre-fix: the driver's idle break exited 0 with the main task still parked
+    // and nothing printed — a deadlocked program looked identical to a successful
+    // one. (Uncaught errors exit 0 by convention in run mode, so assert on the
+    // diagnostic, not the status.)
+    let (stdout, stderr, _) = run_qn(
+        "deadlock_exit",
+        r#"
+'before'.print;
+Channel.new.receive;
+'unreachable'.print;
+"#,
+    );
+    assert!(
+        stdout.contains("before") && !stdout.contains("unreachable"),
+        "unexpected stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("deadlock"),
+        "no deadlock diagnostic.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn empty_gather_returns_an_empty_list() {
     // Pre-fix: `Async.gather:#()` spawned no children, so nothing ever delivered
     // the result — the caller parked forever and the program exited 0 silently.

@@ -26,7 +26,7 @@ cargo regression tests.
 | `resume_while_parked.qn` | same abort, minimal 2-task form, 100% without stress | **FIXED** (fiber owner guard) |
 | `shared_fiber_resume.qn` | same abort, yield-suspended variant (~29/50 stress seeds; 0/50 post-fix) | **FIXED** (fiber owner guard) |
 | `empty_gather.qn` | `Async.gather:#()` parks the caller forever; program exits 0 with the rest unexecuted | **FIXED** (immediate empty delivery) |
-| `deadlock_exit.qn` | a globally deadlocked program exits silently with status 0 — indistinguishable from success | OPEN |
+| `deadlock_exit.qn` | a globally deadlocked program exits silently with status 0 — indistinguishable from success | **FIXED** (loud deadlock diagnostic; exit status stays 0 by run-mode convention) |
 | `lost_value_on_cancel.qn` | a committed channel handoff is dropped when the receiver is cancelled before running (send already reported success) | OPEN |
 
 ## aio/ — async I/O
