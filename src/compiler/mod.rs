@@ -27,12 +27,14 @@ mod inlining;
 /// hints, and `populate_from_vm`'s class-table entries.
 pub(crate) fn annotation_name(tr: &TypeRefNode) -> String {
     let base = NamespacedName::from_ast(&tr.ident).to_string();
-    if tr.args.is_empty() {
-        base
-    } else {
-        let args: Vec<String> = tr.args.iter().map(|a| annotation_name(a)).collect();
-        format!("{}({})", base, args.join(" "))
+    if !tr.parenthesized {
+        return base;
     }
+    let mut parts: Vec<String> = tr.args.iter().map(|a| annotation_name(a)).collect();
+    if let Some(r) = &tr.ret {
+        parts.push(format!("^{}", annotation_name(r)));
+    }
+    format!("{}({})", base, parts.join(" "))
 }
 
 /// A plain identifier's rendered name (parent classes, mixin targets — the
@@ -53,7 +55,7 @@ pub(crate) fn type_from_ref(tr: &TypeRefNode) -> Type {
 /// class table, where the compiler's ctx stack isn't available).
 pub(crate) fn type_from_ref_with_vars(tr: &TypeRefNode, vars: &[String]) -> Type {
     let base = NamespacedName::from_ast(&tr.ident).to_string();
-    if tr.args.is_empty() {
+    if !tr.parenthesized {
         if tr.ident.namespace.is_none() {
             let (core, nullable) = match base.strip_suffix('?') {
                 Some(b) => (b, true),
@@ -69,6 +71,23 @@ pub(crate) fn type_from_ref_with_vars(tr: &TypeRefNode, vars: &[String]) -> Type
             }
         }
         return Type::from_annotation_name(&base);
+    }
+    // `Block(args… ^Ret)`: any arity (zero included — `Block()`); no `^`-tail
+    // means an `Any` return (docs/GENERICS_ARCH.md §11).
+    if base == "Block" {
+        return Type::BlockOf {
+            params: tr
+                .args
+                .iter()
+                .map(|a| type_from_ref_with_vars(a, vars))
+                .collect(),
+            ret: Box::new(
+                tr.ret
+                    .as_ref()
+                    .map(|r| type_from_ref_with_vars(r, vars))
+                    .unwrap_or(Type::Any),
+            ),
+        };
     }
     match (base.as_str(), tr.args.len()) {
         ("List", 1) => Type::ListOf(Box::new(type_from_ref_with_vars(&tr.args[0], vars))),
@@ -548,6 +567,19 @@ pub struct Compiler {
     /// One-shot narrowing set right before compiling a guard arm block (Phase 3c); the next
     /// `compile_block` installs it into that arm's scope. Mirrors `next_block_is_init`.
     next_block_narrowing: Option<(NarrowKey, Type)>,
+    /// One-shot: the declared param types of the `Block(…)`-typed parameter the next block
+    /// literal is being passed to, receiver-bound (G4b, GENERICS_ARCH.md §11.3). The literal's
+    /// `compile_block` seeds its UNANNOTATED params from these as narrowing-grade beliefs —
+    /// never contracts, never devirt.
+    next_block_expected: Option<Vec<Type>>,
+    /// Sharpened static types of compiled block literals (`Block(args ^Ret)` shapes), keyed by
+    /// `BlockNode` address — how `static_type` sees a literal after its body compiled; before
+    /// that it is bare `Block` (gradual, a safe miss). Lives only for this compile.
+    block_literal_types: HashMap<usize, Type>,
+    /// Per-`compile_block` accumulator for the body's ACTUAL return type: the join of the tail
+    /// expression and every real (non-inlined) `^` return — `^^` diverges the block and
+    /// contributes nothing. Innermost last; drives block-return inference (§11.3).
+    block_ret_harvest: Vec<Type>,
     /// One-shot request set right before compiling a guard arm block: the key whose narrowed type
     /// the arm's `compile_block` should snapshot at exit (into `captured_arm_exit`) so the join at
     /// the conditional's end can merge the arms' exit states (Phase 3c join/merge).
@@ -622,6 +654,9 @@ impl Compiler {
             value_type_def_depth: 0,
             next_block_is_init: false,
             next_block_narrowing: None,
+            next_block_expected: None,
+            block_literal_types: HashMap::new(),
+            block_ret_harvest: Vec::new(),
             next_block_capture: None,
             captured_arm_exit: None,
             inline_depth: 0,
@@ -735,6 +770,9 @@ impl Compiler {
             value_type_def_depth: 0,
             next_block_is_init: false,
             next_block_narrowing: None,
+            next_block_expected: None,
+            block_literal_types: HashMap::new(),
+            block_ret_harvest: Vec::new(),
             next_block_capture: None,
             captured_arm_exit: None,
             inline_depth: 0,
@@ -948,7 +986,7 @@ impl Compiler {
         // A bare name that matches a declared class/mixin-header type parameter
         // is a type variable (`T?` rides the nullable suffix inside the ident,
         // like every annotation).
-        if tr.args.is_empty() && tr.ident.namespace.is_none() {
+        if !tr.parenthesized && tr.ident.namespace.is_none() {
             let (base, nullable) = match tr.ident.name.strip_suffix('?') {
                 Some(b) => (b, true),
                 None => (tr.ident.name.as_str(), false),
@@ -962,9 +1000,22 @@ impl Compiler {
                 };
             }
         }
-        if !tr.args.is_empty() {
+        if tr.parenthesized {
             let base = ident_name(&tr.ident);
+            // The `^`-marked return tail is block-type syntax only
+            // (`Block(Integer ^Boolean)`, GENERICS_ARCH.md §11).
+            if tr.ret.is_some() && base != "Block" {
+                self.warn(
+                    format!(
+                        "`^` return types belong to `Block(…)` annotations; `{base}` \
+                         takes plain type arguments"
+                    ),
+                    tr.ident.source_info.as_ref(),
+                );
+            }
             match (base.as_str(), tr.args.len()) {
+                // Any arity, zero included (`Block()` = no args, `Any` return).
+                ("Block", _) => {}
                 ("List", 1) | ("Set", 1) => {}
                 ("Map", 2) => {
                     let key = annotation_name(&tr.args[0]);
@@ -1001,6 +1052,9 @@ impl Compiler {
             for a in &tr.args {
                 // Resolve arguments for their own diagnostics (unknown names etc.).
                 let _ = self.resolve_annotation(a);
+            }
+            if let Some(r) = &tr.ret {
+                let _ = self.resolve_annotation(r);
             }
             return type_from_ref_with_vars(tr, &self.ctx_type_params());
         }
@@ -1304,6 +1358,45 @@ impl Compiler {
         let selector = Self::call_selector_nonvariadic(call)?;
         let params = self.class_table.own_method_params(&class, &selector)?;
         (params.len() == call.arguments.expressions.len()).then_some(params)
+    }
+
+    /// The call's declared parameter types with the receiver's element type already bound
+    /// (PARTIAL substitution — unbound variables stay variables). The front half of
+    /// `typed_receiver_return_type`, run BEFORE the args compile so a block-literal argument
+    /// can carry its declared `Block(…)` shape into `compile_block` as the expectation
+    /// (G4b, GENERICS_ARCH.md §11.3). `None` = no declaration found (gradual).
+    fn receiver_bound_param_types(&self, call: &MethodCallNode) -> Option<Vec<Type>> {
+        let subject = call.subject.as_ref()?;
+        let recv_t = self.static_type(subject);
+        let (class_name, recv_elem) = match &recv_t {
+            Type::Any | Type::Never | Type::Nullable(_) => return None,
+            Type::ListOf(e) => ("List".to_string(), Some((**e).clone())),
+            Type::MapOf(e) => ("Map".to_string(), Some((**e).clone())),
+            Type::SetOf(e) => ("Set".to_string(), Some((**e).clone())),
+            concrete => (concrete.name(), None),
+        };
+        let selector = Self::reconstruct_send_selector(call)?;
+        let (params, defining) = self
+            .class_table
+            .declared_params_with_source(&class_name, &selector)?;
+        if params.len() != call.arguments.expressions.len() {
+            return None;
+        }
+        let def_params = self.class_table.type_params_of(&defining);
+        let mut bindings: std::collections::HashMap<Arc<str>, Type> =
+            std::collections::HashMap::new();
+        // The same Map nuance as `typed_receiver_return_type`: a Map's iteration
+        // element is a key/value pair, so a MapOf receiver binds only Map's own methods.
+        let elem_binds = !(matches!(recv_t, Type::MapOf(_)) && defining.as_ref() != "Map");
+        if let (true, Some(elem), Some(p0)) = (elem_binds, recv_elem, def_params.first()) {
+            bindings.insert(p0.clone(), elem);
+        }
+        Some(
+            params
+                .iter()
+                .map(|p| p.substitute_bound(&bindings))
+                .collect(),
+        )
     }
 
     /// Recognize a nil-condition on a narrowable path (Phase 3c): `RECV.defined?`, or `RECV == nil`
@@ -1618,7 +1711,13 @@ impl Compiler {
             NodeValue::List(_) => Type::List,
             NodeValue::Map(_) => Type::Map,
             NodeValue::Set(_) => Type::Set,
-            NodeValue::Block(_) => Type::Block,
+            // A block literal is bare `Block` until its body compiles; after that, its sharpened
+            // `Block(args ^Ret)` shape if it has one (G4b block-literal inference, §11.3).
+            NodeValue::Block(b) => self
+                .block_literal_types
+                .get(&(b as *const BlockNode as usize))
+                .cloned()
+                .unwrap_or(Type::Block),
             NodeValue::Identifier(id) => match NarrowKey::from_ident(id) {
                 // A narrowable read (local or `@field`): its flow-narrowed type if any (Phase 3c),
                 // else the recorded local type (a field carries none → `Any`).
@@ -2108,6 +2207,14 @@ impl Compiler {
                     positions.push(bytecode.len());
                     bytecode.push(Instruction::Jump(0));
                 } else {
+                    // G4b: a real `^` is one of the enclosing block's return values —
+                    // join it into the return harvest (§11.3). An inlined-region `^`
+                    // (above) is the *conditional's* value, not a block return.
+                    let t = self.static_type(&ret.value);
+                    if let Some(h) = self.block_ret_harvest.last_mut() {
+                        let joined = h.join(&t);
+                        *h = joined;
+                    }
                     bytecode.push(Instruction::BlockReturn);
                 }
             }
@@ -2208,13 +2315,42 @@ impl Compiler {
                 bytecode.push(Instruction::ExecuteBlockWithSelf);
             }
             NodeValue::ClassExtension(class_ext) => {
-                // A `Foo <-- {}` reopen contributes its methods' declared returns to `Foo`'s
-                // signature — how the core classes (`Object <-- {}`, `nil <-- {}`, …) carry their
-                // return contracts, since they're reopened rather than defined with `<-` (Phase 3c·4).
+                // A `Foo <-- {}` reopen contributes its methods' declared returns AND params to
+                // `Foo`'s signature — how the core classes (`Object <-- {}`, `List <-- {}`, …)
+                // carry their contracts, since they're reopened rather than defined with `<-`
+                // (Phase 3c·4; params for the G4b expectation channel, §11.3/§11.4). The
+                // target's declared type parameters come from the table (a reopen header can't
+                // declare them), so `^Set(T)` records as `Var("T")`, not a bogus `Instance`.
                 if let NodeValue::Identifier(target) = &class_ext.expression.value {
                     let target_name = ident_name(target);
-                    self.class_table
-                        .add_returns(&target_name, self.declared_method_returns(&class_ext.block));
+                    let vars: Vec<String> = self
+                        .class_table
+                        .type_params_of(&target_name)
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect();
+                    self.class_table.add_returns(
+                        &target_name,
+                        self.declared_method_returns_with_vars(&class_ext.block, &vars),
+                    );
+                    self.class_table.add_params(
+                        &target_name,
+                        self.declared_method_params(&class_ext.block, &vars),
+                    );
+                    // A reopen's `.mix:` runs at runtime, after the from_vm snapshot — record
+                    // it now or the hierarchy walk can't reach the mixin's typed signatures.
+                    let mixins: Vec<Arc<str>> = class_ext
+                        .block
+                        .statements
+                        .iter()
+                        .filter_map(|stmt| match &stmt.value {
+                            NodeValue::MethodCall(call) => {
+                                Self::mixin_target(call).map(|m| Arc::from(m.as_str()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    self.class_table.add_mixins(&target_name, mixins);
                     self.check_return_covariance(&target_name, &class_ext.block);
                 }
                 self.compile_node(&class_ext.expression, bytecode)?;
@@ -2386,6 +2522,17 @@ impl Compiler {
         // numeric literals promoted against them; otherwise compiled unchecked (gradual). `Some`
         // only for fully non-variadic calls, so `i + j` indexes `params` directly.
         let param_types = self.call_param_types(call);
+        // G4b: the declared param types from the class-table walk, receiver-bound — feeds a
+        // block-literal argument its declared `Block(…)` shape (§11.3). Computed once per call;
+        // consulted only for literal block args below.
+        let has_block_arg = call
+            .arguments
+            .expressions
+            .iter()
+            .any(|a| matches!(a.value, NodeValue::Block(_)));
+        let block_expectations = has_block_arg
+            .then(|| self.receiver_bound_param_types(call))
+            .flatten();
         // Phase 3c: if this is a nil-guard conditional (`RECV.defined?.if:`/`.else:`), the per-arm
         // narrowing to install while compiling each arm, and post-guard on divergence.
         let guard = self.guard_narrowing(call);
@@ -2412,6 +2559,16 @@ impl Compiler {
                 // immediately by that block's compile_block, so it can't leak.
                 if run == 1 && idents[i].name == "new" && matches!(arg.value, NodeValue::Block(_)) {
                     self.next_block_is_init = true;
+                }
+                // G4b: a literal block argument whose declared param is a `Block(…)` shape
+                // compiles with that shape as its expectation — seeding its unannotated
+                // params and closing the loop for `U`-binding (§11.3). One-shot, consumed
+                // by the literal's own `compile_block`.
+                if matches!(arg.value, NodeValue::Block(_))
+                    && let Some(dp) = &block_expectations
+                    && let Some(Type::BlockOf { params, .. }) = dp.get(i + j)
+                {
+                    self.next_block_expected = Some(params.clone());
                 }
                 // Phase 3c: narrow the guarded path inside this arm's block (`if` → non-nil arm,
                 // `else` → nil arm). One-shot, consumed by the arm's `compile_block`. Also request a
@@ -2601,6 +2758,9 @@ impl Compiler {
         // Phase 3c: a guard arm's narrowing, installed into this block's scope below. Taken here
         // (one-shot) so nested blocks don't inherit it.
         let block_narrowing = std::mem::take(&mut self.next_block_narrowing);
+        // G4b: the declared `Block(…)` shape this literal is being passed to, receiver-bound —
+        // one-shot like the narrowing so nested blocks don't inherit it (§11.3).
+        let expected_params = std::mem::take(&mut self.next_block_expected);
         // Phase 3c join/merge: the key whose exit narrowing this arm should snapshot. Taken at
         // entry (bound to THIS block) and read from its scope just before `pop_scope`, so the
         // snapshot reflects the arm's straight-line effect (guard refinement + top-level
@@ -2656,19 +2816,46 @@ impl Compiler {
 
         // Seed declared param types so arithmetic on a typed param devirtualizes, and so the
         // annotation acts as a *contract*: a reassignment is checked against it and flow-updates the
-        // param's narrowing (Phase 3c), exactly like a `var x: T` local. Dispatch only selects a
-        // typed method when the arg matches, so the param is provably that type on entry — no runtime
-        // guard needed. An *un-annotated* param is `Any` (gradual, unchecked), NOT `Object` — the
-        // `Object` default above is only the runtime dispatch signature, not a static type.
-        for arg in &block.arguments {
+        // param's narrowing (Phase 3c), exactly like a `var x: T` local. In the METHOD role,
+        // dispatch only selects a typed method when the arg matches, so the param is provably that
+        // type on entry — no runtime guard needed; a `value:`-invoked bare literal gets no such
+        // check, and its seeding stays operationally safe only because the devirt ops it feeds are
+        // value-guarded (GENERICS_ARCH.md §11.1). An *un-annotated* param is `Any` (gradual,
+        // unchecked), NOT `Object` — the `Object` default above is only the runtime dispatch
+        // signature, not a static type.
+        //
+        // `param_beliefs` doubles as this literal's outward param shape (§11.3): the explicit
+        // annotation where present, else the expectation's seed, else `Any`.
+        let mut param_beliefs: Vec<Type> = Vec::with_capacity(block.arguments.len());
+        for (i, arg) in block.arguments.iter().enumerate() {
             if let Some(hint) = &arg.type_hint {
                 let ty = self.resolve_annotation(hint);
                 let prov = Self::provenance_from(
                     arg.identifier.source_info.clone(),
                     "parameter".to_string(),
                 );
-                self.record_declared_type(&arg.identifier.name, ty, prov);
+                self.record_declared_type(&arg.identifier.name, ty.clone(), prov);
+                param_beliefs.push(ty);
+                continue;
             }
+            // G4b: an UNANNOTATED param seeds from the declared `Block(…)` shape this literal is
+            // being passed to — a narrowing-grade belief: read by `static_type`/warnings/
+            // nil-narrowing, dissolved by any reassignment, never a contract and never devirt
+            // (§11.1). `T` not `T?`: elements present during iteration are never the OOB nil
+            // (§10.3). A type still mentioning an unbound variable claims nothing.
+            let seed = expected_params
+                .as_ref()
+                .and_then(|e| e.get(i))
+                .filter(|t| !matches!(t, Type::Any) && !t.contains_var())
+                .cloned();
+            if let Some(ty) = &seed {
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .narrowed
+                    .insert(NarrowKey::Local(arg.identifier.name.clone()), ty.clone());
+            }
+            param_beliefs.push(seed.unwrap_or(Type::Any));
         }
 
         let mut block_bytecode = CodeBlock::new();
@@ -2685,6 +2872,10 @@ impl Compiler {
             .as_ref()
             .map(|rt| type_from_ref_with_vars(rt, &self.ctx_type_params()));
         self.return_type_stack.push(expected_ret.clone());
+        // G4b: accumulate the body's ACTUAL return type — the tail expression joined with every
+        // real `^` return (the `BlockReturn` arm joins in; `^^` diverges the block and adds
+        // nothing). Starts at `Never`, the join identity (§11.3).
+        self.block_ret_harvest.push(Type::Never);
 
         let len = block.statements.len();
         for (idx, stmt) in block.statements.iter().enumerate() {
@@ -2701,11 +2892,21 @@ impl Compiler {
             } else {
                 self.compile_node(stmt, &mut block_bytecode)?;
             }
+            if is_tail_expr {
+                let t = self.static_type(stmt);
+                if let Some(h) = self.block_ret_harvest.last_mut() {
+                    let joined = h.join(&t);
+                    *h = joined;
+                }
+            }
             if idx < len - 1 {
                 block_bytecode.push(Instruction::Pop);
             }
         }
         self.return_type_stack.pop();
+        let harvested = self.block_ret_harvest.pop().unwrap_or(Type::Never);
+        // An empty body yields nil.
+        let harvested = if len == 0 { Type::Nil } else { harvested };
 
         block_bytecode.current_source = block.source_info.clone();
         if len == 0 {
@@ -2742,6 +2943,23 @@ impl Compiler {
         }
 
         self.pop_scope();
+
+        // G4b: record the literal's sharpened outward type (§11.3) — its header with the names
+        // stripped, inference filling what the header leaves blank: params from annotations or
+        // expectation seeds, the return from the declared `^Ret` or the harvested join. Recorded
+        // only when it says something (all-`Any` stays bare `Block`, minting no claims). This is
+        // what `static_type` answers for the literal from here on — and what call-site
+        // unification binds `U` from (`collect:`'s `Block(T ^U)`).
+        let ret_belief = expected_ret.unwrap_or(harvested);
+        if param_beliefs.iter().any(|t| *t != Type::Any) || ret_belief != Type::Any {
+            self.block_literal_types.insert(
+                block as *const BlockNode as usize,
+                Type::BlockOf {
+                    params: param_beliefs,
+                    ret: Box::new(ret_belief),
+                },
+            );
+        }
 
         let block_name = block.name.as_ref().map(|s| s.value.clone());
 

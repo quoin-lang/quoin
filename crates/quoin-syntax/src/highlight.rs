@@ -600,11 +600,16 @@ impl<'a> HighlightParser<'a> {
     }
 
     /// Highlight a type annotation: the base identifier plus any generic
-    /// arguments (`List(Integer)`), all as type-position identifiers.
+    /// arguments (`List(Integer)`) and a block type's `^`-marked return
+    /// (`Block(Integer ^Boolean)`), all as type-position identifiers (the `^`
+    /// itself stays punctuation, filled in as a gap).
     fn highlight_type_ref(&mut self, tr: &TypeRefNode, depth: usize) -> Vec<HighlightSpan> {
         let mut spans = self.highlight_identifier(&tr.ident, depth);
         for a in &tr.args {
             spans.extend(self.highlight_type_ref(a, depth));
+        }
+        if let Some(r) = &tr.ret {
+            spans.extend(self.highlight_type_ref(r, depth));
         }
         spans
     }

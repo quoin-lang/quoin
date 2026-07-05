@@ -86,6 +86,59 @@ GenericGallery(T) <- {
     wellFormed: -> { |m: Map(String Integer) ^List(Integer)| #( m.at:'k' ) }
 };
 
+"* --- G4: Block types (`Block(args ^Ret)`, GENERICS_ARCH §11) ---
+BlockTypeGallery <- {
+    "* The `^`-marked return tail is block-type syntax only.
+    retOnList: -> { |l: List(Integer ^Boolean)| l };
+
+    "* Empty parens are `Block()` syntax only (List/Set/Map have fixed arity).
+    emptyParens: -> { |l: List()| l };
+
+    "* --- these are CORRECT and must emit NO warning ---
+    "* Every block-type arity: args + return, return-only, zero-arg, bare, nested.
+    predicate: -> { |b: Block(Integer ^Boolean)| b };
+    thunk: -> { |b: Block() ^Block(^Boolean)| b };
+    unconstrained: -> { |b: Block| b };
+    higherOrder: -> { |b: Block(List(Integer) ^Block(Integer ^Boolean))| b }
+};
+
+"* --- G4b: block-literal inference (collect:'s U, each:'s param) ---
+BlockFlowGallery <- {
+    "* An each: block's unannotated param is believed T (Integer here) - a bad
+    "* insert through it warns exactly like a directly-typed value would.
+    badEachParam -> { |l: List(Integer)|
+        var strs: List(String) = #();
+        l.each:{ |x| strs.add:x }
+    };
+
+    "* collect:'s element type is INFERRED from the block's return - the result
+    "* is List(Integer), so a String insert warns (runtime tag stays absent;
+    "* ensure: is the bridge when a real tag is needed).
+    badCollectFlow -> { |l: List(Integer)|
+        var doubled = l.collect:{ |x| x * 2 };
+        doubled.add:'nope'
+    };
+
+    "* An annotated literal carries its shape - a declared block var with an
+    "* incompatible return warns, naming both shapes.
+    badLiteralShape -> {
+        var f: Block(^Boolean) = { |x: Integer| x * 2 };
+        f
+    };
+
+    "* --- these are CORRECT and must emit NO warning ---
+    "* collect:+ensure:, reduce:into:'s U from the seed, select: flow, zero-arg
+    "* iteration blocks (arity is gradual), reassignment dissolving the belief.
+    goodFlow -> { |l: List(Integer)|
+        var names = l.collect:{ |x| x.s };
+        var total: Integer = l.reduce:{ |a b| a + b } into:0;
+        var evens: List(Integer) = l.select:{ |x| x > 1 };
+        l.each:{ 'zeroArgIsFine' };
+        l.each:{ |x| x = 'reassigned'; x };
+        (names.ensure:String).count + total + evens.count
+    }
+};
+
 "* --- G2: element types flow through the checker ---
 GenericFlow <- {
     "* An element read is honestly `T?` — dereferencing without a narrow warns…

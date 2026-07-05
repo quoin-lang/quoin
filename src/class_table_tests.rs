@@ -185,3 +185,70 @@ fn insert_preserves_accumulated_returns_across_a_returnless_overwrite() {
     assert_eq!(w.method_returns.get("size"), Some(&Type::Int)); // preserved
     assert!(w.own_selectors.contains(&Arc::from("grow"))); // structural fields applied
 }
+
+#[test]
+fn from_vm_insert_never_shadows_ast_params() {
+    // The `collect:` lesson (G4b): a populate's hint-derived params are the dispatch-ERASED
+    // signature — an existing AST recording (`Block(T ^U)`) must win per selector, while
+    // selectors only the runtime knows still fill in.
+    let t = ClassTable::new();
+    let rich = Type::BlockOf {
+        params: vec![Type::Var(Arc::from("T"))],
+        ret: Box::new(Type::Var(Arc::from("U"))),
+    };
+    let mut ast = sig(None, &[], &["collect:"], false, false);
+    ast.method_params
+        .insert(Arc::from("collect:"), vec![rich.clone()]);
+    t.insert("Iterate", ast);
+
+    let mut vm_sig = sig(None, &[], &["collect:", "nativeOnly:"], false, false);
+    vm_sig.from_vm = true;
+    vm_sig
+        .method_params
+        .insert(Arc::from("collect:"), vec![Type::Block]); // the erased hint
+    vm_sig
+        .method_params
+        .insert(Arc::from("nativeOnly:"), vec![Type::Int]);
+    t.insert("Iterate", vm_sig);
+
+    let merged = t.get("Iterate").unwrap();
+    assert_eq!(merged.method_params.get("collect:"), Some(&vec![rich]));
+    assert_eq!(
+        merged.method_params.get("nativeOnly:"),
+        Some(&vec![Type::Int])
+    );
+
+    // An AST REdefinition (from_vm = false) is the opposite: new wins.
+    let mut redef = sig(None, &[], &["collect:"], false, false);
+    redef
+        .method_params
+        .insert(Arc::from("collect:"), vec![Type::String]);
+    t.insert("Iterate", redef);
+    assert_eq!(
+        t.get("Iterate").unwrap().method_params.get("collect:"),
+        Some(&vec![Type::String])
+    );
+}
+
+#[test]
+fn declared_params_walk_and_reopen_mixins() {
+    // `declared_params_with_source` walks mixins to the DEFINING class, and `add_mixins`
+    // (the reopen contribution) is what makes the walk reachable at all.
+    let t = ClassTable::new();
+    let mut it = sig(None, &[], &["through:"], false, false);
+    it.type_params = vec![Arc::from("T")];
+    it.method_params.insert(
+        Arc::from("through:"),
+        vec![Type::BlockOf {
+            params: vec![Type::Var(Arc::from("T"))],
+            ret: Box::new(Type::Any),
+        }],
+    );
+    t.insert("Pipe", it);
+    t.insert("List", sig(None, &[], &[], false, false));
+    assert!(t.declared_params_with_source("List", "through:").is_none());
+    t.add_mixins("List", vec![Arc::from("Pipe")]);
+    let (params, defining) = t.declared_params_with_source("List", "through:").unwrap();
+    assert_eq!(defining.as_ref(), "Pipe");
+    assert_eq!(params.len(), 1);
+}

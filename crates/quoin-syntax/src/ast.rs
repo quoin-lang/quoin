@@ -114,6 +114,14 @@ pub struct BlockDeclNode {
 pub struct TypeRefNode {
     pub ident: Arc<IdentifierNode>,
     pub args: Vec<Arc<TypeRefNode>>,
+    /// The `^`-marked return type in a block type's argument list
+    /// (`Block(Integer ^Boolean)`). Meaningful only on a `Block` base; the
+    /// resolver warns and degrades elsewhere (GENERICS_ARCH.md §11).
+    pub ret: Option<Arc<TypeRefNode>>,
+    /// Were parens present at all? Distinguishes `Block()` (zero args, `Any`
+    /// return) from bare `Block` (fully unconstrained). Always true when
+    /// `args`/`ret` are non-empty.
+    pub parenthesized: bool,
 }
 
 impl TypeRefNode {
@@ -121,6 +129,9 @@ impl TypeRefNode {
         Arc::make_mut(&mut self.ident).source_info = None;
         for a in &mut self.args {
             Arc::make_mut(a).clear_source_info();
+        }
+        if let Some(r) = &mut self.ret {
+            Arc::make_mut(r).clear_source_info();
         }
     }
 }

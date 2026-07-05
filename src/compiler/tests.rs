@@ -2064,6 +2064,196 @@ fn generic_type_lattice_rules() {
     assert_eq!(Type::SetOf(Box::new(Type::String)).name(), "Set(String)");
 }
 
+// --- G4: Block types (docs/GENERICS_ARCH.md §11) ---
+
+fn block_of(params: Vec<Type>, ret: Type) -> Type {
+    Type::BlockOf {
+        params,
+        ret: Box::new(ret),
+    }
+}
+
+#[test]
+fn block_type_lattice_rules() {
+    let int_to_bool = block_of(vec![Type::Int], Type::Bool);
+    // Width both ways: a shaped block IS a block, and — unlike collections —
+    // bare Block satisfies any shape (shapes are beliefs with no runtime
+    // backing; flagging an opaque block would warn about working code).
+    assert!(int_to_bool.compatible_with(&Type::Block));
+    assert!(Type::Block.compatible_with(&int_to_bool));
+    // Shape vs shape: shared-prefix contravariant params, covariant return. Arity is
+    // GRADUAL — `value:` zip-binds and `valueWithSelfOrArg:` adapts, so a 0-arg block
+    // where `Block(T)` is expected is idiomatic working code (`xs.each:{ 'hi'.print }`).
+    assert!(int_to_bool.compatible_with(&int_to_bool.clone()));
+    assert!(int_to_bool.compatible_with(&block_of(vec![Type::Int, Type::Int], Type::Bool)));
+    assert!(block_of(vec![], Type::Bool).compatible_with(&int_to_bool));
+    let any_to_bool = block_of(vec![Type::Any], Type::Bool);
+    assert!(any_to_bool.compatible_with(&int_to_bool)); // wider param serves
+    let int_to_never = block_of(vec![Type::Int], Type::Never);
+    assert!(int_to_never.compatible_with(&int_to_bool)); // narrower return serves
+    assert!(!block_of(vec![Type::Int], Type::String).compatible_with(&int_to_bool));
+    // Joins: identical shapes hold; differing (or shaped vs bare) → bare Block.
+    assert_eq!(int_to_bool.join(&int_to_bool.clone()), int_to_bool);
+    assert_eq!(int_to_bool.join(&any_to_bool), Type::Block);
+    assert_eq!(int_to_bool.join(&Type::Block), Type::Block);
+    // Rendering: `^Any` is elided; `Block()` round-trips.
+    assert_eq!(int_to_bool.name(), "Block(Integer ^Boolean)");
+    assert_eq!(block_of(vec![], Type::Any).name(), "Block()");
+    assert_eq!(block_of(vec![], Type::Bool).name(), "Block(^Boolean)");
+    assert_eq!(
+        block_of(vec![Type::Int, Type::Int], Type::Any).name(),
+        "Block(Integer Integer)"
+    );
+    // No runtime tag ever (checker-only, §11.1).
+    assert_eq!(
+        crate::runtime::elem_tag::ElemTag::from_type(&int_to_bool),
+        None
+    );
+}
+
+#[test]
+fn block_type_var_machinery() {
+    use std::collections::HashMap;
+    let t = || Arc::<str>::from("T");
+    let u = || Arc::<str>::from("U");
+    let decl = block_of(vec![Type::Var(t())], Type::Var(u()));
+    assert!(decl.contains_var());
+    // unify: params bind positionally, the return binds too.
+    let mut b: HashMap<Arc<str>, Type> = HashMap::new();
+    Type::unify_into(&decl, &block_of(vec![Type::Int], Type::Bool), &mut b);
+    assert_eq!(b.get("T"), Some(&Type::Int));
+    assert_eq!(b.get("U"), Some(&Type::Bool));
+    // substitute rebuilds the shape.
+    assert_eq!(decl.substitute(&b), block_of(vec![Type::Int], Type::Bool));
+    // The string-side twin parses every block form.
+    let vars: Vec<Arc<str>> = vec![t(), u()];
+    assert_eq!(
+        Type::parse_annotation_str("Block(T ^U)", &vars),
+        block_of(vec![Type::Var(t())], Type::Var(u()))
+    );
+    assert_eq!(
+        Type::parse_annotation_str("Block()", &vars),
+        block_of(vec![], Type::Any)
+    );
+    assert_eq!(
+        Type::parse_annotation_str("Block(^Boolean)", &vars),
+        block_of(vec![], Type::Bool)
+    );
+    assert_eq!(
+        Type::parse_annotation_str("Block(List(T) ^Block(Integer ^Boolean))", &vars),
+        block_of(
+            vec![Type::ListOf(Box::new(Type::Var(t())))],
+            block_of(vec![Type::Int], Type::Bool)
+        )
+    );
+}
+
+// A self-contained generic mixin exercising the §11.3 inference chain without qnlib:
+// `T` binds from the receiver, the literal's params seed, its return harvests, `U` binds.
+const PIPE_MIXIN: &str = "
+    Mixin <- Pipe(T U) <- {
+        through: -> { |b: Block(T ^U) ^List(U)| #() };
+        feed: -> { |b: Block(T)| nil }
+    };
+    List <-- { .mix:Pipe };
+";
+
+#[test]
+fn block_literal_inference_binds_call_site_variables() {
+    // U binds from the literal's harvested return (params seeded from T := Integer),
+    // proven by the deliberate mismatch naming the fully-substituted type.
+    let d = all_diags(&format!(
+        "{PIPE_MIXIN}
+        Probe <- {{ m -> {{
+            var xs: List(Integer) = #(1 2 3);
+            var bad: Set(String) = xs.through:{{ |x| x * 2 }};
+            0
+        }} }}"
+    ));
+    assert!(
+        d.iter()
+            .any(|m| m.contains("expected `Set(String)`, found `List(Integer)`")),
+        "{d:?}"
+    );
+}
+
+#[test]
+fn block_param_seeding_is_a_dissolvable_belief() {
+    // An unannotated param seeds as `T` (narrowing-grade): a bad insert through it warns…
+    let d = all_diags(&format!(
+        "{PIPE_MIXIN}
+        Probe <- {{ m -> {{
+            var xs: List(Integer) = #(1 2 3);
+            var strs: List(String) = #();
+            xs.feed:{{ |x| strs.add:x }};
+            0
+        }} }}"
+    ));
+    assert!(
+        d.iter().any(|m| m.contains("rejects a `Integer` element")),
+        "{d:?}"
+    );
+    // …and any reassignment dissolves the belief (never a stale claim, never a contract).
+    let d = all_diags(&format!(
+        "{PIPE_MIXIN}
+        Probe <- {{ m -> {{
+            var xs: List(Integer) = #(1 2 3);
+            var strs: List(String) = #();
+            xs.feed:{{ |x| x = 'now a string'; strs.add:x }};
+            0
+        }} }}"
+    ));
+    assert!(
+        !d.iter().any(|m| m.contains("rejects")),
+        "belief must dissolve on reassignment: {d:?}"
+    );
+}
+
+#[test]
+fn annotated_literal_sharpens_and_checks() {
+    // A literal with an annotated header carries its shape outward — a declared block
+    // var with an incompatible return warns, naming the sharpened literal type.
+    let d = all_diags("Probe <- { m -> { var f: Block(^Boolean) = { |x: Integer| x * 2 }; f } }");
+    assert!(
+        d.iter()
+            .any(|m| m.contains("expected `Block(^Boolean)`, found `Block(Integer ^Integer)`")),
+        "{d:?}"
+    );
+    // An UNANNOTATED literal stays honest: its param is `Any`, so its return is
+    // unknowable and nothing is claimed (bare `Block` satisfies any shape).
+    let d = all_diags("Probe <- { m -> { var f: Block(^Boolean) = { |x| x * 2 }; f } }");
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn block_type_annotations_resolve_and_erase() {
+    // Valid block-type annotations are silent, in every arity.
+    assert!(all_diags("Foo <- { a: -> { |b: Block(Integer ^Boolean)| b } }").is_empty());
+    assert!(all_diags("Foo <- { a: -> { |b: Block()| b } }").is_empty());
+    assert!(all_diags("Foo <- { a: -> { |b: Block(^Boolean) ^Block(^Boolean)| b } }").is_empty());
+    // `^` tails and empty parens on non-Block bases warn and degrade.
+    let d = all_diags("Foo <- { a: -> { |l: List(Integer ^Boolean)| l } }");
+    assert!(
+        d.iter().any(|m| m.contains("`^` return types belong to")),
+        "{d:?}"
+    );
+    let d = all_diags("Foo <- { a: -> { |l: List()| l } }");
+    assert!(
+        d.iter().any(|m| m.contains("takes 1 type argument, got 0")),
+        "{d:?}"
+    );
+    // Dispatch: full erasure to the bare `Block` hint (GENERICS_ARCH §11.2) —
+    // and a `Block()` param erases identically (never, say, "Block()").
+    assert_eq!(
+        first_typed_param_types("Foo <- { a: -> { |b: Block(Integer ^Boolean)| b } }"),
+        vec!["Block".to_string()]
+    );
+    assert_eq!(
+        first_typed_param_types("Foo <- { a: -> { |b: Block()| b } }"),
+        vec!["Block".to_string()]
+    );
+}
+
 // --- G2: type-variable binding machinery (docs/GENERICS_ARCH.md §4.4/§7) ---
 
 #[test]

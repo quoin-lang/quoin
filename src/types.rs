@@ -31,6 +31,14 @@ pub enum Type {
     MapOf(Box<Type>),
     /// `Set(T)` — a checked-element set.
     SetOf(Box<Type>),
+    /// `Block(args ^Ret)` — a block with a declared shape (`ret` = `Any` when
+    /// no `^`-tail; zero params + `Any` is `Block()`). Checker-only, period:
+    /// `value:` enforces nothing, so block shapes are beliefs, never
+    /// guarantees, and dispatch erases them fully (GENERICS_ARCH.md §11).
+    BlockOf {
+        params: Vec<Type>,
+        ret: Box<Type>,
+    },
     /// A declared type variable (class/mixin-header parameter, e.g. `T` in
     /// `Iterate(T U)`). Checker-only; binding/unification arrives in G2 — until
     /// then it behaves gradually (like `Any`) in compatibility checks.
@@ -105,6 +113,28 @@ impl Type {
             (Type::ListOf(a), Type::ListOf(b))
             | (Type::MapOf(a), Type::MapOf(b))
             | (Type::SetOf(a), Type::SetOf(b)) => a == b,
+            // Blocks: a shaped block IS a block (width) — and, unlike the
+            // collections, a bare `Block` also satisfies any shape: shapes are
+            // beliefs with no runtime backing (nothing checks at `value:`), so
+            // flagging an opaque block against a shaped param would warn about
+            // code that runs perfectly (GENERICS_ARCH.md §11.2).
+            (Type::BlockOf { .. }, Type::Block) | (Type::Block, Type::BlockOf { .. }) => true,
+            // Shape vs shape: params contravariant over the SHARED PREFIX (a
+            // block accepting wider arguments serves), return covariant. Arity
+            // is deliberately gradual: `value:` zip-binds (missing → nil,
+            // extras dropped) and `valueWithSelfOrArg:` adapts by inspection,
+            // so a 0-arg block where `Block(T ^Any)` is expected is idiomatic
+            // working code (`xs.each:{ 'hi'.print }`), not a mismatch.
+            (
+                Type::BlockOf {
+                    params: ap,
+                    ret: ar,
+                },
+                Type::BlockOf {
+                    params: ep,
+                    ret: er,
+                },
+            ) => ep.iter().zip(ap).all(|(e, a)| e.compatible_with(a)) && ar.compatible_with(er),
             // Bottom: a diverging expression satisfies any expected type.
             (Type::Never, _) => true,
             // `T?` expected: `nil` fits, else the actual (unwrapped) must fit the inner type.
@@ -144,6 +174,11 @@ impl Type {
             }
             (Type::SetOf(_), Type::SetOf(_) | Type::Set) | (Type::Set, Type::SetOf(_)) => {
                 return Type::Set;
+            }
+            // Differing block shapes (or shaped vs bare) join to bare `Block`.
+            (Type::BlockOf { .. }, Type::BlockOf { .. } | Type::Block)
+            | (Type::Block, Type::BlockOf { .. }) => {
+                return Type::Block;
             }
             _ => {}
         }
@@ -209,6 +244,22 @@ impl Type {
             if start < args_src.len() {
                 args.push(&args_src[start..]);
             }
+            // `Block(args… ^Ret)`: the `^`-prefixed token is the return type
+            // (no `^` ⇒ `Any`; no tokens at all is `Block()` — zero args).
+            if base == "Block" {
+                let mut params = Vec::new();
+                let mut ret = Type::Any;
+                for a in &args {
+                    match a.strip_prefix('^') {
+                        Some(r) => ret = Self::parse_annotation_str(r, vars),
+                        None => params.push(Self::parse_annotation_str(a, vars)),
+                    }
+                }
+                return Type::BlockOf {
+                    params,
+                    ret: Box::new(ret),
+                };
+            }
             let arg_ty = |i: usize| Box::new(Self::parse_annotation_str(args[i], vars));
             return match (base, args.len()) {
                 ("List", 1) => Type::ListOf(arg_ty(0)),
@@ -230,7 +281,36 @@ impl Type {
             Type::Nullable(t) | Type::ListOf(t) | Type::MapOf(t) | Type::SetOf(t) => {
                 t.contains_var()
             }
+            Type::BlockOf { params, ret } => {
+                params.iter().any(|p| p.contains_var()) || ret.contains_var()
+            }
             _ => false,
+        }
+    }
+
+    /// Like `substitute`, but an unbound variable stays a variable instead of
+    /// widening to `Any` — PARTIAL instantiation, e.g. binding `T` from the
+    /// receiver in `Block(T ^U)` while `U` awaits block-return inference
+    /// (GENERICS_ARCH.md §11.3).
+    pub fn substitute_bound(&self, bindings: &std::collections::HashMap<Arc<str>, Type>) -> Type {
+        match self {
+            Type::Var(n) => bindings.get(n).cloned().unwrap_or_else(|| self.clone()),
+            Type::Nullable(t) => match t.substitute_bound(bindings) {
+                Type::Any => Type::Any,
+                Type::Nullable(inner) => Type::Nullable(inner),
+                inner => Type::Nullable(Box::new(inner)),
+            },
+            Type::ListOf(t) => Type::ListOf(Box::new(t.substitute_bound(bindings))),
+            Type::MapOf(t) => Type::MapOf(Box::new(t.substitute_bound(bindings))),
+            Type::SetOf(t) => Type::SetOf(Box::new(t.substitute_bound(bindings))),
+            Type::BlockOf { params, ret } => Type::BlockOf {
+                params: params
+                    .iter()
+                    .map(|p| p.substitute_bound(bindings))
+                    .collect(),
+                ret: Box::new(ret.substitute_bound(bindings)),
+            },
+            other => other.clone(),
         }
     }
 
@@ -248,6 +328,10 @@ impl Type {
             Type::ListOf(t) => Type::ListOf(Box::new(t.substitute(bindings))),
             Type::MapOf(t) => Type::MapOf(Box::new(t.substitute(bindings))),
             Type::SetOf(t) => Type::SetOf(Box::new(t.substitute(bindings))),
+            Type::BlockOf { params, ret } => Type::BlockOf {
+                params: params.iter().map(|p| p.substitute(bindings)).collect(),
+                ret: Box::new(ret.substitute(bindings)),
+            },
             other => other.clone(),
         }
     }
@@ -275,6 +359,23 @@ impl Type {
             (Type::ListOf(d), Type::ListOf(a))
             | (Type::MapOf(d), Type::MapOf(a))
             | (Type::SetOf(d), Type::SetOf(a)) => Self::unify_into(d, a, bindings),
+            // Block shapes: zip params positionally (an arity mismatch binds
+            // only the shared prefix — gradual, never an error) + the return.
+            (
+                Type::BlockOf {
+                    params: dp,
+                    ret: dr,
+                },
+                Type::BlockOf {
+                    params: ap,
+                    ret: ar,
+                },
+            ) => {
+                for (d, a) in dp.iter().zip(ap) {
+                    Self::unify_into(d, a, bindings);
+                }
+                Self::unify_into(dr, ar, bindings);
+            }
             (Type::Nullable(d), Type::Nullable(a)) => Self::unify_into(d, a, bindings),
             (Type::Nullable(d), a) => Self::unify_into(d, a, bindings),
             _ => {}
@@ -296,6 +397,15 @@ impl Type {
             Type::ListOf(t) => format!("List({})", t.name()),
             Type::MapOf(v) => format!("Map(String {})", v.name()),
             Type::SetOf(t) => format!("Set({})", t.name()),
+            Type::BlockOf { params, ret } => {
+                let params: Vec<String> = params.iter().map(|p| p.name()).collect();
+                let ret = match ret.as_ref() {
+                    Type::Any => String::new(),
+                    r if params.is_empty() => format!("^{}", r.name()),
+                    r => format!(" ^{}", r.name()),
+                };
+                format!("Block({}{})", params.join(" "), ret)
+            }
             Type::Var(n) => n.to_string(),
             Type::Instance(n) => n.to_string(),
             Type::Nullable(inner) => format!("{}?", inner.name()),

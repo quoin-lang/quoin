@@ -391,6 +391,13 @@ minimizes how often hot paths cross it.
    megamorphic sites", and `bench/run.py` could collect them per run.
    AOT should land its counters from v0.0 rather than retrofitting;
    the full surface is its own small design pass.
+8. **Block templates.** Blocks passed to combinators are never candidates:
+   `value:` enforces nothing, so their typed params are beliefs, not the
+   dispatch-backed guarantees `AotParam` builds on. Two future mechanisms,
+   analyzed in GENERICS_ARCH §12: runtime `value:`-time checks for
+   explicitly-typed blocks (general, covers escaped callbacks), and
+   tag-flow through AOT-inlined iteration protocols (free, covers the
+   hot combinator-loop case). They compose; neither is scheduled.
 
 ## 10. Expected wins, bounded honestly
 

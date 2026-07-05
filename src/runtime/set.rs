@@ -93,7 +93,7 @@ pub fn build_set_class() -> NativeClassBuilder {
                 host.get_or_create_builtin_class("Set"),
                 NativeSetState::new(Vec::new()),
             );
-            host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
+            let _ = host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
             Ok(v)
         })
         .sdk_instance_method("ensure:", |host, receiver, args| {
@@ -114,7 +114,7 @@ pub fn build_set_class() -> NativeClassBuilder {
                 host.get_or_create_builtin_class("Set"),
                 NativeSetState::new(vec),
             );
-            host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
+            let _ = host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
             Ok(v)
         })
         .sdk_instance_method("collector", |host, receiver, _args| {
@@ -123,9 +123,12 @@ pub fn build_set_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             let v = host.new_list(Vec::new());
             if tag.is_some() {
-                host.with_native_state_mut(v, |l: &mut crate::runtime::list::NativeListState| {
-                    l.elem = tag;
-                });
+                let _ = host.with_native_state_mut(
+                    v,
+                    |l: &mut crate::runtime::list::NativeListState| {
+                        l.elem = tag;
+                    },
+                );
             }
             Ok(v)
         })
@@ -139,7 +142,7 @@ pub fn build_set_class() -> NativeClassBuilder {
                 NativeSetState::new(Vec::new()),
             );
             if tag.is_some() {
-                host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = tag);
+                let _ = host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = tag);
             }
             Ok(v)
         })

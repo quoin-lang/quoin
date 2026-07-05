@@ -59,6 +59,7 @@ impl ElemTag {
             Type::ListOf(_)
             | Type::MapOf(_)
             | Type::SetOf(_)
+            | Type::BlockOf { .. }
             | Type::Var(_)
             | Type::Nil
             | Type::Block
