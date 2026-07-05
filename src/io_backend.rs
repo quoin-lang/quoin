@@ -546,7 +546,12 @@ impl IoBackend for SmolBackend {
     }
 
     fn close(&self, id: StreamId) {
+        // Streams and listeners share one id space but separate registries — a
+        // listener id left here kept the port bound (and the backlog accepting)
+        // forever after `TcpListener.close`, since the reap path is the only close
+        // most code reaches (the async `IoRequest::Close` is test-only).
         let _ = self.inner.streams.borrow_mut().remove(&id);
+        let _ = self.inner.listeners.borrow_mut().remove(&id);
     }
 }
 

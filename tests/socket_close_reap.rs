@@ -65,3 +65,43 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
         "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+#[test]
+fn listener_close_releases_the_port() {
+    // Regression: the sync reap-path close only removed from the `streams`
+    // registry, never `listeners` — every `TcpListener.close` leaked the bound
+    // socket, so the port stayed unavailable and the OS backlog kept accepting.
+    let script = r#"
+var ok = true;
+var l = TcpListener.listen:'127.0.0.1:0';
+var port = l.port;
+l.close;
+Async.sleep:50;
+
+{ var l2 = TcpListener.listen:('127.0.0.1:' + port); l2.close }
+    .catch:{ |e| ok = false; ('FAIL rebind: ' + e.s).print };
+
+{ var c = TcpSocket.connect:('127.0.0.1:' + port);
+  ok = false; 'FAIL: connect to closed listener succeeded'.print;
+  c.close }
+    .catch:{ |_| nil };
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let dir = std::env::temp_dir();
+    let path = dir.join("qn_listener_close_releases_port.qn");
+    std::fs::write(&path, script).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&path)
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_file(&path);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PASS") && !stdout.contains("FAIL"),
+        "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
