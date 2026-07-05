@@ -28,7 +28,10 @@ nil→MNU stub (the cold path is never translated, deleting the
 capturing-block refusal), `TagCollection` compiles, and Nil/SelfRef box
 across block boundaries. **Sieve, with its two annotations, compiles end
 to end: 0.97s → 0.12s (~7.9×), checksums identical in both modes — the
-acceptance test passes.**
+acceptance test passes.** G4 (Block types, §11) designed and in
+progress: G4a = grammar + lattice, G4b = block-literal inference + qnlib
+signatures. Runtime block enforcement analyzed and recorded as a future
+arc (§12), not scheduled.
 Design revisions from review: real type variables replace the earlier
 implicit-`Element` idea; `emptyLike` chosen over extending `default`;
 `collect:as:` dropped as redundant with inference + `ensure:`. The settled generics syntax
@@ -164,7 +167,7 @@ back (`"List(Integer)"`); the `Type` lattice gains `ListOf(Box<Type>)`,
 `MapOf(Box<Type>)` (value type; key pinned String), `SetOf(Box<Type>)`,
 recursing through `compatible_with`/`join`/`name` exactly as `Nullable`
 does today. Bare `List` remains the untagged/any-element type.
-(`Block(args ^Ret)` shares the grammar seam but is out of scope here.)
+(`Block(args ^Ret)` shares the grammar seam — built as G4, §11.)
 
 The IntelliJ plugin mirrors `type_ref` (Quoin.bnf:285) and needs the same
 grammar addition — a separate plugin PR, as with past syntax changes.
@@ -437,9 +440,13 @@ positives" tripwire as always.
 - **G3 — optimizer/AOT integration:** the `Boolean?.if:` nil-stub
   lowering (interpreter + AOT), AOT tag consumption, **sieve annotated
   and compiled end to end** (the acceptance test), bench re-measured.
+- **G4 — Block types** (`Block(args ^Ret)`, §11): the type-position
+  grammar, `Type::BlockOf`, block-literal return inference (binds
+  `collect:`'s `U`), inferred iteration-block params, typed Block
+  signatures on Iterate. Checker-only by §4.4's line.
 - **Later, explicitly out of scope:** nested generic enforcement,
-  `Block(args ^Ret)` types, non-String Map keys, generic user classes,
-  unions. Each gets its own pass when motivated.
+  non-String Map keys, generic user classes, unions, runtime block
+  enforcement (§12). Each gets its own pass when motivated.
 
 ## 10. Open questions (settled ones recorded)
 
@@ -464,3 +471,175 @@ positives" tripwire as always.
 7. **Expression-position type values** (v2, with nested enforcement):
    verify `ident(…)` is grammatically free in expression position; if
    so, reified type values are the path — see §4.2's alignment note.
+
+## 11. G4 — Block types (`Block(args ^Ret)`)
+
+The settled syntax (TYPE_SYSTEM_ARCH §"Settled surface syntax") makes a
+block's type its header with the names stripped:
+
+```
+{ |a:Integer b:Integer ^Integer| … }   ⟺   Block(Integer Integer ^Integer)
+```
+
+`Block()` is zero-args/`Any`-return; bare `Block` (no parens) stays the
+fully-unconstrained type every existing annotation already means. The
+header half (`block_ret = "^" ~ type_ref` inside `block_decls`) has
+parsed since the return-in-header migration; G4 builds the
+*type-position* half and the checker capability that makes it pay.
+
+### 11.1 The guarantee line: beliefs, never guarantees
+
+`value`/`value:` binds block args by plain zip — no arity check, no
+type check (`start_block`). Param types are enforced only in the
+*method role*, by dispatch's match scoring. So `Block(args ^Ret)` is
+checker machinery, period, exactly as §4.4 drew the line. Concretely:
+
+- **Inferred** param types (from unifying a literal against a declared
+  `Block(T ^Any)` param) enter the block body as *narrowing-grade*
+  entries — read by `static_type`, warnings, and nil-narrowing — via
+  the same one-shot channel `if:else:` guard arms use. They never go
+  through `record_declared_type`, so they seed no devirt and produce
+  no reassignment errors: a wrong belief costs at most a soft warning.
+- **Explicitly annotated** literal params (`{ |x: Integer| … }`) keep
+  their existing behavior: `compile_block` seeds them as declared types
+  for in-body devirt. The ops behind that seeding are value-guarded
+  (probed: `{ |x: Integer| x + 1 }.value:'nope'` falls back and returns
+  `'nope1'`), so the seeding is operationally safe even though `value:`
+  never checks — but the "dispatch only selects a typed method when the
+  arg matches" justification in the code covers only the method role;
+  the comment says so now. Inferred types never take this path.
+- Nothing new reaches the runtime: `StaticBlock` is untouched,
+  `collect:` stays runtime-untagged (`ensure:` remains the bridge), and
+  `ElemTag::from_type(BlockOf) = None` — a `List(Block(Integer ^Integer))`
+  tag degrades to `List(Block)`… i.e. to base `List` with a warning,
+  like any nested generic (§8).
+
+### 11.2 Grammar, AST, lattice (G4a)
+
+- **Grammar**: `type_args` generalizes to
+  `"(" ~ type_ref* ~ ("^" ~ type_ref)? ~ ")"` — one rule for all bases,
+  G0-style structural resolve with targeted diagnostics: a `^`-tail or
+  empty parens on a non-`Block` base warns and degrades to the base;
+  `Block(...)` stops warning "does not take generic arguments".
+- **AST**: `TypeRefNode` gains `ret: Option<Arc<TypeRefNode>>` plus a
+  parens marker so `Block()` ≠ `Block`.
+- **Lattice**: `Type::BlockOf { params: Vec<Type>, ret: Box<Type> }`.
+  Width subtyping `BlockOf ⊆ Block` (a shaped block is a block).
+  Between shapes: arity-exact, params contravariant, return covariant —
+  the sound direction costs nothing extra to write, and the existing
+  `contains_var` gate keeps any var-involved comparison gradual. Joins
+  of differing shapes widen to bare `Block`, as differing tags widen to
+  the bare collection. Recurses through `substitute`/`unify_into`/
+  `parse_annotation_str` so natives can declare block signatures too.
+- **Dispatch: full erasure.** `|b: Block(T ^Boolean)|` dispatches
+  exactly as `|b: Block|` (which *is* an enforceable hint —
+  `type_name() == "Block"`). Unlike element tags, block shapes are
+  **not** part of variant identity: the runtime cannot tell
+  `Block(Integer ^Boolean)` from `Block(String ^String)`, so two
+  same-base signatures differing only in block shape are a
+  *redefinition*, not coexisting multimethod variants. Guarantee
+  honesty applied to dispatch: never let two variants differ by a
+  distinction the runtime can't check.
+- The formatter is untouched (block headers are sliced verbatim; a
+  round-trip test pins it); the ANSI/IntelliJ highlighters learn the
+  `^` span; the plugin grammar mirrors `type_args` in a companion PR.
+
+### 11.3 Block-literal inference (G4b — the new checker capability)
+
+At `xs.collect:{ |x| x * 2 }` with `xs: List(Integer)`:
+
+1. The callee's declared param `Block(T ^U)` (via the G2 `method_params`
+   machinery) substitutes receiver-bound variables → `Block(Integer ^U)`.
+2. The expected param types flow into `compile_block` and seed the
+   literal's params as beliefs — `T`, not `T?`, per §10.3 (elements
+   present during iteration are never the OOB nil). Explicit header
+   annotations win over inference.
+3. The body's actual return type is harvested: the join of the tail
+   expression and every `^` block-return; `^^` (non-local return)
+   contributes nothing — the block never returns normally through it.
+   Harvested types are memoized span-keyed so `static_type` answers
+   consistently before and after the body compiles.
+4. Unification binds `U := Integer`; `^List(U)` → `List(Integer)` —
+   checker-typed, runtime-untagged, honest.
+
+A bare literal with a declared header (`{ |x: Integer ^Boolean| … }`)
+sharpens its own static type from `Block` to
+`Block(Integer ^Boolean)` the same way.
+
+### 11.4 qnlib signatures (the generality proof)
+
+`Iterate(T)` becomes `Iterate(T U)`; the §4.4 signatures land as
+written (`collect:` = `|b: Block(T ^U) ^List(U)|`, the predicate family
+`Block(T ^Boolean)`, `reduce:` = `Block(T T ^T)`, `sort:`'s comparator
+`Block(T T ^Boolean)`), and the concrete `each:` definitions take
+`Block(T ^Any)`. Map keeps the G2 nuance: its iteration element is a
+pair, not its value type, so Map's Iterate methods bind no `T`.
+Corpus-zero-warnings remains the gate.
+
+## 12. Future arc: runtime block enforcement (recorded, not scheduled)
+
+Would checking block args at `value:` unlock anything? Analyzed
+2026-07; the answer shapes when — and whether — to build it.
+
+**What type enforcement would mint: a fourth guarantee source** (after
+dispatch-checked params, `sealed!`, element tags), and its consumers,
+ranked:
+
+1. **AOT block templates — the real prize.** `AotParam` trusts a
+   method's typed params *because dispatch enforces them*; that is what
+   makes scalar/unboxed parameter slots sound. Blocks have no such
+   enforcement, so a block template can never be an AOT candidate with
+   trusted params — stuck at `Dyn` + in-body checked narrowing.
+   Enforcement at `value:` extends the method-role justification to
+   blocks verbatim, and real programs spend their time inside
+   combinator blocks, not `while` loops (sieve compiled because it is
+   loop-shaped; most code isn't).
+2. **Error locality.** Today `{ |x: Integer| x + 1 }.value:'nope'`
+   silently returns `'nope1'` — the annotation is decorative at the
+   boundary. Enforcement raises the house-style TypeError at the call
+   site, makes typed params mean the same thing in both roles, and
+   gives §4.4's "lying signatures" a fail-loud point consistent with
+   how tags fail.
+3. **Marginal.** Enforced *return* types would let `collect:` mint an
+   honestly-tagged result when the block declares `^Integer` (the fused
+   checked pass §4.5 defers) — ergonomics only, `ensure:` already
+   covers it in one pass. Structural dispatch on block shapes becomes
+   sound (§11.2's erasure rule could be revisited) — niche. Interpreter
+   devirt in block bodies could drop value guards — near-zero, those
+   guards are predicted branches.
+
+**Arity checking alone: almost nothing.** The ecosystem *adapts* to
+arity rather than assuming it (`valueWithSelfOrArg:` inspects and
+calls accordingly), and the zip-bind tolerance (missing → nil, extras
+dropped) may be load-bearing. AOT already knows a template's arity.
+Better error messages for one class of bugs, at breaking-change cost.
+
+**The counterweights:**
+
+- **For iteration, tags already carry the guarantee.** A
+  `List(Integer)` iterated by `each:` hands the block values that are
+  tag-proven `Integer`-or-nil — exactly a G3 `ElemOrNil` proof. If AOT
+  inlines the iteration protocol (the classic Smalltalk move: the
+  combinator becomes a compiled loop invoking the block body directly),
+  the proof flows from the receiver's tag into the body with zero
+  per-element checks and zero annotations. Enforcement is redundant
+  there; where it is the *only* possible source is escaped blocks —
+  callbacks, comparators, stored handlers — invoked with values from
+  arbitrary places.
+- **The cost lands on the hottest primitive in the language.** Every
+  typed block call pays a dispatch-grade check; untyped blocks need the
+  all-`"Object"`-normalizes-to-empty trick (the `param_elem_tags`
+  precedent) to stay at one branch. Inlined control-flow blocks never
+  reach `value:` and are exempt.
+- **Enforcement can never strengthen inference.** It applies only to
+  *explicit* annotations — enforcing an inferred type would change
+  program behavior on the strength of checker beliefs, the one line the
+  doctrine never crosses. G4 is unaffected whether or not this arc
+  ever lands.
+
+**Shape of the arc, if built:** opt-in per annotation; `value:`-time
+param checks for explicitly-typed blocks (the general/escaped-callback
+story) composing with tag-flow-through-inlined-combinators (the
+iteration story, free); enforced returns only if the fused-`collect:`
+payoff ever matters. AOT_ARCH §9 tracks the block-template question
+from its side.
