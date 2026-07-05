@@ -176,6 +176,7 @@ impl Compiler {
                         | Type::Set
                         | Type::SetOf(_)
                         | Type::Block
+                        | Type::BlockOf { .. }
                         | Type::Instance(_)
                         | Type::Nullable(_)
                         | Type::Var(_)

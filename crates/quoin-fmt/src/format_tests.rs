@@ -426,3 +426,22 @@ fn namespaced_type_annotations_round_trip() {
     let out = fmt("var x: [IO]File = openIt.value");
     assert!(out.contains("var x: [IO]File"), "{out}");
 }
+
+#[test]
+fn block_type_annotations_round_trip() {
+    // `Block(args ^Ret)` types (GENERICS_ARCH §11) survive formatting in
+    // params, returns, and var declarations — headers slice verbatim, and the
+    // self-verify re-parse must accept the `^`-tail grammar.
+    let out = fmt("run = { |b:Block(Integer Integer ^Integer) ^Block(^Boolean)| b }");
+    assert!(out.contains("b:Block(Integer Integer ^Integer)"), "{out}");
+    assert!(out.contains("^Block(^Boolean)"), "{out}");
+
+    let out = fmt("var f: Block(List(Integer) ^Boolean) = { |xs| true }");
+    assert!(
+        out.contains("var f: Block(List(Integer) ^Boolean)"),
+        "{out}"
+    );
+
+    let out = fmt("var t: Block() = { 1 }");
+    assert!(out.contains("var t: Block()"), "{out}");
+}

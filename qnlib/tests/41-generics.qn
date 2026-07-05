@@ -188,4 +188,34 @@ ShapeG <- CircleG <- {
         };
         .is:{ RedefG.v:(#(1).ensure:Integer) } equalTo:'second';
     };
+
+    "* G4: Block(args ^Ret) erases fully at dispatch - a shaped Block param
+    "* accepts ANY block (shapes are checker beliefs; value: checks nothing),
+    "* while still constraining against non-block arguments.
+    .test:
+    blockTypesEraseAtDispatch -> {
+        BlockEraseG <- {
+            .meta <-- {
+                call: -> { |b: Block(Integer ^Boolean)| 'block' };
+                call: -> { |x: Integer| 'int' }
+            }
+        };
+        .is:{ BlockEraseG.call:{ |s| s } } equalTo:'block';
+        .is:{ BlockEraseG.call:3 } equalTo:'int';
+    };
+
+    "* Unlike element tags, block shapes are NOT variant identity: the runtime
+    "* cannot tell Block(Integer ^Boolean) from Block(String ^String), so two
+    "* signatures differing only in block shape REDEFINE (the later wins) -
+    "* never two variants distinguished by something dispatch can't check.
+    .test:
+    blockShapesRedefine -> {
+        BlockRedefG <- {
+            .meta <-- {
+                v: -> { |b: Block(Integer ^Boolean)| 'first' };
+                v: -> { |b: Block(String ^String)| 'second' }
+            }
+        };
+        .is:{ BlockRedefG.v:{ |x| x } } equalTo:'second';
+    };
 }

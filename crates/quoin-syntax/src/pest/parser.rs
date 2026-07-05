@@ -962,16 +962,28 @@ fn parse_type_ref(pair: Pair<Rule>, filename: &str, source_text: &str) -> TypeRe
         Rule::ident => (parse_ident(first, filename, source_text), inner.next()),
         _ => unreachable!(),
     };
-    let args = match rest {
-        Some(ta) if ta.as_rule() == Rule::type_args => ta
-            .into_inner()
-            .map(|t| Arc::new(parse_type_ref(t, filename, source_text)))
-            .collect(),
-        _ => Vec::new(),
+    let (args, ret, parenthesized) = match rest {
+        Some(ta) if ta.as_rule() == Rule::type_args => {
+            let mut args = Vec::new();
+            let mut ret = None;
+            for p in ta.into_inner() {
+                match p.as_rule() {
+                    Rule::type_ret => {
+                        let inner = p.into_inner().next().unwrap();
+                        ret = Some(Arc::new(parse_type_ref(inner, filename, source_text)));
+                    }
+                    _ => args.push(Arc::new(parse_type_ref(p, filename, source_text))),
+                }
+            }
+            (args, ret, true)
+        }
+        _ => (Vec::new(), None, false),
     };
     TypeRefNode {
         ident: Arc::new(ident),
         args,
+        ret,
+        parenthesized,
     }
 }
 
@@ -2380,6 +2392,8 @@ mod tests {
         Arc::new(TypeRefNode {
             args: Vec::new(),
             ident: ns_ident(path, name),
+            ret: None,
+            parenthesized: false,
         })
     }
 
@@ -2388,6 +2402,19 @@ mod tests {
         Arc::new(TypeRefNode {
             ident: ident_node(name, IdentifierType::Local),
             args,
+            ret: None,
+            parenthesized: true,
+        })
+    }
+
+    /// A block type annotation node: `Block(args… ^ret)` (`ret` = None for no
+    /// `^`-tail; `args` empty + no ret = `Block()`).
+    fn block_type(args: Vec<Arc<TypeRefNode>>, ret: Option<Arc<TypeRefNode>>) -> Arc<TypeRefNode> {
+        Arc::new(TypeRefNode {
+            ident: ident_node("Block", IdentifierType::Local),
+            args,
+            ret,
+            parenthesized: true,
         })
     }
 
@@ -2396,6 +2423,8 @@ mod tests {
         Arc::new(TypeRefNode {
             ident: ident_node(name, IdentifierType::Local),
             args: Vec::new(),
+            ret: None,
+            parenthesized: false,
         })
     }
 
@@ -2468,6 +2497,62 @@ mod tests {
                         generic_type("List", vec![flat_type("Integer")]),
                     ],
                 )),
+                vec![],
+            )],
+        }));
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn test_parse_block_type_annotations() {
+        // `|b: Block(Integer Integer ^Integer)|` — args plus the `^`-marked return.
+        let ast = parse("{ |b: Block(Integer Integer ^Integer)| 1; };");
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![block_arg(
+                    "b",
+                    IdentifierType::Local,
+                    Some(block_type(
+                        vec![flat_type("Integer"), flat_type("Integer")],
+                        Some(flat_type("Integer")),
+                    )),
+                )],
+                None,
+                vec![],
+            )],
+        }));
+        assert_eq!(ast, expected);
+
+        // `Block()` (zero args, parens present) ≠ bare `Block`; `Block(^Boolean)`
+        // is return-only; block types nest as generic arguments and returns.
+        let ast = parse(
+            "{ |a: Block() b: Block(^Boolean) c: Block d: Block(List(Integer) ^Block(Integer ^Boolean))| 1; };",
+        );
+        let expected = val_node(NodeValue::Program(ProgramNode {
+            source_info: None,
+            expressions: vec![block_with(
+                vec![
+                    block_arg("a", IdentifierType::Local, Some(block_type(vec![], None))),
+                    block_arg(
+                        "b",
+                        IdentifierType::Local,
+                        Some(block_type(vec![], Some(flat_type("Boolean")))),
+                    ),
+                    block_arg("c", IdentifierType::Local, Some(flat_type("Block"))),
+                    block_arg(
+                        "d",
+                        IdentifierType::Local,
+                        Some(block_type(
+                            vec![generic_type("List", vec![flat_type("Integer")])],
+                            Some(block_type(
+                                vec![flat_type("Integer")],
+                                Some(flat_type("Boolean")),
+                            )),
+                        )),
+                    ),
+                ],
+                None,
                 vec![],
             )],
         }));

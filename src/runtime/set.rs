@@ -123,10 +123,12 @@ pub fn build_set_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             let v = host.new_list(Vec::new());
             if tag.is_some() {
-                let _ =
-                    host.with_native_state_mut(v, |l: &mut crate::runtime::list::NativeListState| {
+                let _ = host.with_native_state_mut(
+                    v,
+                    |l: &mut crate::runtime::list::NativeListState| {
                         l.elem = tag;
-                    });
+                    },
+                );
             }
             Ok(v)
         })

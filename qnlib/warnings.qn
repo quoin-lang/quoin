@@ -86,6 +86,22 @@ GenericGallery(T) <- {
     wellFormed: -> { |m: Map(String Integer) ^List(Integer)| #( m.at:'k' ) }
 };
 
+"* --- G4: Block types (`Block(args ^Ret)`, GENERICS_ARCH §11) ---
+BlockTypeGallery <- {
+    "* The `^`-marked return tail is block-type syntax only.
+    retOnList: -> { |l: List(Integer ^Boolean)| l };
+
+    "* Empty parens are `Block()` syntax only (List/Set/Map have fixed arity).
+    emptyParens: -> { |l: List()| l };
+
+    "* --- these are CORRECT and must emit NO warning ---
+    "* Every block-type arity: args + return, return-only, zero-arg, bare, nested.
+    predicate: -> { |b: Block(Integer ^Boolean)| b };
+    thunk: -> { |b: Block() ^Block(^Boolean)| b };
+    unconstrained: -> { |b: Block| b };
+    higherOrder: -> { |b: Block(List(Integer) ^Block(Integer ^Boolean))| b }
+};
+
 "* --- G2: element types flow through the checker ---
 GenericFlow <- {
     "* An element read is honestly `T?` — dereferencing without a narrow warns…

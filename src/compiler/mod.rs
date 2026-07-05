@@ -27,12 +27,14 @@ mod inlining;
 /// hints, and `populate_from_vm`'s class-table entries.
 pub(crate) fn annotation_name(tr: &TypeRefNode) -> String {
     let base = NamespacedName::from_ast(&tr.ident).to_string();
-    if tr.args.is_empty() {
-        base
-    } else {
-        let args: Vec<String> = tr.args.iter().map(|a| annotation_name(a)).collect();
-        format!("{}({})", base, args.join(" "))
+    if !tr.parenthesized {
+        return base;
     }
+    let mut parts: Vec<String> = tr.args.iter().map(|a| annotation_name(a)).collect();
+    if let Some(r) = &tr.ret {
+        parts.push(format!("^{}", annotation_name(r)));
+    }
+    format!("{}({})", base, parts.join(" "))
 }
 
 /// A plain identifier's rendered name (parent classes, mixin targets — the
@@ -53,7 +55,7 @@ pub(crate) fn type_from_ref(tr: &TypeRefNode) -> Type {
 /// class table, where the compiler's ctx stack isn't available).
 pub(crate) fn type_from_ref_with_vars(tr: &TypeRefNode, vars: &[String]) -> Type {
     let base = NamespacedName::from_ast(&tr.ident).to_string();
-    if tr.args.is_empty() {
+    if !tr.parenthesized {
         if tr.ident.namespace.is_none() {
             let (core, nullable) = match base.strip_suffix('?') {
                 Some(b) => (b, true),
@@ -69,6 +71,23 @@ pub(crate) fn type_from_ref_with_vars(tr: &TypeRefNode, vars: &[String]) -> Type
             }
         }
         return Type::from_annotation_name(&base);
+    }
+    // `Block(args… ^Ret)`: any arity (zero included — `Block()`); no `^`-tail
+    // means an `Any` return (docs/GENERICS_ARCH.md §11).
+    if base == "Block" {
+        return Type::BlockOf {
+            params: tr
+                .args
+                .iter()
+                .map(|a| type_from_ref_with_vars(a, vars))
+                .collect(),
+            ret: Box::new(
+                tr.ret
+                    .as_ref()
+                    .map(|r| type_from_ref_with_vars(r, vars))
+                    .unwrap_or(Type::Any),
+            ),
+        };
     }
     match (base.as_str(), tr.args.len()) {
         ("List", 1) => Type::ListOf(Box::new(type_from_ref_with_vars(&tr.args[0], vars))),
@@ -948,7 +967,7 @@ impl Compiler {
         // A bare name that matches a declared class/mixin-header type parameter
         // is a type variable (`T?` rides the nullable suffix inside the ident,
         // like every annotation).
-        if tr.args.is_empty() && tr.ident.namespace.is_none() {
+        if !tr.parenthesized && tr.ident.namespace.is_none() {
             let (base, nullable) = match tr.ident.name.strip_suffix('?') {
                 Some(b) => (b, true),
                 None => (tr.ident.name.as_str(), false),
@@ -962,9 +981,22 @@ impl Compiler {
                 };
             }
         }
-        if !tr.args.is_empty() {
+        if tr.parenthesized {
             let base = ident_name(&tr.ident);
+            // The `^`-marked return tail is block-type syntax only
+            // (`Block(Integer ^Boolean)`, GENERICS_ARCH.md §11).
+            if tr.ret.is_some() && base != "Block" {
+                self.warn(
+                    format!(
+                        "`^` return types belong to `Block(…)` annotations; `{base}` \
+                         takes plain type arguments"
+                    ),
+                    tr.ident.source_info.as_ref(),
+                );
+            }
             match (base.as_str(), tr.args.len()) {
+                // Any arity, zero included (`Block()` = no args, `Any` return).
+                ("Block", _) => {}
                 ("List", 1) | ("Set", 1) => {}
                 ("Map", 2) => {
                     let key = annotation_name(&tr.args[0]);
@@ -1001,6 +1033,9 @@ impl Compiler {
             for a in &tr.args {
                 // Resolve arguments for their own diagnostics (unknown names etc.).
                 let _ = self.resolve_annotation(a);
+            }
+            if let Some(r) = &tr.ret {
+                let _ = self.resolve_annotation(r);
             }
             return type_from_ref_with_vars(tr, &self.ctx_type_params());
         }

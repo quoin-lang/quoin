@@ -234,8 +234,13 @@ local_ident      = { ident }
 // `Map(String List(Integer))` — space-separated, nesting allowed; the settled
 // syntax from docs/TYPE_SYSTEM_ARCH.md, designed in docs/GENERICS_ARCH.md).
 // Shared by every type position (`var x: T`, `|x:T|`, `|a - x:T|`, `^T`).
+// The optional `^`-marked tail is a block type's return (`Block(Integer
+// ^Boolean)`, `Block()` = zero args / `Any` — GENERICS_ARCH.md §11); the
+// grammar is one shape for all bases, the resolver rejects `^Ret` and empty
+// parens on non-`Block` bases (G0-style structural resolve + diagnostics).
 type_ref  = { namespace? ~ ident ~ type_args? }
-type_args = { "(" ~ type_ref+ ~ ")" }
+type_args = { "(" ~ type_ref* ~ type_ret? ~ ")" }
+type_ret  = { "^" ~ type_ref }
 
 // Class/mixin-header type parameters (`Iterate(T U) <- { … }`): bare names,
 // declaring the type variables the body's method signatures may use
