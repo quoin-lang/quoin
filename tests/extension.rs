@@ -329,6 +329,14 @@ var arr = e.call:'buildArray' with:'';
 "* host reach: the ext reads a passed value back as structured data (read_handle)
 ((e.call:'inspect' with:'' args:#( #{{ 'k': 7 }} )) == #{{ 'k': 7 }}).else:{{ ok = false }};
 
+"* a pathologically deep structured value is rejected catchably — the host must not
+"* overflow its stack decoding it (crash isolation is the whole point of Tier 1)
+{{ e.call:'deepData' with:''; ok = false; 'FAIL: deep value accepted'.print }}
+    .catch:{{ |err| nil }};
+
+"* and the extension is still alive and usable after the rejected call
+((e.call:'mkList' with:'') == #( 1 2 3 )).else:{{ ok = false; 'FAIL: ext dead after deep'.print }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );

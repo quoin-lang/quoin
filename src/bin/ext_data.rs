@@ -24,6 +24,17 @@ fn main() {
                 DataValue::Int(2),
                 DataValue::Int(3),
             ])),
+            // A `DataValue` nested past the host's decode-depth cap — the host must
+            // reject it with a catchable error, not overflow its stack (crash isolation).
+            "deepData" => {
+                // Above the host's decode cap, but shallow enough that
+                // building/encoding it in this process does not itself overflow.
+                let mut dv = DataValue::Int(1);
+                for _ in 0..300 {
+                    dv = DataValue::List(vec![dv]);
+                }
+                Reply::Data(dv)
+            }
             "buildArray" => {
                 let array_class = host.get_global("Array").expect("get_global Array");
                 let list = host
