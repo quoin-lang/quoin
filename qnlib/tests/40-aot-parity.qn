@@ -134,4 +134,34 @@ AotGenerics <- {
         .is:{ { AotGenerics.fillInto:(List.of:String) count:4 }.catch:{ |e| 'caught' } }
             equalTo:'caught';
     };
+};
+
+"* G3: the proven Boolean?-if lowering. A checked List(Boolean) element read
+"* feeding if: compiles to a direct branch with a nil->MNU stub (no capturing
+"* cold path). The nil case must raise the EXACT interpreter MNU, catchable,
+"* identical in both modes.
+
+AotNilIf <- {
+    .meta <-- {
+        flagAt: -> { |n: Integer ^Integer|
+            var flags: List(Boolean) = #();
+            flags.add:true;
+            flags.add:false;
+            (flags.at:n).if:{ ^^1 };
+            0
+        }
+    };
+    .sealed!
+};
+
+(TestSuite.new:{ var name = 'AotParityNilIf' }).add:{
+    .test:provenBoolIfBranches -> {
+        .is:{ AotNilIf.flagAt:0 } equalTo:1;
+        .is:{ AotNilIf.flagAt:1 } equalTo:0
+    };
+
+    .test:outOfBoundsNilRaisesTheExactMnu -> {
+        var m = { AotNilIf.flagAt:99 }.catch:{ |e| e.message };
+        .is:{ m } equalTo:'no method \'if:\' for Nil'
+    }
 }

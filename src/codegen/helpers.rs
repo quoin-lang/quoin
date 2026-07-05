@@ -20,6 +20,7 @@ use gc_arena::Mutation;
 
 use crate::devirt_ops;
 use crate::error::QuoinError;
+use crate::runtime::elem_tag;
 use crate::runtime::list::NativeListState;
 use crate::symbol::Symbol;
 use crate::value::NamespacedName;
@@ -151,19 +152,26 @@ pub(super) unsafe extern "C" fn list_push(
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
     let value = decode(vm, kind, bits);
     let receiver = vm.stack[list_idx as usize];
-    // Untagged fast path exactly mirrors the interpreter's ListPush arm; a
-    // tagged list takes the shared cold checked write.
-    let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
-        if l.elem.is_none() {
+    // Mirrors the interpreter's ListPush arm: untagged and scalar-tag checks
+    // decide inside the one borrow; only Class tags escalate to the walk.
+    let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| match l.elem {
+        None => {
             l.get_vec_mut().push(value);
-            true
-        } else {
-            false
+            Some(Ok(()))
         }
+        Some(t) => match t.matches_value(&value) {
+            Some(true) => {
+                l.get_vec_mut().push(value);
+                Some(Ok(()))
+            }
+            Some(false) => Some(Err(elem_tag::elem_type_error("List", t, &value, None))),
+            None => None,
+        },
     });
     match res {
-        Ok(true) => TAG_OK,
-        Ok(false) => match vm.tagged_list_push(mc, receiver, value) {
+        Ok(Some(Ok(()))) => TAG_OK,
+        Ok(Some(Err(e))) => store_err(vm, e),
+        Ok(None) => match vm.tagged_list_push(mc, receiver, value) {
             Ok(()) => TAG_OK,
             Err(e) => store_err(vm, e),
         },
@@ -221,6 +229,60 @@ pub(super) unsafe extern "C" fn list_set(
         },
         Err(_) => invariant(vm, "ListSet on a non-list receiver"),
     }
+}
+
+/// `TagCollection`: verify + stamp a FRESH collection literal in a slot
+/// (annotation-driven tagged literals inside compiled code). Mirrors the
+/// interpreter arm exactly (`vm.tag_fresh_collection`).
+pub(super) unsafe extern "C" fn tag_collection(
+    vm: *mut c_void,
+    mc: *const c_void,
+    slot_idx: i64,
+    tag_code: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let Some(tag) = crate::runtime::elem_tag::ElemTag::from_code(tag_code) else {
+        return invariant(vm, "TagCollection: bad tag code");
+    };
+    let v = vm.stack[slot_idx as usize];
+    match vm.tag_fresh_collection(mc, v, tag) {
+        Ok(()) => TAG_OK,
+        Err(e) => store_err(vm, e),
+    }
+}
+
+/// The provable cold path of an inlined conditional on a PROVEN
+/// `Boolean`-or-nil value (a checked `List(Boolean)` element read): the only
+/// runtime possibility here is nil, whose sealed class has no `if:` — raise
+/// the exact MessageNotUnderstood the interpreter's real send would
+/// (GENERICS_ARCH.md §7). Renders the actual value defensively, so even an
+/// impossible tag-corruption failure names what arrived.
+pub(super) unsafe extern "C" fn nil_mnu(
+    vm: *mut c_void,
+    mc: *const c_void,
+    kind: i64,
+    bits: i64,
+    selector: *const Symbol,
+    argc: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let _ = mc;
+    let receiver = decode(vm, kind, bits);
+    let selector = unsafe { &*selector };
+    let candidates = vm
+        .collect_method_candidates(receiver, *selector)
+        .iter()
+        .map(|&mv| vm.format_candidate_signature(mv, *selector))
+        .collect();
+    store_err(
+        vm,
+        crate::error::QuoinError::MessageNotUnderstood {
+            receiver: receiver.class_name(),
+            selector: selector.as_str().to_string(),
+            args: vec!["Block".to_string(); argc as usize],
+            candidates,
+        },
+    )
 }
 
 /// A string literal, materialized into `out_idx`.
@@ -331,5 +393,7 @@ pub(super) fn symbols() -> Vec<(&'static str, *const u8)> {
         ("qn_aot_outcall", outcall as *const u8),
         ("qn_aot_load_global", load_global as *const u8),
         ("qn_aot_narrow_error", narrow_error as *const u8),
+        ("qn_aot_tag_collection", tag_collection as *const u8),
+        ("qn_aot_nil_mnu", nil_mnu as *const u8),
     ]
 }

@@ -845,7 +845,7 @@ impl<'gc> VmState<'gc> {
     /// stamp the tag (`TagCollection` — annotation-driven tagged literals,
     /// docs/GENERICS_ARCH.md §4.2). Safe to stamp in place: the literal has no
     /// aliases yet.
-    fn tag_fresh_collection(
+    pub(crate) fn tag_fresh_collection(
         &self,
         mc: &Mutation<'gc>,
         v: Value<'gc>,
@@ -4022,10 +4022,18 @@ impl<'gc> VmState<'gc> {
                     // body behind one `is_none`. Tagged lists take the
                     // out-of-line checked path (docs/GENERICS_ARCH.md §6).
                     let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
-                        if l.elem.is_none() {
-                            Some(devirt_ops::list_set(l.get_vec_mut(), i, value))
-                        } else {
-                            None
+                        match l.elem {
+                            None => Some(devirt_ops::list_set(l.get_vec_mut(), i, value)),
+                            // Scalar tags decide inside the one borrow; the tag
+                            // check precedes the bounds check (the VALUE is
+                            // illegal regardless of index). Class tags escalate.
+                            Some(t) => match t.matches_value(&value) {
+                                Some(true) => Some(devirt_ops::list_set(l.get_vec_mut(), i, value)),
+                                Some(false) => {
+                                    Some(Err(elem_tag::elem_type_error("List", t, &value, Some(i))))
+                                }
+                                None => None,
+                            },
                         }
                     });
                     if let Ok(fast) = res {
@@ -4041,7 +4049,7 @@ impl<'gc> VmState<'gc> {
                             }
                         };
                         self.stack.truncate(n - 3);
-                        inner?; // propagate an IndexError (out-of-bounds write)
+                        inner?; // propagate an IndexError or tag TypeError
                         self.push(receiver); // `at:put:` evaluates to the receiver
                         // b2: early-return arm — sync the hoisted ip (see dispatch_one invariant).
                         self.frames[frame_idx].ip = ip + 1;
@@ -4055,23 +4063,37 @@ impl<'gc> VmState<'gc> {
                 let value = self.stack[n - 1];
                 let receiver = self.stack[n - 2];
                 let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
-                    if l.elem.is_none() {
-                        l.get_vec_mut().push(value);
-                        true
-                    } else {
-                        false
+                    match l.elem {
+                        None => {
+                            l.get_vec_mut().push(value);
+                            Some(Ok(()))
+                        }
+                        // Scalar tags decide inside the one borrow (vm-free);
+                        // only a Class tag escalates to the dispatch walk.
+                        Some(t) => match t.matches_value(&value) {
+                            Some(true) => {
+                                l.get_vec_mut().push(value);
+                                Some(Ok(()))
+                            }
+                            Some(false) => {
+                                Some(Err(elem_tag::elem_type_error("List", t, &value, None)))
+                            }
+                            None => None,
+                        },
                     }
                 });
                 if let Ok(fast) = res {
-                    if !fast {
-                        let r = self.tagged_list_push(mc, receiver, value);
-                        self.stack.truncate(n - 2);
-                        r?;
-                        self.push(receiver);
-                        self.frames[frame_idx].ip = ip + 1;
-                        return Ok(VmStatus::Running);
+                    match fast {
+                        Some(inner) => {
+                            self.stack.truncate(n - 2);
+                            inner?;
+                        }
+                        None => {
+                            let r = self.tagged_list_push(mc, receiver, value);
+                            self.stack.truncate(n - 2);
+                            r?;
+                        }
                     }
-                    self.stack.truncate(n - 2);
                     self.push(receiver); // `add:` evaluates to the receiver
                     self.frames[frame_idx].ip = ip + 1;
                     return Ok(VmStatus::Running);
@@ -4109,24 +4131,40 @@ impl<'gc> VmState<'gc> {
                     && let ObjectPayload::String(s) = o.borrow().payload
                 {
                     let key_str = s.to_string(); // the map owns String keys
-                    let res = receiver.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
-                        if m.elem.is_none() {
-                            m.get_map_mut().insert(key_str.clone(), value);
-                            true
-                        } else {
-                            false
-                        }
-                    });
+                    let res =
+                        receiver.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
+                            match m.elem {
+                                None => {
+                                    m.get_map_mut().insert(key_str.clone(), value);
+                                    Some(Ok(()))
+                                }
+                                Some(t) => match t.matches_value(&value) {
+                                    Some(true) => {
+                                        m.get_map_mut().insert(key_str.clone(), value);
+                                        Some(Ok(()))
+                                    }
+                                    Some(false) => Some(Err(elem_tag::elem_type_error(
+                                        "Map String",
+                                        t,
+                                        &value,
+                                        None,
+                                    ))),
+                                    None => None,
+                                },
+                            }
+                        });
                     if let Ok(fast) = res {
-                        if !fast {
-                            let r = self.tagged_map_set(mc, receiver, key_str, value);
-                            self.stack.truncate(n - 3);
-                            r?;
-                            self.push(receiver);
-                            self.frames[frame_idx].ip = ip + 1;
-                            return Ok(VmStatus::Running);
+                        match fast {
+                            Some(inner) => {
+                                self.stack.truncate(n - 3);
+                                inner?;
+                            }
+                            None => {
+                                let r = self.tagged_map_set(mc, receiver, key_str, value);
+                                self.stack.truncate(n - 3);
+                                r?;
+                            }
                         }
-                        self.stack.truncate(n - 3);
                         self.push(receiver); // `at:put:` evaluates to the receiver
                         self.frames[frame_idx].ip = ip + 1;
                         return Ok(VmStatus::Running);

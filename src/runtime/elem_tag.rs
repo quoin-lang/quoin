@@ -110,6 +110,36 @@ impl ElemTag {
     }
 }
 
+impl ElemTag {
+    /// Compact code for embedding in compiled code (AOT `TagCollection`).
+    /// `Class` tags have no code — the translator refuses those literals.
+    pub fn code(self) -> Option<i64> {
+        Some(match self {
+            ElemTag::Int => 0,
+            ElemTag::Double => 1,
+            ElemTag::Bool => 2,
+            ElemTag::Str => 3,
+            ElemTag::List => 4,
+            ElemTag::Map => 5,
+            ElemTag::Set => 6,
+            ElemTag::Class(_) => return None,
+        })
+    }
+
+    pub fn from_code(c: i64) -> Option<ElemTag> {
+        Some(match c {
+            0 => ElemTag::Int,
+            1 => ElemTag::Double,
+            2 => ElemTag::Bool,
+            3 => ElemTag::Str,
+            4 => ElemTag::List,
+            5 => ElemTag::Map,
+            6 => ElemTag::Set,
+            _ => return None,
+        })
+    }
+}
+
 /// Single-borrow insertion gate for the hot devirtualized write paths: the
 /// caller's closure consults it while already holding the state borrow, writes
 /// on `Pass`, and escalates `NeedWalk` (a `Class` tag) to the VM's class walk
