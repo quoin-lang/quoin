@@ -86,4 +86,19 @@ GenericGallery(T) <- {
     wellFormed: -> { |m: Map(String Integer) ^List(Integer)| #( m.at:'k' ) }
 };
 
+"* --- G2: element types flow through the checker ---
+GenericFlow <- {
+    "* An element read is honestly `T?` — dereferencing without a narrow warns…
+    badRead: -> { |l: List(Integer)| var z: Integer = l.at:0; z };
+
+    "* …and a statically-visible bad insertion warns (it would raise at runtime).
+    badInsert: -> { |l: List(Integer)| l.add:'nope' };
+
+    "* --- these are CORRECT and must emit NO warning ---
+    "* narrowed element read; select: flows List(Integer); nil is always insertable.
+    goodRead: -> { |l: List(Integer)| var v = l.at:0; v.defined?.if:{ v + 1 } else:{ 0 } };
+    goodFlow: -> { |l: List(Integer)| var evens: List(Integer) = l.select:{ |x| x > 1 }; evens };
+    goodNil: -> { |l: List(Integer)| l.add:nil }
+};
+
 'Defined Warnings — see the diagnostics printed above.'.print

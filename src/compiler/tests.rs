@@ -2063,3 +2063,110 @@ fn generic_type_lattice_rules() {
     );
     assert_eq!(Type::SetOf(Box::new(Type::String)).name(), "Set(String)");
 }
+
+// --- G2: type-variable binding machinery (docs/GENERICS_ARCH.md §4.4/§7) ---
+
+#[test]
+fn type_substitution_and_unification() {
+    use std::collections::HashMap;
+    let t = || Arc::<str>::from("T");
+    // substitute: bound vars replace; unbound become Any; T? collapses on Any.
+    let mut b: HashMap<Arc<str>, Type> = HashMap::new();
+    b.insert(t(), Type::Int);
+    assert_eq!(
+        Type::ListOf(Box::new(Type::Var(t()))).substitute(&b),
+        Type::ListOf(Box::new(Type::Int))
+    );
+    assert_eq!(
+        Type::Nullable(Box::new(Type::Var(t()))).substitute(&b),
+        Type::Nullable(Box::new(Type::Int))
+    );
+    let empty: HashMap<Arc<str>, Type> = HashMap::new();
+    assert_eq!(
+        Type::Nullable(Box::new(Type::Var(t()))).substitute(&empty),
+        Type::Any
+    );
+    // unify: binds through collection/nullable structure; conflicts widen to Any.
+    let mut b2: HashMap<Arc<str>, Type> = HashMap::new();
+    Type::unify_into(
+        &Type::ListOf(Box::new(Type::Var(t()))),
+        &Type::ListOf(Box::new(Type::String)),
+        &mut b2,
+    );
+    assert_eq!(b2.get("T"), Some(&Type::String));
+    Type::unify_into(&Type::Var(t()), &Type::Int, &mut b2);
+    assert_eq!(b2.get("T"), Some(&Type::Any));
+}
+
+#[test]
+fn annotation_string_parsing_with_vars() {
+    let vars: Vec<Arc<str>> = vec![Arc::from("T")];
+    assert_eq!(
+        Type::parse_annotation_str("T", &vars),
+        Type::Var(Arc::from("T"))
+    );
+    assert_eq!(
+        Type::parse_annotation_str("T?", &vars),
+        Type::Nullable(Box::new(Type::Var(Arc::from("T"))))
+    );
+    assert_eq!(
+        Type::parse_annotation_str("List(T)", &vars),
+        Type::ListOf(Box::new(Type::Var(Arc::from("T"))))
+    );
+    assert_eq!(
+        Type::parse_annotation_str("Map(String V)", &[Arc::from("V")]),
+        Type::MapOf(Box::new(Type::Var(Arc::from("V"))))
+    );
+    assert_eq!(Type::parse_annotation_str("Integer", &vars), Type::Int);
+}
+
+#[test]
+fn generic_insertion_warnings() {
+    // A statically-visible bad insertion warns; nil and matching types are silent.
+    let d = all_diags("Foo <- { a: -> { |l: List(Integer)| l.add:'nope' } }");
+    assert!(
+        d.iter().any(|m| m.contains("rejects a `String` element")),
+        "{d:?}"
+    );
+    let d = all_diags("Foo <- { a: -> { |l: List(Integer)| l.at:0 put:'bad' } }");
+    assert!(
+        d.iter().any(|m| m.contains("rejects a `String` element")),
+        "{d:?}"
+    );
+    assert!(all_diags("Foo <- { a: -> { |l: List(Integer)| l.add:nil } }").is_empty());
+    assert!(all_diags("Foo <- { a: -> { |l: List(Integer)| l.add:3 } }").is_empty());
+    // A variable-typed element claims nothing (generic method bodies stay quiet).
+    assert!(all_diags("It(T) <- { a: -> { |l: List(T)| l.add:'anything' } }").is_empty());
+}
+
+#[test]
+fn tagged_receivers_keep_collection_devirt() {
+    // A List(Integer)-typed receiver still compiles at:put:/add:/at: to the
+    // devirtualized ops (whose interpreter arms carry the tag gate).
+    let node = crate::parser::parse_quoin_string(
+        "Foo <- { a: -> { |l: List(Integer)| l.at:0 put:1; l.add:2; l.at:0 } }",
+    );
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    let code = c.compile_program(p).unwrap();
+    fn collect(insts: &[Instruction], out: &mut Vec<&'static str>) {
+        for i in insts {
+            match i {
+                Instruction::ListSet => out.push("set"),
+                Instruction::ListPush => out.push("push"),
+                Instruction::ListGet => out.push("get"),
+                Instruction::Push(Constant::Block(b)) => collect(&b.bytecode, out),
+                _ => {}
+            }
+        }
+    }
+    let mut found = Vec::new();
+    collect(&code.bytecode, &mut found);
+    assert!(
+        found.contains(&"set") && found.contains(&"push") && found.contains(&"get"),
+        "{found:?} bytecode: {:?}",
+        code.bytecode
+    );
+}

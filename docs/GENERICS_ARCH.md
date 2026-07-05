@@ -6,8 +6,23 @@ states, all write sites gated including the devirtualized arms and the AOT
 ListPush/ListSet helpers, `List.of:`/`Map.of:`/`Set.of:`, `ensure:`,
 `elementType`, tagged-literal lowering via `TagCollection`, `sliceFrom:`
 propagation). Untagged-path cost verified at zero: full bench suite within
-same-source noise. G2 (checker/type variables + `emptyLike` + typed Iterate
-signatures) and G3 (optimizer/AOT + the sieve acceptance test) remain.
+same-source noise. G2 SHIPPED: type variables end to end — class-header
+params on `ClassSig` (AST-recorded, merged across the shared cross-unit
+table; the builtin collections seeded `List(T)`/`Set(T)`/`Map(V)` so
+natives declare `.returns("T?")`-style signatures), receiver-element
+binding + argument unification + substitution in
+`typed_receiver_return_type`, construction inference (`List.of:X`,
+`ensure:X`), `emptyLike` + the `collector` species protocol (List
+combinators and Set algebra preserve tags; `collect:` honestly untagged),
+typed Iterate signatures (`^List(T)`, `^T?` — the generality proof),
+element reads honestly `T?` through nil-narrowing, insertion warnings
+mirroring the runtime check, and tagged receivers keeping collection
+devirt. G2 findings: a Map's ITERATION element is a pair, not its value
+type, so MapOf receivers bind only Map's own methods; a type mentioning an
+unbound variable is gradual in `compatible_with` (adjudicates nothing);
+`collect:`'s result typing needs `Block(args ^Ret)` annotations — deferred
+with that grammar, `ensure:` covers the runtime need. G3 (optimizer/AOT +
+the sieve acceptance test) remains.
 Design revisions from review: real type variables replace the earlier
 implicit-`Element` idea; `emptyLike` chosen over extending `default`;
 `collect:as:` dropped as redundant with inference + `ensure:`. The settled generics syntax

@@ -151,6 +151,16 @@ pub fn build_list_class() -> NativeClassBuilder {
             }
             Ok(new_list_with_tag(vm, mc, vec, Some(tag)))
         })
+        // `emptyLike` — the species protocol (GENERICS_ARCH.md §4.5): a fresh
+        // empty collection LIKE the receiver, element tag included. Iterate's
+        // default is `self.class.default`; the natives override to carry tags.
+        .instance_method("emptyLike", |vm, mc, receiver, _args| {
+            let tag = receiver
+                .with_native_state::<NativeListState, _, _>(|l| l.elem)
+                .map_err(QuoinError::Other)?;
+            Ok(new_list_with_tag(vm, mc, Vec::new(), tag))
+        })
+        .returns("List(T)") // emptyLike: same shape, same tag, empty
         // The element tag as a Symbol (`#Integer`), or nil when untagged.
         .instance_method("elementType", |vm, mc, receiver, _args| {
             let tag = receiver
@@ -202,6 +212,10 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(got.unwrap_or_else(|| vm.new_nil(mc)))
         })
+        // Element-typed read: on a `List(Integer)` receiver the checker binds
+        // T and sees `Integer?` (out-of-bounds is nil). `T` is the seeded
+        // type parameter of the builtin List (class_table.rs).
+        .returns("T?")
         // Only the index is typed (`&["Integer"]`); the value (arg 2) is any type.
         .typed_instance_method("at:put:", &["Integer"], |vm, mc, receiver, args| {
             let idx = arg!(args, Int, 0);
@@ -235,6 +249,7 @@ pub fn build_list_class() -> NativeClassBuilder {
                 })
                 .map_err(|e| QuoinError::Other(e))?
         })
+        .returns("List(T)") // sliceFrom: carries the receiver's tag
         .instance_method("s", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())

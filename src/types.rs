@@ -87,9 +87,14 @@ impl Type {
     /// fits, so untyped code is never flagged. `Instance` matches by name only — subtyping arrives
     /// with the class table (Phase 3b).
     pub fn compatible_with(&self, expected: &Type) -> bool {
+        // A type mentioning an unbound variable (`List(T)` inside a generic
+        // method body) can't be adjudicated statically — gradual, both ways.
+        if self.contains_var() || expected.contains_var() {
+            return true;
+        }
         match (self, expected) {
             (Type::Any, _) | (_, Type::Any) => true,
-            // Type variables are gradual until G2 binding lands.
+            // (kept for exhaustiveness; the contains_var gate above fires first)
             (Type::Var(_), _) | (_, Type::Var(_)) => true,
             // Width subtyping: a checked collection IS its bare type; the bare
             // (untagged) type never satisfies a checked one (no tag, no
@@ -163,6 +168,116 @@ impl Type {
             None => Type::Nil,
             Some(t) if nullable => Type::Nullable(Box::new(t)),
             Some(t) => t,
+        }
+    }
+
+    /// Parse an annotation STRING (`"Integer"`, `"T?"`, `"List(T)"`,
+    /// `"Map(String V)"`) with `vars` in scope as type variables — the
+    /// VM-bridge twin of the compiler's structural resolver, for native
+    /// `.returns(..)` declarations on the generic builtin collections.
+    pub fn parse_annotation_str(s: &str, vars: &[Arc<str>]) -> Type {
+        let s = s.trim();
+        if let Some(base) = s.strip_suffix('?') {
+            let inner = Self::parse_annotation_str(base, vars);
+            return match inner {
+                Type::Any => Type::Any,
+                Type::Nullable(t) => Type::Nullable(t),
+                t => Type::Nullable(Box::new(t)),
+            };
+        }
+        if let Some(open) = s.find('(') {
+            let (base, rest) = s.split_at(open);
+            let Some(args_src) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) else {
+                return Type::from_annotation_name(s);
+            };
+            // Split space-separated args at paren depth 0.
+            let mut args = Vec::new();
+            let (mut depth, mut start) = (0usize, 0usize);
+            for (i, c) in args_src.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    ' ' if depth == 0 => {
+                        if start < i {
+                            args.push(&args_src[start..i]);
+                        }
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            if start < args_src.len() {
+                args.push(&args_src[start..]);
+            }
+            let arg_ty = |i: usize| Box::new(Self::parse_annotation_str(args[i], vars));
+            return match (base, args.len()) {
+                ("List", 1) => Type::ListOf(arg_ty(0)),
+                ("Set", 1) => Type::SetOf(arg_ty(0)),
+                ("Map", 2) => Type::MapOf(arg_ty(1)),
+                _ => Type::from_annotation_name(base),
+            };
+        }
+        if vars.iter().any(|v| v.as_ref() == s) {
+            return Type::Var(Arc::from(s));
+        }
+        Type::from_annotation_name(s)
+    }
+
+    /// Does this type mention a type variable anywhere?
+    pub fn contains_var(&self) -> bool {
+        match self {
+            Type::Var(_) => true,
+            Type::Nullable(t) | Type::ListOf(t) | Type::MapOf(t) | Type::SetOf(t) => {
+                t.contains_var()
+            }
+            _ => false,
+        }
+    }
+
+    /// Replace every `Var` by its binding; unbound variables become `Any`
+    /// (gradual: an unbound variable claims nothing).
+    pub fn substitute(&self, bindings: &std::collections::HashMap<Arc<str>, Type>) -> Type {
+        match self {
+            Type::Var(n) => bindings.get(n).cloned().unwrap_or(Type::Any),
+            Type::Nullable(t) => match t.substitute(bindings) {
+                // `T?` with `T := U?` (or Any) must not double-wrap.
+                Type::Any => Type::Any,
+                Type::Nullable(inner) => Type::Nullable(inner),
+                inner => Type::Nullable(Box::new(inner)),
+            },
+            Type::ListOf(t) => Type::ListOf(Box::new(t.substitute(bindings))),
+            Type::MapOf(t) => Type::MapOf(Box::new(t.substitute(bindings))),
+            Type::SetOf(t) => Type::SetOf(Box::new(t.substitute(bindings))),
+            other => other.clone(),
+        }
+    }
+
+    /// Structural one-way unification: bind variables in `decl` from the shape
+    /// of `actual` (call-site argument binding, GENERICS_ARCH.md §4.4). First
+    /// binding wins; a conflicting rebind widens to `Any` (gradual, never an
+    /// error). `actual = Any` binds nothing.
+    pub fn unify_into(
+        decl: &Type,
+        actual: &Type,
+        bindings: &mut std::collections::HashMap<Arc<str>, Type>,
+    ) {
+        match (decl, actual) {
+            (_, Type::Any) => {}
+            (Type::Var(n), a) => match bindings.get(n.as_ref()) {
+                None => {
+                    bindings.insert(n.clone(), a.clone());
+                }
+                Some(prev) if prev == a => {}
+                Some(_) => {
+                    bindings.insert(n.clone(), Type::Any);
+                }
+            },
+            (Type::ListOf(d), Type::ListOf(a))
+            | (Type::MapOf(d), Type::MapOf(a))
+            | (Type::SetOf(d), Type::SetOf(a)) => Self::unify_into(d, a, bindings),
+            (Type::Nullable(d), Type::Nullable(a)) => Self::unify_into(d, a, bindings),
+            (Type::Nullable(d), a) => Self::unify_into(d, a, bindings),
+            _ => {}
         }
     }
 

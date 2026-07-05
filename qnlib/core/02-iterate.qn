@@ -8,15 +8,22 @@ iterable) - is derived from `each:`. No `next`/`reset` cursor, so iteration is
 re-entrant and `nil` is a perfectly valid element.
 "
 
-Mixin <- Iterate <- {
-    collect: -> { |collectBlock:Block|
+Mixin <- Iterate(T) <- {
+    "* The accumulator for element-preserving combinators (the species idea,
+    "* GENERICS_ARCH.md 4.5): a fresh list-shaped collector. List overrides it
+    "* with .emptyLike and Set with a tag-carrying list, so select:/take:/...
+    "* on a checked collection stay checked. collect: deliberately does NOT
+    "* use it - its elements are whatever the block returns.
+    collector -> { |^List| #() };
+
+    collect: -> { |collectBlock:Block ^List|
         var l = #();
         .each:{ |collectItem| l.add:collectBlock.valueWithSelfOrArg:collectItem };
         ^l
     };
 
-    select: -> { |selectBlock:Block|
-        var l = #();
+    select: -> { |selectBlock:Block ^List(T)|
+        var l = .collector;
         .each:{ |x| (selectBlock.valueWithSelfOrArg:x).if:{ l.add:x } };
         ^l
     };
@@ -53,12 +60,12 @@ Mixin <- Iterate <- {
         ^n
     };
 
-    detect: -> { |block|
+    detect: -> { |block ^T?|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^x } };
         ^nil
     };
 
-    nth: -> { |n|
+    nth: -> { |n ^T?|
         var i = 0;
         .each:{ |x| (i == n).if:{ ^^x }; i = i + 1 };
         ^nil
@@ -74,16 +81,16 @@ Mixin <- Iterate <- {
     "* External (pull-style) iteration, backed by a fiber over `each:`."
     iterator -> { Iterator.over:self };
 
-    take: -> { |n|
-        var l = #();
+    take: -> { |n ^List(T)|
+        var l = .collector;
         var it = .iterator;
         var i = 0;
         { (i < n) && it.hasNext? }.whileDo:{ l.add:it.next; i = i + 1 };
         ^l
     };
 
-    drop: -> { |n|
-        var l = #();
+    drop: -> { |n ^List(T)|
+        var l = .collector;
         var it = .iterator;
         var i = 0;
         { (i < n) && it.hasNext? }.whileDo:{ it.next; i = i + 1 };
@@ -157,7 +164,7 @@ Mixin <- Iterate <- {
         ^sum
     };
 
-    max: -> { |block:Block|
+    max: -> { |block:Block ^T?|
         var max = nil;
         .each:{ |x|
             max.defined?.if:{ (block.valueWithArgs:#(max x)).else:{ max = x } } else:{ max = x }
@@ -165,9 +172,9 @@ Mixin <- Iterate <- {
         ^max
     };
 
-    max -> { .max:{ |a b| a > b } };
+    max -> { |^T?| .max:{ |a b| a > b } };
 
-    min: -> { |block:Block|
+    min: -> { |block:Block ^T?|
         var min = nil;
         .each:{ |x|
             min.defined?.if:{ (block.valueWithArgs:#(min x)).if:{ min = x } } else:{ min = x }
@@ -175,11 +182,11 @@ Mixin <- Iterate <- {
         ^min
     };
 
-    min -> { .min:{ |a b| a > b } };
+    min -> { |^T?| .min:{ |a b| a > b } };
 
-    partition: -> { |block:Block|
-        var trueValues = #();
-        var falseValues = #();
+    partition: -> { |block:Block ^List|
+        var trueValues = .collector;
+        var falseValues = .collector;
 
         .each:{ |x|
             ((block.valueWithSelfOrArg:x) == true)
@@ -190,14 +197,14 @@ Mixin <- Iterate <- {
         #( trueValues falseValues )
     };
 
-    reject: -> { |block:Block|
-        var l = #();
+    reject: -> { |block:Block ^List(T)|
+        var l = .collector;
         .each:{ |x| (block.valueWithSelfOrArg:x).else:{ l.add:x } };
         ^l
     };
 
-    uniq -> {
-        var result = #();
+    uniq -> { |^List(T)|
+        var result = .collector;
         .each:{ |x| (result.contains?:x).else:{ result.add:x } };
         ^result
     };
@@ -219,16 +226,16 @@ Mixin <- Iterate <- {
         ^result
     };
 
-    reverse -> {
-        var result = #();
+    reverse -> { |^List(T)|
+        var result = .collector;
         .each:{ |x| result.push:x };
         ^result
     };
 
-    sort: -> { |block| .list.sort:block };
-    sort -> { .list.sort };
+    sort: -> { |block ^List(T)| .list.sort:block };
+    sort -> { |^List(T)| .list.sort };
 
-    list -> { self.select:{ true } }
+    list -> { |^List(T)| self.select:{ true } }
 };
 
 "
@@ -307,6 +314,8 @@ List <-- {
         default -> { #() }
     };
 
+    collector -> { |^List| .emptyLike };
+
     each: -> { |b|
         var i = 0;
         var n = .count;
@@ -327,21 +336,21 @@ Set <-- {
     "* each: is implemented natively (Set#each: in src/runtime/set.rs).
 
     "* Set algebra, built on the native add:/contains?: and the Iterate combinators.
-    union: -> { |other|
-        var r = #<>;
+    union: -> { |other ^Set(T)|
+        var r = .emptyLike;
         .each:{ |x| r.add:x };
         other.each:{ |x| r.add:x };
         r
     };
 
-    intersection: -> { |other|
-        var r = #<>;
+    intersection: -> { |other ^Set(T)|
+        var r = .emptyLike;
         .each:{ |x| (other.contains?:x).if:{ r.add:x } };
         r
     };
 
-    difference: -> { |other|
-        var r = #<>;
+    difference: -> { |other ^Set(T)|
+        var r = .emptyLike;
         .each:{ |x| (other.contains?:x).else:{ r.add:x } };
         r
     };

@@ -117,6 +117,33 @@ pub fn build_set_class() -> NativeClassBuilder {
             host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
             Ok(v)
         })
+        .sdk_instance_method("collector", |host, receiver, _args| {
+            let tag = receiver
+                .with_native_state::<NativeSetState, _, _>(|s| s.elem)
+                .map_err(QuoinError::Other)?;
+            let v = host.new_list(Vec::new());
+            if tag.is_some() {
+                host.with_native_state_mut(v, |l: &mut crate::runtime::list::NativeListState| {
+                    l.elem = tag;
+                });
+            }
+            Ok(v)
+        })
+        .returns("List(T)")
+        .sdk_instance_method("emptyLike", |host, receiver, _args| {
+            let tag = receiver
+                .with_native_state::<NativeSetState, _, _>(|s| s.elem)
+                .map_err(QuoinError::Other)?;
+            let v = host.new_native_state(
+                host.get_or_create_builtin_class("Set"),
+                NativeSetState::new(Vec::new()),
+            );
+            if tag.is_some() {
+                host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = tag);
+            }
+            Ok(v)
+        })
+        .returns("Set(T)") // emptyLike: same shape, same tag, empty
         .sdk_instance_method("elementType", |host, receiver, _args| {
             let tag = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.elem)

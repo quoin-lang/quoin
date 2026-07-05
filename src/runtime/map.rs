@@ -90,6 +90,7 @@ pub fn build_map_class() -> NativeClassBuilder {
                 .with_native_state(|m: &NativeMapState| devirt_ops::map_get(m.get_map(), &key))?;
             Ok(value.unwrap_or_else(|| vm.new_nil(mc)))
         })
+        .returns("V?") // value-typed read on a Map(String V) receiver
         .instance_method("at:put:", |vm, mc, receiver, args| {
             let key = arg!(args, String, 0).to_string();
             let val = args[1];
@@ -141,6 +142,15 @@ pub fn build_map_class() -> NativeClassBuilder {
             let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| m.elem = Some(tag));
             Ok(v)
         })
+        .instance_method("emptyLike", |vm, mc, receiver, _args| {
+            let tag = receiver.with_native_state(|m: &NativeMapState| m.elem)?;
+            let v = vm.new_map(mc, IndexMap::new());
+            if tag.is_some() {
+                let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| m.elem = tag);
+            }
+            Ok(v)
+        })
+        .returns("Map(String V)") // emptyLike: same shape, same tag, empty
         .instance_method("elementType", |vm, mc, receiver, _args| {
             let tag = receiver.with_native_state(|m: &NativeMapState| m.elem)?;
             Ok(match tag {
