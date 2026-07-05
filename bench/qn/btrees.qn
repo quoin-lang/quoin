@@ -1,0 +1,55 @@
+"Binary trees (CLBG-style) - the allocation/GC-bound benchmark: builds and
+checks ~2^depth short-lived TreeNode objects plus one long-lived tree.
+Run whole-process: `qn bench/qn/btrees.qn` from the repo root."
+
+TreeNode <- { | @left @right @item |
+    check -> { @left.defined?.if:{ ^@item + @left.check - @right.check } else:{ ^@item } }
+};
+
+Trees <- {
+    .meta <-- {
+        powerOfTwo: -> { |p: Integer ^Integer|
+            var res = 1;
+            var i = 0;
+            { i < p }.whileDo:{
+                res = res * 2;
+                i = i + 1
+            };
+            ^res
+        };
+
+        makeTree:depth: -> { |item: Integer depth: Integer|
+            (depth > 0).if:{
+                var left = Trees.makeTree:(2 * item - 1) depth:(depth - 1);
+                var right = Trees.makeTree:(2 * item) depth:(depth - 1);
+                ^TreeNode.new:{ item=item; left=left; right=right }
+            }
+            else:{ ^TreeNode.new:{ item=item } }
+        };
+
+        run: -> { |maxDepth: Integer ^Integer|
+            var minDepth = 4;
+            var checkTotal = 0;
+
+            var longLived = Trees.makeTree:0 depth:maxDepth;
+
+            var depth = minDepth;
+            { depth <= maxDepth }.whileDo:{
+                var iterations = Trees.powerOfTwo:(maxDepth - depth + minDepth);
+                var i = 1;
+                { i <= iterations }.whileDo:{
+                    var t = Trees.makeTree:i depth:depth;
+                    checkTotal = checkTotal + t.check;
+                    t = Trees.makeTree:(0 - i) depth:depth;
+                    checkTotal = checkTotal + t.check;
+                    i = i + 1
+                };
+                depth = depth + 2
+            };
+            ^checkTotal + longLived.check
+        }
+    }
+};
+
+var r = Trees.run:12;
+(r == -10913).if:{ 'btrees: ok'.print } else:{ ('btrees: FAIL got ' + r).print }

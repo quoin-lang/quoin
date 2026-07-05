@@ -1,0 +1,25 @@
+"Combinator pipelines - idiomatic Quoin iteration through the pure-Quoin
+Iterate mixin (everything derives from each:). Block-invocation-heavy:
+measures closure creation, block calls, and non-local-return machinery
+that the while-loop benchmarks never touch.
+Run whole-process: `qn bench/qn/combinators.qn` from the repo root."
+
+var data = #();
+var i = 0;
+{ i < 1000 }.whileDo:{ data.add:i; i = i + 1 };
+
+var total = 0;
+var k = 0;
+{ k < 300 }.whileDo:{
+    var tripled = data.collect:{ |x| (x * 3) + 1 };
+    var evens = tripled.select:{ |x| (x % 2) == 0 };
+    total = total + evens.sum;
+    total = total + (tripled.count:{ |x| x > 1500 });
+    total = total + (tripled.detect:{ |x| x > 1500 });
+    (tripled.any?:{ |x| x > 2900 }).if:{ total = total + 1 };
+    k = k + 1
+};
+
+(total == 225750600)
+    .if:{ 'combinators: ok'.print }
+     else:{ ('combinators: FAIL got ' + total).print }

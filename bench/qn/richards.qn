@@ -1,0 +1,315 @@
+"Richards - the classic OS task-scheduler simulation (a port of the Octane
+benchmark). Exercises what fib/sieve/btrees don't: one megamorphic send site
+(`@task.run:packet` dispatches over four task classes), linked-list packet
+queues, accessor-heavy objects, and branchy method bodies.
+
+Quoin adaptations, kept bit-exact with the original:
+- no bitwise operators, so the idle task's `(v1 >> 1) ^ 0xD008` is computed
+  arithmetically (xorD008:), and the TCB state bitmask becomes a small state
+  integer (0 running, 1 runnable, 2 suspended, 3 suspended+runnable) plus a
+  separate held flag.
+The canonical checksums still hold: queueCount = 2322 and holdCount = 928
+per schedule run.
+
+Run whole-process: `qn bench/qn/richards.qn` from the repo root."
+
+IdIdle <- 0;
+IdWorker <- 1;
+IdHandlerA <- 2;
+IdHandlerB <- 3;
+IdDeviceA <- 4;
+IdDeviceB <- 5;
+KindDevice <- 0;
+KindWork <- 1;
+DataSize <- 4;
+
+Packet <- { |@link @id @kind @a1 @a2|
+    .meta <-- {
+        link:id:kind: -> { |l i k|
+            var d = #();
+            var j = 0;
+            { j < DataSize }.whileDo:{ d.add:0; j = j + 1 };
+            ^Packet.new:{ link=l; id=i; kind=k; a1=0; a2=d }
+        }
+    };
+
+    link -> { @link };
+    link: -> { |v| @link = v };
+    id -> { @id };
+    id: -> { |v| @id = v };
+    kind -> { @kind };
+    a1 -> { @a1 };
+    a1: -> { |v| @a1 = v };
+    a2 -> { @a2 };
+
+    addTo: -> { |queue|
+        @link = nil;
+        queue.defined?.not.if:{ ^^self };
+        var peek = queue;
+        { peek.link.defined? }.whileDo:{ peek = peek.link };
+        peek.link:self;
+        ^queue
+    }
+};
+
+Tcb <- { |@link @id @priority @queue @task @state @held|
+    .meta <-- {
+        link:id:priority:queue:task: -> { |l i p q t|
+            var s = 2;
+            q.defined?.if:{ s = 3 };
+            ^Tcb.new:{ link=l; id=i; priority=p; queue=q; task=t; state=s; held=false }
+        }
+    };
+
+    link -> { @link };
+    id -> { @id };
+    priority -> { @priority };
+
+    setRunning -> { @state = 0 };
+    markAsNotHeld -> { @held = false };
+    markAsHeld -> { @held = true };
+    isHeldOrSuspended -> { @held || (@state == 2) };
+    markAsSuspended -> { @state = 2 + (@state % 2) };
+    markAsRunnable -> { (@state >= 2).if:{ @state = 3 } else:{ @state = 1 } };
+
+    run -> {
+        var packet = nil;
+        (@state == 3).if:{
+            packet = @queue;
+            @queue = packet.link;
+            @queue.defined?.if:{ @state = 1 } else:{ @state = 0 }
+        };
+        ^@task.run:packet
+    };
+
+    checkPriorityAdd:packet: -> { |cur packet|
+        @queue.defined?.if:{ @queue = packet.addTo:@queue }
+        else:{
+            @queue = packet;
+            .markAsRunnable;
+            (@priority > cur.priority).if:{ ^^self }
+        };
+        ^cur
+    }
+};
+
+IdleTask <- { |@scheduler @v1 @count|
+    .meta <-- {
+        scheduler:v1:count: -> { |s v c| ^IdleTask.new:{ scheduler=s; v1=v; count=c } }
+    };
+
+    "xor with 0xD008 (bits 3, 12, 14, 15), computed arithmetically"
+    xorD008: -> { |a: Integer ^Integer|
+        var acc = 0;
+        (((a / 8) % 2) == 1).if:{ acc = acc + 8 };
+        (((a / 4096) % 2) == 1).if:{ acc = acc + 4096 };
+        (((a / 16384) % 2) == 1).if:{ acc = acc + 16384 };
+        (((a / 32768) % 2) == 1).if:{ acc = acc + 32768 };
+        ^(a + 53256) - (2 * acc)
+    };
+
+    run: -> { |packet|
+        @count = @count - 1;
+        (@count == 0).if:{ ^^@scheduler.holdCurrent };
+        ((@v1 % 2) == 0).if:{
+            @v1 = @v1 / 2;
+            ^^@scheduler.release:IdDeviceA
+        };
+        @v1 = .xorD008:(@v1 / 2);
+        ^@scheduler.release:IdDeviceB
+    }
+};
+
+DeviceTask <- { |@scheduler @v1|
+    .meta <-- {
+        scheduler: -> { |s| ^DeviceTask.new:{ scheduler=s; v1=nil } }
+    };
+
+    run: -> { |packet|
+        packet.defined?.if:{
+            @v1 = packet;
+            ^^@scheduler.holdCurrent
+        };
+        @v1.defined?.not.if:{ ^^@scheduler.suspendCurrent };
+        var v = @v1;
+        @v1 = nil;
+        ^@scheduler.queue:v
+    }
+};
+
+WorkerTask <- { |@scheduler @v1 @v2|
+    .meta <-- {
+        scheduler: -> { |s| ^WorkerTask.new:{ scheduler=s; v1=IdHandlerA; v2=0 } }
+    };
+
+    run: -> { |packet|
+        packet.defined?.not.if:{ ^^@scheduler.suspendCurrent };
+        (@v1 == IdHandlerA).if:{ @v1 = IdHandlerB } else:{ @v1 = IdHandlerA };
+        packet.id:@v1;
+        packet.a1:0;
+        var i = 0;
+        { i < DataSize }.whileDo:{
+            @v2 = @v2 + 1;
+            (@v2 > 26).if:{ @v2 = 1 };
+            packet.a2.at:i put:@v2;
+            i = i + 1
+        };
+        ^@scheduler.queue:packet
+    }
+};
+
+HandlerTask <- { |@scheduler @v1 @v2|
+    .meta <-- {
+        scheduler: -> { |s| ^HandlerTask.new:{ scheduler=s; v1=nil; v2=nil } }
+    };
+
+    run: -> { |packet|
+        packet.defined?.if:{
+            (packet.kind == KindWork).if:{ @v1 = packet.addTo:@v1 } else:{ @v2 = packet.addTo:@v2 }
+        };
+        @v1.defined?.if:{
+            var count = @v1.a1;
+            (count < DataSize).if:{
+                @v2.defined?.if:{
+                    var v = @v2;
+                    @v2 = @v2.link;
+                    v.a1:(@v1.a2.at:count);
+                    @v1.a1:(count + 1);
+                    ^^@scheduler.queue:v
+                }
+            }
+            else:{
+                var v = @v1;
+                @v1 = @v1.link;
+                ^^@scheduler.queue:v
+            }
+        };
+        ^@scheduler.suspendCurrent
+    }
+};
+
+Scheduler <- { |@queueCount @holdCount @blocks @list @currentTcb @currentId|
+    .meta <-- {
+        make -> {
+            var b = #();
+            var j = 0;
+            { j < 6 }.whileDo:{ b.add:nil; j = j + 1 };
+            ^Scheduler.new:{
+                queueCount=0;
+                holdCount=0;
+                blocks=b;
+                list=nil;
+                currentTcb=nil;
+                currentId=nil
+            }
+        }
+    };
+
+    queueCount -> { @queueCount };
+    holdCount -> { @holdCount };
+
+    addTask:priority:queue:task: -> { |id priority queue task|
+        @currentTcb = Tcb.link:@list id:id priority:priority queue:queue task:task;
+        @list = @currentTcb;
+        @blocks.at:id put:@currentTcb
+    };
+
+    addRunningTask:priority:queue:task: -> { |id priority queue task|
+        .addTask:id priority:priority queue:queue task:task;
+        @currentTcb.setRunning
+    };
+
+    addIdleTask:priority:queue:count: -> { |id priority queue count|
+        .addRunningTask:id
+         priority:priority
+         queue:queue
+         task:(IdleTask.scheduler:self v1:1 count:count)
+    };
+
+    addWorkerTask:priority:queue: -> { |id priority queue|
+        .addTask:id priority:priority queue:queue task:(WorkerTask.scheduler:self)
+    };
+
+    addHandlerTask:priority:queue: -> { |id priority queue|
+        .addTask:id priority:priority queue:queue task:(HandlerTask.scheduler:self)
+    };
+
+    addDeviceTask:priority:queue: -> { |id priority queue|
+        .addTask:id priority:priority queue:queue task:(DeviceTask.scheduler:self)
+    };
+
+    schedule -> {
+        @currentTcb = @list;
+        { @currentTcb.defined? }.whileDo:{
+            @currentTcb.isHeldOrSuspended.if:{ @currentTcb = @currentTcb.link }
+            else:{
+                @currentId = @currentTcb.id;
+                @currentTcb = @currentTcb.run
+            }
+        }
+    };
+
+    release: -> { |id|
+        var tcb = @blocks.at:id;
+        tcb.markAsNotHeld;
+        (tcb.priority > @currentTcb.priority).if:{ ^^tcb };
+        ^@currentTcb
+    };
+
+    holdCurrent -> {
+        @holdCount = @holdCount + 1;
+        @currentTcb.markAsHeld;
+        ^@currentTcb.link
+    };
+
+    suspendCurrent -> {
+        @currentTcb.markAsSuspended;
+        ^@currentTcb
+    };
+
+    queue: -> { |packet|
+        var t = @blocks.at:(packet.id);
+        t.defined?.not.if:{ ^^nil };
+        @queueCount = @queueCount + 1;
+        packet.link:nil;
+        packet.id:@currentId;
+        ^t.checkPriorityAdd:@currentTcb packet:packet
+    }
+};
+
+var rounds = 50;
+var qTotal = 0;
+var hTotal = 0;
+var k = 0;
+{ k < rounds }.whileDo:{
+    var s = Scheduler.make;
+
+    s.addIdleTask:IdIdle priority:0 queue:nil count:1000;
+
+    var q = Packet.link:nil id:IdWorker kind:KindWork;
+    q = Packet.link:q id:IdWorker kind:KindWork;
+    s.addWorkerTask:IdWorker priority:1000 queue:q;
+
+    q = Packet.link:nil id:IdDeviceA kind:KindDevice;
+    q = Packet.link:q id:IdDeviceA kind:KindDevice;
+    q = Packet.link:q id:IdDeviceA kind:KindDevice;
+    s.addHandlerTask:IdHandlerA priority:2000 queue:q;
+
+    q = Packet.link:nil id:IdDeviceB kind:KindDevice;
+    q = Packet.link:q id:IdDeviceB kind:KindDevice;
+    q = Packet.link:q id:IdDeviceB kind:KindDevice;
+    s.addHandlerTask:IdHandlerB priority:3000 queue:q;
+
+    s.addDeviceTask:IdDeviceA priority:4000 queue:nil;
+    s.addDeviceTask:IdDeviceB priority:5000 queue:nil;
+
+    s.schedule;
+
+    qTotal = qTotal + s.queueCount;
+    hTotal = hTotal + s.holdCount;
+    k = k + 1
+};
+
+((qTotal == (rounds * 2322)) && (hTotal == (rounds * 928)))
+    .if:{ 'richards: ok'.print }
+     else:{ ('richards: FAIL q=' + qTotal + ' h=' + hTotal).print }

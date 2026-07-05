@@ -1,0 +1,36 @@
+"JSON round-trip - JSON.generate: and JSON.parse: over a nested
+list-of-maps document. Exercises native<->Quoin value conversion,
+string building, and Map/List allocation together.
+Run whole-process: `qn bench/qn/json.qn` from the repo root."
+
+var meta = #{};
+meta.at:'name' put:'quoin';
+meta.at:'version' put:5;
+
+var items = #();
+var i = 0;
+{ i < 50 }.whileDo:{
+    var m = #{};
+    m.at:'id' put:i;
+    m.at:'name' put:('item-' + i);
+    m.at:'flag' put:((i % 2) == 0);
+    m.at:'score' put:(i * 1.5);
+    items.add:m;
+    i = i + 1
+};
+
+var doc = #{};
+doc.at:'items' put:items;
+doc.at:'meta' put:meta;
+
+var checksum = 0;
+var k = 0;
+{ k < 8000 }.whileDo:{
+    var s = JSON.generate:doc;
+    var parsed = JSON.parse:s;
+    var parsedItems = parsed.at:'items';
+    checksum = checksum + s.length + parsedItems.count + ((parsedItems.at:10).at:'id');
+    k = k + 1
+};
+
+(checksum == 21640000).if:{ 'json: ok'.print } else:{ ('json: FAIL got ' + checksum).print }
