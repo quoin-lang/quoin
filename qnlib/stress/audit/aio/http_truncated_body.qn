@@ -1,0 +1,24 @@
+"* HTTP client: server promises Content-Length: 10 but sends only 5 bytes and
+"* closes. Correct: an unexpected-EOF error. Observed: silent 5-byte body.
+"* Also shows the Host header sent for a non-default port (should be host:port).
+use std:net/http;
+
+var listener = TcpListener.listen:'127.0.0.1:0';
+var port = listener.port;
+Task.spawn:{
+    listener.acceptOnce:{ |conn|
+        var head = conn.read:4096;
+        '--- server saw request head ---'.print;
+        (head.asStringLossy).print;
+        '-------------------------------'.print;
+        conn.writeAll:('HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello'.asBytes)
+    }
+};
+
+{
+    var resp = [HTTP]Client.get:('http://127.0.0.1:' + port + '/');
+    ('status: ' + resp.status.s).print;
+    var body = resp.body.text;
+    ('BUG: got body <' + body + '> (' + body.length.s
+        + ' of 10 promised bytes) with no error').print
+}.catch:{ |e| ('client threw (correct): ' + e.s).print }

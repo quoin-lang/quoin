@@ -164,6 +164,41 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 }
 
 #[test]
+fn extension_concurrent_calls_are_serialized() {
+    // Regression (audit): the transport is a single request/response socket with no
+    // request ids, so two tasks calling one extension at once interleaved frames and
+    // desynced the connection ("unknown stream id", or a killed serve loop). A second
+    // top-level call while one is in flight must now fail with a catchable "busy"
+    // error — deterministic, and the connection survives for the winner and for later
+    // sequential calls.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_echo");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+
+"* Two calls raced on one connection: exactly one wins, the other gets a catchable
+"* busy error — never a desync/corruption.
+var r = Async.gather:#(
+    {{ {{ e.call:'echo' with:'A' }}.catch:{{ |ex| 'busy' }} }}
+    {{ {{ e.call:'echo' with:'B' }}.catch:{{ |ex| 'busy' }} }}
+);
+var a = r.at:0;
+var b = r.at:1;
+var oneWon = ((a == 'A') && (b == 'busy')) || ((a == 'busy') && (b == 'B'));
+oneWon.else:{{ ok = false; ('FAIL race: ' + r.s).print }};
+
+"* The connection is intact: sequential calls still work after the rejected one.
+((e.call:'echo' with:'again') == 'again').else:{{ ok = false; 'FAIL: connection desynced'.print }};
+((e.call:'upper' with:'z') == 'Z').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_serialize_test.qn", &script);
+}
+
+#[test]
 fn extension_handle_round_trip() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_handles");
     let script = format!(
@@ -224,6 +259,43 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_crash_test.qn", &script);
+}
+
+#[test]
+fn extension_silent_handshake_times_out() {
+    // Regression (audit): the spawn-time GetManifest read was unbounded, so an
+    // extension that binds+accepts the socket but never answers the handshake parked
+    // the spawning task forever. `ext_silent` does exactly that; with a short
+    // handshake budget the spawn must fail catchably (not hang), and no orphan child
+    // survives (the failed spawn kills it).
+    let ext_bin = env!("CARGO_BIN_EXE_ext_silent");
+    // The core property: a silent extension makes spawn FAIL catchably and promptly — it
+    // must not hang the VM (a hang would make this test time out). The common failure is
+    // the handshake read timing out (#timedOut); under heavy parallel load the connect
+    // retry can lose to a slow-to-bind child and fail connect-side instead, which is
+    // equally "fast, catchable, no hang" — so assert the no-hang/catchable property, not
+    // the exact kind.
+    let script = format!(
+        r#"
+{{ Extension.spawn:'{ext_bin}'; 'FAIL: silent extension spawned'.print }}
+    .catch:{{ |e:IoError| 'PASS'.print }}
+    catch:{{ |e| ('FAIL class: ' + e.s).print }};
+"#
+    );
+    let path = std::env::temp_dir().join("qn_ext_silent_test.qn");
+    std::fs::write(&path, &script).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&path)
+        .env("QN_EXT_HANDSHAKE_TIMEOUT_MS", "1500")
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_file(&path);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PASS") && !stdout.contains("FAIL"),
+        "silent-handshake test did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 }
 
 #[test]
@@ -328,6 +400,14 @@ var arr = e.call:'buildArray' with:'';
 
 "* host reach: the ext reads a passed value back as structured data (read_handle)
 ((e.call:'inspect' with:'' args:#( #{{ 'k': 7 }} )) == #{{ 'k': 7 }}).else:{{ ok = false }};
+
+"* a pathologically deep structured value is rejected catchably — the host must not
+"* overflow its stack decoding it (crash isolation is the whole point of Tier 1)
+{{ e.call:'deepData' with:''; ok = false; 'FAIL: deep value accepted'.print }}
+    .catch:{{ |err| nil }};
+
+"* and the extension is still alive and usable after the rejected call
+((e.call:'mkList' with:'') == #( 1 2 3 )).else:{{ ok = false; 'FAIL: ext dead after deep'.print }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#

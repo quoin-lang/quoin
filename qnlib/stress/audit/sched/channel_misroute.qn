@@ -1,0 +1,17 @@
+"* A cancelled receiver leaves a ghost entry in channel A's waiter queue. While the
+"* cancelled task's finally block parks it on channel B, a send on A pops the ghost,
+"* sees `parked_on_channel == true` (it is — but on B!), and delivers A's value to
+"* the B receive. Buggy: got == ('A-VALUE'). Correct: a.send finds no receiver.
+var a = Channel.new;
+var b = Channel.new;
+var got = #();
+var entered = #();
+var t = Task.spawn:{
+    { entered.add: 1; a.receive }.catch:{ |e| nil } finally:{ got.add:(b.receive) }
+};
+{ entered.count == 0 }.whileDo:{ Async.sleep:1 };
+t.cancel;
+Async.sleep:20;
+a.send:'A-VALUE';
+Async.sleep:20;
+('got: ' + got.s).print

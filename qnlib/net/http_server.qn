@@ -238,12 +238,24 @@ Error <- [HTTP]HeadTooLarge <- {};
     "* runs as its own Task so `stop` can cancel it — including a parked accept.
     start -> {
         @acceptTask = Task.spawn:{
-            { true }.whileDo:{
-                var conn = @listener.accept;
-                @tasks = @tasks.reject:{ |t| t.done? };
-                (@maxConnections.defined? && (@tasks.count >= @maxConnections))
-                    .if:{ @tasks.add:(Task.spawn:{ .refuse:conn }) }
-                     else:{ @tasks.add:(Task.spawn:{ .serve:conn }) }
+            var accepting = true;
+            { accepting }.whileDo:{
+                var conn = nil;
+                "* A closed listener ends the loop cleanly; any other accept failure
+                "* (fd exhaustion, transient network error) backs off and retries — one
+                "* bad accept must not silently kill the server. Cancellation (`stop`)
+                "* passes through catch: untouched.
+                { conn = @listener.accept }.catch:{ |e:IoError|
+                    ((e.kind == #closed) || (e.kind == #notFound))
+                        .if:{ accepting = false }
+                         else:{ Async.sleep:10 }
+                };
+                conn.defined?.if:{
+                    @tasks = @tasks.reject:{ |t| t.done? };
+                    (@maxConnections.defined? && (@tasks.count >= @maxConnections))
+                        .if:{ @tasks.add:(Task.spawn:{ .refuse:conn }) }
+                         else:{ @tasks.add:(Task.spawn:{ .serve:conn }) }
+                }
             }
         };
         self

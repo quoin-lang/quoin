@@ -104,3 +104,33 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
         "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+#[test]
+fn folder_open_on_missing_directory_is_a_catchable_io_error() {
+    // Regression: `[IO]Folder.open:` (and the lazy re-open in `next` after
+    // `reset`) unwrapped `read_dir`, so a missing/unreadable directory aborted
+    // the whole VM instead of throwing a catchable IoError.
+    let script = r#"
+var ok = true;
+{ [IO]Folder.open:'/no/such/dir/anywhere'; ok = false; 'FAIL: open succeeded'.print }
+    .catch:{ |e:IoError| (e.kind == #notFound).else:{ ok = false; ('FAIL kind: ' + e.kind.s).print } }
+    catch:{ |e| ok = false; ('FAIL class: ' + e.s).print };
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let dir = std::env::temp_dir();
+    let path = dir.join("qn_folder_open_missing.qn");
+    std::fs::write(&path, script).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&path)
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_file(&path);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PASS") && !stdout.contains("FAIL"),
+        "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}

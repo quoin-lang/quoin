@@ -121,7 +121,14 @@ Error <- [HTTP]BodyTooLarge <- {};
                 var got = 0;
                 var reading = true;
                 { reading }.whileDo:{
-                    var line = (((st.readUntil:'\r\n').asString).splitString:'\r\n').at:0;
+                    var rawLine = st.readUntil:'\r\n';
+                    "* EOF where a chunk-size line belongs is a truncated body — surface it
+                    "* as such, not as a hex-parse ValueError on an empty string.
+                    (rawLine.count == 0).if:{
+                        IoError.throw:'HTTP: connection closed inside chunked framing (expected a chunk-size line)'
+                            kind:#unexpectedEof
+                    };
+                    var line = ((rawLine.asString).splitString:'\r\n').at:0;
                     var parts = line.splitString:';';
                     var size = Integer.fromHex:(parts.at:0);
                     (size == 0).if:{
@@ -158,7 +165,12 @@ Error <- [HTTP]BodyTooLarge <- {};
                     { remaining > 0 }.whileDo:{
                         var want = (remaining < 8192).if:{ remaining } else:{ 8192 };
                         var data = st.read:want;
-                        (data.count == 0).if:{ remaining = 0 }
+                        "* EOF before the promised length is a truncated body, not success —
+                        "* silently returning a short body is indistinguishable from a good 200.
+                        (data.count == 0).if:{
+                            IoError.throw:('HTTP: connection closed with ' + remaining
+                                + ' of ' + len + ' Content-Length bytes unread') kind:#unexpectedEof
+                        }
                         else:{
                             ^>([HTTP]Body.chunk:data meta:#{} mediaType:mt);
                             remaining = remaining - data.count
@@ -381,7 +393,10 @@ Error <- [HTTP]BodyTooLarge <- {};
         }
         else:{ TcpSocket.connect:target };
 
-        sock.writeAll:(.requestBytes:host path:path);
+        "* RFC 7230 §5.4: Host carries the port unless it is the scheme default.
+        var defaultPort = (scheme == 'https').if:{ '443' } else:{ '80' };
+        var hostHeader = (port == defaultPort).if:{ host } else:{ host + ':' + port };
+        sock.writeAll:(.requestBytes:hostHeader path:path);
 
         "* Non-scoped stream (consumes the socket; no auto-close). Read the head; on any
         "* error before we hand the stream to the body, close it and re-raise.
@@ -455,13 +470,25 @@ Error <- [HTTP]BodyTooLarge <- {};
     "* adjust the method/body per status. 307/308 preserve method+body; 303 (and a 301/302
     "* from a non-GET/HEAD method) become a bodyless GET.
     nextRequestFor: -> { |resp|
-        var next = [HTTP]Request.new:{
-            var url = [HTTP]Request.resolveLocation:(resp.location) against:@url
-        };
+        var target = [HTTP]Request.resolveLocation:(resp.location) against:@url;
+        var next = [HTTP]Request.new:{ var url = target };
         next.insecure:@insecure;
         next.followRedirects:@followRedirects;
         next.maxRedirects:@maxRedirects;
-        next.headers:@headers;
+        "* Credentials must not follow a redirect to a different origin: strip
+        "* Authorization/Proxy-Authorization/Cookie when scheme, host, or port change
+        "* (parseUrl fills in default ports, so implicit vs explicit compare equal).
+        var from = [HTTP]Request.parseUrl:@url;
+        var to = [HTTP]Request.parseUrl:target;
+        var sameOrigin = ((from.at:0) == (to.at:0))
+            && ((from.at:1) == (to.at:1))
+            && ((from.at:2) == (to.at:2));
+        next.headers:(sameOrigin.if:{ @headers } else:{
+            @headers.reject:{ |p|
+                var n = (p.at:0).lower;
+                (n == 'authorization') || (n == 'proxy-authorization') || (n == 'cookie')
+            }
+        });
         ((resp.status == 307) || (resp.status == 308)).if:{
             next.method:@method;
             @body.defined?.if:{ next.body:@body }

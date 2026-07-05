@@ -69,6 +69,10 @@ impl From<std::io::ErrorKind> for IoErrorKind {
             E::UnexpectedEof => IoErrorKind::UnexpectedEof,
             E::InvalidInput => IoErrorKind::InvalidInput,
             E::InvalidData => IoErrorKind::InvalidData,
+            // The backend reports an op interrupted by a handle close as NotConnected
+            // ("stream/listener closed while ... in flight") — surface it as #closed
+            // so accept/read loops can tell shutdown apart from transient failures.
+            E::NotConnected => IoErrorKind::Closed,
             _ => IoErrorKind::Other,
         }
     }

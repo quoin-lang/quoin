@@ -159,6 +159,13 @@ pub enum Msg {
     },
 }
 
+/// Upper bound on one length-prefixed frame's payload, enforced by both ends before
+/// allocating toward the declared length. The u32 prefix alone permits ~4 GiB, so a
+/// corrupt or hostile length would otherwise drive a multi-GB allocation / OOM from a
+/// few bytes. 256 MiB is far above any realistic control frame or bulk Arrow column
+/// yet bounds the blast radius of a bad prefix. Shared so host and SDK agree.
+pub const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
+
 /// Encode one `Msg` as a complete FlatBuffers `Envelope` buffer (no length prefix —
 /// the transport frames it).
 pub fn encode(msg: &Msg) -> Vec<u8> {
@@ -291,6 +298,43 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<Msg, String> {
         .ok_or_else(|| "extension protocol: Envelope had no `msg`".to_string())
 }
 
+/// Hard cap on `DataValue` nesting depth accepted from an extension. The peer runs on
+/// the same machine but is a separate process that can crash or be buggy/malicious;
+/// `decode_dv` recurses per level, so without a bound a deeply nested (or cyclic-
+/// looking) value from the extension overflows the *host* stack — an uncatchable
+/// process abort that would defeat the whole point of out-of-process isolation. Real
+/// payloads (DB rows, JSON) are shallow; 64 is above any legitimate structure yet low
+/// enough that decoding to the cap stays well within the 1 MiB VM coroutine stack
+/// (each `decode_dv` frame is heavy, so the bound must be conservative, not just finite).
+const MAX_DV_DEPTH: usize = 64;
+
+/// A decode failure: a planus/flatbuffer accessor error, or a structural limit the
+/// host imposes on data received from an extension. `From<planus::Error>` so the
+/// accessor `?`s in the decode helpers keep composing unchanged.
+#[derive(Debug)]
+enum DecodeError {
+    Planus(planus::Error),
+    TooDeep,
+}
+
+impl From<planus::Error> for DecodeError {
+    fn from(e: planus::Error) -> Self {
+        DecodeError::Planus(e)
+    }
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Planus(e) => write!(f, "{e}"),
+            DecodeError::TooDeep => write!(
+                f,
+                "extension protocol: DataValue nesting exceeds the {MAX_DV_DEPTH}-level decode limit"
+            ),
+        }
+    }
+}
+
 /// Collect a planus `[uint64]` accessor result into an owned `Vec` (absent vector -> empty).
 fn read_u64_vec(v: Option<planus::Vector<'_, u64>>) -> Vec<u64> {
     v.map(|vec| vec.iter().collect()).unwrap_or_default()
@@ -340,10 +384,10 @@ fn encode_arg(a: &Arg) -> g::Arg {
 }
 
 /// A decoded `ArgRef` -> owned [`Arg`].
-fn decode_arg(a: g::ArgRef<'_>) -> Result<Arg, planus::Error> {
+fn decode_arg(a: g::ArgRef<'_>) -> Result<Arg, DecodeError> {
     Ok(match a.kind()? {
         g::ArgKind::Data => Arg::Data(match a.data()? {
-            Some(b) => decode_dv(b)?,
+            Some(b) => decode_dv(b, 0)?,
             None => DataValue::Null,
         }),
         g::ArgKind::Resource => Arg::Resource(a.id()?),
@@ -401,8 +445,11 @@ fn encode_dv(dv: &DataValue) -> g::DataValueBox {
 
 /// A decoded `DataValueBoxRef` -> owned [`DataValue`] (recursive). An absent union/field is `Null`
 /// (trusted peer, §4).
-fn decode_dv(b: g::DataValueBoxRef<'_>) -> Result<DataValue, planus::Error> {
+fn decode_dv(b: g::DataValueBoxRef<'_>, depth: usize) -> Result<DataValue, DecodeError> {
     use g::DataValueKindRef as K;
+    if depth > MAX_DV_DEPTH {
+        return Err(DecodeError::TooDeep);
+    }
     let Some(kind) = b.v()? else {
         return Ok(DataValue::Null);
     };
@@ -419,7 +466,7 @@ fn decode_dv(b: g::DataValueBoxRef<'_>) -> Result<DataValue, planus::Error> {
             let mut items = Vec::new();
             if let Some(v) = x.items()? {
                 for it in v {
-                    items.push(decode_dv(it?)?);
+                    items.push(decode_dv(it?, depth + 1)?);
                 }
             }
             DataValue::List(items)
@@ -430,7 +477,7 @@ fn decode_dv(b: g::DataValueBoxRef<'_>) -> Result<DataValue, planus::Error> {
                 for e in v {
                     let e = e?;
                     let value = match e.value()? {
-                        Some(b) => decode_dv(b)?,
+                        Some(b) => decode_dv(b, depth + 1)?,
                         None => DataValue::Null,
                     };
                     entries.push((e.key()?.unwrap_or_default().to_string(), value));
@@ -443,7 +490,7 @@ fn decode_dv(b: g::DataValueBoxRef<'_>) -> Result<DataValue, planus::Error> {
 
 /// The planus-fallible core of [`decode_envelope`]; `Ok(None)` means the `msg` union was
 /// absent (kept separate so the accessor `?`s stay on `planus::Error`).
-fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
+fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, DecodeError> {
     let env = g::EnvelopeRef::read_as_root(bytes)?;
     let Some(msg) = env.msg()? else {
         return Ok(None);
@@ -465,7 +512,7 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
                 arrays
             },
             data: match c.data()? {
-                Some(b) => Some(decode_dv(b)?),
+                Some(b) => Some(decode_dv(b, 0)?),
                 None => None,
             },
             class_name: c.class_name()?.unwrap_or_default().to_string(),
@@ -502,7 +549,7 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         },
         g::MessageRef::CallReturnData(c) => Msg::CallReturnData {
             value: match c.value()? {
-                Some(b) => decode_dv(b)?,
+                Some(b) => decode_dv(b, 0)?,
                 None => DataValue::Null,
             },
         },
@@ -572,7 +619,7 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         },
         g::MessageRef::MakeValue(m) => Msg::MakeValue {
             value: match m.value()? {
-                Some(b) => decode_dv(b)?,
+                Some(b) => decode_dv(b, 0)?,
                 None => DataValue::Null,
             },
         },
@@ -581,7 +628,7 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
         },
         g::MessageRef::ReadHandleReturn(r) => Msg::ReadHandleReturn {
             value: match r.value()? {
-                Some(b) => decode_dv(b)?,
+                Some(b) => decode_dv(b, 0)?,
                 None => DataValue::Null,
             },
             error: r.error()?.map(str::to_string),
@@ -592,4 +639,34 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, planus::Error> {
             error: h.error()?.map(str::to_string),
         },
     }))
+}
+
+#[cfg(test)]
+mod depth_cap_tests {
+    use super::{DataValue, Msg, decode_envelope, encode};
+
+    #[test]
+    fn deep_datavalue_is_rejected_not_overflowed() {
+        // Build a value nested well past the cap; encode/decode must return an error,
+        // never overflow the (host) stack.
+        // Above the decode cap (128) but shallow enough that building the frame here
+        // does not itself recurse too deep.
+        let mut dv = DataValue::Int(1);
+        for _ in 0..300 {
+            dv = DataValue::List(vec![dv]);
+        }
+        let frame = encode(&Msg::CallReturnData { value: dv });
+        let err = decode_envelope(&frame).expect_err("deep value must be rejected");
+        assert!(err.contains("nesting"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn shallow_datavalue_still_decodes() {
+        let dv = DataValue::List(vec![DataValue::Int(1), DataValue::Int(2)]);
+        let frame = encode(&Msg::CallReturnData { value: dv.clone() });
+        match decode_envelope(&frame).unwrap() {
+            Msg::CallReturnData { value } => assert_eq!(value, dv),
+            other => panic!("unexpected msg: {other:?}"),
+        }
+    }
 }

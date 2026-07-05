@@ -47,6 +47,17 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
         Err(e) => return Err(e),
     }
     let len = u32::from_le_bytes(len_buf) as usize;
+    // Refuse a frame larger than the shared cap before allocating for it — a corrupt or
+    // hostile length would otherwise `vec![0u8; len]` up to ~4 GiB from a 4-byte prefix.
+    if len > quoin_ext_proto::MAX_FRAME_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "extension frame length {len} exceeds the {} byte limit",
+                quoin_ext_proto::MAX_FRAME_LEN
+            ),
+        ));
+    }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     Ok(Some(buf))

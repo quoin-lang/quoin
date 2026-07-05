@@ -1,0 +1,5 @@
+var e = Extension.spawn:'qnlib/stress/audit/ext/slow_echo.py';
+var results = { Async.gather:#( { e.call:'A' with:'1' } { e.call:'B' with:'2' } ) }.catch:{ |ex|
+    'CAUGHT'
+};
+results.print

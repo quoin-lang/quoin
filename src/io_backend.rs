@@ -11,7 +11,7 @@
 //! mock for tests. No VM wiring yet — that is Stage 1.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
@@ -24,6 +24,7 @@ use futures_lite::{AsyncReadExt, AsyncWriteExt};
 use futures_rustls::TlsConnector;
 use futures_rustls::rustls::pki_types::ServerName;
 use futures_rustls::rustls::{ClientConfig, RootCertStore};
+use futures_util::future::{AbortHandle, Abortable};
 use once_cell::unsync::OnceCell;
 
 /// An opaque handle to a backend-owned resource. The QN side holds only this
@@ -73,6 +74,11 @@ pub enum IoRequest {
     ConnectUnix { path: String },
     /// Read up to `max` bytes. An empty result means EOF.
     Read { id: StreamId, max: usize },
+    /// Like `Read`, but the op fails with a `TimedOut` error if no bytes arrive within
+    /// `ms` milliseconds. Used to bound reads that have no surrounding `Async.timeout:`
+    /// (e.g. the extension handshake, which runs at spawn time), so a peer that accepts
+    /// the socket but never replies cannot park the caller forever.
+    ReadTimed { id: StreamId, max: usize, ms: u64 },
     /// Write all of `bytes`.
     Write { id: StreamId, bytes: Vec<u8> },
     /// Close and deregister the stream.
@@ -154,6 +160,19 @@ struct SmolInner {
     // because the VM + backend live on one thread (gc_arena is `!Send`).
     tls_secure: OnceCell<TlsConnector>,
     tls_insecure: OnceCell<TlsConnector>,
+    // Ids whose stream/listener is currently leased out to an in-flight op. While an
+    // id is leased it is absent from both registries, so `close` would otherwise be
+    // a silent no-op: the parked op never woke, and the lease's drop re-inserted the
+    // fd — an unkillable, unclosable connection.
+    leased: RefCell<HashSet<StreamId>>,
+    // Leased ids that were closed while their op was in flight. The lease's drop
+    // consumes the tombstone and drops the resource (closing the fd) instead of
+    // re-inserting it.
+    closed_while_leased: RefCell<HashSet<StreamId>>,
+    // Abort handles for in-flight leased ops, so `close` interrupts a parked
+    // read/write/accept promptly (the op resolves to a catchable "closed" error)
+    // instead of leaving the task waiting on a handle that no longer exists.
+    op_aborts: RefCell<HashMap<StreamId, AbortHandle>>,
 }
 
 impl SmolInner {
@@ -301,6 +320,9 @@ impl SmolBackend {
                 next_id: Cell::new(1),
                 tls_secure: OnceCell::new(),
                 tls_insecure: OnceCell::new(),
+                leased: RefCell::new(HashSet::new()),
+                closed_while_leased: RefCell::new(HashSet::new()),
+                op_aborts: RefCell::new(HashMap::new()),
             }),
         }
     }
@@ -338,6 +360,7 @@ struct StreamLease {
 impl StreamLease {
     fn take(inner: &Rc<SmolInner>, id: StreamId) -> Result<Self, IoError> {
         let stream = take_stream(inner, id)?;
+        inner.leased.borrow_mut().insert(id);
         Ok(Self {
             inner: inner.clone(),
             id,
@@ -352,8 +375,17 @@ impl StreamLease {
 
 impl Drop for StreamLease {
     fn drop(&mut self) {
+        self.inner.leased.borrow_mut().remove(&self.id);
+        self.inner.op_aborts.borrow_mut().remove(&self.id);
         if let Some(s) = self.stream.take() {
-            self.inner.streams.borrow_mut().insert(self.id, s);
+            // A close that arrived while the op was in flight left a tombstone:
+            // honor it by dropping the stream (closing the fd) instead of
+            // resurrecting a handle the program already closed.
+            if self.inner.closed_while_leased.borrow_mut().remove(&self.id) {
+                drop(s);
+            } else {
+                self.inner.streams.borrow_mut().insert(self.id, s);
+            }
         }
     }
 }
@@ -376,6 +408,7 @@ impl ListenerLease {
                 kind: std::io::ErrorKind::NotFound,
                 message: format!("unknown listener id {}", id.0),
             })?;
+        inner.leased.borrow_mut().insert(id);
         Ok(Self {
             inner: inner.clone(),
             id,
@@ -392,8 +425,14 @@ impl ListenerLease {
 
 impl Drop for ListenerLease {
     fn drop(&mut self) {
+        self.inner.leased.borrow_mut().remove(&self.id);
+        self.inner.op_aborts.borrow_mut().remove(&self.id);
         if let Some(l) = self.listener.take() {
-            self.inner.listeners.borrow_mut().insert(self.id, l);
+            if self.inner.closed_while_leased.borrow_mut().remove(&self.id) {
+                drop(l); // closed mid-accept: release the port, don't resurrect it
+            } else {
+                self.inner.listeners.borrow_mut().insert(self.id, l);
+            }
         }
     }
 }
@@ -425,20 +464,82 @@ impl IoBackend for SmolBackend {
 
             IoRequest::Read { id, max } => Box::pin(async move {
                 // Leased, not taken: aborting a parked read (task cancel / timeout)
-                // must return the stream to the registry, not drop the fd.
-                let mut lease = match StreamLease::take(&inner, id) {
+                // must return the stream to the registry, not drop the fd. The op is
+                // additionally abortable by `close` on the handle (see `op_aborts`):
+                // the parked task then wakes with a catchable "closed" error and the
+                // lease's tombstone check closes the fd.
+                let lease = match StreamLease::take(&inner, id) {
                     Ok(l) => l,
                     Err(e) => return IoResult::Err(e),
                 };
-                let mut buf = vec![0u8; max];
-                let res = lease.stream().read(&mut buf).await;
-                drop(lease);
+                let (abort, reg) = AbortHandle::new_pair();
+                inner.op_aborts.borrow_mut().insert(id, abort);
+                let res = Abortable::new(
+                    async move {
+                        let mut lease = lease;
+                        let mut buf = vec![0u8; max];
+                        let r = lease.stream().read(&mut buf).await;
+                        drop(lease);
+                        (r, buf)
+                    },
+                    reg,
+                )
+                .await;
                 match res {
-                    Ok(n) => {
+                    Ok((Ok(n), mut buf)) => {
                         buf.truncate(n);
                         IoResult::Read(buf)
                     }
-                    Err(e) => IoResult::Err(e.into()),
+                    Ok((Err(e), _)) => IoResult::Err(e.into()),
+                    Err(_aborted) => IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::NotConnected,
+                        message: "stream closed while a read was in flight".to_string(),
+                    }),
+                }
+            }),
+
+            IoRequest::ReadTimed { id, max, ms } => Box::pin(async move {
+                // Leased like Read, plus a wall-clock deadline: whichever of the read or
+                // the timer resolves first wins. On timeout the lease drops (returning
+                // the stream to the registry — the caller decides whether to close it).
+                let lease = match StreamLease::take(&inner, id) {
+                    Ok(l) => l,
+                    Err(e) => return IoResult::Err(e),
+                };
+                let (abort, reg) = AbortHandle::new_pair();
+                inner.op_aborts.borrow_mut().insert(id, abort);
+                let read = Abortable::new(
+                    async move {
+                        let mut lease = lease;
+                        let mut buf = vec![0u8; max];
+                        let r = lease.stream().read(&mut buf).await;
+                        drop(lease);
+                        (r, buf)
+                    },
+                    reg,
+                );
+                let timeout = async {
+                    Timer::after(Duration::from_millis(ms)).await;
+                };
+                match futures_lite::future::or(async { Some(read.await) }, async {
+                    timeout.await;
+                    None
+                })
+                .await
+                {
+                    Some(Ok((Ok(n), mut buf))) => {
+                        buf.truncate(n);
+                        IoResult::Read(buf)
+                    }
+                    Some(Ok((Err(e), _))) => IoResult::Err(e.into()),
+                    Some(Err(_aborted)) => IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::NotConnected,
+                        message: "stream closed while a read was in flight".to_string(),
+                    }),
+                    None => IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::TimedOut,
+                        message: format!("read timed out after {ms}ms"),
+                    }),
                 }
             }),
 
@@ -446,20 +547,34 @@ impl IoBackend for SmolBackend {
                 // Leased like Read. An aborted write may leave the peer with a
                 // partial message — the canceller's problem — but the stream itself
                 // stays usable (and properly closeable).
-                let mut lease = match StreamLease::take(&inner, id) {
+                let lease = match StreamLease::take(&inner, id) {
                     Ok(l) => l,
                     Err(e) => return IoResult::Err(e),
                 };
-                let res = async {
-                    lease.stream().write_all(&bytes).await?;
-                    lease.stream().flush().await?;
-                    Ok::<usize, std::io::Error>(bytes.len())
-                }
+                let (abort, reg) = AbortHandle::new_pair();
+                inner.op_aborts.borrow_mut().insert(id, abort);
+                let res = Abortable::new(
+                    async move {
+                        let mut lease = lease;
+                        let r = async {
+                            lease.stream().write_all(&bytes).await?;
+                            lease.stream().flush().await?;
+                            Ok::<usize, std::io::Error>(bytes.len())
+                        }
+                        .await;
+                        drop(lease);
+                        r
+                    },
+                    reg,
+                )
                 .await;
-                drop(lease);
                 match res {
-                    Ok(n) => IoResult::Wrote(n),
-                    Err(e) => IoResult::Err(e.into()),
+                    Ok(Ok(n)) => IoResult::Wrote(n),
+                    Ok(Err(e)) => IoResult::Err(e.into()),
+                    Err(_aborted) => IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::NotConnected,
+                        message: "stream closed while a write was in flight".to_string(),
+                    }),
                 }
             }),
 
@@ -490,15 +605,29 @@ impl IoBackend for SmolBackend {
                 // survives an aborted accept (server `stop` cancels a parked one),
                 // which must not tear the listening socket down. The accepted stream
                 // drops into the shared `AsyncStream` registry.
-                let mut lease = match ListenerLease::take(&inner, id) {
+                let lease = match ListenerLease::take(&inner, id) {
                     Ok(l) => l,
                     Err(e) => return IoResult::Err(e),
                 };
-                let res = lease.listener().accept().await;
-                drop(lease);
+                let (abort, reg) = AbortHandle::new_pair();
+                inner.op_aborts.borrow_mut().insert(id, abort);
+                let res = Abortable::new(
+                    async move {
+                        let mut lease = lease;
+                        let r = lease.listener().accept().await;
+                        drop(lease);
+                        r
+                    },
+                    reg,
+                )
+                .await;
                 match res {
-                    Ok((stream, _peer)) => IoResult::Connected(inner.insert(Box::new(stream))),
-                    Err(e) => IoResult::Err(e.into()),
+                    Ok(Ok((stream, _peer))) => IoResult::Connected(inner.insert(Box::new(stream))),
+                    Ok(Err(e)) => IoResult::Err(e.into()),
+                    Err(_aborted) => IoResult::Err(IoError {
+                        kind: std::io::ErrorKind::NotConnected,
+                        message: "listener closed while an accept was in flight".to_string(),
+                    }),
                 }
             }),
 
@@ -546,7 +675,22 @@ impl IoBackend for SmolBackend {
     }
 
     fn close(&self, id: StreamId) {
+        // Streams and listeners share one id space but separate registries — a
+        // listener id left here kept the port bound (and the backlog accepting)
+        // forever after `TcpListener.close`, since the reap path is the only close
+        // most code reaches (the async `IoRequest::Close` is test-only).
         let _ = self.inner.streams.borrow_mut().remove(&id);
+        let _ = self.inner.listeners.borrow_mut().remove(&id);
+        // If the resource is leased out to an in-flight op, it is in neither map:
+        // tombstone it (the lease's drop will close the fd instead of re-inserting)
+        // and abort the op so the parked task wakes with a "closed" error now,
+        // rather than hanging until the peer happens to act.
+        if self.inner.leased.borrow().contains(&id) {
+            self.inner.closed_while_leased.borrow_mut().insert(id);
+            if let Some(h) = self.inner.op_aborts.borrow_mut().remove(&id) {
+                h.abort();
+            }
+        }
     }
 }
 
@@ -593,7 +737,7 @@ impl IoBackend for MockBackend {
                 self.next_id.set(self.next_id.get() + 1);
                 IoResult::Connected(id)
             }
-            IoRequest::Read { max, .. } => {
+            IoRequest::Read { max, .. } | IoRequest::ReadTimed { max, .. } => {
                 let mut buf = self.reads.borrow_mut().pop_front().unwrap_or_default();
                 buf.truncate(max);
                 IoResult::Read(buf)

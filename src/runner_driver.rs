@@ -223,6 +223,12 @@ fn complete_current_task<'gc>(
 /// every top-level unit runs under the scheduler.
 pub(crate) fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
     let fiber = Fiber::new(|yielder, ctx| run_vm_loop(yielder, ctx));
+    // Stamp a fresh park epoch: the main task runs (and can park) before its first
+    // `load_task_context`, and the REPL reinstalls task #0 every line — a fixed epoch
+    // here could collide with a ghost waiter entry left in a channel that outlived
+    // the previous line. `park_seq` itself survives reinstalls, so epochs stay unique.
+    vm.sched.park_seq += 1;
+    let epoch = vm.sched.park_seq;
     vm.sched.tasks = vec![Some(Task {
         coro: gc!(mc, fiber),
         root_yielder: None,
@@ -244,9 +250,10 @@ pub(crate) fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
         cancel_requested: false,
         abort_handle: None,
         joining: None,
-        park_epoch: 0,
+        park_epoch: epoch,
         deadline_abort: None,
         parked_on_channel: false,
+        native_reentry_depth: 0,
     })];
     vm.sched.current_task = TaskId(0);
 }
@@ -393,6 +400,26 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                     }
                     None => {
                         if futures.is_empty() {
+                            // Nothing ready and nothing in flight. A finished main
+                            // task already broke out via `RunStep::Finished`, so if
+                            // its slot is still occupied it is parked — on a channel,
+                            // a join, or a gather that can never complete: a global
+                            // deadlock. Surface it as an error; the old silent
+                            // `break` exited 0 with the rest of the program
+                            // unexecuted, indistinguishable from success.
+                            let main_parked = arena.mutate_root(|_mc, vm| {
+                                vm.sched.tasks.first().is_some_and(|t| t.is_some())
+                            });
+                            if main_parked {
+                                let e = QuoinError::Other(
+                                    "deadlock: every task is parked with no I/O in \
+                                     flight (e.g. a receive with no sender, or a join \
+                                     cycle); the program cannot make progress"
+                                        .to_string(),
+                                );
+                                frontend.on_finished(arena, Some(&e))?;
+                                return Err(e);
+                            }
                             break; // nothing ready and nothing in flight
                         }
                         // About to go idle: flush pending fd closes FIRST. A parked peer may

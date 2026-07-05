@@ -1,0 +1,6 @@
+"* [IO]Folder.open: with a nonexistent path panics the VM (unwrap on read_dir)
+"* instead of throwing a catchable error.
+{ var f = [IO]Folder.open:'/no/such/dir/quoin-audit-xyz'; f.path.print }.catch:{ |e|
+    ('caught (correct): ' + e.s).print
+};
+'after folder open (only printed if the error was catchable)'.print

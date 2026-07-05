@@ -16,7 +16,7 @@ use futures_rustls::rustls::{self, ServerConfig};
 
 /// Read one HTTP/1.1 request (request line + headers + Content-Length body) and return
 /// `(path, body)`. `reader` is a buffered view over the connection.
-fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
+fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>, String) {
     let mut request_line = String::new();
     let _ = reader.read_line(&mut request_line);
     let path = request_line
@@ -25,6 +25,7 @@ fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
         .unwrap_or("/")
         .to_string();
     let mut content_length = 0usize;
+    let mut host = String::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -37,18 +38,30 @@ fn read_request(reader: &mut impl BufRead) -> (String, Vec<u8>) {
         if let Some(v) = lower.strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
         }
+        if let Some(v) = lower.strip_prefix("host:") {
+            host = v.trim().to_string();
+        }
     }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         let _ = reader.read_exact(&mut body);
     }
-    (path, body)
+    (path, body, host)
 }
 
 /// The canned response for a given request path. `/close` is Content-Length-less (the
 /// body is delimited by the connection close), `/chunked` is `Transfer-Encoding: chunked`,
 /// the others carry Content-Length.
-fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
+fn response_for(path: &str, req_body: &[u8], host: &str) -> Vec<u8> {
+    if path == "/host" {
+        // Echo the Host header the client actually sent (RFC 7230 §5.4 check).
+        return format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+            host.len(),
+            host
+        )
+        .into_bytes();
+    }
     if path == "/chunked" {
         // "Hello, world!" as two chunks ("Hello, " = 0x7, "world!" = 0x6) + the 0 terminator.
         return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
@@ -76,6 +89,15 @@ fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&body[mid..]);
         out.extend_from_slice(b"\r\n0\r\n\r\n");
         return out;
+    }
+    if path == "/truncated" {
+        // Promises 10 bytes, delivers 5; the connection then closes (thread ends →
+        // drop). The client must surface unexpectedEof, not a silent short 200 body.
+        return b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello".to_vec();
+    }
+    if path == "/chunked-eof" {
+        // Chunked framing cut off after the first complete chunk (no next size line).
+        return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nHello, \r\n".to_vec();
     }
     if path == "/redirect" {
         // 302 to a root-relative target on the same server.
@@ -192,9 +214,9 @@ fn http_get_post_and_close() {
         for conn in listener.incoming().flatten() {
             thread::spawn(move || {
                 let mut reader = BufReader::new(conn.try_clone().unwrap());
-                let (path, body) = read_request(&mut reader);
+                let (path, body, host) = read_request(&mut reader);
                 let mut conn = conn;
-                let _ = conn.write_all(&response_for(&path, &body));
+                let _ = conn.write_all(&response_for(&path, &body, &host));
                 let _ = conn.flush();
                 // For /close we just drop `conn` (EOF signals the body end).
             });
@@ -254,6 +276,10 @@ var r5c = [HTTP]Client.get: base + '/gzip-chunked';
 var r5d = [HTTP]Client.get: base + '/gzip-chunked';
 ((r5d.body.chunks.collect:{{ |c| c.text }}) == #( 'hello gzip world' )).else:{{ ok = false }};
 
+"* Host header carries the (non-default) port — RFC 7230 §5.4
+var rh = [HTTP]Client.get: base + '/host';
+(rh.body.text == ('127.0.0.1:' + '{port}')).else:{{ ok = false; ('FAIL host: ' + rh.body.text).print }};
+
 "* zstd Content-Encoding (transparently decoded)
 var r6 = [HTTP]Client.get: base + '/zstd';
 (r6.body.text == 'hello zstd world').else:{{ ok = false }};
@@ -307,8 +333,8 @@ fn https_get_insecure() {
                 };
                 let mut tls = rustls::Stream::new(&mut sc, &mut tcp);
                 let mut reader = BufReader::new(&mut tls);
-                let (path, body) = read_request(&mut reader);
-                let resp = response_for(&path, &body);
+                let (path, body, host) = read_request(&mut reader);
+                let resp = response_for(&path, &body, &host);
                 let _ = tls.write_all(&resp);
                 let _ = tls.flush();
             });
@@ -348,4 +374,129 @@ var ok = (r.status == 200) && (r.body.bytes.size > 0);
 ok.if:{ 'PASS'.print } else:{ ('FAIL status ' + r.status + ' size ' + r.body.bytes.size).print };
 "#;
     run_pass(script, "realhost");
+}
+
+#[test]
+fn truncated_bodies_error_instead_of_silent_success() {
+    // Regression (audit): an EOF before the promised Content-Length used to be
+    // treated as normal completion — status 200, short body, no error; a chunked
+    // body cut at a chunk boundary surfaced as a misleading hex ValueError. Both
+    // must be typed IoErrors with kind #unexpectedEof.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            thread::spawn(move || {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let (path, body, host) = read_request(&mut reader);
+                let mut conn = conn;
+                let _ = conn.write_all(&response_for(&path, &body, &host));
+                let _ = conn.flush();
+            });
+        }
+    });
+
+    let script = format!(
+        r#"
+use std:net/http;
+var ok = true;
+var base = 'http://127.0.0.1:{port}';
+
+"* Content-Length promises 10 bytes; the server sends 5 and closes.
+var r1 = [HTTP]Client.get: base + '/truncated';
+{{ r1.body.text; ok = false; 'FAIL: truncated body read as success'.print }}
+    .catch:{{ |e:IoError| (e.kind == #unexpectedEof).else:{{ ok = false; ('FAIL kind1: ' + e.kind.s).print }} }}
+    catch:{{ |e| ok = false; ('FAIL class1: ' + e.s).print }};
+
+"* Chunked framing cut off between chunks.
+var r2 = [HTTP]Client.get: base + '/chunked-eof';
+{{ r2.body.text; ok = false; 'FAIL: chunked-eof body read as success'.print }}
+    .catch:{{ |e:IoError| (e.kind == #unexpectedEof).else:{{ ok = false; ('FAIL kind2: ' + e.kind.s).print }} }}
+    catch:{{ |e| ok = false; ('FAIL class2: ' + e.s).print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    run_pass(&script, "truncated");
+}
+
+#[test]
+fn cross_origin_redirects_strip_credentials() {
+    // Regression (audit): nextRequestFor: forwarded every header on a 3xx, so an
+    // Authorization header set for origin A was re-sent to a different origin B —
+    // credential leakage standard clients prevent. Same-origin redirects must
+    // still keep the header.
+    fn spawn_auth_server(redirect_target: Option<String>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let redirect_target = redirect_target.clone();
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(conn.try_clone().unwrap());
+                    let mut request_line = String::new();
+                    let _ = reader.read_line(&mut request_line);
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+                    let mut auth = String::from("none");
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        if line == "\r\n" || line == "\n" {
+                            break;
+                        }
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(v) = lower.strip_prefix("authorization:") {
+                            auth = v.trim().to_string();
+                        }
+                    }
+                    let mut conn = conn;
+                    let resp = if path == "/go" {
+                        let loc = redirect_target.as_deref().unwrap_or("/reflect");
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\n\r\n"
+                        )
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                            auth.len(),
+                            auth
+                        )
+                    };
+                    let _ = conn.write_all(resp.as_bytes());
+                    let _ = conn.flush();
+                });
+            }
+        });
+        port
+    }
+
+    let b = spawn_auth_server(None);
+    let a = spawn_auth_server(Some(format!("http://127.0.0.1:{b}/reflect")));
+    let same = spawn_auth_server(None);
+
+    let script = format!(
+        r#"
+use std:net/http;
+var ok = true;
+
+"* same-origin redirect (/go -> /reflect on one server) keeps Authorization
+var r1 = (([HTTP]Client.request:'http://127.0.0.1:{same}/go')
+    .header:'Authorization' value:'Bearer sekrit').send;
+(r1.body.text == 'bearer sekrit').else:{{ ok = false; ('FAIL same-origin: ' + r1.body.text).print }};
+
+"* cross-origin redirect (server A -> server B) strips it
+var r2 = (([HTTP]Client.request:'http://127.0.0.1:{a}/go')
+    .header:'Authorization' value:'Bearer sekrit').send;
+(r2.body.text == 'none').else:{{ ok = false; ('FAIL cross-origin: ' + r2.body.text).print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    run_pass(&script, "redirect_auth");
 }

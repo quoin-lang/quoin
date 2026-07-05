@@ -262,8 +262,27 @@ Quoin over the current sockets/streams).
   and the `unexpected I/O result` internal-invariant guards.
 - [ ] **`Bytes` extras.** A mutable `BytesBuilder` (if concat churn shows up — body assembly
   is `bytes + chunk` today). (The `#b'HEX'` byte literal moved to `## Syntax`.)
-- [ ] **(Separate, larger track) Polyglot extension system.** Out-of-process, shared-memory
-  extensions — design captured in `docs/FUTURE_EXT_ARCH.md` (not started).
+- [x] **(Separate, larger track) Polyglot extension system.** Out-of-process extensions over a
+  unix-domain socket — design in `docs/FUTURE_EXT_ARCH.md`. Shipped: Tier 0 (gc-free `Host`
+  trait) + Tier 1 transport, structured values, host-reach, crash/timeout isolation, and
+  extension-backed classes; Rust + Python SDKs at parity (`crates/quoin-ext`,
+  `crates/quoin-ext-proto`, `src/runtime/extension.rs`). Remaining refinements below.
+  - [ ] **Extension calls: fair queuing instead of a busy error.** *(audit follow-up, PR #48.)*
+    A connection serves one top-level call at a time (a single request/response socket, no
+    request ids); a second *concurrent* call now fails fast with a catchable "extension busy"
+    error (`in_flight` guard, `src/runtime/extension.rs`) instead of interleaving frames and
+    desyncing the socket. The nicer behavior is to **queue** a waiting caller — park it on the
+    connection, wake it when the in-flight call finishes — so `Async.gather:` over one
+    long-lived `[ADBC]Connection` just works. Needs a per-extension waiter queue + park/wake
+    (mirrors the channel park model in `src/runtime/channel.rs`). Same-task re-entry (the
+    extension re-entering itself through a host block) must still error — only cross-task
+    contention queues.
+  - [ ] **Extension socket files leak on abnormal *host* exit.** *(audit follow-up, PR #48.)* An
+    extension's socket file (`/tmp/quoin-ext-*.sock`) and child are torn down by
+    `NativeExtension::drop` (and promptly on a timeout via `kill_now`), but if the *host* crashes
+    or is killed, `Drop` never runs and the socket file persists. Add a startup sweep of stale
+    `quoin-ext-*.sock` files (own-pid-tagged so a concurrently-running host isn't clobbered), or
+    place them under a process-scoped temp dir removed on a best-effort atexit/panic hook.
 
 ## REPL (`qn repl`)
 
@@ -506,6 +525,28 @@ deferred `Mirror` in `## REPL`.
   `user_string_expr` (`#ident'…'`). Fixed by byte-slicing between the single-byte `'`/`#` delimiters
   (`&raw[1..raw.len() - 1]`), which is char-boundary-safe. The `us`→`µs` workaround in `qnlib/test.qn` was
   reverted. Regression test: `multibyteLiterals` (`qnlib/tests/08-strings.qn`).
+- [ ] **Native re-entry through `execute_block` can still overflow the machine stack
+  (uncatchable SIGBUS).** *(audit follow-up, PR #48.)* `call_method`/`call_method_value` now
+  cap native→Quoin re-entry depth (`VmState.native_reentry_depth`, per-task, saved/restored
+  across task switches), so a self-referential `==:`/`hash`/comparator that re-enters a native
+  op raises a catchable error instead of aborting the process (`src/vm.rs`,
+  `tests/native_recursion.rs`). `execute_block` is **deliberately not** capped: lazy generator
+  pipelines legitimately compose blocks many levels deep on the native stack (the Generators
+  suite nests past any machine-stack-safe fixed cap), so a low cap there would break real
+  programs. A block-based infinite re-entry (a sort comparator that re-sorts its own receiver,
+  an `each:` body that re-iterates it) can therefore still SIGBUS. A real fix needs a
+  stack-remaining check (stacker-style `maybe_grow`) or a larger/growable coroutine stack,
+  rather than a fixed depth counter that conflates pathological recursion with deep-but-finite
+  legitimate nesting.
+- [ ] **Extension `DataValue` depth cap is decode-side only — the host encode path is still
+  unbounded.** *(audit follow-up, PR #48.)* Decoding a deeply nested `DataValue` *from* an
+  extension is capped (`MAX_DV_DEPTH = 64`, catchable `DecodeError` —
+  `crates/quoin-ext-proto/src/lib.rs`), which stops a buggy/hostile extension from overflowing
+  the host stack. The **symmetric** path — the host serializing a deeply nested Quoin value to
+  *send* (`value_to_data` + `encode_dv`, via `call:…data:` or a `MakeValue`/`ReadHandleReturn`
+  reply) — still recurses without a bound, so a deep value built in Quoin can overflow the host
+  on the way out. Cap it the same way: a depth check in `value_to_data` (or a fallible
+  depth-bounded `encode_dv`) raising a catchable error.
 
 ## 1. Class & Method Definition Semantics
 - [x] **Class Creation (`<-` operator)**:

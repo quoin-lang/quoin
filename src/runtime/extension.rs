@@ -171,6 +171,13 @@ pub struct NativeExtension {
     handle_reap: Rc<RefCell<Vec<u64>>>,
     /// Set once the child has been observed exited, so further calls fail fast (crash isolation).
     dead: bool,
+    /// True while a top-level call is in flight on this connection (from the moment it opens
+    /// until its reply — including the whole re-entrant host-reach conversation, which parks
+    /// on the socket). The transport is a single request/response stream with no request ids,
+    /// so a *second* top-level call started while one is live — another task under
+    /// `Async.gather:`, or the extension re-entering the same extension through a host block —
+    /// would interleave frames and desync the connection. Guarded in `ext_prelude`.
+    in_flight: bool,
     /// Ext-side resource ids whose host `ExtResource` was dropped, awaiting flush to the
     /// extension as `Call.releases`. Cloned into each `ExtResource` this extension hands out so
     /// its `Drop` can enqueue here (a GC `Drop` can't send a frame; mirrors the fd-reap pattern).
@@ -209,6 +216,20 @@ impl Drop for NativeExtResource {
 }
 
 impl NativeExtension {
+    /// Tear the extension down *now* rather than lingering until GC drop: mark it dead and
+    /// kill + reap the child and remove the socket file. Called when a call leaves the
+    /// connection permanently unusable (a timeout / cancel desyncs the framed conversation),
+    /// so a wedged or slow child does not keep running — holding a process slot and its
+    /// socket file — until the `Extension` value is eventually collected (which may be much
+    /// later, or never if the program keeps the handle). Idempotent and mirrors `Drop`; the
+    /// host-side fd + handle reap still happen in `Drop`.
+    fn kill_now(&mut self) {
+        self.dead = true;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.sock_path);
+    }
+
     /// If a call's I/O failed *because* the child exited, mark the extension dead and return a
     /// short description of how it exited; otherwise `None` (the failure was something else).
     /// `try_wait` is non-blocking, so this is cheap and only runs on the error path.
@@ -294,6 +315,14 @@ fn read_reply_frame<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>,
         buf.extend_from_slice(&chunk);
     }
     let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if len > quoin_ext_proto::MAX_FRAME_LEN {
+        // A corrupt/hostile length would otherwise drive unbounded accumulation. Refuse
+        // before growing `buf`; the connection is desynced, so this is a hard error.
+        return Err(QuoinError::Other(format!(
+            "Extension call: reply frame length {len} exceeds the {} byte limit",
+            quoin_ext_proto::MAX_FRAME_LEN
+        )));
+    }
     while buf.len() < 4 + len {
         let chunk = read_chunk(vm, id)?;
         if chunk.is_empty() {
@@ -302,6 +331,17 @@ fn read_reply_frame<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>,
             ));
         }
         buf.extend_from_slice(&chunk);
+    }
+    // The protocol is strict request/response (one frame in flight per direction), so a
+    // read that pulled in bytes past this frame means a pipelining/desync bug — silently
+    // dropping them (as the old `buf[4..4+len]` slice did) would lose the next frame and
+    // mask the fault. The SDK reads with `read_exact`; hold the host to the same
+    // discipline and surface the extra bytes as an error.
+    if buf.len() > 4 + len {
+        return Err(QuoinError::Other(format!(
+            "Extension call: {} trailing byte(s) after a {len}-byte reply frame (protocol desync)",
+            buf.len() - (4 + len)
+        )));
     }
     Ok(buf[4..4 + len].to_vec())
 }
@@ -748,8 +788,10 @@ fn finish_outcome<'gc>(
         // combinator still turns it into a catchable `TimeoutError`. The peer is now unusable; the
         // program spawns a fresh `Extension` to retry.
         Err(QuoinError::Cancelled) => {
+            // The peer is unusable (desynced) — tear its child + socket down promptly rather
+            // than let a slow/wedged process linger until this `Extension` value is collected.
             let _ = ext_receiver
-                .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.dead = true);
+                .with_native_state_mut::<NativeExtension, _, _>(mc, |ext| ext.kill_now());
             vm.handle_table.release_for_ext(ext_id);
             Err(QuoinError::Cancelled)
         }
@@ -784,17 +826,46 @@ struct ExtCall {
 }
 
 /// Peek at the extension's native state and drain its pending dropped-resource releases (one peek
-/// per call), shared by the generic `call:with:` path and extension-backed-class dispatch.
-fn ext_prelude<'gc>(receiver: Value<'gc>) -> Result<ExtCall, QuoinError> {
-    receiver
-        .with_native_state::<NativeExtension, _, _>(|e| ExtCall {
-            id: e.id,
-            ext_id: e.ext_id,
-            dead: e.dead,
-            resource_reap: e.resource_reap.clone(),
-            releases: e.resource_reap.borrow_mut().drain(..).collect(),
+/// per call), shared by the generic `call:with:` path and extension-backed-class dispatch. Also
+/// claims the connection for this top-level call (`in_flight`): a call attempted while one is
+/// already live returns a catchable "busy" error rather than interleaving frames on the shared
+/// socket. The caller must release the claim (`ext_end_call`) once the call completes.
+fn ext_prelude<'gc>(
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+) -> Result<ExtCall, QuoinError> {
+    let call = receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+            if e.in_flight {
+                return None;
+            }
+            e.in_flight = true;
+            Some(ExtCall {
+                id: e.id,
+                ext_id: e.ext_id,
+                dead: e.dead,
+                resource_reap: e.resource_reap.clone(),
+                releases: e.resource_reap.borrow_mut().drain(..).collect(),
+            })
         })
-        .map_err(QuoinError::Other)
+        .map_err(QuoinError::Other)?;
+    call.ok_or_else(|| {
+        QuoinError::Other(
+            "extension is busy with another call: an extension connection serves one call at a \
+             time (no concurrent calls from separate tasks, and no re-entering the same \
+             extension from within its own call)"
+                .to_string(),
+        )
+    })
+}
+
+/// Release the `in_flight` claim taken by [`ext_prelude`] once a top-level call has finished
+/// (whether it succeeded, errored, or the extension died). Never clears when the extension is
+/// gone from the table (nothing to clear).
+fn ext_end_call<'gc>(mc: &gc_arena::Mutation<'gc>, receiver: Value<'gc>) {
+    let _ = receiver.with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+        e.in_flight = false;
+    });
 }
 
 /// The shared body of the `call:` selectors: fail fast if the extension is already known dead,
@@ -810,13 +881,21 @@ fn run_extension_method<'gc>(
     args: Vec<Value<'gc>>,
     data_arg: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
-    let ctx = ext_prelude(receiver)?;
+    let ctx = ext_prelude(mc, receiver)?;
     if ctx.dead {
+        ext_end_call(mc, receiver);
         return Err(extension_dead_error("already exited"));
     }
-    // Serialize the optional structured-value payload before opening the call (no handles involved).
+    // Serialize the optional structured-value payload before opening the call. If this fails
+    // (e.g. a value too deep to encode) release the in-flight claim first.
     let data = match data_arg {
-        Some(value) => Some(runtime_to_wire(&value_to_data(value)?)),
+        Some(value) => match value_to_data(value) {
+            Ok(d) => Some(runtime_to_wire(&d)),
+            Err(e) => {
+                ext_end_call(mc, receiver);
+                return Err(e);
+            }
+        },
         None => None,
     };
     let outcome = extension_call(
@@ -832,6 +911,7 @@ fn run_extension_method<'gc>(
         0,
         ctx.releases,
     );
+    ext_end_call(mc, receiver);
     finish_outcome(vm, mc, receiver, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -876,8 +956,9 @@ pub fn dispatch_ext_method<'gc>(
     // both `[Ns]Name` (loadPackage) and a verbatim bare name (spawn:).
     let class_name = class_obj.borrow().name.name.clone();
 
-    let ctx = ext_prelude(ext)?;
+    let ctx = ext_prelude(mc, ext)?;
     if ctx.dead {
+        ext_end_call(mc, ext);
         return Err(extension_dead_error("already exited"));
     }
     // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
@@ -895,15 +976,70 @@ pub fn dispatch_ext_method<'gc>(
         recv,
         ctx.releases,
     );
+    ext_end_call(mc, ext);
     finish_outcome(vm, mc, ext, ctx.ext_id, ctx.resource_reap, outcome)
+}
+
+/// Read one length-prefixed reply frame, but fail with a `TimedOut` error if the whole
+/// read takes longer than `timeout_ms`. Like [`read_reply_frame`], but each `Read` park
+/// carries the *remaining* budget (via `IoRequest::ReadTimed`), so a peer that accepts
+/// the socket and then goes silent cannot hang the caller.
+fn read_reply_frame_timed<'gc>(
+    vm: &mut VmState<'gc>,
+    id: StreamId,
+    timeout_ms: u64,
+) -> Result<Vec<u8>, QuoinError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut buf: Vec<u8> = Vec::new();
+    let read_more = |vm: &mut VmState<'gc>, buf: &mut Vec<u8>| -> Result<(), QuoinError> {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(QuoinError::Io {
+                kind: crate::error::IoErrorKind::TimedOut,
+                message: format!("extension handshake timed out after {timeout_ms}ms"),
+            });
+        }
+        match vm.await_io(IoRequest::ReadTimed {
+            id,
+            max: 4096,
+            ms: remaining.as_millis() as u64,
+        })? {
+            IoResult::Read(chunk) if chunk.is_empty() => Err(QuoinError::Other(
+                "Extension handshake: connection closed before manifest".to_string(),
+            )),
+            IoResult::Read(chunk) => {
+                buf.extend_from_slice(&chunk);
+                Ok(())
+            }
+            IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+            other => Err(QuoinError::Other(format!(
+                "Extension handshake: unexpected read result {other:?}"
+            ))),
+        }
+    };
+    while buf.len() < 4 {
+        read_more(vm, &mut buf)?;
+    }
+    let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if len > quoin_ext_proto::MAX_FRAME_LEN {
+        return Err(QuoinError::Other(format!(
+            "Extension handshake: manifest frame length {len} exceeds the {} byte limit",
+            quoin_ext_proto::MAX_FRAME_LEN
+        )));
+    }
+    while buf.len() < 4 + len {
+        read_more(vm, &mut buf)?;
+    }
+    Ok(buf[4..4 + len].to_vec())
 }
 
 /// Fetch an extension's class manifest right after connect (Phase 3): send `GetManifest` and read
 /// the single `ManifestReturn`. An extension that provides no classes returns an empty list, so the
-/// generic `call:with:` extensions stay backward-compatible.
+/// generic `call:with:` extensions stay backward-compatible. The read is time-bounded so a silent
+/// extension fails the spawn instead of hanging the VM.
 fn fetch_manifest<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<ClassDecl>, QuoinError> {
     write_msg(vm, id, &Msg::GetManifest)?;
-    let frame = read_reply_frame(vm, id)?;
+    let frame = read_reply_frame_timed(vm, id, crate::tuning::ext_handshake_timeout_ms())?;
     match quoin_ext_proto::decode_envelope(&frame)
         .map_err(|e| QuoinError::Other(format!("Extension manifest: malformed frame: {e}")))?
     {
@@ -976,7 +1112,16 @@ fn spawn_and_connect<'gc>(
 
     // Fetch the class manifest (Phase 3) before creating the value: the fetch parks the fiber (a GC
     // point), so no GC value may be held across it. A generic extension returns an empty manifest.
-    let manifest = fetch_manifest(vm, id)?;
+    // On any handshake failure (including the timeout) the child isn't owned by an `Extension` value
+    // yet, so kill it here rather than orphan it.
+    let manifest = match fetch_manifest(vm, id) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = std::fs::remove_file(&sock_path);
+            return Err(e);
+        }
+    };
 
     let class = vm.get_or_create_builtin_class(mc, "Extension");
     let ext_val = vm.new_native_state(
@@ -990,6 +1135,7 @@ fn spawn_and_connect<'gc>(
             reap: vm.io.socket_reap.clone(),
             handle_reap: vm.io.ext_handle_reap.clone(),
             dead: false,
+            in_flight: false,
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,
         },

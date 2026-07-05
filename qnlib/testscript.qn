@@ -153,14 +153,14 @@ false.if:{
         #( 'Received connection' conn ).print;
 
         conn.writeAll:'Hi\n'.asBytes;
-        conn.close;
 
         i = i + 1;
-        (i > 3).if:{ server.stop };
-        i
+        (i > 3).if:{ server.stop }
     };
 
-    #( 'Server respponses: ' server.join ).print
+    "* join is a drain barrier (no per-connection results); the handler talks over its socket.
+    server.join;
+    #( 'Server drained; connections still tracked:' server.connections ).print
 };
 
 "*

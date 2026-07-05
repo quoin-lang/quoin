@@ -1,0 +1,6 @@
+var e = Extension.spawn:'qnlib/stress/audit/ext/slow_echo.py';
+"* two concurrent calls to the SAME extension via gather
+var results = Async.gather:#( { e.call:'A' with:'1' } { e.call:'B' with:'2' } );
+results.print;
+"* correct answer is #( 'A:1' 'B:2' )
+(results == #( 'A:1' 'B:2' )).if:{ 'CORRECT'.print } else:{ 'MISMATCH'.print }

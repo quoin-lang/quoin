@@ -99,10 +99,13 @@ pub struct Task<'gc> {
     /// joiner from that target's waiter list and wake it. Cleared on becoming current.
     #[collect(require_static)]
     pub joining: Option<TaskId>,
-    /// Park generation, bumped each time this task becomes current (`load_task_context`).
-    /// A `JoinTimed` deadline timer captures the epoch at park time; a stale timer whose
-    /// epoch no longer matches (the task was resumed and re-parked, possibly on a reused
-    /// slot id) is ignored. This is what makes the deadline-vs-completion race exact.
+    /// Park identity, stamped from the *global* `Scheduler::park_seq` each time this
+    /// task becomes current (`load_task_context`). A `JoinTimed` deadline timer and a
+    /// channel waiter-queue entry capture the epoch at park time; a stale capture whose
+    /// epoch no longer matches is ignored. Global (not per-task) allocation is what makes
+    /// this exact across slot reuse: a fresh task in a recycled slot can never repeat an
+    /// epoch the previous occupant parked at, so a ghost timer/queue entry can never
+    /// impersonate the new occupant.
     #[collect(require_static)]
     pub park_epoch: u64,
     /// While parked in `JoinTimed`: aborts the in-flight deadline timer, so a normal
@@ -117,6 +120,12 @@ pub struct Task<'gc> {
     /// it. See `src/runtime/channel.rs`.
     #[collect(require_static)]
     pub parked_on_channel: bool,
+    /// This task's native → Quoin re-entry depth (see `VmState::native_reentry_depth`),
+    /// stashed while parked. Each task has its own coroutine stack, so the depth that
+    /// bounds overflow is per-task, not global — a task parked mid-re-entry (a host-reach
+    /// block that awaits) must not leak its depth into whichever task runs next.
+    #[collect(require_static)]
+    pub native_reentry_depth: usize,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -252,6 +261,12 @@ pub struct Scheduler<'gc> {
     /// `Cancelled`, so the ensuing `finally` unwind is not itself re-cancelled.
     #[collect(require_static)]
     pub cancel_current: bool,
+    /// Monotonic allocator for [`Task::park_epoch`]: bumped and stamped onto a task
+    /// each time it becomes current. Scheduler-global so epochs are unique across all
+    /// tasks and all slot reuses — never reset (not even by `reset_scheduler`), so a
+    /// channel entry or deadline timer surviving a REPL line stays inert too.
+    #[collect(require_static)]
+    pub park_seq: u64,
 }
 
 impl<'gc> VmState<'gc> {
@@ -284,7 +299,8 @@ impl<'gc> VmState<'gc> {
             }
             _ => {}
         }
-        // The only Running fiber is the current one; ancestors are Suspended.
+        // Within the current task, the only Running fiber is the current one and
+        // ancestors are Suspended — these two checks cover the current task's chain.
         if self.sched.current_fiber == Some(fiber_val) {
             return Err(self.raise_fiber_error(mc, "a Fiber cannot resume itself"));
         }
@@ -298,6 +314,24 @@ impl<'gc> VmState<'gc> {
                 mc,
                 "cannot resume a Fiber that is currently resuming this one (would deadlock)",
             ));
+        }
+        // Cross-task: a fiber live inside ANOTHER task (its current fiber, or an
+        // ancestor on its resume chain — that task may be parked mid-fiber on I/O,
+        // or preempted) has its real context live in or stashed with that task,
+        // not in its own state. Re-entering it from here would load an empty
+        // context and resume its coroutine at a foreign suspend point — corrupting
+        // both tasks, failing the fiber, and aborting the whole process when the
+        // owning task later re-resumes the now-completed coroutine.
+        if let Some(owner) = fiber_val
+            .with_native_state::<NativeFiberState, _, _>(|s| s.owner)
+            .map_err(QuoinError::Other)?
+        {
+            if owner != self.sched.current_task {
+                return Err(self.raise_fiber_error(
+                    mc,
+                    "cannot resume a Fiber that is running in another task",
+                ));
+            }
         }
 
         if let Some(yielder) = unsafe { self.get_yielder() } {
@@ -636,6 +670,13 @@ impl<'gc> VmState<'gc> {
             fiber_val.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.status = status);
     }
 
+    /// Record which task `fiber_val` is live inside (`None` = not in any task's
+    /// resume chain). Set on resume, cleared on yield/completion; `fiber_resume`
+    /// refuses a cross-task resume while it is set.
+    fn set_fiber_owner(&self, mc: &Mutation<'gc>, fiber_val: Value<'gc>, owner: Option<TaskId>) {
+        let _ = fiber_val.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.owner = owner);
+    }
+
     /// Save the live VM execution context into the slot for `who` (`None` = main).
     fn save_fiber_context(
         &mut self,
@@ -725,6 +766,9 @@ impl<'gc> VmState<'gc> {
                 .map_err(QuoinError::Other)?;
         }
         self.set_fiber_status(mc, fiber_val, FiberStatus::Running);
+        // The incoming fiber joins this task's resume chain. The outgoing one (now
+        // Suspended, an ancestor on the chain) keeps its owner — it is still live here.
+        self.set_fiber_owner(mc, fiber_val, Some(self.sched.current_task));
         Ok(())
     }
 
@@ -738,6 +782,9 @@ impl<'gc> VmState<'gc> {
         self.save_fiber_context(mc, outgoing)?;
         if let Some(of) = outgoing {
             self.set_fiber_status(mc, of, FiberStatus::Suspended);
+            // A yield removes the fiber from this task's resume chain: its context
+            // is back in its own state, so any task may legally resume it now.
+            self.set_fiber_owner(mc, of, None);
         }
         let resumer = self.sched.resume_stack.pop().unwrap_or(None);
         self.sched.current_fiber = resumer;
@@ -778,6 +825,7 @@ impl<'gc> VmState<'gc> {
                     });
                 }
             }
+            self.set_fiber_owner(mc, finished, None);
         }
         // The finished fiber's execution context is discarded.
         self.stack.clear();
@@ -827,6 +875,9 @@ impl<'gc> VmState<'gc> {
         self.sched.fiber_error = None;
         self.sched.wake = None;
         self.sched.cancel_current = false;
+        // A REPL line that errored mid-native-call may have unwound past the paired
+        // decrement; start each new line at re-entry depth zero.
+        self.native_reentry_depth = 0;
     }
 
     /// Stash the live per-task context into `tasks[tid]` (the task is parking or
@@ -854,6 +905,7 @@ impl<'gc> VmState<'gc> {
         t.saved_root_stack = saved_root_stack;
         t.saved_root_frames = saved_root_frames;
         t.saved_root_native_args = saved_root_native_args;
+        t.native_reentry_depth = self.native_reentry_depth;
     }
 
     /// Make `tid` the current task and restore its context into `VmState`. The
@@ -863,15 +915,17 @@ impl<'gc> VmState<'gc> {
         self.sched.current_task = tid;
         {
             // Becoming current: surface any pending cancel, drop the join park-state
-            // (no longer waiting on anything), bump the park generation, and clear any
-            // deadline-timer handle (a `JoinTimed` park is over once we run).
+            // (no longer waiting on anything), stamp a fresh globally-unique park
+            // epoch, and clear any deadline-timer handle (a `JoinTimed` park is over
+            // once we run).
+            self.sched.park_seq += 1;
             let t = self.sched.tasks[tid.0]
                 .as_mut()
                 .expect("load_task_context: task slot is empty");
             self.sched.cancel_current = t.cancel_requested;
             t.joining = None;
             t.parked_on_channel = false;
-            t.park_epoch = t.park_epoch.wrapping_add(1);
+            t.park_epoch = self.sched.park_seq;
             t.deadline_abort = None;
         }
         let started = self.sched.tasks[tid.0].as_ref().unwrap().started;
@@ -886,6 +940,7 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_frames = std::mem::take(&mut t.saved_root_frames);
             self.sched.main_saved_native_args = std::mem::take(&mut t.saved_root_native_args);
             self.sched.wake = t.wake.take();
+            self.native_reentry_depth = t.native_reentry_depth;
         } else {
             // First activation: a fresh, empty live context, then start the block.
             self.stack = Vec::new();
@@ -897,6 +952,7 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_frames = Vec::new();
             self.sched.main_saved_native_args = Vec::new();
             self.sched.wake = None;
+            self.native_reentry_depth = 0;
             let block = self.sched.tasks[tid.0]
                 .as_ref()
                 .unwrap()
@@ -914,6 +970,16 @@ impl<'gc> VmState<'gc> {
         let parent = self.sched.current_task;
         self.save_task_context(parent);
         let n = blocks.len();
+        if n == 0 {
+            // No children means nothing will ever call `complete_child`, whose
+            // pending==0 check is the only delivery path — deliver the empty result
+            // now, or the parent parks forever (and the program "succeeds" silently).
+            let list = self.new_list(mc, Vec::new());
+            let pt = self.sched.tasks[parent.0].as_mut().unwrap();
+            pt.wake = Some(Wake::Gather { list });
+            self.sched.ready.push_back(parent);
+            return;
+        }
         self.sched.tasks[parent.0].as_mut().unwrap().gather = Some(GatherState {
             pending: n,
             results: vec![None; n],
@@ -988,6 +1054,7 @@ impl<'gc> VmState<'gc> {
             park_epoch: 0,
             deadline_abort: None,
             parked_on_channel: false,
+            native_reentry_depth: 0,
         }
     }
 
@@ -1117,6 +1184,10 @@ impl<'gc> VmState<'gc> {
                 if let Some(ah) = t.deadline_abort.take() {
                     ah.abort();
                 }
+                // No longer waiting on anything: clear the join park-state now (not
+                // just at `load_task_context`), so a `cancel` landing before this
+                // waiter runs cannot take the join branch and enqueue it a second time.
+                t.joining = None;
                 t.wake = Some(wake);
                 self.sched.ready.push_back(w);
             }
@@ -1138,6 +1209,12 @@ impl<'gc> VmState<'gc> {
         }
         if let Some(ah) = t.abort_handle.take() {
             ah.abort(); // parked on I/O: the aborted future wakes it
+        } else if t.wake.is_some() {
+            // Already woken and enqueued (a completion delivered its wake while this
+            // task sat un-run in `ready`): it observes the cancel flag at its next
+            // checkpoint. Enqueueing it again here would double-resume the slot — a
+            // "task slot is empty" panic after it completes, or a spurious resume of
+            // whatever task reuses the slot first.
         } else if let Some(joined) = t.joining.take() {
             // parked on (timed) join: disarm any deadline timer, dequeue from the
             // target's waiters, and make this task runnable so it sees the cancel.

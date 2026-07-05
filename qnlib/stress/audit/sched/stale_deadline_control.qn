@@ -1,0 +1,11 @@
+"* Control for stale_deadline.qn: keep a long-lived dummy task occupying slot 1 during
+"* phase 2, so t2/c2 land on different slots than the ghost's (1,2) tag. If the bug is
+"* the slot+epoch ABA, this variant must print ok2 (no spurious timeout).
+var t1 = Task.spawn:{ Async.timeout:200 do:{ Async.sleep:5; 'ok1' } };
+t1.join.print;
+var dummy = Task.spawn:{ Async.sleep:3000 };
+var t2 = Task.spawn:{ Async.timeout:60000 do:{ Async.sleep:1000; 'ok2' } };
+var r = { t2.join }.catch:{ |e| 'BUG: ' + e.s };
+r.print;
+dummy.cancel;
+'done'.print
