@@ -168,6 +168,24 @@ no inference magic:
    be this type") rather than List-specialized; no relation to Ruby's
    `ensure` (Quoin's try/finally is already `finally:`).
 
+   **The argument is a value, and that is a deliberate alignment.**
+   `ensure:` and `of:` take an ordinary Class value (`Integer`, `List`),
+   which can only express *flat* types — exactly what v1 tags can
+   *enforce*. `#().ensure:List(Integer)` is neither expressible nor
+   enforceable in v1; `xs.ensure:List` (elements must be Lists, their
+   elements unconstrained) is the flat form both the channel and the
+   runtime can honestly deliver. Generic syntax lives in *type
+   positions* (the four annotation slots) only. The v2 seam, when
+   nested enforcement lands: make `Class(args)` legal in expression
+   position too, evaluating to a first-class reified **type value**
+   accepted by `ensure:`/`of:` — one spelling everywhere, in the
+   classes-are-values tradition. The same "bare `ident(…)` is unused"
+   rationale that won the annotation syntax should apply to expressions
+   (sends are keyword/dot-based; adjacency isn't application), but that
+   grammatical freedom must be verified before v2 commits; the fallback
+   is an annotation-driven form (`var xs: List(List(Integer)) =
+   raw.ensured`), weaker because it works only at declarations.
+
 `List(Integer)` in *expression* position (e.g. `List(Integer).new`) is
 deliberately **not** supported: `Value::Class` has no parameter slot, and
 overloading call-parens in expressions collides with the method-call
@@ -398,3 +416,6 @@ positives" tripwire as always.
    native): tag-to-tag fast path — an optimization, not a semantic.
 6. **Method-level variable declarations**: deferred refinement if
    class-header declaration ever feels cluttered.
+7. **Expression-position type values** (v2, with nested enforcement):
+   verify `ident(…)` is grammatically free in expression position; if
+   so, reified type values are the path — see §4.2's alignment note.
