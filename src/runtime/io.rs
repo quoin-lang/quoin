@@ -1,5 +1,5 @@
 use crate::error::QuoinError;
-use crate::io_backend::{IoRequest, IoResult};
+use crate::io_backend::{IoError, IoRequest, IoResult};
 use crate::value::{NativeClassBuilder, ObjectPayload, OpaqueState, Value};
 use crate::vm::{StdStream, VmState};
 use crate::{ansi_colorizer, arg};
@@ -15,11 +15,18 @@ pub struct NativeIoFolder {
     pub iter: Option<ReadDir>,
 }
 
+/// A filesystem failure as a catchable Quoin `IoError` (kind + message), never a
+/// panic — a missing or unreadable directory is ordinary program input.
+fn fs_err(e: std::io::Error) -> QuoinError {
+    let ioe: IoError = e.into();
+    QuoinError::from_io_error(&ioe)
+}
+
 pub fn build_io_folder_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Folder", Some("Object"))
         .class_method("open:", |vm, mc, _receiver, args| {
             let path = arg!(args, String, 0);
-            Ok(new_native_io_folder(vm, mc, path))
+            new_native_io_folder(vm, mc, path)
         })
         .instance_method("path", |vm, mc, receiver, _args| {
             receiver
@@ -29,27 +36,28 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(e.to_string()))
         })
         .instance_method("next", |vm, mc, receiver, _args| {
+            // Lazily (re)open after `reset`, outside the state borrow, so a vanished
+            // directory is a catchable IoError rather than a panic.
+            let needs_iter = receiver.with_native_state(|io: &NativeIoFolder| io.iter.is_none())?;
+            if needs_iter {
+                let path = receiver.with_native_state(|io: &NativeIoFolder| io.path.clone())?;
+                let iter = read_dir(&path).map_err(fs_err)?;
+                receiver.with_native_state_mut(mc, |io: &mut NativeIoFolder| {
+                    io.iter = Some(iter);
+                })?;
+            }
             let r = receiver.with_native_state_mut(mc, |io: &mut NativeIoFolder| {
-                if io.iter.is_none() {
-                    io.iter = Some(read_dir(&io.path).unwrap());
-                }
                 io.iter
                     .as_mut()
-                    .unwrap()
+                    .expect("iter installed above")
                     .next()
-                    .map(|r| r.map_err(|e| QuoinError::Other(e.to_string())))
+                    .map(|r| r.map_err(fs_err))
             })?;
 
             return Ok(if let Some(entry) = r {
                 let ent = entry?;
                 let os_string = ent.path().into_os_string();
-                new_native_io_file(
-                    vm,
-                    mc,
-                    os_string,
-                    ent.metadata()
-                        .map_err(|e| QuoinError::Other(e.to_string()))?,
-                )
+                new_native_io_file(vm, mc, os_string, ent.metadata().map_err(fs_err)?)
             } else {
                 vm.new_nil(mc)
             });
@@ -74,13 +82,13 @@ fn new_native_io_folder<'a>(
     vm: &mut VmState<'a>,
     mc: &Mutation<'a>,
     path: Gc<'a, String>,
-) -> Value<'a> {
+) -> Result<Value<'a>, QuoinError> {
     let state = OpaqueState(NativeIoFolder {
         path: OsString::from(path.as_str()),
-        iter: Some(read_dir(path.as_str()).unwrap()),
+        iter: Some(read_dir(path.as_str()).map_err(fs_err)?),
     });
 
-    vm.new_native_state(mc, vm.get_builtin_class("[IO]Folder"), state)
+    Ok(vm.new_native_state(mc, vm.get_builtin_class("[IO]Folder"), state))
 }
 
 pub struct NativeIoFile {
