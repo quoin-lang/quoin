@@ -1,6 +1,9 @@
 # Checked generic collections
 
-*Status: DESIGN — no code yet. The settled generics syntax
+*Status: DESIGN (revised after review discussion: real type variables
+replace the earlier implicit-`Element` idea; `emptyLike` chosen over
+extending `default`; `collect:as:` dropped as redundant with inference +
+`asListOf:`). No code yet. The settled generics syntax
 (`docs/TYPE_SYSTEM_ARCH.md` §"Settled surface syntax": `Class(args)`,
 space-separated, nesting allowed) is design-locked but entirely unbuilt:
 `List(Integer)` is a hard parse error today. This doc designs the first
@@ -180,6 +183,75 @@ One propagation exception: `sliceFrom:` (and future copying operations on
 the receiver itself) carries the receiver's tag — the elements are
 already checked.
 
+### 4.4 Type variables (checker-only, declared on class headers)
+
+Type variables are **checker machinery, period** — there is nothing at
+runtime a variable could ever be (`Block(args ^Ret)` annotations sit on
+blocks that aren't even arity-checked). Tags remain the only runtime
+guarantee; variables are how the checker reasons about tag flow. This
+keeps guarantee-honesty crisp and makes the design one general feature
+rather than an Iterate special case:
+
+- **Declaration** — a class or mixin definition header may declare type
+  parameters, same shape as the annotation syntax:
+  ```
+  Mixin <- Iterate(T U) <- {
+      each:    -> { |b: Block(T ^Any)| … };
+      select:  -> { |b: Block(T ^Boolean)| ^List(T) };
+      detect:  -> { |b: Block(T ^Boolean)| ^T? };
+      reduce:  -> { |b: Block(T T ^T)| ^T? };
+      collect: -> { |b: Block(T ^U)| ^List(U) };
+      groupBy: -> { |b: Block(T ^String)| ^Map(String List(T)) };
+  }
+  ```
+  Every variable the class's methods use is declared once in the header;
+  each *call site* instantiates them fresh, so a variable used by only
+  one method (`U`) being class-scoped costs nothing semantically.
+  Method-level declarations are a compatible later refinement if header
+  clutter ever bites. User classes use the same syntax (`Stack(T) <- {…}`).
+- **Binding, per call site, by unification**: (1) the receiver — a
+  method defined on a parameterized class/mixin binds the class's
+  parameter(s) from the receiver's static element type (`ListOf(Integer)`
+  → `T := Integer`; Map binds `String` + value type); (2) arguments — a
+  `T` in an argument position unifies with the arg's static type, which
+  makes `max: -> { |a: T b: T ^T| }` work in plain user code with no
+  tags anywhere; (3) blocks — binding `U` in `Block(T ^U)` requires the
+  checker to infer a block literal's return type with its params bound —
+  the one genuinely new checker capability. Anything unbound is `Any`.
+- **Enforcement strength is a property of the class, not the syntax**:
+  on the tagged native collections the class parameter is runtime-backed
+  (the value's tag); on user classes it is checker-only until user-level
+  tags exist. Same feature, two documented strengths.
+- **Dispatch**: a variable-typed parameter scores as unconstrained
+  (`Object`) in multimethod selection. Variables never dispatch; only
+  concrete annotations (`List(Integer)`) are tag-exact.
+- **Lying signatures** (`^List(T)` over a body that returns untagged)
+  fail loudly at the next tag-demanding position (dispatch mismatch or
+  `asListOf:`), never silently — the same trusted-return gradualism
+  scalar annotations already have.
+
+### 4.5 `emptyLike` — the runtime bridge for the combinators
+
+The checker claiming `select: ^List(T)` is only honest if the runtime
+delivers a tagged list. The bridge is a species-style protocol on
+Iterate (the instance-side sibling of the existing class-side `default`
+protocol — which stays a *value* method, used by the value types too):
+
+- `emptyLike` — a fresh empty collection *like the receiver*: Iterate's
+  default implementation is `self.class.default`; the native collections
+  override it to carry the receiver's element tag.
+- The tag-preserving combinators (`select:`, `reject:`, `take:`,
+  `drop:`, `uniq`, `reverse`, partitions, set algebra, …) build their
+  results with `.emptyLike` instead of `#()` — a handful of qnlib edits,
+  zero per-element cost beyond checks that provably pass (and the
+  tag-to-tag fast path skips those).
+- `collect:` builds a plain `#()` and returns **untagged** — its
+  elements really are whatever the block produced. The static type still
+  flows (inference binds `U`); when the *runtime tag* is needed (a
+  tag-dispatched param, a checked return), the one general bridge is
+  `asListOf:`. A fused single-pass form of `.collect:{}.asListOf:X` is a
+  possible later optimization, not new surface syntax.
+
 ## 5. Dispatch
 
 `|l: List(Integer)|` participates in multimethod dispatch **by tag
@@ -274,13 +346,13 @@ positives" tripwire as always.
 
 ## 9. Slices (each shippable, each corpus-gated)
 
-- **G0 — syntax + lattice (checker-only):** grammar (`type_args`), the
-  `TypeRefNode` AST shape through all four annotation positions,
-  rendering, `ListOf`/`MapOf`/`SetOf` in the lattice with
-  `compatible_with`/`join`/`name` recursion, resolver rules
-  (`Map(String V)` key pinning, nested-generic warnings, unknown-base
-  warnings). No runtime change; `warnings.qn` gallery grows. Plugin
-  grammar PR filed alongside.
+- **G0 — syntax + lattice (checker-only):** grammar (`type_args` in
+  annotation positions AND class/mixin definition headers), the
+  `TypeRefNode` AST shape, rendering, `ListOf`/`MapOf`/`SetOf` plus a
+  `Var(name)` form in the lattice with `compatible_with`/`join`/`name`
+  recursion, resolver rules (`Map(String V)` key pinning, declared-vs-
+  unknown variable names, nested-generic warnings). No runtime change;
+  `warnings.qn` gallery grows. Plugin grammar PR filed alongside.
 - **G1 — runtime tags + enforcement:** `ElemTag` on the three native
   states; checks at the six write sites (3 List, 1 Map, 2 Set);
   `List.of:`/`Map.of:`/`Set.of:`/`asListOf:`-family; tagged-literal
@@ -289,8 +361,13 @@ positives" tripwire as always.
   descriptors; TypeError messages; parity + corpus tests (including the
   qnlib-combinator composition property: `collect:` over a tagged source
   into a tagged destination checks correctly with zero combinator edits).
-- **G2 — checker integration:** `static_type` element propagation,
-  insertion/assignment warnings, narrowing interplay with `T?` reads.
+- **G2 — checker integration (the type-variables slice):** call-site
+  unification (receiver-tag, argument, and block-return binding — block
+  literal return inference is the chunky new capability), `static_type`
+  element propagation, insertion/assignment warnings, narrowing
+  interplay with `T?` reads. Deliverables: `emptyLike` (native overrides
+  + Iterate default + qnlib combinator edits) and **typed signatures on
+  the Iterate mixin** — the proof the design generalizes.
 - **G3 — optimizer/AOT integration:** the `Boolean?.if:` nil-stub
   lowering (interpreter + AOT), AOT tag consumption, **sieve annotated
   and compiled end to end** (the acceptance test), bench re-measured.
@@ -298,17 +375,21 @@ positives" tripwire as always.
   `Block(args ^Ret)` types, non-String Map keys, generic user classes,
   unions. Each gets its own pass when motivated.
 
-## 10. Open questions
+## 10. Open questions (settled ones recorded)
 
-1. **Constructor spelling.** `List.of:Boolean` vs `List.holding:` vs
-   `List.typed:` — bikeshed welcome; `of:` proposed for brevity and
-   symmetry (`Map.of:`, `Set.of:`).
-2. **`each:` block param typing** (G2+): should iterating a
-   `List(Integer)` type the block param `Integer?`→`Integer` (elements
-   present during iteration are never the OOB nil)? Nice checker win;
-   needs the generic-signature machinery — deferred.
-3. **`VM.stats` counters**: tag checks performed / failed, tagged
+1. **Settled:** species protocol = `emptyLike` (instance-side; `default`
+   stays the class-side *value* protocol, used by value types too).
+   `collect:as:` dropped — `asListOf:` is the sole checker→runtime
+   bridge; a fused checked pass is a later optimization. Type variables:
+   class-header declaration, unification binding, checker-only.
+2. **Constructor spelling.** `List.of:Boolean` proposed for brevity and
+   symmetry (`Map.of:`, `Set.of:`) — still open to bikeshed.
+3. **`each:` block param typing** (G2): with variables this falls out —
+   `each: -> { |b: Block(T ^Any)| }` types the block param `T`, not
+   `T?` (elements present during iteration are never the OOB nil).
+4. **`VM.stats` counters**: tag checks performed / failed, tagged
    collections live — land with G1 per the AOT_ARCH §9.7 note.
-4. **`+`-style bulk ops** (`addAll:`, list concat if it ever goes native):
-   tag-to-tag fast path (skip per-element checks when source tag ⊆
-   destination tag) — an optimization, not a semantic.
+5. **`+`-style bulk ops** (`addAll:`, list concat if it ever goes
+   native): tag-to-tag fast path — an optimization, not a semantic.
+6. **Method-level variable declarations**: deferred refinement if
+   class-header declaration ever feels cluttered.
