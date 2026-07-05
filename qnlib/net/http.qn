@@ -121,7 +121,14 @@ Error <- [HTTP]BodyTooLarge <- {};
                 var got = 0;
                 var reading = true;
                 { reading }.whileDo:{
-                    var line = (((st.readUntil:'\r\n').asString).splitString:'\r\n').at:0;
+                    var rawLine = st.readUntil:'\r\n';
+                    "* EOF where a chunk-size line belongs is a truncated body — surface it
+                    "* as such, not as a hex-parse ValueError on an empty string.
+                    (rawLine.count == 0).if:{
+                        IoError.throw:'HTTP: connection closed inside chunked framing (expected a chunk-size line)'
+                            kind:#unexpectedEof
+                    };
+                    var line = ((rawLine.asString).splitString:'\r\n').at:0;
                     var parts = line.splitString:';';
                     var size = Integer.fromHex:(parts.at:0);
                     (size == 0).if:{

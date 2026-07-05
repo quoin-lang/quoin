@@ -77,6 +77,16 @@ fn response_for(path: &str, req_body: &[u8]) -> Vec<u8> {
         out.extend_from_slice(b"\r\n0\r\n\r\n");
         return out;
     }
+    if path == "/truncated" {
+        // Promises 10 bytes, delivers 5; the connection then closes (thread ends →
+        // drop). The client must surface unexpectedEof, not a silent short 200 body.
+        return b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello".to_vec();
+    }
+    if path == "/chunked-eof" {
+        // Chunked framing cut off after the first complete chunk (no next size line).
+        return b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nHello, \r\n"
+            .to_vec();
+    }
     if path == "/redirect" {
         // 302 to a root-relative target on the same server.
         return b"HTTP/1.1 302 Found\r\nLocation: /cl\r\nContent-Length: 0\r\n\r\n".to_vec();
@@ -348,4 +358,48 @@ var ok = (r.status == 200) && (r.body.bytes.size > 0);
 ok.if:{ 'PASS'.print } else:{ ('FAIL status ' + r.status + ' size ' + r.body.bytes.size).print };
 "#;
     run_pass(script, "realhost");
+}
+
+#[test]
+fn truncated_bodies_error_instead_of_silent_success() {
+    // Regression (audit): an EOF before the promised Content-Length used to be
+    // treated as normal completion — status 200, short body, no error; a chunked
+    // body cut at a chunk boundary surfaced as a misleading hex ValueError. Both
+    // must be typed IoErrors with kind #unexpectedEof.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            thread::spawn(move || {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let (path, body) = read_request(&mut reader);
+                let mut conn = conn;
+                let _ = conn.write_all(&response_for(&path, &body));
+                let _ = conn.flush();
+            });
+        }
+    });
+
+    let script = format!(
+        r#"
+use std:net/http;
+var ok = true;
+var base = 'http://127.0.0.1:{port}';
+
+"* Content-Length promises 10 bytes; the server sends 5 and closes.
+var r1 = [HTTP]Client.get: base + '/truncated';
+{{ r1.body.text; ok = false; 'FAIL: truncated body read as success'.print }}
+    .catch:{{ |e:IoError| (e.kind == #unexpectedEof).else:{{ ok = false; ('FAIL kind1: ' + e.kind.s).print }} }}
+    catch:{{ |e| ok = false; ('FAIL class1: ' + e.s).print }};
+
+"* Chunked framing cut off between chunks.
+var r2 = [HTTP]Client.get: base + '/chunked-eof';
+{{ r2.body.text; ok = false; 'FAIL: chunked-eof body read as success'.print }}
+    .catch:{{ |e:IoError| (e.kind == #unexpectedEof).else:{{ ok = false; ('FAIL kind2: ' + e.kind.s).print }} }}
+    catch:{{ |e| ok = false; ('FAIL class2: ' + e.s).print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    run_pass(&script, "truncated");
 }
