@@ -1502,6 +1502,7 @@ fn test_compile_class_and_method_definitions() {
                 name: "Object".to_string(),
                 identifier_type: IdentifierType::Local,
             })),
+            type_params: vec![],
             block: Arc::new(block_node.clone()),
         }),
     };
@@ -1902,4 +1903,118 @@ fn fuse_3instr_fixes_jump_offset() {
     if let Instruction::IfJump(off) = out[1] {
         assert!(matches!(out[(1 + off) as usize], Instruction::Return));
     }
+}
+
+// --- Checked generics G0: syntax → lattice → dispatch erasure (docs/GENERICS_ARCH.md §9) ---
+
+/// All diagnostic messages for a compiled source.
+fn all_diags(src: &str) -> Vec<String> {
+    let node = crate::parser::parse_quoin_string(src);
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    c.compile_program(p).unwrap();
+    c.diagnostics().iter().map(|d| d.message.clone()).collect()
+}
+
+/// The first compiled block whose param_types is non-empty (the method body).
+fn first_typed_param_types(src: &str) -> Vec<String> {
+    let node = crate::parser::parse_quoin_string(src);
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    let code = c.compile_program(p).unwrap();
+    fn walk(insts: &[Instruction], out: &mut Vec<Vec<String>>) {
+        for i in insts {
+            if let Instruction::Push(Constant::Block(b)) = i {
+                if !b.param_types.is_empty() {
+                    out.push(b.param_types.clone());
+                }
+                walk(&b.bytecode, out);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(&code.bytecode, &mut found);
+    found.into_iter().next().expect("a typed method block")
+}
+
+#[test]
+fn generic_annotations_resolve_and_diagnose() {
+    // Well-formed shapes (including nesting and a declared type variable) are silent.
+    assert!(
+        all_diags(
+            "It(T) <- { m: -> { |x: T l: List(Integer) m: Map(String List(Integer)) ^T| x } }"
+        )
+        .is_empty()
+    );
+    // Malformed shapes each get a targeted diagnostic.
+    let d = all_diags("Foo <- { a: -> { |m: Map(Integer Integer)| m } }");
+    assert!(d.iter().any(|m| m.contains("Map keys are String")), "{d:?}");
+    let d = all_diags("Foo <- { a: -> { |l: List(Integer Integer)| l } }");
+    assert!(
+        d.iter().any(|m| m.contains("takes 1 type argument")),
+        "{d:?}"
+    );
+    let d = all_diags("Foo <- { a: -> { |m: Map(String)| m } }");
+    assert!(
+        d.iter().any(|m| m.contains("takes 2 type arguments")),
+        "{d:?}"
+    );
+    let d = all_diags("Foo <- { a: -> { |x: Foo(Integer)| x } }");
+    assert!(
+        d.iter()
+            .any(|m| m.contains("does not take generic arguments")),
+        "{d:?}"
+    );
+    // An unknown name nested inside generic arguments still warns.
+    let d = all_diags("Foo <- { a: -> { |l: List(Wibble)| l } }");
+    assert!(
+        d.iter().any(|m| m.contains("unknown type `Wibble`")),
+        "{d:?}"
+    );
+    // An undeclared bare variable name is an unknown type, not a silent variable.
+    let d = all_diags("Foo <- { a: -> { |x: T| x } }");
+    assert!(d.iter().any(|m| m.contains("unknown type `T`")), "{d:?}");
+}
+
+#[test]
+fn generic_params_erase_for_dispatch() {
+    // G0 dispatch erasure: `List(Integer)` dispatches as `List` (tag-aware
+    // dispatch is G1); a declared type variable never dispatches (`Object`).
+    assert_eq!(
+        first_typed_param_types("Foo <- { a: -> { |l: List(Integer) n: Integer| l } }"),
+        vec!["List".to_string(), "Integer".to_string()]
+    );
+    assert_eq!(
+        first_typed_param_types("It(T) <- { a: -> { |x: T n: Integer| x } }"),
+        vec!["Object".to_string(), "Integer".to_string()]
+    );
+}
+
+#[test]
+fn generic_type_lattice_rules() {
+    let li = Type::ListOf(Box::new(Type::Int));
+    let ld = Type::ListOf(Box::new(Type::Double));
+    // Width subtyping: checked → bare, never bare → checked; tags invariant.
+    assert!(li.compatible_with(&Type::List));
+    assert!(!Type::List.compatible_with(&li));
+    assert!(li.compatible_with(&li.clone()));
+    assert!(!li.compatible_with(&ld));
+    // Joins: same tag holds; differing (or bare) joins to the bare collection.
+    assert_eq!(li.join(&li.clone()), li);
+    assert_eq!(li.join(&ld), Type::List);
+    assert_eq!(li.join(&Type::List), Type::List);
+    // Variables are gradual until G2 binding.
+    let v = Type::Var("T".into());
+    assert!(v.compatible_with(&Type::Int) && Type::Int.compatible_with(&v));
+    // Rendering.
+    assert_eq!(li.name(), "List(Integer)");
+    assert_eq!(
+        Type::MapOf(Box::new(Type::ListOf(Box::new(Type::Int)))).name(),
+        "Map(String List(Integer))"
+    );
+    assert_eq!(Type::SetOf(Box::new(Type::String)).name(), "Set(String)");
 }

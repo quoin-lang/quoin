@@ -143,17 +143,27 @@ impl Compiler {
                     // compile until it's classified — so this can't be silently overlooked.
                     let ty = self.static_type(&decl.rvalue);
                     let has_devirt_path = match &ty {
-                        Type::Int | Type::Double | Type::List | Type::Map => true,
+                        // Checked collections are their bare type at runtime, so the
+                        // same List/Map devirt ops apply.
+                        Type::Int
+                        | Type::Double
+                        | Type::List
+                        | Type::Map
+                        | Type::ListOf(_)
+                        | Type::MapOf(_) => true,
                         // `Bool` is excluded even though `if:else:` inlines it — that inline has no
                         // runtime fallback, so a stale `Bool` hint would be unsound. `Set` has no
                         // devirt op (its `contains?:`/`add:` dispatch `==:` per element).
+                        // Type variables are gradual until G2 binding.
                         Type::Bool
                         | Type::String
                         | Type::Nil
                         | Type::Set
+                        | Type::SetOf(_)
                         | Type::Block
                         | Type::Instance(_)
                         | Type::Nullable(_)
+                        | Type::Var(_)
                         | Type::Any
                         | Type::Never => false,
                     };

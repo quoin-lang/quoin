@@ -69,7 +69,7 @@ pub struct DeclarationNode {
     pub lvalues: Vec<Arc<Node>>,
     /// Type annotation — only for a single ident target (`var x: Integer = …`);
     /// destructuring targets are always untyped.
-    pub type_hint: Option<Arc<IdentifierNode>>,
+    pub type_hint: Option<Arc<TypeRefNode>>,
     pub rvalue: Arc<Node>,
 }
 
@@ -85,7 +85,7 @@ pub struct BlockNode {
     pub arguments: Vec<Arc<BlockArgNode>>,
     /// Declared return type (`|args ^Integer|`), for return-type-aware devirtualization. On a
     /// method-body block this is the method's return type (`sel -> { |args ^Integer| … }`).
-    pub return_type: Option<Arc<IdentifierNode>>,
+    pub return_type: Option<Arc<TypeRefNode>>,
     pub decls: Vec<Arc<BlockDeclNode>>,
     pub decl_block: Option<Arc<BlockNode>>,
     pub statements: Vec<Arc<Node>>,
@@ -96,13 +96,33 @@ pub struct BlockNode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockArgNode {
     pub identifier: Arc<IdentifierNode>,
-    pub type_hint: Option<Arc<IdentifierNode>>,
+    pub type_hint: Option<Arc<TypeRefNode>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockDeclNode {
     pub identifier: Arc<IdentifierNode>,
-    pub type_hint: Option<Arc<IdentifierNode>>,
+    pub type_hint: Option<Arc<TypeRefNode>>,
+}
+
+/// A type-annotation reference: base identifier plus optional generic
+/// arguments (`List(Integer)`, `Map(String List(Integer))`). All four
+/// annotation positions (`var x: T`, `|x:T|`, block-local `- x:T`, `^T`)
+/// carry one of these; class-header type parameters are plain names on
+/// `ClassDefinitionNode` instead. See docs/GENERICS_ARCH.md.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeRefNode {
+    pub ident: Arc<IdentifierNode>,
+    pub args: Vec<Arc<TypeRefNode>>,
+}
+
+impl TypeRefNode {
+    pub fn clear_source_info(&mut self) {
+        Arc::make_mut(&mut self.ident).source_info = None;
+        for a in &mut self.args {
+            Arc::make_mut(a).clear_source_info();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +134,10 @@ pub struct BlockReturnNode {
 pub struct ClassDefinitionNode {
     pub identifier: Arc<IdentifierNode>,
     pub parent_identifier: Option<Arc<IdentifierNode>>,
+    /// Class/mixin-header type parameters (`Iterate(T U) <- { … }`) — the type
+    /// variables the body's method signatures may use. Checker-only; never
+    /// reaches the runtime (docs/GENERICS_ARCH.md §4.4).
+    pub type_params: Vec<String>,
     pub block: Arc<BlockNode>,
 }
 
@@ -356,14 +380,14 @@ impl BlockNode {
             let arg = Arc::make_mut(a);
             Arc::make_mut(&mut arg.identifier).source_info = None;
             if let Some(hint) = &mut arg.type_hint {
-                Arc::make_mut(hint).source_info = None;
+                Arc::make_mut(hint).clear_source_info();
             }
         }
         for d in &mut self.decls {
             let decl = Arc::make_mut(d);
             Arc::make_mut(&mut decl.identifier).source_info = None;
             if let Some(hint) = &mut decl.type_hint {
-                Arc::make_mut(hint).source_info = None;
+                Arc::make_mut(hint).clear_source_info();
             }
         }
         if let Some(decl) = &mut self.decl_block {
@@ -387,7 +411,7 @@ impl Node {
                     Arc::make_mut(l).clear_source_info();
                 }
                 if let Some(hint) = &mut node.type_hint {
-                    Arc::make_mut(hint).source_info = None;
+                    Arc::make_mut(hint).clear_source_info();
                 }
                 Arc::make_mut(&mut node.rvalue).clear_source_info();
             }

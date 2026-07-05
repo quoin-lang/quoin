@@ -19,11 +19,22 @@ pub enum Type {
     Bool,
     String,
     Nil,
-    // Collection / callable builtins (generics come later: `List(T)`, `Block(args ^Ret)`).
+    // Collection / callable builtins. The bare forms are the untagged/any-element
+    // types; the `*Of` forms carry a checked element type (docs/GENERICS_ARCH.md).
     List,
     Map,
     Set,
     Block,
+    /// `List(T)` — a checked-element list.
+    ListOf(Box<Type>),
+    /// `Map(String V)` — keys are pinned `String`; `V` is the checked value type.
+    MapOf(Box<Type>),
+    /// `Set(T)` — a checked-element set.
+    SetOf(Box<Type>),
+    /// A declared type variable (class/mixin-header parameter, e.g. `T` in
+    /// `Iterate(T U)`). Checker-only; binding/unification arrives in G2 — until
+    /// then it behaves gradually (like `Any`) in compatibility checks.
+    Var(Arc<str>),
     /// An instance of a user-defined class, identified by name.
     Instance(Arc<str>),
     /// `T?` — `T` or `nil`.
@@ -78,6 +89,17 @@ impl Type {
     pub fn compatible_with(&self, expected: &Type) -> bool {
         match (self, expected) {
             (Type::Any, _) | (_, Type::Any) => true,
+            // Type variables are gradual until G2 binding lands.
+            (Type::Var(_), _) | (_, Type::Var(_)) => true,
+            // Width subtyping: a checked collection IS its bare type; the bare
+            // (untagged) type never satisfies a checked one (no tag, no
+            // guarantee), and tags are invariant (GENERICS_ARCH.md §3.2).
+            (Type::ListOf(_), Type::List)
+            | (Type::MapOf(_), Type::Map)
+            | (Type::SetOf(_), Type::Set) => true,
+            (Type::ListOf(a), Type::ListOf(b))
+            | (Type::MapOf(a), Type::MapOf(b))
+            | (Type::SetOf(a), Type::SetOf(b)) => a == b,
             // Bottom: a diverging expression satisfies any expected type.
             (Type::Never, _) => true,
             // `T?` expected: `nil` fits, else the actual (unwrapped) must fit the inner type.
@@ -105,6 +127,20 @@ impl Type {
         }
         if self == other {
             return self.clone();
+        }
+        // Checked collections: differing tags (or tagged vs bare) join to the
+        // bare collection type — a better bound than `Any`.
+        match (self, other) {
+            (Type::ListOf(_), Type::ListOf(_) | Type::List) | (Type::List, Type::ListOf(_)) => {
+                return Type::List;
+            }
+            (Type::MapOf(_), Type::MapOf(_) | Type::Map) | (Type::Map, Type::MapOf(_)) => {
+                return Type::Map;
+            }
+            (Type::SetOf(_), Type::SetOf(_) | Type::Set) | (Type::Set, Type::SetOf(_)) => {
+                return Type::Set;
+            }
+            _ => {}
         }
         // Split each side into (non-nil core, may-be-nil?).
         fn split(t: &Type) -> (Option<&Type>, bool) {
@@ -142,6 +178,10 @@ impl Type {
             Type::Map => "Map".to_string(),
             Type::Set => "Set".to_string(),
             Type::Block => "Block".to_string(),
+            Type::ListOf(t) => format!("List({})", t.name()),
+            Type::MapOf(v) => format!("Map(String {})", v.name()),
+            Type::SetOf(t) => format!("Set({})", t.name()),
+            Type::Var(n) => n.to_string(),
             Type::Instance(n) => n.to_string(),
             Type::Nullable(inner) => format!("{}?", inner.name()),
             Type::Any => "Any".to_string(),

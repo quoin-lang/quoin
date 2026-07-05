@@ -6,7 +6,25 @@ use super::*;
 impl Compiler {
     /// Selector → declared-return-`Type` map for a class body, from its method
     /// definitions/extensions that carry a return type.
-    pub(super) fn collect_class_ctx(&mut self, name: &str, block: &BlockNode) -> ClassCtx {
+    pub(super) fn collect_class_ctx(
+        &mut self,
+        name: &str,
+        block: &BlockNode,
+        type_params: Vec<String>,
+    ) -> ClassCtx {
+        // Push a stub ctx so the header's type parameters are in scope while the
+        // declared returns below resolve (`^T` must be a variable, not an
+        // unknown class); the caller pushes the real ctx right after.
+        self.class_ctx_counter += 1;
+        self.class_ctx.push(ClassCtx {
+            id: self.class_ctx_counter,
+            name: name.to_string(),
+            multi: HashSet::new(),
+            type_params: type_params.clone(),
+            returns: HashMap::new(),
+            bodies: HashMap::new(),
+            sealed: false,
+        });
         let mut returns = HashMap::new();
         let mut bodies = HashMap::new();
         let mut multi = HashSet::new();
@@ -43,11 +61,12 @@ impl Compiler {
                 .or_default()
                 .extend(bodies.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
-        self.class_ctx_counter += 1;
+        let stub = self.class_ctx.pop().expect("stub ctx pushed above");
         ClassCtx {
-            id: self.class_ctx_counter,
+            id: stub.id,
             name: name.to_string(),
             multi,
+            type_params,
             returns,
             bodies,
             sealed,
@@ -81,7 +100,7 @@ impl Compiler {
             return None;
         }
         match &call.arguments.expressions[0].value {
-            NodeValue::Identifier(id) => Some(annotation_name(id)),
+            NodeValue::Identifier(id) => Some(ident_name(id)),
             _ => None,
         }
     }
@@ -119,7 +138,7 @@ impl Compiler {
             parent: class_def
                 .parent_identifier
                 .as_ref()
-                .map(|p| Arc::from(annotation_name(p).as_str())),
+                .map(|p| Arc::from(ident_name(p).as_str())),
             mixins,
             own_selectors,
             sealed,
@@ -143,10 +162,7 @@ impl Compiler {
                 _ => continue,
             };
             if let (Ok(sel), Some(rt)) = (self.reconstruct_selector(sig), &blk.return_type) {
-                out.insert(
-                    Arc::from(sel.as_str()),
-                    Type::from_annotation_name(&annotation_name(rt)),
-                );
+                out.insert(Arc::from(sel.as_str()), type_from_ref(rt));
             }
         }
         out

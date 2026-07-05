@@ -190,8 +190,8 @@ definition_expr = {
   | method_def
   | method_ext
 }
-class_def_2 = { nsvarident ~ op_def ~ nsvarident ~ op_def ~ block }
-class_def   = { nsvarident ~ op_def ~ block }
+class_def_2 = { nsvarident ~ op_def ~ nsvarident ~ type_params? ~ op_def ~ block }
+class_def   = { nsvarident ~ type_params? ~ op_def ~ block }
 const_def   = { nsvarident ~ op_def ~ expr }
 // `->` is purely the method arrow; the return type lives in the block header as `^Type`
 // (see `block_ret` below and docs/TYPE_SYSTEM_ARCH.md). This lets a bare block declare its
@@ -230,9 +230,17 @@ instance_ident   = { "@" ~ ident }
 local_ident      = { ident }
 
 // A type-annotation reference: an optionally namespaced class name (`Integer`,
-// `[Web]Halt`, `[A/B]Thing?`). Shared by every type position (`var x: T`, `|x:T|`,
-// `|a - x:T|`, `^T`), and the seam where generics (`List(T)`) land later.
-type_ref = { namespace? ~ ident }
+// `[Web]Halt`, `[A/B]Thing?`) with optional generic arguments (`List(Integer)`,
+// `Map(String List(Integer))` — space-separated, nesting allowed; the settled
+// syntax from docs/TYPE_SYSTEM_ARCH.md, designed in docs/GENERICS_ARCH.md).
+// Shared by every type position (`var x: T`, `|x:T|`, `|a - x:T|`, `^T`).
+type_ref  = { namespace? ~ ident ~ type_args? }
+type_args = { "(" ~ type_ref+ ~ ")" }
+
+// Class/mixin-header type parameters (`Iterate(T U) <- { … }`): bare names,
+// declaring the type variables the body's method signatures may use
+// (checker-only; see docs/GENERICS_ARCH.md §4.4).
+type_params = { "(" ~ ident+ ~ ")" }
 
 namespace = {
     root_ns

@@ -23,7 +23,7 @@ use crate::error::QuoinError;
 use crate::runtime::list::NativeListState;
 use crate::symbol::Symbol;
 use crate::value::NamespacedName;
-use crate::value::{ObjectPayload, Value};
+use crate::value::Value;
 use crate::vm::VmState;
 
 use super::{TAG_ERR, TAG_OK};

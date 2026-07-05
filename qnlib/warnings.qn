@@ -59,4 +59,27 @@ BadOverride <- {
     defined? -> { |^String| 'nope' }
 };
 
+"* --- generic annotations (G0, checker-only: docs/GENERICS_ARCH.md) ---
+"* Malformed generic shapes each get a targeted diagnostic; a declared
+"* class-header type variable (T) is silently in scope for that body.
+GenericGallery(T) <- {
+    "* Map keys are pinned String for now — `Map(Integer …)` warns.
+    badMapKey: -> { |m: Map(Integer Integer)| m };
+
+    "* Only List/Map/Set take type arguments today.
+    notGeneric: -> { |x: Point(Integer)| x };
+
+    "* Arity: List/Set take exactly 1 argument, Map exactly 2.
+    badListArity: -> { |l: List(Integer Integer)| l };
+    badMapArity: -> { |m: Map(String)| m };
+
+    "* An unknown name inside the arguments still warns (nested resolution).
+    unknownElem: -> { |l: List(Wibble)| l };
+
+    "* --- these are CORRECT and must emit NO warning ---
+    "* A declared type variable, and well-formed (nested) generics.
+    usesVar: -> { |x: T ^T| x };
+    wellFormed: -> { |m: Map(String List(Integer)) ^List(Integer)| m.at:'k' }
+};
+
 'Defined Warnings — see the diagnostics printed above.'.print

@@ -5,7 +5,7 @@ use crate::instruction::{
 use crate::parser::ast::{
     AssignmentNode, BinaryOperatorNode, BinaryOperatorType, BlockNode, ClassDefinitionNode,
     DeclKind, DeclarationNode, IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode,
-    Node, NodeValue, ProgramNode, UnaryOperatorNode, UnaryOperatorType,
+    Node, NodeValue, ProgramNode, TypeRefNode, UnaryOperatorNode, UnaryOperatorType,
 };
 use crate::symbol::Symbol;
 use crate::types::{SeenTypes, Type};
@@ -24,8 +24,36 @@ mod inlining;
 /// root name (`Integer`, `Foo?`), bracket-qualified when namespaced (`[Web]Halt`).
 /// Must agree with `NamespacedName`'s `Display`, which keys `globals`, runtime dispatch
 /// hints, and `populate_from_vm`'s class-table entries.
-pub(crate) fn annotation_name(ident: &IdentifierNode) -> String {
+pub(crate) fn annotation_name(tr: &TypeRefNode) -> String {
+    let base = NamespacedName::from_ast(&tr.ident).to_string();
+    if tr.args.is_empty() {
+        base
+    } else {
+        let args: Vec<String> = tr.args.iter().map(|a| annotation_name(a)).collect();
+        format!("{}({})", base, args.join(" "))
+    }
+}
+
+/// A plain identifier's rendered name (parent classes, mixin targets — the
+/// non-type-annotation positions).
+pub(crate) fn ident_name(ident: &IdentifierNode) -> String {
     NamespacedName::from_ast(ident).to_string()
+}
+
+/// Pure structural `Type` of an annotation — no diagnostics, no type-variable
+/// scope (the resolver's `resolve_annotation` layers those on top). Unknown
+/// bases become `Instance`; malformed generic arity degrades to the bare base.
+pub(crate) fn type_from_ref(tr: &TypeRefNode) -> Type {
+    let base = NamespacedName::from_ast(&tr.ident).to_string();
+    if tr.args.is_empty() {
+        return Type::from_annotation_name(&base);
+    }
+    match (base.as_str(), tr.args.len()) {
+        ("List", 1) => Type::ListOf(Box::new(type_from_ref(&tr.args[0]))),
+        ("Set", 1) => Type::SetOf(Box::new(type_from_ref(&tr.args[0]))),
+        ("Map", 2) => Type::MapOf(Box::new(type_from_ref(&tr.args[1]))),
+        _ => Type::from_annotation_name(&base),
+    }
 }
 
 pub struct CodeBlock {
@@ -338,6 +366,9 @@ struct ClassCtx {
     /// variants) — excluded from AOT candidacy, since a direct call would bypass
     /// the runtime variant scoring.
     multi: HashSet<String>,
+    /// Class/mixin-header type parameters (`Iterate(T U)`) — the type variables
+    /// this body's method signatures may use (checker-only).
+    type_params: Vec<String>,
     /// Method selector → declared return `Type` (methods that annotate a return).
     returns: HashMap<String, Type>,
     /// The class is compile-sealed: `sealed!` appears as a direct (unconditional) body
@@ -867,7 +898,7 @@ impl Compiler {
     fn prescan_class_defs(&self, program: &ProgramNode) {
         for expr in &program.expressions {
             if let NodeValue::ClassDefinition(cd) = &expr.value {
-                let name = annotation_name(&cd.identifier);
+                let name = ident_name(&cd.identifier);
                 self.seen_types.insert(&name);
                 self.class_table.insert(&name, self.class_sig_from_def(cd));
             }
@@ -891,8 +922,58 @@ impl Compiler {
         });
     }
 
-    fn resolve_annotation(&mut self, ident: &IdentifierNode) -> Type {
-        let ty = Type::from_annotation_name(&annotation_name(ident));
+    fn resolve_annotation(&mut self, tr: &TypeRefNode) -> Type {
+        // A bare name that matches a declared class/mixin-header type parameter
+        // is a type variable (checker-only; binding arrives in G2).
+        if tr.args.is_empty()
+            && tr.ident.namespace.is_none()
+            && self.declared_type_var(&tr.ident.name)
+        {
+            return Type::Var(Arc::from(tr.ident.name.as_str()));
+        }
+        if !tr.args.is_empty() {
+            let base = ident_name(&tr.ident);
+            match (base.as_str(), tr.args.len()) {
+                ("List", 1) | ("Set", 1) => {}
+                ("Map", 2) => {
+                    let key = annotation_name(&tr.args[0]);
+                    if key != "String" {
+                        self.warn(
+                            format!(
+                                "Map keys are String (got `Map({} …)`); only the value \
+                                 type is generic for now",
+                                key
+                            ),
+                            tr.ident.source_info.as_ref(),
+                        );
+                    }
+                }
+                ("List", n) | ("Set", n) => {
+                    self.warn(
+                        format!("`{base}` takes 1 type argument, got {n}"),
+                        tr.ident.source_info.as_ref(),
+                    );
+                }
+                ("Map", n) => {
+                    self.warn(
+                        format!("`Map` takes 2 type arguments (`Map(String V)`), got {n}"),
+                        tr.ident.source_info.as_ref(),
+                    );
+                }
+                _ => {
+                    self.warn(
+                        format!("type `{base}` does not take generic arguments"),
+                        tr.ident.source_info.as_ref(),
+                    );
+                }
+            }
+            for a in &tr.args {
+                // Resolve arguments for their own diagnostics (unknown names etc.).
+                let _ = self.resolve_annotation(a);
+            }
+            return type_from_ref(tr);
+        }
+        let ty = Type::from_annotation_name(&ident_name(&tr.ident));
         // `T?` is unknown iff its base `T` is unknown.
         let base = match &ty {
             Type::Nullable(inner) => inner.as_ref(),
@@ -902,11 +983,33 @@ impl Compiler {
             if !self.seen_types.contains(class) {
                 self.warn(
                     format!("unknown type `{}`", class),
-                    ident.source_info.as_ref(),
+                    tr.ident.source_info.as_ref(),
                 );
             }
         }
         ty
+    }
+
+    /// Is `name` a type parameter declared by any enclosing class/mixin header?
+    fn declared_type_var(&self, name: &str) -> bool {
+        self.class_ctx
+            .iter()
+            .any(|c| c.type_params.iter().any(|p| p == name))
+    }
+
+    /// The runtime dispatch signature for a param annotation: generic arguments
+    /// erase to the base class (tag-aware dispatch is G1 — until then a
+    /// `List(Integer)` param dispatches as `List`, width-safe), and a declared
+    /// type variable erases to `Object` (variables never dispatch;
+    /// GENERICS_ARCH.md §4.4/§5).
+    fn dispatch_type_name(&self, tr: &TypeRefNode) -> String {
+        if tr.args.is_empty()
+            && tr.ident.namespace.is_none()
+            && self.declared_type_var(&tr.ident.name)
+        {
+            return "Object".to_string();
+        }
+        ident_name(&tr.ident)
     }
 
     /// Compile `node` in a position that expects `expected`. A numeric *literal* promotes to
@@ -1464,7 +1567,7 @@ impl Compiler {
             else {
                 continue;
             };
-            let over = Type::from_annotation_name(&annotation_name(rt));
+            let over = type_from_ref(rt);
             if self.override_return_violates(&over, &base) {
                 self.warn(
                     format!(
@@ -1474,7 +1577,7 @@ impl Compiler {
                         base.name(),
                         from,
                     ),
-                    rt.source_info.as_ref(),
+                    rt.ident.source_info.as_ref(),
                 );
             }
         }
@@ -1812,7 +1915,11 @@ impl Compiler {
                 if is_value_type {
                     self.value_type_def_depth += 1;
                 }
-                let ctx = self.collect_class_ctx(&class_name, &class_def.block);
+                let ctx = self.collect_class_ctx(
+                    &class_name,
+                    &class_def.block,
+                    class_def.type_params.clone(),
+                );
                 self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_def.block, bytecode);
                 self.class_ctx.pop();
@@ -1827,7 +1934,7 @@ impl Compiler {
                 // signature — how the core classes (`Object <-- {}`, `nil <-- {}`, …) carry their
                 // return contracts, since they're reopened rather than defined with `<-` (Phase 3c·4).
                 if let NodeValue::Identifier(target) = &class_ext.expression.value {
-                    let target_name = annotation_name(target);
+                    let target_name = ident_name(target);
                     self.class_table
                         .add_returns(&target_name, self.declared_method_returns(&class_ext.block));
                     self.check_return_covariance(&target_name, &class_ext.block);
@@ -1849,10 +1956,10 @@ impl Compiler {
                     self.value_type_def_depth += 1;
                 }
                 let ext_name = match &class_ext.expression.value {
-                    NodeValue::Identifier(id) => annotation_name(id),
+                    NodeValue::Identifier(id) => ident_name(id),
                     _ => String::new(),
                 };
-                let ctx = self.collect_class_ctx(&ext_name, &class_ext.block);
+                let ctx = self.collect_class_ctx(&ext_name, &class_ext.block, Vec::new());
                 self.class_ctx.push(ctx);
                 let r = self.compile_block(&class_ext.block, bytecode);
                 self.class_ctx.pop();
@@ -2230,7 +2337,7 @@ impl Compiler {
             let type_name = arg
                 .type_hint
                 .as_ref()
-                .map(|id| annotation_name(id))
+                .map(|tr| self.dispatch_type_name(tr))
                 .unwrap_or_else(|| "Object".to_string());
             param_types.push(type_name);
             locals.insert(name);
@@ -2275,10 +2382,7 @@ impl Compiler {
         }
 
         // Phase 3a: check/promote returns against this block's declared return type (`|args ^T|`).
-        let expected_ret = block
-            .return_type
-            .as_ref()
-            .map(|rt| Type::from_annotation_name(&annotation_name(rt)));
+        let expected_ret = block.return_type.as_ref().map(|rt| type_from_ref(rt));
         self.return_type_stack.push(expected_ret.clone());
 
         let len = block.statements.len();
