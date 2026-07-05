@@ -51,4 +51,4 @@ cargo regression tests.
 
 | file | bug | status |
 |---|---|---|
-| `native_reentry_recursion.qn` | unbounded native re-entrant recursion (`set_add → == : → set_add …`) overflows the real C stack — uncatchable SIGBUS (pure-Quoin recursion is fine) | OPEN |
+| `native_reentry_recursion.qn` | unbounded native re-entrant recursion (`set_add → == : → set_add …`) overflows the real C stack — uncatchable SIGBUS (pure-Quoin recursion is fine) | **FIXED** (per-task re-entry depth cap on method dispatch) |

@@ -120,6 +120,12 @@ pub struct Task<'gc> {
     /// it. See `src/runtime/channel.rs`.
     #[collect(require_static)]
     pub parked_on_channel: bool,
+    /// This task's native → Quoin re-entry depth (see `VmState::native_reentry_depth`),
+    /// stashed while parked. Each task has its own coroutine stack, so the depth that
+    /// bounds overflow is per-task, not global — a task parked mid-re-entry (a host-reach
+    /// block that awaits) must not leak its depth into whichever task runs next.
+    #[collect(require_static)]
+    pub native_reentry_depth: usize,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -869,6 +875,9 @@ impl<'gc> VmState<'gc> {
         self.sched.fiber_error = None;
         self.sched.wake = None;
         self.sched.cancel_current = false;
+        // A REPL line that errored mid-native-call may have unwound past the paired
+        // decrement; start each new line at re-entry depth zero.
+        self.native_reentry_depth = 0;
     }
 
     /// Stash the live per-task context into `tasks[tid]` (the task is parking or
@@ -896,6 +905,7 @@ impl<'gc> VmState<'gc> {
         t.saved_root_stack = saved_root_stack;
         t.saved_root_frames = saved_root_frames;
         t.saved_root_native_args = saved_root_native_args;
+        t.native_reentry_depth = self.native_reentry_depth;
     }
 
     /// Make `tid` the current task and restore its context into `VmState`. The
@@ -930,6 +940,7 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_frames = std::mem::take(&mut t.saved_root_frames);
             self.sched.main_saved_native_args = std::mem::take(&mut t.saved_root_native_args);
             self.sched.wake = t.wake.take();
+            self.native_reentry_depth = t.native_reentry_depth;
         } else {
             // First activation: a fresh, empty live context, then start the block.
             self.stack = Vec::new();
@@ -941,6 +952,7 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_frames = Vec::new();
             self.sched.main_saved_native_args = Vec::new();
             self.sched.wake = None;
+            self.native_reentry_depth = 0;
             let block = self.sched.tasks[tid.0]
                 .as_ref()
                 .unwrap()
@@ -1042,6 +1054,7 @@ impl<'gc> VmState<'gc> {
             park_epoch: 0,
             deadline_abort: None,
             parked_on_channel: false,
+            native_reentry_depth: 0,
         }
     }
 

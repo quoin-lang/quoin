@@ -335,6 +335,16 @@ pub struct VmState<'gc> {
     #[collect(require_static)]
     pub pending_class_def: Option<NamespacedName>,
     pub next_frame_id: usize,
+    /// Depth of native → Quoin re-entry currently on the *real* Rust/C stack: each
+    /// `call_method` / `call_method_value` / `execute_block` from native code drives a
+    /// nested `step` loop on a native frame that does not return until its subtree
+    /// completes. Pure-Quoin recursion grows the heap frame stack (bounded, catchable),
+    /// but native re-entry grows the machine stack, so unbounded re-entry — a custom
+    /// `==:` / `hash` / comparator / render hook that re-enters the same native op —
+    /// overflows it and aborts the process uncatchably. Bumped on entry, dropped on
+    /// exit (via `NativeReentryGuard`), and capped at `MAX_NATIVE_REENTRY`.
+    #[collect(require_static)]
+    pub native_reentry_depth: usize,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
@@ -442,6 +452,7 @@ impl<'gc> VmState<'gc> {
             symbol_table: gcl!(mc, HashMap::new()),
             pending_class_def: None,
             next_frame_id: 1,
+            native_reentry_depth: 0,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
             last_popped_env: None,
@@ -1304,6 +1315,41 @@ impl<'gc> VmState<'gc> {
         selector: &str,
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, QuoinError> {
+        // Bound native → Quoin re-entry so a self-referential hook (a `==:` that re-adds
+        // to the set it's a key of, a comparator that re-sorts, …) fails catchably rather
+        // than overflowing the machine stack. The `?` returns before incrementing on the
+        // over-limit case; otherwise the guard decrements on every exit path.
+        self.enter_native_reentry()?;
+        let result = self.call_method_inner(mc, receiver, selector, args);
+        self.native_reentry_depth = self.native_reentry_depth.saturating_sub(1);
+        result
+    }
+
+    /// The catchable ceiling on native → Quoin re-entry depth (see `native_reentry_depth`).
+    /// Well above any legitimate nesting of custom hooks, low enough to fault before the
+    /// 1 MiB VM coroutine stack overflows (each re-entry frame drives a nested `step` loop).
+    const MAX_NATIVE_REENTRY: usize = 12;
+
+    /// Claim one level of native re-entry, or return a catchable error at the ceiling.
+    fn enter_native_reentry(&mut self) -> Result<(), QuoinError> {
+        if self.native_reentry_depth >= Self::MAX_NATIVE_REENTRY {
+            return Err(QuoinError::Other(format!(
+                "native call recursion too deep (> {}): a custom ==:/hash/comparator/render \
+                 hook is re-entering a native operation without bound",
+                Self::MAX_NATIVE_REENTRY
+            )));
+        }
+        self.native_reentry_depth += 1;
+        Ok(())
+    }
+
+    fn call_method_inner(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        selector: &str,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
         let sel = Symbol::intern(selector);
         let method = self.lookup_method(mc, receiver, sel, &args)?;
         if let Some(method) = method {
@@ -1348,8 +1394,22 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    #[allow(no_gc_across_yield)]
     pub fn call_method_value(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        method_val: Value<'gc>,
+        selector: &str,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        self.enter_native_reentry()?;
+        let result = self.call_method_value_inner(mc, receiver, method_val, selector, args);
+        self.native_reentry_depth = self.native_reentry_depth.saturating_sub(1);
+        result
+    }
+
+    #[allow(no_gc_across_yield)]
+    fn call_method_value_inner(
         &mut self,
         mc: &Mutation<'gc>,
         receiver: Value<'gc>,
@@ -1498,6 +1558,13 @@ impl<'gc> VmState<'gc> {
         args: Vec<Value<'gc>>,
         self_val: Option<Value<'gc>>,
     ) -> Result<Value<'gc>, QuoinError> {
+        // NOTE: deliberately *not* guarded by `enter_native_reentry`. Lazy generator
+        // pipelines legitimately compose blocks many levels deep on the native stack
+        // (each stage's `execute_block` nests inside the next), so a low machine-stack
+        // cap here would break real programs. The native-recursion guard lives on the
+        // method-dispatch paths (`call_method`/`call_method_value`), where the
+        // pathological self-referential hooks (a `==:` that re-adds to its own set)
+        // actually recurse.
         let initial_frame_count = self.frames.len();
         if let Some(receiver) = self_val {
             self.start_block_as_method(mc, block, receiver, args, None, false);
