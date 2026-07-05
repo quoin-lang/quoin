@@ -64,3 +64,29 @@ var r = Async.gather:#();
 "#,
     );
 }
+
+#[test]
+fn committed_channel_handoff_survives_receiver_cancellation() {
+    // Pre-fix: a parked receiver was handed a value (the send: returned
+    // success), then cancelled before running — the committed value vanished:
+    // neither delivered, nor re-queued, nor an error anywhere.
+    assert_pass(
+        "lost_value_on_cancel",
+        r#"
+var ok = true;
+var ch = Channel.new;
+var entered = #();
+var t = Task.spawn:{ entered.add:1; ch.receive };
+{ entered.count == 0 }.whileDo:{ Async.sleep:1 };
+ch.send:'precious';
+t.cancel;
+Async.sleep:20;
+
+"* The value must be recoverable: back in the buffer for the next receive.
+(ch.count == 1).else:{ ok = false; ('FAIL: buffered=' + ch.count.s).print };
+(ch.receive == 'precious').else:{ ok = false; 'FAIL: value lost'.print };
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#,
+    );
+}

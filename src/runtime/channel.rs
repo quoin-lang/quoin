@@ -101,9 +101,15 @@ enum ParkOutcome<'gc> {
 impl<'gc> VmState<'gc> {
     /// Suspend the running task on a channel rendezvous and report how it was resumed.
     /// The caller has already registered itself in the channel's waiter queue and set
-    /// `parked_on_channel`, so this carries no payload — only plain data crosses the yield.
+    /// `parked_on_channel`. `channel` (the native method's receiver, rooted in
+    /// `active_native_args` — the `await_timeout` rooting argument) is needed on the
+    /// resume side: a cancelled receiver may hold a wake whose value must go back.
     #[allow(no_gc_across_yield)]
-    fn channel_park(&mut self) -> Result<ParkOutcome<'gc>, QuoinError> {
+    fn channel_park(
+        &mut self,
+        mc: &Mutation<'gc>,
+        channel: Value<'gc>,
+    ) -> Result<ParkOutcome<'gc>, QuoinError> {
         if let Some(yielder) = unsafe { self.get_yielder() } {
             yielder.suspend(YieldReason::ChannelPark);
         } else {
@@ -111,8 +117,14 @@ impl<'gc> VmState<'gc> {
                 "channel operation attempted outside the VM scheduler".to_string(),
             ));
         }
-        // On resume: a pending cancel on this task raises before consuming any result.
+        // On resume: a pending cancel on this task raises before consuming any result —
+        // but a value a sender already committed to this receiver (the send reported
+        // success) must not vanish with the cancellation: hand it to the next live
+        // receiver, or put it back at the front of the buffer.
         if self.sched.cancel_current {
+            if let Some(Wake::ChannelRecv { value }) = self.sched.wake.take() {
+                self.channel_redeliver(mc, channel, value)?;
+            }
             return Err(self.take_cancellation());
         }
         match self.sched.wake.take() {
@@ -123,6 +135,27 @@ impl<'gc> VmState<'gc> {
                 "channel park resumed without a result".to_string(),
             )),
         }
+    }
+
+    /// Re-deliver `value` — already committed to `channel` by a completed send — after
+    /// its intended receiver was cancelled: the next live parked receiver gets it, else
+    /// it goes to the *front* of the buffer (even if that momentarily exceeds `cap`;
+    /// the alternative is silently dropping a value whose send reported success).
+    fn channel_redeliver(
+        &mut self,
+        mc: &Mutation<'gc>,
+        channel: Value<'gc>,
+        value: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        if let Some(rid) = self.pop_live_recv(mc, channel)? {
+            self.wake_channel_task(rid, Wake::ChannelRecv { value });
+            return Ok(());
+        }
+        channel
+            .with_native_state_mut::<NativeChannelState, _, _>(mc, |ch| {
+                ch.buffer_mut().push_front(value)
+            })
+            .map_err(QuoinError::Other)
     }
 
     /// True if `id` is still parked on a channel *at the same park epoch the entry was
@@ -254,7 +287,7 @@ impl<'gc> VmState<'gc> {
         if let Some(t) = self.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
             t.parked_on_channel = true;
         }
-        match self.channel_park()? {
+        match self.channel_park(mc, receiver)? {
             ParkOutcome::SendAccepted => Ok(()),
             ParkOutcome::Closed => Err(QuoinError::ValueError(
                 "send on a closed channel".to_string(),
@@ -307,7 +340,7 @@ impl<'gc> VmState<'gc> {
         if let Some(t) = self.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
             t.parked_on_channel = true;
         }
-        match self.channel_park()? {
+        match self.channel_park(mc, receiver)? {
             ParkOutcome::Received(v) => Ok(Some(v)),
             ParkOutcome::Closed => Ok(None),
             ParkOutcome::SendAccepted => Err(QuoinError::Other(
