@@ -12,7 +12,7 @@ use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
-use crate::symbol::{Symbol, self_symbol};
+use crate::symbol::{Symbol, init_colon_symbol, init_symbol, self_symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, Fields, NamespacedName, NativeCall, NativeClass,
     NativeFunc, Object, ObjectPayload, Value,
@@ -1004,15 +1004,15 @@ impl<'gc> VmState<'gc> {
         instance_selectors: &[String],
         class_selectors: &[String],
     ) {
-        let mut instance_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
+        let mut instance_methods: FxHashMap<Symbol, Value<'gc>> = FxHashMap::default();
         for sel in instance_selectors {
             let node = self.new_ext_method(mc, sel.clone(), ext);
-            instance_methods.insert(sel.clone(), node);
+            instance_methods.insert(Symbol::intern(sel), node);
         }
-        let mut class_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
+        let mut class_methods: FxHashMap<Symbol, Value<'gc>> = FxHashMap::default();
         for sel in class_selectors {
             let node = self.new_ext_method(mc, sel.clone(), ext);
-            class_methods.insert(sel.clone(), node);
+            class_methods.insert(Symbol::intern(sel), node);
         }
         let parent = self.get_or_create_builtin_class(mc, "Object");
         let ns_name = NamespacedName::parse(name);
@@ -1076,7 +1076,11 @@ impl<'gc> VmState<'gc> {
 
         let receiver = Value::Object(obj);
         for clz in classes {
-            let init_colon = clz.borrow().instance_methods.get("init:").copied();
+            let init_colon = clz
+                .borrow()
+                .instance_methods
+                .get(&init_colon_symbol())
+                .copied();
             if let Some(method_val) = init_colon {
                 let param_names = self.init_param_names(method_val).unwrap_or_default();
                 let mut init_args = Vec::new();
@@ -1089,7 +1093,7 @@ impl<'gc> VmState<'gc> {
                 }
                 self.call_method_value(mc, receiver, method_val, "init:", init_args)?;
             } else {
-                let init_plain = clz.borrow().instance_methods.get("init").copied();
+                let init_plain = clz.borrow().instance_methods.get(&init_symbol()).copied();
                 if let Some(method_val) = init_plain {
                     self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
                 }
@@ -1206,8 +1210,9 @@ impl<'gc> VmState<'gc> {
         // Several defs may share a selector (typed multimethod variants); chain
         // them in declaration order so the scorer routes by argument type and ties
         // resolve to the first-declared.
-        let mut inst_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
+        let mut inst_methods: FxHashMap<Symbol, Value<'gc>> = FxHashMap::default();
         for def in native_class.instance_methods() {
+            let sym = Symbol::intern(&def.selector);
             let node = self.new_native_method(
                 mc,
                 def.selector.clone(),
@@ -1215,15 +1220,16 @@ impl<'gc> VmState<'gc> {
                 def.param_types,
                 def.ret_type,
             );
-            if let Some(head) = inst_methods.get(&def.selector).copied() {
+            if let Some(head) = inst_methods.get(&sym).copied() {
                 let _ = Self::append_method_to_chain(mc, head, node);
             } else {
-                inst_methods.insert(def.selector, node);
+                inst_methods.insert(sym, node);
             }
         }
 
-        let mut cls_methods: FxHashMap<String, Value<'gc>> = FxHashMap::default();
+        let mut cls_methods: FxHashMap<Symbol, Value<'gc>> = FxHashMap::default();
         for def in native_class.class_methods() {
+            let sym = Symbol::intern(&def.selector);
             let node = self.new_native_method(
                 mc,
                 def.selector.clone(),
@@ -1231,10 +1237,10 @@ impl<'gc> VmState<'gc> {
                 def.param_types,
                 def.ret_type,
             );
-            if let Some(head) = cls_methods.get(&def.selector).copied() {
+            if let Some(head) = cls_methods.get(&sym).copied() {
                 let _ = Self::append_method_to_chain(mc, head, node);
             } else {
-                cls_methods.insert(def.selector, node);
+                cls_methods.insert(sym, node);
             }
         }
 
@@ -1543,7 +1549,7 @@ impl<'gc> VmState<'gc> {
 
         let receiver = Value::Object(obj);
         for clz in classes {
-            let method_opt = clz.borrow().instance_methods.get("init").copied();
+            let method_opt = clz.borrow().instance_methods.get(&init_symbol()).copied();
             if let Some(method_val) = method_opt {
                 self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
             }
@@ -1857,6 +1863,8 @@ impl<'gc> VmState<'gc> {
         selector: &str,
         class_side: bool,
     ) -> Option<Value<'gc>> {
+        // Intern once at the boundary; the recursive walk probes by Symbol.
+        let selector = Symbol::intern(selector);
         let mut visited = Vec::new();
         self.lookup_in_class_hierarchy_rec(class_ref, selector, class_side, &mut visited)
     }
@@ -1864,7 +1872,7 @@ impl<'gc> VmState<'gc> {
     fn lookup_in_class_hierarchy_rec(
         &self,
         class_ref: Gc<'gc, RefLock<Class<'gc>>>,
-        selector: &str,
+        selector: Symbol,
         class_side: bool,
         visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
     ) -> Option<Value<'gc>> {
@@ -1879,7 +1887,7 @@ impl<'gc> VmState<'gc> {
         } else {
             &class_borrow.instance_methods
         };
-        if let Some(method) = methods.get(selector).copied() {
+        if let Some(method) = methods.get(&selector).copied() {
             return Some(method);
         }
         for mixin in &class_borrow.mixin_classes {
@@ -4066,40 +4074,32 @@ impl<'gc> VmState<'gc> {
                     self.ensure_not_sealed(target_class)?;
 
                     let method_obj = self.new_method(mc, selector.clone(), block_val, false);
+                    let sel_sym = Symbol::intern(selector);
                     let is_class_side = matches!(self_val, Value::ClassMeta(_));
                     if is_class_side {
-                        if target_class.borrow().class_methods.contains_key(selector) {
-                            let existing_val = target_class
-                                .borrow()
-                                .class_methods
-                                .get(selector)
-                                .copied()
-                                .unwrap();
+                        if let Some(existing_val) =
+                            target_class.borrow().class_methods.get(&sel_sym).copied()
+                        {
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
                                 .class_methods
-                                .insert(selector.clone(), method_obj);
+                                .insert(sel_sym, method_obj);
                         }
                     } else {
-                        if target_class
+                        if let Some(existing_val) = target_class
                             .borrow()
                             .instance_methods
-                            .contains_key(selector)
+                            .get(&sel_sym)
+                            .copied()
                         {
-                            let existing_val = target_class
-                                .borrow()
-                                .instance_methods
-                                .get(selector)
-                                .copied()
-                                .unwrap();
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
                                 .instance_methods
-                                .insert(selector.clone(), method_obj);
+                                .insert(sel_sym, method_obj);
                         }
                     }
                     // The class's method table just changed — drop memoized resolutions.
@@ -4139,39 +4139,31 @@ impl<'gc> VmState<'gc> {
                         )));
                     }
 
+                    let sel_sym = Symbol::intern(selector);
                     if is_class_side {
-                        if target_class.borrow().class_methods.contains_key(selector) {
-                            let existing_val = target_class
-                                .borrow()
-                                .class_methods
-                                .get(selector)
-                                .copied()
-                                .unwrap();
+                        if let Some(existing_val) =
+                            target_class.borrow().class_methods.get(&sel_sym).copied()
+                        {
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
                                 .class_methods
-                                .insert(selector.clone(), method_obj);
+                                .insert(sel_sym, method_obj);
                         }
                     } else {
-                        if target_class
+                        if let Some(existing_val) = target_class
                             .borrow()
                             .instance_methods
-                            .contains_key(selector)
+                            .get(&sel_sym)
+                            .copied()
                         {
-                            let existing_val = target_class
-                                .borrow()
-                                .instance_methods
-                                .get(selector)
-                                .copied()
-                                .unwrap();
                             self.replace_or_append_method_in_chain(mc, existing_val, method_obj)?;
                         } else {
                             target_class
                                 .borrow_mut(mc)
                                 .instance_methods
-                                .insert(selector.clone(), method_obj);
+                                .insert(sel_sym, method_obj);
                         }
                     }
                     // The class's method table just changed — drop memoized resolutions.

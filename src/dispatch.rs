@@ -465,7 +465,7 @@ impl<'gc> VmState<'gc> {
         } else {
             &class_borrow.instance_methods
         };
-        let method_chain_start = methods.get(selector.as_str()).copied();
+        let method_chain_start = methods.get(&selector).copied();
         let mixins = class_borrow.mixin_classes.clone();
         let parent = class_borrow.parent;
         drop(class_borrow);
@@ -645,7 +645,7 @@ impl<'gc> VmState<'gc> {
         } else {
             &class_borrow.instance_methods
         };
-        let chain_start = methods.get(selector.as_str()).copied();
+        let chain_start = methods.get(&selector).copied();
         let mixins = class_borrow.mixin_classes.clone();
         let parent = class_borrow.parent;
         drop(class_borrow);

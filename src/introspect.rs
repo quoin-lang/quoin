@@ -190,7 +190,12 @@ fn collect_selectors<'gc>(
     out: &mut BTreeSet<String>,
 ) {
     let class = class_gc.borrow();
-    out.extend(class.instance_methods.keys().cloned());
+    out.extend(
+        class
+            .instance_methods
+            .keys()
+            .map(|s| s.as_str().to_string()),
+    );
     if include_inherited {
         for mixin in &class.mixin_classes {
             collect_selectors(*mixin, true, out);
@@ -245,11 +250,11 @@ pub fn describe_value<'gc>(_vm: &VmState<'gc>, value: Value<'gc>) -> ValueInfo {
 /// selector.
 fn methods_of<'gc>(
     vm: &VmState<'gc>,
-    map: &rustc_hash::FxHashMap<String, Value<'gc>>,
+    map: &rustc_hash::FxHashMap<crate::symbol::Symbol, Value<'gc>>,
 ) -> Vec<MethodInfo> {
     let mut out: Vec<MethodInfo> = map
         .iter()
-        .map(|(selector, head)| method_info(vm, selector, *head))
+        .map(|(selector, head)| method_info(vm, selector.as_str(), *head))
         .collect();
     out.sort_by(|a, b| a.selector.cmp(&b.selector));
     out

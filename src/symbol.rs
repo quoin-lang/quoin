@@ -62,6 +62,18 @@ pub fn self_symbol() -> Symbol {
     *SELF.get_or_init(|| Symbol::intern("self"))
 }
 
+/// The interned `init` / `init:` selectors — probed in every class of the
+/// hierarchy on every instantiation, so cached past the interner lock.
+pub fn init_symbol() -> Symbol {
+    static INIT: OnceLock<Symbol> = OnceLock::new();
+    *INIT.get_or_init(|| Symbol::intern("init"))
+}
+
+pub fn init_colon_symbol() -> Symbol {
+    static INIT_COLON: OnceLock<Symbol> = OnceLock::new();
+    *INIT_COLON.get_or_init(|| Symbol::intern("init:"))
+}
+
 impl PartialEq for Symbol {
     #[inline]
     fn eq(&self, other: &Self) -> bool {

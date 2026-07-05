@@ -459,7 +459,7 @@ fn test_native_methods_are_chainable() {
         let native_method = obj_class
             .borrow()
             .instance_methods
-            .get("can?:")
+            .get(&Symbol::intern("can?:"))
             .copied()
             .expect("Object should have a native can?: method");
 
@@ -1117,7 +1117,11 @@ fn test_class_and_method_definition_vm() {
 
             // Verify method x exists in instance_methods
             if let Value::Class(c) = class_val {
-                assert!(c.borrow().instance_methods.contains_key("x"));
+                assert!(
+                    c.borrow()
+                        .instance_methods
+                        .contains_key(&Symbol::intern("x"))
+                );
             }
 
             // Inside class_block: Push(override_x_block)
@@ -1417,7 +1421,7 @@ fn test_mixin_method_lookup_and_instance_vars() {
                 instance_methods: {
                     let mut m = FxHashMap::default();
                     m.insert(
-                        "name".to_string(),
+                        Symbol::intern("name"),
                         vm.new_native_method(
                             mc,
                             "name".to_string(),

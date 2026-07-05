@@ -365,7 +365,7 @@ impl<'gc> VmState<'gc> {
                 .instance_methods
                 .iter()
                 .chain(class_ref.class_methods.iter())
-                .map(|(selector, method)| (selector.clone(), *method))
+                .map(|(selector, method)| (selector.as_str().to_string(), *method))
                 .collect();
             drop(class_ref);
 

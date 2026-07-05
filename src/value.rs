@@ -666,8 +666,10 @@ pub struct Class<'gc> {
     pub name: NamespacedName,
     pub parent: Option<Gc<'gc, RefLock<Class<'gc>>>>,
     pub instance_vars: Vec<String>,
-    pub instance_methods: FxHashMap<String, Value<'gc>>,
-    pub class_methods: FxHashMap<String, Value<'gc>>,
+    /// Method tables keyed by interned selector: hot lookups already hold a
+    /// `Symbol`, so probing is a pointer-hash, never a byte-hash of the name.
+    pub instance_methods: FxHashMap<Symbol, Value<'gc>>,
+    pub class_methods: FxHashMap<Symbol, Value<'gc>>,
     pub mixin_classes: Vec<Gc<'gc, RefLock<Class<'gc>>>>,
     /// Memoized, append-only instance-variable layout: name -> absolute slot in an
     /// instance's `fields` array. Built lazily from the full hierarchy (own +
