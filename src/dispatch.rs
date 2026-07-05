@@ -607,12 +607,26 @@ impl<'gc> VmState<'gc> {
                 // by its declared signature if it has one; a signatureless legacy
                 // native makes no specificity claim and ranks last as a pure fallback.
                 return Ok(match self.native_method_param_types(method_val) {
-                    Some(param_types) => self.score_param_types(&param_types, args).map(|s| (s, 1)),
+                    Some(param_types) => self
+                        .score_param_types(&param_types, &[], args)
+                        .map(|s| (s, 1)),
                     None => Some((i64::MAX, 1)),
                 });
             }
         };
-        let param_score = match self.score_param_types(&block.template.param_types, args) {
+        // A tag-requiring variant makes the whole resolution uncacheable: the
+        // (kind, class-ptr) guards can't distinguish an Integer-tagged list
+        // from a String-tagged or untagged one, so a cached selection would be
+        // wrong for the next differently-tagged argument (GENERICS_ARCH.md §5).
+        // Same mechanism guarded variants use; legacy chains never hit this.
+        if block.template.param_elem_tags.iter().any(|t| t.is_some()) {
+            self.dispatch_cache.uncacheable = true;
+        }
+        let param_score = match self.score_param_types(
+            &block.template.param_types,
+            &block.template.param_elem_tags,
+            args,
+        ) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -882,13 +896,39 @@ impl<'gc> VmState<'gc> {
     /// unconstrained (not defaulted to `Object`). E.g. `List#at:put:` declares
     /// `["Integer"]`, constraining the index but leaving the value free. (A native
     /// method with no signature at all is handled by `match_score` as a fallback.)
-    fn score_param_types(&self, param_types: &[String], args: &[Value<'gc>]) -> Option<i64> {
+    fn score_param_types(
+        &self,
+        param_types: &[String],
+        elem_tags: &[Option<crate::runtime::elem_tag::ElemTag>],
+        args: &[Value<'gc>],
+    ) -> Option<i64> {
         if args.len() < param_types.len() {
             return None;
         }
+        // Base distances are doubled so a satisfied tag requirement can sit
+        // between them as a discount: legacy scoring (empty `elem_tags` — every
+        // pre-generics block, normalized at compile time) is a pure monotonic
+        // scaling with ZERO tag probes, identical orderings everywhere.
         let mut score: i64 = 0;
+        if elem_tags.is_empty() {
+            for (i, hint) in param_types.iter().enumerate() {
+                score += 2 * self.type_distance(args[i], hint)?;
+            }
+            return Some(score);
+        }
         for (i, hint) in param_types.iter().enumerate() {
-            score += self.type_distance(args[i], hint)?;
+            score += 2 * self.type_distance(args[i], hint)?;
+            // Tag-aware dispatch (GENERICS_ARCH.md §5): a `List(Integer)` param
+            // matches only an Integer-tagged list — untagged or differently
+            // tagged falls through to a bare-`List`/`Object` variant or MNU. A
+            // satisfied requirement DISCOUNTS the param (strictly more specific
+            // than the requirement-free variant at the same base distance).
+            if let Some(required) = elem_tags.get(i).copied().flatten() {
+                if crate::runtime::elem_tag::value_elem_tag(&args[i]) != Some(required) {
+                    return None;
+                }
+                score -= 1;
+            }
         }
         Some(score)
     }

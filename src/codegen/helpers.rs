@@ -151,11 +151,22 @@ pub(super) unsafe extern "C" fn list_push(
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
     let value = decode(vm, kind, bits);
     let receiver = vm.stack[list_idx as usize];
+    // Untagged fast path exactly mirrors the interpreter's ListPush arm; a
+    // tagged list takes the shared cold checked write.
     let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
-        l.get_vec_mut().push(value);
+        if l.elem.is_none() {
+            l.get_vec_mut().push(value);
+            true
+        } else {
+            false
+        }
     });
     match res {
-        Ok(()) => TAG_OK,
+        Ok(true) => TAG_OK,
+        Ok(false) => match vm.tagged_list_push(mc, receiver, value) {
+            Ok(()) => TAG_OK,
+            Err(e) => store_err(vm, e),
+        },
         Err(_) => invariant(vm, "ListPush on a non-list receiver"),
     }
 }
@@ -195,11 +206,19 @@ pub(super) unsafe extern "C" fn list_set(
     let value = decode(vm, kind, bits);
     let receiver = vm.stack[list_idx as usize];
     let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
-        devirt_ops::list_set(l.get_vec_mut(), index, value)
+        if l.elem.is_none() {
+            Some(devirt_ops::list_set(l.get_vec_mut(), index, value))
+        } else {
+            None
+        }
     });
     match res {
-        Ok(Ok(())) => TAG_OK,
-        Ok(Err(e)) => store_err(vm, e),
+        Ok(Some(Ok(()))) => TAG_OK,
+        Ok(Some(Err(e))) => store_err(vm, e),
+        Ok(None) => match vm.tagged_list_set(mc, receiver, index, value) {
+            Ok(()) => TAG_OK,
+            Err(e) => store_err(vm, e),
+        },
         Err(_) => invariant(vm, "ListSet on a non-list receiver"),
     }
 }

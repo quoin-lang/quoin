@@ -5,6 +5,7 @@ use crate::highlighter::{HighlightSpan, format_ansi, highlight_resilient, highli
 use crate::instruction::{Constant, Instruction, IntBinKind, SharedBytecode, StaticBlock};
 use crate::io_backend::StreamId;
 use crate::packages::{FsResolver, LoadedUnit, PackageResolver};
+use crate::runtime::elem_tag;
 use crate::runtime::fiber::NativeFiberState;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
@@ -838,6 +839,123 @@ impl<'gc> VmState<'gc> {
             // Object + immediate value types dispatch their `s` method.
             _ => self.call_method(mc, value, "s", vec![]),
         }
+    }
+
+    /// Verify every element of a FRESH collection literal against `tag`, then
+    /// stamp the tag (`TagCollection` — annotation-driven tagged literals,
+    /// docs/GENERICS_ARCH.md §4.2). Safe to stamp in place: the literal has no
+    /// aliases yet.
+    fn tag_fresh_collection(
+        &self,
+        mc: &Mutation<'gc>,
+        v: Value<'gc>,
+        tag: elem_tag::ElemTag,
+    ) -> Result<(), QuoinError> {
+        use crate::runtime::map::NativeMapState;
+        use crate::runtime::set::NativeSetState;
+        if let Ok(vec) = v.with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec()) {
+            for (i, e) in vec.iter().enumerate() {
+                elem_tag::check_insert(Some(tag), "List", e, Some(i as i64), |val, n| {
+                    self.value_matches_type(*val, n)
+                })?;
+            }
+            let _ = v.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
+                l.elem = Some(tag);
+            });
+            return Ok(());
+        }
+        if let Ok(vals) = v.with_native_state::<NativeMapState, _, _>(|m| {
+            m.get_map().values().copied().collect::<Vec<_>>()
+        }) {
+            for e in &vals {
+                elem_tag::check_insert(Some(tag), "Map String", e, None, |val, n| {
+                    self.value_matches_type(*val, n)
+                })?;
+            }
+            let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
+                m.elem = Some(tag);
+            });
+            return Ok(());
+        }
+        if let Ok(vec) = v.with_native_state::<NativeSetState, _, _>(|s| s.get_vec().to_vec()) {
+            for (i, e) in vec.iter().enumerate() {
+                elem_tag::check_insert(Some(tag), "Set", e, Some(i as i64), |val, n| {
+                    self.value_matches_type(*val, n)
+                })?;
+            }
+            let _ = v.with_native_state_mut::<NativeSetState, _, _>(mc, |s| {
+                s.elem = Some(tag);
+            });
+            return Ok(());
+        }
+        Err(QuoinError::Other(
+            "TagCollection on a non-collection value".to_string(),
+        ))
+    }
+
+    /// Checked write into a TAGGED list (the cold side of the ListPush arm).
+    #[inline(never)]
+    pub(crate) fn tagged_list_push(
+        &self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        value: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        let tag = receiver
+            .with_native_state::<NativeListState, _, _>(|l| l.elem)
+            .map_err(QuoinError::Other)?;
+        elem_tag::check_insert(tag, "List", &value, None, |v, n| {
+            self.value_matches_type(*v, n)
+        })?;
+        let _ = receiver
+            .with_native_state_mut::<NativeListState, _, _>(mc, |l| l.get_vec_mut().push(value));
+        Ok(())
+    }
+
+    /// Checked write into a TAGGED list (the cold side of the ListSet arm).
+    /// The tag check precedes the bounds check — the VALUE is illegal
+    /// regardless of index.
+    #[inline(never)]
+    pub(crate) fn tagged_list_set(
+        &self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        i: i64,
+        value: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        let tag = receiver
+            .with_native_state::<NativeListState, _, _>(|l| l.elem)
+            .map_err(QuoinError::Other)?;
+        elem_tag::check_insert(tag, "List", &value, Some(i), |v, n| {
+            self.value_matches_type(*v, n)
+        })?;
+        receiver
+            .with_native_state_mut::<NativeListState, _, _>(mc, |l| {
+                devirt_ops::list_set(l.get_vec_mut(), i, value)
+            })
+            .map_err(QuoinError::Other)?
+    }
+
+    /// Checked write into a TAGGED map (the cold side of the MapSet arm).
+    #[inline(never)]
+    pub(crate) fn tagged_map_set(
+        &self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        key: String,
+        value: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        use crate::runtime::map::NativeMapState;
+        let tag = receiver
+            .with_native_state::<NativeMapState, _, _>(|m| m.elem)
+            .map_err(QuoinError::Other)?;
+        elem_tag::check_insert(tag, "Map String", &value, None, |v, n| {
+            self.value_matches_type(*v, n)
+        })?;
+        let _ = receiver.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
+            m.get_map_mut().insert(key, value);
+        });
+        Ok(())
     }
 
     pub fn new_list(&self, mc: &Mutation<'gc>, list: Vec<Value<'gc>>) -> Value<'gc> {
@@ -1881,11 +1999,20 @@ impl<'gc> VmState<'gc> {
                 new_method.with_native_state::<NativeMethodState, _, _>(|m| m.get_block())?
         {
             let new_param_types = nb.template.param_types.clone();
+            // Element-tag requirements are part of a variant's identity:
+            // `|l: List(Integer)|` and `|l: List(String)|` share the erased
+            // base signature ["List"] but are distinct multimethod variants
+            // (GENERICS_ARCH.md §5), not a redefinition.
+            let new_elem_tags = nb.template.param_elem_tags.clone();
             let mut curr = Some(chain_start);
             while let Some(node) = curr {
                 let is_match = self
                     .get_block_from_method(node)
-                    .map(|eb| eb.decl_block.is_none() && eb.template.param_types == new_param_types)
+                    .map(|eb| {
+                        eb.decl_block.is_none()
+                            && eb.template.param_types == new_param_types
+                            && eb.template.param_elem_tags == new_elem_tags
+                    })
                     .unwrap_or(false);
                 if is_match {
                     if let Value::Object(obj) = node {
@@ -3880,16 +4007,39 @@ impl<'gc> VmState<'gc> {
                 }
                 return self.exec_send(mc, frame_idx, Symbol::intern("at:"), 1);
             }
+            Instruction::TagCollection(tag) => {
+                let v = *self.stack.last().expect("TagCollection: literal on stack");
+                self.tag_fresh_collection(mc, v, *tag)?;
+                ip += 1;
+            }
             Instruction::ListSet => {
                 let n = self.stack.len();
                 let value = self.stack[n - 1];
                 let index = self.stack[n - 2];
                 let receiver = self.stack[n - 3];
                 if let Value::Int(i) = index {
+                    // Untagged (the whole pre-generics world): exactly the old
+                    // body behind one `is_none`. Tagged lists take the
+                    // out-of-line checked path (docs/GENERICS_ARCH.md §6).
                     let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
-                        devirt_ops::list_set(l.get_vec_mut(), i, value)
+                        if l.elem.is_none() {
+                            Some(devirt_ops::list_set(l.get_vec_mut(), i, value))
+                        } else {
+                            None
+                        }
                     });
-                    if let Ok(inner) = res {
+                    if let Ok(fast) = res {
+                        let inner = match fast {
+                            Some(inner) => inner,
+                            None => {
+                                let r = self.tagged_list_set(mc, receiver, i, value);
+                                self.stack.truncate(n - 3);
+                                r?;
+                                self.push(receiver);
+                                self.frames[frame_idx].ip = ip + 1;
+                                return Ok(VmStatus::Running);
+                            }
+                        };
                         self.stack.truncate(n - 3);
                         inner?; // propagate an IndexError (out-of-bounds write)
                         self.push(receiver); // `at:put:` evaluates to the receiver
@@ -3905,9 +4055,22 @@ impl<'gc> VmState<'gc> {
                 let value = self.stack[n - 1];
                 let receiver = self.stack[n - 2];
                 let res = receiver.with_native_state_mut::<NativeListState, _, _>(mc, |l| {
-                    l.get_vec_mut().push(value);
+                    if l.elem.is_none() {
+                        l.get_vec_mut().push(value);
+                        true
+                    } else {
+                        false
+                    }
                 });
-                if res.is_ok() {
+                if let Ok(fast) = res {
+                    if !fast {
+                        let r = self.tagged_list_push(mc, receiver, value);
+                        self.stack.truncate(n - 2);
+                        r?;
+                        self.push(receiver);
+                        self.frames[frame_idx].ip = ip + 1;
+                        return Ok(VmStatus::Running);
+                    }
                     self.stack.truncate(n - 2);
                     self.push(receiver); // `add:` evaluates to the receiver
                     self.frames[frame_idx].ip = ip + 1;
@@ -3947,9 +4110,22 @@ impl<'gc> VmState<'gc> {
                 {
                     let key_str = s.to_string(); // the map owns String keys
                     let res = receiver.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
-                        m.get_map_mut().insert(key_str, value);
+                        if m.elem.is_none() {
+                            m.get_map_mut().insert(key_str.clone(), value);
+                            true
+                        } else {
+                            false
+                        }
                     });
-                    if res.is_ok() {
+                    if let Ok(fast) = res {
+                        if !fast {
+                            let r = self.tagged_map_set(mc, receiver, key_str, value);
+                            self.stack.truncate(n - 3);
+                            r?;
+                            self.push(receiver);
+                            self.frames[frame_idx].ip = ip + 1;
+                            return Ok(VmStatus::Running);
+                        }
                         self.stack.truncate(n - 3);
                         self.push(receiver); // `at:put:` evaluates to the receiver
                         self.frames[frame_idx].ip = ip + 1;

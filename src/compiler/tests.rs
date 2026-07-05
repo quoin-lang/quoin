@@ -1375,6 +1375,7 @@ fn test_compile_blocks() {
         is_nested_block: true,
         param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
         param_types: vec!["Object".to_string()],
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode(Rc::new(inner_bc)),
         source_info: None,
         decl_block: None,
@@ -1513,6 +1514,7 @@ fn test_compile_class_and_method_definitions() {
         is_nested_block: true,
         param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),
         param_types: vec!["Object".to_string(), "Object".to_string()],
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode(Rc::new(vec![
             Instruction::Push(Constant::Nil),
             Instruction::Return,
@@ -1943,12 +1945,17 @@ fn first_typed_param_types(src: &str) -> Vec<String> {
 
 #[test]
 fn generic_annotations_resolve_and_diagnose() {
-    // Well-formed shapes (including nesting and a declared type variable) are silent.
+    // Well-formed flat shapes (including a declared type variable) are silent.
     assert!(
-        all_diags(
-            "It(T) <- { m: -> { |x: T l: List(Integer) m: Map(String List(Integer)) ^T| x } }"
-        )
-        .is_empty()
+        all_diags("It(T) <- { m: -> { |x: T l: List(Integer) s: Set(String) ^T| x } }").is_empty()
+    );
+    // A NESTED element type in a tag-minting position (a param) degrades to its
+    // enforceable base with a warning (guarantee honesty, GENERICS_ARCH.md §3.3).
+    let d = all_diags("Foo <- { a: -> { |m: Map(String List(Integer))| m } }");
+    assert!(
+        d.iter()
+            .any(|m| m.contains("nested element types are checker-only")),
+        "{d:?}"
     );
     // Malformed shapes each get a targeted diagnostic.
     let d = all_diags("Foo <- { a: -> { |m: Map(Integer Integer)| m } }");
@@ -1978,6 +1985,44 @@ fn generic_annotations_resolve_and_diagnose() {
     // An undeclared bare variable name is an unknown type, not a silent variable.
     let d = all_diags("Foo <- { a: -> { |x: T| x } }");
     assert!(d.iter().any(|m| m.contains("unknown type `T`")), "{d:?}");
+}
+
+#[test]
+fn generic_params_carry_tag_requirements() {
+    // The dispatch descriptor: base erased in param_types, the tag requirement
+    // in param_elem_tags (GENERICS_ARCH.md §5).
+    let node = crate::parser::parse_quoin_string(
+        "Foo <- { a: -> { |l: List(Integer) n: Integer s: Set(Wibble2) b: List| l } }",
+    );
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    let code = c.compile_program(p).unwrap();
+    fn walk(insts: &[Instruction], out: &mut Vec<Rc<StaticBlock>>) {
+        for i in insts {
+            if let Instruction::Push(Constant::Block(b)) = i {
+                if !b.param_types.is_empty() {
+                    out.push(b.clone());
+                }
+                walk(&b.bytecode, out);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(&code.bytecode, &mut found);
+    let b = found.first().expect("typed method block");
+    assert_eq!(b.param_types, vec!["List", "Integer", "Set", "List"]);
+    use crate::runtime::elem_tag::ElemTag;
+    assert_eq!(
+        b.param_elem_tags,
+        vec![
+            Some(ElemTag::Int),
+            None,
+            Some(ElemTag::Class(crate::symbol::Symbol::intern("Wibble2"))),
+            None
+        ]
+    );
 }
 
 #[test]

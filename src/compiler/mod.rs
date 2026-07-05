@@ -7,6 +7,7 @@ use crate::parser::ast::{
     DeclKind, DeclarationNode, IdentifierNode, IdentifierType, MethodCallNode, MethodSelectorNode,
     Node, NodeValue, ProgramNode, TypeRefNode, UnaryOperatorNode, UnaryOperatorType,
 };
+use crate::runtime::elem_tag::ElemTag;
 use crate::symbol::Symbol;
 use crate::types::{SeenTypes, Type};
 use crate::value::{NamespacedName, SourceInfo};
@@ -997,9 +998,104 @@ impl Compiler {
             .any(|c| c.type_params.iter().any(|p| p == name))
     }
 
+    /// The element-tag *requirement* a generic param annotation places on
+    /// dispatch: `|l: List(Integer)|` matches only Integer-tagged lists
+    /// (GENERICS_ARCH.md §5). `None` = no requirement (bare or unenforceable).
+    fn param_elem_tag(&mut self, tr: &TypeRefNode) -> Option<ElemTag> {
+        if tr.args.is_empty() {
+            return None;
+        }
+        let inner = match (ident_name(&tr.ident).as_str(), tr.args.len()) {
+            ("List", 1) | ("Set", 1) => &tr.args[0],
+            ("Map", 2) => &tr.args[1],
+            _ => return None,
+        };
+        self.enforceable_elem_tag_of_ref(inner)
+    }
+
+    /// Is this decl a collection literal whose declared type is generic —
+    /// the tagged-literal construction pattern?
+    pub(super) fn generic_literal_decl(expected: &Type, rvalue: &Node) -> bool {
+        matches!(
+            (expected, &rvalue.value),
+            (Type::ListOf(_), NodeValue::List(_))
+                | (Type::MapOf(_), NodeValue::Map(_))
+                | (Type::SetOf(_), NodeValue::Set(_))
+        )
+    }
+
+    /// `enforceable_elem_tag_of_ref`, but from a resolved `Type` (the decl
+    /// path, where the annotation is already resolved). Same honesty rules.
+    pub(super) fn enforceable_elem_tag_of_type(
+        &mut self,
+        inner: &Type,
+        decl: &DeclarationNode,
+    ) -> Option<ElemTag> {
+        match ElemTag::from_type(inner) {
+            Some(tag) => Some(tag),
+            None => {
+                let base = match inner {
+                    Type::ListOf(_) => Some(ElemTag::List),
+                    Type::MapOf(_) => Some(ElemTag::Map),
+                    Type::SetOf(_) => Some(ElemTag::Set),
+                    _ => None, // Var/Any/…: checker-only, no tag
+                };
+                if let Some(b) = base {
+                    self.warn(
+                        format!(
+                            "nested element types are checker-only; `{}` is enforced as \
+                             `{}` at runtime",
+                            inner.name(),
+                            b.name(),
+                        ),
+                        decl.rvalue.source_info.as_ref(),
+                    );
+                }
+                base
+            }
+        }
+    }
+
+    /// The runtime-enforceable tag for an element annotation, with the
+    /// guarantee-honesty degradations: a nested generic degrades to its base
+    /// (with a warning — `List(List(Integer))` is enforced as `List(List)`),
+    /// and a type variable or `Any` yields no tag at all (checker-only).
+    fn enforceable_elem_tag_of_ref(&mut self, tr: &TypeRefNode) -> Option<ElemTag> {
+        if tr.args.is_empty()
+            && tr.ident.namespace.is_none()
+            && self.declared_type_var(&tr.ident.name)
+        {
+            return None;
+        }
+        let t = type_from_ref(tr);
+        match ElemTag::from_type(&t) {
+            Some(tag) => Some(tag),
+            None => {
+                let base = match t {
+                    Type::ListOf(_) => Some(ElemTag::List),
+                    Type::MapOf(_) => Some(ElemTag::Map),
+                    Type::SetOf(_) => Some(ElemTag::Set),
+                    _ => None,
+                };
+                if let Some(b) = base {
+                    self.warn(
+                        format!(
+                            "nested element types are checker-only; `{}` is enforced as \
+                             `{}` at runtime",
+                            annotation_name(tr),
+                            b.name(),
+                        ),
+                        tr.ident.source_info.as_ref(),
+                    );
+                }
+                base
+            }
+        }
+    }
+
     /// The runtime dispatch signature for a param annotation: generic arguments
-    /// erase to the base class (tag-aware dispatch is G1 — until then a
-    /// `List(Integer)` param dispatches as `List`, width-safe), and a declared
+    /// erase to the base class (the tag requirement rides separately in
+    /// `param_elem_tags`), and a declared
     /// type variable erases to `Object` (variables never dispatch;
     /// GENERICS_ARCH.md §4.4/§5).
     fn dispatch_type_name(&self, tr: &TypeRefNode) -> String {
@@ -1725,6 +1821,7 @@ impl Compiler {
             is_nested_block: false,
             param_syms: Vec::new(),
             param_types: Vec::new(),
+            param_elem_tags: Vec::new(),
             bytecode: SharedBytecode(Rc::new(bytecode)),
             source_info: program.source_info.clone(),
             decl_block: None,
@@ -2327,6 +2424,7 @@ impl Compiler {
         let saved_inline = self.inline_carets.take();
         let mut param_names = Vec::new();
         let mut param_types = Vec::new();
+        let mut param_elem_tags: Vec<Option<ElemTag>> = Vec::new();
         let mut locals = HashSet::new();
 
         for arg in &block.arguments {
@@ -2340,7 +2438,19 @@ impl Compiler {
                 .map(|tr| self.dispatch_type_name(tr))
                 .unwrap_or_else(|| "Object".to_string());
             param_types.push(type_name);
+            param_elem_tags.push(
+                arg.type_hint
+                    .as_ref()
+                    .and_then(|tr| self.param_elem_tag(tr)),
+            );
             locals.insert(name);
+        }
+
+        // All-None normalizes to empty: legacy blocks share one shape, dispatch
+        // scoring skips tag work entirely on `is_empty`, and variant identity
+        // compares equal across pre- and post-generics compiles.
+        if param_elem_tags.iter().all(Option::is_none) {
+            param_elem_tags.clear();
         }
 
         let mut decls_names = Vec::new();
@@ -2451,6 +2561,7 @@ impl Compiler {
             is_nested_block: true,
             param_syms: crate::value::intern_param_syms(&param_names),
             param_types,
+            param_elem_tags,
             bytecode: SharedBytecode(Rc::new(fused_bytecode)),
             source_info: block.source_info.clone(),
             decl_block,

@@ -112,6 +112,21 @@ impl Compiler {
         // checks/promotes the initializer against it; un-annotated decls compile plainly.
         let annotated = decl.type_hint.as_ref().map(|h| self.resolve_annotation(h));
         match &annotated {
+            // Annotation-driven tagged literals (docs/GENERICS_ARCH.md §4.2): a
+            // collection LITERAL initializing a generic-annotated decl constructs
+            // tagged — elements verified, tag stamped — instead of being checked
+            // against the annotation (which would always mismatch: the bare
+            // literal is honestly untagged until this lowering runs).
+            Some(expected) if Self::generic_literal_decl(expected, &decl.rvalue) => {
+                self.compile_node(&decl.rvalue, bytecode)?;
+                let inner = match expected {
+                    Type::ListOf(t) | Type::MapOf(t) | Type::SetOf(t) => t,
+                    _ => unreachable!("gated by generic_literal_decl"),
+                };
+                if let Some(tag) = self.enforceable_elem_tag_of_type(inner, decl) {
+                    bytecode.push(Instruction::TagCollection(tag));
+                }
+            }
             Some(expected) => self.compile_expecting(&decl.rvalue, expected, bytecode)?,
             None => self.compile_node(&decl.rvalue, bytecode)?,
         }

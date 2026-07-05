@@ -76,10 +76,14 @@ GenericGallery(T) <- {
     "* An unknown name inside the arguments still warns (nested resolution).
     unknownElem: -> { |l: List(Wibble)| l };
 
+    "* Nested element types degrade to their enforceable base, with a warning
+    "* (a `Map(String List(Integer))` param enforces values-are-Lists only).
+    nestedDegrades: -> { |m: Map(String List(Integer))| m };
+
     "* --- these are CORRECT and must emit NO warning ---
-    "* A declared type variable, and well-formed (nested) generics.
+    "* A declared type variable, and well-formed flat generics.
     usesVar: -> { |x: T ^T| x };
-    wellFormed: -> { |m: Map(String List(Integer)) ^List(Integer)| m.at:'k' }
+    wellFormed: -> { |m: Map(String Integer) ^List(Integer)| #( m.at:'k' ) }
 };
 
 'Defined Warnings — see the diagnostics printed above.'.print

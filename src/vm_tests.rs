@@ -159,6 +159,7 @@ where
             is_nested_block: false,
             param_syms: Vec::new(),
             param_types: Vec::new(),
+            param_elem_tags: Vec::new(),
             bytecode: instructions.into(),
             decl_block: None,
             source_map: SharedSourceMap::from(Vec::new()),
@@ -305,6 +306,7 @@ fn test_deferred_call_values_survive_collection() {
             is_nested_block: false,
             param_syms: Vec::new(),
             param_types: Vec::new(),
+            param_elem_tags: Vec::new(),
             bytecode: Vec::<Instruction>::new().into(),
             decl_block: None,
             source_map: SharedSourceMap::from(Vec::new()),
@@ -767,6 +769,7 @@ fn test_block_execution_and_returns() {
         is_nested_block: false,
         param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
         param_types: vec!["Object".to_string()],
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::LoadLocal(Symbol::intern("x")),
             Instruction::Push(Constant::Int(1)),
@@ -848,6 +851,7 @@ fn test_method_return() {
         is_nested_block: true,
         param_syms: Vec::new(),
         param_types: Vec::new(),
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::Push(Constant::Int(999)),
             Instruction::MethodReturn,
@@ -865,6 +869,7 @@ fn test_method_return() {
         is_nested_block: false, // enclosing_method_id will be this frame's ID
         param_syms: Vec::new(),
         param_types: Vec::new(),
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::Push(Constant::block(block_nested)),
             Instruction::Send(Symbol::intern("value"), 0),
@@ -912,6 +917,7 @@ fn test_non_local_return_callback() {
         is_nested_block: true,
         param_syms: Vec::new(),
         param_types: Vec::new(),
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::Push(Constant::Int(777)),
             Instruction::MethodReturn,
@@ -928,6 +934,7 @@ fn test_non_local_return_callback() {
         is_nested_block: false,
         param_syms: crate::value::intern_param_syms(&vec!["blk".to_string()]),
         param_types: vec!["Object".to_string()],
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::LoadLocal(Symbol::intern("blk")),
             Instruction::Send(Symbol::intern("value"), 0),
@@ -946,6 +953,7 @@ fn test_non_local_return_callback() {
         is_nested_block: false,
         param_syms: Vec::new(),
         param_types: Vec::new(),
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "bar_func".to_string())),
             Instruction::Push(Constant::block(block_nested)),
@@ -1023,6 +1031,7 @@ fn test_class_and_method_definition_vm() {
         is_nested_block: false,
         param_syms: Vec::new(),
         param_types: Vec::new(),
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             // 1. Define inst method x
             Instruction::Push(Constant::block(StaticBlock {
@@ -1031,6 +1040,7 @@ fn test_class_and_method_definition_vm() {
                 is_nested_block: false,
                 param_syms: Vec::new(),
                 param_types: Vec::new(),
+                param_elem_tags: Vec::new(),
                 bytecode: vec![
                     Instruction::LoadLocal(Symbol::intern("self")),
                     Instruction::Return,
@@ -1048,6 +1058,7 @@ fn test_class_and_method_definition_vm() {
                 is_nested_block: false,
                 param_syms: Vec::new(),
                 param_types: Vec::new(),
+                param_elem_tags: Vec::new(),
                 bytecode: vec![Instruction::Push(Constant::Int(42)), Instruction::Return].into(),
                 decl_block: None,
                 source_map: Vec::new().into(),
@@ -1187,6 +1198,7 @@ fn test_primitive_methods_and_overrides() {
         is_nested_block: false,
         param_syms: Vec::new(),
         param_types: Vec::new(),
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::Push(Constant::Int(42)),
             Instruction::Return,
@@ -1202,6 +1214,7 @@ fn test_primitive_methods_and_overrides() {
         is_nested_block: false,
         param_syms: Vec::new(),
         param_types: Vec::new(),
+        param_elem_tags: Vec::new(),
         bytecode: SharedBytecode::from(vec![
             Instruction::Push(Constant::block(custom_true_method)),
             Instruction::DefineMethod("custom_true".to_string()),
@@ -1497,6 +1510,7 @@ fn test_execute_block_helper() {
                         "b".to_string()
                     ]),
                     param_types: vec!["Object".to_string(), "Object".to_string()],
+                    param_elem_tags: Vec::new(),
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal(Symbol::intern("self")),
                         Instruction::LoadLocal(Symbol::intern("a")),
@@ -1552,6 +1566,7 @@ fn test_execute_block_helper() {
                         "b".to_string()
                     ]),
                     param_types: vec!["Object".to_string(), "Object".to_string()],
+                    param_elem_tags: Vec::new(),
                     bytecode: SharedBytecode::from(vec![
                         Instruction::LoadLocal(Symbol::intern("a")),
                         Instruction::LoadLocal(Symbol::intern("b")),
@@ -1605,6 +1620,7 @@ fn test_cannot_extend_non_existent_class() {
                 is_nested_block: false,
                 param_syms: Vec::new(),
                 param_types: Vec::new(),
+                param_elem_tags: Vec::new(),
                 bytecode: SharedBytecode::from(vec![
                     Instruction::Push(Constant::Nil),
                     Instruction::Return,

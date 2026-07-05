@@ -1,0 +1,139 @@
+"* Checked generic collections (docs/GENERICS_ARCH.md): runtime element tags.
+"* G1 semantics — insertion enforcement, construction, ensure:, introspection,
+"* tag-aware dispatch. Untagged collections are the entire pre-existing world
+"* and must behave exactly as before (the corpus is that regression test).
+
+RenderG <- {
+    .meta <-- {
+        show: -> { |xs: List(Integer)| 'ints' };
+        show: -> { |xs: List(String)| 'strings' };
+        show: -> { |xs: List| 'plain' }
+    }
+};
+
+ShapeG <- {
+    area -> { 0 }
+};
+ShapeG <- CircleG <- {
+    area -> { 314 }
+};
+
+(TestSuite.new:{ var name = 'CheckedGenerics' }).add:{
+    .test:
+    taggedLiteralConstructsAndEnforces -> {
+        var xs: List(Integer) = #(1 2 3);
+        .is:{ xs.elementType } equalTo:#Integer;
+        xs.add:4;
+        .is:{ xs.count } equalTo:4;
+        .is:{ { xs.add:'nope' }.catch:{ |e| 'caught' } } equalTo:'caught';
+        .is:{ xs.count } equalTo:4;
+    };
+
+    .test:
+    taggedLiteralChecksItsElements -> {
+        .is:{ { var bad: List(Integer) = #(1 'two' 3); bad }.catch:{ |e| 'caught' } }
+            equalTo:'caught';
+    };
+
+    "* The devirtualized at:put: path (statically-typed receiver) enforces too,
+    "* and the tag check wins over the bounds check (the VALUE is illegal
+    "* regardless of index).
+    .test:
+    devirtWritePathEnforces -> {
+        var xs: List(Integer) = #(1 2 3);
+        .is:{ { xs.at:0 put:'bad' }.catch:{ |e| 'caught' } } equalTo:'caught';
+        .is:{ xs.at:0 } equalTo:1;
+        .is:{ { xs.at:99 put:'bad' }.catch:{ |e| 'caught' } } equalTo:'caught';
+    };
+
+    .test:
+    ofConstructorsAndEnsure -> {
+        var dst = List.of:Integer;
+        .is:{ dst.elementType } equalTo:#Integer;
+        #(7 8 9).each:{ |x| dst.add:(x * 2) };
+        .is:{ dst.at:2 } equalTo:18;
+
+        var raw = #(1 2);
+        var checked = raw.ensure:Integer;
+        .is:{ checked.elementType } equalTo:#Integer;
+        "ensure: returns a NEW list; the original stays untagged"
+        .is:{ raw.elementType } equalTo:nil;
+        raw.add:'still fine';
+        .is:{ { #(1 'two').ensure:Integer }.catch:{ |e| 'caught' } } equalTo:'caught';
+    };
+
+    .test:
+    nilElementsAlwaysAllowed -> {
+        var xs = List.of:Integer;
+        xs.add:nil;
+        xs.add:5;
+        .is:{ xs.count } equalTo:2;
+    };
+
+    .test:
+    sliceCarriesTheTag -> {
+        var xs: List(Integer) = #(1 2 3 4);
+        .is:{ (xs.sliceFrom:2).elementType } equalTo:#Integer;
+    };
+
+    .test:
+    mapValuesAndSetElements -> {
+        var m = Map.of:Integer;
+        m.at:'a' put:1;
+        .is:{ m.elementType } equalTo:#Integer;
+        .is:{ { m.at:'b' put:'x' }.catch:{ |e| 'caught' } } equalTo:'caught';
+        var st = Set.of:String;
+        st.add:'hi';
+        .is:{ st.elementType } equalTo:#String;
+        .is:{ { st.add:3 }.catch:{ |e| 'caught' } } equalTo:'caught';
+    };
+
+    "* Tag-aware multimethods: exact tag match beats the bare variant; untagged
+    "* falls to bare. Cycled through ONE call site so the dispatch caches must
+    "* stay correct across tag shapes.
+    .test:
+    tagDispatchSelectsByTag -> {
+        var a = #(1 2).ensure:Integer;
+        var b = #('x').ensure:String;
+        var c = #(1 2);
+        var out = #();
+        #(a b c a b c).each:{ |l| out.add:(RenderG.show:l) };
+        .is:{ out.at:0 } equalTo:'ints';
+        .is:{ out.at:1 } equalTo:'strings';
+        .is:{ out.at:2 } equalTo:'plain';
+        .is:{ out.at:3 } equalTo:'ints';
+        .is:{ out.at:4 } equalTo:'strings';
+        .is:{ out.at:5 } equalTo:'plain';
+    };
+
+    "* User-class tags use the dispatch parent/mixin walk: List(ShapeG)
+    "* accepts a subclass instance and rejects unrelated values.
+    .test:
+    userClassTagsWalkTheHierarchy -> {
+        var shapes = List.of:ShapeG;
+        shapes.add:CircleG.new;
+        .is:{ (shapes.at:0).area } equalTo:314;
+        .is:{ { shapes.add:5 }.catch:{ |e| 'caught' } } equalTo:'caught';
+    };
+
+    "* The insertion error is the house-style TypeError, naming the container
+    "* shape, the expected tag, and what arrived.
+    .test:
+    insertionErrorMessage -> {
+        var msg = { (List.of:Integer).add:'x' }.catch:{ |e| e.message };
+        .is:{ msg } equalTo:'List(Integer): element must be Integer, got String';
+    };
+
+    "* Variant identity: same base AND same tags = a true redefinition (the
+    "* later definition wins); differing tags coexist as multimethod variants.
+    .test:
+    sameTagsRedefine -> {
+        RedefG <- {
+            .meta <-- {
+                v: -> { |xs: List(Integer)| 'first' };
+                v: -> { |xs: List(Integer)| 'second' }
+            }
+        };
+        .is:{ RedefG.v:(#(1).ensure:Integer) } equalTo:'second';
+    };
+}

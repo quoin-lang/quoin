@@ -1,6 +1,7 @@
 use crate::arg;
 use crate::devirt_ops;
 use crate::error::QuoinError;
+use crate::runtime::elem_tag::{ElemTag, check_insert};
 use crate::runtime::pretty::{PpChild, PpShape, PrettyPrint};
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmStatus;
@@ -18,12 +19,18 @@ use std::mem::transmute;
 #[derive(Debug)]
 pub struct NativeMapState {
     pub map: IndexMap<String, Value<'static>>,
+    /// Checked *value* type (`Map(String V)` — keys are pinned String).
+    /// `None` = untagged, no checks (docs/GENERICS_ARCH.md).
+    pub elem: Option<ElemTag>,
 }
 
 impl NativeMapState {
     pub fn new(map: IndexMap<String, Value<'_>>) -> Self {
         let map_static: IndexMap<String, Value<'static>> = unsafe { transmute(map) };
-        Self { map: map_static }
+        Self {
+            map: map_static,
+            elem: None,
+        }
     }
 
     pub fn get_map<'gc>(&self) -> &IndexMap<String, Value<'gc>> {
@@ -83,13 +90,63 @@ pub fn build_map_class() -> NativeClassBuilder {
                 .with_native_state(|m: &NativeMapState| devirt_ops::map_get(m.get_map(), &key))?;
             Ok(value.unwrap_or_else(|| vm.new_nil(mc)))
         })
-        .instance_method("at:put:", |_vm, mc, receiver, args| {
+        .instance_method("at:put:", |vm, mc, receiver, args| {
             let key = arg!(args, String, 0).to_string();
             let val = args[1];
+            let tag = receiver.with_native_state(|m: &NativeMapState| m.elem)?;
+            check_insert(tag, "Map String", &val, None, |v, n| {
+                vm.value_matches_type(*v, n)
+            })?;
             receiver.with_native_state_mut(mc, |m: &mut NativeMapState| {
                 m.get_map_mut().insert(key, val)
             })?;
             Ok(receiver)
+        })
+        // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6): the VALUE type
+        // is generic (`Map(String V)`); keys are pinned String. ---
+        .class_method("of:", |vm, mc, _receiver, args| {
+            let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
+                expected: "Class".to_string(),
+                got: args[0].type_name().to_string(),
+                msg: "Map.of: expects a value class (e.g. `Map.of:Integer`)".to_string(),
+            })?;
+            let v = vm.new_map(mc, IndexMap::new());
+            let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| m.elem = Some(tag));
+            Ok(v)
+        })
+        .instance_method("ensure:", |vm, mc, receiver, args| {
+            let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
+                expected: "Class".to_string(),
+                got: args[0].type_name().to_string(),
+                msg: "ensure: expects a value class (e.g. `m.ensure:Integer`)".to_string(),
+            })?;
+            let entries: Vec<(String, Value)> =
+                receiver.with_native_state(|m: &NativeMapState| {
+                    m.get_map().iter().map(|(k, v)| (k.clone(), *v)).collect()
+                })?;
+            for (k, v) in &entries {
+                check_insert(Some(tag), "Map String", v, None, |v, n| {
+                    vm.value_matches_type(*v, n)
+                })
+                .map_err(|e| match e {
+                    QuoinError::TypeError { expected, got, msg } => QuoinError::TypeError {
+                        expected,
+                        got,
+                        msg: format!("{msg} (key '{k}')"),
+                    },
+                    other => other,
+                })?;
+            }
+            let v = vm.new_map(mc, entries.into_iter().collect());
+            let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| m.elem = Some(tag));
+            Ok(v)
+        })
+        .instance_method("elementType", |vm, mc, receiver, _args| {
+            let tag = receiver.with_native_state(|m: &NativeMapState| m.elem)?;
+            Ok(match tag {
+                Some(t) => vm.new_symbol(mc, t.name().to_string()),
+                None => Value::Nil,
+            })
         })
         .instance_method("count", |vm, mc, receiver, _args| {
             Ok(vm.new_int(

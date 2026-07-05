@@ -1,9 +1,16 @@
 # Checked generic collections
 
-*Status: DESIGN (revised after review discussion: real type variables
-replace the earlier implicit-`Element` idea; `emptyLike` chosen over
-extending `default`; `collect:as:` dropped as redundant with inference +
-the checked conversion, now spelled `ensure:`). No code yet. The settled generics syntax
+*Status: G0 + G1 SHIPPED (G0: syntax + lattice, checker-only; G1: runtime
+tags + enforcement + tag-aware dispatch — `ElemTag` on the three native
+states, all write sites gated including the devirtualized arms and the AOT
+ListPush/ListSet helpers, `List.of:`/`Map.of:`/`Set.of:`, `ensure:`,
+`elementType`, tagged-literal lowering via `TagCollection`, `sliceFrom:`
+propagation). Untagged-path cost verified at zero: full bench suite within
+same-source noise. G2 (checker/type variables + `emptyLike` + typed Iterate
+signatures) and G3 (optimizer/AOT + the sieve acceptance test) remain.
+Design revisions from review: real type variables replace the earlier
+implicit-`Element` idea; `emptyLike` chosen over extending `default`;
+`collect:as:` dropped as redundant with inference + `ensure:`. The settled generics syntax
 (`docs/TYPE_SYSTEM_ARCH.md` §"Settled surface syntax": `Class(args)`,
 space-separated, nesting allowed) is design-locked but entirely unbuilt:
 `List(Integer)` is a hard parse error today. This doc designs the first
@@ -287,10 +294,27 @@ equality**, extending `type_distance`:
 This makes the tag a **dispatch-guaranteed param fact**, identical in kind
 to `|n: Integer|`: inside the method, `l`'s elements are proven without a
 prologue check. That is precisely the boundary contract AOT already relies
-on. Implementation note: param descriptors are precomputed at compile time
-(`StaticBlock` grows a parsed form alongside `param_types: Vec<String>`),
-so scoring never string-parses; the tag check itself is an enum compare
-for scalar tags and the existing class walk for user classes.
+on.
+
+Implementation notes (as shipped in G1):
+- Descriptors are precomputed: `StaticBlock.param_elem_tags` rides beside
+  the base-erased `param_types` strings; all-`None` normalizes to empty so
+  every pre-generics block shares one shape and legacy scoring does zero
+  tag work.
+- **Tag requirements are part of a variant's identity**: `|l:
+  List(Integer)|` and `|l: List(String)|` share the erased base signature
+  `["List"]` but are distinct multimethod variants, not a redefinition
+  (same base AND same tags = the true-redefinition semantic, unchanged).
+- **Specificity**: base distances are doubled and a *satisfied* tag
+  requirement discounts by one — `List(Integer)` beats bare `List` for a
+  tagged argument, the base class still dominates, and legacy scoring is a
+  pure monotonic scaling (identical orderings, no probes).
+- **Caching**: the `(kind, class-ptr)` guards of the inline and method
+  caches cannot see tags, so any resolution whose chain contains a
+  tag-requiring variant is marked uncacheable — the same mechanism guarded
+  variants use. Legacy chains never pay this; tag-multimethod call sites
+  take the full scoring path every time (a G3-era optimization candidate
+  if profiles ever care).
 
 Multimethod power this buys immediately:
 
