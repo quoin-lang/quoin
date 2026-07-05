@@ -54,6 +54,13 @@ pub fn gc_pacing() -> Pacing {
 /// Argument arity an inline-cache slot's guard can encode (larger sends bypass the IC).
 pub const IC_MAX_ARGS: usize = 2;
 
+/// `ICSlot::recv_kind` value marking a *field-slot* entry (the `LoadField`/`StoreField`
+/// family) rather than a send entry: `recv_ptr` holds the receiver's class pointer and
+/// `arg_ptrs[0]` the field's slot index. Send and field instructions never share an `ip`,
+/// so one per-template array serves both; a field entry can never satisfy `ic_probe`
+/// (its `callable` is `None`), and `value_type_guard` kinds are tiny, far from this.
+pub const IC_FIELD_KIND: u8 = u8::MAX;
+
 /// A monomorphic inline-cache entry: a resolved method memoized at one call site. Lives in the
 /// executing [`Block`]'s per-`ip` cache array ([`Block::inline_cache`]), so the block+ip *is*
 /// the call-site identity — and because the executing block roots its own array, there is no
@@ -2815,22 +2822,61 @@ impl<'gc> VmState<'gc> {
     /// Read instance field `name` off `self` in the current frame. The body of the
     /// `LoadField` handler, shared with the fused `SendField` superinstruction.
     /// Missing/undeclared field (or a non-object `self`) reads as nil.
-    fn load_field(&mut self, mc: &Mutation<'gc>, frame_idx: usize, name: &str) -> Value<'gc> {
+    /// `cache_ip`: the call site for the field-slot cache, or `None` to skip caching —
+    /// `SendField` must pass `None`, because its *send* entry lives at the same `ip`
+    /// (one fused instruction) and a field entry there would thrash the slot.
+    fn load_field(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame_idx: usize,
+        cache_ip: Option<usize>,
+        name: &str,
+    ) -> Value<'gc> {
         let frame = &self.frames[frame_idx];
+        let block = frame.block;
         let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
-        self.field_of(mc, self_val, name)
+        self.field_of(mc, block, cache_ip, self_val, name)
     }
 
     /// Read instance field `name` off an arbitrary object value (the body of `LoadFieldOf`, and
     /// shared by `load_field` with `self`). Missing/undeclared field, or a non-object value => nil.
-    fn field_of(&mut self, mc: &Mutation<'gc>, obj_val: Value<'gc>, name: &str) -> Value<'gc> {
+    /// `(block, ip)` is the executing call site, for the field-slot cache.
+    fn field_of(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        cache_ip: Option<usize>,
+        obj_val: Value<'gc>,
+        name: &str,
+    ) -> Value<'gc> {
         if let Value::Object(obj) = obj_val {
-            let class = obj.borrow().class;
+            // Fast path: one object borrow, one cache probe, direct index — no class
+            // borrow, no field-name hash.
+            let borrowed = obj.borrow();
+            let class = borrowed.class;
+            if let Some(ip) = cache_ip
+                && let Some(slot) = self.field_probe(block, ip, Gc::as_ptr(class) as usize)
+            {
+                let val = borrowed.fields.get(slot).copied();
+                drop(borrowed);
+                return val.unwrap_or_else(|| self.new_nil(mc));
+            }
+            drop(borrowed);
             // No slot (undeclared) or a slot past this instance's array (declared on the
             // class after this object was created) => nil.
-            self.field_slot(class, name)
-                .and_then(|slot| obj.borrow().fields.get(slot).copied())
-                .unwrap_or_else(|| self.new_nil(mc))
+            match self.field_slot(class, name) {
+                Some(slot) => {
+                    if let Some(ip) = cache_ip {
+                        self.field_fill(mc, block, ip, class, slot);
+                    }
+                    obj.borrow()
+                        .fields
+                        .get(slot)
+                        .copied()
+                        .unwrap_or_else(|| self.new_nil(mc))
+                }
+                None => self.new_nil(mc),
+            }
         } else {
             self.new_nil(mc)
         }
@@ -2950,6 +2996,64 @@ impl<'gc> VmState<'gc> {
                 }
             }
             None => gcl!(mc, None),
+        }
+    }
+
+    /// Probe the executing `block`'s inline cache at `ip` for a *field-slot* entry
+    /// (see [`IC_FIELD_KIND`]): a hit returns the receiver-class's slot index for the
+    /// field named at this instruction, skipping the `field_slots` hash lookup and
+    /// the class borrow. Guarded on the exact class pointer — inherited methods run
+    /// the same `Gc<Block>` for every subclass, and the same field name maps to a
+    /// *different* slot per class, so the guard is load-bearing.
+    #[inline]
+    fn field_probe(
+        &self,
+        block: Gc<'gc, Block<'gc>>,
+        ip: usize,
+        class_ptr: usize,
+    ) -> Option<usize> {
+        let cache = block.inline_cache.borrow();
+        let slot = cache.as_ref()?.get(ip)?;
+        if slot.epoch != self.dispatch_epoch
+            || slot.recv_kind != IC_FIELD_KIND
+            || slot.recv_ptr != class_ptr
+        {
+            return None;
+        }
+        Some(slot.arg_ptrs[0])
+    }
+
+    /// Memoize `class`'s slot index for the field read/written at `(block, ip)`.
+    /// Eigenclasses are never cached (transient pointers — same ABA rule as the
+    /// dispatch cache); their accesses just re-run the hash lookup. Slot indices are
+    /// append-only per class (see `Class::field_slots`), so a cached entry can't go
+    /// stale; the epoch guard is belt-and-braces and gives O(1) invalidation anyway.
+    fn field_fill(
+        &mut self,
+        mc: &Mutation<'gc>,
+        block: Gc<'gc, Block<'gc>>,
+        ip: usize,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+        slot_idx: usize,
+    ) {
+        if class.borrow().is_eigenclass {
+            return;
+        }
+        let epoch = self.dispatch_epoch;
+        let mut cache = block.inline_cache.borrow_mut(mc);
+        if cache.is_none() {
+            *cache = Some(vec![ICSlot::empty(); block.template.bytecode.len()].into_boxed_slice());
+        }
+        if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
+            *slot = ICSlot {
+                epoch,
+                recv_kind: IC_FIELD_KIND,
+                recv_ptr: Gc::as_ptr(class) as usize,
+                n_args: 0,
+                arg_kinds: [0; IC_MAX_ARGS],
+                arg_ptrs: [slot_idx, 0],
+                callable: None,
+            };
         }
     }
 
@@ -3182,15 +3286,27 @@ impl<'gc> VmState<'gc> {
         &mut self,
         mc: &Mutation<'gc>,
         frame_idx: usize,
+        ip: usize,
         name: &str,
         val: Value<'gc>,
     ) -> Result<(), QuoinError> {
         let frame = &self.frames[frame_idx];
+        let block = frame.block;
         let self_val = EnvFrame::get(frame.env, self_symbol()).unwrap_or_else(|| self.new_nil(mc));
         if let Value::Object(obj) = self_val {
             let class = obj.borrow().class;
+            // Fast path: cached slot for this exact class at this call site. A hit
+            // implies the field is declared; the length guard below still applies
+            // (an instance can predate a later-added ivar).
+            if let Some(slot) = self.field_probe(block, ip, Gc::as_ptr(class) as usize)
+                && slot < obj.borrow().fields.len()
+            {
+                obj.borrow_mut(mc).fields[slot] = val;
+                return Ok(());
+            }
             match self.field_slot(class, name) {
                 Some(slot) if slot < obj.borrow().fields.len() => {
+                    self.field_fill(mc, block, ip, class, slot);
                     obj.borrow_mut(mc).fields[slot] = val;
                 }
                 Some(_) => {
@@ -3830,7 +3946,7 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::SendField(field, selector, num_args) => {
                 let (selector, num_args) = (*selector, *num_args);
-                let val = self.load_field(mc, frame_idx, field);
+                let val = self.load_field(mc, frame_idx, None, field);
                 self.push(val);
                 return self.exec_send(mc, frame_idx, selector, num_args);
             }
@@ -4256,25 +4372,26 @@ impl<'gc> VmState<'gc> {
             }
 
             Instruction::LoadField(name) => {
-                let val = self.load_field(mc, frame_idx, name);
+                let val = self.load_field(mc, frame_idx, Some(ip), name);
                 self.push(val);
                 ip += 1;
             }
             // Phase 5·3: read a field off the object on top of the stack (an inlined `v.x`).
             Instruction::LoadFieldOf(name) => {
                 let obj = self.pop()?;
-                let val = self.field_of(mc, obj, name);
+                let block = self.frames[frame_idx].block;
+                let val = self.field_of(mc, block, Some(ip), obj, name);
                 self.push(val);
                 ip += 1;
             }
             Instruction::StoreField(name) => {
                 let val = self.pop()?;
-                self.store_field_value(mc, frame_idx, name, val)?;
+                self.store_field_value(mc, frame_idx, ip, name, val)?;
                 ip += 1;
             }
             Instruction::StoreFieldKeep(name) => {
                 let val = self.peek()?;
-                self.store_field_value(mc, frame_idx, name, val)?;
+                self.store_field_value(mc, frame_idx, ip, name, val)?;
                 ip += 1;
             }
             Instruction::Use {
