@@ -3,7 +3,7 @@
 *Status: DESIGN (revised after review discussion: real type variables
 replace the earlier implicit-`Element` idea; `emptyLike` chosen over
 extending `default`; `collect:as:` dropped as redundant with inference +
-`asListOf:`). No code yet. The settled generics syntax
+the checked conversion, now spelled `ensure:`). No code yet. The settled generics syntax
 (`docs/TYPE_SYSTEM_ARCH.md` §"Settled surface syntax": `Class(args)`,
 space-separated, nesting allowed) is design-locked but entirely unbuilt:
 `List(Integer)` is a hard parse error today. This doc designs the first
@@ -159,11 +159,14 @@ no inference magic:
    tagged empty list; `var xs: List(Integer) = #(1 2 3)` tags and checks
    the elements at construction. (Lowering: `NewList` grows an optional
    tag operand.) This is what makes the sieve edit a pure annotation add.
-3. **Checked conversion**: `aList.asListOf:Integer` — verifies every
-   current element, returns a **new** tagged list (copy, not in-place
-   tagging: retagging an aliased list under someone else's feet is the
-   kind of spooky action this design avoids). `asSetOf:`/`asMapOf:`
-   likewise.
+3. **Checked conversion**: `aList.ensure:Integer` — verifies every
+   current element, returns a **new** tagged collection (copy, not
+   in-place tagging: retagging an aliased list under someone else's feet
+   is the kind of spooky action this design avoids). One generic
+   selector across List/Map/Set — on a Map it ensures the *values*
+   (keys are pinned String). The name is verification-first ("this must
+   be this type") rather than List-specialized; no relation to Ruby's
+   `ensure` (Quoin's try/finally is already `finally:`).
 
 `List(Integer)` in *expression* position (e.g. `List(Integer).new`) is
 deliberately **not** supported: `Value::Class` has no parameter slot, and
@@ -178,7 +181,7 @@ Every native decoder that builds collections directly — `JSON.parse:`,
 MessagePack/YAML/TOML (`data_to_value`), CSV, `splitString:`, Map
 `keys`/`values`, `Array.toList` — keeps producing untagged collections:
 decoded data is inherently dynamic, and a guess would be a false
-guarantee. Users opt in explicitly (`(JSON.parse:s).asListOf:Integer`).
+guarantee. Users opt in explicitly (`(JSON.parse:s).ensure:Integer`).
 One propagation exception: `sliceFrom:` (and future copying operations on
 the receiver itself) carries the receiver's tag — the elements are
 already checked.
@@ -227,7 +230,7 @@ rather than an Iterate special case:
   concrete annotations (`List(Integer)`) are tag-exact.
 - **Lying signatures** (`^List(T)` over a body that returns untagged)
   fail loudly at the next tag-demanding position (dispatch mismatch or
-  `asListOf:`), never silently — the same trusted-return gradualism
+  `ensure:`), never silently — the same trusted-return gradualism
   scalar annotations already have.
 
 ### 4.5 `emptyLike` — the runtime bridge for the combinators
@@ -249,7 +252,7 @@ protocol — which stays a *value* method, used by the value types too):
   elements really are whatever the block produced. The static type still
   flows (inference binds `U`); when the *runtime tag* is needed (a
   tag-dispatched param, a checked return), the one general bridge is
-  `asListOf:`. A fused single-pass form of `.collect:{}.asListOf:X` is a
+  `ensure:`. A fused single-pass form of `.collect:{}.ensure:X` is a
   possible later optimization, not new surface syntax.
 
 ## 5. Dispatch
@@ -355,7 +358,7 @@ positives" tripwire as always.
   `warnings.qn` gallery grows. Plugin grammar PR filed alongside.
 - **G1 — runtime tags + enforcement:** `ElemTag` on the three native
   states; checks at the six write sites (3 List, 1 Map, 2 Set);
-  `List.of:`/`Map.of:`/`Set.of:`/`asListOf:`-family; tagged-literal
+  `List.of:`/`Map.of:`/`Set.of:` and `ensure:`; tagged-literal
   lowering (`NewList` tag operand); `elementType` introspection;
   `sliceFrom:` propagation; dispatch tag-matching with precomputed
   descriptors; TypeError messages; parity + corpus tests (including the
@@ -379,8 +382,10 @@ positives" tripwire as always.
 
 1. **Settled:** species protocol = `emptyLike` (instance-side; `default`
    stays the class-side *value* protocol, used by value types too).
-   `collect:as:` dropped — `asListOf:` is the sole checker→runtime
-   bridge; a fused checked pass is a later optimization. Type variables:
+   `collect:as:` dropped — the checked conversion is the sole
+   checker→runtime bridge, spelled **`ensure:`** (one generic selector
+   for List/Map/Set; verification-first, not List-specialized); a fused
+   checked pass is a later optimization. Type variables:
    class-header declaration, unification binding, checker-only.
 2. **Constructor spelling.** `List.of:Boolean` proposed for brevity and
    symmetry (`Map.of:`, `Set.of:`) — still open to bikeshed.
