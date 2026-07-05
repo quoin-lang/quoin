@@ -171,6 +171,13 @@ pub struct NativeExtension {
     handle_reap: Rc<RefCell<Vec<u64>>>,
     /// Set once the child has been observed exited, so further calls fail fast (crash isolation).
     dead: bool,
+    /// True while a top-level call is in flight on this connection (from the moment it opens
+    /// until its reply — including the whole re-entrant host-reach conversation, which parks
+    /// on the socket). The transport is a single request/response stream with no request ids,
+    /// so a *second* top-level call started while one is live — another task under
+    /// `Async.gather:`, or the extension re-entering the same extension through a host block —
+    /// would interleave frames and desync the connection. Guarded in `ext_prelude`.
+    in_flight: bool,
     /// Ext-side resource ids whose host `ExtResource` was dropped, awaiting flush to the
     /// extension as `Call.releases`. Cloned into each `ExtResource` this extension hands out so
     /// its `Drop` can enqueue here (a GC `Drop` can't send a frame; mirrors the fd-reap pattern).
@@ -803,17 +810,46 @@ struct ExtCall {
 }
 
 /// Peek at the extension's native state and drain its pending dropped-resource releases (one peek
-/// per call), shared by the generic `call:with:` path and extension-backed-class dispatch.
-fn ext_prelude<'gc>(receiver: Value<'gc>) -> Result<ExtCall, QuoinError> {
-    receiver
-        .with_native_state::<NativeExtension, _, _>(|e| ExtCall {
-            id: e.id,
-            ext_id: e.ext_id,
-            dead: e.dead,
-            resource_reap: e.resource_reap.clone(),
-            releases: e.resource_reap.borrow_mut().drain(..).collect(),
+/// per call), shared by the generic `call:with:` path and extension-backed-class dispatch. Also
+/// claims the connection for this top-level call (`in_flight`): a call attempted while one is
+/// already live returns a catchable "busy" error rather than interleaving frames on the shared
+/// socket. The caller must release the claim (`ext_end_call`) once the call completes.
+fn ext_prelude<'gc>(
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+) -> Result<ExtCall, QuoinError> {
+    let call = receiver
+        .with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+            if e.in_flight {
+                return None;
+            }
+            e.in_flight = true;
+            Some(ExtCall {
+                id: e.id,
+                ext_id: e.ext_id,
+                dead: e.dead,
+                resource_reap: e.resource_reap.clone(),
+                releases: e.resource_reap.borrow_mut().drain(..).collect(),
+            })
         })
-        .map_err(QuoinError::Other)
+        .map_err(QuoinError::Other)?;
+    call.ok_or_else(|| {
+        QuoinError::Other(
+            "extension is busy with another call: an extension connection serves one call at a \
+             time (no concurrent calls from separate tasks, and no re-entering the same \
+             extension from within its own call)"
+                .to_string(),
+        )
+    })
+}
+
+/// Release the `in_flight` claim taken by [`ext_prelude`] once a top-level call has finished
+/// (whether it succeeded, errored, or the extension died). Never clears when the extension is
+/// gone from the table (nothing to clear).
+fn ext_end_call<'gc>(mc: &gc_arena::Mutation<'gc>, receiver: Value<'gc>) {
+    let _ = receiver.with_native_state_mut::<NativeExtension, _, _>(mc, |e| {
+        e.in_flight = false;
+    });
 }
 
 /// The shared body of the `call:` selectors: fail fast if the extension is already known dead,
@@ -829,13 +865,21 @@ fn run_extension_method<'gc>(
     args: Vec<Value<'gc>>,
     data_arg: Option<Value<'gc>>,
 ) -> Result<Value<'gc>, QuoinError> {
-    let ctx = ext_prelude(receiver)?;
+    let ctx = ext_prelude(mc, receiver)?;
     if ctx.dead {
+        ext_end_call(mc, receiver);
         return Err(extension_dead_error("already exited"));
     }
-    // Serialize the optional structured-value payload before opening the call (no handles involved).
+    // Serialize the optional structured-value payload before opening the call. If this fails
+    // (e.g. a value too deep to encode) release the in-flight claim first.
     let data = match data_arg {
-        Some(value) => Some(runtime_to_wire(&value_to_data(value)?)),
+        Some(value) => match value_to_data(value) {
+            Ok(d) => Some(runtime_to_wire(&d)),
+            Err(e) => {
+                ext_end_call(mc, receiver);
+                return Err(e);
+            }
+        },
         None => None,
     };
     let outcome = extension_call(
@@ -851,6 +895,7 @@ fn run_extension_method<'gc>(
         0,
         ctx.releases,
     );
+    ext_end_call(mc, receiver);
     finish_outcome(vm, mc, receiver, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -895,8 +940,9 @@ pub fn dispatch_ext_method<'gc>(
     // both `[Ns]Name` (loadPackage) and a verbatim bare name (spawn:).
     let class_name = class_obj.borrow().name.name.clone();
 
-    let ctx = ext_prelude(ext)?;
+    let ctx = ext_prelude(mc, ext)?;
     if ctx.dead {
+        ext_end_call(mc, ext);
         return Err(extension_dead_error("already exited"));
     }
     // The method arguments are routed by `extension_call` (ext-class mode) into the ordered
@@ -914,6 +960,7 @@ pub fn dispatch_ext_method<'gc>(
         recv,
         ctx.releases,
     );
+    ext_end_call(mc, ext);
     finish_outcome(vm, mc, ext, ctx.ext_id, ctx.resource_reap, outcome)
 }
 
@@ -1072,6 +1119,7 @@ fn spawn_and_connect<'gc>(
             reap: vm.io.socket_reap.clone(),
             handle_reap: vm.io.ext_handle_reap.clone(),
             dead: false,
+            in_flight: false,
             resource_reap: Rc::new(RefCell::new(Vec::new())),
             namespace,
         },

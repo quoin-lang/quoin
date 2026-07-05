@@ -164,6 +164,41 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 }
 
 #[test]
+fn extension_concurrent_calls_are_serialized() {
+    // Regression (audit): the transport is a single request/response socket with no
+    // request ids, so two tasks calling one extension at once interleaved frames and
+    // desynced the connection ("unknown stream id", or a killed serve loop). A second
+    // top-level call while one is in flight must now fail with a catchable "busy"
+    // error — deterministic, and the connection survives for the winner and for later
+    // sequential calls.
+    let ext_bin = env!("CARGO_BIN_EXE_ext_echo");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{ext_bin}';
+
+"* Two calls raced on one connection: exactly one wins, the other gets a catchable
+"* busy error — never a desync/corruption.
+var r = Async.gather:#(
+    {{ {{ e.call:'echo' with:'A' }}.catch:{{ |ex| 'busy' }} }}
+    {{ {{ e.call:'echo' with:'B' }}.catch:{{ |ex| 'busy' }} }}
+);
+var a = r.at:0;
+var b = r.at:1;
+var oneWon = ((a == 'A') && (b == 'busy')) || ((a == 'busy') && (b == 'B'));
+oneWon.else:{{ ok = false; ('FAIL race: ' + r.s).print }};
+
+"* The connection is intact: sequential calls still work after the rejected one.
+((e.call:'echo' with:'again') == 'again').else:{{ ok = false; 'FAIL: connection desynced'.print }};
+((e.call:'upper' with:'z') == 'Z').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_ext_serialize_test.qn", &script);
+}
+
+#[test]
 fn extension_handle_round_trip() {
     let ext_bin = env!("CARGO_BIN_EXE_ext_handles");
     let script = format!(
