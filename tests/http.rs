@@ -419,3 +419,84 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     run_pass(&script, "truncated");
 }
+
+#[test]
+fn cross_origin_redirects_strip_credentials() {
+    // Regression (audit): nextRequestFor: forwarded every header on a 3xx, so an
+    // Authorization header set for origin A was re-sent to a different origin B —
+    // credential leakage standard clients prevent. Same-origin redirects must
+    // still keep the header.
+    fn spawn_auth_server(redirect_target: Option<String>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let redirect_target = redirect_target.clone();
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(conn.try_clone().unwrap());
+                    let mut request_line = String::new();
+                    let _ = reader.read_line(&mut request_line);
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+                    let mut auth = String::from("none");
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        if line == "\r\n" || line == "\n" {
+                            break;
+                        }
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(v) = lower.strip_prefix("authorization:") {
+                            auth = v.trim().to_string();
+                        }
+                    }
+                    let mut conn = conn;
+                    let resp = if path == "/go" {
+                        let loc = redirect_target.as_deref().unwrap_or("/reflect");
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\n\r\n"
+                        )
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                            auth.len(),
+                            auth
+                        )
+                    };
+                    let _ = conn.write_all(resp.as_bytes());
+                    let _ = conn.flush();
+                });
+            }
+        });
+        port
+    }
+
+    let b = spawn_auth_server(None);
+    let a = spawn_auth_server(Some(format!("http://127.0.0.1:{b}/reflect")));
+    let same = spawn_auth_server(None);
+
+    let script = format!(
+        r#"
+use std:net/http;
+var ok = true;
+
+"* same-origin redirect (/go -> /reflect on one server) keeps Authorization
+var r1 = (([HTTP]Client.request:'http://127.0.0.1:{same}/go')
+    .header:'Authorization' value:'Bearer sekrit').send;
+(r1.body.text == 'bearer sekrit').else:{{ ok = false; ('FAIL same-origin: ' + r1.body.text).print }};
+
+"* cross-origin redirect (server A -> server B) strips it
+var r2 = (([HTTP]Client.request:'http://127.0.0.1:{a}/go')
+    .header:'Authorization' value:'Bearer sekrit').send;
+(r2.body.text == 'none').else:{{ ok = false; ('FAIL cross-origin: ' + r2.body.text).print }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    run_pass(&script, "redirect_auth");
+}

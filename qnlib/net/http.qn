@@ -470,13 +470,25 @@ Error <- [HTTP]BodyTooLarge <- {};
     "* adjust the method/body per status. 307/308 preserve method+body; 303 (and a 301/302
     "* from a non-GET/HEAD method) become a bodyless GET.
     nextRequestFor: -> { |resp|
-        var next = [HTTP]Request.new:{
-            var url = [HTTP]Request.resolveLocation:(resp.location) against:@url
-        };
+        var target = [HTTP]Request.resolveLocation:(resp.location) against:@url;
+        var next = [HTTP]Request.new:{ var url = target };
         next.insecure:@insecure;
         next.followRedirects:@followRedirects;
         next.maxRedirects:@maxRedirects;
-        next.headers:@headers;
+        "* Credentials must not follow a redirect to a different origin: strip
+        "* Authorization/Proxy-Authorization/Cookie when scheme, host, or port change
+        "* (parseUrl fills in default ports, so implicit vs explicit compare equal).
+        var from = [HTTP]Request.parseUrl:@url;
+        var to = [HTTP]Request.parseUrl:target;
+        var sameOrigin = ((from.at:0) == (to.at:0))
+            && ((from.at:1) == (to.at:1))
+            && ((from.at:2) == (to.at:2));
+        next.headers:(sameOrigin.if:{ @headers } else:{
+            @headers.reject:{ |p|
+                var n = (p.at:0).lower;
+                (n == 'authorization') || (n == 'proxy-authorization') || (n == 'cookie')
+            }
+        });
         ((resp.status == 307) || (resp.status == 308)).if:{
             next.method:@method;
             @body.defined?.if:{ next.body:@body }
