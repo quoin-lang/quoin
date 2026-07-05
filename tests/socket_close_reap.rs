@@ -197,3 +197,52 @@ Async.timeout:3000 do:{ srv.join };
         "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+#[test]
+fn tcp_server_task_registry_stays_bounded() {
+    // Contract change (audit finding 13): TcpServer.join is now a drain barrier, not a
+    // result collector, so the accept loop sweeps finished handlers and the task
+    // registry stays bounded by live concurrency instead of growing one entry per
+    // connection ever served. 30 sequential connections must leave `connections` small.
+    let script = r#"
+var ok = true;
+var srv = TcpServer.new:{ var address = '127.0.0.1:0' };
+srv.start:{ |conn| conn.writeAll:(conn.read:4); conn.close };
+var tgt = '127.0.0.1:' + srv.port.s;
+
+var n = 0;
+{ n < 30 }.whileDo:{
+    var c = TcpSocket.connect:tgt;
+    c.writeAll:'ping'.asBytes;
+    ((c.read:4).asString == 'ping').else:{ ok = false; 'FAIL: bad echo'.print };
+    c.close;
+    n = n + 1
+};
+
+"* Swept per accept: bounded by concurrency (~1 here), NOT the 30 served.
+(srv.connections <= 5).else:{ ok = false; ('FAIL: registry grew to ' + srv.connections.s).print };
+
+srv.stop;
+"* Drain must return promptly (join is a barrier, no hang, no result collection).
+Async.timeout:3000 do:{ srv.join } onCancel:{ ok = false; 'FAIL: join hung'.print };
+srv.close;
+
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let dir = std::env::temp_dir();
+    let path = dir.join("qn_tcp_server_bounded.qn");
+    std::fs::write(&path, script).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&path)
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_file(&path);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PASS") && !stdout.contains("FAIL"),
+        "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}

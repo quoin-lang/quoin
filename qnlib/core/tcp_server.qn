@@ -2,6 +2,11 @@
 "* each in its own Task so they overlap; the *caller* decides when to stop accepting (`stop`)
 "* and then drains the in-flight handlers (`join`). Termination is deliberately external — a
 "* server doesn't know on its own when it should quit, so that policy lives with the caller.
+"*
+"* A handler communicates through its own socket (or a caller-supplied channel); `join` is a
+"* drain *barrier*, not a result collector. Finished handlers are swept on each accept, so the
+"* task registry stays bounded by live concurrency rather than growing one entry per connection
+"* ever served — the tradeoff is that `join` does not return per-connection results.
 TcpServer <- { |@address @listener @tasks @acceptTask|
     init: -> { |address|
         @address = address;
@@ -11,6 +16,10 @@ TcpServer <- { |@address @listener @tasks @acceptTask|
 
     "* The bound local port (e.g. after an ephemeral ':0' bind).
     port -> { @listener.port };
+
+    "* Connection-handler tasks currently tracked. Finished handlers are swept on each accept,
+    "* so this reflects live concurrency, not the total number of connections served.
+    connections -> { @tasks.count };
 
     "* Begin accepting in the background and return immediately. Each accepted connection is
     "* handled in its own Task, which owns the socket and closes it when the handler returns.
@@ -30,7 +39,10 @@ TcpServer <- { |@address @listener @tasks @acceptTask|
                          else:{ Async.sleep:10 }
                 };
                 conn.defined?.if:{
-                    @tasks.add:Task.spawn:{ var result = block.value:conn; conn.close; result }
+                    "* Sweep finished handlers so the registry stays bounded by concurrency,
+                    "* not by the number of connections ever served (mirrors [HTTP]Server).
+                    @tasks = @tasks.reject:{ |t| t.done? };
+                    @tasks.add:(Task.spawn:{ block.value:conn; conn.close })
                 }
             }
         }
@@ -38,12 +50,15 @@ TcpServer <- { |@address @listener @tasks @acceptTask|
 
     "* Stop accepting: cancel the accept loop, which aborts its parked `accept`. In-flight
     "* handler tasks keep running — drain them with `join`. A no-op before `start:`.
-    stop -> { @acceptTask.defined?.if:{ @acceptTask.cancel } };
+    stop -> { @acceptTask.defined?.if:{ @acceptTask.cancel }; self };
 
-    "* Wait for all connection-handler tasks and return their values, in connection order.
+    "* Drain: wait for the accept loop to end and the in-flight handlers to finish. Returns
+    "* self — handler results are not collected here (a handler writes to its socket or a
+    "* caller-supplied channel); the registry is swept, so this drains only live handlers.
     join -> {
         { @acceptTask.join }.catch:{};
-        Async.joinAll:@tasks
+        Async.joinAll:@tasks;
+        self
     };
 
     "* Release the listening socket / bound port.
