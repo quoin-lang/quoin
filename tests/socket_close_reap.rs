@@ -105,3 +105,62 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
         "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+#[test]
+fn close_wakes_a_parked_reader_and_closes_the_fd() {
+    // Regression: while a read leased the stream out of the registry, `close`
+    // was a silent no-op — the parked reader hung until the peer acted, and the
+    // lease re-inserted the fd afterwards, resurrecting a closed handle. Now the
+    // close tombstones the lease (fd drops) and aborts the in-flight op, so the
+    // reader wakes with a catchable error and the peer sees EOF.
+    let script = r#"
+var ok = true;
+var listener = TcpListener.listen:'127.0.0.1:0';
+var target = '127.0.0.1:' + listener.port;
+var peerSawEof = #();
+Task.spawn:{
+    var c = listener.accept;
+    "* the peer's read must end (EOF/reset) once the client fd actually closes
+    { var d = c.read:10; (d.count == 0).if:{ peerSawEof.add:1 } }
+        .catch:{ |_| peerSawEof.add:1 };
+    c.close
+};
+
+var sock = TcpSocket.connect:target;
+var entered = #();
+var readerWoke = #();
+var reader = Task.spawn:{
+    entered.add:1;
+    { sock.read:10; nil }.catch:{ |e| readerWoke.add:(e.s) }
+};
+{ entered.count == 0 }.whileDo:{ Async.sleep:1 };
+Async.sleep:30;
+
+sock.close;
+{ Async.timeout:1500 do:{ reader.join } }.catch:{ |e|
+    ok = false; 'FAIL: reader still parked after close'.print };
+(readerWoke.count == 1).else:{ ok = false; 'FAIL: reader did not get an error'.print };
+
+{ Async.timeout:1500 do:{ { peerSawEof.count == 0 }.whileDo:{ Async.sleep:5 } } }
+    .catch:{ |e| ok = false; 'FAIL: peer never saw EOF (fd not closed)'.print };
+
+listener.close;
+ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
+"#;
+    let dir = std::env::temp_dir();
+    let path = dir.join("qn_close_wakes_parked_reader.qn");
+    std::fs::write(&path, script).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .arg(&path)
+        .output()
+        .expect("run qn");
+    let _ = std::fs::remove_file(&path);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PASS") && !stdout.contains("FAIL"),
+        "script did not pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}

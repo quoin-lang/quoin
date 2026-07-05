@@ -33,7 +33,7 @@ cargo regression tests.
 
 | file | bug | status |
 |---|---|---|
-| `close_while_read_parked.qn` | closing a socket while another task is parked reading it: reader never woken, fd never closed (lease re-inserts it) | OPEN |
+| `close_while_read_parked.qn` | closing a socket while another task is parked reading it: reader never woken, fd never closed (lease re-inserts it) | **FIXED** (lease tombstone + op abort) |
 | `listener_close_leak.qn` | `TcpListener.close` never closes the OS fd — port stays bound, backlog keeps accepting | **FIXED** (reap close drops listeners too) |
 | `http_truncated_body.qn` | Content-Length body truncated by early EOF returns status 200 with a short body, no error | OPEN |
 | `http_chunked_eof.qn` | chunked body truncated at a chunk boundary surfaces as a hex `ValueError` instead of an unexpected-EOF `IoError` | OPEN |

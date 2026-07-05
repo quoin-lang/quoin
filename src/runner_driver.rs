@@ -406,10 +406,9 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                             // deadlock. Surface it as an error; the old silent
                             // `break` exited 0 with the rest of the program
                             // unexecuted, indistinguishable from success.
-                            let main_parked = arena
-                                .mutate_root(|_mc, vm| {
-                                    vm.sched.tasks.first().is_some_and(|t| t.is_some())
-                                });
+                            let main_parked = arena.mutate_root(|_mc, vm| {
+                                vm.sched.tasks.first().is_some_and(|t| t.is_some())
+                            });
                             if main_parked {
                                 let e = QuoinError::Other(
                                     "deadlock: every task is parked with no I/O in \
