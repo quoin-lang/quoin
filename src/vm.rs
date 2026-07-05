@@ -326,7 +326,10 @@ pub struct Instrumentation {
 pub struct VmState<'gc> {
     pub stack: Vec<Value<'gc>>,
     pub frames: Vec<Frame<'gc>>,
-    pub globals: Gc<'gc, RefLock<HashMap<NamespacedName, Value<'gc>>>>,
+    /// FxHash, not SipHash: `LoadGlobal` probes this once per instantiation
+    /// (`TreeNode` etc. resolve here before every `.new:`), the last
+    /// default-hasher map on the allocation path.
+    pub globals: Gc<'gc, RefLock<FxHashMap<NamespacedName, Value<'gc>>>>,
     /// Intern pool for symbols: one canonical `Symbol` value per name, so symbols
     /// compare by identity. Rooted here and traced as part of `VmState`.
     pub symbol_table: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
@@ -455,7 +458,7 @@ impl<'gc> VmState<'gc> {
         Self {
             stack: Vec::new(),
             frames: Vec::new(),
-            globals: gcl!(mc, HashMap::new()),
+            globals: gcl!(mc, FxHashMap::default()),
             symbol_table: gcl!(mc, HashMap::new()),
             pending_class_def: None,
             next_frame_id: 1,
