@@ -491,4 +491,41 @@ SpecSeams <- {
         { i < 20 }.whileDo:{ last = SpecSeams.scan:'ab%41cd'; i = i + 1 };
         .is:{ last } equalTo:5
     }
+};
+
+"* S2 (SPECULATIVE_AOT_ARCH): observed-scalar RETURNS compile as scalars with
+"* epoch-guarded DIRECT SELF-RECURSION for open owners. Redefining any method
+"* stales the epoch, so compiled recursion Bails to the interpreter and picks
+"* up new definitions exactly.
+
+SpecRec <- {
+    .meta <-- {
+        fib: -> { |n| (n <= 1).if:{ ^n } else:{ ^(.fib:(n - 1)) + (.fib:(n - 2)) } }
+    }
+};
+SpecRedef <- {
+    .meta <-- {
+        gen: -> { |n| (n <= 0).if:{ ^0 } else:{ ^1 + (.gen:(n - 1)) } }
+    }
+};
+
+(TestSuite.new:{ var name = 'AotParitySpecReturns' }).add:{
+    .test:recursionCompilesAndStaysExact -> {
+        var i = 0;
+        var last = 0;
+        { i < 12 }.whileDo:{ last = SpecRec.fib:15; i = i + 1 };
+        .is:{ last } equalTo:610;
+        .is:{ SpecRec.fib:0 } equalTo:0;
+        .is:{ SpecRec.fib:1 } equalTo:1;
+    };
+
+    .test:redefinitionInvalidatesCompiledRecursion -> {
+        var i = 0;
+        { i < 12 }.whileDo:{ SpecRedef.gen:10; i = i + 1 };
+        .is:{ SpecRedef.gen:10 } equalTo:10;
+        "* replace the method mid-run: compiled direct recursion must not
+        "* keep running the old body
+        SpecRedef <-- { .meta <-- { gen: -> { |n| ^100 + n } } };
+        .is:{ SpecRedef.gen:10 } equalTo:110;
+    }
 }

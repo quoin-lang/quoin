@@ -197,6 +197,27 @@ impl IntBinKind {
             IntBinKind::Ne => "!=:",
         }
     }
+
+    /// The reverse map, for TRANSLATION-TIME devirtualization of generic
+    /// sends whose operands are proven scalars (S2): sealed Integer/Double
+    /// arithmetic is frozen, so `C(Int) '+:' C(Int)` may compile to the
+    /// machine op — the same guarantee the compiler's typed devirt uses.
+    pub fn from_selector(sel: &str) -> Option<IntBinKind> {
+        Some(match sel {
+            "+:" => IntBinKind::Add,
+            "-:" => IntBinKind::Sub,
+            "*:" => IntBinKind::Mul,
+            "/:" => IntBinKind::Div,
+            "%:" => IntBinKind::Mod,
+            "<:" => IntBinKind::Lt,
+            "<=:" => IntBinKind::Le,
+            ">:" => IntBinKind::Gt,
+            ">=:" => IntBinKind::Ge,
+            "==:" => IntBinKind::Eq,
+            "!=:" => IntBinKind::Ne,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Collect, PartialEq)]

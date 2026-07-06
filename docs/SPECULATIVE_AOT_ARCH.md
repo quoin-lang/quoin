@@ -1,6 +1,6 @@
 # Speculative AOT: type-feedback compilation for untyped code
 
-*Status: S0+S1 SHIPPED (observation + parameter speculation). S2-S3 next.*
+*Status: S0+S1+S2 SHIPPED (observation, parameter and return speculation, direct self-recursion). S3 (fields) next.*
 
 ## 1. Why: the measured shape of the untyped gap
 
@@ -143,18 +143,44 @@ Debug surface that made the hunt tractable (kept): `QN_AOT_SPEC_MAX` /
 `QN_AOT_SPEC_ONLY` (promotion bisection), `QN_AOT_DUMP=<selector>`
 (CLIF dump), promotion lines under `QN_AOT_VERBOSE`.
 
-### S2 — speculate on returns (the fib unlock)
+### S2 — speculate on returns (the fib unlock) — SHIPPED
 
-Obj returns leave self-recursive scalar math boxed; fib_untyped needs
-`AotRet::Scalar` to hit the fib_typed path. Speculated returns are
-sound exactly where the value is produced:
-- compiled→compiled sibling/self calls: the callee's declared scalar ret
-  is trusted (same as typed today);
-- every deopt edge (outcall result, Bail continuation): checked narrow —
-  on mismatch, demote-and-retry recompiles the member with the return
-  demoted to Obj (machinery exists; G3's tag-proof narrows are the
-  precedent).
-Acceptance: fib_untyped within 2× of fib_typed (≥10× vs today's 0.551).
+**fib_untyped 0.582 → 0.017s (−97%)** — compiled untyped fib matches
+typed per-call; vs the arc's 0.700 baseline that is ~40× and the ≥10×
+acceptance is met with room. Everything else at noise once the
+trampoline bug below was fixed. Four coordinated pieces:
+
+- **Observed-scalar returns compile as scalars**, STATICALLY verified:
+  a return path the translator can't prove scalar raises `RET_DEMOTION`
+  and the member retries with an Obj ret (no runtime narrowing — a
+  speculated ret must never raise an error the interpreter wouldn't;
+  annotated rets keep their deliberate checked-narrow divergence).
+- **Translation-time scalar-op devirt**: unannotated bytecode carries
+  GENERIC sends (`SendLocalConst(n, 1, '<=:')`) — the compiler's devirt
+  needed annotations — so the translator now emits machine ops when
+  both operands PROVE scalar (sealed Integer/Double semantics, the same
+  guarantee typed devirt uses). The purity whitelist admits the sealed
+  operator selectors optimistically; a member that still needs an
+  outcall trips the translation purity check and demotes.
+- **Epoch-guarded direct self-recursion for open owners**: a
+  redefinition epoch (bumped by `DefineMethod` — replace OR fresh, an
+  override anywhere can change any dispatch) is stamped into entries
+  that emit direct self-calls; `invoke` Bails stale entries to the
+  interpreted body, which re-dispatches per send. Pinned by parity
+  tests: mid-run redefinition takes effect immediately.
+- **Promotion waits for a RETURN observation when the ret is
+  speculated** (capped at OBSERVE_CAP): a recursive method reaches
+  warmth by ENTRIES alone — fib descends past the threshold before its
+  first base case returns — and would otherwise promote with an
+  unknowable ret, compiled Obj forever.
+
+The shipping bug: the demote-retry compiled the INNER fn with the
+demoted Obj ret but the TRAMPOLINE still converted with the candidate's
+scalar ret — Cranelift verifier error, method refused, and combinators
+paid +9% for the missing compiled `>:` until `build_trampoline` learned
+the effective ret. `count:`/`sum:` still refuse (mixed C/Dyn merges /
+uninitialized-local reads) — a box-at-merge unification is the known
+next refinement if their weight ever matters.
 
 ### S3 — compiled field access (the richards unlock)
 

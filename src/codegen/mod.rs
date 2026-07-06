@@ -209,6 +209,11 @@ pub struct AotEntry {
     /// Consecutive precondition Bails (reset on every pass); at
     /// `spec::BAIL_TOMBSTONE` the entry is tombstoned.
     pub spec_bails: std::sync::atomic::AtomicU32,
+    /// The body contains DIRECT SELF-CALLS (S2 recursion fast path): valid
+    /// only while `compile_epoch` matches the global redefinition epoch —
+    /// `invoke` Bails otherwise.
+    pub direct_self: bool,
+    pub compile_epoch: u64,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -245,6 +250,23 @@ pub fn warm_threshold() -> u32 {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8)
     })
+}
+
+/// Class-redefinition epoch (S2): bumped whenever a method table mutates
+/// (`DefineMethod`, extension class installs). A compiled entry that emits
+/// DIRECT SELF-CALLS records the epoch at compile time; `invoke` Bails the
+/// entry to the interpreted body when the epochs differ — a redefinition
+/// anywhere may change what a self-send should dispatch to (an override in a
+/// new subclass included), and the interpreted body re-dispatches per send.
+/// Shared across VMs: cross-VM bumps only cost conservative Bails.
+static REDEF_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn redef_epoch() -> u64 {
+    REDEF_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn bump_redef_epoch() {
+    REDEF_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Remove a promoted entry whose speculation keeps mispredicting (S1
@@ -353,6 +375,12 @@ pub fn invoke<'gc>(
     // The main task and spawned tasks are torn down gracefully (cancellation
     // errors / process exit), so they keep compiled execution.
     if vm.sched.current_fiber.is_some() {
+        return AotOutcome::Bail;
+    }
+    // S2: direct self-recursion bakes in "dispatch(self, sel) reaches this
+    // template"; any later method-table mutation could change that, so a
+    // stale epoch runs the interpreted body (which re-dispatches per send).
+    if entry.direct_self && entry.compile_epoch != redef_epoch() {
         return AotOutcome::Bail;
     }
     if args.len() != entry.params.len() {

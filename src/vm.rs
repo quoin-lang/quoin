@@ -3207,7 +3207,15 @@ impl<'gc> VmState<'gc> {
         }
         p.count += 1;
         self.aot_spec_obs_left -= 1;
-        if p.count >= crate::codegen::warm_threshold() {
+        // A speculated RETURN needs at least one observed return before
+        // promotion — a recursive method reaches warmth by ENTRIES alone
+        // (fib descends past the threshold before its first base case), and
+        // promoting with an unknown ret would compile Obj forever. Cap the
+        // wait so a genuinely non-returning-yet method still promotes.
+        let ret_pending = p.cand.spec_ret && p.ret_kind == spec::K_UNKNOWN;
+        if p.count >= crate::codegen::warm_threshold()
+            && (!ret_pending || p.count >= spec::OBSERVE_CAP)
+        {
             self.spec_promote(tid);
             return 0; // promoted (or refused): no frame stash needed
         }
@@ -3250,6 +3258,15 @@ impl<'gc> VmState<'gc> {
                 cand.params[i] = crate::codegen::AotParam::Scalar(kind);
                 preconds[i] = Some(kind);
             }
+        }
+        // S2: an observed-scalar RETURN compiles as a scalar too — statically
+        // verified (a return path the translator can't prove demotes the ret
+        // back to Obj and retries; no runtime narrowing, no wrong-type error
+        // the interpreter wouldn't raise).
+        if cand.spec_ret
+            && let Some(kind) = spec::scalar_kind(pending.ret_kind)
+        {
+            cand.ret = crate::codegen::AotRet::Scalar(kind);
         }
         if preconds.iter().any(|p| p.is_some()) {
             cand.spec_preconditions = preconds;
@@ -4966,8 +4983,10 @@ impl<'gc> VmState<'gc> {
                                 .insert(sel_sym, method_obj);
                         }
                     }
-                    // The class's method table just changed — drop memoized resolutions.
+                    // The class's method table just changed — drop memoized resolutions
+                    // and invalidate compiled direct-self recursion (S2).
                     self.invalidate_method_cache();
+                    crate::codegen::bump_redef_epoch();
                     self.push(method_obj);
                     ip += 1;
                 } else {
@@ -5030,8 +5049,10 @@ impl<'gc> VmState<'gc> {
                                 .insert(sel_sym, method_obj);
                         }
                     }
-                    // The class's method table just changed — drop memoized resolutions.
+                    // The class's method table just changed — drop memoized resolutions
+                    // and invalidate compiled direct-self recursion (S2).
                     self.invalidate_method_cache();
+                    crate::codegen::bump_redef_epoch();
                     self.push(method_obj);
                     ip += 1;
                 } else {
