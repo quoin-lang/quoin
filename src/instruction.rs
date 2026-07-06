@@ -94,6 +94,12 @@ pub struct StaticBlock {
     /// interpolation, runner entry) — keeps a private per-closure cache, since a
     /// per-evaluation compile would otherwise grow the registry without bound.
     pub template_id: Option<u32>,
+    /// Speculative-AOT observation state (spec::NOT_SPECULATIVE/OBSERVING/
+    /// SATURATED, docs/SPECULATIVE_AOT_ARCH.md S0). Lives HERE so the
+    /// method-entry gate is one byte off a template line that entry binding
+    /// touches anyway — a side table would cost a dependent pointer chase on
+    /// every method call. Shared by all closures of the literal (one `Rc`).
+    pub spec_state: std::cell::Cell<u8>,
 }
 
 /// Mint a globally unique template id (compile time only; ids are never reused,
@@ -190,6 +196,27 @@ impl IntBinKind {
             IntBinKind::Eq => "==:",
             IntBinKind::Ne => "!=:",
         }
+    }
+
+    /// The reverse map, for TRANSLATION-TIME devirtualization of generic
+    /// sends whose operands are proven scalars (S2): sealed Integer/Double
+    /// arithmetic is frozen, so `C(Int) '+:' C(Int)` may compile to the
+    /// machine op — the same guarantee the compiler's typed devirt uses.
+    pub fn from_selector(sel: &str) -> Option<IntBinKind> {
+        Some(match sel {
+            "+:" => IntBinKind::Add,
+            "-:" => IntBinKind::Sub,
+            "*:" => IntBinKind::Mul,
+            "/:" => IntBinKind::Div,
+            "%:" => IntBinKind::Mod,
+            "<:" => IntBinKind::Lt,
+            "<=:" => IntBinKind::Le,
+            ">:" => IntBinKind::Gt,
+            ">=:" => IntBinKind::Ge,
+            "==:" => IntBinKind::Eq,
+            "!=:" => IntBinKind::Ne,
+            _ => return None,
+        })
     }
 }
 

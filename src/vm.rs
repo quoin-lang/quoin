@@ -164,6 +164,12 @@ pub struct Frame<'gc> {
     pub selector: Option<Symbol>,
     pub args: Vec<Value<'gc>>,
     pub stack_base: usize,
+    /// Speculative-AOT (S0): the template id iff this is a method frame
+    /// whose template was OBSERVING at push time (0 = not observing; real ids
+    /// start at 1) — computed once at push, so the pop-side return
+    /// observation is an in-struct integer test, not a pointer chase. Packed
+    /// as a bare u32 to ride Frame padding.
+    pub spec_tid: u32,
     pub return_receiver: bool,
     /// Calls queued (e.g. by `mix:`) to run when this frame returns normally.
     pub defers: Vec<DeferredCall<'gc>>,
@@ -392,6 +398,25 @@ pub struct VmState<'gc> {
     pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, crate::codegen::AotCandidate)>,
     #[collect(require_static)]
     pub aot_refused_blocks: rustc_hash::FxHashSet<u32>,
+    /// Speculative pending methods: template id → warmth + kind profile +
+    /// the candidate S1 will compile from it. The fast-path observation gate
+    /// is NOT here — it is `aot_spec_obs_left` below plus the `spec_state`
+    /// Cell on each `StaticBlock`.
+    #[collect(require_static)]
+    pub aot_pending_spec: crate::codegen::spec::SpecPendingMap,
+    /// Rust-stack nesting depth of compiled-call re-entries (outcalls into
+    /// `call_method_cached`); dispatch stops entering compiled bodies past
+    /// `spec::MAX_OUTCALL_NESTING` (see there).
+    #[collect(require_static)]
+    pub outcall_nesting: u32,
+    /// Speculative methods promoted to compiled entries (S1) — stats only.
+    #[collect(require_static)]
+    pub aot_spec_promoted: u32,
+    /// Remaining process-wide observation budget (spec::OBSERVE_BUDGET).
+    /// Checked FIRST at method entry — one load from this hot struct — so
+    /// once spent, observation costs one predicted branch per call, total.
+    #[collect(require_static)]
+    pub aot_spec_obs_left: u32,
     /// The ENCLOSING lexical environment of the currently-executing compiled
     /// frame (the invoked block/method's own `parent_env`) — the parent a
     /// cold-path `make_closure` snapshot must chain to, so a materialized
@@ -517,6 +542,10 @@ impl<'gc> VmState<'gc> {
             aot_pending_error: None,
             aot_pending_blocks: rustc_hash::FxHashMap::default(),
             aot_refused_blocks: rustc_hash::FxHashSet::default(),
+            aot_pending_spec: crate::codegen::spec::SpecPendingMap::default(),
+            outcall_nesting: 0,
+            aot_spec_promoted: 0,
+            aot_spec_obs_left: crate::codegen::spec::OBSERVE_BUDGET,
             aot_enclosing_env: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
@@ -617,12 +646,21 @@ impl<'gc> VmState<'gc> {
                 level.to_string()
             };
             match span {
-                Some(s) => format!(
-                    "{pad}{}:{}:{}: {label}: {message}\n",
-                    s.filename,
-                    s.line,
-                    s.column + 1
-                ),
+                Some(s) => {
+                    // The `file:line:col` form colored exactly like a stack
+                    // trace's location (gray separators, cyan numbers).
+                    let loc = if colorize {
+                        ansi_colorizer::colorize(&format!(
+                            "{}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                            s.filename,
+                            s.line,
+                            s.column + 1
+                        ))
+                    } else {
+                        format!("{}:{}:{}", s.filename, s.line, s.column + 1)
+                    };
+                    format!("{pad}{loc}: {label}: {message}\n")
+                }
                 None => format!("{pad}{label}: {message}\n"),
             }
         }
@@ -843,7 +881,6 @@ impl<'gc> VmState<'gc> {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    #[allow(no_gc_across_yield)]
     pub fn to_s(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1220,7 +1257,6 @@ impl<'gc> VmState<'gc> {
         self.invalidate_method_cache();
     }
 
-    #[allow(no_gc_across_yield)]
     /// NO borrow may be held while an initializer runs: `call_method_value` executes
     /// arbitrary Quoin that can cooperatively yield (an `init` that resumes a fiber or
     /// does I/O parks the whole task mid-call), and a Class/env borrow living on this
@@ -1258,7 +1294,32 @@ impl<'gc> VmState<'gc> {
         self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
 
         let receiver = Value::Object(obj);
-        for clz in classes {
+        // Root the collected chain across the user init calls below: an init
+        // that reopens its own class can drop the class table's reference to
+        // an old class object, leaving this Vec the only (unrooted) holder.
+        let root_base = self.stack.len();
+        for &clz in &classes {
+            self.push(Value::Class(clz));
+        }
+        let result = self.run_init_chain_rooted(mc, receiver, &classes, env);
+        self.stack.truncate(root_base);
+        result
+    }
+
+    /// The init-chain body of [`Self::finalize_instantiation`], split out so
+    /// the caller can root `classes` around its early `?` exits.
+    // The caller has pushed every class in `classes` onto the VM stack for
+    // this whole call; `clz` and the method values fetched from it are rooted
+    // by that contract across the user init calls.
+    #[allow(no_gc_across_yield)]
+    fn run_init_chain_rooted(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        classes: &[Gc<'gc, RefLock<Class<'gc>>>],
+        env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
+    ) -> Result<(), QuoinError> {
+        for &clz in classes {
             let init_colon = clz
                 .borrow()
                 .instance_methods
@@ -1476,7 +1537,6 @@ impl<'gc> VmState<'gc> {
         // A class's method tables just changed — drop any memoized resolutions.
         self.invalidate_method_cache();
     }
-    #[allow(no_gc_across_yield)]
     pub fn start_method_call(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1498,7 +1558,6 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    #[allow(no_gc_across_yield)]
     pub fn call_method(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1570,7 +1629,6 @@ impl<'gc> VmState<'gc> {
         result
     }
 
-    #[allow(no_gc_across_yield)]
     fn call_method_value_inner(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1675,13 +1733,23 @@ impl<'gc> VmState<'gc> {
         self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
 
         let receiver = Value::Object(obj);
-        for clz in classes {
-            let method_opt = clz.borrow().instance_methods.get(&init_symbol()).copied();
-            if let Some(method_val) = method_opt {
-                self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
-            }
+        // Same rooting as `finalize_instantiation`: the chain must survive an
+        // init that reopens its own class.
+        let root_base = self.stack.len();
+        for &clz in &classes {
+            self.push(Value::Class(clz));
         }
-        Ok(())
+        let result = (|| {
+            for &clz in &classes {
+                let method_opt = clz.borrow().instance_methods.get(&init_symbol()).copied();
+                if let Some(method_val) = method_opt {
+                    self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+                }
+            }
+            Ok(())
+        })();
+        self.stack.truncate(root_base);
+        result
     }
 
     /// Drive nested execution (a native-initiated block or method call) until the frame
@@ -1696,7 +1764,6 @@ impl<'gc> VmState<'gc> {
     /// coverage is unchanged. Errors are returned raw (un-annotated), exactly as the
     /// per-step loops returned them; `context` names the caller in the uncaught-throw
     /// message, byte-identical to the old per-site strings.
-    #[allow(no_gc_across_yield)]
     fn run_nested(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1804,6 +1871,7 @@ impl<'gc> VmState<'gc> {
             selector: None,
             args: Vec::new(),
             stack_base: base_stack,
+            spec_tid: 0,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -1875,6 +1943,7 @@ impl<'gc> VmState<'gc> {
             selector: None,
             args: args.to_vec(),
             stack_base: self.stack.len(),
+            spec_tid: 0,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -2138,6 +2207,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args,
             stack_base: self.stack.len(),
+            spec_tid: 0,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -2155,6 +2225,15 @@ impl<'gc> VmState<'gc> {
     ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
+
+        let spec_tid = if is_method_call
+            && self.aot_spec_obs_left != 0
+            && block.template.spec_state.get() == crate::codegen::spec::OBSERVING
+        {
+            self.spec_observe_entry(&block.template, &args)
+        } else {
+            0
+        };
 
         let mut env_frame = EnvFrame::new(block.parent_env);
         // Bind self
@@ -2187,6 +2266,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args,
             stack_base: self.stack.len(),
+            spec_tid,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -2232,6 +2312,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args: Vec::new(),
             stack_base: self.stack.len(),
+            spec_tid: 0,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -2952,6 +3033,93 @@ impl<'gc> VmState<'gc> {
     /// `cache_ip`: the call site for the field-slot cache, or `None` to skip caching —
     /// `SendField` must pass `None`, because its *send* entry lives at the same `ip`
     /// (one fused instruction) and a field entry there would thrash the slot.
+    /// `load_field` for compiled frames (S3): the receiver comes from the
+    /// frame's slot window and the slot cache is the SHARED `(template_id,
+    /// ip)` cell — both tiers warm one cache, the B3a outcall lesson applied
+    /// to fields. Missing/undeclared/non-object reads are nil, exactly as
+    /// interpreted.
+    pub(crate) fn field_load_cached(
+        &mut self,
+        mc: &Mutation<'gc>,
+        tid: u32,
+        ip: usize,
+        bc_len: usize,
+        self_val: Value<'gc>,
+        name: &str,
+    ) -> Value<'gc> {
+        let ic = self.ic_cell_by_id(mc, tid);
+        if let Value::Object(obj) = self_val {
+            let borrowed = obj.borrow();
+            let class = borrowed.class;
+            if let Some(slot) = self.field_probe(ic, ip, Gc::as_ptr(class) as usize) {
+                let val = borrowed.fields.get(slot).copied();
+                drop(borrowed);
+                return val.unwrap_or_else(|| self.new_nil(mc));
+            }
+            drop(borrowed);
+            match self.field_slot(class, name) {
+                Some(slot) => {
+                    self.field_fill_cell(mc, ic, bc_len, ip, class, slot);
+                    obj.borrow()
+                        .fields
+                        .get(slot)
+                        .copied()
+                        .unwrap_or_else(|| self.new_nil(mc))
+                }
+                None => self.new_nil(mc),
+            }
+        } else {
+            self.new_nil(mc)
+        }
+    }
+
+    /// `store_field_value` for compiled frames (S3) — same shared-cell cache,
+    /// same declared-field errors as interpreted.
+    pub(crate) fn field_store_cached(
+        &mut self,
+        mc: &Mutation<'gc>,
+        tid: u32,
+        ip: usize,
+        bc_len: usize,
+        self_val: Value<'gc>,
+        name: &str,
+        val: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        let ic = self.ic_cell_by_id(mc, tid);
+        if let Value::Object(obj) = self_val {
+            let class = obj.borrow().class;
+            if let Some(slot) = self.field_probe(ic, ip, Gc::as_ptr(class) as usize)
+                && slot < obj.borrow().fields.len()
+            {
+                obj.borrow_mut(mc).fields[slot] = val;
+                return Ok(());
+            }
+            match self.field_slot(class, name) {
+                Some(slot) if slot < obj.borrow().fields.len() => {
+                    self.field_fill_cell(mc, ic, bc_len, ip, class, slot);
+                    obj.borrow_mut(mc).fields[slot] = val;
+                    Ok(())
+                }
+                Some(_) => Err(QuoinError::Other(format!(
+                    "Instance of '{}' has no '@{}' (it was added after this instance was created)",
+                    class.borrow().name,
+                    name
+                ))),
+                None => Err(QuoinError::Other(format!(
+                    "No instance variable '@{}' declared on '{}'",
+                    name,
+                    class.borrow().name
+                ))),
+            }
+        } else {
+            Err(QuoinError::Other(format!(
+                "Cannot set instance variable '@{}' on a value type ({})",
+                name,
+                self_val.type_name()
+            )))
+        }
+    }
+
     fn load_field(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3068,6 +3236,199 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Register unit-load AOT candidates (S0): classic annotated methods
+    /// compile eagerly, block templates and speculative methods go pending
+    /// (blocks tier by invocation count at the vWSOA seams; speculative
+    /// methods first OBSERVE their param/return kinds here).
+    pub fn register_aot_candidates(&mut self, cands: Vec<crate::codegen::AotCandidate>) {
+        use crate::codegen::{AotRole, spec};
+        let mut immediate = Vec::new();
+        for cand in cands {
+            let Some(tid) = cand.block.template_id else {
+                continue;
+            };
+            if cand.role == AotRole::BlockTemplate {
+                self.aot_pending_blocks.insert(tid, (0, cand));
+            } else if cand.speculative() {
+                cand.block.spec_state.set(spec::OBSERVING);
+                let n_params = cand.params.len();
+                self.aot_pending_spec.insert(
+                    tid,
+                    spec::SpecPending {
+                        count: 0,
+                        param_kinds: vec![spec::K_UNKNOWN; n_params],
+                        ret_kind: spec::K_UNKNOWN,
+                        cand,
+                    },
+                );
+            } else {
+                immediate.push(cand);
+            }
+        }
+        if !immediate.is_empty() {
+            crate::codegen::compile_candidates(immediate);
+        }
+    }
+
+    /// The kind lattice value of a runtime value (spec-AOT observation).
+    fn spec_kind(v: Value<'gc>) -> u8 {
+        use crate::codegen::spec;
+        match v {
+            Value::Int(_) => spec::K_INT,
+            Value::Double(_) => spec::K_DOUBLE,
+            Value::Bool(_) => spec::K_BOOL,
+            _ => spec::K_OBJ,
+        }
+    }
+
+    /// Merge a method entry's arg kinds into its speculative profile and
+    /// return the tid for the frame to stash (`Frame.spec_tid`) — so the
+    /// pop-side return observation never re-chases the template. Called on
+    /// every method-frame push; the common case (template not OBSERVING) is
+    /// one bounds-checked byte load.
+    /// Cold path: the caller has already checked the template's `spec_state`
+    /// Cell (the hot-path gate is inline at the push site). Returns the tid
+    /// for `Frame.spec_tid`, or 0.
+    #[cold]
+    fn spec_observe_entry(&mut self, template: &Rc<StaticBlock>, args: &[Value<'gc>]) -> u32 {
+        use crate::codegen::spec;
+        let Some(tid) = template.template_id else {
+            return 0;
+        };
+        let Some(p) = self.aot_pending_spec.get_mut(&tid) else {
+            return 0;
+        };
+        for (lat, arg) in p.param_kinds.iter_mut().zip(args.iter()) {
+            *lat = spec::merge(*lat, Self::spec_kind(*arg));
+        }
+        p.count += 1;
+        self.aot_spec_obs_left -= 1;
+        // A speculated RETURN needs at least one observed return before
+        // promotion — a recursive method reaches warmth by ENTRIES alone
+        // (fib descends past the threshold before its first base case), and
+        // promoting with an unknown ret would compile Obj forever. Cap the
+        // wait so a genuinely non-returning-yet method still promotes.
+        let ret_pending = p.cand.spec_ret && p.ret_kind == spec::K_UNKNOWN;
+        if p.count >= crate::codegen::warm_threshold()
+            && (!ret_pending || p.count >= spec::OBSERVE_CAP)
+        {
+            self.spec_promote(tid);
+            return 0; // promoted (or refused): no frame stash needed
+        }
+        tid
+    }
+
+    /// S1 promotion: compile a warm speculative method with its OBSERVED
+    /// kinds. Scalar observations become the compiled params AND entry
+    /// preconditions (checked by the dispatch arm; mismatch Bails to the
+    /// interpreted body); `Obj`/unknown observations ride as Obj with no
+    /// check. Annotated params were never speculated — dispatch guarantees
+    /// them, exactly as before. The method-cache epoch bumps so call sites
+    /// whose inline caches hold the interpreted callable re-fill with the
+    /// compiled entry.
+    fn spec_promote(&mut self, tid: u32) {
+        use crate::codegen::spec;
+        // Bisection debug hooks (they found every S1 seam bug):
+        // QN_AOT_SPEC_MAX=<n> promotes only tids <= n;
+        // QN_AOT_SPEC_ONLY=<csv> promotes only the listed tids.
+        if let Ok(max) = std::env::var("QN_AOT_SPEC_MAX")
+            && max.parse::<u32>().map(|m| tid > m).unwrap_or(false)
+        {
+            return;
+        }
+        if let Ok(only) = std::env::var("QN_AOT_SPEC_ONLY")
+            && !only.split(',').any(|t| t.trim() == tid.to_string())
+        {
+            return;
+        }
+        let Some(pending) = self.aot_pending_spec.remove(&tid) else {
+            return;
+        };
+        let mut cand = pending.cand;
+        cand.block.spec_state.set(spec::RESOLVED);
+        let mut preconds = vec![None; cand.params.len()];
+        for i in 0..cand.params.len() {
+            if cand.spec_params[i]
+                && let Some(kind) = spec::scalar_kind(*pending.param_kinds.get(i).unwrap_or(&0))
+            {
+                cand.params[i] = crate::codegen::AotParam::Scalar(kind);
+                preconds[i] = Some(kind);
+            }
+        }
+        // S2: an observed-scalar RETURN compiles as a scalar too — statically
+        // verified (a return path the translator can't prove demotes the ret
+        // back to Obj and retries; no runtime narrowing, no wrong-type error
+        // the interpreter wouldn't raise).
+        if cand.spec_ret
+            && let Some(kind) = spec::scalar_kind(pending.ret_kind)
+        {
+            cand.ret = crate::codegen::AotRet::Scalar(kind);
+        }
+        if preconds.iter().any(|p| p.is_some()) {
+            cand.spec_preconditions = preconds;
+        }
+        let sel = cand.selector.clone();
+        crate::codegen::compile_candidates(vec![cand]);
+        if crate::codegen::block_registered(tid) {
+            if std::env::var("QN_AOT_VERBOSE").is_ok_and(|v| v == "1") {
+                eprintln!("qn aot: promoted {sel} (tid {tid})");
+            }
+            self.aot_spec_promoted += 1;
+            self.invalidate_method_cache();
+        }
+    }
+
+    /// Merge a method's return kind into its speculative profile. `tid` comes
+    /// from the popped frame's `spec_tid` (set at push), so this only runs
+    /// for frames that were observing; the state re-check tolerates
+    /// saturation between push and pop.
+    #[cold]
+    fn spec_observe_return(&mut self, tid: u32, ret: Value<'gc>) {
+        use crate::codegen::spec;
+        if let Some(p) = self.aot_pending_spec.get_mut(&tid) {
+            p.ret_kind = spec::merge(p.ret_kind, Self::spec_kind(ret));
+        }
+    }
+
+    /// One-line profile summary for `QN_AOT_STATS=1`.
+    pub fn aot_spec_stats(&self) -> String {
+        use crate::codegen::spec;
+        let observing = self
+            .aot_pending_spec
+            .values()
+            .filter(|p| p.cand.block.spec_state.get() == spec::OBSERVING)
+            .count();
+        let saturated = self
+            .aot_pending_spec
+            .values()
+            .filter(|p| p.cand.block.spec_state.get() == spec::SATURATED)
+            .count();
+        let mut lines = vec![format!(
+            "spec-aot: {} pending ({} observing, {} saturated), {} promoted",
+            self.aot_pending_spec.len(),
+            observing,
+            saturated,
+            self.aot_spec_promoted
+        )];
+        let mut profiled: Vec<_> = self
+            .aot_pending_spec
+            .values()
+            .filter(|p| p.count > 0)
+            .collect();
+        profiled.sort_by_key(|p| std::cmp::Reverse(p.count));
+        for p in profiled.iter().take(12) {
+            let kinds: Vec<&str> = p.param_kinds.iter().map(|&k| spec::kind_name(k)).collect();
+            lines.push(format!(
+                "  {} x{}: ({}) -> {}",
+                p.cand.selector,
+                p.count,
+                kinds.join(", "),
+                spec::kind_name(p.ret_kind)
+            ));
+        }
+        lines.join("\n")
+    }
+
     /// Materialize a runtime closure from a compiled template: the thin
     /// `{template, captured state}` pair plus the (possibly registry-shared)
     /// inline-cache cell. Shared by the runner entry points, eval, and string
@@ -3160,12 +3521,22 @@ impl<'gc> VmState<'gc> {
         selector: Symbol,
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, QuoinError> {
-        self.enter_native_reentry()?;
+        // No `enter_native_reentry` here (unlike `call_method`): charging the
+        // 12-deep hook-recursion budget per outcall made a 12-deep chain of
+        // PROMOTED methods (S1: everything unannotated compiles) a spurious
+        // "recursion too deep". Instead, `outcall_nesting` counts the REAL
+        // hazard — Rust-stack frames per compiled<->interpreted alternation —
+        // and dispatch degrades to interpreted bodies past the cap.
+        self.outcall_nesting += 1;
         let result = self.call_method_cached_inner(mc, tid, ip, bc_len, receiver, selector, args);
-        self.native_reentry_depth = self.native_reentry_depth.saturating_sub(1);
+        self.outcall_nesting = self.outcall_nesting.saturating_sub(1);
         result
     }
 
+    // The IC cell local is a copy of a `Gc` rooted in the traced `ic_registry`
+    // for the VM's whole life — safe across `lookup_method`'s guard-predicate
+    // yields by that rooting, which the span heuristic can't see.
+    #[allow(no_gc_across_yield)]
     fn call_method_cached_inner(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3221,6 +3592,37 @@ impl<'gc> VmState<'gc> {
     /// dispatch cache); their accesses just re-run the hash lookup. Slot indices are
     /// append-only per class (see `Class::field_slots`), so a cached entry can't go
     /// stale; the epoch guard is belt-and-braces and gives O(1) invalidation anyway.
+    /// `field_fill` for a cell reached by template id (compiled field access,
+    /// S3) — same slot-cache protocol, shared with the interpreted site.
+    fn field_fill_cell(
+        &mut self,
+        mc: &Mutation<'gc>,
+        cell: Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>,
+        bc_len: usize,
+        ip: usize,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+        slot_idx: usize,
+    ) {
+        if class.borrow().is_eigenclass {
+            return;
+        }
+        Self::ic_write_slot(
+            mc,
+            cell,
+            bc_len,
+            ip,
+            ICSlot {
+                epoch: self.dispatch_epoch,
+                recv_kind: IC_FIELD_KIND,
+                recv_ptr: Gc::as_ptr(class) as usize,
+                n_args: 0,
+                arg_kinds: [0; IC_MAX_ARGS],
+                arg_ptrs: [slot_idx, 0],
+                callable: None,
+            },
+        );
+    }
+
     fn field_fill(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3419,7 +3821,6 @@ impl<'gc> VmState<'gc> {
     // parameter into the guard env frame before it steps — so both are rooted through
     // any yield. `caller_block` is a copy of `self.frames[frame_idx].block`, rooted by
     // the live frame stack. Nothing here is held across a yield unrooted.
-    #[allow(no_gc_across_yield)]
     fn exec_send(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3434,9 +3835,9 @@ impl<'gc> VmState<'gc> {
         args.reverse();
 
         let receiver = self.pop()?;
-        // Call-site identity for the inline cache: the executing block + the Send's own `ip`,
-        // captured before we advance it.
-        let caller_block = self.frames[frame_idx].block;
+        // Call-site identity for the inline cache: the executing frame's cache cell + the
+        // Send's own `ip`, captured before we advance it (the block itself is re-read at
+        // fill time — see the note at `ic_fill` below).
         let caller_ic = self.frames[frame_idx].ic;
         let site_ip = self.frames[frame_idx].ip;
         self.frames[frame_idx].ip += 1; // Advance caller frame IP
@@ -3470,9 +3871,12 @@ impl<'gc> VmState<'gc> {
             }
         };
         if let Some(callable) = method_opt {
+            // Re-read rather than reuse `caller_block`: `lookup_method` above
+            // can run guard blocks (yield-capable); the frame itself stays in
+            // the traced `self.frames`, so the fresh read is always rooted.
             self.ic_fill(
                 mc,
-                caller_block,
+                self.frames[frame_idx].block,
                 site_ip,
                 receiver,
                 selector,
@@ -3623,7 +4027,6 @@ impl<'gc> VmState<'gc> {
     /// sub-execution loops, the debugger, and `qn benchmark`; it clones the current frame's
     /// bytecode `Rc` per call. The hot path (`run_vm_loop`) uses `run_dispatch`, which hoists
     /// that clone out of the per-instruction path.
-    #[allow(no_gc_across_yield)]
     pub(crate) fn step_internal(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3650,7 +4053,6 @@ impl<'gc> VmState<'gc> {
     /// `step_internal` do per instruction, so the result feeds `run_vm_loop` directly. Returns
     /// `Running` once the budget is spent (i.e. "yield now"). The held `Rc` keeps the bytecode
     /// alive across frame changes and GC, exactly as the per-step clone did.
-    #[allow(no_gc_across_yield)]
     pub(crate) fn run_dispatch(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3705,7 +4107,6 @@ impl<'gc> VmState<'gc> {
     /// `self.frames[frame_idx].ip = ip` — the tail write-back only runs on fall-through. A
     /// violation is never silent: it surfaces immediately as a stack imbalance under the
     /// `.qn` suite.
-    #[allow(no_gc_across_yield)]
     pub(crate) fn dispatch_one(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3721,6 +4122,9 @@ impl<'gc> VmState<'gc> {
                 // Implicit return Nil
                 let ret_val = self.new_nil(mc);
                 let popped = self.frames.pop().unwrap();
+                if popped.spec_tid != 0 {
+                    self.spec_observe_return(popped.spec_tid, ret_val);
+                }
                 self.last_popped_env = Some(popped.env);
                 self.push(ret_val);
                 return Ok(VmStatus::Running);
@@ -4345,16 +4749,28 @@ impl<'gc> VmState<'gc> {
                 }
                 let mut ret_val = self.pop()?;
                 let popped_frame = self.frames.pop().unwrap();
+                // The frame is consumed COMPLETELY before the potential yield:
+                // `finalize_instantiation` can park (an init that sleeps), and a
+                // collection while parked leaves `popped_frame`'s Gc pointers
+                // dangling on this suspended stack (the S0 segfault). The
+                // receiver-return applies first and the instantiation pop
+                // overwrites it, which is the old else-if priority inverted with
+                // the same outcome.
+                let spec_tid = popped_frame.spec_tid;
                 self.last_popped_env = Some(popped_frame.env);
                 self.stack.truncate(popped_frame.stack_base);
+                if popped_frame.return_receiver
+                    && let Some(rx) = popped_frame.receiver
+                {
+                    ret_val = rx;
+                }
                 if let Some(obj) = popped_frame.instantiating_obj {
                     self.push(Value::Object(obj));
                     self.finalize_instantiation(mc, obj, popped_frame.env)?;
                     ret_val = self.pop()?;
-                } else if popped_frame.return_receiver {
-                    if let Some(rx) = popped_frame.receiver {
-                        ret_val = rx;
-                    }
+                }
+                if spec_tid != 0 {
+                    self.spec_observe_return(spec_tid, ret_val);
                 }
                 self.push(ret_val);
             }
@@ -4366,18 +4782,29 @@ impl<'gc> VmState<'gc> {
                     let mut ret_val = ret_val;
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
+                        // Same discipline as the `Return` arm: the frame is
+                        // consumed completely before `finalize_instantiation`
+                        // can park and let a collection invalidate its Gc
+                        // pointers — only plain copies survive the yield.
+                        let spec_tid = f.spec_tid;
+                        let f_id = f.id;
+                        let f_stack_base = f.stack_base;
                         self.last_popped_env = Some(f.env);
+                        if f.return_receiver
+                            && let Some(rx) = f.receiver
+                        {
+                            ret_val = rx;
+                        }
                         if let Some(obj) = f.instantiating_obj {
                             self.push(Value::Object(obj));
                             self.finalize_instantiation(mc, obj, f.env)?;
                             ret_val = self.pop()?;
-                        } else if f.return_receiver {
-                            if let Some(rx) = f.receiver {
-                                ret_val = rx;
-                            }
                         }
-                        if f.id == target_id {
-                            target_stack_base = Some(f.stack_base);
+                        if f_id == target_id {
+                            if spec_tid != 0 {
+                                self.spec_observe_return(spec_tid, ret_val);
+                            }
+                            target_stack_base = Some(f_stack_base);
                             break;
                         }
                     }
@@ -4500,18 +4927,26 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::NewSet(n) => {
                 let n = *n;
-                let mut raw = Vec::new();
-                for _ in 0..n {
-                    raw.push(self.pop()?);
-                }
-                raw.reverse();
                 // Build by inserting through set_add so the literal is deduplicated
                 // by `==:`, the same way `add:` enforces uniqueness at runtime.
-                let set_val = self.new_set(mc, Vec::new());
-                for v in raw {
-                    self.set_add(mc, set_val, v)?;
+                // A user `==:` can PARK, so nothing GC-managed may live in Rust
+                // locals across the inserts: the elements stay rooted in place on
+                // the VM stack and the set rides on top, re-read after each
+                // insert (popping into a Vec here once left both the elements
+                // and the fresh set collectible mid-dedup).
+                {
+                    let set_val = self.new_set(mc, Vec::new());
+                    self.push(set_val);
                 }
-                self.push(set_val);
+                let base = self.stack.len() - 1 - n;
+                for i in 0..n {
+                    let sv = *self.stack.last().expect("set literal under construction");
+                    let v = self.stack[base + i];
+                    self.set_add(mc, sv, v)?;
+                }
+                let sv = self.pop()?;
+                self.stack.truncate(base);
+                self.push(sv);
                 ip += 1;
             }
             Instruction::NewRegex => {
@@ -4675,8 +5110,10 @@ impl<'gc> VmState<'gc> {
                                 .insert(sel_sym, method_obj);
                         }
                     }
-                    // The class's method table just changed — drop memoized resolutions.
+                    // The class's method table just changed — drop memoized resolutions
+                    // and invalidate compiled direct-self recursion (S2).
                     self.invalidate_method_cache();
+                    crate::codegen::bump_redef_epoch();
                     self.push(method_obj);
                     ip += 1;
                 } else {
@@ -4739,8 +5176,10 @@ impl<'gc> VmState<'gc> {
                                 .insert(sel_sym, method_obj);
                         }
                     }
-                    // The class's method table just changed — drop memoized resolutions.
+                    // The class's method table just changed — drop memoized resolutions
+                    // and invalidate compiled direct-self recursion (S2).
                     self.invalidate_method_cache();
+                    crate::codegen::bump_redef_epoch();
                     self.push(method_obj);
                     ip += 1;
                 } else {

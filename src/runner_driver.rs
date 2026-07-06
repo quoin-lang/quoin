@@ -344,8 +344,21 @@ impl DriverFrontend for CliFrontend {
 
 /// The interactive/normal driver: a [`CliFrontend`] over the shared scheduler loop. Used by
 /// `qn debug`, plain `qn <file>`, the REPL, and the debug fixtures.
+/// `QN_AOT_STATS=1`: dump the speculative-AOT observation summary after the
+/// main task finishes (S0 has no other observable surface).
+fn maybe_print_spec_stats(arena: &mut ReplArena) {
+    if std::env::var("QN_AOT_STATS").map(|v| v != "0") != Ok(true) {
+        return;
+    }
+    arena.mutate_root(|_mc, vm| {
+        eprintln!("{}", vm.aot_spec_stats());
+    });
+}
+
 pub(crate) fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
-    drive_with_frontend(arena, &mut CliFrontend::default())
+    let result = drive_with_frontend(arena, &mut CliFrontend::default());
+    maybe_print_spec_stats(arena);
+    result
 }
 
 /// The cooperative scheduler loop, parameterized by a [`DriverFrontend`] for the debug

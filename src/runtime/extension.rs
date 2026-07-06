@@ -518,7 +518,6 @@ fn service_host_op<'gc>(
 /// Invoke the host block behind `block_handle` once per tuple in `batches`, minting a
 /// call-local handle for each result. The host runs the block N times locally — the batch is
 /// one re-entrant round-trip. Any bad handle or a raise during a block run fails the whole batch.
-#[allow(no_gc_across_yield)]
 fn invoke_block_batches<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -1258,7 +1257,6 @@ fn resolve_command(dir: &Path, command: &str) -> PathBuf {
 // which performs no Quoin execution and cannot yield); the only later yield — running an
 // optional `init.qn` via `eval_string` — happens after those classes exist, so `ext_val`
 // is reachable through the globals for the duration. See the inline note below.
-#[allow(no_gc_across_yield)]
 fn load_package<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -1288,6 +1286,10 @@ fn load_package<'gc>(
         Some(spec.namespace.clone()),
     )?;
 
+    // Root `ext_val` on the VM stack for the rest of the load: the old claim
+    // that the installed classes root it fails for a ZERO-class package whose
+    // init.qn (a yield-capable eval) runs below.
+    vm.push(ext_val);
     // Namespacing (§4): the host prefixes the package namespace onto each simple `ClassDecl` name;
     // a package that ships an already-namespaced name doesn't get to choose its namespace.
     for decl in &classes {
@@ -1322,6 +1324,7 @@ fn load_package<'gc>(
         })?;
     }
 
+    let ext_val = vm.pop()?;
     vm.modules.packages.borrow_mut(mc).insert(key, ext_val);
     Ok(ext_val)
 }

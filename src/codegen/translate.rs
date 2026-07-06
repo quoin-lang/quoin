@@ -60,6 +60,14 @@ type SiblingMap = HashMap<(u32, String), (Vec<AotParam>, AotRet, u32)>;
 /// Refusal sentinel: the member used the slot window while marked
 /// scalar-pure; `compile_all` demotes it and retries instead of refusing.
 const PURITY_VIOLATION: &str = "__aot_purity__";
+/// A SPECULATED scalar return hit a return path the translator can't prove
+/// scalar: retry the member with the ret demoted to Obj (S2). Never used for
+/// annotated returns, whose checked-narrow divergence is deliberate.
+const RET_DEMOTION: &str = "__aot_ret_demote__";
+/// A merge point was first planned with a SCALAR shape but a later
+/// predecessor arrives Dyn (S3): retry the member with that merge FORCED to
+/// Dyn from the start (scalars box on entry). Payload: `__aot_merge_dyn__:ip`.
+const MERGE_DEMOTION: &str = "__aot_merge_dyn__";
 
 /// Compile every group; members are refused individually. Returns the
 /// registered entries and refusals `(selector, reason)`.
@@ -79,11 +87,13 @@ pub(super) fn compile_all(
         // member from the direct-call set instead of refusing it. Groups are
         // small; worst-case quadratic compile cost is trivial.
         let mut demoted: HashSet<u32> = HashSet::new();
+        let mut ret_demoted: HashSet<u32> = HashSet::new();
+        let mut dyn_merges: HashMap<u32, HashSet<usize>> = HashMap::new();
         loop {
             if active.is_empty() {
                 break;
             }
-            match compile_group(&active, siblings, &demoted) {
+            match compile_group(&active, siblings, &demoted, &ret_demoted, &dyn_merges) {
                 Ok(mut entries) => {
                     compiled.append(&mut entries);
                     break;
@@ -91,6 +101,18 @@ pub(super) fn compile_all(
                 Err((failed_tid, reason)) => {
                     if reason == PURITY_VIOLATION {
                         demoted.insert(failed_tid);
+                        continue;
+                    }
+                    if reason == RET_DEMOTION {
+                        ret_demoted.insert(failed_tid);
+                        continue;
+                    }
+                    if let Some(ip) = reason
+                        .strip_prefix(MERGE_DEMOTION)
+                        .and_then(|r| r.strip_prefix(':'))
+                        .and_then(|r| r.parse::<usize>().ok())
+                    {
+                        dyn_merges.entry(failed_tid).or_default().insert(ip);
                         continue;
                     }
                     let i = active
@@ -131,12 +153,16 @@ fn ret_type(r: AotRet) -> Type {
 /// The scalar-pure subset of a group: all-scalar signatures whose bodies stay
 /// in the scalar instruction set and send only to other scalar-pure siblings.
 /// These keep the direct native-call path; everything else outcalls.
-fn scalar_pure_set(members: &[&AotCandidate], siblings: &SiblingMap) -> HashSet<u32> {
+fn scalar_pure_set(
+    members: &[&AotCandidate],
+    siblings: &SiblingMap,
+    ret_demoted: &HashSet<u32>,
+) -> HashSet<u32> {
     let mut pure: HashSet<u32> = members
         .iter()
         .filter(|c| {
             c.params.iter().all(|p| matches!(p, AotParam::Scalar(_)))
-                && matches!(c.ret, AotRet::Scalar(_))
+                && matches!(eff_ret(c, ret_demoted), AotRet::Scalar(_))
         })
         .filter_map(|c| c.block.template_id)
         .collect();
@@ -190,10 +216,22 @@ fn scalar_pure_set(members: &[&AotCandidate], siblings: &SiblingMap) -> HashSet<
                 | Instruction::IfJump(_)
                 | Instruction::ElseJump(_)
                 | Instruction::Return
-                | Instruction::BlockReturn => true,
-                Instruction::Send(sel, _) | Instruction::SendLocal(_, sel, _) => siblings
-                    .get(&(c.group_id, sel.as_str().to_string()))
-                    .is_some_and(|(_, _, callee)| pure.contains(callee)),
+                | Instruction::BlockReturn
+                | Instruction::MethodReturn => true,
+                Instruction::Send(sel, _)
+                | Instruction::SendLocal(_, sel, _)
+                | Instruction::SendConst(_, sel, _)
+                | Instruction::SendLocalLocal(_, _, sel, _)
+                | Instruction::SendLocalConst(_, _, sel, _) => {
+                    // A sealed scalar operator devirtualizes at translation
+                    // (S2) when its operands prove scalar — optimistically
+                    // pure here; a member that still needs an outcall trips
+                    // the translation purity check and demotes.
+                    IntBinKind::from_selector(sel.as_str()).is_some()
+                        || siblings
+                            .get(&(c.group_id, sel.as_str().to_string()))
+                            .is_some_and(|(_, _, callee)| pure.contains(callee))
+                }
                 _ => false,
             });
             if !ok {
@@ -335,14 +373,29 @@ aot_helpers! {
         *mut c_void, *const c_void, *const Rc<StaticBlock>, i64,
     ) -> u8,
     closure_bind: helpers::closure_bind as fn(*mut c_void, *const c_void, i64, *const Symbol, i64, i64) -> u8,
+    field_get: helpers::field_get as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, *const u8, i64, i64,
+    ) -> u8,
+    field_set: helpers::field_set as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, *const u8, i64, i64, i64,
+    ) -> u8,
 }
 
 /// Compile one attempt at a group. `Err((template_id, reason))` names the
 /// member to refuse before retrying.
+fn eff_ret(c: &AotCandidate, ret_demoted: &HashSet<u32>) -> AotRet {
+    match c.block.template_id {
+        Some(tid) if ret_demoted.contains(&tid) => AotRet::Obj,
+        _ => c.ret,
+    }
+}
+
 fn compile_group(
     members: &[&AotCandidate],
     siblings: &SiblingMap,
     demoted: &HashSet<u32>,
+    ret_demoted: &HashSet<u32>,
+    dyn_merges: &HashMap<u32, HashSet<usize>>,
 ) -> Result<Vec<(u32, AotEntry)>, (u32, String)> {
     let fail = |tid: u32, e: String| (tid, e);
     let any_tid = members[0].block.template_id.unwrap_or(0);
@@ -362,7 +415,7 @@ fn compile_group(
     let mut module = JITModule::new(jb);
     let ptr = module.target_config().pointer_type();
     let helpers = declare_helpers(&mut module, ptr).map_err(|e| fail(any_tid, e))?;
-    let mut pure = scalar_pure_set(members, siblings);
+    let mut pure = scalar_pure_set(members, siblings, ret_demoted);
     for d in demoted {
         pure.remove(d);
     }
@@ -375,7 +428,7 @@ fn compile_group(
             .block
             .template_id
             .ok_or_else(|| fail(any_tid, "candidate without template id".into()))?;
-        let sig = inner_sig(&mut module, ptr, m);
+        let sig = inner_sig(&mut module, ptr, m, eff_ret(m, ret_demoted));
         let fid = module
             .declare_function(&format!("t{tid}"), Linkage::Local, &sig)
             .map_err(|e| fail(tid, e.to_string()))?;
@@ -383,19 +436,39 @@ fn compile_group(
     }
 
     let mut fb_ctx = FunctionBuilderContext::new();
-    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool)> = Vec::new();
+    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool, bool)> = Vec::new();
 
     for m in members {
         let tid = m.block.template_id.unwrap();
+        if std::env::var("QN_AOT_DUMP").is_ok_and(|v| v == m.selector) {
+            eprintln!(
+                "=== bytecode {} (tid {tid}; pure={}, ret={:?}, spec_ret={}, open={}) ===",
+                m.selector,
+                pure.contains(&tid),
+                eff_ret(m, ret_demoted),
+                m.spec_ret,
+                m.open_owner
+            );
+            for (i, inst) in m.block.bytecode.0.iter().enumerate() {
+                eprintln!("  {i:3}: {inst:?}");
+            }
+        }
         let mut ctx = module.make_context();
-        ctx.func.signature = inner_sig(&mut module, ptr, m);
+        ctx.func.signature = inner_sig(&mut module, ptr, m, eff_ret(m, ret_demoted));
         let n_scratch;
         let needs_list_self;
+        let direct_self;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+            static EMPTY_MERGES: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
             let mut tr = Translator {
                 module: &mut module,
                 cand: m,
+                eff_ret: eff_ret(m, ret_demoted),
+                used_direct_self: false,
+                dyn_merges: dyn_merges
+                    .get(&tid)
+                    .unwrap_or_else(|| EMPTY_MERGES.get_or_init(HashSet::new)),
                 siblings,
                 inner_ids: &inner_ids,
                 pure: &pure,
@@ -407,11 +480,16 @@ fn compile_group(
                 name_consts: Vec::new(),
                 needs_list_self: false,
                 tmpl_consts: Vec::new(),
+                str_consts: Vec::new(),
+                nil_deferred: HashSet::new(),
+
                 pending_writebacks: HashMap::new(),
+                materialized: HashSet::new(),
             };
             tr.build_inner(&mut b).map_err(|e| fail(tid, e))?;
             n_scratch = tr.next_scratch;
             needs_list_self = tr.needs_list_self;
+            direct_self = tr.used_direct_self;
             b.seal_all_blocks();
             b.finalize();
         }
@@ -419,6 +497,9 @@ fn compile_group(
         module
             .define_function(fid, &mut ctx)
             .map_err(|e| fail(tid, format!("{e:?}\nIR:\n{}", ctx.func.display())))?;
+        if std::env::var("QN_AOT_DUMP").is_ok_and(|v| v == m.selector || v == "1") {
+            eprintln!("=== {} (tid {tid}) ===\n{}", m.selector, ctx.func.display());
+        }
 
         let mut tctx = module.make_context();
         tctx.func.signature = tramp_sig(&mut module, ptr);
@@ -431,21 +512,21 @@ fn compile_group(
             .map_err(|e| fail(tid, e.to_string()))?;
         {
             let mut b = FunctionBuilder::new(&mut tctx.func, &mut fb_ctx);
-            build_trampoline(&mut module, &mut b, m, fid);
+            build_trampoline(&mut module, &mut b, m, fid, eff_ret(m, ret_demoted));
             b.seal_all_blocks();
             b.finalize();
         }
         module
             .define_function(tramp_id, &mut tctx)
             .map_err(|e| fail(tid, e.to_string()))?;
-        tramp_ids.push((tid, tramp_id, m, n_scratch, needs_list_self));
+        tramp_ids.push((tid, tramp_id, m, n_scratch, needs_list_self, direct_self));
     }
 
     module
         .finalize_definitions()
         .map_err(|e| fail(any_tid, e.to_string()))?;
     let mut out = Vec::new();
-    for (tid, tramp_id, m, n_scratch, needs_list_self) in tramp_ids {
+    for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self) in tramp_ids {
         let addr = module.get_finalized_function(tramp_id);
         let raw: AotRawFn = unsafe { std::mem::transmute(addr) };
         out.push((
@@ -453,10 +534,15 @@ fn compile_group(
             AotEntry {
                 raw,
                 params: m.params.clone().into_boxed_slice(),
-                ret: m.ret,
+                ret: eff_ret(m, ret_demoted),
                 n_scratch,
                 needs_list_self,
                 role: m.role,
+                template_id: tid,
+                param_preconditions: m.spec_preconditions.clone().into_boxed_slice(),
+                spec_bails: std::sync::atomic::AtomicU32::new(0),
+                direct_self,
+                compile_epoch: super::redef_epoch(),
             },
         ));
     }
@@ -466,7 +552,7 @@ fn compile_group(
     Ok(out)
 }
 
-fn inner_sig(module: &mut JITModule, ptr: Type, m: &AotCandidate) -> Signature {
+fn inner_sig(module: &mut JITModule, ptr: Type, m: &AotCandidate, eff: AotRet) -> Signature {
     let mut sig = module.make_signature();
     for _ in 0..4 {
         sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth
@@ -476,7 +562,8 @@ fn inner_sig(module: &mut JITModule, ptr: Type, m: &AotCandidate) -> Signature {
         sig.params.push(AbiParam::new(param_type(p)));
     }
     sig.returns.push(AbiParam::new(types::I8)); // tag
-    sig.returns.push(AbiParam::new(ret_type(m.ret)));
+    let _ = m;
+    sig.returns.push(AbiParam::new(ret_type(eff)));
     sig
 }
 
@@ -497,6 +584,7 @@ fn build_trampoline(
     b: &mut FunctionBuilder,
     m: &AotCandidate,
     inner: FuncId,
+    eff: AotRet,
 ) {
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
@@ -524,7 +612,9 @@ fn build_trampoline(
     let call = b.ins().call(callee, &call_args);
     let results = b.inst_results(call).to_vec();
     let (tag, val) = (results[0], results[1]);
-    match m.ret {
+    // The EFFECTIVE ret (a speculated scalar may have demoted to Obj on
+    // retry) — using the candidate's would type-mismatch the inner call.
+    match eff {
         AotRet::Scalar(AotKind::Bool) => {
             let w = b.ins().uextend(types::I64, val);
             b.ins().store(MemFlagsData::trusted(), w, ret, 0);
@@ -595,6 +685,12 @@ enum DynProof {
 struct Translator<'a> {
     module: &'a mut JITModule,
     cand: &'a AotCandidate,
+    /// The ret this member ACTUALLY compiles with: the candidate's, or Obj
+    /// after a speculated-scalar demotion retry (S2).
+    eff_ret: AotRet,
+    /// A direct self-recursion call was emitted (S2): the entry records the
+    /// redefinition epoch and `invoke` Bails when it goes stale.
+    used_direct_self: bool,
     siblings: &'a SiblingMap,
     inner_ids: &'a HashMap<u32, FuncId>,
     pure: &'a HashSet<u32>,
@@ -619,11 +715,26 @@ struct Translator<'a> {
     /// Leaked template `Rc`s for cold-path closure materialization (B3b) —
     /// process-lifetime, like the code and the leaked selectors.
     tmpl_consts: Vec<&'static Rc<StaticBlock>>,
+    /// Leaked field-name strings for compiled field access (S3).
+    str_consts: Vec<&'static str>,
+    /// Merge ips FORCED to all-Dyn shapes (S3 retry): scalars box on entry,
+    /// so predecessors with mixed shapes unify.
+    dyn_merges: &'a HashSet<usize>,
+    /// `var x = nil` declarations whose slot type is still DEFERRED to the
+    /// first store. A closure materialization forces these into Obj slots
+    /// first — see the DefineLocal arm.
+    nil_deferred: HashSet<Symbol>,
     /// Frame locals a materialized closure WRITES (through its snapshot env),
     /// keyed by the closure's slot-index SSA value: after the consuming send
     /// returns, each is read back from the snapshot into the frame local, so
     /// `count:`-style `{ n = n + 1 }` cold arms stay exact (B3b).
     pending_writebacks: HashMap<CVal, Vec<(Symbol, VarSlot)>>,
+    /// Every materialized closure's slot value: a send consuming TWO OR MORE
+    /// of these where any writes a capture must refuse — sibling snapshots
+    /// are INDEPENDENT envs, but interpreted siblings share one cell (the
+    /// unfused-`whileDo:` bug: the body's `i` advanced while the condition's
+    /// stayed frozen).
+    materialized: HashSet<CVal>,
 }
 
 struct FnCtx {
@@ -761,7 +872,7 @@ impl<'a> Translator<'a> {
 
         let exit = b.create_block();
         b.append_block_param(exit, types::I8);
-        b.append_block_param(exit, ret_type(self.cand.ret));
+        b.append_block_param(exit, ret_type(self.eff_ret));
         let kinds_buf = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             (MAX_OUTCALL_ARGS * 8) as u32,
@@ -781,7 +892,7 @@ impl<'a> Translator<'a> {
             depth,
             slot_base,
             exit,
-            ret: self.cand.ret,
+            ret: self.eff_ret,
             kinds_buf,
             bits_buf,
             peek_out,
@@ -875,15 +986,16 @@ impl<'a> Translator<'a> {
                     return Err("fell off the end of bytecode".to_string());
                 }
                 if ip != start_ip && leaders.binary_search(&ip).is_ok() {
-                    let nstack = self.norm_stack(b, &fx, &stack)?;
-                    let (bl, _) = self.block_for(b, &mut blocks, &mut work, ip, &nstack)?;
+                    let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                    let (bl, _) =
+                        self.block_for(b, &fx, &mut blocks, &mut work, ip, &mut nstack)?;
                     let args = Self::stack_args(&nstack)?;
                     b.ins().jump(bl, &args);
                     break 'block;
                 }
                 match &insts[ip] {
                     Instruction::Push(c) => {
-                        let av = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
+                        let av = self.const_av(b, &fx, &mut vars, &obj_param_avs, c, ip)?;
                         stack.push(av);
                     }
                     Instruction::LoadLocal(sym) => {
@@ -909,7 +1021,13 @@ impl<'a> Translator<'a> {
                             && !vars.contains_key(sym)
                             && !obj_param_avs.contains_key(sym)
                         {
-                            // declaration prologue: type decided at first store
+                            // declaration prologue: type decided at first store —
+                            // TRACKED, because a closure materialization must
+                            // force still-deferred vars into real slots (a
+                            // write-captured block stores them OUT-OF-BAND
+                            // through its snapshot env, invisible to "first
+                            // store"; the S1 recordResult nil-capture bug).
+                            self.nil_deferred.insert(*sym);
                         } else if self.free_in_block(&vars, &obj_param_avs, *sym)
                             && matches!(&insts[ip], Instruction::StoreLocal(_))
                         {
@@ -1187,7 +1305,8 @@ impl<'a> Translator<'a> {
                         if target <= ip {
                             nstack = self.emit_fuel_tick(b, &fx, &nstack)?;
                         }
-                        let (bl, _) = self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                        let (bl, _) =
+                            self.block_for(b, &fx, &mut blocks, &mut work, target, &mut nstack)?;
                         let args = Self::stack_args(&nstack)?;
                         b.ins().jump(bl, &args);
                         break 'block;
@@ -1222,9 +1341,9 @@ impl<'a> Translator<'a> {
                             nstack = self.emit_fuel_tick(b, &fx, &nstack)?;
                         }
                         let (tbl, _) =
-                            self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                            self.block_for(b, &fx, &mut blocks, &mut work, target, &mut nstack)?;
                         let (fbl, _) =
-                            self.block_for(b, &mut blocks, &mut work, ip + 1, &nstack)?;
+                            self.block_for(b, &fx, &mut blocks, &mut work, ip + 1, &mut nstack)?;
                         let args = Self::stack_args(&nstack)?;
                         if matches!(insts[ip], Instruction::IfJump(_)) {
                             b.ins().brif(cond, tbl, &args, fbl, &args);
@@ -1239,9 +1358,15 @@ impl<'a> Translator<'a> {
                             AV::C(_, AotKind::Bool) => {} // statically Bool: fall through
                             AV::C(..) | AV::Nil | AV::SelfRef => {
                                 // Statically not a Bool: always the cold path.
-                                let nstack = self.norm_stack(b, &fx, &stack)?;
-                                let (bl, _) =
-                                    self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                                let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                                let (bl, _) = self.block_for(
+                                    b,
+                                    &fx,
+                                    &mut blocks,
+                                    &mut work,
+                                    target,
+                                    &mut nstack,
+                                )?;
                                 let args = Self::stack_args(&nstack)?;
                                 b.ins().jump(bl, &args);
                                 break 'block;
@@ -1257,8 +1382,14 @@ impl<'a> Translator<'a> {
                                 let mut hot_stack = self.norm_stack(b, &fx, &stack)?;
                                 hot_stack.pop();
                                 hot_stack.push(AV::C(as_bool, AotKind::Bool));
-                                let (hot, _) =
-                                    self.block_for(b, &mut blocks, &mut work, ip + 1, &hot_stack)?;
+                                let (hot, _) = self.block_for(
+                                    b,
+                                    &fx,
+                                    &mut blocks,
+                                    &mut work,
+                                    ip + 1,
+                                    &mut hot_stack,
+                                )?;
                                 let hot_args = Self::stack_args(&hot_stack)?;
                                 if self.proofs.get(&idx).copied()
                                     == Some(DynProof::ElemOrNil(ElemTag::Bool))
@@ -1291,9 +1422,15 @@ impl<'a> Translator<'a> {
                                 }
                                 // Unproven: Bool → hot; anything else → the cold
                                 // path's real send.
-                                let nstack = self.norm_stack(b, &fx, &stack)?;
-                                let (cold, _) =
-                                    self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                                let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                                let (cold, _) = self.block_for(
+                                    b,
+                                    &fx,
+                                    &mut blocks,
+                                    &mut work,
+                                    target,
+                                    &mut nstack,
+                                )?;
                                 let cold_args = Self::stack_args(&nstack)?;
                                 b.ins().brif(is_bool, hot, &hot_args, cold, &cold_args);
                                 break 'block;
@@ -1307,6 +1444,7 @@ impl<'a> Translator<'a> {
                     Instruction::Send(sel, n)
                     | Instruction::SendLocal(_, sel, n)
                     | Instruction::SendConst(_, sel, n)
+                    | Instruction::SendField(_, sel, n)
                     | Instruction::SendLocalLocal(_, _, sel, n)
                     | Instruction::SendLocalConst(_, _, sel, n) => {
                         let (sel, n) = (*sel, *n);
@@ -1315,8 +1453,15 @@ impl<'a> Translator<'a> {
                                 let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
                                 stack.push(v);
                             }
+                            Instruction::SendField(field, ..) => {
+                                // Interpreter parity: `SendField` loads the
+                                // field UNCACHED (its single ip belongs to the
+                                // send IC), then shares the send tail.
+                                let v = self.emit_field_get_uncached(b, &fx, field)?;
+                                stack.push(v);
+                            }
                             Instruction::SendConst(c, ..) => {
-                                let v = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
+                                let v = self.const_av(b, &fx, &mut vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
                             }
                             Instruction::SendLocalLocal(a, bb, ..) => {
@@ -1328,7 +1473,7 @@ impl<'a> Translator<'a> {
                             Instruction::SendLocalConst(a, c, ..) => {
                                 let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
                                 stack.push(v);
-                                let v = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
+                                let v = self.const_av(b, &fx, &mut vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
                             }
                             _ => {}
@@ -1340,12 +1485,35 @@ impl<'a> Translator<'a> {
                         // through the block-call helper, invoking a COMPILED block
                         // template directly on a registry hit (else the interpreted
                         // body, else the full send for non-block receivers).
+                        // Sibling-closure interference: 2+ materialized
+                        // closures consumed together, any of which WRITES a
+                        // capture, cannot keep exact shared-cell semantics
+                        // across independent snapshots — refuse (unfused
+                        // `whileDo:`-shaped methods run interpreted).
+                        let closure_args: Vec<CVal> = std::iter::once(&recv)
+                            .chain(args.iter())
+                            .filter_map(|v| match v {
+                                AV::Dyn(idx) if self.materialized.contains(idx) => Some(*idx),
+                                _ => None,
+                            })
+                            .collect();
+                        if closure_args.len() >= 2
+                            && closure_args
+                                .iter()
+                                .any(|idx| self.pending_writebacks.contains_key(idx))
+                        {
+                            return Err(format!(
+                                "sibling closures share written captures at ip {ip}"
+                            ));
+                        }
                         let out = if sel.as_str() == "valueWithSelfOrArg:" && args.len() == 1 {
                             self.emit_block_call(b, &fx, recv, args[0], ip)?
                         } else {
                             self.emit_send(b, &fx, recv, sel, &args, ip)?
                         };
-                        self.flush_writebacks(b, &fx, &args)?;
+                        let mut consumed = args.clone();
+                        consumed.push(recv);
+                        self.flush_writebacks(b, &fx, &consumed)?;
                         stack.push(out);
                     }
                     // Within one method's bytecode, `MethodReturn` (`^^`) always
@@ -1359,6 +1527,18 @@ impl<'a> Translator<'a> {
                         return Err(format!(
                             "non-local return (^^) from a compiled block at ip {ip}"
                         ));
+                    }
+                    Instruction::LoadField(name) => {
+                        let out = self.emit_field_get(b, &fx, name, ip)?;
+                        stack.push(out);
+                    }
+                    Instruction::StoreField(name) => {
+                        let v = stack.pop().ok_or("stack underflow")?;
+                        self.emit_field_set(b, &fx, name, v, ip)?;
+                    }
+                    Instruction::StoreFieldKeep(name) => {
+                        let v = *stack.last().ok_or("stack underflow")?;
+                        self.emit_field_set(b, &fx, name, v, ip)?;
                     }
                     Instruction::Return | Instruction::BlockReturn | Instruction::MethodReturn => {
                         let v = stack.pop().ok_or("stack underflow")?;
@@ -1482,6 +1662,78 @@ impl<'a> Translator<'a> {
         Ok(AV::Dyn(out_idx))
     }
 
+    /// `@name` read (S3): the receiver is this frame's slot-0 value and the
+    /// slot cache is the shared `(template_id, ip)` cell — compiled and
+    /// interpreted execution warm ONE field cache.
+    /// `SendField`'s field read: the interpreter passes `cache_ip: None`
+    /// there (the ip's cache slot belongs to the SEND), mirrored here by the
+    /// out-of-range ip sentinel — probe and fill both miss past `bc_len`.
+    fn emit_field_get_uncached(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        name: &str,
+    ) -> Result<AV, String> {
+        let sentinel = self.cand.block.bytecode.0.len();
+        self.emit_field_get(b, fx, name, sentinel)
+    }
+
+    fn emit_field_get(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        name: &str,
+        ip: usize,
+    ) -> Result<AV, String> {
+        let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+        self.str_consts.push(leaked);
+        let name_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
+        let name_len = b.ins().iconst(types::I64, leaked.len() as i64);
+        let self_idx = self.abs_slot(b, fx, 0);
+        let out = self.alloc_scratch()?;
+        let out_idx = self.abs_slot(b, fx, out);
+        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
+        let f = self.func_ref(b, self.helpers.field_get);
+        let call = b.ins().call(
+            f,
+            &[
+                fx.vm, fx.mc, tid_v, ip_v, len_v, self_idx, name_ptr, name_len, out_idx,
+            ],
+        );
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(AV::Dyn(out_idx))
+    }
+
+    /// `@name = v` (S3) — same shared cache; undeclared fields raise the
+    /// interpreter's exact errors through the tag channel.
+    fn emit_field_set(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        name: &str,
+        v: AV,
+        ip: usize,
+    ) -> Result<(), String> {
+        let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+        self.str_consts.push(leaked);
+        let name_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
+        let name_len = b.ins().iconst(types::I64, leaked.len() as i64);
+        let self_idx = self.abs_slot(b, fx, 0);
+        let (k, bits) = self.encode(b, fx, v);
+        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
+        let f = self.func_ref(b, self.helpers.field_set);
+        let call = b.ins().call(
+            f,
+            &[
+                fx.vm, fx.mc, tid_v, ip_v, len_v, self_idx, name_ptr, name_len, k, bits,
+            ],
+        );
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(())
+    }
+
     /// B3b: materialize a closure at a compiled cold-path `Push(Block)` site.
     /// The snapshot env carries EVERY frame binding (scalars, slots, obj
     /// params, `self`) — exactly the visibility the interpreter's live env
@@ -1494,11 +1746,28 @@ impl<'a> Translator<'a> {
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
-        vars: &HashMap<Symbol, VarSlot>,
+        vars: &mut HashMap<Symbol, VarSlot>,
         obj_params: &HashMap<Symbol, CVal>,
         rc: &Rc<StaticBlock>,
         ip: usize,
     ) -> Result<AV, String> {
+        // Force still-deferred `var x = nil` locals into REAL slots before
+        // snapshotting: the closure may read or write them through its
+        // snapshot env, which "type decided at first store" cannot see. The
+        // slot init to nil is exact — any earlier store would have typed the
+        // var already.
+        let deferred: Vec<Symbol> = self.nil_deferred.drain().collect();
+        for sym in deferred {
+            let w = self.alloc_scratch()?;
+            let idx = self.abs_slot(b, fx, w);
+            let (k, bits) = self.encode(b, fx, AV::Nil);
+            let f = self.func_ref(b, self.helpers.slot_set);
+            let call = b.ins().call(f, &[fx.vm, fx.mc, idx, k, bits]);
+            let tag = b.inst_results(call)[0];
+            self.tag_check(b, fx, tag);
+            vars.insert(sym, VarSlot::Obj(w, None));
+        }
+
         // Gates: scan the template's bytecode once.
         if rc.decl_block.is_some() {
             return Err(format!("guarded block materialization at ip {ip}"));
@@ -1558,7 +1827,7 @@ impl<'a> Translator<'a> {
         let call = b.ins().call(f, &[fx.vm, fx.mc, tmpl_ptr, out_idx]);
         let tag = b.inst_results(call)[0];
         self.tag_check(b, fx, tag);
-        let mut bind = |tr: &mut Self, b: &mut FunctionBuilder, sym: Symbol, v: AV| {
+        let bind = |tr: &mut Self, b: &mut FunctionBuilder, sym: Symbol, v: AV| {
             let leaked: &'static Symbol = Box::leak(Box::new(sym));
             tr.sym_consts.push(leaked);
             let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
@@ -1586,6 +1855,7 @@ impl<'a> Translator<'a> {
         if !writebacks.is_empty() {
             self.pending_writebacks.insert(out_idx, writebacks);
         }
+        self.materialized.insert(out_idx);
         Ok(AV::Dyn(out_idx))
     }
 
@@ -1636,7 +1906,7 @@ impl<'a> Translator<'a> {
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
-        vars: &HashMap<Symbol, VarSlot>,
+        vars: &mut HashMap<Symbol, VarSlot>,
         obj_params: &HashMap<Symbol, CVal>,
         c: &Constant,
         ip: usize,
@@ -1737,6 +2007,7 @@ impl<'a> Translator<'a> {
         if obj_params.contains_key(&sym) || sym == self_symbol() {
             return Err(format!("store to parameter/self '{}'", sym.as_str()));
         }
+        self.nil_deferred.remove(&sym);
         match v {
             AV::C(cv, k) => match vars.get(&sym) {
                 Some(&VarSlot::Scalar(var, vk)) => {
@@ -1889,13 +2160,33 @@ impl<'a> Translator<'a> {
         args: &[AV],
         ip: usize,
     ) -> Result<AV, String> {
+        // Sealed scalar operators devirtualize when both operands PROVE
+        // scalar (S2): Integer/Double are startup-sealed, so `Int +: Int` is
+        // frozen semantics — the same guarantee the compiler's typed devirt
+        // uses. Anything unproven falls through to the outcall.
+        if args.len() == 1
+            && let Some(kind) = IntBinKind::from_selector(sel.as_str())
+        {
+            match (recv, args[0]) {
+                (AV::C(a, AotKind::Int), AV::C(c, AotKind::Int)) => {
+                    return self.emit_int_bin(b, fx, kind, a, c);
+                }
+                (AV::C(a, AotKind::Double), AV::C(c, AotKind::Double)) => {
+                    return Ok(self.emit_double_bin(b, kind, a, c));
+                }
+                _ => {}
+            }
+        }
         let key = (self.cand.group_id, sel.as_str().to_string());
-        // An OPEN owner (B2) never emits direct calls: the frozen-callee-set
-        // assumption behind them is exactly what a reopen would violate. Every
-        // send goes through the outcall (dispatch-equivalent) seam instead.
-        if !self.cand.open_owner
-            && matches!(recv, AV::SelfRef)
+        // An OPEN owner (B2) never emits direct calls — EXCEPT to itself
+        // (S2): the entry records the redefinition epoch and `invoke` Bails
+        // the whole method to the interpreter once ANY method table mutates,
+        // so a stale direct recursion is never entered. Non-self sends keep
+        // the outcall (dispatch-equivalent) seam.
+        let own_tid = self.cand.block.template_id;
+        if matches!(recv, AV::SelfRef)
             && let Some((psig, pret, callee_tid)) = self.siblings.get(&key)
+            && (!self.cand.open_owner || Some(*callee_tid) == own_tid)
             && self.pure.contains(callee_tid)
             && psig.len() == args.len()
         {
@@ -1912,16 +2203,26 @@ impl<'a> Translator<'a> {
                 }
             }
             if ok {
+                if self.cand.open_owner {
+                    self.used_direct_self = true;
+                }
+                // A self-call's ret may have been DEMOTED this retry; the
+                // sibling map still holds the pre-demotion signature.
+                let effective = if Some(*callee_tid) == own_tid {
+                    self.eff_ret
+                } else {
+                    *pret
+                };
                 let callee_fid = self.inner_ids[callee_tid];
                 let callee = self.func_ref(b, callee_fid);
                 let call = b.ins().call(callee, &call_args);
                 let res = b.inst_results(call).to_vec();
                 let (tag, val) = (res[0], res[1]);
                 self.tag_check(b, fx, tag);
-                let AotRet::Scalar(rk) = pret else {
+                let AotRet::Scalar(rk) = effective else {
                     return Err(format!("pure sibling with non-scalar ret at ip {ip}"));
                 };
-                return Ok(AV::C(val, *rk));
+                return Ok(AV::C(val, rk));
             }
         }
         self.emit_outcall(b, fx, recv, sel.as_str(), args, ip)
@@ -1975,6 +2276,12 @@ impl<'a> Translator<'a> {
         match (fx.ret, v) {
             (AotRet::Scalar(want), AV::C(cv, k)) if k == want => {
                 b.ins().jump(fx.exit, &[tag0.into(), cv.into()]);
+            }
+            // A SPECULATED scalar ret must be statically provable on every
+            // return path — no runtime narrowing whose failure would raise an
+            // error the interpreter wouldn't. Demote to Obj and retry.
+            (AotRet::Scalar(_), _) if self.cand.spec_ret => {
+                return Err(RET_DEMOTION.to_string());
             }
             (AotRet::Scalar(want), AV::Dyn(idx)) => {
                 let val = self.narrow_to_scalar(b, fx, idx, want);
@@ -2085,17 +2392,47 @@ impl<'a> Translator<'a> {
     fn block_for(
         &mut self,
         b: &mut FunctionBuilder,
+        fx: &FnCtx,
         blocks: &mut HashMap<usize, (CBlock, Vec<BKind>)>,
         work: &mut Vec<usize>,
         ip: usize,
-        stack: &[AV],
+        stack: &mut Vec<AV>,
     ) -> Result<(CBlock, Vec<BKind>), String> {
+        // A merge FORCED to all-Dyn by an earlier retry (mixed scalar/Dyn
+        // predecessors, S3): box scalars before shape computation, so every
+        // predecessor unifies. The interpreted value world is uniform —
+        // boxing is exact, only the abstraction loses precision.
+        if self.dyn_merges.contains(&ip) {
+            for i in 0..stack.len() {
+                if let AV::C(..) = stack[i] {
+                    stack[i] = self.box_av(b, fx, stack[i])?;
+                }
+            }
+        }
         let kinds = Self::stack_bkinds(stack)?;
         if let Some((bl, expect)) = blocks.get(&ip) {
-            if *expect != kinds {
-                return Err(format!("stack shape mismatch at merge ip {ip}"));
+            let (bl, expect) = (*bl, expect.clone());
+            if expect != kinds {
+                if expect.len() != kinds.len() {
+                    return Err(format!(
+                        "stack shape mismatch at merge ip {ip}: {expect:?} vs {kinds:?}"
+                    ));
+                }
+                for i in 0..kinds.len() {
+                    match (&expect[i], &kinds[i]) {
+                        (a, bk) if a == bk => {}
+                        // Box toward an existing Dyn expectation, in place.
+                        (BKind::Dyn, BKind::S(_)) => {
+                            stack[i] = self.box_av(b, fx, stack[i])?;
+                        }
+                        // The merge was first planned scalar; a Dyn (or a
+                        // different scalar) predecessor needs it re-planned
+                        // all-Dyn — signal the retry.
+                        _ => return Err(format!("{MERGE_DEMOTION}:{ip}")),
+                    }
+                }
             }
-            return Ok((*bl, expect.clone()));
+            return Ok((bl, expect));
         }
         let bl = b.create_block();
         for &k in &kinds {
@@ -2104,6 +2441,18 @@ impl<'a> Translator<'a> {
         blocks.insert(ip, (bl, kinds.clone()));
         work.push(ip);
         Ok((bl, kinds))
+    }
+
+    /// Box any AV into a fresh scratch slot (merge-shape unification).
+    fn box_av(&mut self, b: &mut FunctionBuilder, fx: &FnCtx, v: AV) -> Result<AV, String> {
+        let slot = self.alloc_scratch()?;
+        let dst = self.abs_slot(b, fx, slot);
+        let (k, bits) = self.encode(b, fx, v);
+        let f = self.func_ref(b, self.helpers.slot_set);
+        let call = b.ins().call(f, &[fx.vm, fx.mc, dst, k, bits]);
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(AV::Dyn(dst))
     }
 
     fn zero_of(&self, b: &mut FunctionBuilder, r: AotRet) -> CVal {

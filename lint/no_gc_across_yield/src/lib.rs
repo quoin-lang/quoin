@@ -45,6 +45,9 @@ struct FnLintInfo<'tcx> {
     )>,
     // Usages: (HirId, Span)
     usages: Vec<(rustc_hir::HirId, rustc_span::Span)>,
+    // Whole-local writes (assignment LHS): a write between a yield and a use
+    // means the used value was created AFTER the yield — not a hold.
+    writes: Vec<(rustc_hir::HirId, rustc_span::Span)>,
     // Method/Function calls inside this function: (Callee DefId, Span of call)
     calls: Vec<(rustc_hir::def_id::DefId, rustc_span::Span)>,
     // Direct yielder suspend spans in this function
@@ -66,10 +69,41 @@ struct GcYieldVisitor<'tcx, 'sym> {
     registered_locals: HashSet<rustc_hir::HirId>,
     suspend_spans: Vec<rustc_span::Span>,
     usages: Vec<(rustc_hir::HirId, rustc_span::Span)>,
+    writes: Vec<(rustc_hir::HirId, rustc_span::Span)>,
     calls: Vec<(rustc_hir::def_id::DefId, rustc_span::Span)>,
+    /// Expr ids that are the LHS of an assignment: a WRITE kills the old
+    /// value rather than using it, so `ret_val = self.pop()?` right after a
+    /// yield must not count as holding `ret_val` across it.
+    assign_lhs: HashSet<rustc_hir::HirId>,
+    /// The function's parameter binding ids: locals initialized from a bare
+    /// param path (`let c = receiver;`, `if let Value::Class(c) = receiver`)
+    /// are the caller's rooted value under another name and inherit the
+    /// param exemption.
+    param_ids: HashSet<rustc_hir::HirId>,
 }
 
 impl<'tcx, 'sym> GcYieldVisitor<'tcx, 'sym> {
+    /// Is `expr` a bare path to one of this function's parameters?
+    fn is_param_path(&self, expr: &rustc_hir::Expr<'_>) -> bool {
+        if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = &expr.kind
+            && let rustc_hir::def::Res::Local(hir_id) = path.res
+        {
+            return self.param_ids.contains(&hir_id);
+        }
+        false
+    }
+
+    /// Register `pat`'s bindings as exempt (never GC-flagged) — used for
+    /// patterns destructuring a parameter.
+    fn exempt_pat_bindings(&mut self, pat: &'tcx rustc_hir::Pat<'tcx>) {
+        pat.walk(|p| {
+            if let rustc_hir::PatKind::Binding(_, hir_id, _, _) = p.kind {
+                self.registered_locals.insert(hir_id);
+            }
+            true
+        });
+    }
+
     fn register_pat_bindings(
         &mut self,
         pat: &'tcx rustc_hir::Pat<'tcx>,
@@ -84,7 +118,7 @@ impl<'tcx, 'sym> GcYieldVisitor<'tcx, 'sym> {
                 if let rustc_hir::PatKind::Binding(_, hir_id, _ident, _) = pat.kind {
                     if !self.visitor.registered_locals.contains(&hir_id) {
                         let ty = self.visitor.cx.typeck_results().node_type(hir_id);
-                        if contains_gc_lifetime(ty) {
+                        if carries_gc(self.visitor.cx.tcx, ty) {
                             self.visitor
                                 .locals
                                 .push((hir_id, pat.span, ty, self.init_span));
@@ -105,6 +139,11 @@ impl<'tcx, 'sym> GcYieldVisitor<'tcx, 'sym> {
 
 impl<'tcx, 'sym> rustc_hir::intravisit::Visitor<'tcx> for GcYieldVisitor<'tcx, 'sym> {
     fn visit_local(&mut self, local: &'tcx rustc_hir::LetStmt<'tcx>) {
+        if let Some(init) = local.init
+            && self.is_param_path(init)
+        {
+            self.exempt_pat_bindings(local.pat);
+        }
         let init_span = local.init.map(|i| i.span);
         self.register_pat_bindings(local.pat, init_span);
         rustc_hir::intravisit::walk_local(self, local);
@@ -117,6 +156,35 @@ impl<'tcx, 'sym> rustc_hir::intravisit::Visitor<'tcx> for GcYieldVisitor<'tcx, '
 
     fn visit_expr(&mut self, expr: &'tcx rustc_hir::Expr<'tcx>) {
         match expr.kind {
+            // `if let PAT = SCRUT` / `while let` / `let-else`: the bindings
+            // are BORN FROM the scrutinee — a yield inside it must not flag
+            // them (same rule as a LetStmt initializer), and destructuring a
+            // parameter inherits the param exemption.
+            rustc_hir::ExprKind::Let(let_expr) => {
+                if self.is_param_path(let_expr.init) {
+                    self.exempt_pat_bindings(let_expr.pat);
+                }
+                self.register_pat_bindings(let_expr.pat, Some(let_expr.init.span));
+            }
+            // `match SCRUT { PAT => … }`: same — arm bindings are born from
+            // the scrutinee.
+            rustc_hir::ExprKind::Match(scrut, arms, _) => {
+                let from_param = self.is_param_path(scrut);
+                for arm in arms {
+                    if from_param {
+                        self.exempt_pat_bindings(arm.pat);
+                    }
+                    self.register_pat_bindings(arm.pat, Some(scrut.span));
+                }
+            }
+            rustc_hir::ExprKind::Assign(lhs, _, _) => {
+                if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = &lhs.kind {
+                    if let rustc_hir::def::Res::Local(hir_id) = path.res {
+                        self.assign_lhs.insert(lhs.hir_id);
+                        self.writes.push((hir_id, expr.span));
+                    }
+                }
+            }
             rustc_hir::ExprKind::MethodCall(path, _, _, _) => {
                 if path.ident.name.as_str() == "suspend" {
                     self.suspend_spans.push(expr.span);
@@ -134,7 +202,9 @@ impl<'tcx, 'sym> rustc_hir::intravisit::Visitor<'tcx> for GcYieldVisitor<'tcx, '
                 }
             }
             rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) => {
-                if let rustc_hir::def::Res::Local(hir_id) = path.res {
+                if let rustc_hir::def::Res::Local(hir_id) = path.res
+                    && !self.assign_lhs.contains(&expr.hir_id)
+                {
                     self.usages.push((hir_id, expr.span));
                 }
             }
@@ -144,12 +214,49 @@ impl<'tcx, 'sym> rustc_hir::intravisit::Visitor<'tcx> for GcYieldVisitor<'tcx, '
     }
 }
 
-/// A generic-position match (`Value<…>` / `Gc<…>`, incl. wrappers like `Vec<Value<…>>`),
-/// not a bare substring one: plain-data types that merely *mention* the words — a
-/// `ValueInfo` of Strings, a `GcMetrics` — carry nothing collectable and must not match.
-fn contains_gc_lifetime(ty: rustc_middle::ty::Ty<'_>) -> bool {
-    let ty_str = format!("{:?}", ty);
-    ty_str.contains("Value<") || ty_str.contains("Gc<")
+/// Does `ty` transitively OWN `Gc`/`GcWeak` data? A real type walk — through
+/// ADT fields (all variants), ADT generic arguments (so containers like
+/// `Vec<Value>` match without descending into their raw-pointer internals),
+/// tuples, arrays and slices — terminating at the gc_arena smart pointers
+/// themselves (matched by ADT name at the def level).
+///
+/// This replaced a name-substring test on the PRINTED type, which missed
+/// wrapper structs: `Frame<'gc>` prints without its field types, so a popped
+/// frame held across a yield sailed through unregistered — the S0 segfault.
+/// Plain-data types that merely mention the words (`ValueInfo` of Strings, a
+/// `GcMetrics`) still don't match: they own no Gc anywhere.
+///
+/// References and raw pointers are deliberately NOT traversed: a `&Frame`
+/// borrowed from rooted storage stays valid across a yield (rustc's borrowck
+/// covers the Rust side), and the OWNED local behind any dangerous reference
+/// is flagged on its own.
+fn carries_gc<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, ty: rustc_middle::ty::Ty<'tcx>) -> bool {
+    fn go<'tcx>(
+        tcx: rustc_middle::ty::TyCtxt<'tcx>,
+        ty: rustc_middle::ty::Ty<'tcx>,
+        seen: &mut HashSet<rustc_middle::ty::Ty<'tcx>>,
+        depth: u32,
+    ) -> bool {
+        use rustc_middle::ty::TyKind;
+        if depth > 32 || !seen.insert(ty) {
+            return false;
+        }
+        match ty.kind() {
+            TyKind::Adt(def, args) => {
+                let name = tcx.item_name(def.did());
+                if name.as_str() == "Gc" || name.as_str() == "GcWeak" {
+                    return true;
+                }
+                def.all_fields()
+                    .any(|f| go(tcx, f.ty(tcx, args), seen, depth + 1))
+                    || args.types().any(|t| go(tcx, t, seen, depth + 1))
+            }
+            TyKind::Array(t, _) | TyKind::Slice(t) => go(tcx, *t, seen, depth + 1),
+            TyKind::Tuple(ts) => ts.iter().any(|t| go(tcx, t, seen, depth + 1)),
+            _ => false,
+        }
+    }
+    go(tcx, ty, &mut HashSet::new(), 0)
 }
 
 impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
@@ -168,8 +275,19 @@ impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
             registered_locals: HashSet::new(),
             suspend_spans: Vec::new(),
             usages: Vec::new(),
+            writes: Vec::new(),
             calls: Vec::new(),
+            assign_lhs: HashSet::new(),
+            param_ids: HashSet::new(),
         };
+        for param in body.params {
+            param.pat.walk(|p| {
+                if let rustc_hir::PatKind::Binding(_, hir_id, _, _) = p.kind {
+                    visitor.param_ids.insert(hir_id);
+                }
+                true
+            });
+        }
 
         // Parameters are NOT registered (see the lint docs): their rooting is the
         // caller's contract — the hold is flagged where the value was created, and the
@@ -180,6 +298,7 @@ impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
         let info = FnLintInfo {
             locals: visitor.locals,
             usages: visitor.usages,
+            writes: visitor.writes,
             calls: visitor.calls,
             suspend_spans: visitor.suspend_spans,
         };
@@ -225,8 +344,14 @@ impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
                 }
             }
 
-            // 3. Analyze each function for live variables across yielding call sites
-            for (&_caller, info) in infos.iter() {
+            // 3. Analyze each function for live variables across yielding call
+            // sites — in source order (HashMap iteration would make the
+            // diagnostic order, and therefore the UI test, nondeterministic).
+            let mut ordered: Vec<_> = infos.iter().collect();
+            ordered.sort_by_key(|(_, info)| {
+                info.locals.first().map(|&(_, span, _, _)| span.lo())
+            });
+            for (&_caller, info) in ordered {
                 let info_tcx: &FnLintInfo<'tcx> = unsafe { std::mem::transmute(info) };
 
                 // Find all yield points inside this function
@@ -257,11 +382,39 @@ impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
 
                         // Check if variable is declared before the yield
                         if decl_span.lo() < yield_span.lo() {
-                            // Check if there is any usage after this yield
+                            // A use after this yield is a hold ONLY if no
+                            // whole-local write lands in between (a write
+                            // means the used value was created post-yield —
+                            // `ret_val = self.pop()?` after finalize). Flow-
+                            // insensitive: a write on a sibling branch can
+                            // over-suppress; the lint is a net, not a prover.
+                            // A local passed as an ARGUMENT to the yielding
+                            // call is rooted through it (the crate convention
+                            // the param exemption already assumes: VM entry
+                            // points bind what they're given into frames/envs
+                            // for the duration of their yields) — so uses
+                            // after THAT call are safe; a later yield still
+                            // flags via its own pair.
+                            let arg_of_yield = info_tcx.usages.iter().any(|(id, span)| {
+                                *id == hir_id
+                                    && span.lo() >= yield_span.lo()
+                                    && span.hi() <= yield_span.hi()
+                            });
+                            if arg_of_yield {
+                                continue;
+                            }
                             if let Some((_, usage_span)) = info_tcx
                                 .usages
                                 .iter()
-                                .find(|(id, span)| *id == hir_id && span.lo() > yield_span.hi())
+                                .find(|(id, span)| {
+                                    *id == hir_id
+                                        && span.lo() > yield_span.hi()
+                                        && !info_tcx.writes.iter().any(|(wid, wspan)| {
+                                            *wid == hir_id
+                                                && wspan.lo() > yield_span.hi()
+                                                && wspan.hi() < span.lo()
+                                        })
+                                })
                             {
                                 clippy_utils::diagnostics::span_lint_hir_and_then(
                                     cx,

@@ -104,7 +104,6 @@ impl<'gc> VmState<'gc> {
     /// `parked_on_channel`. `channel` (the native method's receiver, rooted in
     /// `active_native_args` — the `await_timeout` rooting argument) is needed on the
     /// resume side: a cancelled receiver may hold a wake whose value must go back.
-    #[allow(no_gc_across_yield)]
     fn channel_park(
         &mut self,
         mc: &Mutation<'gc>,

@@ -508,7 +508,6 @@ fn scope_stream<'gc>(
 /// `active_native_args` for the whole native call, so it stays rooted; each `line` is handed
 /// *into* `execute_block` (`vec![line]`), reachable through the callee frame across its
 /// yields. Neither is held across a yield unrooted — hence the allow.
-#[allow(no_gc_across_yield)]
 fn each_line<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,

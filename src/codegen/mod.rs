@@ -19,6 +19,7 @@
 //! rule — gc-arena collects only between coroutine resumes).
 
 mod helpers;
+pub mod spec;
 mod translate;
 
 #[cfg(test)]
@@ -130,6 +131,26 @@ pub struct AotCandidate {
     /// new template and the stale entry stops being reachable (the same
     /// per-dispatch minting argument as §6.2's no-deopt case).
     pub open_owner: bool,
+    /// Speculative-AOT (S0, docs/SPECULATIVE_AOT_ARCH.md): `true` per param
+    /// whose kind is UNANNOTATED — `params[i]` holds an Obj placeholder and
+    /// the runtime profile supplies the real kind at compile time. All-false
+    /// for classic annotated candidates.
+    pub spec_params: Vec<bool>,
+    /// The return annotation is absent; `ret` is an Obj placeholder.
+    pub spec_ret: bool,
+    /// Entry kind preconditions minted at PROMOTION (S1): `Some(kind)` per
+    /// param whose scalar kind is speculated from the runtime profile rather
+    /// than guaranteed by dispatch. Empty until promotion; always empty for
+    /// classic annotated candidates.
+    pub spec_preconditions: Vec<Option<AotKind>>,
+}
+
+impl AotCandidate {
+    /// A candidate that must wait for a runtime type profile (any observed
+    /// slot) rather than compiling at unit load.
+    pub fn speculative(&self) -> bool {
+        self.spec_ret || self.spec_params.iter().any(|&b| b)
+    }
 }
 
 /// Raw ABI of a compiled trampoline. `args`/`ret` carry bit patterns (`f64` via
@@ -178,6 +199,21 @@ pub struct AotEntry {
     /// receiver exactly) when it isn't. Checked before any state changes.
     pub needs_list_self: bool,
     pub role: AotRole,
+    /// The compiled template's id (the registry key), so the dispatch arm can
+    /// tombstone a mispredicting speculation.
+    pub template_id: u32,
+    /// Speculated entry kind preconditions (S1): checked by the dispatch arm
+    /// BEFORE `invoke` — a mismatching arg Bails to the interpreted body.
+    /// Empty for classic annotated entries.
+    pub param_preconditions: Box<[Option<AotKind>]>,
+    /// Consecutive precondition Bails (reset on every pass); at
+    /// `spec::BAIL_TOMBSTONE` the entry is tombstoned.
+    pub spec_bails: std::sync::atomic::AtomicU32,
+    /// The body contains DIRECT SELF-CALLS (S2 recursion fast path): valid
+    /// only while `compile_epoch` matches the global redefinition epoch —
+    /// `invoke` Bails otherwise.
+    pub direct_self: bool,
+    pub compile_epoch: u64,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -203,6 +239,61 @@ fn registry() -> &'static RwLock<FxHashMap<u32, &'static AotEntry>> {
 /// The compiled entry for a template id, if any. Probed only on the cold
 /// `lookup_method` path — the dispatch cache and inline cache memoize the minted
 /// `Callable` exactly like any other.
+/// The lazy-compilation warmth threshold (block templates and speculative
+/// methods alike). Tunable for debugging/tests: `QN_AOT_WARM=1` compiles on
+/// first use — the corpus's maximal-speculation stress mode.
+pub fn warm_threshold() -> u32 {
+    static WARM: OnceLock<u32> = OnceLock::new();
+    *WARM.get_or_init(|| {
+        std::env::var("QN_AOT_WARM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8)
+    })
+}
+
+/// Class-redefinition epoch (S2): bumped whenever a method table mutates
+/// (`DefineMethod`, extension class installs). A compiled entry that emits
+/// DIRECT SELF-CALLS records the epoch at compile time; `invoke` Bails the
+/// entry to the interpreted body when the epochs differ — a redefinition
+/// anywhere may change what a self-send should dispatch to (an override in a
+/// new subclass included), and the interpreted body re-dispatches per send.
+/// Shared across VMs: cross-VM bumps only cost conservative Bails.
+static REDEF_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn redef_epoch() -> u64 {
+    REDEF_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn bump_redef_epoch() {
+    REDEF_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Remove a promoted entry whose speculation keeps mispredicting (S1
+/// tombstone): new dispatches stop minting `AotCall`; call sites whose
+/// inline caches still hold the entry keep failing its precondition and
+/// Bailing — correct, just interpreted.
+pub fn tombstone(template_id: u32) {
+    registry().write().unwrap().remove(&template_id);
+}
+
+/// Does a runtime value satisfy a speculated scalar-kind precondition?
+pub fn scalar_matches(kind: AotKind, v: crate::value::Value<'_>) -> bool {
+    use crate::value::Value;
+    matches!(
+        (kind, v),
+        (AotKind::Int, Value::Int(_))
+            | (AotKind::Double, Value::Double(_))
+            | (AotKind::Bool, Value::Bool(_))
+    )
+}
+
+/// Is a compiled entry registered for this template? (Promotion uses this to
+/// distinguish a successful compile from a translator refusal.)
+pub fn block_registered(template_id: u32) -> bool {
+    registry().read().unwrap().contains_key(&template_id)
+}
+
 pub fn lookup(template_id: u32) -> Option<&'static AotEntry> {
     registry().read().unwrap().get(&template_id).copied()
 }
@@ -286,6 +377,12 @@ pub fn invoke<'gc>(
     if vm.sched.current_fiber.is_some() {
         return AotOutcome::Bail;
     }
+    // S2: direct self-recursion bakes in "dispatch(self, sel) reaches this
+    // template"; any later method-table mutation could change that, so a
+    // stale epoch runs the interpreted body (which re-dispatches per send).
+    if entry.direct_self && entry.compile_epoch != redef_epoch() {
+        return AotOutcome::Bail;
+    }
     if args.len() != entry.params.len() {
         return AotOutcome::Bail;
     }
@@ -365,7 +462,15 @@ pub fn invoke<'gc>(
             "AOT: compiled method returned unknown tag {other}"
         ))),
     };
-    vm.stack.truncate(base);
+    // Window teardown — EXCEPT when a non-local return escaped through this
+    // frame: the `^^` unwind already truncated past the window and pushed the
+    // delivered value at its target's stack base, which can sit AT `base`
+    // (a caller whose operand stack was empty at the send). Truncating then
+    // would chop the delivered value off the stack (found by a promoted
+    // `False#else:` whose arm block did `^^` — S1).
+    if !matches!(&outcome, AotOutcome::Err(QuoinError::NonLocalReturn)) {
+        vm.stack.truncate(base);
+    }
     outcome
 }
 
@@ -382,14 +487,7 @@ pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&
     // Tiering: a once-invoked block would pay Cranelift more than it saves —
     // compile only once a template proves warm. A combinator loop crosses the
     // threshold in its first handful of elements.
-    // Tunable for debugging/tests (`QN_AOT_WARM=1` compiles on first use).
-    static WARM: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    let warm = *WARM.get_or_init(|| {
-        std::env::var("QN_AOT_WARM")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8)
-    });
+    let warm = warm_threshold();
     {
         let (count, _) = vm.aot_pending_blocks.get_mut(&template_id)?;
         *count += 1;
@@ -480,7 +578,10 @@ pub fn invoke_block<'gc>(
             "AOT: compiled block returned unknown tag {other}"
         ))),
     };
-    vm.stack.truncate(base);
+    // Same non-local-return teardown rule as `invoke` above.
+    if !matches!(&outcome, AotOutcome::Err(QuoinError::NonLocalReturn)) {
+        vm.stack.truncate(base);
+    }
     outcome
 }
 

@@ -58,15 +58,21 @@ pub fn build_block_class() -> NativeClassBuilder {
                 Ok(vm.new_nil(mc))
             }
         })
-        // .instance_method("value", |vm, mc, receiver, args| {
-        //     let block = recv!(receiver, Block);
-        //     vm.execute_block(mc, block, Vec::new(), None)
-        // })
-        // .instance_method("value:", |vm, mc, receiver, args| {
-        //     let block = recv!(receiver, Block);
-        //     let val = args[0];
-        //     vm.execute_block(mc, block, vec![val], None)
-        // })
+        // `value`/`value:` have an interpreter fast path (`exec_send`, which
+        // short-circuits before lookup), but they must ALSO be real methods:
+        // `call_method`-family callers — compiled outcalls above all (S1
+        // promoted a compiled `False#else:` whose `elseblock.value` silently
+        // returned nil through the lookup miss) — resolve through the
+        // hierarchy, not through `exec_send`.
+        .instance_method("value", |vm, mc, receiver, _args| {
+            let block = recv!(receiver, Block);
+            vm.execute_block(mc, block, Vec::new(), None)
+        })
+        .instance_method("value:", |vm, mc, receiver, args| {
+            let block = recv!(receiver, Block);
+            let val = args[0];
+            vm.execute_block(mc, block, vec![val], None)
+        })
         .instance_method("valueWithArgs:", |vm, mc, receiver, args| {
             let block = recv!(receiver, Block);
             let block_args =
@@ -96,7 +102,8 @@ pub fn build_block_class() -> NativeClassBuilder {
             // B3a: the interpreted-side seam — a compiled block template runs
             // natively even under an interpreted combinator loop. Bail (arity
             // or precondition mismatch) falls through to the interpreted body.
-            if let Some(tid) = block.template.template_id
+            if vm.outcall_nesting < crate::codegen::spec::MAX_OUTCALL_NESTING
+                && let Some(tid) = block.template.template_id
                 && let Some(entry) = crate::codegen::block_entry_for(vm, tid)
             {
                 match crate::codegen::invoke_block(vm, mc, entry, receiver, arg_val) {
@@ -221,6 +228,10 @@ fn handler_type_names(handlers: &[Value<'_>]) -> Vec<String> {
 // GC-rooting: `res` is safe across the handler run — an `Ok` value crosses no yield
 // (it returns before any handler executes), and an `Err` is plain data whose thrown
 // Quoin value rides rooted in `vm.exceptions.active` until a handler consumes it.
+// The `Result` held across `debug_check_throw` (debugger-only yield) is
+// dynamically `Err` there — guarded by `let Err(e) = &res` — and `Thrown`
+// carries no payload: the thrown VALUE is rooted in `exceptions.active`
+// (vm.rs). The lint's span model can't see the Ok/Err exclusivity.
 #[allow(no_gc_across_yield)]
 fn do_catch<'gc>(
     vm: &mut VmState<'gc>,
@@ -269,6 +280,10 @@ fn do_catch<'gc>(
 /// the result it runs after.
 // GC-rooting: as in `do_catch` — plus every `Ok` value that must survive the `finally`
 // run is explicitly pushed onto the VM stack first (see the in-body comments).
+// The `Result` held across `debug_check_throw` (debugger-only yield) is
+// dynamically `Err` there — guarded by `let Err(e) = &res` — and `Thrown`
+// carries no payload: the thrown VALUE is rooted in `exceptions.active`
+// (vm.rs). The lint's span model can't see the Ok/Err exclusivity.
 #[allow(no_gc_across_yield)]
 fn do_catch_finally<'gc>(
     vm: &mut VmState<'gc>,
