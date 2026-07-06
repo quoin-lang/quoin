@@ -182,6 +182,16 @@ both under `## Misc`.)
   type-based multi-catch (`{x}.catch:{|e:IoError| …} catch:{|e:Error| …} finally:{…}`); the native
   `catch+:`/`catch+:finally:` handlers + break-on-uncaught are the follow-on (see exception-handling).
 - [ ] Implement `...` / `???` / `!!!`.
+- [ ] **Full Unicode identifiers.** Today `IDENT_PREFIX`/`IDENT_REST` are ASCII-closed
+  (`[a-zA-Z_][a-zA-Z0-9?_]*`); eventually identifiers should support full Unicode (UAX #31
+  `XID_Start`/`XID_Continue` or similar). **Coupling to watch:** the compiler's alpha-renaming
+  for control-flow fusion (docs/MATERIALIZATION_ARCH.md, M1) mints *source-unspellable* local
+  names by using a character outside the identifier charset (e.g. `·` U+00B7) — the
+  collision-freedom/invisibility guarantee is pure grammar closure. U+00B7 is `XID_Continue`
+  (Catalan), so naive Unicode identifiers would make the minted names spellable and break the
+  guarantee. Any Unicode identifier design must preserve a reserved compiler namespace: either
+  explicitly exclude one sigil from the identifier grammar forever, or switch the renamer to a
+  scheme the parser structurally rejects (e.g. a reserved prefix the grammar refuses).
 
 ## Networking & Async I/O
 
