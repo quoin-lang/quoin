@@ -372,3 +372,24 @@ pub enum Instruction {
         glob: bool,
     },
 }
+
+impl Instruction {
+    /// The selector-carrying send forms, exhaustively: `(selector, argc,
+    /// fused constant operand if the form carries one)`. Every scan that
+    /// reasons about a body's sends (AOT purity sets, materialization-nest
+    /// gates, cold-path send identification) must go through this — four
+    /// hand-copied match lists had already drifted apart (two silently
+    /// missed `SendField`). A new send variant added to the enum is handled
+    /// here or its selector is invisible to every gate at once, loudly.
+    pub fn send_parts(&self) -> Option<(&Symbol, usize, Option<&Constant>)> {
+        match self {
+            Instruction::Send(s, n) => Some((s, *n, None)),
+            Instruction::SendLocal(_, s, n) => Some((s, *n, None)),
+            Instruction::SendField(_, s, n) => Some((s, *n, None)),
+            Instruction::SendLocalLocal(_, _, s, n) => Some((s, *n, None)),
+            Instruction::SendConst(c, s, n) => Some((s, *n, Some(c))),
+            Instruction::SendLocalConst(_, c, s, n) => Some((s, *n, Some(c))),
+            _ => None,
+        }
+    }
+}

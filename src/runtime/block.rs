@@ -147,6 +147,19 @@ pub fn build_block_class() -> NativeClassBuilder {
         })
 }
 
+/// The catch-family selectors — exactly the `Block` natives above that run
+/// a protected block and may ABSORB what unwinds out of it. The AOT
+/// translator's `^^`-parity gates key on this predicate (a compiled home
+/// cannot reproduce a catch-all catching a `^^` in flight), so it must
+/// stay in lockstep with the registrations: registering a new absorber
+/// without listing it here silently compiles methods that diverge.
+pub fn is_catch_family(selector: &str) -> bool {
+    matches!(
+        selector,
+        "catch:" | "catch+:" | "catch:finally:" | "catch+:finally:"
+    )
+}
+
 /// Pop frames back to `initial` — unwind a partially-executed block after a throw.
 fn unwind(vm: &mut VmState<'_>, initial: usize) {
     while vm.frames.len() > initial {

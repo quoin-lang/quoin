@@ -57,17 +57,31 @@ const MAX_OUTCALL_ARGS: usize = 8;
 
 type SiblingMap = HashMap<(u32, String), (Vec<AotParam>, AotRet, u32)>;
 
-/// Refusal sentinel: the member used the slot window while marked
-/// scalar-pure; `compile_all` demotes it and retries instead of refusing.
-const PURITY_VIOLATION: &str = "__aot_purity__";
-/// A SPECULATED scalar return hit a return path the translator can't prove
-/// scalar: retry the member with the ret demoted to Obj (S2). Never used for
-/// annotated returns, whose checked-narrow divergence is deliberate.
-const RET_DEMOTION: &str = "__aot_ret_demote__";
-/// A merge point was first planned with a SCALAR shape but a later
-/// predecessor arrives Dyn (S3): retry the member with that merge FORCED to
-/// Dyn from the start (scalars box on entry). Payload: `__aot_merge_dyn__:ip`.
-const MERGE_DEMOTION: &str = "__aot_merge_dyn__";
+/// Why a member's translation attempt stopped — a TYPED protocol between
+/// the translator and `compile_all`'s retry loop. The demote variants are
+/// RETRY instructions, never user-facing refusals; they used to ride
+/// in-band as magic strings in the same `Err(String)` as refusal reasons,
+/// matched by `==`/prefix-parse, where one context-adding `.map_err` on the
+/// propagation path silently downgraded a retry into a permanent refusal.
+/// They now travel out-of-band (`Translator::pending_abort`, set at the
+/// same moment the aborting `Err` is returned), so the refusal strings stay
+/// free-form messages.
+enum TranslateAbort {
+    /// A real refusal: the member runs interpreted; the string is the
+    /// human-readable reason (surfaced under `QN_AOT_VERBOSE`).
+    Refuse(String),
+    /// The member used the slot window while marked scalar-pure — demote it
+    /// from the direct-call set and retry.
+    PurityDemote,
+    /// A SPECULATED scalar return hit a return path the translator can't
+    /// prove scalar — retry with the ret demoted to Obj (S2). Never used
+    /// for annotated returns, whose checked-narrow divergence is deliberate.
+    RetDemote,
+    /// A merge point first planned SCALAR sees a Dyn predecessor (S3) —
+    /// retry with the merge at this ip FORCED to Dyn from the start
+    /// (scalars box on entry).
+    MergeDemote(usize),
+}
 
 /// Compile every group; members are refused individually. Returns the
 /// registered entries and refusals `(selector, reason)`.
@@ -85,7 +99,11 @@ pub(super) fn compile_all(
         // Per-member refusal: rebuild the module without the failed member and
         // retry (sends to it become outcalls). A purity violation demotes the
         // member from the direct-call set instead of refusing it. Groups are
-        // small; worst-case quadratic compile cost is trivial.
+        // small; worst-case quadratic compile cost is trivial — as are the
+        // per-attempt `Box::leak`ed selector/name/template constants of a
+        // FAILED attempt (bounded by the monotone retry sets; a successful
+        // attempt's leaks are load-bearing, referenced by the compiled code
+        // for the process lifetime).
         let mut demoted: HashSet<u32> = HashSet::new();
         let mut ret_demoted: HashSet<u32> = HashSet::new();
         let mut dyn_merges: HashMap<u32, HashSet<usize>> = HashMap::new();
@@ -98,29 +116,32 @@ pub(super) fn compile_all(
                     compiled.append(&mut entries);
                     break;
                 }
-                Err((failed_tid, reason)) => {
-                    if reason == PURITY_VIOLATION {
-                        demoted.insert(failed_tid);
-                        continue;
-                    }
-                    if reason == RET_DEMOTION {
-                        ret_demoted.insert(failed_tid);
-                        continue;
-                    }
-                    if let Some(ip) = reason
-                        .strip_prefix(MERGE_DEMOTION)
-                        .and_then(|r| r.strip_prefix(':'))
-                        .and_then(|r| r.parse::<usize>().ok())
-                    {
-                        dyn_merges.entry(failed_tid).or_default().insert(ip);
-                        continue;
-                    }
-                    let i = active
+                Err((failed_tid, TranslateAbort::PurityDemote)) => {
+                    demoted.insert(failed_tid);
+                }
+                Err((failed_tid, TranslateAbort::RetDemote)) => {
+                    ret_demoted.insert(failed_tid);
+                }
+                Err((failed_tid, TranslateAbort::MergeDemote(ip))) => {
+                    dyn_merges.entry(failed_tid).or_default().insert(ip);
+                }
+                Err((failed_tid, TranslateAbort::Refuse(reason))) => {
+                    if let Some(i) = active
                         .iter()
                         .position(|c| c.block.template_id == Some(failed_tid))
-                        .expect("failed member is in the active set");
-                    refused.push((active[i].selector.clone(), reason));
-                    active.remove(i);
+                    {
+                        refused.push((active[i].selector.clone(), reason));
+                        active.remove(i);
+                    } else {
+                        // A failure not attributable to one member (a
+                        // candidate without a template id, or a module-level
+                        // error blamed on a placeholder tid): refuse the
+                        // whole group instead of panicking on a member
+                        // lookup that cannot succeed.
+                        for c in active.drain(..) {
+                            refused.push((c.selector.clone(), reason.clone()));
+                        }
+                    }
                 }
             }
         }
@@ -218,21 +239,22 @@ fn scalar_pure_set(
                 | Instruction::Return
                 | Instruction::BlockReturn
                 | Instruction::MethodReturn => true,
-                Instruction::Send(sel, _)
-                | Instruction::SendLocal(_, sel, _)
-                | Instruction::SendConst(_, sel, _)
-                | Instruction::SendLocalLocal(_, _, sel, _)
-                | Instruction::SendLocalConst(_, _, sel, _) => {
+                inst => match inst.send_parts() {
                     // A sealed scalar operator devirtualizes at translation
                     // (S2) when its operands prove scalar — optimistically
                     // pure here; a member that still needs an outcall trips
-                    // the translation purity check and demotes.
-                    IntBinKind::from_selector(sel.as_str()).is_some()
-                        || siblings
-                            .get(&(c.group_id, sel.as_str().to_string()))
-                            .is_some_and(|(_, _, callee)| pure.contains(callee))
-                }
-                _ => false,
+                    // the translation purity check and demotes. (Via the
+                    // exhaustive `send_parts`: the hand-copied list here
+                    // used to miss `SendField`, silently evicting any
+                    // member with a field-operand send from the pure set.)
+                    Some((sel, _, _)) => {
+                        IntBinKind::from_selector(sel.as_str()).is_some()
+                            || siblings
+                                .get(&(c.group_id, sel.as_str().to_string()))
+                                .is_some_and(|(_, _, callee)| pure.contains(callee))
+                    }
+                    None => false,
+                },
             });
             if !ok {
                 pure.remove(&tid);
@@ -396,8 +418,8 @@ fn compile_group(
     demoted: &HashSet<u32>,
     ret_demoted: &HashSet<u32>,
     dyn_merges: &HashMap<u32, HashSet<usize>>,
-) -> Result<Vec<(u32, AotEntry)>, (u32, String)> {
-    let fail = |tid: u32, e: String| (tid, e);
+) -> Result<Vec<(u32, AotEntry)>, (u32, TranslateAbort)> {
+    let fail = |tid: u32, e: String| (tid, TranslateAbort::Refuse(e));
     let any_tid = members[0].block.template_id.unwrap_or(0);
 
     let mut flags = settings::builder();
@@ -477,18 +499,21 @@ fn compile_group(
                 is_pure: pure.contains(&tid),
                 next_scratch: 0,
                 proofs: HashMap::new(),
-                sym_consts: Vec::new(),
-                name_consts: Vec::new(),
                 needs_list_self: false,
-                tmpl_consts: Vec::new(),
-                str_consts: Vec::new(),
                 nil_deferred: HashSet::new(),
 
                 pending_writebacks: HashMap::new(),
                 materialized: HashSet::new(),
                 materialized_nlr: HashSet::new(),
+                pending_abort: None,
             };
-            tr.build_inner(&mut b).map_err(|e| fail(tid, e))?;
+            if let Err(e) = tr.build_inner(&mut b) {
+                // A demote signal set alongside the aborting Err travels
+                // out-of-band — the message string is free-form and may be
+                // wrapped without breaking the retry protocol.
+                let abort = tr.pending_abort.take().unwrap_or(TranslateAbort::Refuse(e));
+                return Err((tid, abort));
+            }
             n_scratch = tr.next_scratch;
             needs_list_self = tr.needs_list_self;
             direct_self = tr.used_direct_self;
@@ -717,18 +742,9 @@ struct Translator<'a> {
     /// conditional) stay within one block, and locals carry proofs in
     /// `VarSlot::Obj` across blocks.
     proofs: HashMap<CVal, DynProof>,
-    /// Leaked `Symbol`/`NamespacedName` boxes for outcall selectors and
-    /// global references (live for the process, like the code).
-    sym_consts: Vec<&'static Symbol>,
-    name_consts: Vec<&'static crate::value::NamespacedName>,
     /// Set when a fused-`each:` guard on `self` compiled hot-path-only (B2):
     /// becomes the entry's `needs_list_self` precondition.
     needs_list_self: bool,
-    /// Leaked template `Rc`s for cold-path closure materialization (B3b) —
-    /// process-lifetime, like the code and the leaked selectors.
-    tmpl_consts: Vec<&'static Rc<StaticBlock>>,
-    /// Leaked field-name strings for compiled field access (S3).
-    str_consts: Vec<&'static str>,
     /// Merge ips FORCED to all-Dyn shapes (S3 retry): scalars box on entry,
     /// so predecessors with mixed shapes unify.
     dyn_merges: &'a HashSet<usize>,
@@ -747,6 +763,9 @@ struct Translator<'a> {
     /// unfused-`whileDo:` bug: the body's `i` advanced while the condition's
     /// stayed frozen).
     materialized: HashSet<CVal>,
+    /// Out-of-band demote signal (see [`TranslateAbort`]): set at the same
+    /// moment the aborting `Err` is returned, consumed by `compile_group`.
+    pending_abort: Option<TranslateAbort>,
     /// The materialized closures whose bodies contain a `^^` (S5). A
     /// `catch`-family send consuming one must refuse: interpreted, a
     /// catch-all can catch the `^^` crossing it — a compiled home cannot
@@ -807,23 +826,16 @@ fn scan_materialized_nest(
         }
     }
     for inst in rc.bytecode.0.iter() {
-        let (sel, block_arg) = match inst {
-            Instruction::Send(s, _)
-            | Instruction::SendLocal(_, s, _)
-            | Instruction::SendField(_, s, _)
-            | Instruction::SendLocalLocal(_, _, s, _) => (s, None),
-            Instruction::SendConst(c, s, _) | Instruction::SendLocalConst(_, c, s, _) => {
-                (s, matches!(c, Constant::Block(_)).then_some(c))
-            }
-            _ => continue,
+        let Some((sel, _, fused_const)) = inst.send_parts() else {
+            continue;
         };
         if sel.as_str() == own_selector {
             out.sends_own_selector = true;
         }
-        if sel.as_str().starts_with("catch") {
+        if crate::runtime::block::is_catch_family(sel.as_str()) {
             out.has_catch_send = true;
         }
-        if let Some(Constant::Block(nb)) = block_arg {
+        if let Some(Constant::Block(nb)) = fused_const {
             scan_materialized_nest(nb, &defined, own_selector, out)?;
         }
     }
@@ -851,7 +863,8 @@ impl<'a> Translator<'a> {
             // Translation-verified purity: the syntactic pure-set scan missed a
             // slot use (e.g. a sibling-selector send on a non-self receiver).
             // The caller demotes this member from the pure set and retries.
-            return Err(PURITY_VIOLATION.to_string());
+            self.pending_abort = Some(TranslateAbort::PurityDemote);
+            return Err("scalar-pure member touched the slot window".to_string());
         }
         let fixed = match self.cand.role {
             // 0 = receiver, then obj params.
@@ -1098,7 +1111,6 @@ impl<'a> Translator<'a> {
                     Instruction::LoadGlobal(name) => {
                         let leaked: &'static crate::value::NamespacedName =
                             Box::leak(Box::new(name.clone()));
-                        self.name_consts.push(leaked);
                         let out = self.alloc_scratch()?;
                         let out_idx = self.abs_slot(b, &fx, out);
                         let np = b.ins().iconst(types::I64, leaked as *const _ as i64);
@@ -1508,7 +1520,7 @@ impl<'a> Translator<'a> {
                                     // block re-materialization is never translated:
                                     // this deletes the sieve refusal
                                     // (GENERICS_ARCH.md §7, AOT_ARCH.md §9).
-                                    let (sel, argc) = Self::cold_send(insts, target);
+                                    let (sel, argc) = Self::cold_send(insts, target)?;
                                     let mnu_bl = b.create_block();
                                     b.ins().brif(is_bool, hot, &hot_args, mnu_bl, &[]);
                                     b.switch_to_block(mnu_bl);
@@ -1616,8 +1628,10 @@ impl<'a> Translator<'a> {
                         // closure: interpreted, a catch-all can CATCH the
                         // `^^` crossing it; a compiled home cannot reproduce
                         // that (in-flight compiled-target `^^` is
-                        // uncatchable) — the method runs interpreted.
-                        if sel.as_str().starts_with("catch")
+                        // uncatchable) — the method runs interpreted. The
+                        // predicate lives next to the runtime registrations
+                        // it must mirror.
+                        if crate::runtime::block::is_catch_family(sel.as_str())
                             && closure_args
                                 .iter()
                                 .any(|idx| self.materialized_nlr.contains(idx))
@@ -1718,7 +1732,6 @@ impl<'a> Translator<'a> {
     ) -> Result<AV, String> {
         let block_idx = self.abs_slot(b, fx, 2);
         let leaked: &'static Symbol = Box::leak(Box::new(sym));
-        self.sym_consts.push(leaked);
         let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
         let out = self.alloc_scratch()?;
         let out_idx = self.abs_slot(b, fx, out);
@@ -1742,7 +1755,6 @@ impl<'a> Translator<'a> {
     ) -> Result<(), String> {
         let block_idx = self.abs_slot(b, fx, 2);
         let leaked: &'static Symbol = Box::leak(Box::new(sym));
-        self.sym_consts.push(leaked);
         let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
         let (k, bits) = self.encode(b, fx, v);
         let f = self.func_ref(b, self.helpers.env_set);
@@ -1806,7 +1818,6 @@ impl<'a> Translator<'a> {
         ip: usize,
     ) -> Result<AV, String> {
         let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-        self.str_consts.push(leaked);
         let name_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
         let name_len = b.ins().iconst(types::I64, leaked.len() as i64);
         let self_idx = self.abs_slot(b, fx, 0);
@@ -1836,7 +1847,6 @@ impl<'a> Translator<'a> {
         ip: usize,
     ) -> Result<(), String> {
         let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-        self.str_consts.push(leaked);
         let name_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
         let name_len = b.ins().iconst(types::I64, leaked.len() as i64);
         let self_idx = self.abs_slot(b, fx, 0);
@@ -1924,8 +1934,15 @@ impl<'a> Translator<'a> {
         // Straight-line early exits (richards' task bodies) pass both.
         if has_nlr {
             let insts = &self.cand.block.bytecode.0;
+            // Every offset-carrying form counts (the guard branches only go
+            // forward TODAY, but a future backward fused form must not
+            // silently reopen the per-iteration hole).
             let in_loop = insts.iter().enumerate().any(|(j, inst)| match inst {
-                Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => {
+                Instruction::Jump(o)
+                | Instruction::IfJump(o)
+                | Instruction::ElseJump(o)
+                | Instruction::BranchIfNotBool(o)
+                | Instruction::BranchIfNotList(o) => {
                     *o < 0 && {
                         let target = (j as isize + *o) as usize;
                         target <= ip && ip <= j
@@ -1965,7 +1982,6 @@ impl<'a> Translator<'a> {
         // Build the closure in a scratch slot (rooted throughout), then bind
         // the whole frame environment into its snapshot env.
         let tmpl: &'static Rc<StaticBlock> = Box::leak(Box::new(rc.clone()));
-        self.tmpl_consts.push(tmpl);
         let tmpl_ptr = b
             .ins()
             .iconst(types::I64, tmpl as *const Rc<StaticBlock> as i64);
@@ -1980,7 +1996,6 @@ impl<'a> Translator<'a> {
         self.tag_check(b, fx, tag);
         let bind = |tr: &mut Self, b: &mut FunctionBuilder, sym: Symbol, v: AV| {
             let leaked: &'static Symbol = Box::leak(Box::new(sym));
-            tr.sym_consts.push(leaked);
             let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
             let (k, bits) = tr.encode(b, fx, v);
             let f = tr.func_ref(b, tr.helpers.closure_bind);
@@ -2029,7 +2044,6 @@ impl<'a> Translator<'a> {
             };
             for (sym, slot) in wbs {
                 let leaked: &'static Symbol = Box::leak(Box::new(sym));
-                self.sym_consts.push(leaked);
                 let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
                 let tmp = self.alloc_scratch()?;
                 let tmp_idx = self.abs_slot(b, fx, tmp);
@@ -2249,20 +2263,20 @@ impl<'a> Translator<'a> {
     /// The selector + block-arg count of the cold path's re-materialized send
     /// (the real `if:`/`if:else:` an inlined conditional falls back to) — what
     /// the proven-nil MNU stub must name to match the interpreter exactly.
-    fn cold_send(insts: &[Instruction], target: usize) -> (Symbol, i64) {
+    fn cold_send(insts: &[Instruction], target: usize) -> Result<(Symbol, i64), String> {
         for inst in insts.iter().skip(target).take(8) {
-            match inst {
-                Instruction::Send(sel, n)
-                | Instruction::SendLocal(_, sel, n)
-                | Instruction::SendConst(_, sel, n)
-                | Instruction::SendLocalLocal(_, _, sel, n)
-                | Instruction::SendLocalConst(_, _, sel, n) => {
-                    return (*sel, *n as i64);
-                }
-                _ => {}
+            if let Some((sel, n, _)) = inst.send_parts() {
+                return Ok((*sel, n as i64));
             }
         }
-        (Symbol::intern("if:"), 1)
+        // The proven-nil MNU stub must name the interpreter's EXACT selector
+        // and arity; an unclassifiable cold path used to silently default to
+        // ("if:", 1) — a wrong error message waiting for the first cold
+        // shape this scan doesn't recognize. Refuse instead (the member runs
+        // interpreted, which raises the real MNU).
+        Err(format!(
+            "cold-path send at ip {target} not identifiable for the nil-MNU stub"
+        ))
     }
 
     /// Fill the lane buffers with encoded AVs.
@@ -2297,7 +2311,6 @@ impl<'a> Translator<'a> {
         let (rk, rb) = self.encode(b, fx, recv);
         self.fill_lanes(b, fx, args)?;
         let sym: &'static Symbol = Box::leak(Box::new(Symbol::intern(selector)));
-        self.sym_consts.push(sym);
         let sel = b.ins().iconst(types::I64, sym as *const Symbol as i64);
         let out = self.alloc_scratch()?;
         let out_idx = self.abs_slot(b, fx, out);
@@ -2461,7 +2474,8 @@ impl<'a> Translator<'a> {
             // return path — no runtime narrowing whose failure would raise an
             // error the interpreter wouldn't. Demote to Obj and retry.
             (AotRet::Scalar(_), _) if self.cand.spec_ret => {
-                return Err(RET_DEMOTION.to_string());
+                self.pending_abort = Some(TranslateAbort::RetDemote);
+                return Err("speculated scalar return not provable on this path".to_string());
             }
             (AotRet::Scalar(want), AV::Dyn(idx)) => {
                 let val = self.narrow_to_scalar(b, fx, idx, want);
@@ -2608,7 +2622,10 @@ impl<'a> Translator<'a> {
                         // The merge was first planned scalar; a Dyn (or a
                         // different scalar) predecessor needs it re-planned
                         // all-Dyn — signal the retry.
-                        _ => return Err(format!("{MERGE_DEMOTION}:{ip}")),
+                        _ => {
+                            self.pending_abort = Some(TranslateAbort::MergeDemote(ip));
+                            return Err(format!("merge at ip {ip} re-planned as Dyn"));
+                        }
                     }
                 }
             }
