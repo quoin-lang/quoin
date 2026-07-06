@@ -22,6 +22,7 @@
 //! f64 `%` via an imported helper (Cranelift has no `frem`).
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
 use std::rc::Rc;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -37,8 +38,9 @@ use cranelift_module::{FuncId, Linkage, Module};
 use crate::instruction::{Constant, Instruction, IntBinKind, StaticBlock};
 use crate::runtime::elem_tag::ElemTag;
 use crate::symbol::{Symbol, self_symbol};
+use crate::value::NamespacedName;
 
-use super::helpers::{KIND_BOOL, KIND_DOUBLE, KIND_INT, KIND_NIL, KIND_SLOT};
+use super::helpers::{self, KIND_BOOL, KIND_DOUBLE, KIND_INT, KIND_NIL, KIND_SLOT};
 use super::{
     AOT_MAX_CALL_DEPTH, AotCandidate, AotEntry, AotKind, AotParam, AotRawFn, AotRet, AotRole,
     TAG_DEPTH, TAG_DIV_ZERO,
@@ -205,92 +207,134 @@ fn scalar_pure_set(members: &[&AotCandidate], siblings: &SiblingMap) -> HashSet<
     }
 }
 
-/// Imported helper function ids for one module.
-struct Helpers {
-    checkpoint: FuncId,
-    fmod: FuncId,
-    slot_set: FuncId,
-    slot_peek: FuncId,
-    list_new: FuncId,
-    list_from: FuncId,
-    list_push: FuncId,
-    list_get: FuncId,
-    list_len: FuncId,
-    list_set: FuncId,
-    string_const: FuncId,
-    outcall: FuncId,
-    narrow_error: FuncId,
-    load_global: FuncId,
-    tag_collection: FuncId,
-    nil_mnu: FuncId,
-    env_get: FuncId,
-    env_set: FuncId,
-    block_call: FuncId,
-    make_closure: FuncId,
-    closure_bind: FuncId,
+/// Rust ABI type -> Cranelift type, for deriving helper import signatures
+/// from the helpers' own `extern "C"` fn types.
+trait ClAbi {
+    fn cl(ptr: Type) -> Type;
+}
+impl ClAbi for i64 {
+    fn cl(_: Type) -> Type {
+        types::I64
+    }
+}
+impl ClAbi for u8 {
+    fn cl(_: Type) -> Type {
+        types::I8
+    }
+}
+impl ClAbi for f64 {
+    fn cl(_: Type) -> Type {
+        types::F64
+    }
+}
+impl<T> ClAbi for *const T {
+    fn cl(ptr: Type) -> Type {
+        ptr
+    }
+}
+impl<T> ClAbi for *mut T {
+    fn cl(ptr: Type) -> Type {
+        ptr
+    }
 }
 
-fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String> {
-    let sig = |params: &[Type], rets: &[Type]| {
-        let mut s = module.make_signature();
-        for &p in params {
-            s.params.push(AbiParam::new(p));
+/// Fn-pointer types whose Cranelift import signature derives from the Rust
+/// type itself (one impl per arity, below).
+trait HelperSig {
+    fn cl_sig(self, module: &JITModule, ptr: Type) -> Signature;
+}
+
+macro_rules! impl_helper_sig {
+    ($($a:ident)*) => {
+        impl<$($a: ClAbi,)* R: ClAbi> HelperSig for unsafe extern "C" fn($($a),*) -> R {
+            fn cl_sig(self, module: &JITModule, ptr: Type) -> Signature {
+                let mut s = module.make_signature();
+                $(s.params.push(AbiParam::new(<$a>::cl(ptr)));)*
+                s.returns.push(AbiParam::new(<R>::cl(ptr)));
+                s
+            }
         }
-        for &r in rets {
-            s.returns.push(AbiParam::new(r));
+    };
+}
+impl_helper_sig!(A B);
+impl_helper_sig!(A B C);
+impl_helper_sig!(A B C D);
+impl_helper_sig!(A B C D E);
+impl_helper_sig!(A B C D E F);
+impl_helper_sig!(A B C D E F G);
+impl_helper_sig!(A B C D E F G H);
+impl_helper_sig!(A B C D E F G H I);
+impl_helper_sig!(A B C D E F G H I J);
+impl_helper_sig!(A B C D E F G H I J K);
+impl_helper_sig!(A B C D E F G H I J K L);
+
+/// One row per helper: `field: path as fn(params) -> ret`. Generates the `Helpers`
+/// struct, `declare_helpers`, and `helper_symbols` (the JIT symbol table);
+/// the symbol name derives as `qn_aot_<field>`. Each row's fn type is checked
+/// against the helper's definition by a `let` coercion, and the Cranelift
+/// import signature is derived from that type (`HelperSig`) — so a helper
+/// whose signature drifts from its declaration is a compile error, not a
+/// silent ABI mismatch at runtime.
+macro_rules! aot_helpers {
+    ($($field:ident: $f:path as fn($($p:ty),* $(,)?) -> $r:ty),+ $(,)?) => {
+        /// Imported helper function ids for one module (see `aot_helpers!`).
+        struct Helpers {
+            $($field: FuncId,)+
         }
-        s
+
+        fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String> {
+            Ok(Helpers {
+                $($field: {
+                    // The coercion checks the table row against the definition.
+                    let f: unsafe extern "C" fn($($p),*) -> $r = $f;
+                    let sig = f.cl_sig(module, ptr);
+                    module
+                        .declare_function(
+                            concat!("qn_aot_", stringify!($field)),
+                            Linkage::Import,
+                            &sig,
+                        )
+                        .map_err(|e| e.to_string())?
+                },)+
+            })
+        }
+
+        /// The symbol table registered with every JIT module.
+        fn helper_symbols() -> Vec<(&'static str, *const u8)> {
+            vec![$((concat!("qn_aot_", stringify!($field)), $f as *const u8),)+]
+        }
     };
-    let i = types::I64;
-    let d = |m: &mut JITModule, name: &str, s: &Signature| {
-        m.declare_function(name, Linkage::Import, s)
-            .map_err(|e| e.to_string())
-    };
-    let cp = sig(&[ptr, ptr], &[types::I8]);
-    let fm = sig(&[types::F64, types::F64], &[types::F64]);
-    let s2 = sig(&[ptr, ptr, i, i, i], &[types::I8]); // slot_set / list_push(list,kind,bits) / list_get(list,idx,out)
-    let peek = sig(&[ptr, ptr, i, ptr], &[i]);
-    let l0 = sig(&[ptr, ptr, i], &[types::I8]);
-    let lf = sig(&[ptr, ptr, i, i, ptr, ptr], &[types::I8]);
-    let ls = sig(&[ptr, ptr, i, i, i, i], &[types::I8]);
-    let sc = sig(&[ptr, ptr, ptr, i, i], &[types::I8]);
-    let oc = sig(
-        &[ptr, ptr, i, i, i, i, i, ptr, i, ptr, ptr, i],
-        &[types::I8],
-    );
-    let ne = sig(&[ptr, ptr, i, i], &[types::I8]);
-    let lg = sig(&[ptr, ptr, ptr, i], &[types::I8]);
-    let tc = sig(&[ptr, ptr, i, i], &[types::I8]);
-    let nm = sig(&[ptr, ptr, i, i, ptr, i], &[types::I8]);
-    let ll = sig(&[ptr, ptr, i], &[i]);
-    let eg = sig(&[ptr, ptr, i, ptr, i], &[types::I8]);
-    let es = sig(&[ptr, ptr, i, ptr, i, i], &[types::I8]);
-    let bc = sig(&[ptr, ptr, i, i, i, i, i, i, i, i], &[types::I8]);
-    let mk = sig(&[ptr, ptr, i, i], &[types::I8]);
-    let cb = sig(&[ptr, ptr, i, ptr, i, i], &[types::I8]);
-    Ok(Helpers {
-        checkpoint: d(module, "qn_aot_checkpoint", &cp)?,
-        fmod: d(module, "qn_aot_fmod", &fm)?,
-        slot_set: d(module, "qn_aot_slot_set", &s2)?,
-        slot_peek: d(module, "qn_aot_slot_peek", &peek)?,
-        list_new: d(module, "qn_aot_list_new", &l0)?,
-        list_from: d(module, "qn_aot_list_from", &lf)?,
-        list_push: d(module, "qn_aot_list_push", &s2)?,
-        list_get: d(module, "qn_aot_list_get", &s2)?,
-        list_len: d(module, "qn_aot_list_len", &ll)?,
-        list_set: d(module, "qn_aot_list_set", &ls)?,
-        string_const: d(module, "qn_aot_string_const", &sc)?,
-        outcall: d(module, "qn_aot_outcall", &oc)?,
-        narrow_error: d(module, "qn_aot_narrow_error", &ne)?,
-        load_global: d(module, "qn_aot_load_global", &lg)?,
-        tag_collection: d(module, "qn_aot_tag_collection", &tc)?,
-        nil_mnu: d(module, "qn_aot_nil_mnu", &nm)?,
-        env_get: d(module, "qn_aot_env_get", &eg)?,
-        env_set: d(module, "qn_aot_env_set", &es)?,
-        block_call: d(module, "qn_aot_block_call", &bc)?,
-        make_closure: d(module, "qn_aot_make_closure", &mk)?,
-        closure_bind: d(module, "qn_aot_closure_bind", &cb)?,
-    })
+}
+
+aot_helpers! {
+    checkpoint: super::aot_checkpoint as fn(*mut c_void, *mut i64) -> u8,
+    fmod: aot_fmod as fn(f64, f64) -> f64,
+    slot_set: helpers::slot_set as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    slot_peek: helpers::slot_peek as fn(*mut c_void, *const c_void, i64, *mut i64) -> i64,
+    list_new: helpers::list_new as fn(*mut c_void, *const c_void, i64) -> u8,
+    list_from: helpers::list_from as fn(*mut c_void, *const c_void, i64, i64, *const i64, *const i64) -> u8,
+    list_push: helpers::list_push as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    list_get: helpers::list_get as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    list_len: helpers::list_len as fn(*mut c_void, *const c_void, i64) -> i64,
+    list_set: helpers::list_set as fn(*mut c_void, *const c_void, i64, i64, i64, i64) -> u8,
+    string_const: helpers::string_const as fn(*mut c_void, *const c_void, *const u8, i64, i64) -> u8,
+    outcall: helpers::outcall as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, i64, *const Symbol, i64,
+        *const i64, *const i64, i64,
+    ) -> u8,
+    narrow_error: helpers::narrow_error as fn(*mut c_void, *const c_void, i64, i64) -> u8,
+    load_global: helpers::load_global as fn(*mut c_void, *const c_void, *const NamespacedName, i64) -> u8,
+    tag_collection: helpers::tag_collection as fn(*mut c_void, *const c_void, i64, i64) -> u8,
+    nil_mnu: helpers::nil_mnu as fn(*mut c_void, *const c_void, i64, i64, *const Symbol, i64) -> u8,
+    env_get: helpers::env_get as fn(*mut c_void, *const c_void, i64, *const Symbol, i64) -> u8,
+    env_set: helpers::env_set as fn(*mut c_void, *const c_void, i64, *const Symbol, i64, i64) -> u8,
+    block_call: helpers::block_call as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, i64, i64, i64, i64,
+    ) -> u8,
+    make_closure: helpers::make_closure as fn(
+        *mut c_void, *const c_void, *const Rc<StaticBlock>, i64,
+    ) -> u8,
+    closure_bind: helpers::closure_bind as fn(*mut c_void, *const c_void, i64, *const Symbol, i64, i64) -> u8,
 }
 
 /// Compile one attempt at a group. `Err((template_id, reason))` names the
@@ -312,10 +356,9 @@ fn compile_group(
         .finish(settings::Flags::new(flags))
         .map_err(|e| fail(any_tid, e.to_string()))?;
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-    for (name, addr) in super::helpers::symbols() {
+    for (name, addr) in helper_symbols() {
         jb.symbol(name, addr);
     }
-    jb.symbol("qn_aot_fmod", aot_fmod as *const u8);
     let mut module = JITModule::new(jb);
     let ptr = module.target_config().pointer_type();
     let helpers = declare_helpers(&mut module, ptr).map_err(|e| fail(any_tid, e))?;

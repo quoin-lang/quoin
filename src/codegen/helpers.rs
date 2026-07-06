@@ -594,29 +594,3 @@ pub(super) unsafe extern "C" fn load_global(
     vm.stack[out_idx as usize] = v;
     TAG_OK
 }
-
-/// The symbol table registered with every JIT module.
-pub(super) fn symbols() -> Vec<(&'static str, *const u8)> {
-    vec![
-        ("qn_aot_checkpoint", super::checkpoint_addr()),
-        ("qn_aot_slot_set", slot_set as *const u8),
-        ("qn_aot_slot_peek", slot_peek as *const u8),
-        ("qn_aot_list_new", list_new as *const u8),
-        ("qn_aot_list_from", list_from as *const u8),
-        ("qn_aot_list_push", list_push as *const u8),
-        ("qn_aot_list_get", list_get as *const u8),
-        ("qn_aot_list_len", list_len as *const u8),
-        ("qn_aot_env_get", env_get as *const u8),
-        ("qn_aot_env_set", env_set as *const u8),
-        ("qn_aot_block_call", block_call as *const u8),
-        ("qn_aot_make_closure", make_closure as *const u8),
-        ("qn_aot_closure_bind", closure_bind as *const u8),
-        ("qn_aot_list_set", list_set as *const u8),
-        ("qn_aot_string_const", string_const as *const u8),
-        ("qn_aot_outcall", outcall as *const u8),
-        ("qn_aot_load_global", load_global as *const u8),
-        ("qn_aot_narrow_error", narrow_error as *const u8),
-        ("qn_aot_tag_collection", tag_collection as *const u8),
-        ("qn_aot_nil_mnu", nil_mnu as *const u8),
-    ]
-}

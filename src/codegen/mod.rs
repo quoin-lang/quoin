@@ -510,8 +510,3 @@ unsafe extern "C" fn aot_checkpoint(vm: *mut c_void, fuel: *mut i64) -> u8 {
     unsafe { *fuel = i64::from(crate::tuning::step_batch()) };
     TAG_OK
 }
-
-/// The checkpoint's address, for registration as a JIT symbol.
-pub(crate) fn checkpoint_addr() -> *const u8 {
-    aot_checkpoint as *const u8
-}
