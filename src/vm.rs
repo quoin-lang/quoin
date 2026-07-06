@@ -646,12 +646,21 @@ impl<'gc> VmState<'gc> {
                 level.to_string()
             };
             match span {
-                Some(s) => format!(
-                    "{pad}{}:{}:{}: {label}: {message}\n",
-                    s.filename,
-                    s.line,
-                    s.column + 1
-                ),
+                Some(s) => {
+                    // The `file:line:col` form colored exactly like a stack
+                    // trace's location (gray separators, cyan numbers).
+                    let loc = if colorize {
+                        ansi_colorizer::colorize(&format!(
+                            "{}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                            s.filename,
+                            s.line,
+                            s.column + 1
+                        ))
+                    } else {
+                        format!("{}:{}:{}", s.filename, s.line, s.column + 1)
+                    };
+                    format!("{pad}{loc}: {label}: {message}\n")
+                }
                 None => format!("{pad}{label}: {message}\n"),
             }
         }
