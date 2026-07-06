@@ -1,8 +1,10 @@
 use crate::arg;
 use crate::devirt_ops;
+use crate::dispatch::Callable;
 use crate::error::QuoinError;
 use crate::runtime::elem_tag::{ElemTag, check_insert};
 use crate::runtime::pretty::{PpShape, PrettyPrint};
+use crate::symbol::Symbol;
 use crate::value::{AnyCollect, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::VmState;
 use gc_arena::Mutation as GcMutation;
@@ -201,6 +203,79 @@ pub fn build_list_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(e))?;
             Ok(receiver)
         })
+        // `join:` — the LINEAR native for the hot List case; the Iterate
+        // mixin version (qnlib core/02-iterate.qn) still serves every other
+        // receiver, but it is a QUADRATIC interpreted `+` loop — the biggest
+        // measured cross-language asymmetry in the strings bench (Python and
+        // Ruby join in one linear native call). Semantics match the mixin
+        // exactly: the separator is appended only while the ACCUMULATED
+        // result is non-empty (so an empty first piece suppresses it), and
+        // elements go through `.s`. Elements are re-read per iteration, so a
+        // user `.s` that mutates the list sees it live, like `each:`. One
+        // probe decides whether the `.s` identity dispatch can be skipped
+        // for String elements: only the boot registry installs
+        // `Callable::Native`, so a Native entry at (String, "s") means
+        // "not overridden" — otherwise every element pays the full dispatch
+        // the mixin would.
+        .typed_instance_method("join:", &["String"], |vm, mc, receiver, args| {
+            let sep: String = (*arg!(args, String, 0)).clone();
+            let pristine_s = matches!(
+                vm.lookup_method(mc, args[0], Symbol::intern("s"), &[]),
+                Ok(Some(Callable::Native(_)))
+            );
+            let mut out = String::new();
+            let mut i: usize = 0;
+            loop {
+                let elem = match receiver
+                    .with_native_state::<NativeListState, _, _>(|l| l.get_vec().get(i).copied())
+                {
+                    Ok(Some(v)) => v,
+                    Ok(None) => break,
+                    Err(e) => return Err(QuoinError::Other(e)),
+                };
+                if !out.is_empty() {
+                    out.push_str(&sep);
+                }
+                let direct = if pristine_s
+                    && let Value::Object(o) = elem
+                    && let ObjectPayload::String(s) = &o.borrow().payload
+                {
+                    Some(*s)
+                } else {
+                    None
+                };
+                match direct {
+                    Some(s) => out.push_str(&s),
+                    None => {
+                        let v1 = vm.call_method(mc, elem, "s", vec![])?;
+                        let pushed = if let Value::Object(o) = v1
+                            && let ObjectPayload::String(s) = &o.borrow().payload
+                        {
+                            out.push_str(s);
+                            true
+                        } else {
+                            false
+                        };
+                        if !pushed {
+                            // Mirror the mixin's `result + x.s`: a non-String
+                            // `.s` result rides the untyped `+:` coercion
+                            // (one more `.s`, then Display).
+                            let v2 = vm.call_method(mc, v1, "s", vec![])?;
+                            if let Value::Object(o) = v2
+                                && let ObjectPayload::String(s) = &o.borrow().payload
+                            {
+                                out.push_str(s);
+                            } else {
+                                out.push_str(&format!("{}", v2));
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+            Ok(vm.new_string(mc, out))
+        })
+        .returns("String")
         // The index is typed, so a non-Integer index matches no variant -> MNU
         // (dispatch enforces the type instead of a hand-rolled TypeError).
         .typed_instance_method("at:", &["Integer"], |vm, mc, receiver, args| {

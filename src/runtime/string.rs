@@ -51,19 +51,33 @@ pub fn build_string_class() -> NativeClassBuilder {
         .typed_instance_method("+:", &["String"], |vm, mc, receiver, args| {
             let a = recv!(receiver, String);
             let b = arg!(args, String, 0);
-            Ok(vm.new_string(mc, format!("{}{}", *a, *b)))
+            // Sized concat, NOT `format!`: this is the hottest string op and
+            // the fmt machinery (Formatter, pad, Write plumbing) was ~20% of
+            // the strings bench's whole profile.
+            let mut out = String::with_capacity(a.len() + b.len());
+            out.push_str(&a);
+            out.push_str(&b);
+            Ok(vm.new_string(mc, out))
         })
         .instance_method("+:", |vm, mc, receiver, args| {
-            let a = recv!(receiver, String).to_string();
+            // Coerce the RHS via `.s` FIRST (it re-enters the VM, so the
+            // receiver borrow must not be held across it); clone the receiver
+            // only after, and only once, into the sized output buffer.
             let b_val = vm.call_method(mc, args[0], "s", vec![])?;
-            let b = match b_val {
+            let a = recv!(receiver, String);
+            let out = match b_val {
                 Value::Object(o) => match &o.borrow().payload {
-                    ObjectPayload::String(st) => st.to_string(),
-                    _ => format!("{}", b_val),
+                    ObjectPayload::String(st) => {
+                        let mut out = String::with_capacity(a.len() + st.len());
+                        out.push_str(&a);
+                        out.push_str(st);
+                        out
+                    }
+                    _ => format!("{}{}", *a, b_val),
                 },
-                _ => format!("{}", b_val),
+                _ => format!("{}{}", *a, b_val),
             };
-            Ok(vm.new_string(mc, format!("{}{}", a, b)))
+            Ok(vm.new_string(mc, out))
         })
         // asBytes -> the string's UTF-8 bytes as a `Bytes` (infallible). The inverse
         // is `Bytes.asString` (which can fail). See `docs/ASYNC_ARCH.md`.
@@ -353,7 +367,14 @@ pub fn build_string_class() -> NativeClassBuilder {
             let s = recv!(receiver, String);
             let sub = arg!(args, String, 0);
             if let Some(byte_idx) = s.find(&**sub) {
-                let char_idx = s[..byte_idx].chars().count() as i64;
+                // Byte->char conversion: an all-ASCII prefix (the common
+                // case) needs no second decode pass.
+                let prefix = &s.as_bytes()[..byte_idx];
+                let char_idx = if prefix.is_ascii() {
+                    byte_idx as i64
+                } else {
+                    s[..byte_idx].chars().count() as i64
+                };
                 Ok(vm.new_int(mc, char_idx))
             } else {
                 Ok(vm.new_nil(mc))
@@ -396,10 +417,14 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("splitString:", |vm, mc, receiver, args| {
             let s = recv!(receiver, String);
             let pat = arg!(args, String, 0);
-            let parts: Vec<Value> = s
-                .split(&**pat)
-                .map(|part| vm.new_string(mc, part.to_string()))
-                .collect();
+            // `split`'s iterator is not ExactSize, so a bare collect of
+            // Values regrows repeatedly; collect the cheap slices first and
+            // size the Value Vec exactly.
+            let slices: Vec<&str> = s.split(&**pat).collect();
+            let mut parts: Vec<Value> = Vec::with_capacity(slices.len());
+            for part in slices {
+                parts.push(vm.new_string(mc, part.to_string()));
+            }
             let res = vm.new_list(mc, parts);
             Ok(res)
         })

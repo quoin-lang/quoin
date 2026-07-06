@@ -425,6 +425,14 @@ pub struct VmState<'gc> {
     /// Intern pool for symbols: one canonical `Symbol` value per name, so symbols
     /// compare by identity. Rooted here and traced as part of `VmState`.
     pub symbol_table: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
+    /// Shared INNER BUFFERS for string literals: one `Gc<String>` per
+    /// distinct literal content, so materializing a literal costs one Object
+    /// alloc + a pointer instead of two GC allocs + a byte copy per push.
+    /// Only the buffer is shared — each push still mints a fresh Object
+    /// wrapper, because string VALUES have observable identity (a user can
+    /// eigenclass one: `s <-- {...}`), while the immutable payload does not.
+    /// Bounded by the program's distinct literals.
+    pub string_literal_buffers: FxHashMap<String, Gc<'gc, String>>,
     /// Name of the class just created by `DefineClass`, consumed by the next
     /// `ExecuteBlockWithSelf` to mark the class body's frame for unregister-on-
     /// defer-failure. Only a *new* class definition sets this (not an extension).
@@ -587,6 +595,7 @@ impl<'gc> VmState<'gc> {
             frames: Vec::new(),
             globals: gcl!(mc, FxHashMap::default()),
             symbol_table: gcl!(mc, HashMap::new()),
+            string_literal_buffers: FxHashMap::default(),
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
@@ -893,6 +902,31 @@ impl<'gc> VmState<'gc> {
                 payload: ObjectPayload::String(gc!(mc, s)),
             }
         ))
+    }
+
+    /// A fresh string VALUE over an already-GC'd shared buffer — the
+    /// literal-materialization fast path (see `string_literal_buffers`).
+    pub fn new_string_shared(&self, mc: &Mutation<'gc>, buf: Gc<'gc, String>) -> Value<'gc> {
+        let class = self.builtin_cache.borrow().string_class;
+        let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "String"));
+        Value::Object(gcl!(
+            mc,
+            Object {
+                class,
+                fields: Fields::default(),
+                payload: ObjectPayload::String(buf),
+            }
+        ))
+    }
+
+    /// The shared buffer for literal content `s`, minting it on first use.
+    pub fn literal_string_buffer(&mut self, mc: &Mutation<'gc>, s: &str) -> Gc<'gc, String> {
+        if let Some(g) = self.string_literal_buffers.get(s) {
+            return *g;
+        }
+        let g = gc!(mc, s.to_string());
+        self.string_literal_buffers.insert(s.to_string(), g);
+        g
     }
 
     /// Build an immutable `Bytes` value from raw bytes (mirrors `new_string`). One
@@ -3062,7 +3096,10 @@ impl<'gc> VmState<'gc> {
             Constant::Bool(b) => self.new_bool(mc, *b),
             Constant::Int(i) => self.new_int(mc, *i),
             Constant::Double(f) => self.new_double(mc, *f),
-            Constant::String(s) => self.new_string(mc, s.clone()),
+            Constant::String(s) => {
+                let buf = self.literal_string_buffer(mc, s);
+                self.new_string_shared(mc, buf)
+            }
             Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
             Constant::Block(sb) => {
                 // A closure is its shared template (Rc bump) plus the captured

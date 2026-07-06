@@ -75,4 +75,31 @@
         "* A pattern that is neither String nor Regex matches no variant -> MNU.
         .does:{ 'x'.replace:5 with:'y' } throw:MessageNotUnderstood;
     };
+
+    .test:
+    joinSemantics -> {
+        "* join: is a linear native on List; it must keep the mixin's exact
+        "* quirks: the separator appends only while the ACCUMULATED result is
+        "* non-empty (an empty first piece suppresses it), elements convert
+        "* via `.s`, and non-List receivers still use the Iterate version.
+        .is:{ #( 'a' 'b' 'c' ).join:'-' } equalTo:'a-b-c';
+        .is:{ #( '' 'a' 'b' ).join:'-' } equalTo:'a-b';
+        .is:{ #( 1 2 3 ).join:', ' } equalTo:'1, 2, 3';
+        .is:{ #().join:'-' } equalTo:'';
+        .is:{ #( 'only' ).join:'-' } equalTo:'only';
+        .is:{ (1..4).join:'+' } equalTo:'1+2+3';
+    };
+
+    .test:
+    literalsShareBuffersNotIdentity -> {
+        "* String literals share their immutable inner buffer (one GC alloc
+        "* per push instead of two) but every push mints a FRESH value:
+        "* eigenclassing one literal's value must not leak into the next
+        "* occurrence of the same literal.
+        var a = 'eigen-probe';
+        a <-- { probeTag -> { ^42 } };
+        .is:{ a.probeTag } equalTo:42;
+        .does:{ 'eigen-probe'.probeTag } throw:MessageNotUnderstood;
+        .is:{ a == 'eigen-probe' } equalTo:true;
+    };
 }

@@ -574,7 +574,9 @@ pub(super) unsafe extern "C" fn string_const(
 ) -> u8 {
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
     let s = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize)) };
-    let v = vm.new_string(mc, s.to_string());
+    // Same shared-buffer path as the interpreter's literal materialization.
+    let buf = vm.literal_string_buffer(mc, s);
+    let v = vm.new_string_shared(mc, buf);
     slot_write(vm, out_idx, v)
 }
 
