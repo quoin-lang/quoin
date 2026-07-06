@@ -319,6 +319,22 @@ pub struct CompileStats {
     pub refused: Vec<(String, String)>,
 }
 
+/// Process-lifetime compile/refusal counters. Every `compile_candidates`
+/// caller used to drop its `CompileStats`, so the ONLY record that a
+/// candidate silently fell out of compilation was an env-gated eprintln —
+/// no way to notice a coverage regression. `QN_AOT_STATS=1` surfaces these.
+static TOTAL_COMPILED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TOTAL_REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `(compiled, refused)` across the process so far.
+pub fn compile_totals() -> (usize, usize) {
+    use std::sync::atomic::Ordering;
+    (
+        TOTAL_COMPILED.load(Ordering::Relaxed),
+        TOTAL_REFUSED.load(Ordering::Relaxed),
+    )
+}
+
 /// Translate and register every candidate that survives the authoritative
 /// bytecode walk. Refusal is silent and safe (the method stays interpreted);
 /// `QN_AOT_VERBOSE=1` prints per-method outcomes to stderr.
@@ -355,6 +371,9 @@ pub fn compile_candidates(cands: Vec<AotCandidate>) -> CompileStats {
         }
         stats.refused.push((sel, why));
     }
+    use std::sync::atomic::Ordering;
+    TOTAL_COMPILED.fetch_add(stats.compiled, Ordering::Relaxed);
+    TOTAL_REFUSED.fetch_add(stats.refused.len(), Ordering::Relaxed);
     stats
 }
 

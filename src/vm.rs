@@ -1819,6 +1819,18 @@ impl<'gc> VmState<'gc> {
     /// coverage is unchanged. Errors are returned raw (un-annotated), exactly as the
     /// per-step loops returned them; `context` names the caller in the uncaught-throw
     /// message, byte-identical to the old per-site strings.
+    /// An in-flight `^^` MUST keep unwinding past this loop — either its
+    /// target frame is strictly below the loop's baseline, or its home is a
+    /// live COMPILED frame (`aot.nlr_target` set): a compiled frame owns no
+    /// interpreter frame of its own to pop, so its delivery stops the unwind
+    /// EXACTLY AT nested baselines, where "all callee frames gone" must read
+    /// as delivery, not completion — only the owning `codegen::invoke` may
+    /// consume it (the S5 absorb-at-baseline abort). Every loop that absorbs
+    /// `NonLocalReturn` decides through this ONE predicate.
+    pub(crate) fn nlr_must_propagate(&self, baseline: usize) -> bool {
+        self.frames.len() < baseline || self.aot.nlr_target.is_some()
+    }
+
     fn run_nested(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1844,13 +1856,9 @@ impl<'gc> VmState<'gc> {
                 Ok(VmStatus::Running) => {}
                 // A `^`/`^^` unwound frames: below the baseline it belongs to an
                 // enclosing loop; at/above it, the loop head re-evaluates. Counted
-                // as a step, like `run_dispatch`. EXACTLY AT the baseline with
-                // `aot.nlr_target` set, the `^^` came home to a live COMPILED
-                // frame (S5): it owns no interpreter frame of its own to pop, so
-                // "all callee frames gone" is delivery, not completion — only the
-                // owning `codegen::invoke` may stop that unwind.
+                // as a step, like `run_dispatch`.
                 Err(QuoinError::NonLocalReturn) => {
-                    if self.frames.len() < initial_frame_count || self.aot.nlr_target.is_some() {
+                    if self.nlr_must_propagate(initial_frame_count) {
                         return Err(QuoinError::NonLocalReturn);
                     }
                 }
@@ -3457,17 +3465,14 @@ impl<'gc> VmState<'gc> {
             .values()
             .filter(|p| p.cand.block.spec_state.get() == spec::OBSERVING)
             .count();
-        let saturated = self
-            .aot_pending_spec
-            .values()
-            .filter(|p| p.cand.block.spec_state.get() == spec::SATURATED)
-            .count();
+        let (compiled, refused) = crate::codegen::compile_totals();
         let mut lines = vec![format!(
-            "spec-aot: {} pending ({} observing, {} saturated), {} promoted",
+            "spec-aot: {} pending ({} observing), {} promoted; {} compiled, {} refused (QN_AOT_VERBOSE=1 for reasons)",
             self.aot_pending_spec.len(),
             observing,
-            saturated,
-            self.aot_spec_promoted
+            self.aot_spec_promoted,
+            compiled,
+            refused
         )];
         let mut profiled: Vec<_> = self
             .aot_pending_spec
@@ -4137,8 +4142,17 @@ impl<'gc> VmState<'gc> {
             match self.dispatch_one(mc, bc) {
                 // A completed instruction, or a `^`/`^^` non-local return that unwound frames
                 // (`step` maps `NonLocalReturn` to `Running`). Count it; the changed frame
-                // stack re-hoists next iteration.
-                Ok(VmStatus::Running) | Err(QuoinError::NonLocalReturn) => {
+                // stack re-hoists next iteration. An in-flight COMPILED-home `^^`
+                // can never surface here: the owning `codegen::invoke` always sits
+                // between the `^^` and this top loop (dispatch_one's AotCall arm
+                // consumes the delivery) — asserted, because absorbing one would
+                // desync the S5 protocol and truncate under a live frame.
+                res @ (Ok(VmStatus::Running) | Err(QuoinError::NonLocalReturn)) => {
+                    debug_assert!(
+                        !(matches!(res, Err(QuoinError::NonLocalReturn))
+                            && self.aot.nlr_target.is_some()),
+                        "in-flight compiled-home ^^ surfaced at the top dispatch loop"
+                    );
                     steps += 1;
                     if steps >= budget {
                         return Ok(VmStatus::Running);
