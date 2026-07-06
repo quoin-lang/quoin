@@ -243,17 +243,18 @@ fn scalar_pure_set(
                     // A sealed scalar operator devirtualizes at translation
                     // (S2) when its operands prove scalar — optimistically
                     // pure here; a member that still needs an outcall trips
-                    // the translation purity check and demotes. (Via the
-                    // exhaustive `send_parts`: the hand-copied list here
-                    // used to miss `SendField`, silently evicting any
-                    // member with a field-operand send from the pure set.)
-                    Some((sel, _, _)) => {
+                    // the translation purity check and demotes. Via the
+                    // exhaustive `send_parts` — but `SendField` stays OUT of
+                    // the pure set deliberately: its field read needs a slot,
+                    // so admission would only demote-retry back out, paying
+                    // a wasted compile attempt per such member.
+                    Some((sel, _, _)) if !matches!(inst, Instruction::SendField(..)) => {
                         IntBinKind::from_selector(sel.as_str()).is_some()
                             || siblings
                                 .get(&(c.group_id, sel.as_str().to_string()))
                                 .is_some_and(|(_, _, callee)| pure.contains(callee))
                     }
-                    None => false,
+                    _ => false,
                 },
             });
             if !ok {

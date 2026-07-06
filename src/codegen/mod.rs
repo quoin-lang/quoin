@@ -401,6 +401,7 @@ pub enum AotOutcome<'gc> {
 ///   template"; any later method-table mutation could change that, so a
 ///   stale epoch runs the interpreted body (which re-dispatches per send).
 ///   Templates never carry `direct_self`, so the check is a no-op for them.
+#[inline(always)]
 fn entry_gates(vm: &VmState<'_>, entry: &AotEntry) -> bool {
     if vm.sched.current_fiber.is_some() {
         return false;
@@ -434,6 +435,7 @@ enum HomeCtx {
 /// home, or mark into the caller (the by-convention balance this replaces
 /// is the exact shape of two shipped bugs). Returns the body's tag plus the
 /// minted frame id, if any.
+#[inline(always)]
 fn run_in_frame_ctx<'gc>(
     vm: &mut VmState<'gc>,
     enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
@@ -479,15 +481,24 @@ fn run_in_frame_ctx<'gc>(
 /// supplies the TAG_OK value (scalar-from-lane for methods, slot-read for
 /// blocks — the only shape difference). A new `TAG_*` is handled here or
 /// nowhere.
+#[inline(always)]
 fn outcome_from_tag<'gc>(
     vm: &mut VmState<'gc>,
     tag: u8,
-    ok: impl FnOnce(&mut VmState<'gc>) -> Result<Value<'gc>, QuoinError>,
+    // `Option`, not `Result`: this runs per compiled invocation (per ELEMENT
+    // on combinator seams), and a Drop-glued `Result<_, QuoinError>` here is
+    // real per-call cost; `None` = the checked return-slot read failed.
+    ok: impl FnOnce(&mut VmState<'gc>) -> Option<Value<'gc>>,
 ) -> AotOutcome<'gc> {
     match tag {
         TAG_OK => match ok(vm) {
-            Ok(v) => AotOutcome::Value(v),
-            Err(e) => AotOutcome::Err(e),
+            Some(v) => AotOutcome::Value(v),
+            // An OK tag with the ret slot truncated away means a
+            // delivery/absorb protocol bug upstream — a catchable error
+            // beats a panic that would abort across the Cranelift frames.
+            None => AotOutcome::Err(QuoinError::Other(
+                "AOT invariant violated: return slot past stack top".to_string(),
+            )),
         },
         TAG_DIV_ZERO => {
             AotOutcome::Err(QuoinError::ArithmeticError("Division by zero".to_string()))
@@ -515,6 +526,7 @@ fn outcome_from_tag<'gc>(
 /// can sit AT `base` (a caller whose operand stack was empty at the send);
 /// truncating then would chop the delivered value off the stack (found by a
 /// promoted `False#else:` whose arm block did `^^` — S1).
+#[inline(always)]
 fn finish_frame<'gc>(
     vm: &mut VmState<'gc>,
     outcome: AotOutcome<'gc>,
@@ -620,15 +632,10 @@ pub fn invoke<'gc>(
         }
     });
     let outcome = outcome_from_tag(vm, tag, |vm| match entry.ret {
-        AotRet::Scalar(AotKind::Int) => Ok(Value::Int(ret)),
-        AotRet::Scalar(AotKind::Double) => Ok(Value::Double(f64::from_bits(ret as u64))),
-        AotRet::Scalar(AotKind::Bool) => Ok(Value::Bool(ret != 0)),
-        // Checked: an OK tag with the ret slot truncated away means a
-        // delivery/absorb protocol bug upstream — a catchable error beats a
-        // panic that would abort across the Cranelift frames.
-        AotRet::Obj => vm.stack.get(ret as usize).copied().ok_or_else(|| {
-            QuoinError::Other("AOT invariant violated: return slot past stack top".to_string())
-        }),
+        AotRet::Scalar(AotKind::Int) => Some(Value::Int(ret)),
+        AotRet::Scalar(AotKind::Double) => Some(Value::Double(f64::from_bits(ret as u64))),
+        AotRet::Scalar(AotKind::Bool) => Some(Value::Bool(ret != 0)),
+        AotRet::Obj => vm.stack.get(ret as usize).copied(),
     });
     finish_frame(vm, outcome, base, minted)
 }
@@ -726,11 +733,7 @@ pub fn invoke_block<'gc>(
             )
         }
     });
-    let outcome = outcome_from_tag(vm, tag, |vm| {
-        vm.stack.get(ret as usize).copied().ok_or_else(|| {
-            QuoinError::Other("AOT invariant violated: return slot past stack top".to_string())
-        })
-    });
+    let outcome = outcome_from_tag(vm, tag, |vm| vm.stack.get(ret as usize).copied());
     finish_frame(vm, outcome, base, minted)
 }
 

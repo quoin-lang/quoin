@@ -1827,6 +1827,7 @@ impl<'gc> VmState<'gc> {
     /// as delivery, not completion — only the owning `codegen::invoke` may
     /// consume it (the S5 absorb-at-baseline abort). Every loop that absorbs
     /// `NonLocalReturn` decides through this ONE predicate.
+    #[inline(always)]
     pub(crate) fn nlr_must_propagate(&self, baseline: usize) -> bool {
         self.frames.len() < baseline || self.aot.nlr_target.is_some()
     }
@@ -4147,10 +4148,14 @@ impl<'gc> VmState<'gc> {
                 // between the `^^` and this top loop (dispatch_one's AotCall arm
                 // consumes the delivery) — asserted, because absorbing one would
                 // desync the S5 protocol and truncate under a live frame.
-                res @ (Ok(VmStatus::Running) | Err(QuoinError::NonLocalReturn)) => {
+                Ok(VmStatus::Running) | Err(QuoinError::NonLocalReturn) => {
+                    // (No result binding here: this arm runs once per
+                    // interpreted instruction, and binding the Drop-glued
+                    // Result cost a measured ~6% on combinators. The assert
+                    // holds on BOTH variants — the target must be None
+                    // whenever the top loop is running at all.)
                     debug_assert!(
-                        !(matches!(res, Err(QuoinError::NonLocalReturn))
-                            && self.aot.nlr_target.is_some()),
+                        self.aot.nlr_target.is_none(),
                         "in-flight compiled-home ^^ surfaced at the top dispatch loop"
                     );
                     steps += 1;
@@ -4189,6 +4194,7 @@ impl<'gc> VmState<'gc> {
     /// NORMAL completion (the `Return` and implicit end-of-bytecode arms —
     /// never a `^^` unwinding through the frame); if one throws and this is
     /// a new class definition, the class is unregistered first.
+    #[inline]
     fn run_frame_defers(&mut self, mc: &Mutation<'gc>, frame_idx: usize) -> Result<(), QuoinError> {
         if self.frames[frame_idx].defers.is_empty() {
             return Ok(());
@@ -4206,9 +4212,11 @@ impl<'gc> VmState<'gc> {
         Ok(())
     }
 
-    /// Consume a just-popped frame COMPLETELY — the one discipline every pop
-    /// site shares (`Return`/`BlockReturn`, the `MethodReturn` unwind, the
-    /// implicit end-of-bytecode return): destructure the frame's fields out
+    /// Consume a just-popped frame COMPLETELY — the discipline every pop
+    /// site shares (used by the `MethodReturn` unwind and the implicit-
+    /// return SLOW path; the `Return` arm and the implicit fast path
+    /// OPEN-CODE the same steps for speed — their comments say why. Keep
+    /// them in lockstep with this): destructure the frame's fields out
     /// first, because `finalize_instantiation` can park (an init that
     /// sleeps) and a collection while parked leaves any Gc pointer still
     /// held on this suspended stack dangling (the S0 segfault). The rooting
@@ -4257,21 +4265,34 @@ impl<'gc> VmState<'gc> {
         let inst = match bytecode.0.get(ip) {
             Some(i) => i,
             None => {
-                // Implicit return Nil — a NORMAL completion, so the full
-                // frame-teardown discipline applies exactly as in the
-                // `Return` arm (this arm used to skip defers, the operand
-                // truncate, the receiver-return, and instantiation
-                // finalize — fine for the plain frames that reach it, but
-                // a silent divergence waiting for the first frame here
-                // that carries any of them).
-                self.run_frame_defers(mc, frame_idx)?;
+                // Implicit return Nil — a NORMAL completion, so the frame-
+                // teardown discipline is the `Return` arm's. This arm is HOT
+                // (a fused loop's exit jump lands one past the last
+                // instruction), so the common plain frame stays on a minimal
+                // path; the rare shapes (defers, an instantiation, a
+                // receiver-return) take the full shared discipline — they
+                // used to be silently SKIPPED here, a divergence waiting for
+                // the first such frame to end implicitly.
+                let f = &self.frames[frame_idx];
+                if !f.defers.is_empty() || f.instantiating_obj.is_some() || f.return_receiver {
+                    self.run_frame_defers(mc, frame_idx)?;
+                    let ret_val = self.new_nil(mc);
+                    let popped = self.frames.pop().unwrap();
+                    self.stack.truncate(popped.stack_base);
+                    let (ret_val, spec_tid) = self.consume_popped_frame(mc, popped, ret_val)?;
+                    if spec_tid != 0 {
+                        self.spec_observe_return(spec_tid, ret_val);
+                    }
+                    self.push(ret_val);
+                    return Ok(VmStatus::Running);
+                }
                 let ret_val = self.new_nil(mc);
                 let popped = self.frames.pop().unwrap();
                 self.stack.truncate(popped.stack_base);
-                let (ret_val, spec_tid) = self.consume_popped_frame(mc, popped, ret_val)?;
-                if spec_tid != 0 {
-                    self.spec_observe_return(spec_tid, ret_val);
+                if popped.spec_tid != 0 {
+                    self.spec_observe_return(popped.spec_tid, ret_val);
                 }
+                self.last_popped_env = Some(popped.env);
                 self.push(ret_val);
                 return Ok(VmStatus::Running);
             }
@@ -4871,11 +4892,29 @@ impl<'gc> VmState<'gc> {
                 return self.exec_send(mc, frame_idx, selector, num_args);
             }
             Instruction::Return | Instruction::BlockReturn => {
-                self.run_frame_defers(mc, frame_idx)?;
-                let ret_val = self.pop()?;
+                if !self.frames[frame_idx].defers.is_empty() {
+                    self.run_frame_defers(mc, frame_idx)?;
+                }
+                let mut ret_val = self.pop()?;
                 let popped_frame = self.frames.pop().unwrap();
+                // Open-coded `consume_popped_frame` (see its doc for the
+                // copy-before-park contract): this is the hottest opcode in
+                // the interpreter, and routing the frame through the helper
+                // cost a measured ~20% on combinators (a fat Result plus a
+                // real Frame move per return). Keep the two in lockstep.
+                let spec_tid = popped_frame.spec_tid;
+                self.last_popped_env = Some(popped_frame.env);
                 self.stack.truncate(popped_frame.stack_base);
-                let (ret_val, spec_tid) = self.consume_popped_frame(mc, popped_frame, ret_val)?;
+                if popped_frame.return_receiver
+                    && let Some(rx) = popped_frame.receiver
+                {
+                    ret_val = rx;
+                }
+                if let Some(obj) = popped_frame.instantiating_obj {
+                    self.push(Value::Object(obj));
+                    self.finalize_instantiation(mc, obj, popped_frame.env)?;
+                    ret_val = self.pop()?;
+                }
                 if spec_tid != 0 {
                     self.spec_observe_return(spec_tid, ret_val);
                 }

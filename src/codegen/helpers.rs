@@ -87,6 +87,7 @@ fn invariant(vm: &mut VmState<'_>, what: &str) -> u8 {
 /// the S5 absorb-at-baseline bug aborted the process exactly here), and a
 /// catchable AOT error beats a panic that cannot unwind across the
 /// Cranelift frames.
+#[inline(always)]
 fn slot_write<'gc>(vm: &mut VmState<'gc>, idx: i64, v: Value<'gc>) -> u8 {
     match vm.stack.get_mut(idx as usize) {
         Some(slot) => {
