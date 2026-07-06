@@ -3692,9 +3692,54 @@ impl<'gc> VmState<'gc> {
         };
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(selector), None)?;
-            self.run_nested(mc, initial_frame_count, "method call")?;
-            Ok(self.pop()?)
+            if matches!(
+                method,
+                crate::dispatch::Callable::Native(_) | crate::dispatch::Callable::AotCall { .. }
+            ) {
+                // Same stack-window rooting as `exec_send` (A2c): outcall
+                // args arrive in an owned Vec (decoded from compiled lanes,
+                // never on the value stack), so push them once — two stack
+                // writes beat the rooting clone. The frame-count
+                // discriminator below is exact: a synchronous call pushes no
+                // frame; the AotCall interpreter fallbacks consume the
+                // window themselves before pushing theirs.
+                let recv_start = self.stack.len();
+                self.push(receiver);
+                for &a in &args {
+                    self.push(a);
+                }
+                let res = method.call(
+                    self,
+                    mc,
+                    Some(receiver),
+                    args,
+                    Some(selector),
+                    Some(recv_start + 1),
+                );
+                if let Err(e) = res {
+                    // The S1/finish_frame rule, as in `dispatch_send_rooted`:
+                    // an escaping `^^` already delivered at (possibly) the
+                    // window start — only non-NLR errors tear down here.
+                    if !matches!(e, QuoinError::NonLocalReturn) {
+                        self.stack.truncate(recv_start.min(self.stack.len()));
+                    }
+                    return Err(e);
+                }
+                if self.frames.len() > initial_frame_count {
+                    // An interpreter fallback started a frame (window
+                    // already consumed by the dispatch arm): drive it.
+                    self.run_nested(mc, initial_frame_count, "method call")?;
+                    Ok(self.pop()?)
+                } else {
+                    let result = self.pop()?;
+                    self.stack.truncate(recv_start);
+                    Ok(result)
+                }
+            } else {
+                method.call(self, mc, Some(receiver), args, Some(selector), None)?;
+                self.run_nested(mc, initial_frame_count, "method call")?;
+                Ok(self.pop()?)
+            }
         } else {
             Ok(self.new_nil(mc))
         }
