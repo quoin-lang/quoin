@@ -354,7 +354,9 @@ pub(super) unsafe extern "C" fn block_call(
 /// snapshot `EnvFrame` (populated by the `closure_bind` calls the translator
 /// emits right after) + the leaked template + the registry-shared IC cell —
 /// the same shape `block_from_template` builds for interpreted frames.
-/// Read-only-capture and no-`^^` semantics are the translator's gates.
+/// Read-only-capture semantics are the translator's gate; a `^^` in the block
+/// is fine (S5) — the closure's home is the invoking compiled frame, carried
+/// in `vm.aot_home_frame_id` and addressable through `vm.aot_frame_marks`.
 pub(super) unsafe extern "C" fn make_closure(
     vm: *mut c_void,
     mc: *const c_void,
@@ -373,7 +375,7 @@ pub(super) unsafe extern "C" fn make_closure(
         crate::value::Block {
             template: tmpl.clone(),
             parent_env: Some(env),
-            enclosing_method_id: None,
+            enclosing_method_id: vm.aot_home_frame_id,
             decl_block: None,
             inline_cache,
         },

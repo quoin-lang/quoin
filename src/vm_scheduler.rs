@@ -136,6 +136,16 @@ pub struct Task<'gc> {
     /// its lexical context into whichever task runs next — a closure the next
     /// task materializes would chain its snapshot to the wrong environment.
     pub aot_enclosing_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+    /// This task's compiled-frame `^^` context (see the `VmState` fields of
+    /// the same names), stashed while parked: the marks index this task's
+    /// `frames`/`stack`, and a home id leaked across tasks would tag another
+    /// task's materialized closures with a foreign `^^` target.
+    #[collect(require_static)]
+    pub aot_home_frame_id: Option<usize>,
+    #[collect(require_static)]
+    pub aot_frame_marks: Vec<crate::vm::AotFrameMark>,
+    #[collect(require_static)]
+    pub aot_nlr_target: Option<usize>,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -884,6 +894,9 @@ impl<'gc> VmState<'gc> {
         self.aot_fuel = 0;
         self.aot_depth = 0;
         self.aot_enclosing_env = None;
+        self.aot_home_frame_id = None;
+        self.aot_frame_marks.clear();
+        self.aot_nlr_target = None;
     }
 
     /// Stash the live per-task context into `tasks[tid]` (the task is parking or
@@ -915,6 +928,9 @@ impl<'gc> VmState<'gc> {
         t.aot_fuel = self.aot_fuel;
         t.aot_depth = self.aot_depth;
         t.aot_enclosing_env = self.aot_enclosing_env.take();
+        t.aot_home_frame_id = self.aot_home_frame_id.take();
+        t.aot_frame_marks = std::mem::take(&mut self.aot_frame_marks);
+        t.aot_nlr_target = self.aot_nlr_target.take();
     }
 
     /// Make `tid` the current task and restore its context into `VmState`. The
@@ -953,6 +969,9 @@ impl<'gc> VmState<'gc> {
             self.aot_fuel = t.aot_fuel;
             self.aot_depth = t.aot_depth;
             self.aot_enclosing_env = t.aot_enclosing_env.take();
+            self.aot_home_frame_id = t.aot_home_frame_id.take();
+            self.aot_frame_marks = std::mem::take(&mut t.aot_frame_marks);
+            self.aot_nlr_target = t.aot_nlr_target.take();
         } else {
             // First activation: a fresh, empty live context, then start the block.
             self.stack = Vec::new();
@@ -968,6 +987,9 @@ impl<'gc> VmState<'gc> {
             self.aot_fuel = 0;
             self.aot_depth = 0;
             self.aot_enclosing_env = None;
+            self.aot_home_frame_id = None;
+            self.aot_frame_marks = Vec::new();
+            self.aot_nlr_target = None;
             let block = self.sched.tasks[tid.0]
                 .as_ref()
                 .unwrap()
@@ -1073,6 +1095,9 @@ impl<'gc> VmState<'gc> {
             aot_fuel: 0,
             aot_depth: 0,
             aot_enclosing_env: None,
+            aot_home_frame_id: None,
+            aot_frame_marks: Vec::new(),
+            aot_nlr_target: None,
         }
     }
 

@@ -485,6 +485,7 @@ fn compile_group(
 
                 pending_writebacks: HashMap::new(),
                 materialized: HashSet::new(),
+                materialized_nlr: HashSet::new(),
             };
             tr.build_inner(&mut b).map_err(|e| fail(tid, e))?;
             n_scratch = tr.next_scratch;
@@ -735,6 +736,12 @@ struct Translator<'a> {
     /// unfused-`whileDo:` bug: the body's `i` advanced while the condition's
     /// stayed frozen).
     materialized: HashSet<CVal>,
+    /// The materialized closures whose bodies contain a `^^` (S5). A
+    /// `catch`-family send consuming one must refuse: interpreted, a
+    /// catch-all can catch the `^^` crossing it — a compiled home cannot
+    /// reproduce that (the runtime treats an in-flight compiled-target `^^`
+    /// as uncatchable), so the method stays interpreted.
+    materialized_nlr: HashSet<CVal>,
 }
 
 struct FnCtx {
@@ -1506,6 +1513,18 @@ impl<'a> Translator<'a> {
                                 "sibling closures share written captures at ip {ip}"
                             ));
                         }
+                        // A `catch`-family send consuming a `^^`-carrying
+                        // closure: interpreted, a catch-all can CATCH the
+                        // `^^` crossing it; a compiled home cannot reproduce
+                        // that (in-flight compiled-target `^^` is
+                        // uncatchable) — the method runs interpreted.
+                        if sel.as_str().starts_with("catch")
+                            && closure_args
+                                .iter()
+                                .any(|idx| self.materialized_nlr.contains(idx))
+                        {
+                            return Err(format!("non-local return (^^) under a catch at ip {ip}"));
+                        }
                         let out = if sel.as_str() == "valueWithSelfOrArg:" && args.len() == 1 {
                             self.emit_block_call(b, &fx, recv, args[0], ip)?
                         } else {
@@ -1774,6 +1793,7 @@ impl<'a> Translator<'a> {
         }
         let mut defined: HashSet<Symbol> = rc.param_syms.iter().copied().collect();
         let mut written_frees: Vec<Symbol> = Vec::new();
+        let mut has_nlr = false;
         for inst in rc.bytecode.0.iter() {
             if let Instruction::DefineLocal(s) | Instruction::DefineLocalKeep(s) = inst {
                 defined.insert(*s);
@@ -1781,11 +1801,13 @@ impl<'a> Translator<'a> {
         }
         for inst in rc.bytecode.0.iter() {
             match inst {
-                Instruction::MethodReturn => {
-                    return Err(format!(
-                        "materialized block with a non-local return (^^) at ip {ip}"
-                    ));
-                }
+                // `^^` is fine (S5): the closure's home is THIS compiled
+                // invocation — `make_closure` stamps `vm.aot_home_frame_id`
+                // as its `enclosing_method_id`, and the interpreter's
+                // `MethodReturn` unwind delivers to the frame's mark. Tracked
+                // so a `catch`-family consumer can refuse (see
+                // `materialized_nlr`).
+                Instruction::MethodReturn => has_nlr = true,
                 Instruction::Push(Constant::Block(_))
                 | Instruction::SendConst(Constant::Block(_), ..)
                 | Instruction::SendLocalConst(_, Constant::Block(_), ..) => {
@@ -1856,6 +1878,9 @@ impl<'a> Translator<'a> {
             self.pending_writebacks.insert(out_idx, writebacks);
         }
         self.materialized.insert(out_idx);
+        if has_nlr {
+            self.materialized_nlr.insert(out_idx);
+        }
         Ok(AV::Dyn(out_idx))
     }
 
