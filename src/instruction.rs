@@ -304,6 +304,17 @@ pub enum Instruction {
     // MessageNotUnderstood / a user-defined `if:else:`), leaving the receiver on the stack;
     // if it *is* a `Bool`, fall through to the inlined branch (which consumes it). Never pops.
     BranchIfNotBool(isize),
+    // Guard for fused `each:` loops (B1, docs/BLOCK_AOT_ARCH.md §3). Peeks the stack top
+    // (the `each:` receiver): a native List falls through to the inlined index loop —
+    // List is sealed, so native-List-ness alone decides that dispatch would select the
+    // `List#each:` primitive the loop implements. Anything else jumps to a cold path
+    // performing the real `each:` send (a custom class's own `each:`, Set/Map/Generator,
+    // or MNU — exact semantics), with the receiver left on the stack. Never pops.
+    BranchIfNotList(isize),
+    /// The devirtualized `count` of a native List (the fused `each:` loop bound). Pops
+    /// the receiver, pushes its element count; a non-List receiver falls back to the
+    /// real `count` send, like every devirt op.
+    ListLen,
     NewList(usize), // num_elements
     NewMap(usize),  // num_pairs (key/value count)
     NewSet(usize),  // num_elements

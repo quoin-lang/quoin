@@ -4273,6 +4273,36 @@ impl<'gc> VmState<'gc> {
                     ip = (ip as isize + offset) as usize;
                 }
             }
+            Instruction::BranchIfNotList(offset) => {
+                let offset = *offset;
+                // Peek the `each:` receiver (do not pop): a native List falls through to
+                // the fused index loop (which consumes it); anything else takes the cold
+                // path (the real `each:` send), which needs it on the stack. One downcast
+                // per each: CALL, not per element.
+                let is_list = self
+                    .stack
+                    .last()
+                    .is_some_and(|v| v.with_native_state::<NativeListState, _, _>(|_| ()).is_ok());
+                if is_list {
+                    ip += 1;
+                } else {
+                    ip = (ip as isize + offset) as usize;
+                }
+            }
+            Instruction::ListLen => {
+                let n = self.stack.len();
+                let receiver = self.stack[n - 1];
+                let got =
+                    receiver.with_native_state::<NativeListState, _, _>(|l| l.get_vec().len());
+                if let Ok(len) = got {
+                    self.stack.truncate(n - 1);
+                    self.push(Value::Int(len as i64));
+                    // b2: early-return arm — sync the hoisted ip (see dispatch_one invariant).
+                    self.frames[frame_idx].ip = ip + 1;
+                    return Ok(VmStatus::Running);
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("count"), 0);
+            }
             Instruction::NewList(n) => {
                 let n = *n;
                 let mut elements = Vec::new();

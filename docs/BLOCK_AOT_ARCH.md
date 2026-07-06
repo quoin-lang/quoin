@@ -1,14 +1,25 @@
 # Block-template AOT: compiling the combinator tier
 
-*Status: B0 SHIPPED — batched nested block-execution loops:
-combinators −27.9% (0.700→0.505s), maps −26.0%, strings −18.9%, rest at
-noise; the driver-stepping profile category eliminated outright
-(`profiling/block-template-aot/notes.md`). Audit repro corpus green
-(cancellation/starvation family). Next: B1 (fused `each:` in compiled
-methods) → B2 (compiled Iterate combinator bodies) → B3 (block-template
-compilation). The arc GENERICS_ARCH.md §12 and AOT_ARCH.md §9.8 recorded.
-Acceptance: the `combinators` bench, checksums identical in both modes,
-corpus + stress green per slice; ≥3× is the target for the full arc.*
+*Status: B0 + B1 SHIPPED. B0 — batched nested block-execution loops:
+combinators −27.9%, maps −26.0%, strings −18.9%; the driver-stepping
+profile category eliminated outright. B1 — guarded fused `each:` loops:
+combinators −28.5% more, maps −30.8%, strings −22.4%; cumulative
+combinators 0.700→0.357s (~2×), block-invocation machinery erased from
+the profile. B1 shipped as a GUARDED COMPILER INLINE rather than
+translator splicing (§3 revised below): a new `BranchIfNotList` peek-guard
+(the `BranchIfNotBool` pattern) with the literal body spliced via the
+Phase-5 `inline_block_body` machinery — so the interpreter wins on every
+native-List receiver including bare `.each:` self-sends inside Iterate's
+combinators, and the AOT translator compiles the shape by killing the
+guard on proven receivers (`List`/`List(T)` params seed
+`NativeList`/`CollectionOf` proofs; generic-annotated params became
+candidates via dispatch-name erasure; `MethodReturn` now translates as the
+method's return). Fusion refuses bodies that reference the rebound `self`
+(bare sends/`@fields` — `valueWithSelfOrArg:` binds the ELEMENT as self),
+declare top-level locals, take 2+ params, or `^>`. Next: B2 (compiled
+Iterate combinator bodies) → B3 (block-template compilation); the profile
+residue is the interpreted per-element sends inside spliced bodies.
+Acceptance: ≥3× on `combinators` for the full arc — 2× banked.*
 
 ## 1. Why: the measured shape of combinator cost
 

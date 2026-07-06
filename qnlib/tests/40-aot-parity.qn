@@ -164,4 +164,101 @@ AotNilIf <- {
         var m = { AotNilIf.flagAt:99 }.catch:{ |e| e.message };
         .is:{ m } equalTo:'no method \'if:\' for Nil'
     }
+};
+
+"* B1 (docs/BLOCK_AOT_ARCH.md): fused each: loops. The literal block is spliced
+"* into the method frame behind a native-List guard - no closure, no per-element
+"* frame. Semantics pinned in both modes: captured-local mutation, ^^ escape,
+"* zero-param bodies, the stale loop bound, the cold path (a non-List receiver
+"* dispatches its own each:), and Iterate combinators riding the fused loops.
+
+AotFusedEach <- {
+    .meta <-- {
+        sumOf: -> { |xs: List ^Integer|
+            var sum = 0;
+            xs.each:{ |x: Integer| sum = sum + x };
+            ^sum
+        };
+        sumTagged: -> { |xs: List(Integer) ^Integer|
+            var sum = 0;
+            xs.each:{ |x: Integer| sum = sum + x };
+            ^sum
+        };
+        firstOver:limit: -> { |xs: List n: Integer ^Integer|
+            xs.each:{ |x: Integer| (x > n).if:{ ^^x } };
+            ^0 - 1
+        }
+    };
+    .sealed!
+};
+
+CustomEachG <- {
+    each: -> { |b| b.valueWithSelfOrArg:'custom-elem'; b.valueWithSelfOrArg:'custom-elem' }
+};
+
+(TestSuite.new:{ var name = 'AotParityFusedEach' }).add:{
+    .test:fusedSumBothParamShapes -> {
+        var data = #(1 2 3 4 5);
+        .is:{ AotFusedEach.sumOf:data } equalTo:15;
+        .is:{ AotFusedEach.sumTagged:(data.ensure:Integer) } equalTo:15;
+    };
+
+    .test:nonLocalReturnEscapesTheFusedLoop -> {
+        .is:{ AotFusedEach.firstOver:#(1 5 2) limit:3 } equalTo:5;
+        .is:{ AotFusedEach.firstOver:#(1 2) limit:3 } equalTo:(0 - 1);
+    };
+
+    .test:zeroParamBodyAndValue -> {
+        var n = 0;
+        var r = #(1 2 3).each:{ n = n + 1 };
+        .is:{ n } equalTo:3;
+        "each: evaluates to nil, fused or not"
+        .is:{ r } equalTo:nil;
+    };
+
+    .test:mutationSeesTheStaleBoundAndFreshElements -> {
+        var xs = #(1 2 3);
+        var seen = #();
+        xs.each:{ |x| seen.add:x; xs.add:99 };
+        .is:{ seen.count } equalTo:3;
+        .is:{ xs.count } equalTo:6;
+    };
+
+    .test:coldPathDispatchesACustomEach -> {
+        "a List-BELIEVED var holding a non-list at runtime takes the guard's
+        cold path - the real dispatch, reaching the custom each:"
+        var xs: List = #();
+        xs = (#(CustomEachG.new).at:0);
+        var got = #();
+        xs.each:{ |v| got.add:v };
+        .is:{ got.count } equalTo:2;
+        .is:{ got.at:0 } equalTo:'custom-elem';
+    };
+
+    .test:nilElementsFlowThroughTheFusedLoop -> {
+        var xs = #(1);
+        xs.add:nil;
+        xs.add:3;
+        var count = 0;
+        var nils = 0;
+        xs.each:{ |x| count = count + 1; x.defined?.else:{ nils = nils + 1 } };
+        .is:{ count } equalTo:3;
+        .is:{ nils } equalTo:1;
+    };
+
+    .test:nestedFusedLoops -> {
+        var total = 0;
+        #(1 2).each:{ |a| #(10 20).each:{ |b| total = total + (a * b) } };
+        .is:{ total } equalTo:90;
+    };
+
+    .test:combinatorsRideTheFusedLoops -> {
+        "Iterate's collect:/select: call .each: on self - the guard sends
+        native lists down the fused loop inside the combinator bodies"
+        var xs: List(Integer) = #(1 2 3 4);
+        .is:{ (xs.collect:{ |x| x * 2 }).at:3 } equalTo:8;
+        .is:{ (xs.select:{ |x| x > 2 }).count } equalTo:2;
+        .is:{ xs.detect:{ |x| x > 2 } } equalTo:3;
+        .is:{ xs.reduce:{ |a b| a + b } into:100 } equalTo:110;
+    }
 }

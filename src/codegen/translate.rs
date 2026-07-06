@@ -214,6 +214,7 @@ struct Helpers {
     list_from: FuncId,
     list_push: FuncId,
     list_get: FuncId,
+    list_len: FuncId,
     list_set: FuncId,
     string_const: FuncId,
     outcall: FuncId,
@@ -252,6 +253,7 @@ fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String>
     let lg = sig(&[ptr, ptr, ptr, i], &[types::I8]);
     let tc = sig(&[ptr, ptr, i, i], &[types::I8]);
     let nm = sig(&[ptr, ptr, i, i, ptr, i], &[types::I8]);
+    let ll = sig(&[ptr, ptr, i], &[i]);
     Ok(Helpers {
         checkpoint: d(module, "qn_aot_checkpoint", &cp)?,
         fmod: d(module, "qn_aot_fmod", &fm)?,
@@ -261,6 +263,7 @@ fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String>
         list_from: d(module, "qn_aot_list_from", &lf)?,
         list_push: d(module, "qn_aot_list_push", &s2)?,
         list_get: d(module, "qn_aot_list_get", &s2)?,
+        list_len: d(module, "qn_aot_list_len", &ll)?,
         list_set: d(module, "qn_aot_list_set", &ls)?,
         string_const: d(module, "qn_aot_string_const", &sc)?,
         outcall: d(module, "qn_aot_outcall", &oc)?,
@@ -507,10 +510,17 @@ enum VarSlot {
 /// an element read from such a collection). Never from checker beliefs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DynProof {
-    /// A collection whose element tag is enforced.
+    /// A collection whose element tag is enforced. In compiled code this is
+    /// always a native List: `TagCollection` is only reachable after a list
+    /// literal (`NewMap`/`NewSet` don't translate), and the only param source
+    /// is a `List`-hinted Obj param (B1 seeding below).
     CollectionOf(ElemTag),
     /// An element read from such a collection: proven tag-or-nil.
     ElemOrNil(ElemTag),
+    /// A native List with no (or unknown) element tag — a bare `List`-hinted
+    /// Obj param (dispatch guarantees the class) or a fresh list literal.
+    /// Enough for the fused `each:` guard (B1); mints no element proofs.
+    NativeList,
 }
 
 struct Translator<'a> {
@@ -640,6 +650,19 @@ impl<'a> Translator<'a> {
                 }
                 AotParam::Obj => {
                     obj_param_avs.insert(sym, p[5 + i]);
+                    // B1: a `List`-hinted param is a dispatch-GUARANTEED native
+                    // List (List is sealed; the hint only matches the native
+                    // class) — and a tag-required param is guaranteed tagged,
+                    // since tag requirements gate dispatch too (G1). These
+                    // proofs are what let a fused `each:` guard fall away.
+                    if self.cand.block.param_types.get(i).map(String::as_str) == Some("List") {
+                        let proof = match self.cand.block.param_elem_tags.get(i).copied().flatten()
+                        {
+                            Some(tag) => DynProof::CollectionOf(tag),
+                            None => DynProof::NativeList,
+                        };
+                        self.proofs.insert(p[5 + i], proof);
+                    }
                 }
             }
         }
@@ -707,7 +730,8 @@ impl<'a> Translator<'a> {
                 Instruction::Jump(o)
                 | Instruction::IfJump(o)
                 | Instruction::ElseJump(o)
-                | Instruction::BranchIfNotBool(o) => *o,
+                | Instruction::BranchIfNotBool(o)
+                | Instruction::BranchIfNotList(o) => *o,
                 _ => continue,
             };
             let target = ip as isize + off;
@@ -944,6 +968,37 @@ impl<'a> Translator<'a> {
                         self.tag_check(b, &fx, tag);
                         stack.push(AV::Dyn(recv_idx));
                     }
+                    Instruction::BranchIfNotList(_) => {
+                        // The fused-`each:` guard (B1, docs/BLOCK_AOT_ARCH.md §3). A
+                        // PROVEN native-List receiver takes the hot path
+                        // unconditionally — no branch is emitted, so nothing ever
+                        // jumps to the cold path (the literal re-materialization +
+                        // real send) and it is never translated: the same
+                        // reachability discipline that deleted the sieve refusal
+                        // (G3). An unproven receiver refuses the member — the
+                        // interpreter's guarded loop still runs it.
+                        let proven = match stack.last() {
+                            Some(AV::Dyn(cv)) => matches!(
+                                self.proofs.get(cv),
+                                Some(DynProof::NativeList) | Some(DynProof::CollectionOf(_))
+                            ),
+                            _ => false,
+                        };
+                        if !proven {
+                            return Err(format!(
+                                "fused each: on an unproven receiver at ip {ip} — a \
+                                 `List`-annotated param or a fresh/checked list compiles"
+                            ));
+                        }
+                    }
+                    Instruction::ListLen => {
+                        let recv = stack.pop().ok_or("stack underflow")?;
+                        let recv_idx = self.obj_index(b, &fx, recv, "ListLen receiver")?;
+                        let f = self.func_ref(b, self.helpers.list_len);
+                        let call = b.ins().call(f, &[fx.vm, fx.mc, recv_idx]);
+                        let len = b.inst_results(call)[0];
+                        stack.push(AV::C(len, AotKind::Int));
+                    }
                     Instruction::ListGet => {
                         let idx = Self::pop_kind(&mut stack, AotKind::Int)?;
                         let recv = stack.pop().ok_or("stack underflow")?;
@@ -1169,7 +1224,12 @@ impl<'a> Translator<'a> {
                         let out = self.emit_send(b, &fx, recv, sel, &args, ip)?;
                         stack.push(out);
                     }
-                    Instruction::Return | Instruction::BlockReturn => {
+                    // Within one method's bytecode, `MethodReturn` (`^^`) always
+                    // targets THIS method's frame — a real nested block is a separate
+                    // `StaticBlock` never translated inline, and a fused-`each:` body
+                    // (B1) is spliced into this very frame. So all three return forms
+                    // are the compiled function's return.
+                    Instruction::Return | Instruction::BlockReturn | Instruction::MethodReturn => {
                         let v = stack.pop().ok_or("stack underflow")?;
                         self.emit_return(b, &fx, v)?;
                         break 'block;

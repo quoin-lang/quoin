@@ -201,6 +201,18 @@ pub(super) unsafe extern "C" fn list_get(
     }
 }
 
+/// `list.count` — the fused `each:` loop bound (B1). Reached only behind a
+/// proven-List guard (`BranchIfNotList` in the translator), so the value at
+/// `list_idx` is a native List by construction; the defensive 0 keeps a
+/// violated invariant from reading garbage (an empty loop, never UB).
+pub(super) unsafe extern "C" fn list_len(vm: *mut c_void, mc: *const c_void, list_idx: i64) -> i64 {
+    let (vm, _mc) = unsafe { vm_mc(vm, mc) };
+    let receiver = vm.stack[list_idx as usize];
+    receiver
+        .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len() as i64)
+        .unwrap_or(0)
+}
+
 /// `list.at:i put:v` — `devirt_ops::list_set` semantics (IndexError OOB).
 pub(super) unsafe extern "C" fn list_set(
     vm: *mut c_void,
@@ -388,6 +400,7 @@ pub(super) fn symbols() -> Vec<(&'static str, *const u8)> {
         ("qn_aot_list_from", list_from as *const u8),
         ("qn_aot_list_push", list_push as *const u8),
         ("qn_aot_list_get", list_get as *const u8),
+        ("qn_aot_list_len", list_len as *const u8),
         ("qn_aot_list_set", list_set as *const u8),
         ("qn_aot_string_const", string_const as *const u8),
         ("qn_aot_outcall", outcall as *const u8),

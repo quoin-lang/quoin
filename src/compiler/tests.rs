@@ -2360,3 +2360,70 @@ fn tagged_receivers_keep_collection_devirt() {
         code.bytecode
     );
 }
+
+// --- B1: fused each: loops (docs/BLOCK_AOT_ARCH.md §3) ---
+
+fn each_shapes(src: &str) -> (usize, usize) {
+    // (guards, hot-path block literals): a fused site emits one BranchIfNotList
+    // and exactly ONE Push(Constant::Block) — the cold path's re-materialization.
+    let node = crate::parser::parse_quoin_string(src);
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    let code = c.compile_program(p).unwrap();
+    fn collect(insts: &[Instruction], guards: &mut usize, blocks: &mut usize) {
+        for i in insts {
+            match i {
+                Instruction::BranchIfNotList(_) => *guards += 1,
+                Instruction::Push(Constant::Block(b)) => {
+                    *blocks += 1;
+                    collect(&b.bytecode, guards, blocks);
+                }
+                Instruction::SendConst(c, ..) | Instruction::SendLocalConst(_, c, ..) => {
+                    if let Constant::Block(b) = c {
+                        *blocks += 1;
+                        collect(&b.bytecode, guards, blocks);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (mut g, mut b) = (0, 0);
+    collect(&code.bytecode, &mut g, &mut b);
+    (g, b)
+}
+
+#[test]
+fn each_with_literal_fuses_behind_a_guard() {
+    // One guard; the only block literal left is the cold path's (plus the
+    // method body itself) — the hot path splices the body, closure-free.
+    let (guards, blocks) =
+        each_shapes("Foo <- { m: -> { |l: List| var s = 0; l.each:{ |x| s = s + x }; s } }");
+    assert_eq!(guards, 1, "expected exactly one fused-each guard");
+    assert_eq!(
+        blocks, 3,
+        "class body + method body + the cold-path literal only"
+    );
+}
+
+#[test]
+fn each_fusion_gates_refuse() {
+    // A body referencing the rebound `self` (a bare send) must NOT fuse —
+    // `valueWithSelfOrArg:` binds the ELEMENT as self, which splicing can't do.
+    let (guards, _) = each_shapes("Foo <- { m: -> { |l: List| l.each:{ |x| .print }; 0 } }");
+    assert_eq!(guards, 0, "bare-send body must keep the real block frame");
+    // `self` and `@field` references likewise.
+    let (guards, _) = each_shapes("Foo <- { |@n| m: -> { |l: List| l.each:{ |x| @n = x }; 0 } }");
+    assert_eq!(guards, 0, "@field body must keep the real block frame");
+    // A top-level declaration would splice a binding into the method scope.
+    let (guards, _) = each_shapes("Foo <- { m: -> { |l: List| l.each:{ |x| var t = x; t }; 0 } }");
+    assert_eq!(guards, 0, "declaring body must keep the real block frame");
+    // Two-param blocks aren't each:'s shape.
+    let (guards, _) = each_shapes("Foo <- { m: -> { |l: List| l.each:{ |a b| a }; 0 } }");
+    assert_eq!(guards, 0, "two-param body must not fuse");
+    // A non-literal argument can't be spliced at all.
+    let (guards, _) = each_shapes("Foo <- { m: -> { |l: List b: Block| l.each:b; 0 } }");
+    assert_eq!(guards, 0, "non-literal arg keeps the plain send");
+}
