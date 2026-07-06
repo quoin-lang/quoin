@@ -778,4 +778,49 @@ NlrNestWriter <- {
         "* 1..10 -> n, 11..14 -> 2n : 55 + 2*(11+12+13+14) = 155
         .is:{ total } equalTo:155
     }
+};
+
+"* --- tracked-closure escape (R0a) ----------------------------------------
+"* A materialized closure with OBLIGATIONS (pending write-backs, or a ^^
+"* whose catch-parity gate must see its consumer) must flow directly from
+"* materialization to its consuming send: bound to a local first, its
+"* obligations would key to a stale SSA value and silently orphan. Both
+"* shapes REFUSE (stay interpreted) — these pin the observable parity.
+EscWriter <- {
+    run: -> { |b| b.value };
+    tally -> {
+        var total = 0;
+        var blk = { total = total + 1 };
+        .run:blk;
+        .run:blk;
+        ^total
+    }
+};
+
+EscCatcher <- {
+    m -> {
+        var v = 'early';
+        var p = { ^^ v };
+        p.catch:{ |e| 'caught' };
+        ^'late'
+    }
+};
+
+(TestSuite.new:{ var name = 'AotParityEscape' }).add:{
+    .test:localBoundWriteCaptureStaysExact -> {
+        "* unfixed, the compiled body orphaned the write-back: total stayed 0
+        var w = EscWriter.new;
+        var i = 0;
+        var acc = '';
+        { i < 12 }.whileDo:{ acc = acc + (w.tally); i = i + 1 };
+        .is:{ acc } equalTo:'222222222222'
+    };
+
+    .test:localBoundNlrUnderCatchMatchesInterpreted -> {
+        var t = EscCatcher.new;
+        var i = 0;
+        var acc = '';
+        { i < 5 }.whileDo:{ acc = acc + (t.m); i = i + 1 };
+        .is:{ acc } equalTo:'earlycaught'
+    }
 }

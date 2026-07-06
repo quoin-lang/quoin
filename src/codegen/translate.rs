@@ -1110,6 +1110,7 @@ impl<'a> Translator<'a> {
                     }
                     Instruction::DefineLocal(sym) | Instruction::StoreLocal(sym) => {
                         let v = stack.pop().ok_or("stack underflow")?;
+                        self.refuse_tracked_escape(v, ip, "a local")?;
                         if matches!((v, &insts[ip]), (AV::Nil, Instruction::DefineLocal(_)))
                             && !vars.contains_key(sym)
                             && !obj_param_avs.contains_key(sym)
@@ -1135,6 +1136,7 @@ impl<'a> Translator<'a> {
                     }
                     Instruction::DefineLocalKeep(sym) | Instruction::StoreLocalKeep(sym) => {
                         let v = *stack.last().ok_or("stack underflow")?;
+                        self.refuse_tracked_escape(v, ip, "a local")?;
                         if self.free_in_block(&vars, &obj_param_avs, *sym)
                             && matches!(&insts[ip], Instruction::StoreLocalKeep(_))
                         {
@@ -1263,6 +1265,9 @@ impl<'a> Translator<'a> {
                             }
                             let elems: Vec<AV> =
                                 stack.split_off(stack.len().checked_sub(n).ok_or("underflow")?);
+                            for e in &elems {
+                                self.refuse_tracked_escape(*e, ip, "a list literal")?;
+                            }
                             self.fill_lanes(b, &fx, &elems)?;
                             let ka = b.ins().stack_addr(types::I64, fx.kinds_buf, 0);
                             let ba = b.ins().stack_addr(types::I64, fx.bits_buf, 0);
@@ -1277,6 +1282,7 @@ impl<'a> Translator<'a> {
                     Instruction::ListPush => {
                         let val = stack.pop().ok_or("stack underflow")?;
                         let recv = stack.pop().ok_or("stack underflow")?;
+                        self.refuse_tracked_escape(val, ip, "a list")?;
                         let recv_idx = self.obj_index(b, &fx, recv, "ListPush receiver")?;
                         let (k, bits) = self.encode(b, &fx, val);
                         let f = self.func_ref(b, self.helpers.list_push);
@@ -1368,6 +1374,7 @@ impl<'a> Translator<'a> {
                         let val = stack.pop().ok_or("stack underflow")?;
                         let idx = Self::pop_kind(&mut stack, AotKind::Int)?;
                         let recv = stack.pop().ok_or("stack underflow")?;
+                        self.refuse_tracked_escape(val, ip, "a list")?;
                         let recv_idx = self.obj_index(b, &fx, recv, "ListSet receiver")?;
                         let (k, bits) = self.encode(b, &fx, val);
                         let f = self.func_ref(b, self.helpers.list_set);
@@ -1381,6 +1388,7 @@ impl<'a> Translator<'a> {
                     // string keys out of the compiled ABI.
                     Instruction::MapGet => {
                         let key = stack.pop().ok_or("stack underflow")?;
+                        self.refuse_tracked_escape(key, ip, "a map key")?;
                         let recv = stack.pop().ok_or("stack underflow")?;
                         let out = self.emit_outcall(b, &fx, recv, "at:", &[key], ip)?;
                         stack.push(out);
@@ -1388,6 +1396,11 @@ impl<'a> Translator<'a> {
                     Instruction::MapSet => {
                         let val = stack.pop().ok_or("stack underflow")?;
                         let key = stack.pop().ok_or("stack underflow")?;
+                        // These reissue as outcalls WITHOUT the send head's
+                        // post-send write-back flush — a tracked closure here
+                        // would orphan its obligations.
+                        self.refuse_tracked_escape(val, ip, "a map")?;
+                        self.refuse_tracked_escape(key, ip, "a map key")?;
                         let recv = stack.pop().ok_or("stack underflow")?;
                         let out = self.emit_outcall(b, &fx, recv, "at:put:", &[key, val], ip)?;
                         stack.push(out);
@@ -1639,10 +1652,12 @@ impl<'a> Translator<'a> {
                     }
                     Instruction::StoreField(name) => {
                         let v = stack.pop().ok_or("stack underflow")?;
+                        self.refuse_tracked_escape(v, ip, "a field")?;
                         self.emit_field_set(b, &fx, name, v, ip)?;
                     }
                     Instruction::StoreFieldKeep(name) => {
                         let v = *stack.last().ok_or("stack underflow")?;
+                        self.refuse_tracked_escape(v, ip, "a field")?;
                         self.emit_field_set(b, &fx, name, v, ip)?;
                     }
                     Instruction::Return | Instruction::BlockReturn | Instruction::MethodReturn => {
@@ -2036,6 +2051,32 @@ impl<'a> Translator<'a> {
                         self.tag_check(b, fx, tag);
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// A materialized closure with OBLIGATIONS — pending write-backs, or a
+    /// `^^` whose catch-parity gate must see its consumer — is tracked by
+    /// the SSA value of its slot, and that bookkeeping does NOT survive a
+    /// store/load round-trip through a local, field, or collection: the
+    /// reloaded value is a fresh SSA id, so the obligations silently orphan.
+    /// (Found live: `var blk = { total = total + 1 }; .run:blk` compiled to
+    /// a method whose write-backs never flushed — `total` stayed 0.) Such
+    /// closures must flow DIRECTLY from materialization to their consuming
+    /// send; any escape refuses. Obligation-free closures may escape (their
+    /// only divergence is the documented snapshot-vs-live-env edge).
+    fn refuse_tracked_escape(&self, v: AV, ip: usize, what: &str) -> Result<(), String> {
+        if let AV::Dyn(idx) = v {
+            if self.pending_writebacks.contains_key(&idx) {
+                return Err(format!(
+                    "write-capturing closure escapes to {what} at ip {ip}"
+                ));
+            }
+            if self.materialized_nlr.contains(&idx) {
+                return Err(format!(
+                    "non-local-return closure escapes to {what} at ip {ip}"
+                ));
             }
         }
         Ok(())
