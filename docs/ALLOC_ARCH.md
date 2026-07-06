@@ -8,9 +8,12 @@ the inline-fields cancellation effect, and btrees is the workload it
 punishes), and it breaks the copy-a-cheap-Gc-handle-out-of-the-borrow
 discipline `recv!`/`arg!` and every string native rely on — either
 guard-holding across ops (the borrow-across-yield hazard class) or a
-clone per access. Needs its own prototype + A/B, not a rider. Next: the
-A3 reassessment (escape-analysis stack envs vs btrees' sibling-closure
-compile coverage) against fresh profiles.*
+clone per access. Needs its own prototype + A/B, not a rider. A3 is
+REASSESSED AND RESOLVED (§3-A3): the coverage direction was run to
+ground in A3a — decision (E) landed, the un-refused `makeTree` measured
+SLOWER compiled, and the recursion gate now encodes that; the arc's
+remaining levers (cheap cold-arm materialization, escape-analysis stack
+environments) are fresh own-design arcs.*
 
 ## 1. Why: the measured shape
 
