@@ -1294,6 +1294,11 @@ impl<'gc> VmState<'gc> {
             .borrow_mut(mc)
             .insert(ns_name, Value::Class(class_obj));
         self.invalidate_method_cache();
+        // An ext class can shadow/extend a name already baked into a compiled
+        // entry's direct self-calls — the redefinition epoch is what Bails
+        // those stale entries (the contract codegen's epoch doc promises for
+        // extension installs, matching the DefineMethod arms).
+        crate::codegen::bump_redef_epoch();
     }
 
     /// NO borrow may be held while an initializer runs: `call_method_value` executes
