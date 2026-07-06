@@ -97,12 +97,30 @@ Acceptance: strings ≥1.5× (0.195s → ≤0.13s whole-process, interleaved
 Acceptance: btrees ≥1.15×; strings/maps/json further improvement;
 nothing regresses beyond noise.
 
-### A3 (reassess after A2, own design)
+### A3 (reassessed — coverage direction resolved, envs remain)
 
-Escape-analysis stack environments (block-free bodies skip the
-per-call EnvFrame — PERF_ROADMAP Tier 3a) vs. btrees compilation
-coverage (the sibling-closure-writeback refusal). Sized against fresh
-post-A2 profiles; the collector revisit stays deferred.
+Post-A2 btrees profile: ~43% dispatch/interpreter (its hot methods
+refuse compilation), ~11% alloc/GC. The COVERAGE direction was run to
+ground in A3a: the config-block write-back false positive is fixed
+(init-form binding is now STATIC — `StaticBlock::is_init_literal`,
+decision (E)), which un-refused `makeTree` — and compiling it measured
+btrees +6.8% SLOWER (the whileDo:/any?: lesson: the arms carry the
+recursion, so every node pays a full-frame snapshot materialization
+where the interpreter shares a pointer). The recursion gate now covers
+all materializations, `^^` or not, and makeTree deliberately stays
+interpreted.
+
+REMAINING A3 levers, both own-design arcs:
+- **Cheap cold-arm materialization** (hoisted/lazy closures): the ONE
+  unlock shared by makeTree, qnlib's `whileDo:`/`any?:`, and S5c
+  template-`^^`. Until then, recursive/per-iteration materialization
+  correctly refuses.
+- **Escape-analysis stack environments** (PERF_ROADMAP Tier 3a):
+  attacks the per-call EnvFrame + the interpreted-dispatch share
+  directly.
+- The `run:`-style sibling refusal (cond/body sharing written cells)
+  is a REAL semantics boundary, not a false positive — only cheap
+  shared-cell materialization would lift it.
 
 ## 4. Doctrine
 
