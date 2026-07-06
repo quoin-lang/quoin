@@ -321,13 +321,14 @@ fn compile_group(
     }
 
     let mut fb_ctx = FunctionBuilderContext::new();
-    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32)> = Vec::new();
+    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool)> = Vec::new();
 
     for m in members {
         let tid = m.block.template_id.unwrap();
         let mut ctx = module.make_context();
         ctx.func.signature = inner_sig(&mut module, ptr, m);
         let n_scratch;
+        let needs_list_self;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
             let mut tr = Translator {
@@ -342,9 +343,11 @@ fn compile_group(
                 proofs: HashMap::new(),
                 sym_consts: Vec::new(),
                 name_consts: Vec::new(),
+                needs_list_self: false,
             };
             tr.build_inner(&mut b).map_err(|e| fail(tid, e))?;
             n_scratch = tr.next_scratch;
+            needs_list_self = tr.needs_list_self;
             b.seal_all_blocks();
             b.finalize();
         }
@@ -371,14 +374,14 @@ fn compile_group(
         module
             .define_function(tramp_id, &mut tctx)
             .map_err(|e| fail(tid, e.to_string()))?;
-        tramp_ids.push((tid, tramp_id, m, n_scratch));
+        tramp_ids.push((tid, tramp_id, m, n_scratch, needs_list_self));
     }
 
     module
         .finalize_definitions()
         .map_err(|e| fail(any_tid, e.to_string()))?;
     let mut out = Vec::new();
-    for (tid, tramp_id, m, n_scratch) in tramp_ids {
+    for (tid, tramp_id, m, n_scratch, needs_list_self) in tramp_ids {
         let addr = module.get_finalized_function(tramp_id);
         let raw: AotRawFn = unsafe { std::mem::transmute(addr) };
         out.push((
@@ -388,6 +391,7 @@ fn compile_group(
                 params: m.params.clone().into_boxed_slice(),
                 ret: m.ret,
                 n_scratch,
+                needs_list_self,
             },
         ));
     }
@@ -544,6 +548,9 @@ struct Translator<'a> {
     /// global references (live for the process, like the code).
     sym_consts: Vec<&'static Symbol>,
     name_consts: Vec<&'static crate::value::NamespacedName>,
+    /// Set when a fused-`each:` guard on `self` compiled hot-path-only (B2):
+    /// becomes the entry's `needs_list_self` precondition.
+    needs_list_self: bool,
 }
 
 struct FnCtx {
@@ -982,12 +989,21 @@ impl<'a> Translator<'a> {
                                 self.proofs.get(cv),
                                 Some(DynProof::NativeList) | Some(DynProof::CollectionOf(_))
                             ),
+                            // A guard on `self` (an open-owner combinator body, B2)
+                            // becomes the ENTRY's precondition: `invoke` Bails to
+                            // the interpreted body for non-List receivers, so the
+                            // hot path is proven-by-entry.
+                            Some(AV::SelfRef) => {
+                                self.needs_list_self = true;
+                                true
+                            }
                             _ => false,
                         };
                         if !proven {
                             return Err(format!(
                                 "fused each: on an unproven receiver at ip {ip} — a \
-                                 `List`-annotated param or a fresh/checked list compiles"
+                                 `List`-annotated param, a fresh/checked list, or `self` \
+                                 (entry-gated) compiles"
                             ));
                         }
                     }
@@ -1497,7 +1513,11 @@ impl<'a> Translator<'a> {
         ip: usize,
     ) -> Result<AV, String> {
         let key = (self.cand.group_id, sel.as_str().to_string());
-        if matches!(recv, AV::SelfRef)
+        // An OPEN owner (B2) never emits direct calls: the frozen-callee-set
+        // assumption behind them is exactly what a reopen would violate. Every
+        // send goes through the outcall (dispatch-equivalent) seam instead.
+        if !self.cand.open_owner
+            && matches!(recv, AV::SelfRef)
             && let Some((psig, pret, callee_tid)) = self.siblings.get(&key)
             && self.pure.contains(callee_tid)
             && psig.len() == args.len()

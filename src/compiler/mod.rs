@@ -711,9 +711,15 @@ impl Compiler {
                 .rev()
                 .find(|c| !c.name.is_empty())
                 .is_some_and(|c| c.sealed);
-        if !sealed || imm.multi.contains(selector) || block_node.decl_block.is_some() {
+        if imm.multi.contains(selector) || block_node.decl_block.is_some() {
             return;
         }
+        // B2 (docs/BLOCK_AOT_ARCH.md §3): an OPEN owner's method may compile —
+        // marked so the translator emits no direct sibling calls (every send
+        // crosses a dispatch-equivalent seam; a reopen then simply dispatches
+        // to its new template, per-dispatch minting making the stale entry
+        // unreachable). Sealed owners keep the direct-call fast path.
+        let open_owner = !sealed;
         let mut params = Vec::new();
         for arg in &block_node.arguments {
             if arg.identifier.identifier_type == IdentifierType::Instance {
@@ -734,7 +740,11 @@ impl Compiler {
         let Some(rt) = &block_node.return_type else {
             return;
         };
-        let Some(ret) = crate::codegen::AotRet::from_annotation(&annotation_name(rt)) else {
+        // Same erasure as params: `^List(U)` returns a List at runtime (the
+        // variables are checker-only); a type-var return erases to `Object`
+        // and stays a non-candidate.
+        let Some(ret) = crate::codegen::AotRet::from_annotation(&self.dispatch_type_name(rt))
+        else {
             return;
         };
         // `compile_block` just pushed the compiled body as a block constant.
@@ -748,6 +758,7 @@ impl Compiler {
             block: rc.clone(),
             params,
             ret,
+            open_owner,
         });
     }
 

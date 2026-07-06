@@ -73,7 +73,9 @@ impl AotParam {
             return Some(AotParam::Scalar(k));
         }
         match name {
-            "List" | "Map" | "String" => Some(AotParam::Obj),
+            // `Block`: any block value is an ordinary heap object in a slot;
+            // compiled code interacts with it through outcalls only (B2).
+            "List" | "Map" | "String" | "Block" => Some(AotParam::Obj),
             _ => None,
         }
     }
@@ -109,6 +111,12 @@ pub struct AotCandidate {
     pub block: Rc<StaticBlock>,
     pub params: Vec<AotParam>,
     pub ret: AotRet,
+    /// The owner class is OPEN (B2, docs/BLOCK_AOT_ARCH.md §3): the compiled
+    /// form must contain no direct sibling calls — every send crosses a
+    /// dispatch-equivalent seam, so a later reopen simply dispatches to its
+    /// new template and the stale entry stops being reachable (the same
+    /// per-dispatch minting argument as §6.2's no-deopt case).
+    pub open_owner: bool,
 }
 
 /// Raw ABI of a compiled trampoline. `args`/`ret` carry bit patterns (`f64` via
@@ -151,6 +159,11 @@ pub struct AotEntry {
     pub ret: AotRet,
     /// Scratch slots (beyond receiver + object params) the frame needs.
     pub n_scratch: u32,
+    /// Entry precondition (B2): the body contains a fused-`each:` loop over
+    /// `self` compiled hot-path-only, so the receiver must be a native List —
+    /// `invoke` Bails to the interpreted body (whose guarded loop handles any
+    /// receiver exactly) when it isn't. Checked before any state changes.
+    pub needs_list_self: bool,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -248,6 +261,16 @@ pub fn invoke<'gc>(
     args: &[Value<'gc>],
 ) -> AotOutcome<'gc> {
     if args.len() != entry.params.len() {
+        return AotOutcome::Bail;
+    }
+    if entry.needs_list_self
+        && receiver
+            .with_native_state::<crate::runtime::list::NativeListState, _, _>(|_| ())
+            .is_err()
+    {
+        // B2 entry precondition: the compiled body's fused loop assumes a
+        // native-List self. Any other receiver runs the interpreted body,
+        // whose guarded loop dispatches the real `each:` — exact semantics.
         return AotOutcome::Bail;
     }
     let base = vm.stack.len();

@@ -261,4 +261,41 @@ CustomEachG <- {
         .is:{ xs.detect:{ |x| x > 2 } } equalTo:3;
         .is:{ xs.reduce:{ |a b| a + b } into:100 } equalTo:110;
     }
+};
+
+"* B2: compiled Iterate combinator bodies (open-owner candidacy). The soundness
+"* crux: an open class's compiled entries are minted per-dispatch from the
+"* method's own template, so a reopen simply dispatches to its new template -
+"* and non-List receivers Bail to the interpreted body at entry (whose guarded
+"* loop performs the real each: send).
+
+(TestSuite.new:{ var name = 'AotParityOpenOwner' }).add:{
+    .test:nonListReceiversBailToTheInterpretedBody -> {
+        "Range mixes Iterate but is no native List - the compiled collect:
+        must Bail at entry and the interpreted body must agree"
+        var viaRange = (1..4).collect:{ |x| x * 10 };
+        .is:{ viaRange.count } equalTo:3;
+        .is:{ viaRange.at:0 } equalTo:10;
+        .is:{ viaRange.at:2 } equalTo:30;
+    };
+
+    .test:reopeningIterateInvalidatesCompiledEntries -> {
+        "redefine collect: AFTER qnlib loaded (and after its body compiled):
+        the new template must win for every collection from here on"
+        "same dispatch signature (Block-hinted param) = a TRUE redefinition;
+        an untyped param would APPEND a weaker multimethod variant instead"
+        Iterate <-- {
+            collect: -> { |b: Block| 'redefined' }
+        };
+        .is:{ #(1 2 3).collect:{ |x| x } } equalTo:'redefined';
+        "restore the real collect: so later suites keep working"
+        Iterate <-- {
+            collect: -> { |collectBlock: Block(T ^U) ^List(U)|
+                var l = #();
+                .each:{ |collectItem| l.add:collectBlock.valueWithSelfOrArg:collectItem };
+                ^l
+            }
+        };
+        .is:{ (#(1 2).collect:{ |x| x + 1 }).at:1 } equalTo:3;
+    }
 }

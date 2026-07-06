@@ -134,6 +134,7 @@ fn compile_and_execute_source<'gc>(
     display: &str,
     self_val: Option<Value<'gc>>,
     bindings: &[Binding<'gc>],
+    unit_mode: bool,
 ) -> Result<Value<'gc>, QuoinError> {
     // Use the fallible parser so a syntax error in eval'd / `use`d source surfaces as a
     // catchable `ParseError` rather than panicking the whole VM (the panicking
@@ -159,6 +160,16 @@ fn compile_and_execute_source<'gc>(
     } else {
         Compiler::new_with_locals(binding_names)
     };
+    // A `use`-loaded unit is RUN-ONCE (the load registry) — runner-shaped, not
+    // eval-shaped — so it mints template ids (bounded: once per unit per
+    // process) and collects AOT candidates like any runner unit. This is what
+    // lets qnlib's own methods (the Iterate combinators, B2) compile natively;
+    // eval/REPL/interpolation stay id-less (they compile per evaluation).
+    if unit_mode && crate::tuning::aot_enabled() {
+        compiler = compiler.with_template_ids().with_aot();
+    } else if unit_mode {
+        compiler = compiler.with_template_ids();
+    }
     // Share the VM's class-name accumulator so this unit sees classes earlier-compiled units
     // defined (and later units see this one's) — the basis for `unknown type Foo`.
     compiler.set_seen_types(vm.options.seen_types.clone());
@@ -171,6 +182,9 @@ fn compile_and_execute_source<'gc>(
         .compile_program_with(program_node, self_val.is_none())
         .map_err(|e| QuoinError::ParseError(format!("Compilation error: {}", e)))?;
     vm.report_type_warnings(compiler.diagnostics());
+    if unit_mode && crate::tuning::aot_enabled() {
+        crate::codegen::compile_candidates(compiler.take_aot_candidates());
+    }
     // Seed the bindings into a parent env the eval'd frame walks into.
     let parent_env = (!bindings.is_empty()).then(|| {
         let mut env = EnvFrame::new(None);
@@ -191,7 +205,7 @@ pub(crate) fn eval_string<'gc>(
     self_val: Option<Value<'gc>>,
     bindings: &[Binding<'gc>],
 ) -> Result<Value<'gc>, QuoinError> {
-    compile_and_execute_source(vm, mc, code, filename, self_val, bindings)
+    compile_and_execute_source(vm, mc, code, filename, self_val, bindings, false)
 }
 
 /// Load a unit once. Resolves `(package, path)` to source via the VM's resolver, runs
@@ -231,7 +245,7 @@ pub fn load_unit<'gc>(
     });
     let q = package.map(|p| format!("{p}:")).unwrap_or_default();
     let display = format!("{q}{path}.qn");
-    compile_and_execute_source(vm, mc, &source, &display, None, &[])?;
+    compile_and_execute_source(vm, mc, &source, &display, None, &[], true)?;
     if let Some(u) = vm
         .modules
         .loaded

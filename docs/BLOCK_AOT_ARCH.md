@@ -16,10 +16,26 @@ guard on proven receivers (`List`/`List(T)` params seed
 candidates via dispatch-name erasure; `MethodReturn` now translates as the
 method's return). Fusion refuses bodies that reference the rebound `self`
 (bare sends/`@fields` — `valueWithSelfOrArg:` binds the ELEMENT as self),
-declare top-level locals, take 2+ params, or `^>`. Next: B2 (compiled
-Iterate combinator bodies) → B3 (block-template compilation); the profile
-residue is the interpreted per-element sends inside spliced bodies.
-Acceptance: ≥3× on `combinators` for the full arc — 2× banked.*
+declare top-level locals, take 2+ params, or `^>`. B2 SHIPPED —
+combinators −4.5% more (cumulative 0.700→0.343s, 2.04×), modest by
+design: only `collect:`-shaped bodies compile. What it built:
+`use`-loaded units now mint template ids + AOT candidates (the eval
+id-less policy had silently swept ALL of qnlib in — its methods could
+never compile before); open-owner candidacy per the §3 amendment
+(no direct calls; reopen-invalidation pinned by a parity test — note a
+same-dispatch-signature reopen REPLACES, a different signature APPENDS a
+multimethod variant that may never win); `Block` params ride as Obj;
+returns erase like params (`^List(U)` → Obj); and the `needs_list_self`
+entry precondition (a fused self-loop compiles hot-path-only; `invoke`
+Bails non-List receivers to the interpreted body — Range/Generator
+parity-tested). Startup +~1.5–2ms for the qnlib compile (now ~3.4ms
+total vs kill switch — visible on short whole-process benches).
+Remaining for B3, the two measured blockers: conditional cold paths that
+materialize blocks (kills `select:`/`count:`/`sum:` compilation — needs
+closure materialization from compiled frames, i.e. the captures ABI) and
+the per-element outcall → interpreted block body (needs compiled block
+templates + a fast invocation seam). Acceptance: ≥3× on `combinators`
+for the full arc — 2.04× banked.*
 
 ## 1. Why: the measured shape of combinator cost
 
