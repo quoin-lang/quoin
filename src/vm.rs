@@ -4155,6 +4155,71 @@ impl<'gc> VmState<'gc> {
     /// `self.frames[frame_idx].ip = ip` — the tail write-back only runs on fall-through. A
     /// violation is never silent: it surfaces immediately as a stack imbalance under the
     /// `.qn` suite.
+    /// Run the deferred calls queued on `frames[frame_idx]` (e.g. mixin
+    /// requirement checks) *before* popping it, so the defer queue — and any
+    /// Values it references — stays GC-rooted via `self.frames` even if a
+    /// defer yields and a collection happens during the suspension. Iterates
+    /// a clone to satisfy the borrow checker; the originals stay in the
+    /// (still-live) frame to keep their Values reachable. Defers run only on
+    /// NORMAL completion (the `Return` and implicit end-of-bytecode arms —
+    /// never a `^^` unwinding through the frame); if one throws and this is
+    /// a new class definition, the class is unregistered first.
+    fn run_frame_defers(&mut self, mc: &Mutation<'gc>, frame_idx: usize) -> Result<(), QuoinError> {
+        if self.frames[frame_idx].defers.is_empty() {
+            return Ok(());
+        }
+        let defers = self.frames[frame_idx].defers.clone();
+        if let Err(e) = self.run_defers(mc, &defers) {
+            if let Some(name) = self.frames[frame_idx].unregister_on_defer_failure.clone() {
+                self.globals.borrow_mut(mc).remove(&name);
+                // The class is gone; its pointer could be reused, so drop
+                // any memoized resolutions that might reference it.
+                self.invalidate_method_cache();
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Consume a just-popped frame COMPLETELY — the one discipline every pop
+    /// site shares (`Return`/`BlockReturn`, the `MethodReturn` unwind, the
+    /// implicit end-of-bytecode return): destructure the frame's fields out
+    /// first, because `finalize_instantiation` can park (an init that
+    /// sleeps) and a collection while parked leaves any Gc pointer still
+    /// held on this suspended stack dangling (the S0 segfault). The rooting
+    /// contract across that park: the instantiating object rides the VM
+    /// stack, and the frame's env rides `last_popped_env`. The
+    /// receiver-return applies first and the instantiation pop overwrites
+    /// it. Returns the (possibly replaced) return value plus the frame's
+    /// `spec_tid` — the CALLER decides whether to observe the return (the
+    /// `MethodReturn` unwind observes only at the target frame) and owns
+    /// the value-stack truncation policy (per-frame vs once-at-target).
+    fn consume_popped_frame(
+        &mut self,
+        mc: &Mutation<'gc>,
+        frame: Frame<'gc>,
+        mut ret_val: Value<'gc>,
+    ) -> Result<(Value<'gc>, u32), QuoinError> {
+        let Frame {
+            spec_tid,
+            env,
+            receiver,
+            return_receiver,
+            instantiating_obj,
+            ..
+        } = frame;
+        self.last_popped_env = Some(env);
+        if return_receiver && let Some(rx) = receiver {
+            ret_val = rx;
+        }
+        if let Some(obj) = instantiating_obj {
+            self.push(Value::Object(obj));
+            self.finalize_instantiation(mc, obj, env)?;
+            ret_val = self.pop()?;
+        }
+        Ok((ret_val, spec_tid))
+    }
+
     pub(crate) fn dispatch_one(
         &mut self,
         mc: &Mutation<'gc>,
@@ -4167,13 +4232,21 @@ impl<'gc> VmState<'gc> {
         let inst = match bytecode.0.get(ip) {
             Some(i) => i,
             None => {
-                // Implicit return Nil
+                // Implicit return Nil — a NORMAL completion, so the full
+                // frame-teardown discipline applies exactly as in the
+                // `Return` arm (this arm used to skip defers, the operand
+                // truncate, the receiver-return, and instantiation
+                // finalize — fine for the plain frames that reach it, but
+                // a silent divergence waiting for the first frame here
+                // that carries any of them).
+                self.run_frame_defers(mc, frame_idx)?;
                 let ret_val = self.new_nil(mc);
                 let popped = self.frames.pop().unwrap();
-                if popped.spec_tid != 0 {
-                    self.spec_observe_return(popped.spec_tid, ret_val);
+                self.stack.truncate(popped.stack_base);
+                let (ret_val, spec_tid) = self.consume_popped_frame(mc, popped, ret_val)?;
+                if spec_tid != 0 {
+                    self.spec_observe_return(spec_tid, ret_val);
                 }
-                self.last_popped_env = Some(popped.env);
                 self.push(ret_val);
                 return Ok(VmStatus::Running);
             }
@@ -4773,50 +4846,11 @@ impl<'gc> VmState<'gc> {
                 return self.exec_send(mc, frame_idx, selector, num_args);
             }
             Instruction::Return | Instruction::BlockReturn => {
-                // Run calls deferred during this frame (e.g. mixin requirement
-                // checks) *before* popping it, so the defer queue — and any Values
-                // it references — stays GC-rooted via self.frames even if a defer
-                // yields and a collection happens during the suspension. We iterate
-                // a clone to satisfy the borrow checker; the originals stay in the
-                // (still-live) frame to keep their Values reachable. Defers run only
-                // on normal completion; if one throws and this is a new class
-                // definition, unregister the class first.
-                if !self.frames[frame_idx].defers.is_empty() {
-                    let defers = self.frames[frame_idx].defers.clone();
-                    if let Err(e) = self.run_defers(mc, &defers) {
-                        if let Some(name) =
-                            self.frames[frame_idx].unregister_on_defer_failure.clone()
-                        {
-                            self.globals.borrow_mut(mc).remove(&name);
-                            // The class is gone; its pointer could be reused, so drop
-                            // any memoized resolutions that might reference it.
-                            self.invalidate_method_cache();
-                        }
-                        return Err(e);
-                    }
-                }
-                let mut ret_val = self.pop()?;
+                self.run_frame_defers(mc, frame_idx)?;
+                let ret_val = self.pop()?;
                 let popped_frame = self.frames.pop().unwrap();
-                // The frame is consumed COMPLETELY before the potential yield:
-                // `finalize_instantiation` can park (an init that sleeps), and a
-                // collection while parked leaves `popped_frame`'s Gc pointers
-                // dangling on this suspended stack (the S0 segfault). The
-                // receiver-return applies first and the instantiation pop
-                // overwrites it, which is the old else-if priority inverted with
-                // the same outcome.
-                let spec_tid = popped_frame.spec_tid;
-                self.last_popped_env = Some(popped_frame.env);
                 self.stack.truncate(popped_frame.stack_base);
-                if popped_frame.return_receiver
-                    && let Some(rx) = popped_frame.receiver
-                {
-                    ret_val = rx;
-                }
-                if let Some(obj) = popped_frame.instantiating_obj {
-                    self.push(Value::Object(obj));
-                    self.finalize_instantiation(mc, obj, popped_frame.env)?;
-                    ret_val = self.pop()?;
-                }
+                let (ret_val, spec_tid) = self.consume_popped_frame(mc, popped_frame, ret_val)?;
                 if spec_tid != 0 {
                     self.spec_observe_return(spec_tid, ret_val);
                 }
@@ -4852,24 +4886,10 @@ impl<'gc> VmState<'gc> {
                             break;
                         }
                         let Some(f) = self.frames.pop() else { break };
-                        // Same discipline as the `Return` arm: the frame is
-                        // consumed completely before `finalize_instantiation`
-                        // can park and let a collection invalidate its Gc
-                        // pointers — only plain copies survive the yield.
-                        let spec_tid = f.spec_tid;
                         let f_id = f.id;
                         let f_stack_base = f.stack_base;
-                        self.last_popped_env = Some(f.env);
-                        if f.return_receiver
-                            && let Some(rx) = f.receiver
-                        {
-                            ret_val = rx;
-                        }
-                        if let Some(obj) = f.instantiating_obj {
-                            self.push(Value::Object(obj));
-                            self.finalize_instantiation(mc, obj, f.env)?;
-                            ret_val = self.pop()?;
-                        }
+                        let (rv, spec_tid) = self.consume_popped_frame(mc, f, ret_val)?;
+                        ret_val = rv;
                         if f_id == target_id {
                             if spec_tid != 0 {
                                 self.spec_observe_return(spec_tid, ret_val);
