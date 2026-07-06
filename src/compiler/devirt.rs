@@ -78,13 +78,16 @@ impl Compiler {
             _ => true,
         };
 
-        // Every arg must be a literal, 0-arg, declaration-free block (v1).
-        let then_blk = match Self::inlinable_block(&exprs[0]) {
+        // Every arg must be a literal, 0-arg block: declaration-free (v1,
+        // unconditional) or declaration-carrying via alpha-renamed splicing (v2 —
+        // loop-repeated here only when an enclosing fused loop re-executes this site).
+        let loop_repeated = self.fused_loop_depth > 0;
+        let then_blk = match self.spliceable_arm(&exprs[0], loop_repeated) {
             Some(b) => b,
             None => return Ok(false),
         };
         let else_blk = if has_else {
-            match Self::inlinable_block(&exprs[1]) {
+            match self.spliceable_arm(&exprs[1], loop_repeated) {
                 Some(b) => Some(b),
                 None => return Ok(false),
             }
@@ -138,13 +141,13 @@ impl Compiler {
     ) -> Result<(), String> {
         let mut then_bc = CodeBlock::new();
         then_bc.current_source = out.current_source.clone();
-        self.inline_block_body(then_blk, &mut then_bc)?;
+        self.splice_block_body(then_blk, &mut then_bc)?;
         let t = then_bc.len() as isize;
 
         if let Some(else_blk) = else_blk {
             let mut else_bc = CodeBlock::new();
             else_bc.current_source = out.current_source.clone();
-            self.inline_block_body(else_blk, &mut else_bc)?;
+            self.splice_block_body(else_blk, &mut else_bc)?;
             let e = else_bc.len() as isize;
             // cond false → skip the then-body and its trailing Jump, land on the else-body.
             out.push(Instruction::ElseJump(t + 2));
@@ -161,24 +164,251 @@ impl Compiler {
         Ok(())
     }
 
-    /// A literal block usable for control-flow inlining: no parameters and no local
-    /// declarations. (v1 — declaration-carrying blocks need alpha-renaming, a follow-up.)
-    ///
-    /// A body `var`/`let` is a `Declaration` *statement*, not a `decls` header entry, so
-    /// both must be checked: inlining a block that binds a top-level local would splice
-    /// that binding into the method scope, colliding with a sibling branch's same-named
-    /// local (they are isolated only by their now-absent block frames).
+    /// A literal block usable for v1 control-flow inlining: no parameters and no local
+    /// declarations — splicing it can't bind anything into the method scope, so it
+    /// qualifies unconditionally. Declaration-carrying blocks go through
+    /// `spliceable_arm` (v2 alpha-renaming) instead.
     fn inlinable_block(node: &Node) -> Option<&BlockNode> {
         if let NodeValue::Block(b) = &node.value {
-            let declares_local = b
-                .statements
-                .iter()
-                .any(|s| matches!(&s.value, NodeValue::Declaration(_)));
-            if b.arguments.is_empty() && b.decls.is_empty() && !declares_local {
+            if b.arguments.is_empty() && b.decls.is_empty() && !Self::block_declares_local(b) {
                 return Some(b);
             }
         }
         None
+    }
+
+    /// Does this block's top level declare locals (a `var`/`let` *statement*; header
+    /// `decls` are separate and keep a block v1-ineligible on their own)?
+    fn block_declares_local(b: &BlockNode) -> bool {
+        b.statements
+            .iter()
+            .any(|s| matches!(&s.value, NodeValue::Declaration(_)))
+    }
+
+    /// v2 (alpha-renaming): a literal 0-arg block acceptable for control-flow splicing.
+    /// A declaration-free block qualifies exactly as v1, unconditionally. A block whose
+    /// top level DECLARES locals is spliced with those declarations alpha-renamed to
+    /// fresh source-unspellable names (`Compiler::declare_local`), and qualifies only
+    /// when:
+    /// - it is shape-simple: unnamed, unguarded, no header decls;
+    /// - the splice would not run in an object-initializer frame — under (E) every
+    ///   binding a config frame holds becomes an instance FIELD, so a spliced `var`
+    ///   would pollute the new object (the real block frame isolates it today);
+    /// - if the splice is LOOP-REPEATED (`loop_repeated`: `whileDo:` cond/body always;
+    ///   an `if:` arm compiled inside an enclosing fused loop), no surviving nested
+    ///   literal captures a declared name — a real block frame mints a fresh cell per
+    ///   execution, a splice rebinds ONE frame cell, and only a closure that outlives
+    ///   the iteration can observe the difference (the binding-generation hazard).
+    fn spliceable_arm<'a>(&self, node: &'a Node, loop_repeated: bool) -> Option<&'a BlockNode> {
+        if let Some(b) = Self::inlinable_block(node) {
+            return Some(b);
+        }
+        let NodeValue::Block(b) = &node.value else {
+            return None;
+        };
+        if !b.arguments.is_empty()
+            || !b.decls.is_empty()
+            || b.name.is_some()
+            || b.decl_block.is_some()
+        {
+            return None;
+        }
+        if self.in_init_frame() {
+            return None;
+        }
+        if loop_repeated && !self.splice_hazard_free(b) {
+            return None;
+        }
+        Some(b)
+    }
+
+    /// The plain-local names a block's top-level declarations introduce.
+    fn declared_local_names(&self, b: &BlockNode) -> Vec<String> {
+        let mut names = Vec::new();
+        for s in &b.statements {
+            if let NodeValue::Declaration(d) = &s.value {
+                self.collect_lvalue_names(&d.lvalues, &mut names);
+            }
+        }
+        names
+    }
+
+    /// TRUE if a loop-repeated splice of `b` is free of the binding-generation hazard:
+    /// no nested literal that SURVIVES as a runtime block mentions a name declared at
+    /// `b`'s top level. Nested `whileDo:` constructs that will themselves fuse
+    /// (`while_will_fuse`, recursive) are transparent — their cond/body statements
+    /// splice into the same frame rather than surviving; `if:` arms are conservatively
+    /// treated as surviving (a guarded inline keeps a real cold copy regardless).
+    /// Mentions match the ORIGINAL name anywhere inside the literal — over-approximate
+    /// under shadowing, which only ever refuses a fusible shape, never fuses a
+    /// hazardous one.
+    fn splice_hazard_free(&self, b: &BlockNode) -> bool {
+        let names = self.declared_local_names(b);
+        if names.is_empty() {
+            return true;
+        }
+        !b.statements.iter().any(|s| self.survival_hazard(s, &names))
+    }
+
+    /// Walk one spliced statement: does any surviving nested literal mention a tracked
+    /// name? Unrecognized node kinds conservatively count as hazards — soundness never
+    /// depends on this walk being exhaustive (the `escapes_inlined_frame` discipline).
+    fn survival_hazard(&self, node: &Node, names: &[String]) -> bool {
+        match &node.value {
+            NodeValue::Block(lit) => Self::block_mentions_any(lit, names),
+            NodeValue::MethodCall(mc) => {
+                if self.while_will_fuse(mc) {
+                    let cond = mc.subject.as_deref().unwrap();
+                    let (NodeValue::Block(cb), NodeValue::Block(bb)) =
+                        (&cond.value, &mc.arguments.expressions[0].value)
+                    else {
+                        return true; // will_fuse guarantees blocks; defensive
+                    };
+                    cb.statements.iter().any(|s| self.survival_hazard(s, names))
+                        || bb.statements.iter().any(|s| self.survival_hazard(s, names))
+                } else {
+                    mc.subject
+                        .as_deref()
+                        .is_some_and(|s| self.survival_hazard(s, names))
+                        || mc
+                            .arguments
+                            .expressions
+                            .iter()
+                            .any(|e| self.survival_hazard(e, names))
+                }
+            }
+            NodeValue::Assignment(a) => {
+                a.lvalues.iter().any(|l| self.survival_hazard(l, names))
+                    || self.survival_hazard(&a.rvalue, names)
+            }
+            NodeValue::Declaration(d) => self.survival_hazard(&d.rvalue, names),
+            NodeValue::SubLValue(s) => s.lvalues.iter().any(|l| self.survival_hazard(l, names)),
+            NodeValue::BinaryOperator(op) => {
+                self.survival_hazard(&op.left, names) || self.survival_hazard(&op.right, names)
+            }
+            NodeValue::UnaryOperator(u) => self.survival_hazard(&u.right, names),
+            NodeValue::MethodReturn(r) => self.survival_hazard(&r.value, names),
+            NodeValue::BlockReturn(r) => self.survival_hazard(&r.value, names),
+            NodeValue::YieldReturn(r) => self.survival_hazard(&r.value, names),
+            NodeValue::List(l) => l.values.iter().any(|e| self.survival_hazard(e, names)),
+            NodeValue::Set(s) => s.values.iter().any(|e| self.survival_hazard(e, names)),
+            NodeValue::Map(m) => m
+                .keys
+                .iter()
+                .chain(&m.values)
+                .any(|e| self.survival_hazard(e, names)),
+            NodeValue::Identifier(_)
+            | NodeValue::IdentLValue(_)
+            | NodeValue::SplatLValue(_)
+            | NodeValue::IgnoredLValue
+            | NodeValue::IgnoredSplatLValue
+            | NodeValue::Integer(_)
+            | NodeValue::Double(_)
+            | NodeValue::Str(_)
+            | NodeValue::Symbol(_)
+            | NodeValue::Regex(_) => false,
+            _ => true,
+        }
+    }
+
+    /// Does any plain identifier matching one of `names` appear anywhere in this block
+    /// (its own body and nested literals alike)? Shadowing inside nested blocks is
+    /// deliberately ignored — over-approximation is the sound direction here.
+    fn block_mentions_any(b: &BlockNode, names: &[String]) -> bool {
+        b.statements.iter().any(|s| Self::mentions_any(s, names))
+    }
+
+    fn mentions_any(node: &Node, names: &[String]) -> bool {
+        match &node.value {
+            NodeValue::Identifier(id) => {
+                id.identifier_type != IdentifierType::Instance
+                    && id.namespace.is_none()
+                    && names.iter().any(|n| *n == id.name)
+            }
+            NodeValue::Block(b) => Self::block_mentions_any(b, names),
+            NodeValue::MethodCall(mc) => {
+                mc.subject
+                    .as_deref()
+                    .is_some_and(|s| Self::mentions_any(s, names))
+                    || mc
+                        .arguments
+                        .expressions
+                        .iter()
+                        .any(|e| Self::mentions_any(e, names))
+            }
+            NodeValue::Assignment(a) => {
+                a.lvalues.iter().any(|l| Self::mentions_any(l, names))
+                    || Self::mentions_any(&a.rvalue, names)
+            }
+            NodeValue::Declaration(d) => Self::mentions_any(&d.rvalue, names),
+            NodeValue::IdentLValue(l) => {
+                l.identifier.identifier_type != IdentifierType::Instance
+                    && l.identifier.namespace.is_none()
+                    && names.iter().any(|n| *n == l.identifier.name)
+            }
+            NodeValue::SplatLValue(l) => names.iter().any(|n| *n == l.identifier.name),
+            NodeValue::SubLValue(s) => s.lvalues.iter().any(|l| Self::mentions_any(l, names)),
+            NodeValue::BinaryOperator(op) => {
+                Self::mentions_any(&op.left, names) || Self::mentions_any(&op.right, names)
+            }
+            NodeValue::UnaryOperator(u) => Self::mentions_any(&u.right, names),
+            NodeValue::MethodReturn(r) => Self::mentions_any(&r.value, names),
+            NodeValue::BlockReturn(r) => Self::mentions_any(&r.value, names),
+            NodeValue::YieldReturn(r) => Self::mentions_any(&r.value, names),
+            NodeValue::List(l) => l.values.iter().any(|e| Self::mentions_any(e, names)),
+            NodeValue::Set(s) => s.values.iter().any(|e| Self::mentions_any(e, names)),
+            NodeValue::Map(m) => m
+                .keys
+                .iter()
+                .chain(&m.values)
+                .any(|e| Self::mentions_any(e, names)),
+            NodeValue::Integer(_)
+            | NodeValue::Double(_)
+            | NodeValue::Str(_)
+            | NodeValue::Symbol(_)
+            | NodeValue::Regex(_)
+            | NodeValue::IgnoredLValue
+            | NodeValue::IgnoredSplatLValue => false,
+            _ => true,
+        }
+    }
+
+    /// Mirrors `try_compile_inlined_while`'s decision closely enough to
+    /// UNDER-approximate it (a `false` for a loop that later fuses only over-refuses
+    /// the outer splice — sound; a `true` for one that later refuses would be a missed
+    /// hazard, so the predicates here are exactly the ones the real fusion uses).
+    fn while_will_fuse(&self, mc: &MethodCallNode) -> bool {
+        let kws: Vec<&str> = mc
+            .arguments
+            .signature
+            .identifiers
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        if kws.as_slice() != ["whileDo"] || mc.arguments.expressions.len() != 1 {
+            return false;
+        }
+        let Some(subject) = mc.subject.as_deref() else {
+            return false;
+        };
+        self.spliceable_arm(subject, true).is_some()
+            && self
+                .spliceable_arm(&mc.arguments.expressions[0], true)
+                .is_some()
+    }
+
+    /// Splice a block body inline. A declaration-carrying block (v2) gets a splice
+    /// scope so its declarations alpha-rename and its checker state stays arm-scoped;
+    /// a declaration-free block splices exactly as v1 (no scope).
+    fn splice_block_body(&mut self, block: &BlockNode, out: &mut CodeBlock) -> Result<(), String> {
+        if Self::block_declares_local(block) {
+            self.push_splice_scope();
+            let r = self.inline_block_body(block, out);
+            self.pop_scope();
+            r
+        } else {
+            self.inline_block_body(block, out)
+        }
     }
 
     /// Compile an inlined control-flow block body into `out`: its statements spliced
@@ -214,8 +444,10 @@ impl Compiler {
         Ok(())
     }
 
-    /// Slice 2d (v2) — inline `{cond}.whileDo:{body}` when both the receiver (`cond`) and
-    /// the body are literal, 0-arg, declaration-free blocks, into a native jump loop.
+    /// Slice 2d — inline `{cond}.whileDo:{body}` when both the receiver (`cond`) and
+    /// the body are spliceable 0-arg literal blocks (declaration-free, or
+    /// declaration-carrying via alpha-renaming — `spliceable_arm`), into a native jump
+    /// loop.
     /// Eliminates the per-iteration block allocation, dispatch, and frame — and the
     /// recursion, since the bootstrap `whileDo:` recurses once per iteration
     /// (`^^s.whileDo:block`). Returns `true` if inlined. Evaluates to `nil`, matching the
@@ -240,24 +472,31 @@ impl Compiler {
         if kws.as_slice() != ["whileDo"] {
             return Ok(false);
         }
-        let cond_blk = match Self::inlinable_block(subject) {
+        // Cond and body both re-execute per iteration, so a declaring block here is
+        // always loop-repeated (v2 hazard gating applies unconditionally).
+        let cond_blk = match self.spliceable_arm(subject, true) {
             Some(b) => b,
             None => return Ok(false),
         };
-        let body_blk = match Self::inlinable_block(&call.arguments.expressions[0]) {
+        let body_blk = match self.spliceable_arm(&call.arguments.expressions[0], true) {
             Some(b) => b,
             None => return Ok(false),
         };
 
         // Compile cond/body into their own sub-blocks so their lengths size the jumps.
+        // The depth is raised across BOTH so any `if:` arm spliced inside them knows it
+        // is loop-repeated.
         let mut cond_bc = CodeBlock::new();
         cond_bc.current_source = bytecode.current_source.clone();
-        self.inline_block_body(cond_blk, &mut cond_bc)?;
-        let c = cond_bc.len() as isize;
-
         let mut body_bc = CodeBlock::new();
         body_bc.current_source = bytecode.current_source.clone();
-        self.inline_block_body(body_blk, &mut body_bc)?;
+        self.fused_loop_depth += 1;
+        let compiled = self
+            .splice_block_body(cond_blk, &mut cond_bc)
+            .and_then(|()| self.splice_block_body(body_blk, &mut body_bc));
+        self.fused_loop_depth -= 1;
+        compiled?;
+        let c = cond_bc.len() as isize;
         let b = body_bc.len() as isize;
 
         // Layout (each jump offset is relative to its own position):
@@ -435,7 +674,11 @@ impl Compiler {
             self.param_override.insert(arg.identifier.name.clone(), x);
         }
         self.inline_depth += 1;
+        // The body re-executes per element: a declaring `if:` arm spliced inside it is
+        // loop-repeated (the body itself is declaration-free per `fusable_each_block`).
+        self.fused_loop_depth += 1;
         let body_res = self.inline_block_body(blk, &mut body_bc);
+        self.fused_loop_depth -= 1;
         self.inline_depth -= 1;
         self.param_override = saved_params;
         body_res?;

@@ -20,5 +20,238 @@
         var c = Custom.new;
         .is:{ c.if:{ 't' } else:{ 'e' } } equalTo:'customIfElse';
         .is:{ c.if:{ 't' } } equalTo:'customIf'
+    };
+
+    "* Slice 2d v2: declaration-carrying arms fuse via alpha-renaming. The arm's `var`s
+    "* splice into the method frame under fresh unspellable names, so values compute
+    "* exactly as with real block frames.
+    .test:declaringArmsCompute -> {
+        CFIV2 <- {
+            .meta <-- {
+                pick: -> { |flag|
+                    (flag).if:{
+                        var a = 10;
+                        var b = a + 5;
+                        ^a * b
+                    }
+                    else:{
+                        var a = 2;
+                        ^a + 1
+                    }
+                }
+            }
+        };
+        .is:{ CFIV2.pick:true } equalTo:150;
+        .is:{ CFIV2.pick:false } equalTo:3
+    };
+
+    "* Sibling arms may declare the SAME name — the block frames that used to isolate
+    "* them are gone, so the alpha-renames are what keep them apart.
+    .test:siblingArmsSameNameDoNotCollide -> {
+        CFIV2Sib <- {
+            .meta <-- {
+                both: -> { |flag|
+                    var out = 0;
+                    (flag).if:{ var t = 7; out = t } else:{ var t = 40; out = t };
+                    (flag.not).if:{ var t = 2; out = out + t } else:{ var t = 300; out = out + t };
+                    ^out
+                }
+            }
+        };
+        .is:{ CFIV2Sib.both:true } equalTo:307;
+        .is:{ CFIV2Sib.both:false } equalTo:42
+    };
+
+    "* An arm declaration SHADOWS a same-named method local while the arm runs and
+    "* leaves it untouched after.
+    .test:armDeclarationShadowsMethodLocal -> {
+        CFIV2Shadow <- {
+            .meta <-- {
+                go -> {
+                    var x = 1;
+                    var seen = 0;
+                    (true).if:{ var x = 99; seen = x };
+                    ^(x * 1000) + seen
+                }
+            }
+        };
+        .is:{ CFIV2Shadow.go } equalTo:1099
+    };
+
+    "* The makeTree shape: a surviving nested literal (a `new:{…}` config) reads
+    "* arm-declared locals. The config's STORE targets are field names (never renamed);
+    "* its rvalue READS resolve to the arm's renamed cells.
+    .test:configLiteralCapturesArmDeclarations -> {
+        CFIV2Node <- { |@left @item|
+            left -> { ^@left };
+            item -> { ^@item }
+        };
+        CFIV2Build <- {
+            .meta <-- {
+                make: -> { |flag|
+                    (flag).if:{
+                        var left = 'L';
+                        var item = 5;
+                        ^CFIV2Node.new:{ left=left; item=item * 2 }
+                    }
+                    else:{ ^CFIV2Node.new:{ item=0 } }
+                }
+            }
+        };
+        var n = CFIV2Build.make:true;
+        .is:{ n.left } equalTo:'L';
+        .is:{ n.item } equalTo:10;
+        .is:{ (CFIV2Build.make:false).item } equalTo:0
+    };
+
+    "* A recursive method whose arms declare locals — the whole reason v2 exists
+    "* (btrees' makeTree). Arms fuse, so no per-node closure exists to trip the
+    "* recursion gate, interpreted and compiled alike.
+    .test:recursiveDeclaringArms -> {
+        CFIV2Tree <- { |@l @r @v|
+            sum -> { @l.defined?.if:{ ^@v + @l.sum + @r.sum } else:{ ^@v } }
+        };
+        CFIV2TreeB <- {
+            .meta <-- {
+                build:depth: -> { |v: Integer d: Integer|
+                    (d > 0).if:{
+                        var l = CFIV2TreeB.build:(v * 2) depth:(d - 1);
+                        var r = CFIV2TreeB.build:(v * 2 + 1) depth:(d - 1);
+                        ^CFIV2Tree.new:{ l=l; r=r; v=v }
+                    }
+                    else:{ ^CFIV2Tree.new:{ v=v } }
+                }
+            }
+        };
+        .is:{ (CFIV2TreeB.build:1 depth:3).sum } equalTo:120
+    };
+
+    "* whileDo: bodies (and conds) may declare — a fresh value per iteration, exactly
+    "* as the per-iteration block frame gave.
+    .test:loopBodyDeclarations -> {
+        CFIV2Loop <- {
+            .meta <-- {
+                go: -> { |n: Integer ^Integer|
+                    var total = 0;
+                    var i = 0;
+                    { i < n }.whileDo:{
+                        var sq = i * i;
+                        total = total + sq;
+                        i = i + 1
+                    };
+                    ^total
+                }
+            }
+        };
+        .is:{ CFIV2Loop.go:5 } equalTo:30
+    };
+
+    "* The run: shape — nested whileDo: loops whose bodies declare, inner cond/body
+    "* reading the outer body's declarations. The loop nest fuses bottom-up.
+    .test:nestedLoopDeclarations -> {
+        CFIV2Nest <- {
+            .meta <-- {
+                go -> {
+                    var acc = 0;
+                    var d = 1;
+                    { d <= 3 }.whileDo:{
+                        var limit = d * 2;
+                        var i = 0;
+                        { i < limit }.whileDo:{
+                            var step = d + i;
+                            acc = acc + step;
+                            i = i + 1
+                        };
+                        d = d + 1
+                    };
+                    ^acc
+                }
+            }
+        };
+        .is:{ CFIV2Nest.go } equalTo:50
+    };
+
+    "* THE guardrail: a closure that OUTLIVES its iteration must capture its own
+    "* iteration's binding (a fresh generation per execution). This shape refuses
+    "* fusion — the loop keeps real per-iteration block frames — and must keep
+    "* working exactly like this forever.
+    .test:closureCapturesPerIterationGeneration -> {
+        CFIV2Gen <- {
+            .meta <-- {
+                go -> {
+                    var fns = #();
+                    var i = 0;
+                    { i < 3 }.whileDo:{
+                        var mine = i * 10;
+                        fns.add:{ mine };
+                        i = i + 1
+                    };
+                    ^(fns.at:0).value + (fns.at:1).value + (fns.at:2).value
+                }
+            }
+        };
+        .is:{ CFIV2Gen.go } equalTo:30
+    };
+
+    "* Same guardrail one level down: an `if:` arm inside a fused loop declaring a
+    "* local that a surviving closure captures.
+    .test:armClosureUnderLoopKeepsGenerations -> {
+        CFIV2Gen2 <- {
+            .meta <-- {
+                go -> {
+                    var fns = #();
+                    var i = 0;
+                    { i < 3 }.whileDo:{
+                        (true).if:{
+                            var mine = i * 100;
+                            fns.add:{ mine }
+                        };
+                        i = i + 1
+                    };
+                    ^(fns.at:0).value + (fns.at:1).value + (fns.at:2).value
+                }
+            }
+        };
+        .is:{ CFIV2Gen2.go } equalTo:300
+    };
+
+    "* `^` still ends a declaring arm with its value (the construct's value — NOT a
+    "* method return; a discarded construct falls through); `^^` still returns from
+    "* the method through one.
+    .test:caretsInDeclaringArms -> {
+        CFIV2Ret <- {
+            .meta <-- {
+                early: -> { |flag|
+                    var r = (flag).if:{ var t = 5; ^t * 2 } else:{ var t = 1; ^t };
+                    ^r
+                };
+                discarded -> {
+                    (true).if:{ var t = 5; ^t * 2 };
+                    ^0 - 1
+                };
+                nlr: -> { |flag|
+                    (flag).if:{ var t = 9; ^^t + 1 };
+                    ^0
+                }
+            }
+        };
+        .is:{ CFIV2Ret.early:true } equalTo:10;
+        .is:{ CFIV2Ret.early:false } equalTo:1;
+        .is:{ CFIV2Ret.discarded } equalTo:(0 - 1);
+        .is:{ CFIV2Ret.nlr:true } equalTo:10;
+        .is:{ CFIV2Ret.nlr:false } equalTo:0
+    };
+
+    "* Strictness is scope-faithful through a splice: same-scope redeclaration inside
+    "* one arm and reassigning an arm `let` are still compile errors.
+    .test:strictVarLetInsideArms -> {
+        .does:{
+             Runtime.eval:'CFIV2E1 <- { .meta <-- { go -> { (true).if:{ var q = 1; var q = 2; ^q } } } }'
+         }
+         throw:ParseError;
+        .does:{
+             Runtime.eval:'CFIV2E2 <- { .meta <-- { go -> { (true).if:{ let q = 1; q = 2; ^q } } } }'
+         }
+         throw:ParseError
     }
 }

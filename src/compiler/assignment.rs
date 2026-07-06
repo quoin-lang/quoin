@@ -3,7 +3,7 @@
 use super::*;
 
 impl Compiler {
-    fn collect_lvalue_names(&self, lvalues: &[Arc<Node>], names: &mut Vec<String>) {
+    pub(super) fn collect_lvalue_names(&self, lvalues: &[Arc<Node>], names: &mut Vec<String>) {
         for lval in lvalues {
             match &lval.value {
                 NodeValue::IdentLValue(ident_lval) => {
@@ -310,9 +310,10 @@ impl Compiler {
     ) -> Result<(), String> {
         // A `var`/`let` declaration introduces a fresh binding. The target was
         // validated as a plain local and inserted into the current scope by
-        // `compile_declaration`, so here we just emit the binding instruction.
+        // `compile_declaration`, so here we just emit the binding instruction
+        // (alpha-renamed by `local_symbol` when the declaration lives in a splice scope).
         if declaring {
-            bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
+            bytecode.push(Instruction::DefineLocal(self.local_symbol(name)));
             return Ok(());
         }
         // Reserved identifiers parse as assignable lvalues (`true = false`); emit a store
@@ -345,7 +346,16 @@ impl Compiler {
             if self.is_immutable(name) {
                 return Err(format!("cannot reassign `let` binding `{}`", name));
             }
-            bytecode.push(Instruction::StoreLocal(Symbol::intern(&(name.clone()))));
+            // (E) semantics: a bare store compiled directly in an init-literal body binds
+            // locally at runtime — the name is a FIELD, never an alpha-renamed splice
+            // cell, even when an enclosing spliced arm declares the same name. (The
+            // store's RVALUE compiled first, so its reads of the arm's cell renamed.)
+            let sym = if self.scopes.last().map(|s| s.is_init).unwrap_or(false) {
+                Symbol::intern(name)
+            } else {
+                self.local_symbol(name)
+            };
+            bytecode.push(Instruction::StoreLocal(sym));
         } else if self.scopes.last().map(|s| s.is_init).unwrap_or(false) {
             // Inside an object-initializer block (`X.new:{ … }`), a bare `field = value`
             // binds an instance field — no `var` needed. The instantiating frame binds it

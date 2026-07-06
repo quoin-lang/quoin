@@ -1,9 +1,13 @@
 # Cheap materialization: fusion first, thin closures second
 
-*Status: DESIGN (this document is the design-pass deliverable; no slices
-implemented). Branch `perf/cheap-materialization`, stacked on
-`perf/alloc-churn` (PR #59). Baseline profiles + the two validating
-experiments live in `profiling/cheap-materialization/`.*
+*Status: M1 SHIPPED on `perf/cheap-materialization` (stacked on
+`perf/alloc-churn`, PR #59) — measured btrees −31.8% (1.47×), richards
+−14.4% (1.17×), json −2.6%, rest noise; corpus 1611/0 ×5 modes. The
+alpha-renaming lives in `Compiler::declare_local`/`local_symbol`
+(splice scopes) + `devirt.rs` `spliceable_arm`/`splice_hazard_free`;
+shape pins in `src/compiler/tests.rs`, semantic pins in
+`qnlib/tests/45-controlflow-inline.qn`. M2/M3 not started. Baselines +
+experiments in `profiling/cheap-materialization/`.*
 
 ## 1. Why: the measured shape
 
@@ -87,7 +91,7 @@ interpreted-config seam (`Callable::call` 9.7%, `call_method_cached`
 
 ## 3. Slices
 
-### M1 — alpha-renamed control-flow fusion (compiler; both tiers win)
+### M1 — alpha-renamed control-flow fusion (compiler; both tiers win) — SHIPPED
 
 Extend `inlinable_block` v1 → v2: a literal 0-arg block WITH local
 declarations fuses by renaming each block-local declaration to a fresh
