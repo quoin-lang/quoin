@@ -1,7 +1,8 @@
 # Cross-language results: Quoin vs Python vs Ruby
 
-*Measured 2026-07-05 on the block-template-AOT branch tip (post-B3b,
-combinators 2.99× arc complete), Apple Silicon (darwin25).*
+*Measured 2026-07-06 on main @ `fc89fc9` (post speculative-AOT arc,
+PR #55), Apple Silicon (darwin25). The previous table (2026-07-05,
+block-arc tip) is preserved below for the delta story.*
 
 ## Methodology
 
@@ -26,49 +27,55 @@ combinators 2.99× arc complete), Apple Silicon (darwin25).*
   **14ms**, ruby **24ms** (±yjit). Quoin has the lowest floor, so
   whole-process ratios on the short benches are not flattered by startup.
 
-## Results (seconds, median of 5; ratios = other/quoin, >1 ⇒ Quoin faster)
+## Results (seconds, median of 7; ratios = other/quoin, >1 ⇒ Quoin faster)
 
 | bench        | quoin | python | ruby  | rb-yjit | py/qn | rb/qn | yjit/qn |
 |--------------|------:|-------:|------:|--------:|------:|------:|--------:|
-| btrees       | 0.883 | 0.193  | 0.120 | 0.060   | 0.22  | 0.14  | 0.07    |
-| combinators  | 0.183 | 0.048  | 0.050 | 0.046   | 0.26  | 0.27  | 0.25    |
-| fib_typed    | 0.028 | 0.190  | 0.119 | 0.041   | **6.77** | **4.24** | **1.45** |
-| fib_untyped  | 0.551 | 0.082  | 0.059 | 0.030   | 0.15  | 0.11  | 0.05    |
-| json         | 0.236 | 0.218  | 0.117 | 0.117   | 0.92  | 0.50  | 0.50    |
-| maps         | 0.146 | 0.070  | 0.084 | 0.076   | 0.48  | 0.58  | 0.52    |
-| richards     | 0.492 | 0.095  | 0.080 | 0.045   | 0.19  | 0.16  | 0.09    |
-| sieve        | 0.102 | 0.304  | 0.190 | 0.098   | **2.97** | **1.85** | 0.95 |
-| strings      | 0.178 | 0.045  | 0.071 | 0.068   | 0.25  | 0.40  | 0.38    |
-| **geomean**  |       |        |       |         | 0.54  | 0.44  | 0.28    |
+| btrees       | 0.895 | 0.194  | 0.120 | 0.061   | 0.22  | 0.13  | 0.07    |
+| combinators  | 0.155 | 0.048  | 0.050 | 0.045   | 0.31  | 0.32  | 0.29    |
+| fib_typed    | 0.028 | 0.191  | 0.118 | 0.041   | **6.83** | **4.24** | **1.47** |
+| fib_untyped  | 0.016 | 0.084  | 0.061 | 0.031   | **5.24** | **3.78** | **1.91** |
+| json         | 0.243 | 0.221  | 0.119 | 0.119   | 0.91  | 0.49  | 0.49    |
+| maps         | 0.154 | 0.073  | 0.086 | 0.077   | 0.47  | 0.56  | 0.50    |
+| richards     | 0.431 | 0.096  | 0.081 | 0.046   | 0.22  | 0.19  | 0.11    |
+| sieve        | 0.105 | 0.306  | 0.192 | 0.099   | **2.92** | **1.83** | 0.95 |
+| strings      | 0.169 | 0.045  | 0.073 | 0.069   | 0.27  | 0.43  | 0.41    |
+| **geomean**  |       |        |       |         | 0.83  | 0.67  | 0.43    |
+
+Previous table (2026-07-05, pre-speculative-AOT): fib_untyped 0.551
+(py/qn 0.15), combinators 0.183, richards 0.492, strings 0.178;
+geomeans 0.54 / 0.44 / 0.28.
 
 ## Honest reading
 
-**Where Quoin wins is exactly where its guarantees engage.** fib_typed
-(typed params + sealed class → AOT-compiled) beats CPython 3.13 by 6.8×,
-plain Ruby by 4.2×, and YJIT by 1.45×. sieve (typed + checked generics →
-compiled) beats Python 3× and plain Ruby 1.9×, and matches YJIT. json is
-at parity with Python's C-accelerated stdlib (Quoin's parser is pure).
+**The speculative-AOT arc (PR #55) flipped the headline row.**
+fib_untyped — the matrix's poster child for the untyped-dispatch gap,
+6.7× BEHIND CPython in the previous table — now runs 0.016s: **5.2×
+ahead of CPython 3.13 and 1.9× ahead of Ruby 4 + YJIT**, with zero
+annotations. Runtime type feedback compiles it to the same code the
+typed version gets. Quoin now wins four rows of nine (both fibs, sieve,
+and json-at-parity), and the suite geomean moved from 0.54 to 0.83 vs
+CPython (0.28 → 0.43 vs YJIT).
 
-**Everywhere else, 2026-era interpreters are ahead.** The same benchmarks
-untyped or allocation-bound run 2–7× slower than CPython 3.13:
-fib_untyped (full dynamic dispatch) 6.7×, btrees (GC/allocation) 4.6×,
-richards (megamorphic sends + accessors) 5.2×, combinators 3.9×, strings
-4×, maps 2.1×. Ruby 4 with YJIT extends all of those further. Note the
-combinators number *is* the block-template-AOT arc's 3× win — before the
-arc it would have been ~11× behind Python rather than 3.9×.
-
-Older "4.5–6.8× faster than Python" parity claims in the project notes
-were measured against earlier CPython on a narrower typed-path suite and
-do not describe this matrix; this table supersedes them.
+**What remains behind is allocation-bound, not dispatch-bound.** btrees
+(GC/allocation, 4.6×), richards (2.3× — improved from 5.2× by compiled
+field access, still capped by `^^`-in-cold-arm refusals on the task
+bodies and the deliberately megamorphic `@task.run:`), combinators
+(3.2× — down from ~11× pre-arcs), strings (3.7×), maps (2.1×). Ruby 4 +
+YJIT extends those further.
 
 **What the table points at next** (the gap, in measured order):
-1. **Untyped dispatch** (fib_untyped, richards): every `+`/send through
-   the IC still costs ~7× CPython's specialized bytecode. This is the
-   register-VM / broader-AOT-candidacy frontier.
-2. **Allocation/GC** (btrees, and every per-object workload): ~1.3M
-   short-lived objects cost 0.88s vs Python's 0.19s — frame/object
-   allocation and the collector are the bill.
-3. **Strings** (two GC allocations per string, as the bench header says).
+1. **Allocation/GC** (btrees, and every per-object workload): ~1.3M
+   short-lived objects cost 0.90s vs Python's 0.19s — frame/object
+   allocation and the collector are the bill. Now the #1 frontier.
+2. **Strings** (two GC allocations per string, as the bench header
+   says) — an allocation-frontier special case.
+3. **Cold-arm `^^` + megamorphic dispatch** (richards' residual;
+   recorded follow-up in docs/SPECULATIVE_AOT_ARCH.md).
+
+The untyped-dispatch frontier that headed this list in the previous
+measurement is substantially CLOSED for scalar shapes; its residue
+lives in the alloc-heavy rows above.
 
 ## Reproducing
 
