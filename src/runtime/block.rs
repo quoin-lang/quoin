@@ -102,7 +102,7 @@ pub fn build_block_class() -> NativeClassBuilder {
             // B3a: the interpreted-side seam — a compiled block template runs
             // natively even under an interpreted combinator loop. Bail (arity
             // or precondition mismatch) falls through to the interpreted body.
-            if vm.outcall_nesting < crate::codegen::spec::MAX_OUTCALL_NESTING
+            if vm.aot.outcall_nesting < crate::codegen::spec::MAX_OUTCALL_NESTING
                 && let Some(tid) = block.template.template_id
                 && let Some(entry) = crate::codegen::block_entry_for(vm, tid)
             {
@@ -145,6 +145,19 @@ pub fn build_block_class() -> NativeClassBuilder {
             let finally = arg!(args, Block, 1);
             do_catch_finally(vm, mc, protected, &handlers, finally)
         })
+}
+
+/// The catch-family selectors — exactly the `Block` natives above that run
+/// a protected block and may ABSORB what unwinds out of it. The AOT
+/// translator's `^^`-parity gates key on this predicate (a compiled home
+/// cannot reproduce a catch-all catching a `^^` in flight), so it must
+/// stay in lockstep with the registrations: registering a new absorber
+/// without listing it here silently compiles methods that diverge.
+pub fn is_catch_family(selector: &str) -> bool {
+    matches!(
+        selector,
+        "catch:" | "catch+:" | "catch:finally:" | "catch+:finally:"
+    )
 }
 
 /// Pop frames back to `initial` — unwind a partially-executed block after a throw.
@@ -265,7 +278,7 @@ fn do_catch<'gc>(
         // cancellation. (The syntactic `{ ^^ … }.catch:` shape is refused at
         // translation, so interpreted catch-all semantics are preserved there;
         // this dynamic arm covers a `^^` closure that ESCAPED into a catch.)
-        Err(QuoinError::NonLocalReturn) if vm.aot_nlr_target.is_some() => {
+        Err(QuoinError::NonLocalReturn) if vm.aot.nlr_target.is_some() => {
             unwind(vm, initial);
             Err(QuoinError::NonLocalReturn)
         }
@@ -330,7 +343,7 @@ fn do_catch_finally<'gc>(
         }
         // A `^^` in flight to a live COMPILED frame (S5): uncatchable, but
         // `finally` still runs — see the matching arm in `do_catch`.
-        Err(QuoinError::NonLocalReturn) if vm.aot_nlr_target.is_some() => {
+        Err(QuoinError::NonLocalReturn) if vm.aot.nlr_target.is_some() => {
             unwind(vm, initial);
             let _ = vm.execute_block(mc, finally, Vec::new(), None);
             unwind(vm, initial);

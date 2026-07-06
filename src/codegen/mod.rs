@@ -171,13 +171,20 @@ pub type AotRawFn = unsafe extern "C" fn(
     ret: *mut i64,
 ) -> u8;
 
+/// Status tags returned by every compiled body and helper. `TAG_OK` must be
+/// 0 (compiled code branches on nonzero = error). The error tags start at
+/// 0x11 so the TAG range is DISJOINT from the value-lane KIND range
+/// (`helpers::KIND_*`, 0–4) that shares the same integer ABI — a mis-wired
+/// value channel fed to a tag check then fails loudly as "unknown tag"
+/// instead of aliasing a valid KIND into a spurious cancellation or
+/// phantom error.
 pub const TAG_OK: u8 = 0;
-pub const TAG_DIV_ZERO: u8 = 1;
-pub const TAG_DEPTH: u8 = 2;
-pub const TAG_CANCELLED: u8 = 3;
+pub const TAG_DIV_ZERO: u8 = 0x11;
+pub const TAG_DEPTH: u8 = 0x12;
+pub const TAG_CANCELLED: u8 = 0x13;
 /// The helper stored a full `QuoinError` in `VmState::aot_pending_error`
 /// (outcall errors, IndexError, thrown values via `QuoinError::Thrown`, …).
-pub const TAG_ERR: u8 = 4;
+pub const TAG_ERR: u8 = 0x14;
 
 /// Compiled recursion consumes the real coroutine stack (1 MiB) and bypasses
 /// `MAX_NATIVE_REENTRY`, so every compiled prologue counts call depth and bails
@@ -312,6 +319,22 @@ pub struct CompileStats {
     pub refused: Vec<(String, String)>,
 }
 
+/// Process-lifetime compile/refusal counters. Every `compile_candidates`
+/// caller used to drop its `CompileStats`, so the ONLY record that a
+/// candidate silently fell out of compilation was an env-gated eprintln —
+/// no way to notice a coverage regression. `QN_AOT_STATS=1` surfaces these.
+static TOTAL_COMPILED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TOTAL_REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `(compiled, refused)` across the process so far.
+pub fn compile_totals() -> (usize, usize) {
+    use std::sync::atomic::Ordering;
+    (
+        TOTAL_COMPILED.load(Ordering::Relaxed),
+        TOTAL_REFUSED.load(Ordering::Relaxed),
+    )
+}
+
 /// Translate and register every candidate that survives the authoritative
 /// bytecode walk. Refusal is silent and safe (the method stays interpreted);
 /// `QN_AOT_VERBOSE=1` prints per-method outcomes to stderr.
@@ -348,6 +371,9 @@ pub fn compile_candidates(cands: Vec<AotCandidate>) -> CompileStats {
         }
         stats.refused.push((sel, why));
     }
+    use std::sync::atomic::Ordering;
+    TOTAL_COMPILED.fetch_add(stats.compiled, Ordering::Relaxed);
+    TOTAL_REFUSED.fetch_add(stats.refused.len(), Ordering::Relaxed);
     stats
 }
 
@@ -360,11 +386,178 @@ pub enum AotOutcome<'gc> {
     Err(QuoinError),
 }
 
+/// The entry gates every compiled invocation shares — checked BEFORE any
+/// state changes, so a `false` (Bail to the interpreted body, identical
+/// semantics) is always safe.
+///
+/// - NO COMPILED FRAMES INSIDE USER FIBERS: an abandoned fiber (a generator
+///   dropped mid-iteration by `take:`) is torn down by corosensei's FORCED
+///   UNWIND, which cannot cross Cranelift frames (no unwind info) — the
+///   process aborts. A compiled body may suspend at any outcall or fuel
+///   checkpoint, so the only sound rule is entry-level. The main task and
+///   spawned tasks are torn down gracefully (cancellation errors / process
+///   exit), so they keep compiled execution.
+/// - S2: direct self-recursion bakes in "dispatch(self, sel) reaches this
+///   template"; any later method-table mutation could change that, so a
+///   stale epoch runs the interpreted body (which re-dispatches per send).
+///   Templates never carry `direct_self`, so the check is a no-op for them.
+#[inline(always)]
+fn entry_gates(vm: &VmState<'_>, entry: &AotEntry) -> bool {
+    if vm.sched.current_fiber.is_some() {
+        return false;
+    }
+    if entry.direct_self && entry.compile_epoch != redef_epoch() {
+        return false;
+    }
+    true
+}
+
+/// The `^^`-home context a compiled invocation runs under (S5).
+enum HomeCtx {
+    /// A method frame that materializes a `^^`-carrying nest: mint a frame
+    /// id, push its mark, publish it as the home.
+    Mint,
+    /// A block template that materializes a `^^`-carrying nest: propagate
+    /// the invoked closure's own home (possibly `None` — a homeless block's
+    /// `^^` errors exactly as interpreted).
+    Propagate(Option<usize>),
+    /// The body materializes no `^^` nest — the home is never consulted;
+    /// skip all bookkeeping (the hot majority).
+    Untracked,
+}
+
+/// Run one compiled body inside the frame context it needs — fuel reset at
+/// top-level entry (nested direct calls share one budget like interpreted
+/// steps), a clean error channel, the lexical parent for cold-path
+/// materializations, and the `^^` home/mark per [`HomeCtx`] — with the
+/// setup/teardown pairing enforced BY SCOPE: the closure is the only thing
+/// that runs between them, so no future early return can leak a stale env,
+/// home, or mark into the caller (the by-convention balance this replaces
+/// is the exact shape of two shipped bugs). Returns the body's tag plus the
+/// minted frame id, if any.
+#[inline(always)]
+fn run_in_frame_ctx<'gc>(
+    vm: &mut VmState<'gc>,
+    enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
+    home: HomeCtx,
+    base: usize,
+    body: impl FnOnce(&mut VmState<'gc>) -> u8,
+) -> (u8, Option<usize>) {
+    if vm.aot.depth == 0 {
+        vm.aot.fuel = i64::from(crate::tuning::step_batch());
+    }
+    vm.aot_pending_error = None;
+    let saved_env = std::mem::replace(&mut vm.aot.enclosing_env, enclosing_env);
+    let (minted, saved_home) = match home {
+        HomeCtx::Mint => {
+            let id = vm.next_frame_id;
+            vm.next_frame_id += 1;
+            vm.aot.frame_marks.push(crate::vm::AotFrameMark {
+                id,
+                frames_len: vm.frames.len(),
+                stack_base: base,
+            });
+            (
+                Some(id),
+                Some(std::mem::replace(&mut vm.aot.home_frame_id, Some(id))),
+            )
+        }
+        HomeCtx::Propagate(h) => (None, Some(std::mem::replace(&mut vm.aot.home_frame_id, h))),
+        HomeCtx::Untracked => (None, None),
+    };
+    let tag = body(vm);
+    vm.aot.enclosing_env = saved_env;
+    if let Some(h) = saved_home {
+        vm.aot.home_frame_id = h;
+    }
+    if let Some(id) = minted {
+        let popped = vm.aot.frame_marks.pop();
+        debug_assert_eq!(popped.map(|m| m.id), Some(id));
+    }
+    (tag, minted)
+}
+
+/// The one tag → [`AotOutcome`] translation both entry points share; `ok`
+/// supplies the TAG_OK value (scalar-from-lane for methods, slot-read for
+/// blocks — the only shape difference). A new `TAG_*` is handled here or
+/// nowhere.
+#[inline(always)]
+fn outcome_from_tag<'gc>(
+    vm: &mut VmState<'gc>,
+    tag: u8,
+    // `Option`, not `Result`: this runs per compiled invocation (per ELEMENT
+    // on combinator seams), and a Drop-glued `Result<_, QuoinError>` here is
+    // real per-call cost; `None` = the checked return-slot read failed.
+    ok: impl FnOnce(&mut VmState<'gc>) -> Option<Value<'gc>>,
+) -> AotOutcome<'gc> {
+    match tag {
+        TAG_OK => match ok(vm) {
+            Some(v) => AotOutcome::Value(v),
+            // An OK tag with the ret slot truncated away means a
+            // delivery/absorb protocol bug upstream — a catchable error
+            // beats a panic that would abort across the Cranelift frames.
+            None => AotOutcome::Err(QuoinError::Other(
+                "AOT invariant violated: return slot past stack top".to_string(),
+            )),
+        },
+        TAG_DIV_ZERO => {
+            AotOutcome::Err(QuoinError::ArithmeticError("Division by zero".to_string()))
+        }
+        TAG_DEPTH => AotOutcome::Err(QuoinError::Other(
+            "Maximum compiled-call depth exceeded (recursion too deep for native code)".to_string(),
+        )),
+        TAG_CANCELLED => AotOutcome::Err(vm.take_cancellation()),
+        TAG_ERR => AotOutcome::Err(vm.aot_pending_error.take().unwrap_or_else(|| {
+            QuoinError::Other("AOT: TAG_ERR with no pending error".to_string())
+        })),
+        other => AotOutcome::Err(QuoinError::Other(format!(
+            "AOT: compiled code returned unknown tag {other}"
+        ))),
+    }
+}
+
+/// The shared exit protocol: consume a `^^` that came home to THIS
+/// invocation (the unwind already popped the outcall frames to our mark,
+/// truncated the stack to our window base, and pushed the delivered value
+/// there — to the caller, `^^v` from a cold arm IS the method returning
+/// `v`), then tear down the slot window — EXCEPT when a non-local return
+/// escaped through this frame: the `^^` unwind already truncated past the
+/// window and pushed the delivered value at its target's stack base, which
+/// can sit AT `base` (a caller whose operand stack was empty at the send);
+/// truncating then would chop the delivered value off the stack (found by a
+/// promoted `False#else:` whose arm block did `^^` — S1).
+#[inline(always)]
+fn finish_frame<'gc>(
+    vm: &mut VmState<'gc>,
+    outcome: AotOutcome<'gc>,
+    base: usize,
+    minted: Option<usize>,
+) -> AotOutcome<'gc> {
+    if let Some(frame_id) = minted
+        && vm.aot.nlr_target == Some(frame_id)
+    {
+        vm.aot.nlr_target = None;
+        debug_assert!(matches!(
+            &outcome,
+            AotOutcome::Err(QuoinError::NonLocalReturn)
+        ));
+        debug_assert_eq!(vm.stack.len(), base + 1);
+        if let AotOutcome::Err(QuoinError::NonLocalReturn) = &outcome
+            && let Some(v) = vm.stack.pop()
+        {
+            return AotOutcome::Value(v);
+        }
+    }
+    if !matches!(&outcome, AotOutcome::Err(QuoinError::NonLocalReturn)) {
+        vm.stack.truncate(base);
+    }
+    outcome
+}
+
 /// Unbox the (dispatch-guaranteed) args, reserve this frame's slot window on
 /// `vm.stack` (slot 0 = receiver, then object params, then nil-initialized
 /// scratch — all GC-rooted by construction), run the compiled body, and box
-/// the result. Fuel is reset at top-level entry only, so nested direct calls
-/// share one budget like interpreted steps do.
+/// the result.
 pub fn invoke<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -373,21 +566,7 @@ pub fn invoke<'gc>(
     args: &[Value<'gc>],
     enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
 ) -> AotOutcome<'gc> {
-    // NO COMPILED FRAMES INSIDE USER FIBERS: an abandoned fiber (a generator
-    // dropped mid-iteration by `take:`) is torn down by corosensei's FORCED
-    // UNWIND, which cannot cross Cranelift frames (no unwind info) — the
-    // process aborts. A compiled body may suspend at any outcall or fuel
-    // checkpoint, so the only sound rule is entry-level: inside a fiber,
-    // Bail to the interpreted body (identical semantics, unwindable frames).
-    // The main task and spawned tasks are torn down gracefully (cancellation
-    // errors / process exit), so they keep compiled execution.
-    if vm.sched.current_fiber.is_some() {
-        return AotOutcome::Bail;
-    }
-    // S2: direct self-recursion bakes in "dispatch(self, sel) reaches this
-    // template"; any later method-table mutation could change that, so a
-    // stale epoch runs the interpreted body (which re-dispatches per send).
-    if entry.direct_self && entry.compile_epoch != redef_epoch() {
+    if !entry_gates(vm, entry) {
         return AotOutcome::Bail;
     }
     if args.len() != entry.params.len() {
@@ -426,102 +605,39 @@ pub fn invoke<'gc>(
     for _ in 0..entry.n_scratch {
         vm.stack.push(Value::Nil);
     }
-    if vm.aot_depth == 0 {
-        vm.aot_fuel = i64::from(crate::tuning::step_batch());
-    }
-    vm.aot_pending_error = None;
-    let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
-    // S5: a frame that materializes closures is a potential `^^` target (the
-    // compiled home id travels only inside closures it materializes). Mint a
-    // frame id from the shared counter (so it can never collide with an
-    // interpreter frame's), publish it as the home for those closures, and
-    // mark where the frame's outcall frames and slot window begin — the
-    // `MethodReturn` unwind stops there when a `^^` comes home. Frames that
-    // materialize nothing skip all of it.
-    let nlr_mark = if entry.materializes_nlr {
-        let id = vm.next_frame_id;
-        vm.next_frame_id += 1;
-        vm.aot_frame_marks.push(crate::vm::AotFrameMark {
-            id,
-            frames_len: vm.frames.len(),
-            stack_base: base,
-        });
-        Some((id, std::mem::replace(&mut vm.aot_home_frame_id, Some(id))))
+    // S5: a frame that materializes a `^^`-carrying nest is a potential `^^`
+    // target (the compiled home id travels only inside such closures) —
+    // frames that don't skip all bookkeeping.
+    let home = if entry.materializes_nlr {
+        HomeCtx::Mint
     } else {
-        None
+        HomeCtx::Untracked
     };
-    let fuel_ptr = &raw mut vm.aot_fuel;
-    let depth_ptr = &raw mut vm.aot_depth;
-    let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
-    let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
     let mut ret: i64 = 0;
-    let tag = unsafe {
-        (entry.raw)(
-            vm_ptr,
-            mc_ptr,
-            fuel_ptr,
-            depth_ptr,
-            base as i64,
-            raw.as_ptr(),
-            &mut ret,
-        )
-    };
-    vm.aot_enclosing_env = saved_env;
-    if let Some((_, saved_home)) = nlr_mark {
-        vm.aot_home_frame_id = saved_home;
-        vm.aot_frame_marks.pop();
-    }
-    let outcome = match tag {
-        TAG_OK => AotOutcome::Value(match entry.ret {
-            AotRet::Scalar(AotKind::Int) => Value::Int(ret),
-            AotRet::Scalar(AotKind::Double) => Value::Double(f64::from_bits(ret as u64)),
-            AotRet::Scalar(AotKind::Bool) => Value::Bool(ret != 0),
-            AotRet::Obj => vm.stack[ret as usize],
-        }),
-        TAG_DIV_ZERO => {
-            AotOutcome::Err(QuoinError::ArithmeticError("Division by zero".to_string()))
+    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, |vm| {
+        let fuel_ptr = &raw mut vm.aot.fuel;
+        let depth_ptr = &raw mut vm.aot.depth;
+        let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
+        let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
+        unsafe {
+            (entry.raw)(
+                vm_ptr,
+                mc_ptr,
+                fuel_ptr,
+                depth_ptr,
+                base as i64,
+                raw.as_ptr(),
+                &mut ret,
+            )
         }
-        TAG_DEPTH => AotOutcome::Err(QuoinError::Other(
-            "Maximum compiled-call depth exceeded (recursion too deep for native code)".to_string(),
-        )),
-        TAG_CANCELLED => AotOutcome::Err(vm.take_cancellation()),
-        TAG_ERR => AotOutcome::Err(vm.aot_pending_error.take().unwrap_or_else(|| {
-            QuoinError::Other("AOT: TAG_ERR with no pending error".to_string())
-        })),
-        other => AotOutcome::Err(QuoinError::Other(format!(
-            "AOT: compiled method returned unknown tag {other}"
-        ))),
-    };
-    // S5: a `^^` whose home is THIS invocation. The unwind already popped the
-    // outcall frames to our mark, truncated the stack to our window base, and
-    // pushed the delivered value there — consume it as this method's ordinary
-    // return value (to the caller, `^^v` from a cold arm IS the method
-    // returning `v`).
-    if let Some((frame_id, _)) = nlr_mark
-        && vm.aot_nlr_target == Some(frame_id)
-    {
-        vm.aot_nlr_target = None;
-        debug_assert!(matches!(
-            &outcome,
-            AotOutcome::Err(QuoinError::NonLocalReturn)
-        ));
-        debug_assert_eq!(vm.stack.len(), base + 1);
-        if let AotOutcome::Err(QuoinError::NonLocalReturn) = &outcome
-            && let Some(v) = vm.stack.pop()
-        {
-            return AotOutcome::Value(v);
-        }
-    }
-    // Window teardown — EXCEPT when a non-local return escaped through this
-    // frame: the `^^` unwind already truncated past the window and pushed the
-    // delivered value at its target's stack base, which can sit AT `base`
-    // (a caller whose operand stack was empty at the send). Truncating then
-    // would chop the delivered value off the stack (found by a promoted
-    // `False#else:` whose arm block did `^^` — S1).
-    if !matches!(&outcome, AotOutcome::Err(QuoinError::NonLocalReturn)) {
-        vm.stack.truncate(base);
-    }
-    outcome
+    });
+    let outcome = outcome_from_tag(vm, tag, |vm| match entry.ret {
+        AotRet::Scalar(AotKind::Int) => Some(Value::Int(ret)),
+        AotRet::Scalar(AotKind::Double) => Some(Value::Double(f64::from_bits(ret as u64))),
+        AotRet::Scalar(AotKind::Bool) => Some(Value::Bool(ret != 0)),
+        AotRet::Obj => vm.stack.get(ret as usize).copied(),
+    });
+    finish_frame(vm, outcome, base, minted)
 }
 
 /// The compiled entry for a block template, compiling LAZILY on first use
@@ -571,14 +687,14 @@ pub fn invoke_block<'gc>(
     arg: Value<'gc>,
 ) -> AotOutcome<'gc> {
     debug_assert!(entry.role == AotRole::BlockTemplate);
-    // Same fiber gate as `invoke` — see the comment there.
-    if vm.sched.current_fiber.is_some() {
+    if !entry_gates(vm, entry) {
         return AotOutcome::Bail;
     }
     // The invoked closure's lexical parent AND its `^^` home: a closure the
     // template's cold path materializes belongs to the same home method this
     // closure does (S5) — including `None` (a homeless block's `^^` errors,
-    // exactly as interpreted).
+    // exactly as interpreted). A template is never a `^^` TARGET itself
+    // (`HomeCtx::Propagate`, not `Mint` — so `finish_frame` never consumes).
     let (enclosing_env, home_id) = match block_val {
         Value::Object(obj) => match &obj.borrow().payload {
             crate::value::ObjectPayload::Block(b) => (b.parent_env, b.enclosing_method_id),
@@ -593,59 +709,32 @@ pub fn invoke_block<'gc>(
     for _ in 0..entry.n_scratch {
         vm.stack.push(Value::Nil);
     }
-    if vm.aot_depth == 0 {
-        vm.aot_fuel = i64::from(crate::tuning::step_batch());
-    }
-    vm.aot_pending_error = None;
-    let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
-    // S5: only a template that materializes a `^^`-carrying closure
-    // propagates its home — `make_closure`'s `want_home` path is the sole
-    // reader.
-    let saved_home = entry
-        .materializes_nlr
-        .then(|| std::mem::replace(&mut vm.aot_home_frame_id, home_id));
-    let fuel_ptr = &raw mut vm.aot_fuel;
-    let depth_ptr = &raw mut vm.aot_depth;
-    let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
-    let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
-    let raw_args: [i64; 1] = [base as i64 + 1];
+    let home = if entry.materializes_nlr {
+        HomeCtx::Propagate(home_id)
+    } else {
+        HomeCtx::Untracked
+    };
     let mut ret: i64 = 0;
-    let tag = unsafe {
-        (entry.raw)(
-            vm_ptr,
-            mc_ptr,
-            fuel_ptr,
-            depth_ptr,
-            base as i64,
-            raw_args.as_ptr(),
-            &mut ret,
-        )
-    };
-    vm.aot_enclosing_env = saved_env;
-    if let Some(saved_home) = saved_home {
-        vm.aot_home_frame_id = saved_home;
-    }
-    let outcome = match tag {
-        TAG_OK => AotOutcome::Value(vm.stack[ret as usize]),
-        TAG_DIV_ZERO => {
-            AotOutcome::Err(QuoinError::ArithmeticError("Division by zero".to_string()))
+    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, |vm| {
+        let fuel_ptr = &raw mut vm.aot.fuel;
+        let depth_ptr = &raw mut vm.aot.depth;
+        let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
+        let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
+        let raw_args: [i64; 1] = [base as i64 + 1];
+        unsafe {
+            (entry.raw)(
+                vm_ptr,
+                mc_ptr,
+                fuel_ptr,
+                depth_ptr,
+                base as i64,
+                raw_args.as_ptr(),
+                &mut ret,
+            )
         }
-        TAG_DEPTH => AotOutcome::Err(QuoinError::Other(
-            "Maximum compiled-call depth exceeded (recursion too deep for native code)".to_string(),
-        )),
-        TAG_CANCELLED => AotOutcome::Err(vm.take_cancellation()),
-        TAG_ERR => AotOutcome::Err(vm.aot_pending_error.take().unwrap_or_else(|| {
-            QuoinError::Other("AOT: TAG_ERR with no pending error".to_string())
-        })),
-        other => AotOutcome::Err(QuoinError::Other(format!(
-            "AOT: compiled block returned unknown tag {other}"
-        ))),
-    };
-    // Same non-local-return teardown rule as `invoke` above.
-    if !matches!(&outcome, AotOutcome::Err(QuoinError::NonLocalReturn)) {
-        vm.stack.truncate(base);
-    }
-    outcome
+    });
+    let outcome = outcome_from_tag(vm, tag, |vm| vm.stack.get(ret as usize).copied());
+    finish_frame(vm, outcome, base, minted)
 }
 
 /// Fuel checkpoint, called from compiled code when the fuel counter hits zero.

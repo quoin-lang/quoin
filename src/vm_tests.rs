@@ -218,20 +218,12 @@ fn test_push_pop_dup() {
             assert_eq!(to_status_spec(status), VmStatusSpec::Running);
             assert_eq!(stack_spec(vm), vec![ValueSpec::Int(10), ValueSpec::Int(10)]);
 
-            // Step 5: Implicit return Nil
+            // Step 5: Implicit return Nil — the frame's operand leftovers are
+            // truncated to its stack base exactly like an explicit `Return`
+            // (the implicit arm used to leak them; R0d unified the teardown).
             let status = vm.step(mc).unwrap();
             assert_eq!(to_status_spec(status), VmStatusSpec::Running);
-            assert_eq!(
-                stack_spec(vm),
-                vec![ValueSpec::Int(10), ValueSpec::Int(10), ValueSpec::Nil]
-            );
-
-            // Pop the remaining values left on stack for testing to satisfy the stack-empty assertion
-            vm.pop().unwrap(); // Nil
-            vm.pop().unwrap(); // 10
-            vm.pop().unwrap(); // 10
-            let nil_val = vm.new_nil(mc);
-            vm.push(nil_val); // Push it back as the return value
+            assert_eq!(stack_spec(vm), vec![ValueSpec::Nil]);
 
             // Step 6: Finished
             let status = vm.step(mc).unwrap();

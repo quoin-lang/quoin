@@ -33,7 +33,9 @@ pub fn merge(lat: u8, observed: u8) -> u8 {
 /// bounds-checked byte load.
 pub const NOT_SPECULATIVE: u8 = 0;
 pub const OBSERVING: u8 = 1;
-pub const SATURATED: u8 = 2;
+// (2 was a per-template SATURATED state that no code ever set — observation
+// stops via the process-wide budget instead; the value stays unused so
+// RESOLVED needn't renumber.)
 /// Promoted (compiled, or refused by the translator) — never observed again.
 pub const RESOLVED: u8 = 3;
 

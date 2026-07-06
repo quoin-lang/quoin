@@ -10,11 +10,10 @@ use crate::gc;
 use crate::io_backend::{IoRequest, IoResult};
 use crate::runtime::fiber::{FiberStatus, NativeFiberState};
 use crate::runtime::task::NativeTaskHandle;
-use crate::value::{Block, EnvFrame, NativeCall, ObjectPayload, Value};
+use crate::value::{Block, NativeCall, ObjectPayload, Value};
 use crate::vm::{Frame, VmState};
 
 use futures_util::future::AbortHandle;
-use gc_arena::lock::RefLock;
 use gc_arena::{Collect, Gc, Mutation};
 use std::collections::VecDeque;
 
@@ -127,25 +126,13 @@ pub struct Task<'gc> {
     /// block that awaits) must not leak its depth into whichever task runs next.
     #[collect(require_static)]
     pub native_reentry_depth: usize,
-    /// This task's AOT fuel/depth counters (see `VmState::aot_fuel`).
-    pub aot_fuel: i64,
-    pub aot_depth: i64,
-    /// This task's enclosing-env slot for compiled frames (see
-    /// `VmState::aot_enclosing_env`), stashed while parked. A task that parks
-    /// *inside* a compiled body (fuel checkpoint, outcall I/O) must not leak
-    /// its lexical context into whichever task runs next — a closure the next
-    /// task materializes would chain its snapshot to the wrong environment.
-    pub aot_enclosing_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
-    /// This task's compiled-frame `^^` context (see the `VmState` fields of
-    /// the same names), stashed while parked: the marks index this task's
-    /// `frames`/`stack`, and a home id leaked across tasks would tag another
-    /// task's materialized closures with a foreign `^^` target.
-    #[collect(require_static)]
-    pub aot_home_frame_id: Option<usize>,
-    #[collect(require_static)]
-    pub aot_frame_marks: Vec<crate::vm::AotFrameMark>,
-    #[collect(require_static)]
-    pub aot_nlr_target: Option<usize>,
+    /// This task's compiled-execution slice (see `AotTaskState`), stashed
+    /// while parked and swapped as ONE unit: everything in it describes
+    /// state frozen on THIS task's coroutine stack (fuel/depth budgets,
+    /// outcall nesting, the lexical and `^^` context of in-flight compiled
+    /// frames), so leaking any field to the next task corrupts that task's
+    /// compiled execution.
+    pub aot: crate::vm::AotTaskState<'gc>,
 }
 
 /// Bookkeeping for a task parked in `Async.gather:`: it resumes once `pending`
@@ -891,12 +878,7 @@ impl<'gc> VmState<'gc> {
         // A REPL line that errored mid-native-call may have unwound past the paired
         // decrement; start each new line at re-entry depth zero.
         self.native_reentry_depth = 0;
-        self.aot_fuel = 0;
-        self.aot_depth = 0;
-        self.aot_enclosing_env = None;
-        self.aot_home_frame_id = None;
-        self.aot_frame_marks.clear();
-        self.aot_nlr_target = None;
+        self.aot = crate::vm::AotTaskState::default();
     }
 
     /// Stash the live per-task context into `tasks[tid]` (the task is parking or
@@ -925,12 +907,7 @@ impl<'gc> VmState<'gc> {
         t.saved_root_frames = saved_root_frames;
         t.saved_root_native_args = saved_root_native_args;
         t.native_reentry_depth = self.native_reentry_depth;
-        t.aot_fuel = self.aot_fuel;
-        t.aot_depth = self.aot_depth;
-        t.aot_enclosing_env = self.aot_enclosing_env.take();
-        t.aot_home_frame_id = self.aot_home_frame_id.take();
-        t.aot_frame_marks = std::mem::take(&mut self.aot_frame_marks);
-        t.aot_nlr_target = self.aot_nlr_target.take();
+        t.aot = std::mem::take(&mut self.aot);
     }
 
     /// Make `tid` the current task and restore its context into `VmState`. The
@@ -966,12 +943,7 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_native_args = std::mem::take(&mut t.saved_root_native_args);
             self.sched.wake = t.wake.take();
             self.native_reentry_depth = t.native_reentry_depth;
-            self.aot_fuel = t.aot_fuel;
-            self.aot_depth = t.aot_depth;
-            self.aot_enclosing_env = t.aot_enclosing_env.take();
-            self.aot_home_frame_id = t.aot_home_frame_id.take();
-            self.aot_frame_marks = std::mem::take(&mut t.aot_frame_marks);
-            self.aot_nlr_target = t.aot_nlr_target.take();
+            self.aot = std::mem::take(&mut t.aot);
         } else {
             // First activation: a fresh, empty live context, then start the block.
             self.stack = Vec::new();
@@ -984,12 +956,7 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_native_args = Vec::new();
             self.sched.wake = None;
             self.native_reentry_depth = 0;
-            self.aot_fuel = 0;
-            self.aot_depth = 0;
-            self.aot_enclosing_env = None;
-            self.aot_home_frame_id = None;
-            self.aot_frame_marks = Vec::new();
-            self.aot_nlr_target = None;
+            self.aot = crate::vm::AotTaskState::default();
             let block = self.sched.tasks[tid.0]
                 .as_ref()
                 .unwrap()
@@ -1092,12 +1059,7 @@ impl<'gc> VmState<'gc> {
             deadline_abort: None,
             parked_on_channel: false,
             native_reentry_depth: 0,
-            aot_fuel: 0,
-            aot_depth: 0,
-            aot_enclosing_env: None,
-            aot_home_frame_id: None,
-            aot_frame_marks: Vec::new(),
-            aot_nlr_target: None,
+            aot: crate::vm::AotTaskState::default(),
         }
     }
 

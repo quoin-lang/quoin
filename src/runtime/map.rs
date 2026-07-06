@@ -306,19 +306,16 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
                         )));
                     }
                     Err(QuoinError::NonLocalReturn) => {
-                        // At the baseline with `aot_nlr_target` set, the `^^`
-                        // came home to a live COMPILED frame (S5) — delivery,
-                        // not completion; propagate (see `run_nested`).
-                        if vm.aot_nlr_target.is_some() {
+                        // The ONE absorb/propagate decision (see the
+                        // predicate's doc — this hand-rolled loop predates
+                        // `run_nested` and deliberately never yields).
+                        if vm.nlr_must_propagate(initial_frame_count) {
                             return Err(QuoinError::NonLocalReturn);
                         }
                         if vm.frames.len() > initial_frame_count {
                             continue;
-                        } else if vm.frames.len() == initial_frame_count {
-                            break;
-                        } else {
-                            return Err(QuoinError::NonLocalReturn);
                         }
+                        break;
                     }
                     Err(e) => return Err(e),
                 }

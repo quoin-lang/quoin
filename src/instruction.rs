@@ -95,7 +95,7 @@ pub struct StaticBlock {
     /// per-evaluation compile would otherwise grow the registry without bound.
     pub template_id: Option<u32>,
     /// Speculative-AOT observation state (spec::NOT_SPECULATIVE/OBSERVING/
-    /// SATURATED, docs/SPECULATIVE_AOT_ARCH.md S0). Lives HERE so the
+    /// RESOLVED, docs/SPECULATIVE_AOT_ARCH.md S0). Lives HERE so the
     /// method-entry gate is one byte off a template line that entry binding
     /// touches anyway — a side table would cost a dependent pointer chase on
     /// every method call. Shared by all closures of the literal (one `Rc`).
@@ -371,4 +371,25 @@ pub enum Instruction {
         path: String,
         glob: bool,
     },
+}
+
+impl Instruction {
+    /// The selector-carrying send forms, exhaustively: `(selector, argc,
+    /// fused constant operand if the form carries one)`. Every scan that
+    /// reasons about a body's sends (AOT purity sets, materialization-nest
+    /// gates, cold-path send identification) must go through this — four
+    /// hand-copied match lists had already drifted apart (two silently
+    /// missed `SendField`). A new send variant added to the enum is handled
+    /// here or its selector is invisible to every gate at once, loudly.
+    pub fn send_parts(&self) -> Option<(&Symbol, usize, Option<&Constant>)> {
+        match self {
+            Instruction::Send(s, n) => Some((s, *n, None)),
+            Instruction::SendLocal(_, s, n) => Some((s, *n, None)),
+            Instruction::SendField(_, s, n) => Some((s, *n, None)),
+            Instruction::SendLocalLocal(_, _, s, n) => Some((s, *n, None)),
+            Instruction::SendConst(c, s, n) => Some((s, *n, Some(c))),
+            Instruction::SendLocalConst(_, c, s, n) => Some((s, *n, Some(c))),
+            _ => None,
+        }
+    }
 }

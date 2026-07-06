@@ -33,7 +33,9 @@ use gc_arena::lock::RefLock;
 
 use super::{TAG_ERR, TAG_OK};
 
-/// Value-lane kinds in the compiled ABI.
+/// Value-lane kinds in the compiled ABI. Kept DISJOINT from the nonzero
+/// status TAGs (`super::TAG_*`, 0x11+) that share the same integer ABI —
+/// see the note at the TAG definitions.
 pub const KIND_INT: i64 = 0;
 pub const KIND_DOUBLE: i64 = 1;
 pub const KIND_BOOL: i64 = 2;
@@ -79,6 +81,23 @@ fn invariant(vm: &mut VmState<'_>, what: &str) -> u8 {
     )
 }
 
+/// The ONE way a helper writes a result into the compiled frame's slot
+/// window. Checked: a slot index past the stack top means the stack was
+/// truncated under us (an unwind the calling protocol failed to surface —
+/// the S5 absorb-at-baseline bug aborted the process exactly here), and a
+/// catchable AOT error beats a panic that cannot unwind across the
+/// Cranelift frames.
+#[inline(always)]
+fn slot_write<'gc>(vm: &mut VmState<'gc>, idx: i64, v: Value<'gc>) -> u8 {
+    match vm.stack.get_mut(idx as usize) {
+        Some(slot) => {
+            *slot = v;
+            TAG_OK
+        }
+        None => invariant(vm, "slot write past the stack top"),
+    }
+}
+
 /// `vm.stack[idx] = decode(kind, bits)` — writes into the compiled frame's
 /// slot window (or copies slot→slot when `kind == KIND_SLOT`).
 pub(super) unsafe extern "C" fn slot_set(
@@ -90,8 +109,7 @@ pub(super) unsafe extern "C" fn slot_set(
 ) -> u8 {
     let (vm, _mc) = unsafe { vm_mc(vm, mc) };
     let v = decode(vm, kind, bits);
-    vm.stack[idx as usize] = v;
-    TAG_OK
+    slot_write(vm, idx, v)
 }
 
 /// Read `vm.stack[idx]` as `(kind, bits)`: scalars by value; anything else
@@ -119,8 +137,7 @@ pub(super) unsafe extern "C" fn slot_peek(
 pub(super) unsafe extern "C" fn list_new(vm: *mut c_void, mc: *const c_void, out_idx: i64) -> u8 {
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
     let list = vm.new_list(mc, Vec::new());
-    vm.stack[out_idx as usize] = list;
-    TAG_OK
+    slot_write(vm, out_idx, list)
 }
 
 /// `#(a b …)` — a list built from `n` value lanes.
@@ -139,8 +156,7 @@ pub(super) unsafe extern "C" fn list_from(
         elems.push(decode(vm, k, b));
     }
     let list = vm.new_list(mc, elems);
-    vm.stack[out_idx as usize] = list;
-    TAG_OK
+    slot_write(vm, out_idx, list)
 }
 
 /// `list.add:value` — mirrors the interpreter's `ListPush` arm. The compiler
@@ -197,10 +213,7 @@ pub(super) unsafe extern "C" fn list_get(
         devirt_ops::list_get(l.get_vec(), index).unwrap_or(Value::Nil)
     });
     match out {
-        Ok(v) => {
-            vm.stack[out_idx as usize] = v;
-            TAG_OK
-        }
+        Ok(v) => slot_write(vm, out_idx, v),
         Err(_) => invariant(vm, "ListGet on a non-list receiver"),
     }
 }
@@ -241,8 +254,7 @@ pub(super) unsafe extern "C" fn env_get(
         .parent_env
         .and_then(|env| crate::value::EnvFrame::get(env, sym))
         .unwrap_or(Value::Nil);
-    vm.stack[out_idx as usize] = val;
-    TAG_OK
+    slot_write(vm, out_idx, val)
 }
 
 /// Write a compiled block template's FREE variable through its closure's
@@ -321,31 +333,24 @@ pub(super) unsafe extern "C" fn block_call(
             crate::symbol::Symbol::intern("valueWithSelfOrArg:"),
             vec![arg],
         ) {
-            Ok(v) => {
-                vm.stack[out_idx as usize] = v;
-                TAG_OK
-            }
+            Ok(v) => slot_write(vm, out_idx, v),
             Err(e) => store_err(vm, e),
         };
     };
-    if vm.outcall_nesting < super::spec::MAX_OUTCALL_NESTING
+    if vm.aot.outcall_nesting < super::spec::MAX_OUTCALL_NESTING
         && let Some(tid) = block.template.template_id
         && let Some(entry) = super::block_entry_for(vm, tid)
     {
         match super::invoke_block(vm, mc, entry, recv, arg) {
             super::AotOutcome::Value(v) => {
-                vm.stack[out_idx as usize] = v;
-                return TAG_OK;
+                return slot_write(vm, out_idx, v);
             }
             super::AotOutcome::Err(e) => return store_err(vm, e),
             super::AotOutcome::Bail => {}
         }
     }
     match vm.execute_block(mc, block, vec![arg], Some(arg)) {
-        Ok(v) => {
-            vm.stack[out_idx as usize] = v;
-            TAG_OK
-        }
+        Ok(v) => slot_write(vm, out_idx, v),
         Err(e) => store_err(vm, e),
     }
 }
@@ -357,7 +362,7 @@ pub(super) unsafe extern "C" fn block_call(
 /// Read-only-capture semantics are the translator's gate; a `^^` in the nest
 /// is fine (S5) — `want_home != 0` iff the nest contains one, and then the
 /// closure's home is the invoking compiled frame, carried in
-/// `vm.aot_home_frame_id` and addressable through `vm.aot_frame_marks`
+/// `vm.aot.home_frame_id` and addressable through `vm.aot.frame_marks`
 /// (a `^^`-free nest never consults `enclosing_method_id`, and its invoking
 /// frame skips the S5 bookkeeping entirely, so the field would be stale).
 pub(super) unsafe extern "C" fn make_closure(
@@ -372,7 +377,7 @@ pub(super) unsafe extern "C" fn make_closure(
     // Chain the snapshot to the invoking frame's enclosing environment, so a
     // nested materialized closure's free names resolve through the FULL
     // lexical chain, exactly as interpreted (the webapp `path` lesson).
-    let env = crate::gcl!(mc, crate::value::EnvFrame::new(vm.aot_enclosing_env));
+    let env = crate::gcl!(mc, crate::value::EnvFrame::new(vm.aot.enclosing_env));
     let inline_cache = vm.ic_cell_for(mc, tmpl);
     let v = vm.new_block(
         mc,
@@ -380,7 +385,7 @@ pub(super) unsafe extern "C" fn make_closure(
             template: tmpl.clone(),
             parent_env: Some(env),
             enclosing_method_id: if want_home != 0 {
-                vm.aot_home_frame_id
+                vm.aot.home_frame_id
             } else {
                 None
             },
@@ -388,8 +393,7 @@ pub(super) unsafe extern "C" fn make_closure(
             inline_cache,
         },
     );
-    vm.stack[out_idx as usize] = v;
-    TAG_OK
+    slot_write(vm, out_idx, v)
 }
 
 /// Bind one captured value into a `make_closure`-built snapshot env. The
@@ -439,8 +443,7 @@ pub(super) unsafe extern "C" fn field_get(
     };
     let self_val = vm.stack[self_idx as usize];
     let v = vm.field_load_cached(mc, tid as u32, ip as usize, bc_len as usize, self_val, name);
-    vm.stack[out_idx as usize] = v;
-    TAG_OK
+    slot_write(vm, out_idx, v)
 }
 
 /// `@name = v` in a compiled frame (S3) — same shared cache; undeclared
@@ -572,8 +575,7 @@ pub(super) unsafe extern "C" fn string_const(
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
     let s = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize)) };
     let v = vm.new_string(mc, s.to_string());
-    vm.stack[out_idx as usize] = v;
-    TAG_OK
+    slot_write(vm, out_idx, v)
 }
 
 /// A dynamic send from compiled code: the general boundary out of the
@@ -616,10 +618,7 @@ pub(super) unsafe extern "C" fn outcall(
         selector,
         args,
     ) {
-        Ok(v) => {
-            vm.stack[out_idx as usize] = v;
-            TAG_OK
-        }
+        Ok(v) => slot_write(vm, out_idx, v),
         Err(e) => store_err(vm, e),
     }
 }
@@ -665,6 +664,5 @@ pub(super) unsafe extern "C" fn load_global(
     let name = unsafe { &*name };
     let v = vm.globals.borrow().get(name).copied().unwrap_or(Value::Nil);
     let _ = mc;
-    vm.stack[out_idx as usize] = v;
-    TAG_OK
+    slot_write(vm, out_idx, v)
 }

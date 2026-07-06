@@ -200,7 +200,7 @@ impl<'gc> Callable<'gc> {
                 // runs instead (flat frames) — deep untyped recursion must
                 // not overflow the coroutine stack via per-level outcall
                 // re-entries, and must not error where the interpreter works.
-                if vm.outcall_nesting >= crate::codegen::spec::MAX_OUTCALL_NESTING {
+                if vm.aot.outcall_nesting >= crate::codegen::spec::MAX_OUTCALL_NESTING {
                     vm.start_block_as_method(mc, block, receiver, args, selector, true);
                     return Ok(());
                 }
