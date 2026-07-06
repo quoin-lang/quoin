@@ -448,7 +448,7 @@ pub fn build_list_class() -> NativeClassBuilder {
 
                         let key_lhs = vm.call_method(
                             mc,
-                            active_args.args[0],
+                            active_args.arg(&vm.stack, 0).unwrap(),
                             "valueWithArgs:",
                             vec![vm.new_list(mc, vec![val_prev])],
                         )?;
@@ -459,7 +459,7 @@ pub fn build_list_class() -> NativeClassBuilder {
 
                         let key_rhs = vm.call_method(
                             mc,
-                            active_args.args[0],
+                            active_args.arg(&vm.stack, 0).unwrap(),
                             "valueWithArgs:",
                             vec![vm.new_list(mc, vec![val_curr])],
                         )?;
@@ -493,7 +493,7 @@ pub fn build_list_class() -> NativeClassBuilder {
 
                         let res = vm.call_method(
                             mc,
-                            active_args.args[0],
+                            active_args.arg(&vm.stack, 0).unwrap(),
                             "valueWithArgs:",
                             vec![vm.new_list(mc, vec![val_prev, val_curr])],
                         )?;

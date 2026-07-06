@@ -93,7 +93,10 @@ pub fn build_string_class() -> NativeClassBuilder {
         .instance_method("%:", |vm, mc, receiver, _args| {
             let s_str = recv!(receiver, String).to_string();
 
-            let arg1 = vm.active_native_args.last().unwrap().args[0];
+            let arg1 = {
+                let c = vm.active_native_args.last().unwrap();
+                c.arg(&vm.stack, 0).unwrap()
+            };
             let mut format_args_raw = Vec::new();
             if let Value::Object(o) = arg1 {
                 let oref = o.borrow();
@@ -130,7 +133,10 @@ pub fn build_string_class() -> NativeClassBuilder {
             }
 
             let mut map_formatted_args = HashMap::new();
-            let arg1 = vm.active_native_args.last().unwrap().args[0];
+            let arg1 = {
+                let c = vm.active_native_args.last().unwrap();
+                c.arg(&vm.stack, 0).unwrap()
+            };
             // Snapshot the map's pairs under a short borrow, THEN render: `.s` on a
             // value runs arbitrary Quoin that can cooperatively yield, and a map-state
             // borrow held across that suspend collides with any concurrent use of the

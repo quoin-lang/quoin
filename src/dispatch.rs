@@ -5,7 +5,9 @@ use crate::error::QuoinError;
 use crate::ext_sdk::HostCtx;
 use crate::runtime::method::NativeMethodState;
 use crate::symbol::Symbol;
-use crate::value::{Block, Class, NamespacedName, NativeCall, NativeFunc, ObjectPayload, Value};
+use crate::value::{
+    Block, Class, NamespacedName, NativeArgs, NativeCall, NativeFunc, ObjectPayload, Value,
+};
 use crate::vm::VmState;
 
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
@@ -99,6 +101,12 @@ impl<'gc> Callable<'gc> {
         receiver: Option<Value<'gc>>,
         args: Vec<Value<'gc>>,
         selector: Option<Symbol>,
+        // `Some(start)` when the CALLER keeps `[receiver, args..]` live on
+        // the value stack at `stack[start-1..start+args.len()]` for this
+        // whole call (the `exec_send` window): the Native/AotCall arms then
+        // root via the window instead of cloning `args`. `None` = re-entry
+        // paths that own their Vec (the arms clone, as ever).
+        args_window: Option<usize>,
     ) -> Result<(), QuoinError> {
         match self {
             Callable::Block(block) => {
@@ -164,10 +172,17 @@ impl<'gc> Callable<'gc> {
                 })?;
                 // Keep (receiver, args) GC-rooted as one unit so a native fn can re-read
                 // them after a nested call that may have collected. One push/pop -> they
-                // can never desync.
+                // can never desync. With a caller-kept stack window the root
+                // is the window itself — no clone on the hot path.
                 vm.active_native_args.push(NativeCall {
                     receiver,
-                    args: args.clone(),
+                    args: match args_window {
+                        Some(start) => NativeArgs::StackWindow {
+                            start,
+                            len: args.len(),
+                        },
+                        None => NativeArgs::Owned(args.clone()),
+                    },
                 });
                 // `Legacy` fns take `&mut VmState` + `mc`; `Sdk` fns take `&mut dyn Host`
                 // — a `HostCtx` captures `(vm, mc)` for the call so the SDK never sees `mc`.
@@ -181,10 +196,10 @@ impl<'gc> Callable<'gc> {
                 };
                 if ret.is_err() {
                     // Native error: the send failed in place (no callee frame), so the
-                    // stack-trace formatter wants its args. Reuse the rooting snapshot
-                    // (cloned only here, on the cold error path — not on every send).
+                    // stack-trace formatter wants its args. Materialized only here, on
+                    // the cold error path — not on every send.
                     if let Some(call) = vm.active_native_args.last() {
-                        vm.exceptions.last_send_args = call.args.clone();
+                        vm.exceptions.last_send_args = call.args_vec(&vm.stack);
                     }
                 }
                 vm.active_native_args.pop();
@@ -201,6 +216,12 @@ impl<'gc> Callable<'gc> {
                 // not overflow the coroutine stack via per-level outcall
                 // re-entries, and must not error where the interpreter works.
                 if vm.aot.outcall_nesting >= crate::codegen::spec::MAX_OUTCALL_NESTING {
+                    // Interpreter fallback pushes a FRAME: the caller-kept
+                    // window (if any) must be consumed first so the frame's
+                    // stack_base sits where the send began.
+                    if let Some(start) = args_window {
+                        vm.stack.truncate(start - 1);
+                    }
                     vm.start_block_as_method(mc, block, receiver, args, selector, true);
                     return Ok(());
                 }
@@ -226,6 +247,9 @@ impl<'gc> Callable<'gc> {
                         if bails >= crate::codegen::spec::BAIL_TOMBSTONE {
                             crate::codegen::tombstone(entry.0.template_id);
                         }
+                        if let Some(start) = args_window {
+                            vm.stack.truncate(start - 1);
+                        }
                         vm.start_block_as_method(mc, block, receiver, args, selector, true);
                         return Ok(());
                     }
@@ -237,13 +261,19 @@ impl<'gc> Callable<'gc> {
                 // the receiver stays reachable here).
                 vm.active_native_args.push(NativeCall {
                     receiver,
-                    args: args.clone(),
+                    args: match args_window {
+                        Some(start) => NativeArgs::StackWindow {
+                            start,
+                            len: args.len(),
+                        },
+                        None => NativeArgs::Owned(args.clone()),
+                    },
                 });
                 let outcome =
                     crate::codegen::invoke(vm, mc, entry.0, receiver, &args, block.parent_env);
                 if matches!(outcome, crate::codegen::AotOutcome::Err(_)) {
                     if let Some(call) = vm.active_native_args.last() {
-                        vm.exceptions.last_send_args = call.args.clone();
+                        vm.exceptions.last_send_args = call.args_vec(&vm.stack);
                     }
                 }
                 vm.active_native_args.pop();
@@ -256,6 +286,9 @@ impl<'gc> Callable<'gc> {
                     // Unboxing mismatch (shouldn't happen: dispatch selected the
                     // typed variant) — run the ordinary interpreted body.
                     crate::codegen::AotOutcome::Bail => {
+                        if let Some(start) = args_window {
+                            vm.stack.truncate(start - 1);
+                        }
                         vm.start_block_as_method(mc, block, receiver, args, selector, true);
                         Ok(())
                     }
@@ -269,7 +302,7 @@ impl<'gc> Callable<'gc> {
                 // mirroring the `Native` arm; `ext` stays rooted via the class's method table.
                 vm.active_native_args.push(NativeCall {
                     receiver,
-                    args: args.clone(),
+                    args: NativeArgs::Owned(args.clone()),
                 });
                 let ret = crate::runtime::extension::dispatch_ext_method(
                     vm, mc, ext, receiver, selector, args,
@@ -277,7 +310,7 @@ impl<'gc> Callable<'gc> {
                 if ret.is_err()
                     && let Some(call) = vm.active_native_args.last()
                 {
-                    vm.exceptions.last_send_args = call.args.clone();
+                    vm.exceptions.last_send_args = call.args_vec(&vm.stack);
                 }
                 vm.active_native_args.pop();
                 let ret = ret?;

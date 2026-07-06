@@ -156,7 +156,54 @@ impl NativeFunc {
 #[collect(no_drop)]
 pub struct NativeCall<'gc> {
     pub receiver: Value<'gc>,
-    pub args: Vec<Value<'gc>>,
+    pub args: NativeArgs<'gc>,
+}
+
+/// How an in-flight native call's args are ROOTED (see
+/// `VmState::active_native_args`). The hot `exec_send` path leaves
+/// `[receiver, args..]` live on the VALUE STACK for the call's duration and
+/// records only the window — no rooting clone per native call; re-entry
+/// paths (`call_method` from inside a native) own their Vec as before.
+/// Window indices stay valid across parks and nested calls: the stack is
+/// per-task, callees only grow it above the window, and truncation back to
+/// the window happens in `exec_send` after the call returns.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub enum NativeArgs<'gc> {
+    Owned(Vec<Value<'gc>>),
+    StackWindow { start: usize, len: usize },
+}
+
+impl<'gc> NativeCall<'gc> {
+    /// The i-th argument; `stack` must be the owning VM's value stack (the
+    /// window variant indexes into it). Bounds-clamped: a `^^` unwinding
+    /// BELOW the window truncates it away mid-call, and the error paths that
+    /// then snapshot args must see "gone", not a panic.
+    pub fn arg(&self, stack: &[Value<'gc>], i: usize) -> Option<Value<'gc>> {
+        match &self.args {
+            NativeArgs::Owned(v) => v.get(i).copied(),
+            NativeArgs::StackWindow { start, len } => {
+                if i < *len {
+                    stack.get(start + i).copied()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// All arguments as an owned Vec (error-path snapshots only — the hot
+    /// path never materializes this). Bounds-clamped like [`Self::arg`].
+    pub fn args_vec(&self, stack: &[Value<'gc>]) -> Vec<Value<'gc>> {
+        match &self.args {
+            NativeArgs::Owned(v) => v.clone(),
+            NativeArgs::StackWindow { start, len } => {
+                let lo = (*start).min(stack.len());
+                let hi = (start + len).min(stack.len());
+                stack[lo..hi].to_vec()
+            }
+        }
+    }
 }
 
 unsafe impl<'gc> Collect<'gc> for NativeFunc {

@@ -1679,7 +1679,7 @@ impl<'gc> VmState<'gc> {
         let method = self.lookup_method(mc, receiver, sel, &args)?;
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(sel))?;
+            method.call(self, mc, Some(receiver), args, Some(sel), None)?;
             Ok(initial_frame_count)
         } else {
             Err(QuoinError::Other(format!(
@@ -1735,7 +1735,7 @@ impl<'gc> VmState<'gc> {
         let method = self.lookup_method(mc, receiver, sel, &args)?;
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(sel))?;
+            method.call(self, mc, Some(receiver), args, Some(sel), None)?;
 
             // let the VM catch up (batched — B0)
             self.run_nested(mc, initial_frame_count, "method call")?;
@@ -1806,6 +1806,7 @@ impl<'gc> VmState<'gc> {
                 Some(receiver),
                 args,
                 Some(Symbol::intern(selector)),
+                None,
             )?;
 
             // let the VM catch up (batched — B0)
@@ -3691,7 +3692,7 @@ impl<'gc> VmState<'gc> {
         };
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(selector))?;
+            method.call(self, mc, Some(receiver), args, Some(selector), None)?;
             self.run_nested(mc, initial_frame_count, "method call")?;
             Ok(self.pop()?)
         } else {
@@ -3959,17 +3960,20 @@ impl<'gc> VmState<'gc> {
         selector: Symbol,
         num_args: usize,
     ) -> Result<VmStatus<'gc>, QuoinError> {
-        // The operands sit in ORDER at the stack top: copy the window in one
-        // exact-size allocation instead of pop-looping and reversing.
-        let start = self
+        // The operands sit in ORDER at the stack top. Copy the args in one
+        // exact-size allocation, but leave `[receiver, args..]` LIVE on the
+        // stack: for Native/AotCall callables that window IS the GC root for
+        // the whole call (no rooting clone — see `NativeArgs::StackWindow`),
+        // torn down in `dispatch_send_rooted` after the call returns. Frame-
+        // pushing callables consume the window before their frame instead.
+        let args_start = self
             .stack
             .len()
             .checked_sub(num_args)
             .ok_or("Stack underflow")?;
-        let args: Vec<Value<'gc>> = self.stack[start..].to_vec();
-        self.stack.truncate(start);
-
-        let receiver = self.pop()?;
+        let recv_start = args_start.checked_sub(1).ok_or("Stack underflow")?;
+        let args: Vec<Value<'gc>> = self.stack[args_start..].to_vec();
+        let receiver = self.stack[recv_start];
         // Call-site identity for the inline cache: the executing frame's cache cell + the
         // Send's own `ip`, captured before we advance it (the block itself is re-read at
         // fill time — see the note at `ic_fill` below).
@@ -3981,15 +3985,16 @@ impl<'gc> VmState<'gc> {
             && let ObjectPayload::Block(block) = &obj.borrow().payload
         {
             if selector.as_str() == "value" || selector.as_str() == "value:" {
-                self.start_block(mc, *block, args, Some(receiver), Some(selector));
+                let block = *block;
+                self.stack.truncate(recv_start);
+                self.start_block(mc, block, args, Some(receiver), Some(selector));
                 return Ok(VmStatus::Running);
             }
         }
 
         // Inline-cache fast path: a hit skips `lookup_method`'s key-build + hash + hashmap.
         if let Some(callable) = self.ic_probe(caller_ic, site_ip, receiver, &args) {
-            callable.call(self, mc, Some(receiver), args, Some(selector))?;
-            return Ok(VmStatus::Running);
+            return self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start);
         }
 
         // `last_send_args` is read only by the stack-trace formatter, and only for an
@@ -4001,6 +4006,7 @@ impl<'gc> VmState<'gc> {
         let method_opt = match self.lookup_method(mc, receiver, selector, &args) {
             Ok(m) => m,
             Err(e) => {
+                self.stack.truncate(recv_start);
                 self.exceptions.last_send_args = args;
                 return Err(e);
             }
@@ -4018,7 +4024,7 @@ impl<'gc> VmState<'gc> {
                 &args,
                 callable,
             );
-            callable.call(self, mc, Some(receiver), args, Some(selector))?;
+            self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start)
         } else {
             // The selector may still exist with non-matching signatures; surface those
             // filtered-out variants as a hint.
@@ -4029,15 +4035,78 @@ impl<'gc> VmState<'gc> {
                 .collect();
             let receiver_name = receiver.class_name();
             let arg_names = args.iter().map(|a| a.class_name()).collect();
+            self.stack.truncate(recv_start);
             self.exceptions.last_send_args = args;
-            return Err(QuoinError::MessageNotUnderstood {
+            Err(QuoinError::MessageNotUnderstood {
                 receiver: receiver_name,
                 selector: selector.as_str().to_string(),
                 args: arg_names,
                 candidates,
-            });
+            })
         }
-        Ok(VmStatus::Running)
+    }
+
+    /// Dispatch a send whose `[receiver, args..]` window is still LIVE on the
+    /// value stack at `stack[recv_start..]` (see `exec_send`). Native and
+    /// AotCall callables run with the window as their GC root — no rooting
+    /// clone — and their pushed result is re-seated over the window
+    /// afterwards. Everything else (interpreted methods, guarded variants,
+    /// ext methods) consumes the window up front, exactly as before. The
+    /// AotCall arm's interpreter fallbacks truncate the window themselves
+    /// before pushing their frame, so after an `Ok` the discriminator is the
+    /// stack height: above `recv_start` = a synchronous result to re-seat;
+    /// at it = a frame was started and there is nothing to move.
+    fn dispatch_send_rooted(
+        &mut self,
+        mc: &Mutation<'gc>,
+        callable: crate::dispatch::Callable<'gc>,
+        receiver: Value<'gc>,
+        args: Vec<Value<'gc>>,
+        selector: Symbol,
+        recv_start: usize,
+    ) -> Result<VmStatus<'gc>, QuoinError> {
+        use crate::dispatch::Callable;
+        match callable {
+            Callable::Native(_) | Callable::AotCall { .. } => {
+                let res = callable.call(
+                    self,
+                    mc,
+                    Some(receiver),
+                    args,
+                    Some(selector),
+                    Some(recv_start + 1),
+                );
+                match res {
+                    Ok(()) => {
+                        if self.stack.len() > recv_start {
+                            let result = self.pop()?;
+                            self.stack.truncate(recv_start);
+                            self.push(result);
+                        }
+                        Ok(VmStatus::Running)
+                    }
+                    Err(e) => {
+                        // NLR-aware teardown — the S1/finish_frame rule: a
+                        // `^^` that escaped through this send has already
+                        // truncated to its target's base and pushed the
+                        // delivered value there, and that base can sit AT or
+                        // ABOVE this window's start (a caller whose operand
+                        // stack was empty at the send). Touching the stack
+                        // then chops the delivery; every OTHER error tears
+                        // the window down here.
+                        if !matches!(e, QuoinError::NonLocalReturn) {
+                            self.stack.truncate(recv_start.min(self.stack.len()));
+                        }
+                        Err(e)
+                    }
+                }
+            }
+            _ => {
+                self.stack.truncate(recv_start);
+                callable.call(self, mc, Some(receiver), args, Some(selector), None)?;
+                Ok(VmStatus::Running)
+            }
+        }
     }
 
     /// Bind `name` in the current frame to an already-obtained `val`. Shared by the

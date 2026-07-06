@@ -686,16 +686,18 @@ NlrCatcher <- {
     };
 
     .test:nlrUnderCatchMatchesInterpreted -> {
-        "* interpreted, a catch-all CATCHES a ^^ crossing it (and the unwound
-        "* loop below observes the interpreter's exact pop-arm artifact) —
-        "* compiled must match byte-for-byte, which the translation refusal
-        "* ('non-local return (^^) under a catch') guarantees.
+        "* interpreted, a catch-all CATCHES a ^^ crossing it — compiled must
+        "* match byte-for-byte, which the translation refusal ('non-local
+        "* return (^^) under a catch') guarantees. (Before the send-window
+        "* rework this pinned 'earlycaught': the pre-window unwind leaked a
+        "* stack slot that broke the loop after ONE iteration. The catch now
+        "* cleanly yields the handler value every pass, both modes.)
         var t = NlrCatcher.new;
         .is:{ t.m } equalTo:'caught';
         var i = 0;
         var acc = '';
         { i < 5 }.whileDo:{ acc = acc + (t.m); i = i + 1 };
-        .is:{ acc } equalTo:'earlycaught'
+        .is:{ acc } equalTo:'caughtcaughtcaughtcaughtcaught'
     };
 
     .test:taskInterleavedNlrHomesStayPerTask -> {
@@ -821,6 +823,6 @@ EscCatcher <- {
         var i = 0;
         var acc = '';
         { i < 5 }.whileDo:{ acc = acc + (t.m); i = i + 1 };
-        .is:{ acc } equalTo:'earlycaught'
+        .is:{ acc } equalTo:'caughtcaughtcaughtcaughtcaught'
     }
 }
