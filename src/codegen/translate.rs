@@ -64,6 +64,10 @@ const PURITY_VIOLATION: &str = "__aot_purity__";
 /// scalar: retry the member with the ret demoted to Obj (S2). Never used for
 /// annotated returns, whose checked-narrow divergence is deliberate.
 const RET_DEMOTION: &str = "__aot_ret_demote__";
+/// A merge point was first planned with a SCALAR shape but a later
+/// predecessor arrives Dyn (S3): retry the member with that merge FORCED to
+/// Dyn from the start (scalars box on entry). Payload: `__aot_merge_dyn__:ip`.
+const MERGE_DEMOTION: &str = "__aot_merge_dyn__";
 
 /// Compile every group; members are refused individually. Returns the
 /// registered entries and refusals `(selector, reason)`.
@@ -84,11 +88,12 @@ pub(super) fn compile_all(
         // small; worst-case quadratic compile cost is trivial.
         let mut demoted: HashSet<u32> = HashSet::new();
         let mut ret_demoted: HashSet<u32> = HashSet::new();
+        let mut dyn_merges: HashMap<u32, HashSet<usize>> = HashMap::new();
         loop {
             if active.is_empty() {
                 break;
             }
-            match compile_group(&active, siblings, &demoted, &ret_demoted) {
+            match compile_group(&active, siblings, &demoted, &ret_demoted, &dyn_merges) {
                 Ok(mut entries) => {
                     compiled.append(&mut entries);
                     break;
@@ -100,6 +105,14 @@ pub(super) fn compile_all(
                     }
                     if reason == RET_DEMOTION {
                         ret_demoted.insert(failed_tid);
+                        continue;
+                    }
+                    if let Some(ip) = reason
+                        .strip_prefix(MERGE_DEMOTION)
+                        .and_then(|r| r.strip_prefix(':'))
+                        .and_then(|r| r.parse::<usize>().ok())
+                    {
+                        dyn_merges.entry(failed_tid).or_default().insert(ip);
                         continue;
                     }
                     let i = active
@@ -360,6 +373,12 @@ aot_helpers! {
         *mut c_void, *const c_void, *const Rc<StaticBlock>, i64,
     ) -> u8,
     closure_bind: helpers::closure_bind as fn(*mut c_void, *const c_void, i64, *const Symbol, i64, i64) -> u8,
+    field_get: helpers::field_get as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, *const u8, i64, i64,
+    ) -> u8,
+    field_set: helpers::field_set as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, *const u8, i64, i64, i64,
+    ) -> u8,
 }
 
 /// Compile one attempt at a group. `Err((template_id, reason))` names the
@@ -376,6 +395,7 @@ fn compile_group(
     siblings: &SiblingMap,
     demoted: &HashSet<u32>,
     ret_demoted: &HashSet<u32>,
+    dyn_merges: &HashMap<u32, HashSet<usize>>,
 ) -> Result<Vec<(u32, AotEntry)>, (u32, String)> {
     let fail = |tid: u32, e: String| (tid, e);
     let any_tid = members[0].block.template_id.unwrap_or(0);
@@ -440,11 +460,15 @@ fn compile_group(
         let direct_self;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+            static EMPTY_MERGES: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
             let mut tr = Translator {
                 module: &mut module,
                 cand: m,
                 eff_ret: eff_ret(m, ret_demoted),
                 used_direct_self: false,
+                dyn_merges: dyn_merges
+                    .get(&tid)
+                    .unwrap_or_else(|| EMPTY_MERGES.get_or_init(HashSet::new)),
                 siblings,
                 inner_ids: &inner_ids,
                 pure: &pure,
@@ -456,7 +480,9 @@ fn compile_group(
                 name_consts: Vec::new(),
                 needs_list_self: false,
                 tmpl_consts: Vec::new(),
+                str_consts: Vec::new(),
                 nil_deferred: HashSet::new(),
+
                 pending_writebacks: HashMap::new(),
                 materialized: HashSet::new(),
             };
@@ -689,6 +715,11 @@ struct Translator<'a> {
     /// Leaked template `Rc`s for cold-path closure materialization (B3b) —
     /// process-lifetime, like the code and the leaked selectors.
     tmpl_consts: Vec<&'static Rc<StaticBlock>>,
+    /// Leaked field-name strings for compiled field access (S3).
+    str_consts: Vec<&'static str>,
+    /// Merge ips FORCED to all-Dyn shapes (S3 retry): scalars box on entry,
+    /// so predecessors with mixed shapes unify.
+    dyn_merges: &'a HashSet<usize>,
     /// `var x = nil` declarations whose slot type is still DEFERRED to the
     /// first store. A closure materialization forces these into Obj slots
     /// first — see the DefineLocal arm.
@@ -955,8 +986,9 @@ impl<'a> Translator<'a> {
                     return Err("fell off the end of bytecode".to_string());
                 }
                 if ip != start_ip && leaders.binary_search(&ip).is_ok() {
-                    let nstack = self.norm_stack(b, &fx, &stack)?;
-                    let (bl, _) = self.block_for(b, &mut blocks, &mut work, ip, &nstack)?;
+                    let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                    let (bl, _) =
+                        self.block_for(b, &fx, &mut blocks, &mut work, ip, &mut nstack)?;
                     let args = Self::stack_args(&nstack)?;
                     b.ins().jump(bl, &args);
                     break 'block;
@@ -1273,7 +1305,8 @@ impl<'a> Translator<'a> {
                         if target <= ip {
                             nstack = self.emit_fuel_tick(b, &fx, &nstack)?;
                         }
-                        let (bl, _) = self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                        let (bl, _) =
+                            self.block_for(b, &fx, &mut blocks, &mut work, target, &mut nstack)?;
                         let args = Self::stack_args(&nstack)?;
                         b.ins().jump(bl, &args);
                         break 'block;
@@ -1308,9 +1341,9 @@ impl<'a> Translator<'a> {
                             nstack = self.emit_fuel_tick(b, &fx, &nstack)?;
                         }
                         let (tbl, _) =
-                            self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                            self.block_for(b, &fx, &mut blocks, &mut work, target, &mut nstack)?;
                         let (fbl, _) =
-                            self.block_for(b, &mut blocks, &mut work, ip + 1, &nstack)?;
+                            self.block_for(b, &fx, &mut blocks, &mut work, ip + 1, &mut nstack)?;
                         let args = Self::stack_args(&nstack)?;
                         if matches!(insts[ip], Instruction::IfJump(_)) {
                             b.ins().brif(cond, tbl, &args, fbl, &args);
@@ -1325,9 +1358,15 @@ impl<'a> Translator<'a> {
                             AV::C(_, AotKind::Bool) => {} // statically Bool: fall through
                             AV::C(..) | AV::Nil | AV::SelfRef => {
                                 // Statically not a Bool: always the cold path.
-                                let nstack = self.norm_stack(b, &fx, &stack)?;
-                                let (bl, _) =
-                                    self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                                let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                                let (bl, _) = self.block_for(
+                                    b,
+                                    &fx,
+                                    &mut blocks,
+                                    &mut work,
+                                    target,
+                                    &mut nstack,
+                                )?;
                                 let args = Self::stack_args(&nstack)?;
                                 b.ins().jump(bl, &args);
                                 break 'block;
@@ -1343,8 +1382,14 @@ impl<'a> Translator<'a> {
                                 let mut hot_stack = self.norm_stack(b, &fx, &stack)?;
                                 hot_stack.pop();
                                 hot_stack.push(AV::C(as_bool, AotKind::Bool));
-                                let (hot, _) =
-                                    self.block_for(b, &mut blocks, &mut work, ip + 1, &hot_stack)?;
+                                let (hot, _) = self.block_for(
+                                    b,
+                                    &fx,
+                                    &mut blocks,
+                                    &mut work,
+                                    ip + 1,
+                                    &mut hot_stack,
+                                )?;
                                 let hot_args = Self::stack_args(&hot_stack)?;
                                 if self.proofs.get(&idx).copied()
                                     == Some(DynProof::ElemOrNil(ElemTag::Bool))
@@ -1377,9 +1422,15 @@ impl<'a> Translator<'a> {
                                 }
                                 // Unproven: Bool → hot; anything else → the cold
                                 // path's real send.
-                                let nstack = self.norm_stack(b, &fx, &stack)?;
-                                let (cold, _) =
-                                    self.block_for(b, &mut blocks, &mut work, target, &nstack)?;
+                                let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                                let (cold, _) = self.block_for(
+                                    b,
+                                    &fx,
+                                    &mut blocks,
+                                    &mut work,
+                                    target,
+                                    &mut nstack,
+                                )?;
                                 let cold_args = Self::stack_args(&nstack)?;
                                 b.ins().brif(is_bool, hot, &hot_args, cold, &cold_args);
                                 break 'block;
@@ -1393,12 +1444,20 @@ impl<'a> Translator<'a> {
                     Instruction::Send(sel, n)
                     | Instruction::SendLocal(_, sel, n)
                     | Instruction::SendConst(_, sel, n)
+                    | Instruction::SendField(_, sel, n)
                     | Instruction::SendLocalLocal(_, _, sel, n)
                     | Instruction::SendLocalConst(_, _, sel, n) => {
                         let (sel, n) = (*sel, *n);
                         match &insts[ip] {
                             Instruction::SendLocal(a, ..) => {
                                 let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
+                                stack.push(v);
+                            }
+                            Instruction::SendField(field, ..) => {
+                                // Interpreter parity: `SendField` loads the
+                                // field UNCACHED (its single ip belongs to the
+                                // send IC), then shares the send tail.
+                                let v = self.emit_field_get_uncached(b, &fx, field)?;
                                 stack.push(v);
                             }
                             Instruction::SendConst(c, ..) => {
@@ -1468,6 +1527,18 @@ impl<'a> Translator<'a> {
                         return Err(format!(
                             "non-local return (^^) from a compiled block at ip {ip}"
                         ));
+                    }
+                    Instruction::LoadField(name) => {
+                        let out = self.emit_field_get(b, &fx, name, ip)?;
+                        stack.push(out);
+                    }
+                    Instruction::StoreField(name) => {
+                        let v = stack.pop().ok_or("stack underflow")?;
+                        self.emit_field_set(b, &fx, name, v, ip)?;
+                    }
+                    Instruction::StoreFieldKeep(name) => {
+                        let v = *stack.last().ok_or("stack underflow")?;
+                        self.emit_field_set(b, &fx, name, v, ip)?;
                     }
                     Instruction::Return | Instruction::BlockReturn | Instruction::MethodReturn => {
                         let v = stack.pop().ok_or("stack underflow")?;
@@ -1589,6 +1660,78 @@ impl<'a> Translator<'a> {
         let tag = b.inst_results(call)[0];
         self.tag_check(b, fx, tag);
         Ok(AV::Dyn(out_idx))
+    }
+
+    /// `@name` read (S3): the receiver is this frame's slot-0 value and the
+    /// slot cache is the shared `(template_id, ip)` cell — compiled and
+    /// interpreted execution warm ONE field cache.
+    /// `SendField`'s field read: the interpreter passes `cache_ip: None`
+    /// there (the ip's cache slot belongs to the SEND), mirrored here by the
+    /// out-of-range ip sentinel — probe and fill both miss past `bc_len`.
+    fn emit_field_get_uncached(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        name: &str,
+    ) -> Result<AV, String> {
+        let sentinel = self.cand.block.bytecode.0.len();
+        self.emit_field_get(b, fx, name, sentinel)
+    }
+
+    fn emit_field_get(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        name: &str,
+        ip: usize,
+    ) -> Result<AV, String> {
+        let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+        self.str_consts.push(leaked);
+        let name_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
+        let name_len = b.ins().iconst(types::I64, leaked.len() as i64);
+        let self_idx = self.abs_slot(b, fx, 0);
+        let out = self.alloc_scratch()?;
+        let out_idx = self.abs_slot(b, fx, out);
+        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
+        let f = self.func_ref(b, self.helpers.field_get);
+        let call = b.ins().call(
+            f,
+            &[
+                fx.vm, fx.mc, tid_v, ip_v, len_v, self_idx, name_ptr, name_len, out_idx,
+            ],
+        );
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(AV::Dyn(out_idx))
+    }
+
+    /// `@name = v` (S3) — same shared cache; undeclared fields raise the
+    /// interpreter's exact errors through the tag channel.
+    fn emit_field_set(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        name: &str,
+        v: AV,
+        ip: usize,
+    ) -> Result<(), String> {
+        let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+        self.str_consts.push(leaked);
+        let name_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
+        let name_len = b.ins().iconst(types::I64, leaked.len() as i64);
+        let self_idx = self.abs_slot(b, fx, 0);
+        let (k, bits) = self.encode(b, fx, v);
+        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
+        let f = self.func_ref(b, self.helpers.field_set);
+        let call = b.ins().call(
+            f,
+            &[
+                fx.vm, fx.mc, tid_v, ip_v, len_v, self_idx, name_ptr, name_len, k, bits,
+            ],
+        );
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(())
     }
 
     /// B3b: materialize a closure at a compiled cold-path `Push(Block)` site.
@@ -2249,19 +2392,47 @@ impl<'a> Translator<'a> {
     fn block_for(
         &mut self,
         b: &mut FunctionBuilder,
+        fx: &FnCtx,
         blocks: &mut HashMap<usize, (CBlock, Vec<BKind>)>,
         work: &mut Vec<usize>,
         ip: usize,
-        stack: &[AV],
+        stack: &mut Vec<AV>,
     ) -> Result<(CBlock, Vec<BKind>), String> {
+        // A merge FORCED to all-Dyn by an earlier retry (mixed scalar/Dyn
+        // predecessors, S3): box scalars before shape computation, so every
+        // predecessor unifies. The interpreted value world is uniform —
+        // boxing is exact, only the abstraction loses precision.
+        if self.dyn_merges.contains(&ip) {
+            for i in 0..stack.len() {
+                if let AV::C(..) = stack[i] {
+                    stack[i] = self.box_av(b, fx, stack[i])?;
+                }
+            }
+        }
         let kinds = Self::stack_bkinds(stack)?;
         if let Some((bl, expect)) = blocks.get(&ip) {
-            if *expect != kinds {
-                return Err(format!(
-                    "stack shape mismatch at merge ip {ip}: {expect:?} vs {kinds:?}"
-                ));
+            let (bl, expect) = (*bl, expect.clone());
+            if expect != kinds {
+                if expect.len() != kinds.len() {
+                    return Err(format!(
+                        "stack shape mismatch at merge ip {ip}: {expect:?} vs {kinds:?}"
+                    ));
+                }
+                for i in 0..kinds.len() {
+                    match (&expect[i], &kinds[i]) {
+                        (a, bk) if a == bk => {}
+                        // Box toward an existing Dyn expectation, in place.
+                        (BKind::Dyn, BKind::S(_)) => {
+                            stack[i] = self.box_av(b, fx, stack[i])?;
+                        }
+                        // The merge was first planned scalar; a Dyn (or a
+                        // different scalar) predecessor needs it re-planned
+                        // all-Dyn — signal the retry.
+                        _ => return Err(format!("{MERGE_DEMOTION}:{ip}")),
+                    }
+                }
             }
-            return Ok((*bl, expect.clone()));
+            return Ok((bl, expect));
         }
         let bl = b.create_block();
         for &k in &kinds {
@@ -2270,6 +2441,18 @@ impl<'a> Translator<'a> {
         blocks.insert(ip, (bl, kinds.clone()));
         work.push(ip);
         Ok((bl, kinds))
+    }
+
+    /// Box any AV into a fresh scratch slot (merge-shape unification).
+    fn box_av(&mut self, b: &mut FunctionBuilder, fx: &FnCtx, v: AV) -> Result<AV, String> {
+        let slot = self.alloc_scratch()?;
+        let dst = self.abs_slot(b, fx, slot);
+        let (k, bits) = self.encode(b, fx, v);
+        let f = self.func_ref(b, self.helpers.slot_set);
+        let call = b.ins().call(f, &[fx.vm, fx.mc, dst, k, bits]);
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(AV::Dyn(dst))
     }
 
     fn zero_of(&self, b: &mut FunctionBuilder, r: AotRet) -> CVal {

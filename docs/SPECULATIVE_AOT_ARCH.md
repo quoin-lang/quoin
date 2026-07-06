@@ -1,6 +1,6 @@
 # Speculative AOT: type-feedback compilation for untyped code
 
-*Status: S0+S1+S2 SHIPPED (observation, parameter and return speculation, direct self-recursion). S3 (fields) next.*
+*Status: S0-S3 SHIPPED. Remaining: S4 quickening (deferred), cold-arm-^^ (recorded), btrees profitability heuristic (btrees turned net-positive at S3; deprioritized).*
 
 ## 1. Why: the measured shape of the untyped gap
 
@@ -182,15 +182,35 @@ the effective ret. `count:`/`sum:` still refuse (mixed C/Dyn merges /
 uninitialized-local reads) — a box-at-merge unification is the known
 next refinement if their weight ever matters.
 
-### S3 — compiled field access (the richards unlock)
+### S3 — compiled field access (the richards unlock) — SHIPPED
 
-`LoadField`/`StoreField` translate via helpers that probe/fill the
-interpreter's own field-slot cache keyed `(template_id, ip)` — the B3a
-lesson applied to fields: both tiers warm one cache. Accessor-heavy
-open-owner methods (richards' Tcb/Packet) then compile speculatively
-like everything else. Store barriers go through the same helper (the
-GC write barrier lives host-side; no barrier code in Cranelift).
-Acceptance: richards ≥1.8× vs today's 0.492s.
+`LoadField`/`StoreField`/`StoreFieldKeep` translate via helpers that
+probe/fill the interpreter's own field-slot cache keyed
+`(template_id, ip)` — the B3a lesson applied to fields; write barriers
+stay host-side. Two follow-ons the first richards run demanded:
+
+- **`SendField`** (the fuser's load-field-then-send) blocked richards'
+  hottest methods (`schedule`, `holdCurrent`, `release:`). It now
+  pushes an UNCACHED field read (interpreter parity: the ip's cache
+  slot belongs to the send IC) and shares the send tail.
+- **Merge-shape unification**: mixed scalar/Dyn stacks at a join
+  refused whole methods (`xorD008:`, `count:`). Both directions handled:
+  box-toward-Dyn inline when the merge was planned Dyn; a
+  `MERGE_DEMOTION` retry (the demote-loop pattern) re-plans a
+  scalar-first merge as all-Dyn when a later predecessor arrives Dyn.
+
+Interleaved A/B vs the S2 tip: **richards −24.6% (0.700→0.528),
+combinators −15.1% (0.224→0.190 — box-at-merge un-refused `count:`),
+btrees −5.5%**, rest noise. Cumulative combinators vs the block-arc
+baseline: 0.700 → 0.190 ≈ **3.7×**.
+
+HONEST ACCEPTANCE NOTE: the ≥1.8× richards target (0.49→0.27-class,
+set against the PGO baseline) is NOT met — this is ~1.3× on the plain
+release basis. What remains: the four task `run:` bodies refuse on
+`^^`-in-materialized-cold-arms (the documented B3b boundary), and the
+`@task.run:packet` megamorphic dispatch stays an outcall by design.
+Cold-arm-`^^` support (e.g. cold paths that Bail the frame instead of
+materializing) is the recorded follow-up if richards' weight matters.
 
 ### S4 (deferred) — interpreter quickening
 

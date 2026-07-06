@@ -409,6 +409,64 @@ pub(super) unsafe extern "C" fn closure_bind(
     TAG_OK
 }
 
+/// `@name` read in a compiled frame (S3): the receiver is the frame's slot-0
+/// value; the slot cache is the SHARED `(template_id, ip)` cell. Missing /
+/// undeclared / non-object => nil, exactly as interpreted.
+pub(super) unsafe extern "C" fn field_get(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tid: i64,
+    ip: i64,
+    bc_len: i64,
+    self_idx: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+    out_idx: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let name = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len as usize))
+    };
+    let self_val = vm.stack[self_idx as usize];
+    let v = vm.field_load_cached(mc, tid as u32, ip as usize, bc_len as usize, self_val, name);
+    vm.stack[out_idx as usize] = v;
+    TAG_OK
+}
+
+/// `@name = v` in a compiled frame (S3) — same shared cache; undeclared
+/// fields raise the interpreter's exact errors.
+pub(super) unsafe extern "C" fn field_set(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tid: i64,
+    ip: i64,
+    bc_len: i64,
+    self_idx: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+    kind: i64,
+    bits: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let name = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len as usize))
+    };
+    let self_val = vm.stack[self_idx as usize];
+    let val = decode(vm, kind, bits);
+    match vm.field_store_cached(
+        mc,
+        tid as u32,
+        ip as usize,
+        bc_len as usize,
+        self_val,
+        name,
+        val,
+    ) {
+        Ok(()) => TAG_OK,
+        Err(e) => store_err(vm, e),
+    }
+}
+
 /// `list.at:i put:v` — `devirt_ops::list_set` semantics (IndexError OOB).
 pub(super) unsafe extern "C" fn list_set(
     vm: *mut c_void,

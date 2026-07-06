@@ -3024,6 +3024,93 @@ impl<'gc> VmState<'gc> {
     /// `cache_ip`: the call site for the field-slot cache, or `None` to skip caching —
     /// `SendField` must pass `None`, because its *send* entry lives at the same `ip`
     /// (one fused instruction) and a field entry there would thrash the slot.
+    /// `load_field` for compiled frames (S3): the receiver comes from the
+    /// frame's slot window and the slot cache is the SHARED `(template_id,
+    /// ip)` cell — both tiers warm one cache, the B3a outcall lesson applied
+    /// to fields. Missing/undeclared/non-object reads are nil, exactly as
+    /// interpreted.
+    pub(crate) fn field_load_cached(
+        &mut self,
+        mc: &Mutation<'gc>,
+        tid: u32,
+        ip: usize,
+        bc_len: usize,
+        self_val: Value<'gc>,
+        name: &str,
+    ) -> Value<'gc> {
+        let ic = self.ic_cell_by_id(mc, tid);
+        if let Value::Object(obj) = self_val {
+            let borrowed = obj.borrow();
+            let class = borrowed.class;
+            if let Some(slot) = self.field_probe(ic, ip, Gc::as_ptr(class) as usize) {
+                let val = borrowed.fields.get(slot).copied();
+                drop(borrowed);
+                return val.unwrap_or_else(|| self.new_nil(mc));
+            }
+            drop(borrowed);
+            match self.field_slot(class, name) {
+                Some(slot) => {
+                    self.field_fill_cell(mc, ic, bc_len, ip, class, slot);
+                    obj.borrow()
+                        .fields
+                        .get(slot)
+                        .copied()
+                        .unwrap_or_else(|| self.new_nil(mc))
+                }
+                None => self.new_nil(mc),
+            }
+        } else {
+            self.new_nil(mc)
+        }
+    }
+
+    /// `store_field_value` for compiled frames (S3) — same shared-cell cache,
+    /// same declared-field errors as interpreted.
+    pub(crate) fn field_store_cached(
+        &mut self,
+        mc: &Mutation<'gc>,
+        tid: u32,
+        ip: usize,
+        bc_len: usize,
+        self_val: Value<'gc>,
+        name: &str,
+        val: Value<'gc>,
+    ) -> Result<(), QuoinError> {
+        let ic = self.ic_cell_by_id(mc, tid);
+        if let Value::Object(obj) = self_val {
+            let class = obj.borrow().class;
+            if let Some(slot) = self.field_probe(ic, ip, Gc::as_ptr(class) as usize)
+                && slot < obj.borrow().fields.len()
+            {
+                obj.borrow_mut(mc).fields[slot] = val;
+                return Ok(());
+            }
+            match self.field_slot(class, name) {
+                Some(slot) if slot < obj.borrow().fields.len() => {
+                    self.field_fill_cell(mc, ic, bc_len, ip, class, slot);
+                    obj.borrow_mut(mc).fields[slot] = val;
+                    Ok(())
+                }
+                Some(_) => Err(QuoinError::Other(format!(
+                    "Instance of '{}' has no '@{}' (it was added after this instance was created)",
+                    class.borrow().name,
+                    name
+                ))),
+                None => Err(QuoinError::Other(format!(
+                    "No instance variable '@{}' declared on '{}'",
+                    name,
+                    class.borrow().name
+                ))),
+            }
+        } else {
+            Err(QuoinError::Other(format!(
+                "Cannot set instance variable '@{}' on a value type ({})",
+                name,
+                self_val.type_name()
+            )))
+        }
+    }
+
     fn load_field(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3496,6 +3583,37 @@ impl<'gc> VmState<'gc> {
     /// dispatch cache); their accesses just re-run the hash lookup. Slot indices are
     /// append-only per class (see `Class::field_slots`), so a cached entry can't go
     /// stale; the epoch guard is belt-and-braces and gives O(1) invalidation anyway.
+    /// `field_fill` for a cell reached by template id (compiled field access,
+    /// S3) — same slot-cache protocol, shared with the interpreted site.
+    fn field_fill_cell(
+        &mut self,
+        mc: &Mutation<'gc>,
+        cell: Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>,
+        bc_len: usize,
+        ip: usize,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+        slot_idx: usize,
+    ) {
+        if class.borrow().is_eigenclass {
+            return;
+        }
+        Self::ic_write_slot(
+            mc,
+            cell,
+            bc_len,
+            ip,
+            ICSlot {
+                epoch: self.dispatch_epoch,
+                recv_kind: IC_FIELD_KIND,
+                recv_ptr: Gc::as_ptr(class) as usize,
+                n_args: 0,
+                arg_kinds: [0; IC_MAX_ARGS],
+                arg_ptrs: [slot_idx, 0],
+                callable: None,
+            },
+        );
+    }
+
     fn field_fill(
         &mut self,
         mc: &Mutation<'gc>,
