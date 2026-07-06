@@ -282,6 +282,11 @@ pub(super) unsafe extern "C" fn env_set(
 /// from compiled code. Registry hit (a compiled block template) → direct
 /// native call; miss → the interpreted block body; a non-block receiver →
 /// the full send (a custom class may define `valueWithSelfOrArg:`).
+// `recv`/`arg`/`block` are copies of values ROOTED in the calling compiled
+// frame's slot window on `vm.stack` for the whole outcall (the AOT rooting
+// convention, AOT_ARCH §9) — safe across the compiled/interpreted block
+// invocations below, which the lint's span heuristic can't see.
+#[allow(no_gc_across_yield)]
 pub(super) unsafe extern "C" fn block_call(
     vm: *mut c_void,
     mc: *const c_void,

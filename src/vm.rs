@@ -3322,6 +3322,10 @@ impl<'gc> VmState<'gc> {
         result
     }
 
+    // The IC cell local is a copy of a `Gc` rooted in the traced `ic_registry`
+    // for the VM's whole life — safe across `lookup_method`'s guard-predicate
+    // yields by that rooting, which the span heuristic can't see.
+    #[allow(no_gc_across_yield)]
     fn call_method_cached_inner(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3861,7 +3865,6 @@ impl<'gc> VmState<'gc> {
     /// `self.frames[frame_idx].ip = ip` — the tail write-back only runs on fall-through. A
     /// violation is never silent: it surfaces immediately as a stack imbalance under the
     /// `.qn` suite.
-    #[allow(no_gc_across_yield)]
     pub(crate) fn dispatch_one(
         &mut self,
         mc: &Mutation<'gc>,
@@ -4504,21 +4507,25 @@ impl<'gc> VmState<'gc> {
                 }
                 let mut ret_val = self.pop()?;
                 let popped_frame = self.frames.pop().unwrap();
-                // Copied out NOW: `finalize_instantiation` below can park (an
-                // init that sleeps), and a collection while parked leaves
-                // `popped_frame`'s Gc pointers dangling on this suspended
-                // stack — only the plain u32 id may be used after it.
+                // The frame is consumed COMPLETELY before the potential yield:
+                // `finalize_instantiation` can park (an init that sleeps), and a
+                // collection while parked leaves `popped_frame`'s Gc pointers
+                // dangling on this suspended stack (the S0 segfault). The
+                // receiver-return applies first and the instantiation pop
+                // overwrites it, which is the old else-if priority inverted with
+                // the same outcome.
                 let spec_tid = popped_frame.spec_tid;
                 self.last_popped_env = Some(popped_frame.env);
                 self.stack.truncate(popped_frame.stack_base);
+                if popped_frame.return_receiver
+                    && let Some(rx) = popped_frame.receiver
+                {
+                    ret_val = rx;
+                }
                 if let Some(obj) = popped_frame.instantiating_obj {
                     self.push(Value::Object(obj));
                     self.finalize_instantiation(mc, obj, popped_frame.env)?;
                     ret_val = self.pop()?;
-                } else if popped_frame.return_receiver {
-                    if let Some(rx) = popped_frame.receiver {
-                        ret_val = rx;
-                    }
                 }
                 if spec_tid != 0 {
                     self.spec_observe_return(spec_tid, ret_val);
@@ -4533,25 +4540,29 @@ impl<'gc> VmState<'gc> {
                     let mut ret_val = ret_val;
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
-                        // Same discipline as the `Return` arm: the plain id
-                        // is copied before `finalize_instantiation` can park
-                        // and let a collection invalidate `f`'s Gc pointers.
+                        // Same discipline as the `Return` arm: the frame is
+                        // consumed completely before `finalize_instantiation`
+                        // can park and let a collection invalidate its Gc
+                        // pointers — only plain copies survive the yield.
                         let spec_tid = f.spec_tid;
+                        let f_id = f.id;
+                        let f_stack_base = f.stack_base;
                         self.last_popped_env = Some(f.env);
+                        if f.return_receiver
+                            && let Some(rx) = f.receiver
+                        {
+                            ret_val = rx;
+                        }
                         if let Some(obj) = f.instantiating_obj {
                             self.push(Value::Object(obj));
                             self.finalize_instantiation(mc, obj, f.env)?;
                             ret_val = self.pop()?;
-                        } else if f.return_receiver {
-                            if let Some(rx) = f.receiver {
-                                ret_val = rx;
-                            }
                         }
-                        if f.id == target_id {
+                        if f_id == target_id {
                             if spec_tid != 0 {
                                 self.spec_observe_return(spec_tid, ret_val);
                             }
-                            target_stack_base = Some(f.stack_base);
+                            target_stack_base = Some(f_stack_base);
                             break;
                         }
                     }
@@ -4674,18 +4685,26 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::NewSet(n) => {
                 let n = *n;
-                let mut raw = Vec::new();
-                for _ in 0..n {
-                    raw.push(self.pop()?);
-                }
-                raw.reverse();
                 // Build by inserting through set_add so the literal is deduplicated
                 // by `==:`, the same way `add:` enforces uniqueness at runtime.
-                let set_val = self.new_set(mc, Vec::new());
-                for v in raw {
-                    self.set_add(mc, set_val, v)?;
+                // A user `==:` can PARK, so nothing GC-managed may live in Rust
+                // locals across the inserts: the elements stay rooted in place on
+                // the VM stack and the set rides on top, re-read after each
+                // insert (popping into a Vec here once left both the elements
+                // and the fresh set collectible mid-dedup).
+                {
+                    let set_val = self.new_set(mc, Vec::new());
+                    self.push(set_val);
                 }
-                self.push(set_val);
+                let base = self.stack.len() - 1 - n;
+                for i in 0..n {
+                    let sv = *self.stack.last().expect("set literal under construction");
+                    let v = self.stack[base + i];
+                    self.set_add(mc, sv, v)?;
+                }
+                let sv = self.pop()?;
+                self.stack.truncate(base);
+                self.push(sv);
                 ip += 1;
             }
             Instruction::NewRegex => {
