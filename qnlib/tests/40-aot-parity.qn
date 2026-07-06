@@ -717,4 +717,65 @@ NlrWorker <- {
         (label.length > 0).if:{ ^^'ok-' + label };
         ^'fell-through'
     }
+};
+
+"* --- S5b: nested literals in materialized cold arms ----------------------
+"* The materialized closure runs interpreted, so nested blocks execute
+"* naturally; the gate scan is transitive (free writes -> writebacks, ^^
+"* anywhere -> the S5a home machinery, inherited through the closure's
+"* frame). HandlerTask#run: (richards) is the motivating shape: a ^^ two
+"* arms deep.
+NlrHandler <- { | @v1 @v2 |
+    init: -> { |v1| @v1 = v1; @v2 = 0 };
+    handle: -> { |limit|
+        @v1.defined?.if:{
+            var have = @v1;
+            (have < limit).if:{
+                (@v2 < 100).if:{
+                    @v2 = @v2 + have;
+                    ^^'queued'
+                }
+            }
+            else:{
+                @v1 = nil;
+                ^^'drained'
+            }
+        };
+        ^'idle'
+    };
+    v2 -> { ^@v2 }
+};
+
+NlrNestWriter <- {
+    tally: -> { |n|
+        var seen = 0;
+        (n > 0).if:{ (n > 10).if:{ seen = n * 2 } else:{ seen = n } };
+        ^seen
+    }
+};
+
+(TestSuite.new:{ var name = 'AotParityNlrNested' }).add:{
+    .test:nestedArmReturnsThroughTwoLevels -> {
+        var acc = '';
+        var i = 0;
+        { i < 12 }.whileDo:{
+            var h = NlrHandler.new:{ var v1 = 5 };
+            acc = acc + (h.handle:10) + ' ';
+            acc = acc + (h.handle:3) + ' ';
+            i = i + 1;
+            (i == 12).if:{ acc = acc + h.v2 }
+        };
+        "* first call: 5 < 10, @v2 0->5, 'queued'; second: 5 >= 3, 'drained'
+        .is:{ acc.contains?:'queued drained' } equalTo:true;
+        .is:{ acc.contains?:' 5' } equalTo:true
+    };
+
+    .test:nestedFreeWritesFlushBack -> {
+        var w = NlrNestWriter.new;
+        var i = 0;
+        var total = 0;
+        { i < 15 }.whileDo:{ total = total + (w.tally:i); i = i + 1 };
+        "* 1..10 -> n, 11..14 -> 2n : 55 + 2*(11+12+13+14) = 155
+        .is:{ total } equalTo:155
+    }
 }

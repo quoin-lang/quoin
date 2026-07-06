@@ -354,14 +354,18 @@ pub(super) unsafe extern "C" fn block_call(
 /// snapshot `EnvFrame` (populated by the `closure_bind` calls the translator
 /// emits right after) + the leaked template + the registry-shared IC cell —
 /// the same shape `block_from_template` builds for interpreted frames.
-/// Read-only-capture semantics are the translator's gate; a `^^` in the block
-/// is fine (S5) — the closure's home is the invoking compiled frame, carried
-/// in `vm.aot_home_frame_id` and addressable through `vm.aot_frame_marks`.
+/// Read-only-capture semantics are the translator's gate; a `^^` in the nest
+/// is fine (S5) — `want_home != 0` iff the nest contains one, and then the
+/// closure's home is the invoking compiled frame, carried in
+/// `vm.aot_home_frame_id` and addressable through `vm.aot_frame_marks`
+/// (a `^^`-free nest never consults `enclosing_method_id`, and its invoking
+/// frame skips the S5 bookkeeping entirely, so the field would be stale).
 pub(super) unsafe extern "C" fn make_closure(
     vm: *mut c_void,
     mc: *const c_void,
     tmpl: *const std::rc::Rc<crate::instruction::StaticBlock>,
     out_idx: i64,
+    want_home: i64,
 ) -> u8 {
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
     let tmpl = unsafe { &*tmpl };
@@ -375,7 +379,11 @@ pub(super) unsafe extern "C" fn make_closure(
         crate::value::Block {
             template: tmpl.clone(),
             parent_env: Some(env),
-            enclosing_method_id: vm.aot_home_frame_id,
+            enclosing_method_id: if want_home != 0 {
+                vm.aot_home_frame_id
+            } else {
+                None
+            },
             decl_block: None,
             inline_cache,
         },

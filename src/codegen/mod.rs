@@ -214,11 +214,13 @@ pub struct AotEntry {
     /// `invoke` Bails otherwise.
     pub direct_self: bool,
     pub compile_epoch: u64,
-    /// The body MATERIALIZES closures (B3b `make_closure` sites). Only such a
-    /// frame can ever be a `^^` target — the compiled home id travels solely
-    /// inside closures it materializes — so `invoke` skips the S5 frame-mark
-    /// and home-id bookkeeping entirely when this is false (the hot majority).
-    pub materializes: bool,
+    /// The body materializes at least one closure whose nest carries a `^^`
+    /// (B3b/S5). Only such a frame can ever be a `^^` target — the compiled
+    /// home id travels solely inside `^^`-carrying closures it materializes
+    /// (`make_closure`'s `want_home`) — so `invoke` skips the S5 frame-mark
+    /// and home-id bookkeeping entirely when this is false (the hot
+    /// majority, including every `count:`-style write-back arm).
+    pub materializes_nlr: bool,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -436,7 +438,7 @@ pub fn invoke<'gc>(
     // mark where the frame's outcall frames and slot window begin — the
     // `MethodReturn` unwind stops there when a `^^` comes home. Frames that
     // materialize nothing skip all of it.
-    let nlr_mark = if entry.materializes {
+    let nlr_mark = if entry.materializes_nlr {
         let id = vm.next_frame_id;
         vm.next_frame_id += 1;
         vm.aot_frame_marks.push(crate::vm::AotFrameMark {
@@ -596,10 +598,11 @@ pub fn invoke_block<'gc>(
     }
     vm.aot_pending_error = None;
     let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
-    // S5: only a template that materializes closures propagates its home —
-    // `make_closure` is the sole reader.
+    // S5: only a template that materializes a `^^`-carrying closure
+    // propagates its home — `make_closure`'s `want_home` path is the sole
+    // reader.
     let saved_home = entry
-        .materializes
+        .materializes_nlr
         .then(|| std::mem::replace(&mut vm.aot_home_frame_id, home_id));
     let fuel_ptr = &raw mut vm.aot_fuel;
     let depth_ptr = &raw mut vm.aot_depth;
