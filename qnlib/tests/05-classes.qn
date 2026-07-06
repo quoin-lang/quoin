@@ -153,4 +153,28 @@
         "* ...and the failed class is not registered.
         .is:{ TSCNC_ReqBad.defined? } equalTo:false;
     };
+
+    .test:
+    lateMixInvalidatesCaches -> {
+        "* Mixing into a class AFTER it has dispatched and instantiated must
+        "* invalidate every cache: memoized resolutions, inline caches, and
+        "* the instantiation plan. (mix: previously invalidated nothing — a
+        "* mixin shadowing a PARENT's method left stale resolutions.)
+        TSCNC_LateParent <- { greet -> { ^'parent' } };
+        TSCNC_LateParent <- TSCNC_LateHost <- {};
+        var before = TSCNC_LateHost.new;
+        "* warm the caches through the parent's method and the init plan
+        .is:{ before.greet } equalTo:'parent';
+        .is:{ before.greet } equalTo:'parent';
+        Mixin <- TSCNC_LateShadow <- { |@stamped|
+            greet -> { ^'mixin' };
+            init -> { @stamped = 99 };
+            stamped -> { ^@stamped }
+        };
+        TSCNC_LateHost.mix:TSCNC_LateShadow;
+        "* dispatch sees the mixin immediately (was stale before the fix)...
+        .is:{ TSCNC_LateHost.new.greet } equalTo:'mixin';
+        "* ...and the rebuilt instantiation plan runs the mixin's init.
+        .is:{ TSCNC_LateHost.new.stamped } equalTo:99;
+    };
 }

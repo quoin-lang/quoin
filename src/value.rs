@@ -660,6 +660,38 @@ pub fn intern_param_syms(names: &[String]) -> Vec<Symbol> {
     names.iter().map(|n| Symbol::intern(n)).collect()
 }
 
+/// The memoized per-class instantiation recipe (field-fill + init chain),
+/// built once per (class, dispatch_epoch) by `VmState::instantiation_plan`
+/// and cached on the class — `new:`/`new` used to re-derive all of it per
+/// instantiation (two hierarchy walks, a Vec per walk, a String clone per
+/// ivar name, and an `init:` param-name Vec per init). IMMUTABLE once built:
+/// users iterate a copied `Gc` (rooted via `VmState::active_init_plans`
+/// across the user init calls, which can park — a stale plan replaced
+/// mid-chain must stay alive for its running iteration).
+#[derive(Collect, Debug)]
+#[collect(no_drop)]
+pub struct InitPlan<'gc> {
+    /// Deduped ivar names paired with their resolved field slots, in the
+    /// same self-then-mixins-then-parent order the per-call walk produced.
+    #[collect(require_static)]
+    pub ivar_slots: Vec<(String, usize)>,
+    /// The base->derived init chain, one entry per class that defines any
+    /// initializer. `finalize_instantiation` (the `new:{}` path) runs
+    /// `init_colon` when present, else `init_plain`; `run_all_inits` (the
+    /// plain `new` path) runs `init_plain` ONLY — mirroring the two
+    /// pre-plan walks exactly.
+    pub inits: Vec<InitEntry<'gc>>,
+}
+
+/// One class's resolved initializers in an [`InitPlan`].
+#[derive(Collect, Debug)]
+#[collect(no_drop)]
+pub struct InitEntry<'gc> {
+    /// `init:` plus the param names it is fed from the `new:{}` block.
+    pub init_colon: Option<(Value<'gc>, Vec<String>)>,
+    pub init_plain: Option<Value<'gc>>,
+}
+
 #[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Class<'gc> {
@@ -676,6 +708,10 @@ pub struct Class<'gc> {
     /// mixins + parent) at first instantiation; new ivars only ever append, so
     /// existing slots stay stable across runtime mixins. `len()` is the field count.
     pub field_slots: FxHashMap<String, usize>,
+    /// Memoized instantiation recipe (see [`InitPlan`]): valid only while
+    /// the stamped `dispatch_epoch` matches — any method/mixin/hierarchy
+    /// mutation bumps the epoch and the next instantiation rebuilds.
+    pub init_plan: Option<(u64, Gc<'gc, InitPlan<'gc>>)>,
     /// True only for per-instance *eigenclasses* (singletons synthesized by
     /// `get_target_class_for_def` for a `Value::Object` receiver). Named classes —
     /// including the `$TrueClass`/`$FalseClass` boolean singletons, which are

@@ -15,8 +15,8 @@ use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
 use crate::symbol::{Symbol, init_colon_symbol, init_symbol, self_symbol};
 use crate::value::{
-    AnyCollect, Block, Class, EnvFrame, Fields, NamespacedName, NativeCall, NativeClass,
-    NativeFunc, Object, ObjectPayload, Value,
+    AnyCollect, Block, Class, EnvFrame, Fields, InitEntry, InitPlan, NamespacedName, NativeCall,
+    NativeClass, NativeFunc, Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, devirt_ops, gc, gcl};
 use std::rc::Rc;
@@ -487,6 +487,11 @@ pub struct VmState<'gc> {
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
+    /// Root slot for [`InitPlan`]s whose init chains are RUNNING: a user
+    /// init can park, and can invalidate/replace the class's cached plan
+    /// (reopen bumps the epoch) — the running iteration's plan must stay
+    /// alive regardless. Pushed/popped around each chain.
+    pub active_init_plans: Vec<Gc<'gc, InitPlan<'gc>>>,
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
     /// The REPL's persistent top-level environment. `Some` only under `qn repl`: each
@@ -608,6 +613,7 @@ impl<'gc> VmState<'gc> {
             aot_spec_obs_left: crate::codegen::spec::OBSERVE_BUDGET,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
+            active_init_plans: Vec::new(),
             last_popped_env: None,
             repl_env: None,
             sched: Scheduler {
@@ -1330,6 +1336,7 @@ impl<'gc> VmState<'gc> {
                 class_methods,
                 mixin_classes: Vec::new(),
                 field_slots: FxHashMap::default(),
+                init_plan: None,
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,
@@ -1344,6 +1351,51 @@ impl<'gc> VmState<'gc> {
         // those stale entries (the contract codegen's epoch doc promises for
         // extension installs, matching the DefineMethod arms).
         crate::codegen::bump_redef_epoch();
+    }
+
+    /// The memoized instantiation recipe for `class` (see [`InitPlan`]),
+    /// rebuilt whenever the dispatch epoch has moved — every method-table,
+    /// mixin, or extension mutation bumps it (including `mix:`, fixed
+    /// alongside this cache), so a stale plan cannot survive a hierarchy
+    /// change. Field layout is append-only (`field_slots`), so resolved
+    /// slots never go stale within an epoch.
+    fn instantiation_plan(
+        &mut self,
+        mc: &Mutation<'gc>,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+    ) -> Gc<'gc, InitPlan<'gc>> {
+        if let Some((epoch, plan)) = class.borrow().init_plan
+            && epoch == self.dispatch_epoch
+        {
+            return plan;
+        }
+        let vars = self.get_all_instance_vars(class);
+        let ivar_slots: Vec<(String, usize)> = vars
+            .into_iter()
+            .filter_map(|v| self.field_slot(class, &v).map(|slot| (v, slot)))
+            .collect();
+        let mut classes = Vec::new();
+        let mut visited = Vec::new();
+        self.collect_classes_for_init(class, &mut classes, &mut visited);
+        let mut inits = Vec::new();
+        for clz in classes {
+            let init_colon = clz
+                .borrow()
+                .instance_methods
+                .get(&init_colon_symbol())
+                .copied()
+                .map(|m| (m, self.init_param_names(m).unwrap_or_default()));
+            let init_plain = clz.borrow().instance_methods.get(&init_symbol()).copied();
+            if init_colon.is_some() || init_plain.is_some() {
+                inits.push(InitEntry {
+                    init_colon,
+                    init_plain,
+                });
+            }
+        }
+        let plan = gc!(mc, InitPlan { ivar_slots, inits });
+        class.borrow_mut(mc).init_plan = Some((self.dispatch_epoch, plan));
+        plan
     }
 
     /// NO borrow may be held while an initializer runs: `call_method_value` executes
@@ -1362,77 +1414,65 @@ impl<'gc> VmState<'gc> {
         env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
     ) -> Result<(), QuoinError> {
         let class = obj.borrow().class;
-        let vars = self.get_all_instance_vars(class);
-        for var in &vars {
-            let val = env.borrow().lookup_str(var);
-            if let Some(val) = val
-                && let Some(slot) = self.field_slot(class, var)
-            {
-                obj.borrow_mut(mc).fields[slot] = val;
+        let plan = self.instantiation_plan(mc, class);
+        for (name, slot) in &plan.ivar_slots {
+            let val = env.borrow().lookup_str(name);
+            if let Some(val) = val {
+                obj.borrow_mut(mc).fields[*slot] = val;
             }
         }
 
-        // Run each class's initializer base->derived (parents, then mixins, then
-        // self), mirroring `run_all_inits` for the no-block path. A class that
-        // defines `init:` receives the block fields it names (matched by param
-        // name); otherwise its zero-arg `init` runs. Running the whole chain means
-        // an ancestor or mixin initializer is never skipped just because a more
-        // derived class happens to define `init:`.
-        let mut classes = Vec::new();
-        let mut visited = Vec::new();
-        self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
-
+        // Run each class's initializer base->derived (parents, then mixins,
+        // then self). A class that defines `init:` receives the block fields
+        // it names (matched by param name); otherwise its zero-arg `init`
+        // runs. Running the whole chain means an ancestor or mixin
+        // initializer is never skipped just because a more derived class
+        // happens to define `init:`. The plan is rooted for the chain's
+        // duration (a user init can park AND replace the cached plan).
         let receiver = Value::Object(obj);
-        // Root the collected chain across the user init calls below: an init
-        // that reopens its own class can drop the class table's reference to
-        // an old class object, leaving this Vec the only (unrooted) holder.
-        let root_base = self.stack.len();
-        for &clz in &classes {
-            self.push(Value::Class(clz));
-        }
-        let result = self.run_init_chain_rooted(mc, receiver, &classes, env);
-        self.stack.truncate(root_base);
+        self.active_init_plans.push(plan);
+        let result = self.run_init_chain_planned(mc, receiver, plan, Some(env));
+        self.active_init_plans.pop();
         result
     }
 
-    /// The init-chain body of [`Self::finalize_instantiation`], split out so
-    /// the caller can root `classes` around its early `?` exits.
-    // The caller has pushed every class in `classes` onto the VM stack for
-    // this whole call; `clz` and the method values fetched from it are rooted
-    // by that contract across the user init calls.
+    /// The init-chain body shared by [`Self::finalize_instantiation`]
+    /// (`with_env` = the `new:{}` block env feeding `init:` params) and
+    /// [`Self::run_all_inits`] (`None`: the plain-`new` path runs `init`
+    /// ONLY, exactly as before the plan existed).
+    // The caller has pushed `plan` onto `active_init_plans` for this whole
+    // call; the method Values read from it are rooted by that contract
+    // across the user init calls (which can park).
     #[allow(no_gc_across_yield)]
-    fn run_init_chain_rooted(
+    fn run_init_chain_planned(
         &mut self,
         mc: &Mutation<'gc>,
         receiver: Value<'gc>,
-        classes: &[Gc<'gc, RefLock<Class<'gc>>>],
-        env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
+        plan: Gc<'gc, InitPlan<'gc>>,
+        with_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     ) -> Result<(), QuoinError> {
-        for &clz in classes {
-            let init_colon = clz
-                .borrow()
-                .instance_methods
-                .get(&init_colon_symbol())
-                .copied();
-            if let Some(method_val) = init_colon {
-                let param_names = self.init_param_names(method_val).unwrap_or_default();
-                let mut init_args = Vec::new();
-                for param in &param_names {
-                    let val = env
-                        .borrow()
-                        .lookup_str(param)
-                        .unwrap_or_else(|| self.new_nil(mc));
-                    init_args.push(val);
+        for idx in 0..plan.inits.len() {
+            let entry = &plan.inits[idx];
+            match (with_env, &entry.init_colon) {
+                (Some(env), Some((method_val, param_names))) => {
+                    let method_val = *method_val;
+                    let mut init_args = Vec::with_capacity(param_names.len());
+                    for param in param_names {
+                        let val = env
+                            .borrow()
+                            .lookup_str(param)
+                            .unwrap_or_else(|| self.new_nil(mc));
+                        init_args.push(val);
+                    }
+                    self.call_method_value(mc, receiver, method_val, "init:", init_args)?;
                 }
-                self.call_method_value(mc, receiver, method_val, "init:", init_args)?;
-            } else {
-                let init_plain = clz.borrow().instance_methods.get(&init_symbol()).copied();
-                if let Some(method_val) = init_plain {
-                    self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+                _ => {
+                    if let Some(method_val) = entry.init_plain {
+                        self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+                    }
                 }
             }
         }
-
         Ok(())
     }
 
@@ -1499,6 +1539,7 @@ impl<'gc> VmState<'gc> {
                     class_methods: FxHashMap::default(),
                     mixin_classes: Vec::new(),
                     field_slots: FxHashMap::default(),
+                    init_plan: None,
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
@@ -1599,6 +1640,7 @@ impl<'gc> VmState<'gc> {
                     class_methods: cls_methods,
                     mixin_classes: Vec::new(),
                     field_slots: FxHashMap::default(),
+                    init_plan: None,
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
@@ -1817,27 +1859,12 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         obj: Gc<'gc, RefLock<Object<'gc>>>,
     ) -> Result<(), QuoinError> {
-        let mut classes = Vec::new();
-        let mut visited = Vec::new();
-        self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
-
+        let class = obj.borrow().class;
+        let plan = self.instantiation_plan(mc, class);
         let receiver = Value::Object(obj);
-        // Same rooting as `finalize_instantiation`: the chain must survive an
-        // init that reopens its own class.
-        let root_base = self.stack.len();
-        for &clz in &classes {
-            self.push(Value::Class(clz));
-        }
-        let result = (|| {
-            for &clz in &classes {
-                let method_opt = clz.borrow().instance_methods.get(&init_symbol()).copied();
-                if let Some(method_val) = method_opt {
-                    self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
-                }
-            }
-            Ok(())
-        })();
-        self.stack.truncate(root_base);
+        self.active_init_plans.push(plan);
+        let result = self.run_init_chain_planned(mc, receiver, plan, None);
+        self.active_init_plans.pop();
         result
     }
 
@@ -2534,6 +2561,7 @@ impl<'gc> VmState<'gc> {
                         class_methods: FxHashMap::default(),
                         mixin_classes: Vec::new(),
                         field_slots: FxHashMap::default(),
+                        init_plan: None,
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
@@ -2569,6 +2597,7 @@ impl<'gc> VmState<'gc> {
                             class_methods: FxHashMap::default(),
                             mixin_classes: Vec::new(),
                             field_slots,
+                            init_plan: None,
                             is_eigenclass: true,
                             is_sealed: false,
                             is_abstract: false,
@@ -5217,6 +5246,7 @@ impl<'gc> VmState<'gc> {
                         class_methods: FxHashMap::default(),
                         mixin_classes: Vec::new(),
                         field_slots: FxHashMap::default(),
+                        init_plan: None,
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
