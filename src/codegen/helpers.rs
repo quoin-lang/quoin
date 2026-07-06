@@ -328,7 +328,7 @@ pub(super) unsafe extern "C" fn block_call(
             Err(e) => store_err(vm, e),
         };
     };
-    if vm.outcall_nesting < super::spec::MAX_OUTCALL_NESTING
+    if vm.aot.outcall_nesting < super::spec::MAX_OUTCALL_NESTING
         && let Some(tid) = block.template.template_id
         && let Some(entry) = super::block_entry_for(vm, tid)
     {
@@ -357,7 +357,7 @@ pub(super) unsafe extern "C" fn block_call(
 /// Read-only-capture semantics are the translator's gate; a `^^` in the nest
 /// is fine (S5) — `want_home != 0` iff the nest contains one, and then the
 /// closure's home is the invoking compiled frame, carried in
-/// `vm.aot_home_frame_id` and addressable through `vm.aot_frame_marks`
+/// `vm.aot.home_frame_id` and addressable through `vm.aot.frame_marks`
 /// (a `^^`-free nest never consults `enclosing_method_id`, and its invoking
 /// frame skips the S5 bookkeeping entirely, so the field would be stale).
 pub(super) unsafe extern "C" fn make_closure(
@@ -372,7 +372,7 @@ pub(super) unsafe extern "C" fn make_closure(
     // Chain the snapshot to the invoking frame's enclosing environment, so a
     // nested materialized closure's free names resolve through the FULL
     // lexical chain, exactly as interpreted (the webapp `path` lesson).
-    let env = crate::gcl!(mc, crate::value::EnvFrame::new(vm.aot_enclosing_env));
+    let env = crate::gcl!(mc, crate::value::EnvFrame::new(vm.aot.enclosing_env));
     let inline_cache = vm.ic_cell_for(mc, tmpl);
     let v = vm.new_block(
         mc,
@@ -380,7 +380,7 @@ pub(super) unsafe extern "C" fn make_closure(
             template: tmpl.clone(),
             parent_env: Some(env),
             enclosing_method_id: if want_home != 0 {
-                vm.aot_home_frame_id
+                vm.aot.home_frame_id
             } else {
                 None
             },

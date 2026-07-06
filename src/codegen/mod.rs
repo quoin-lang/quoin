@@ -426,11 +426,11 @@ pub fn invoke<'gc>(
     for _ in 0..entry.n_scratch {
         vm.stack.push(Value::Nil);
     }
-    if vm.aot_depth == 0 {
-        vm.aot_fuel = i64::from(crate::tuning::step_batch());
+    if vm.aot.depth == 0 {
+        vm.aot.fuel = i64::from(crate::tuning::step_batch());
     }
     vm.aot_pending_error = None;
-    let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
+    let saved_env = std::mem::replace(&mut vm.aot.enclosing_env, enclosing_env);
     // S5: a frame that materializes closures is a potential `^^` target (the
     // compiled home id travels only inside closures it materializes). Mint a
     // frame id from the shared counter (so it can never collide with an
@@ -441,17 +441,17 @@ pub fn invoke<'gc>(
     let nlr_mark = if entry.materializes_nlr {
         let id = vm.next_frame_id;
         vm.next_frame_id += 1;
-        vm.aot_frame_marks.push(crate::vm::AotFrameMark {
+        vm.aot.frame_marks.push(crate::vm::AotFrameMark {
             id,
             frames_len: vm.frames.len(),
             stack_base: base,
         });
-        Some((id, std::mem::replace(&mut vm.aot_home_frame_id, Some(id))))
+        Some((id, std::mem::replace(&mut vm.aot.home_frame_id, Some(id))))
     } else {
         None
     };
-    let fuel_ptr = &raw mut vm.aot_fuel;
-    let depth_ptr = &raw mut vm.aot_depth;
+    let fuel_ptr = &raw mut vm.aot.fuel;
+    let depth_ptr = &raw mut vm.aot.depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
     let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
     let mut ret: i64 = 0;
@@ -466,10 +466,10 @@ pub fn invoke<'gc>(
             &mut ret,
         )
     };
-    vm.aot_enclosing_env = saved_env;
+    vm.aot.enclosing_env = saved_env;
     if let Some((_, saved_home)) = nlr_mark {
-        vm.aot_home_frame_id = saved_home;
-        vm.aot_frame_marks.pop();
+        vm.aot.home_frame_id = saved_home;
+        vm.aot.frame_marks.pop();
     }
     let outcome = match tag {
         TAG_OK => AotOutcome::Value(match entry.ret {
@@ -498,9 +498,9 @@ pub fn invoke<'gc>(
     // return value (to the caller, `^^v` from a cold arm IS the method
     // returning `v`).
     if let Some((frame_id, _)) = nlr_mark
-        && vm.aot_nlr_target == Some(frame_id)
+        && vm.aot.nlr_target == Some(frame_id)
     {
-        vm.aot_nlr_target = None;
+        vm.aot.nlr_target = None;
         debug_assert!(matches!(
             &outcome,
             AotOutcome::Err(QuoinError::NonLocalReturn)
@@ -593,19 +593,19 @@ pub fn invoke_block<'gc>(
     for _ in 0..entry.n_scratch {
         vm.stack.push(Value::Nil);
     }
-    if vm.aot_depth == 0 {
-        vm.aot_fuel = i64::from(crate::tuning::step_batch());
+    if vm.aot.depth == 0 {
+        vm.aot.fuel = i64::from(crate::tuning::step_batch());
     }
     vm.aot_pending_error = None;
-    let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
+    let saved_env = std::mem::replace(&mut vm.aot.enclosing_env, enclosing_env);
     // S5: only a template that materializes a `^^`-carrying closure
     // propagates its home — `make_closure`'s `want_home` path is the sole
     // reader.
     let saved_home = entry
         .materializes_nlr
-        .then(|| std::mem::replace(&mut vm.aot_home_frame_id, home_id));
-    let fuel_ptr = &raw mut vm.aot_fuel;
-    let depth_ptr = &raw mut vm.aot_depth;
+        .then(|| std::mem::replace(&mut vm.aot.home_frame_id, home_id));
+    let fuel_ptr = &raw mut vm.aot.fuel;
+    let depth_ptr = &raw mut vm.aot.depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
     let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
     let raw_args: [i64; 1] = [base as i64 + 1];
@@ -621,9 +621,9 @@ pub fn invoke_block<'gc>(
             &mut ret,
         )
     };
-    vm.aot_enclosing_env = saved_env;
+    vm.aot.enclosing_env = saved_env;
     if let Some(saved_home) = saved_home {
-        vm.aot_home_frame_id = saved_home;
+        vm.aot.home_frame_id = saved_home;
     }
     let outcome = match tag {
         TAG_OK => AotOutcome::Value(vm.stack[ret as usize]),

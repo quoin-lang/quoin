@@ -193,6 +193,62 @@ pub struct AotFrameMark {
     pub stack_base: usize,
 }
 
+/// The PER-TASK slice of compiled-execution state, swapped with the task
+/// context as ONE unit (`std::mem::take` in `save_task_context` /
+/// `load_task_context`). Every field here describes something frozen on the
+/// task's own coroutine stack while it parks — fuel/depth budgets, the
+/// compiled-call nesting count, the lexical/`^^` context of in-flight
+/// compiled frames — so leaking any of it to the next task corrupts that
+/// task's compiled execution (the `aot.enclosing_env` and `outcall_nesting`
+/// bugs, found one arc apart). ADDING A FIELD HERE is the whole protocol:
+/// the swap sites move the struct wholesale and `Default` covers fresh
+/// tasks and resets. Process-global AOT state (pending candidates, the
+/// observation budget, `aot_pending_error` — set and taken within one
+/// straight-line `codegen::invoke`) stays on `VmState` directly;
+/// `native_reentry_depth` predates this struct and rides the task context
+/// as its own field.
+#[derive(Collect, Default)]
+#[collect(no_drop)]
+pub struct AotTaskState<'gc> {
+    /// Fuel/depth counters (docs/AOT_ARCH.md §5): compiled code decrements
+    /// `fuel` in every prologue and checkpoints (cancellation + cooperative
+    /// yield) at zero; `depth` caps compiled-call recursion on the real
+    /// coroutine stack (which bypasses `MAX_NATIVE_REENTRY`).
+    #[collect(require_static)]
+    pub fuel: i64,
+    #[collect(require_static)]
+    pub depth: i64,
+    /// Rust-stack nesting depth of compiled-call re-entries (outcalls into
+    /// `call_method_cached`); dispatch stops entering compiled bodies past
+    /// `spec::MAX_OUTCALL_NESTING` (see there).
+    #[collect(require_static)]
+    pub outcall_nesting: u32,
+    /// The ENCLOSING lexical environment of the currently-executing compiled
+    /// frame (the invoked block/method's own `parent_env`) — the parent a
+    /// cold-path `make_closure` snapshot must chain to, so a materialized
+    /// closure's free names resolve through the full lexical chain exactly
+    /// as interpreted (B3b). Saved/restored around each compiled invocation.
+    pub enclosing_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+    /// The `^^` home a `make_closure`-materialized closure must carry as its
+    /// `enclosing_method_id` (S5): compiled METHOD invocations mint a frame
+    /// id and put it here; a compiled BLOCK template propagates the invoked
+    /// closure's own home. Saved/restored around each compiled invocation.
+    #[collect(require_static)]
+    pub home_frame_id: Option<usize>,
+    /// The live compiled METHOD invocations on this task, addressable as
+    /// `^^` targets (S5): a compiled method has no interpreter `Frame`, so
+    /// the `MethodReturn` unwind finds it here. Pushed/popped by
+    /// `codegen::invoke`; entries index this task's `frames`/`stack`.
+    #[collect(require_static)]
+    pub frame_marks: Vec<AotFrameMark>,
+    /// Set by the `MethodReturn` unwind when the `^^` home is a live
+    /// compiled invocation: the delivered value sits at that frame's window
+    /// base, and the matching `codegen::invoke` consumes both as its
+    /// ordinary return.
+    #[collect(require_static)]
+    pub nlr_target: Option<usize>,
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct BuiltinCache<'gc> {
@@ -386,16 +442,10 @@ pub struct VmState<'gc> {
     #[collect(require_static)]
     pub native_reentry_depth: usize,
 
-    /// AOT fuel/depth counters (docs/AOT_ARCH.md §5): compiled code decrements
-    /// `aot_fuel` in every prologue and checkpoints (cancellation + cooperative
-    /// yield) at zero; `aot_depth` caps compiled-call recursion on the real
-    /// coroutine stack (which bypasses `MAX_NATIVE_REENTRY`). Per-task state —
-    /// saved/restored with the task context, since another task may run while
-    /// this one is suspended at a checkpoint.
-    #[collect(require_static)]
-    pub aot_fuel: i64,
-    #[collect(require_static)]
-    pub aot_depth: i64,
+    /// The per-task compiled-execution slice (see [`AotTaskState`]) —
+    /// swapped as ONE unit with the task context, since another task may run
+    /// while this one is suspended at a checkpoint or parked mid-outcall.
+    pub aot: AotTaskState<'gc>,
     /// Error channel for compiled code (docs/AOT_ARCH.md v0.2): helpers store a
     /// full `QuoinError` here and return `TAG_ERR`; `codegen::invoke` takes it.
     /// A thrown Quoin *value* needs no slot here — it travels as
@@ -418,11 +468,6 @@ pub struct VmState<'gc> {
     /// Cell on each `StaticBlock`.
     #[collect(require_static)]
     pub aot_pending_spec: crate::codegen::spec::SpecPendingMap,
-    /// Rust-stack nesting depth of compiled-call re-entries (outcalls into
-    /// `call_method_cached`); dispatch stops entering compiled bodies past
-    /// `spec::MAX_OUTCALL_NESTING` (see there).
-    #[collect(require_static)]
-    pub outcall_nesting: u32,
     /// Speculative methods promoted to compiled entries (S1) — stats only.
     #[collect(require_static)]
     pub aot_spec_promoted: u32,
@@ -431,34 +476,6 @@ pub struct VmState<'gc> {
     /// once spent, observation costs one predicted branch per call, total.
     #[collect(require_static)]
     pub aot_spec_obs_left: u32,
-    /// The ENCLOSING lexical environment of the currently-executing compiled
-    /// frame (the invoked block/method's own `parent_env`) — the parent a
-    /// cold-path `make_closure` snapshot must chain to, so a materialized
-    /// closure's free names resolve through the full lexical chain exactly as
-    /// interpreted (B3b). Saved/restored around each compiled invocation, and
-    /// per-task like `aot_fuel` (a compiled body can park at a fuel checkpoint
-    /// or outcall; the next task's compiled frames must not see this one's
-    /// lexical context).
-    pub aot_enclosing_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
-    /// The `^^` home a `make_closure`-materialized closure must carry as its
-    /// `enclosing_method_id` (S5): compiled METHOD invocations mint a frame id
-    /// and put it here; a compiled BLOCK template propagates the invoked
-    /// closure's own home. Saved/restored around each compiled invocation and
-    /// per-task, exactly like `aot_enclosing_env` above.
-    #[collect(require_static)]
-    pub aot_home_frame_id: Option<usize>,
-    /// The live compiled METHOD invocations on this task, addressable as `^^`
-    /// targets (S5): a compiled method has no interpreter `Frame`, so the
-    /// `MethodReturn` unwind finds it here. Pushed/popped by
-    /// `codegen::invoke`; per-task (entries index this task's `frames`/
-    /// `stack`).
-    #[collect(require_static)]
-    pub aot_frame_marks: Vec<AotFrameMark>,
-    /// Set by the `MethodReturn` unwind when the `^^` home is a live compiled
-    /// invocation: the delivered value sits at that frame's window base, and
-    /// the matching `codegen::invoke` consumes both as its ordinary return.
-    #[collect(require_static)]
-    pub aot_nlr_target: Option<usize>,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
@@ -573,19 +590,13 @@ impl<'gc> VmState<'gc> {
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
-            aot_fuel: 0,
-            aot_depth: 0,
+            aot: AotTaskState::default(),
             aot_pending_error: None,
             aot_pending_blocks: rustc_hash::FxHashMap::default(),
             aot_refused_blocks: rustc_hash::FxHashSet::default(),
             aot_pending_spec: crate::codegen::spec::SpecPendingMap::default(),
-            outcall_nesting: 0,
             aot_spec_promoted: 0,
             aot_spec_obs_left: crate::codegen::spec::OBSERVE_BUDGET,
-            aot_enclosing_env: None,
-            aot_home_frame_id: None,
-            aot_frame_marks: Vec::new(),
-            aot_nlr_target: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
             last_popped_env: None,
@@ -1834,12 +1845,12 @@ impl<'gc> VmState<'gc> {
                 // A `^`/`^^` unwound frames: below the baseline it belongs to an
                 // enclosing loop; at/above it, the loop head re-evaluates. Counted
                 // as a step, like `run_dispatch`. EXACTLY AT the baseline with
-                // `aot_nlr_target` set, the `^^` came home to a live COMPILED
+                // `aot.nlr_target` set, the `^^` came home to a live COMPILED
                 // frame (S5): it owns no interpreter frame of its own to pop, so
                 // "all callee frames gone" is delivery, not completion — only the
                 // owning `codegen::invoke` may stop that unwind.
                 Err(QuoinError::NonLocalReturn) => {
-                    if self.frames.len() < initial_frame_count || self.aot_nlr_target.is_some() {
+                    if self.frames.len() < initial_frame_count || self.aot.nlr_target.is_some() {
                         return Err(QuoinError::NonLocalReturn);
                     }
                 }
@@ -3575,9 +3586,9 @@ impl<'gc> VmState<'gc> {
         // "recursion too deep". Instead, `outcall_nesting` counts the REAL
         // hazard — Rust-stack frames per compiled<->interpreted alternation —
         // and dispatch degrades to interpreted bodies past the cap.
-        self.outcall_nesting += 1;
+        self.aot.outcall_nesting += 1;
         let result = self.call_method_cached_inner(mc, tid, ip, bc_len, receiver, selector, args);
-        self.outcall_nesting = self.outcall_nesting.saturating_sub(1);
+        self.aot.outcall_nesting = self.aot.outcall_nesting.saturating_sub(1);
         result
     }
 
@@ -4866,11 +4877,12 @@ impl<'gc> VmState<'gc> {
                     // frames and slot window begin. Pop only the frames above
                     // the mark, deliver the value at the window base, and let
                     // the AOT error channel unwind the native frames
-                    // (`codegen::invoke` consumes `aot_nlr_target`). A dead
+                    // (`codegen::invoke` consumes `aot.nlr_target`). A dead
                     // home matches neither a frame nor a mark (ids are never
                     // reused) and drains like an interpreted dead home.
                     let compiled_home = self
-                        .aot_frame_marks
+                        .aot
+                        .frame_marks
                         .iter()
                         .rev()
                         .find(|m| m.id == target_id)
@@ -4882,7 +4894,7 @@ impl<'gc> VmState<'gc> {
                             && self.frames.len() <= m.frames_len
                         {
                             target_stack_base = Some(m.stack_base);
-                            self.aot_nlr_target = Some(target_id);
+                            self.aot.nlr_target = Some(target_id);
                             break;
                         }
                         let Some(f) = self.frames.pop() else { break };
