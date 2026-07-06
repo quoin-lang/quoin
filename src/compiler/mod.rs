@@ -141,7 +141,8 @@ fn jump_offset(inst: &Instruction) -> Option<isize> {
         Instruction::Jump(o)
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
-        | Instruction::BranchIfNotBool(o) => Some(*o),
+        | Instruction::BranchIfNotBool(o)
+        | Instruction::BranchIfNotList(o) => Some(*o),
         _ => None,
     }
 }
@@ -151,7 +152,8 @@ fn set_jump_offset(inst: &mut Instruction, off: isize) {
         Instruction::Jump(o)
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
-        | Instruction::BranchIfNotBool(o) => *o = off,
+        | Instruction::BranchIfNotBool(o)
+        | Instruction::BranchIfNotList(o) => *o = off,
         _ => {}
     }
 }
@@ -709,16 +711,28 @@ impl Compiler {
                 .rev()
                 .find(|c| !c.name.is_empty())
                 .is_some_and(|c| c.sealed);
-        if !sealed || imm.multi.contains(selector) || block_node.decl_block.is_some() {
+        if imm.multi.contains(selector) || block_node.decl_block.is_some() {
             return;
         }
+        // B2 (docs/BLOCK_AOT_ARCH.md §3): an OPEN owner's method may compile —
+        // marked so the translator emits no direct sibling calls (every send
+        // crosses a dispatch-equivalent seam; a reopen then simply dispatches
+        // to its new template, per-dispatch minting making the stale entry
+        // unreachable). Sealed owners keep the direct-call fast path.
+        let open_owner = !sealed;
         let mut params = Vec::new();
         for arg in &block_node.arguments {
             if arg.identifier.identifier_type == IdentifierType::Instance {
                 return; // not a plain method parameter list
             }
             let Some(hint) = &arg.type_hint else { return };
-            let Some(k) = crate::codegen::AotParam::from_annotation(&annotation_name(hint)) else {
+            // The ERASED dispatch name (`List(Integer)` → `List`), exactly what the
+            // runtime guarantees about the arg; the element tag rides separately in
+            // `StaticBlock.param_elem_tags`, where the translator picks it up as a
+            // `CollectionOf` proof (B1). A type-var param erases to `Object` and
+            // stays a non-candidate, as before.
+            let Some(k) = crate::codegen::AotParam::from_annotation(&self.dispatch_type_name(hint))
+            else {
                 return;
             };
             params.push(k);
@@ -726,7 +740,11 @@ impl Compiler {
         let Some(rt) = &block_node.return_type else {
             return;
         };
-        let Some(ret) = crate::codegen::AotRet::from_annotation(&annotation_name(rt)) else {
+        // Same erasure as params: `^List(U)` returns a List at runtime (the
+        // variables are checker-only); a type-var return erases to `Object`
+        // and stays a non-candidate.
+        let Some(ret) = crate::codegen::AotRet::from_annotation(&self.dispatch_type_name(rt))
+        else {
             return;
         };
         // `compile_block` just pushed the compiled body as a block constant.
@@ -740,6 +758,46 @@ impl Compiler {
             block: rc.clone(),
             params,
             ret,
+            open_owner,
+            role: crate::codegen::AotRole::Method,
+        });
+    }
+
+    /// Collect a nested block LITERAL as a block-template candidate (B3a,
+    /// docs/BLOCK_AOT_ARCH.md §3): invoked via `valueWithSelfOrArg:` from the
+    /// combinator seams when the registry has a compiled entry. Cheap
+    /// prefilter only — translation refusals do the real gating; the prescan
+    /// skips the two shapes that always refuse (a nested literal push, a
+    /// non-local return) to keep unit-load compile time down.
+    fn maybe_collect_block_candidate(&mut self, rc: &Rc<StaticBlock>) {
+        if !self.collect_aot || !self.mint_template_ids {
+            return;
+        }
+        if rc.template_id.is_none()
+            || rc.param_syms.len() > 1
+            || rc.decl_block.is_some()
+            || rc.name.is_some()
+        {
+            return;
+        }
+        let hopeless = rc.bytecode.0.iter().any(|i| {
+            matches!(
+                i,
+                Instruction::Push(Constant::Block(_)) | Instruction::MethodReturn
+            )
+        });
+        if hopeless {
+            return;
+        }
+        self.aot_candidates.push(crate::codegen::AotCandidate {
+            // Blocks have no sibling group (no direct calls either way).
+            group_id: u32::MAX,
+            selector: format!("block@{}", rc.template_id.unwrap()),
+            block: rc.clone(),
+            params: vec![crate::codegen::AotParam::Obj],
+            ret: crate::codegen::AotRet::Obj,
+            open_owner: true,
+            role: crate::codegen::AotRole::BlockTemplate,
         });
     }
 
@@ -2197,6 +2255,12 @@ impl Compiler {
             }
             NodeValue::Block(block) => {
                 self.compile_block(block, bytecode)?;
+                // B3a: a block LITERAL is a block-template candidate (method
+                // bodies are collected as Method candidates at their def site).
+                if let Some(Instruction::Push(Constant::Block(rc))) = bytecode.bytecode.last() {
+                    let rc = rc.clone();
+                    self.maybe_collect_block_candidate(&rc);
+                }
             }
             NodeValue::BlockReturn(ret) => {
                 self.compile_return_value(&ret.value, bytecode)?;
@@ -2478,6 +2542,12 @@ impl Compiler {
             return Ok(());
         }
         if self.try_compile_inlined_while(call, bytecode)? {
+            return Ok(());
+        }
+        // B1 (docs/BLOCK_AOT_ARCH.md §3): fuse `recv.each:{ |x| … }` into a guarded
+        // native index loop — closure-free per element on any native-List receiver,
+        // with the real send as the cold path (the guard IS the dispatch).
+        if self.try_compile_inlined_each(call, bytecode)? {
             return Ok(());
         }
         // Phase 5·1/5·2: inline a self-send to a sealed class's own method with an inline-safe body

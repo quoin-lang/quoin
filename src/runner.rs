@@ -57,11 +57,24 @@ fn unit_compiler() -> Compiler {
     }
 }
 
-/// Compile and register this unit's AOT candidates (no-op unless `QN_AOT=1`).
-fn compile_unit_aot(compiler: &mut Compiler) {
-    if crate::tuning::aot_enabled() {
-        crate::codegen::compile_candidates(compiler.take_aot_candidates());
+/// Compile and register this unit's AOT candidates (no-op when `QN_AOT=0`).
+/// METHOD candidates compile eagerly (few, hot by construction); BLOCK
+/// templates stash as pending and compile lazily on first invocation
+/// (B3a — eager compilation of every literal cost ~+34ms startup).
+fn compile_unit_aot(vm: &mut VmState, compiler: &mut Compiler) {
+    if !crate::tuning::aot_enabled() {
+        return;
     }
+    let (blocks, methods): (Vec<_>, Vec<_>) = compiler
+        .take_aot_candidates()
+        .into_iter()
+        .partition(|c| c.role == crate::codegen::AotRole::BlockTemplate);
+    for b in blocks {
+        if let Some(tid) = b.block.template_id {
+            vm.aot_pending_blocks.insert(tid, (0, b));
+        }
+    }
+    crate::codegen::compile_candidates(methods);
 }
 
 pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {
@@ -416,7 +429,7 @@ pub(crate) fn install_dap_program(
             }
         };
         vm.report_type_warnings(compiler.diagnostics());
-        compile_unit_aot(&mut compiler);
+        compile_unit_aot(vm, &mut compiler);
         let block = build_block(mc, &sb);
         // Run to a breakpoint (`stopOnEntry` is honored at `launch`). Program output is captured
         // and re-emitted as DAP `output` events rather than written to fd 1/2.
@@ -771,7 +784,7 @@ impl VmRunner {
                 }
             };
             vm.report_type_warnings(compiler.diagnostics());
-            compile_unit_aot(&mut compiler);
+            compile_unit_aot(vm, &mut compiler);
             let block = build_block(mc, &sb);
             // Stop at entry: an armed `StepInto` halts at the first line start. Source is
             // shown at each pause by default ($source off to silence). `--break-on-throw` types
@@ -969,7 +982,7 @@ impl VmRunner {
                     }
                 };
                 vm.report_type_warnings(compiler.diagnostics());
-                compile_unit_aot(&mut compiler);
+                compile_unit_aot(vm, &mut compiler);
 
                 let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
@@ -1058,7 +1071,7 @@ impl VmRunner {
                     Err(e) => panic!("Compilation error: {}", e),
                 };
                 vm.report_type_warnings(compiler.diagnostics());
-                compile_unit_aot(&mut compiler);
+                compile_unit_aot(vm, &mut compiler);
                 let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 install_main_task(mc, vm);
@@ -1085,7 +1098,7 @@ impl VmRunner {
                     Ok(_) => {
                         let had = !compiler.diagnostics().is_empty();
                         vm.report_type_warnings(compiler.diagnostics());
-                        compile_unit_aot(&mut compiler);
+                        compile_unit_aot(vm, &mut compiler);
                         had
                     }
                     Err(e) => {
@@ -1264,7 +1277,7 @@ impl VmRunner {
                     }
                 };
                 vm.report_type_warnings(compiler.diagnostics());
-                compile_unit_aot(&mut compiler);
+                compile_unit_aot(vm, &mut compiler);
 
                 let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);

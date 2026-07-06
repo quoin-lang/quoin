@@ -24,8 +24,12 @@ use crate::runtime::elem_tag;
 use crate::runtime::list::NativeListState;
 use crate::symbol::Symbol;
 use crate::value::NamespacedName;
-use crate::value::Value;
+use crate::value::{ObjectPayload, Value};
 use crate::vm::VmState;
+#[allow(unused_imports)]
+use gc_arena::Gc;
+#[allow(unused_imports)]
+use gc_arena::lock::RefLock;
 
 use super::{TAG_ERR, TAG_OK};
 
@@ -201,6 +205,204 @@ pub(super) unsafe extern "C" fn list_get(
     }
 }
 
+/// `list.count` — the fused `each:` loop bound (B1). Reached only behind a
+/// proven-List guard (`BranchIfNotList` in the translator), so the value at
+/// `list_idx` is a native List by construction; the defensive 0 keeps a
+/// violated invariant from reading garbage (an empty loop, never UB).
+pub(super) unsafe extern "C" fn list_len(vm: *mut c_void, mc: *const c_void, list_idx: i64) -> i64 {
+    let (vm, _mc) = unsafe { vm_mc(vm, mc) };
+    let receiver = vm.stack[list_idx as usize];
+    receiver
+        .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len() as i64)
+        .unwrap_or(0)
+}
+
+/// Read a compiled block template's FREE variable through its closure's real
+/// `EnvFrame` chain (B3a). Slot `block_idx` holds the block object (rooted by
+/// `invoke_block`). A missing name mirrors the interpreter's `LoadLocal`
+/// exactly: nil, not an error.
+pub(super) unsafe extern "C" fn env_get(
+    vm: *mut c_void,
+    mc: *const c_void,
+    block_idx: i64,
+    sym: *const crate::symbol::Symbol,
+    out_idx: i64,
+) -> u8 {
+    let (vm, _mc) = unsafe { vm_mc(vm, mc) };
+    let sym = unsafe { *sym };
+    let bv = vm.stack[block_idx as usize];
+    let Value::Object(obj) = bv else {
+        return invariant(vm, "env_get on a non-block slot");
+    };
+    let ObjectPayload::Block(block) = &obj.borrow().payload else {
+        return invariant(vm, "env_get on a non-block slot");
+    };
+    let val = block
+        .parent_env
+        .and_then(|env| crate::value::EnvFrame::get(env, sym))
+        .unwrap_or(Value::Nil);
+    vm.stack[out_idx as usize] = val;
+    TAG_OK
+}
+
+/// Write a compiled block template's FREE variable through its closure's
+/// `EnvFrame` chain (B3a) — the same shared cell the enclosing frame reads,
+/// so `sum = sum + x` mutates the caller's binding exactly as interpreted.
+/// The name is compile-time-scoped at the original site, so a missing
+/// binding is a broken invariant, not a user error.
+pub(super) unsafe extern "C" fn env_set(
+    vm: *mut c_void,
+    mc: *const c_void,
+    block_idx: i64,
+    sym: *const crate::symbol::Symbol,
+    kind: i64,
+    bits: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let sym = unsafe { *sym };
+    let val = decode(vm, kind, bits);
+    let bv = vm.stack[block_idx as usize];
+    let Value::Object(obj) = bv else {
+        return invariant(vm, "env_set on a non-block slot");
+    };
+    let ObjectPayload::Block(block) = &obj.borrow().payload else {
+        return invariant(vm, "env_set on a non-block slot");
+    };
+    let Some(env) = block.parent_env else {
+        return invariant(vm, "env_set: compiled block has no captured environment");
+    };
+    if crate::value::EnvFrame::set(env, mc, sym, val) {
+        TAG_OK
+    } else {
+        invariant(vm, "env_set: captured variable has no binding")
+    }
+}
+
+/// The per-element block-invocation seam (B3a): a `valueWithSelfOrArg:` send
+/// from compiled code. Registry hit (a compiled block template) → direct
+/// native call; miss → the interpreted block body; a non-block receiver →
+/// the full send (a custom class may define `valueWithSelfOrArg:`).
+pub(super) unsafe extern "C" fn block_call(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tid: i64,
+    ip: i64,
+    bc_len: i64,
+    recv_kind: i64,
+    recv_bits: i64,
+    arg_kind: i64,
+    arg_bits: i64,
+    out_idx: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let recv = decode(vm, recv_kind, recv_bits);
+    let arg = decode(vm, arg_kind, arg_bits);
+    let block = match recv {
+        Value::Object(obj) => match &obj.borrow().payload {
+            ObjectPayload::Block(b) => Some(*b),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(block) = block else {
+        // Not a block: the ordinary (cached) send — dispatch decides: custom
+        // classes, or MNU with the exact interpreter shape.
+        return match vm.call_method_cached(
+            mc,
+            tid as u32,
+            ip as usize,
+            bc_len as usize,
+            recv,
+            crate::symbol::Symbol::intern("valueWithSelfOrArg:"),
+            vec![arg],
+        ) {
+            Ok(v) => {
+                vm.stack[out_idx as usize] = v;
+                TAG_OK
+            }
+            Err(e) => store_err(vm, e),
+        };
+    };
+    if let Some(tid) = block.template.template_id
+        && let Some(entry) = super::block_entry_for(vm, tid)
+    {
+        match super::invoke_block(vm, mc, entry, recv, arg) {
+            super::AotOutcome::Value(v) => {
+                vm.stack[out_idx as usize] = v;
+                return TAG_OK;
+            }
+            super::AotOutcome::Err(e) => return store_err(vm, e),
+            super::AotOutcome::Bail => {}
+        }
+    }
+    match vm.execute_block(mc, block, vec![arg], Some(arg)) {
+        Ok(v) => {
+            vm.stack[out_idx as usize] = v;
+            TAG_OK
+        }
+        Err(e) => store_err(vm, e),
+    }
+}
+
+/// Materialize a closure from a compiled frame's cold path (B3b): a fresh
+/// snapshot `EnvFrame` (populated by the `closure_bind` calls the translator
+/// emits right after) + the leaked template + the registry-shared IC cell —
+/// the same shape `block_from_template` builds for interpreted frames.
+/// Read-only-capture and no-`^^` semantics are the translator's gates.
+pub(super) unsafe extern "C" fn make_closure(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tmpl: *const std::rc::Rc<crate::instruction::StaticBlock>,
+    out_idx: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let tmpl = unsafe { &*tmpl };
+    // Chain the snapshot to the invoking frame's enclosing environment, so a
+    // nested materialized closure's free names resolve through the FULL
+    // lexical chain, exactly as interpreted (the webapp `path` lesson).
+    let env = crate::gcl!(mc, crate::value::EnvFrame::new(vm.aot_enclosing_env));
+    let inline_cache = vm.ic_cell_for(mc, tmpl);
+    let v = vm.new_block(
+        mc,
+        crate::value::Block {
+            template: tmpl.clone(),
+            parent_env: Some(env),
+            enclosing_method_id: None,
+            decl_block: None,
+            inline_cache,
+        },
+    );
+    vm.stack[out_idx as usize] = v;
+    TAG_OK
+}
+
+/// Bind one captured value into a `make_closure`-built snapshot env. The
+/// block sits rooted in its slot throughout construction.
+pub(super) unsafe extern "C" fn closure_bind(
+    vm: *mut c_void,
+    mc: *const c_void,
+    block_idx: i64,
+    sym: *const crate::symbol::Symbol,
+    kind: i64,
+    bits: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let sym = unsafe { *sym };
+    let val = decode(vm, kind, bits);
+    let bv = vm.stack[block_idx as usize];
+    let Value::Object(obj) = bv else {
+        return invariant(vm, "closure_bind on a non-block slot");
+    };
+    let ObjectPayload::Block(block) = &obj.borrow().payload else {
+        return invariant(vm, "closure_bind on a non-block slot");
+    };
+    let Some(env) = block.parent_env else {
+        return invariant(vm, "closure_bind: snapshot env missing");
+    };
+    env.borrow_mut(mc).bind(sym, val);
+    TAG_OK
+}
+
 /// `list.at:i put:v` — `devirt_ops::list_set` semantics (IndexError OOB).
 pub(super) unsafe extern "C" fn list_set(
     vm: *mut c_void,
@@ -308,6 +510,9 @@ pub(super) unsafe extern "C" fn string_const(
 pub(super) unsafe extern "C" fn outcall(
     vm: *mut c_void,
     mc: *const c_void,
+    tid: i64,
+    ip: i64,
+    bc_len: i64,
     recv_kind: i64,
     recv_bits: i64,
     selector: *const Symbol,
@@ -323,8 +528,20 @@ pub(super) unsafe extern "C" fn outcall(
         let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
         args.push(decode(vm, k, b));
     }
-    let selector = unsafe { &*selector };
-    match vm.call_method(mc, receiver, selector.as_str(), args) {
+    let selector = unsafe { *selector };
+    // `(tid, ip)` is the SAME call-site identity the interpreted send at this
+    // instruction uses, so compiled and interpreted execution share one warm
+    // inline cache — without it every compiled operator send paid an uncached
+    // lookup and lost to the interpreted body it replaced.
+    match vm.call_method_cached(
+        mc,
+        tid as u32,
+        ip as usize,
+        bc_len as usize,
+        receiver,
+        selector,
+        args,
+    ) {
         Ok(v) => {
             vm.stack[out_idx as usize] = v;
             TAG_OK
@@ -376,24 +593,4 @@ pub(super) unsafe extern "C" fn load_global(
     let _ = mc;
     vm.stack[out_idx as usize] = v;
     TAG_OK
-}
-
-/// The symbol table registered with every JIT module.
-pub(super) fn symbols() -> Vec<(&'static str, *const u8)> {
-    vec![
-        ("qn_aot_checkpoint", super::checkpoint_addr()),
-        ("qn_aot_slot_set", slot_set as *const u8),
-        ("qn_aot_slot_peek", slot_peek as *const u8),
-        ("qn_aot_list_new", list_new as *const u8),
-        ("qn_aot_list_from", list_from as *const u8),
-        ("qn_aot_list_push", list_push as *const u8),
-        ("qn_aot_list_get", list_get as *const u8),
-        ("qn_aot_list_set", list_set as *const u8),
-        ("qn_aot_string_const", string_const as *const u8),
-        ("qn_aot_outcall", outcall as *const u8),
-        ("qn_aot_load_global", load_global as *const u8),
-        ("qn_aot_narrow_error", narrow_error as *const u8),
-        ("qn_aot_tag_collection", tag_collection as *const u8),
-        ("qn_aot_nil_mnu", nil_mnu as *const u8),
-    ]
 }

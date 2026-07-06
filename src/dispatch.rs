@@ -204,7 +204,8 @@ impl<'gc> Callable<'gc> {
                     receiver,
                     args: args.clone(),
                 });
-                let outcome = crate::codegen::invoke(vm, mc, entry.0, receiver, &args);
+                let outcome =
+                    crate::codegen::invoke(vm, mc, entry.0, receiver, &args, block.parent_env);
                 if matches!(outcome, crate::codegen::AotOutcome::Err(_)) {
                     if let Some(call) = vm.active_native_args.last() {
                         vm.exceptions.last_send_args = call.args.clone();

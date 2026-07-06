@@ -16,7 +16,7 @@ impl Compiler {
     /// How deep self-send inlining may nest (Phase 5·2). A body may itself self-send, so without a
     /// bound a recursive or fan-out body would expand without limit at compile time; past the bound,
     /// the send stays a normal dispatch.
-    const MAX_INLINE_DEPTH: usize = 3;
+    pub(super) const MAX_INLINE_DEPTH: usize = 3;
 
     /// Can this method body be spliced at a call site (Phase 5·1→5·5)? No name / header-decl /
     /// decl-block, no *top-level* local decl (a `var`/`let` would splice a binding into the caller's

@@ -383,6 +383,21 @@ pub struct VmState<'gc> {
     /// exactly as across any native boundary.
     #[collect(require_static)]
     pub aot_pending_error: Option<QuoinError>,
+    /// Block templates collected at unit load but NOT yet compiled (B3a lazy
+    /// compilation): most literals are never invoked, and eager Cranelift
+    /// work for all of them cost ~+34ms startup. A template compiles on its
+    /// FIRST `valueWithSelfOrArg:` invocation (`codegen::block_entry_for`),
+    /// once; refusals tombstone so they never retry.
+    #[collect(require_static)]
+    pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, crate::codegen::AotCandidate)>,
+    #[collect(require_static)]
+    pub aot_refused_blocks: rustc_hash::FxHashSet<u32>,
+    /// The ENCLOSING lexical environment of the currently-executing compiled
+    /// frame (the invoked block/method's own `parent_env`) — the parent a
+    /// cold-path `make_closure` snapshot must chain to, so a materialized
+    /// closure's free names resolve through the full lexical chain exactly as
+    /// interpreted (B3b). Saved/restored around each compiled invocation.
+    pub aot_enclosing_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
@@ -500,6 +515,9 @@ impl<'gc> VmState<'gc> {
             aot_fuel: 0,
             aot_depth: 0,
             aot_pending_error: None,
+            aot_pending_blocks: rustc_hash::FxHashMap::default(),
+            aot_refused_blocks: rustc_hash::FxHashSet::default(),
+            aot_enclosing_env: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
             last_popped_env: None,
@@ -1529,37 +1547,8 @@ impl<'gc> VmState<'gc> {
             let initial_frame_count = self.frames.len();
             method.call(self, mc, Some(receiver), args, Some(sel))?;
 
-            // let the VM catch up
-            if self.frames.len() > initial_frame_count {
-                while self.frames.len() > initial_frame_count {
-                    match self.step_internal(mc) {
-                        Ok(VmStatus::Running) => {
-                            if let Some(yielder) = unsafe { self.get_yielder() } {
-                                yielder.suspend(YieldReason::CooperativeYield);
-                            }
-                        }
-                        Ok(VmStatus::Finished(_)) => {
-                            break;
-                        }
-                        Ok(VmStatus::Yeeted(val)) => {
-                            return Err(QuoinError::Other(format!(
-                                "Uncaught exception during method call: {}",
-                                val
-                            )));
-                        }
-                        Err(QuoinError::NonLocalReturn) => {
-                            if self.frames.len() > initial_frame_count {
-                                continue;
-                            } else if self.frames.len() == initial_frame_count {
-                                break;
-                            } else {
-                                return Err(QuoinError::NonLocalReturn);
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
+            // let the VM catch up (batched — B0)
+            self.run_nested(mc, initial_frame_count, "method call")?;
 
             Ok(self.pop()?)
         } else {
@@ -1630,37 +1619,8 @@ impl<'gc> VmState<'gc> {
                 Some(Symbol::intern(selector)),
             )?;
 
-            // let the VM catch up
-            if self.frames.len() > initial_frame_count {
-                while self.frames.len() > initial_frame_count {
-                    match self.step_internal(mc) {
-                        Ok(VmStatus::Running) => {
-                            if let Some(yielder) = unsafe { self.get_yielder() } {
-                                yielder.suspend(YieldReason::CooperativeYield);
-                            }
-                        }
-                        Ok(VmStatus::Finished(_)) => {
-                            break;
-                        }
-                        Ok(VmStatus::Yeeted(val)) => {
-                            return Err(QuoinError::Other(format!(
-                                "Uncaught exception during method call: {}",
-                                val
-                            )));
-                        }
-                        Err(QuoinError::NonLocalReturn) => {
-                            if self.frames.len() > initial_frame_count {
-                                continue;
-                            } else if self.frames.len() == initial_frame_count {
-                                break;
-                            } else {
-                                return Err(QuoinError::NonLocalReturn);
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
+            // let the VM catch up (batched — B0)
+            self.run_nested(mc, initial_frame_count, "method call")?;
 
             Ok(self.pop()?)
         } else {
@@ -1724,6 +1684,70 @@ impl<'gc> VmState<'gc> {
         Ok(())
     }
 
+    /// Drive nested execution (a native-initiated block or method call) until the frame
+    /// stack returns to `initial_frame_count` — the BATCHED form (B0,
+    /// docs/BLOCK_AOT_ARCH.md §3). One flat loop with the current frame's bytecode `Rc`
+    /// hoisted exactly like `run_dispatch` (re-cloned only when the frame stack changes),
+    /// yielding to the driver every `step_batch()` instructions instead of after every
+    /// one. This gives nested block bodies — every `each:`-family combinator element —
+    /// the same observable scheduling granularity as top-level code; before B0 they paid
+    /// a full coroutine suspend→driver→resume round-trip plus a bytecode-`Rc` clone per
+    /// instruction. Under the stress modes `step_batch()` is 1, so their per-instruction
+    /// coverage is unchanged. Errors are returned raw (un-annotated), exactly as the
+    /// per-step loops returned them; `context` names the caller in the uncaught-throw
+    /// message, byte-identical to the old per-site strings.
+    #[allow(no_gc_across_yield)]
+    fn run_nested(
+        &mut self,
+        mc: &Mutation<'gc>,
+        initial_frame_count: usize,
+        context: &str,
+    ) -> Result<(), QuoinError> {
+        let budget = crate::tuning::step_batch();
+        let mut steps: u32 = 0;
+        let mut cached_len = usize::MAX;
+        let mut bytecode: Option<SharedBytecode> = None;
+        while self.frames.len() > initial_frame_count {
+            // The cancellation check `step_internal` performed per step — including
+            // immediately after a resume from the suspend below.
+            if self.sched.cancel_current {
+                return Err(self.take_cancellation());
+            }
+            let flen = self.frames.len();
+            if flen != cached_len {
+                cached_len = flen;
+                bytecode = Some(self.frames[flen - 1].block.template.bytecode.clone());
+            }
+            match self.dispatch_one(mc, bytecode.as_ref().unwrap()) {
+                Ok(VmStatus::Running) => {}
+                // A `^`/`^^` unwound frames: below the baseline it belongs to an
+                // enclosing loop; at/above it, the loop head re-evaluates. Counted
+                // as a step, like `run_dispatch`.
+                Err(QuoinError::NonLocalReturn) => {
+                    if self.frames.len() < initial_frame_count {
+                        return Err(QuoinError::NonLocalReturn);
+                    }
+                }
+                Ok(VmStatus::Finished(_)) => break,
+                Ok(VmStatus::Yeeted(val)) => {
+                    return Err(QuoinError::Other(format!(
+                        "Uncaught exception during {}: {}",
+                        context, val
+                    )));
+                }
+                Err(e) => return Err(e),
+            }
+            steps += 1;
+            if steps >= budget {
+                steps = 0;
+                if let Some(yielder) = unsafe { self.get_yielder() } {
+                    yielder.suspend(YieldReason::CooperativeYield);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn execute_block(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1745,36 +1769,7 @@ impl<'gc> VmState<'gc> {
             self.start_block(mc, block, args, None, None);
         }
 
-        if self.frames.len() > initial_frame_count {
-            while self.frames.len() > initial_frame_count {
-                match self.step_internal(mc) {
-                    Ok(VmStatus::Running) => {
-                        if let Some(yielder) = unsafe { self.get_yielder() } {
-                            yielder.suspend(YieldReason::CooperativeYield);
-                        }
-                    }
-                    Ok(VmStatus::Finished(_)) => {
-                        break;
-                    }
-                    Ok(VmStatus::Yeeted(val)) => {
-                        return Err(QuoinError::Other(format!(
-                            "Uncaught exception during block execution: {}",
-                            val
-                        )));
-                    }
-                    Err(QuoinError::NonLocalReturn) => {
-                        if self.frames.len() > initial_frame_count {
-                            continue;
-                        } else if self.frames.len() == initial_frame_count {
-                            break;
-                        } else {
-                            return Err(QuoinError::NonLocalReturn);
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
+        self.run_nested(mc, initial_frame_count, "block execution")?;
 
         Ok(self.pop()?)
     }
@@ -1885,36 +1880,7 @@ impl<'gc> VmState<'gc> {
             unregister_on_defer_failure: None,
         });
 
-        if self.frames.len() > initial_frame_count {
-            while self.frames.len() > initial_frame_count {
-                match self.step_internal(mc) {
-                    Ok(VmStatus::Running) => {
-                        if let Some(yielder) = unsafe { self.get_yielder() } {
-                            yielder.suspend(YieldReason::CooperativeYield);
-                        }
-                    }
-                    Ok(VmStatus::Finished(_)) => {
-                        break;
-                    }
-                    Ok(VmStatus::Yeeted(val)) => {
-                        return Err(QuoinError::Other(format!(
-                            "Uncaught exception during validation block execution: {}",
-                            val
-                        )));
-                    }
-                    Err(QuoinError::NonLocalReturn) => {
-                        if self.frames.len() > initial_frame_count {
-                            continue;
-                        } else if self.frames.len() == initial_frame_count {
-                            break;
-                        } else {
-                            return Err(QuoinError::NonLocalReturn);
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
+        self.run_nested(mc, initial_frame_count, "validation block execution")?;
 
         Ok(self.pop()?)
     }
@@ -3143,7 +3109,7 @@ impl<'gc> VmState<'gc> {
     /// per-template cell from `ic_registry` when the template has an id (so every
     /// closure of one literal warms the same call sites), or a fresh private cell
     /// for id-less runtime-built blocks.
-    fn ic_cell_for(
+    pub(crate) fn ic_cell_for(
         &mut self,
         mc: &Mutation<'gc>,
         template: &Rc<StaticBlock>,
@@ -3159,6 +3125,75 @@ impl<'gc> VmState<'gc> {
                 }
             }
             None => gcl!(mc, None),
+        }
+    }
+
+    /// The shared IC cell for a template id directly — the compiled-code twin of
+    /// `ic_cell_for` (outcall sites pass their `(template_id, ip)`, which is the
+    /// same call-site identity the interpreted send at that instruction uses, so
+    /// compiled and interpreted execution warm ONE cache).
+    pub(crate) fn ic_cell_by_id(
+        &mut self,
+        mc: &Mutation<'gc>,
+        id: u32,
+    ) -> Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>> {
+        if let Some(cell) = self.ic_registry.get(&id) {
+            *cell
+        } else {
+            let cell = gcl!(mc, None);
+            self.ic_registry.insert(id, cell);
+            cell
+        }
+    }
+
+    /// `call_method`, with the caller's inline cache consulted and filled — the
+    /// compiled-code outcall path (B3a): without it every compiled operator send
+    /// paid an uncached `lookup_method` while the interpreted body it replaced
+    /// had warm ICs, which measurably REGRESSED arithmetic-heavy blocks.
+    pub fn call_method_cached(
+        &mut self,
+        mc: &Mutation<'gc>,
+        tid: u32,
+        ip: usize,
+        bc_len: usize,
+        receiver: Value<'gc>,
+        selector: Symbol,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        self.enter_native_reentry()?;
+        let result = self.call_method_cached_inner(mc, tid, ip, bc_len, receiver, selector, args);
+        self.native_reentry_depth = self.native_reentry_depth.saturating_sub(1);
+        result
+    }
+
+    fn call_method_cached_inner(
+        &mut self,
+        mc: &Mutation<'gc>,
+        tid: u32,
+        ip: usize,
+        bc_len: usize,
+        receiver: Value<'gc>,
+        selector: Symbol,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        let ic = self.ic_cell_by_id(mc, tid);
+        let method = match self.ic_probe(ic, ip, receiver, &args) {
+            Some(c) => Some(c),
+            None => {
+                let m = self.lookup_method(mc, receiver, selector, &args)?;
+                if let Some(c) = &m {
+                    self.ic_fill_cell(mc, ic, bc_len, ip, receiver, selector, &args, c.clone());
+                }
+                m
+            }
+        };
+        if let Some(method) = method {
+            let initial_frame_count = self.frames.len();
+            method.call(self, mc, Some(receiver), args, Some(selector))?;
+            self.run_nested(mc, initial_frame_count, "method call")?;
+            Ok(self.pop()?)
+        } else {
+            Ok(self.new_nil(mc))
         }
     }
 
@@ -3292,12 +3327,12 @@ impl<'gc> VmState<'gc> {
         // The cache cell is its own `Gc<RefLock<…>>` (shared across every closure of
         // the same template via `ic_registry`), so mutate it directly through the
         // write barrier, same idiom as `globals`.
-        let mut cache = block.inline_cache.borrow_mut(mc);
-        if cache.is_none() {
-            *cache = Some(vec![ICSlot::empty(); block.template.bytecode.len()].into_boxed_slice());
-        }
-        if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
-            *slot = ICSlot {
+        Self::ic_write_slot(
+            mc,
+            block.inline_cache,
+            block.template.bytecode.len(),
+            ip,
+            ICSlot {
                 epoch,
                 recv_kind,
                 recv_ptr,
@@ -3305,8 +3340,77 @@ impl<'gc> VmState<'gc> {
                 arg_kinds,
                 arg_ptrs,
                 callable: Some(callable),
-            };
+            },
+        );
+    }
+
+    fn ic_write_slot(
+        mc: &Mutation<'gc>,
+        cell: Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>,
+        bc_len: usize,
+        ip: usize,
+        new_slot: ICSlot<'gc>,
+    ) {
+        let mut cache = cell.borrow_mut(mc);
+        if cache.is_none() {
+            *cache = Some(vec![ICSlot::empty(); bc_len].into_boxed_slice());
         }
+        if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
+            *slot = new_slot;
+        }
+    }
+
+    /// `ic_fill` for a cell reached by template id (the compiled outcall path) —
+    /// the same guards and cacheability rules, no `Gc<Block>` needed.
+    #[allow(clippy::too_many_arguments)]
+    fn ic_fill_cell(
+        &mut self,
+        mc: &Mutation<'gc>,
+        cell: Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>,
+        bc_len: usize,
+        ip: usize,
+        receiver: Value<'gc>,
+        selector: Symbol,
+        args: &[Value<'gc>],
+        callable: Callable<'gc>,
+    ) {
+        if args.len() > IC_MAX_ARGS {
+            return;
+        }
+        let class_side = matches!(receiver, Value::Class(_));
+        let Some(class_ref) = self.get_class_for_lookup(receiver) else {
+            return;
+        };
+        let Some(key) = self.method_cache_key(class_ref, selector, class_side, args) else {
+            return;
+        };
+        if !matches!(self.dispatch_cache.entries.get(&key), Some(Some(_))) {
+            return; // uncacheable (guarded/tag-requiring) — never inline-cache
+        }
+        let epoch = self.dispatch_epoch;
+        let (recv_kind, recv_ptr) = value_type_guard(receiver);
+        let mut arg_kinds = [0u8; IC_MAX_ARGS];
+        let mut arg_ptrs = [0usize; IC_MAX_ARGS];
+        for (i, a) in args.iter().enumerate() {
+            let (ak, ap) = value_type_guard(*a);
+            arg_kinds[i] = ak;
+            arg_ptrs[i] = ap;
+        }
+        Self::ic_write_slot(
+            mc,
+            cell,
+            bc_len,
+            ip,
+            ICSlot {
+                epoch,
+                recv_kind,
+                recv_ptr,
+                n_args: args.len() as u8,
+                arg_kinds,
+                arg_ptrs,
+                callable: Some(callable),
+            },
+        );
     }
 
     // GC-rooting: the only yield reachable from here is a *guarded* method's guard
@@ -4324,6 +4428,36 @@ impl<'gc> VmState<'gc> {
                 } else {
                     ip = (ip as isize + offset) as usize;
                 }
+            }
+            Instruction::BranchIfNotList(offset) => {
+                let offset = *offset;
+                // Peek the `each:` receiver (do not pop): a native List falls through to
+                // the fused index loop (which consumes it); anything else takes the cold
+                // path (the real `each:` send), which needs it on the stack. One downcast
+                // per each: CALL, not per element.
+                let is_list = self
+                    .stack
+                    .last()
+                    .is_some_and(|v| v.with_native_state::<NativeListState, _, _>(|_| ()).is_ok());
+                if is_list {
+                    ip += 1;
+                } else {
+                    ip = (ip as isize + offset) as usize;
+                }
+            }
+            Instruction::ListLen => {
+                let n = self.stack.len();
+                let receiver = self.stack[n - 1];
+                let got =
+                    receiver.with_native_state::<NativeListState, _, _>(|l| l.get_vec().len());
+                if let Ok(len) = got {
+                    self.stack.truncate(n - 1);
+                    self.push(Value::Int(len as i64));
+                    // b2: early-return arm — sync the hoisted ip (see dispatch_one invariant).
+                    self.frames[frame_idx].ip = ip + 1;
+                    return Ok(VmStatus::Running);
+                }
+                return self.exec_send(mc, frame_idx, Symbol::intern("count"), 0);
             }
             Instruction::NewList(n) => {
                 let n = *n;

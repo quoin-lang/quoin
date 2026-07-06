@@ -22,6 +22,8 @@
 //! f64 `%` via an imported helper (Cranelift has no `frem`).
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
+use std::rc::Rc;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -33,14 +35,15 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 
-use crate::instruction::{Constant, Instruction, IntBinKind};
+use crate::instruction::{Constant, Instruction, IntBinKind, StaticBlock};
 use crate::runtime::elem_tag::ElemTag;
 use crate::symbol::{Symbol, self_symbol};
+use crate::value::NamespacedName;
 
-use super::helpers::{KIND_BOOL, KIND_DOUBLE, KIND_INT, KIND_NIL, KIND_SLOT};
+use super::helpers::{self, KIND_BOOL, KIND_DOUBLE, KIND_INT, KIND_NIL, KIND_SLOT};
 use super::{
-    AOT_MAX_CALL_DEPTH, AotCandidate, AotEntry, AotKind, AotParam, AotRawFn, AotRet, TAG_DEPTH,
-    TAG_DIV_ZERO,
+    AOT_MAX_CALL_DEPTH, AotCandidate, AotEntry, AotKind, AotParam, AotRawFn, AotRet, AotRole,
+    TAG_DEPTH, TAG_DIV_ZERO,
 };
 
 /// `%` on doubles: Rust's truncated remainder (what `devirt_ops::double_bin`
@@ -204,71 +207,134 @@ fn scalar_pure_set(members: &[&AotCandidate], siblings: &SiblingMap) -> HashSet<
     }
 }
 
-/// Imported helper function ids for one module.
-struct Helpers {
-    checkpoint: FuncId,
-    fmod: FuncId,
-    slot_set: FuncId,
-    slot_peek: FuncId,
-    list_new: FuncId,
-    list_from: FuncId,
-    list_push: FuncId,
-    list_get: FuncId,
-    list_set: FuncId,
-    string_const: FuncId,
-    outcall: FuncId,
-    narrow_error: FuncId,
-    load_global: FuncId,
-    tag_collection: FuncId,
-    nil_mnu: FuncId,
+/// Rust ABI type -> Cranelift type, for deriving helper import signatures
+/// from the helpers' own `extern "C"` fn types.
+trait ClAbi {
+    fn cl(ptr: Type) -> Type;
+}
+impl ClAbi for i64 {
+    fn cl(_: Type) -> Type {
+        types::I64
+    }
+}
+impl ClAbi for u8 {
+    fn cl(_: Type) -> Type {
+        types::I8
+    }
+}
+impl ClAbi for f64 {
+    fn cl(_: Type) -> Type {
+        types::F64
+    }
+}
+impl<T> ClAbi for *const T {
+    fn cl(ptr: Type) -> Type {
+        ptr
+    }
+}
+impl<T> ClAbi for *mut T {
+    fn cl(ptr: Type) -> Type {
+        ptr
+    }
 }
 
-fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String> {
-    let sig = |params: &[Type], rets: &[Type]| {
-        let mut s = module.make_signature();
-        for &p in params {
-            s.params.push(AbiParam::new(p));
+/// Fn-pointer types whose Cranelift import signature derives from the Rust
+/// type itself (one impl per arity, below).
+trait HelperSig {
+    fn cl_sig(self, module: &JITModule, ptr: Type) -> Signature;
+}
+
+macro_rules! impl_helper_sig {
+    ($($a:ident)*) => {
+        impl<$($a: ClAbi,)* R: ClAbi> HelperSig for unsafe extern "C" fn($($a),*) -> R {
+            fn cl_sig(self, module: &JITModule, ptr: Type) -> Signature {
+                let mut s = module.make_signature();
+                $(s.params.push(AbiParam::new(<$a>::cl(ptr)));)*
+                s.returns.push(AbiParam::new(<R>::cl(ptr)));
+                s
+            }
         }
-        for &r in rets {
-            s.returns.push(AbiParam::new(r));
+    };
+}
+impl_helper_sig!(A B);
+impl_helper_sig!(A B C);
+impl_helper_sig!(A B C D);
+impl_helper_sig!(A B C D E);
+impl_helper_sig!(A B C D E F);
+impl_helper_sig!(A B C D E F G);
+impl_helper_sig!(A B C D E F G H);
+impl_helper_sig!(A B C D E F G H I);
+impl_helper_sig!(A B C D E F G H I J);
+impl_helper_sig!(A B C D E F G H I J K);
+impl_helper_sig!(A B C D E F G H I J K L);
+
+/// One row per helper: `field: path as fn(params) -> ret`. Generates the `Helpers`
+/// struct, `declare_helpers`, and `helper_symbols` (the JIT symbol table);
+/// the symbol name derives as `qn_aot_<field>`. Each row's fn type is checked
+/// against the helper's definition by a `let` coercion, and the Cranelift
+/// import signature is derived from that type (`HelperSig`) — so a helper
+/// whose signature drifts from its declaration is a compile error, not a
+/// silent ABI mismatch at runtime.
+macro_rules! aot_helpers {
+    ($($field:ident: $f:path as fn($($p:ty),* $(,)?) -> $r:ty),+ $(,)?) => {
+        /// Imported helper function ids for one module (see `aot_helpers!`).
+        struct Helpers {
+            $($field: FuncId,)+
         }
-        s
+
+        fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String> {
+            Ok(Helpers {
+                $($field: {
+                    // The coercion checks the table row against the definition.
+                    let f: unsafe extern "C" fn($($p),*) -> $r = $f;
+                    let sig = f.cl_sig(module, ptr);
+                    module
+                        .declare_function(
+                            concat!("qn_aot_", stringify!($field)),
+                            Linkage::Import,
+                            &sig,
+                        )
+                        .map_err(|e| e.to_string())?
+                },)+
+            })
+        }
+
+        /// The symbol table registered with every JIT module.
+        fn helper_symbols() -> Vec<(&'static str, *const u8)> {
+            vec![$((concat!("qn_aot_", stringify!($field)), $f as *const u8),)+]
+        }
     };
-    let i = types::I64;
-    let d = |m: &mut JITModule, name: &str, s: &Signature| {
-        m.declare_function(name, Linkage::Import, s)
-            .map_err(|e| e.to_string())
-    };
-    let cp = sig(&[ptr, ptr], &[types::I8]);
-    let fm = sig(&[types::F64, types::F64], &[types::F64]);
-    let s2 = sig(&[ptr, ptr, i, i, i], &[types::I8]); // slot_set / list_push(list,kind,bits) / list_get(list,idx,out)
-    let peek = sig(&[ptr, ptr, i, ptr], &[i]);
-    let l0 = sig(&[ptr, ptr, i], &[types::I8]);
-    let lf = sig(&[ptr, ptr, i, i, ptr, ptr], &[types::I8]);
-    let ls = sig(&[ptr, ptr, i, i, i, i], &[types::I8]);
-    let sc = sig(&[ptr, ptr, ptr, i, i], &[types::I8]);
-    let oc = sig(&[ptr, ptr, i, i, ptr, i, ptr, ptr, i], &[types::I8]);
-    let ne = sig(&[ptr, ptr, i, i], &[types::I8]);
-    let lg = sig(&[ptr, ptr, ptr, i], &[types::I8]);
-    let tc = sig(&[ptr, ptr, i, i], &[types::I8]);
-    let nm = sig(&[ptr, ptr, i, i, ptr, i], &[types::I8]);
-    Ok(Helpers {
-        checkpoint: d(module, "qn_aot_checkpoint", &cp)?,
-        fmod: d(module, "qn_aot_fmod", &fm)?,
-        slot_set: d(module, "qn_aot_slot_set", &s2)?,
-        slot_peek: d(module, "qn_aot_slot_peek", &peek)?,
-        list_new: d(module, "qn_aot_list_new", &l0)?,
-        list_from: d(module, "qn_aot_list_from", &lf)?,
-        list_push: d(module, "qn_aot_list_push", &s2)?,
-        list_get: d(module, "qn_aot_list_get", &s2)?,
-        list_set: d(module, "qn_aot_list_set", &ls)?,
-        string_const: d(module, "qn_aot_string_const", &sc)?,
-        outcall: d(module, "qn_aot_outcall", &oc)?,
-        narrow_error: d(module, "qn_aot_narrow_error", &ne)?,
-        load_global: d(module, "qn_aot_load_global", &lg)?,
-        tag_collection: d(module, "qn_aot_tag_collection", &tc)?,
-        nil_mnu: d(module, "qn_aot_nil_mnu", &nm)?,
-    })
+}
+
+aot_helpers! {
+    checkpoint: super::aot_checkpoint as fn(*mut c_void, *mut i64) -> u8,
+    fmod: aot_fmod as fn(f64, f64) -> f64,
+    slot_set: helpers::slot_set as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    slot_peek: helpers::slot_peek as fn(*mut c_void, *const c_void, i64, *mut i64) -> i64,
+    list_new: helpers::list_new as fn(*mut c_void, *const c_void, i64) -> u8,
+    list_from: helpers::list_from as fn(*mut c_void, *const c_void, i64, i64, *const i64, *const i64) -> u8,
+    list_push: helpers::list_push as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    list_get: helpers::list_get as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    list_len: helpers::list_len as fn(*mut c_void, *const c_void, i64) -> i64,
+    list_set: helpers::list_set as fn(*mut c_void, *const c_void, i64, i64, i64, i64) -> u8,
+    string_const: helpers::string_const as fn(*mut c_void, *const c_void, *const u8, i64, i64) -> u8,
+    outcall: helpers::outcall as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, i64, *const Symbol, i64,
+        *const i64, *const i64, i64,
+    ) -> u8,
+    narrow_error: helpers::narrow_error as fn(*mut c_void, *const c_void, i64, i64) -> u8,
+    load_global: helpers::load_global as fn(*mut c_void, *const c_void, *const NamespacedName, i64) -> u8,
+    tag_collection: helpers::tag_collection as fn(*mut c_void, *const c_void, i64, i64) -> u8,
+    nil_mnu: helpers::nil_mnu as fn(*mut c_void, *const c_void, i64, i64, *const Symbol, i64) -> u8,
+    env_get: helpers::env_get as fn(*mut c_void, *const c_void, i64, *const Symbol, i64) -> u8,
+    env_set: helpers::env_set as fn(*mut c_void, *const c_void, i64, *const Symbol, i64, i64) -> u8,
+    block_call: helpers::block_call as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, i64, i64, i64, i64,
+    ) -> u8,
+    make_closure: helpers::make_closure as fn(
+        *mut c_void, *const c_void, *const Rc<StaticBlock>, i64,
+    ) -> u8,
+    closure_bind: helpers::closure_bind as fn(*mut c_void, *const c_void, i64, *const Symbol, i64, i64) -> u8,
 }
 
 /// Compile one attempt at a group. `Err((template_id, reason))` names the
@@ -290,10 +356,9 @@ fn compile_group(
         .finish(settings::Flags::new(flags))
         .map_err(|e| fail(any_tid, e.to_string()))?;
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-    for (name, addr) in super::helpers::symbols() {
+    for (name, addr) in helper_symbols() {
         jb.symbol(name, addr);
     }
-    jb.symbol("qn_aot_fmod", aot_fmod as *const u8);
     let mut module = JITModule::new(jb);
     let ptr = module.target_config().pointer_type();
     let helpers = declare_helpers(&mut module, ptr).map_err(|e| fail(any_tid, e))?;
@@ -318,13 +383,14 @@ fn compile_group(
     }
 
     let mut fb_ctx = FunctionBuilderContext::new();
-    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32)> = Vec::new();
+    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool)> = Vec::new();
 
     for m in members {
         let tid = m.block.template_id.unwrap();
         let mut ctx = module.make_context();
         ctx.func.signature = inner_sig(&mut module, ptr, m);
         let n_scratch;
+        let needs_list_self;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
             let mut tr = Translator {
@@ -339,9 +405,13 @@ fn compile_group(
                 proofs: HashMap::new(),
                 sym_consts: Vec::new(),
                 name_consts: Vec::new(),
+                needs_list_self: false,
+                tmpl_consts: Vec::new(),
+                pending_writebacks: HashMap::new(),
             };
             tr.build_inner(&mut b).map_err(|e| fail(tid, e))?;
             n_scratch = tr.next_scratch;
+            needs_list_self = tr.needs_list_self;
             b.seal_all_blocks();
             b.finalize();
         }
@@ -368,14 +438,14 @@ fn compile_group(
         module
             .define_function(tramp_id, &mut tctx)
             .map_err(|e| fail(tid, e.to_string()))?;
-        tramp_ids.push((tid, tramp_id, m, n_scratch));
+        tramp_ids.push((tid, tramp_id, m, n_scratch, needs_list_self));
     }
 
     module
         .finalize_definitions()
         .map_err(|e| fail(any_tid, e.to_string()))?;
     let mut out = Vec::new();
-    for (tid, tramp_id, m, n_scratch) in tramp_ids {
+    for (tid, tramp_id, m, n_scratch, needs_list_self) in tramp_ids {
         let addr = module.get_finalized_function(tramp_id);
         let raw: AotRawFn = unsafe { std::mem::transmute(addr) };
         out.push((
@@ -385,6 +455,8 @@ fn compile_group(
                 params: m.params.clone().into_boxed_slice(),
                 ret: m.ret,
                 n_scratch,
+                needs_list_self,
+                role: m.role,
             },
         ));
     }
@@ -507,10 +579,17 @@ enum VarSlot {
 /// an element read from such a collection). Never from checker beliefs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DynProof {
-    /// A collection whose element tag is enforced.
+    /// A collection whose element tag is enforced. In compiled code this is
+    /// always a native List: `TagCollection` is only reachable after a list
+    /// literal (`NewMap`/`NewSet` don't translate), and the only param source
+    /// is a `List`-hinted Obj param (B1 seeding below).
     CollectionOf(ElemTag),
     /// An element read from such a collection: proven tag-or-nil.
     ElemOrNil(ElemTag),
+    /// A native List with no (or unknown) element tag — a bare `List`-hinted
+    /// Obj param (dispatch guarantees the class) or a fresh list literal.
+    /// Enough for the fused `each:` guard (B1); mints no element proofs.
+    NativeList,
 }
 
 struct Translator<'a> {
@@ -534,6 +613,17 @@ struct Translator<'a> {
     /// global references (live for the process, like the code).
     sym_consts: Vec<&'static Symbol>,
     name_consts: Vec<&'static crate::value::NamespacedName>,
+    /// Set when a fused-`each:` guard on `self` compiled hot-path-only (B2):
+    /// becomes the entry's `needs_list_self` precondition.
+    needs_list_self: bool,
+    /// Leaked template `Rc`s for cold-path closure materialization (B3b) —
+    /// process-lifetime, like the code and the leaked selectors.
+    tmpl_consts: Vec<&'static Rc<StaticBlock>>,
+    /// Frame locals a materialized closure WRITES (through its snapshot env),
+    /// keyed by the closure's slot-index SSA value: after the consuming send
+    /// returns, each is read back from the snapshot into the frame local, so
+    /// `count:`-style `{ n = n + 1 }` cold arms stay exact (B3b).
+    pending_writebacks: HashMap<CVal, Vec<(Symbol, VarSlot)>>,
 }
 
 struct FnCtx {
@@ -559,13 +649,21 @@ impl<'a> Translator<'a> {
             // The caller demotes this member from the pure set and retries.
             return Err(PURITY_VIOLATION.to_string());
         }
-        let n_obj = self
-            .cand
-            .params
-            .iter()
-            .filter(|p| matches!(p, AotParam::Obj))
-            .count() as u32;
-        let k = 1 + n_obj + self.next_scratch; // 0 = receiver, then obj params
+        let fixed = match self.cand.role {
+            // 0 = receiver, then obj params.
+            AotRole::Method => {
+                1 + self
+                    .cand
+                    .params
+                    .iter()
+                    .filter(|p| matches!(p, AotParam::Obj))
+                    .count() as u32
+            }
+            // 0 = self (the vWSOA arg), 1 = the param's own cell, 2 = the
+            // block object (env access) — see `invoke_block`.
+            AotRole::BlockTemplate => 3,
+        };
+        let k = fixed + self.next_scratch;
         self.next_scratch += 1;
         Ok(k)
     }
@@ -640,6 +738,23 @@ impl<'a> Translator<'a> {
                 }
                 AotParam::Obj => {
                     obj_param_avs.insert(sym, p[5 + i]);
+                    // B1: a `List`-hinted param is a dispatch-GUARANTEED native
+                    // List (List is sealed; the hint only matches the native
+                    // class) — and a tag-required param is guaranteed tagged,
+                    // since tag requirements gate dispatch too (G1). These
+                    // proofs are what let a fused `each:` guard fall away.
+                    // METHOD role only: a block's annotations are beliefs
+                    // (`value:` checks nothing) — never proofs.
+                    if self.cand.role == AotRole::Method
+                        && self.cand.block.param_types.get(i).map(String::as_str) == Some("List")
+                    {
+                        let proof = match self.cand.block.param_elem_tags.get(i).copied().flatten()
+                        {
+                            Some(tag) => DynProof::CollectionOf(tag),
+                            None => DynProof::NativeList,
+                        };
+                        self.proofs.insert(p[5 + i], proof);
+                    }
                 }
             }
         }
@@ -707,7 +822,8 @@ impl<'a> Translator<'a> {
                 Instruction::Jump(o)
                 | Instruction::IfJump(o)
                 | Instruction::ElseJump(o)
-                | Instruction::BranchIfNotBool(o) => *o,
+                | Instruction::BranchIfNotBool(o)
+                | Instruction::BranchIfNotList(o) => *o,
                 _ => continue,
             };
             let target = ip as isize + off;
@@ -767,7 +883,7 @@ impl<'a> Translator<'a> {
                 }
                 match &insts[ip] {
                     Instruction::Push(c) => {
-                        let av = self.const_av(b, &fx, c, ip)?;
+                        let av = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
                         stack.push(av);
                     }
                     Instruction::LoadLocal(sym) => {
@@ -794,13 +910,27 @@ impl<'a> Translator<'a> {
                             && !obj_param_avs.contains_key(sym)
                         {
                             // declaration prologue: type decided at first store
+                        } else if self.free_in_block(&vars, &obj_param_avs, *sym)
+                            && matches!(&insts[ip], Instruction::StoreLocal(_))
+                        {
+                            // B3a: a captured-variable write goes through the
+                            // closure's real EnvFrame cell — exact shared-cell
+                            // semantics (`sum = sum + x` mutates the caller's
+                            // binding, as interpreted).
+                            self.emit_env_set(b, &fx, *sym, v)?;
                         } else {
                             self.store_local(b, &fx, &mut vars, &obj_param_avs, *sym, v)?;
                         }
                     }
                     Instruction::DefineLocalKeep(sym) | Instruction::StoreLocalKeep(sym) => {
                         let v = *stack.last().ok_or("stack underflow")?;
-                        self.store_local(b, &fx, &mut vars, &obj_param_avs, *sym, v)?;
+                        if self.free_in_block(&vars, &obj_param_avs, *sym)
+                            && matches!(&insts[ip], Instruction::StoreLocalKeep(_))
+                        {
+                            self.emit_env_set(b, &fx, *sym, v)?;
+                        } else {
+                            self.store_local(b, &fx, &mut vars, &obj_param_avs, *sym, v)?;
+                        }
                     }
                     Instruction::Dup => {
                         let v = *stack.last().ok_or("stack underflow")?;
@@ -944,6 +1074,46 @@ impl<'a> Translator<'a> {
                         self.tag_check(b, &fx, tag);
                         stack.push(AV::Dyn(recv_idx));
                     }
+                    Instruction::BranchIfNotList(_) => {
+                        // The fused-`each:` guard (B1, docs/BLOCK_AOT_ARCH.md §3). A
+                        // PROVEN native-List receiver takes the hot path
+                        // unconditionally — no branch is emitted, so nothing ever
+                        // jumps to the cold path (the literal re-materialization +
+                        // real send) and it is never translated: the same
+                        // reachability discipline that deleted the sieve refusal
+                        // (G3). An unproven receiver refuses the member — the
+                        // interpreter's guarded loop still runs it.
+                        let proven = match stack.last() {
+                            Some(AV::Dyn(cv)) => matches!(
+                                self.proofs.get(cv),
+                                Some(DynProof::NativeList) | Some(DynProof::CollectionOf(_))
+                            ),
+                            // A guard on `self` (an open-owner combinator body, B2)
+                            // becomes the ENTRY's precondition: `invoke` Bails to
+                            // the interpreted body for non-List receivers, so the
+                            // hot path is proven-by-entry.
+                            Some(AV::SelfRef) => {
+                                self.needs_list_self = true;
+                                true
+                            }
+                            _ => false,
+                        };
+                        if !proven {
+                            return Err(format!(
+                                "fused each: on an unproven receiver at ip {ip} — a \
+                                 `List`-annotated param, a fresh/checked list, or `self` \
+                                 (entry-gated) compiles"
+                            ));
+                        }
+                    }
+                    Instruction::ListLen => {
+                        let recv = stack.pop().ok_or("stack underflow")?;
+                        let recv_idx = self.obj_index(b, &fx, recv, "ListLen receiver")?;
+                        let f = self.func_ref(b, self.helpers.list_len);
+                        let call = b.ins().call(f, &[fx.vm, fx.mc, recv_idx]);
+                        let len = b.inst_results(call)[0];
+                        stack.push(AV::C(len, AotKind::Int));
+                    }
                     Instruction::ListGet => {
                         let idx = Self::pop_kind(&mut stack, AotKind::Int)?;
                         let recv = stack.pop().ok_or("stack underflow")?;
@@ -1001,14 +1171,14 @@ impl<'a> Translator<'a> {
                     Instruction::MapGet => {
                         let key = stack.pop().ok_or("stack underflow")?;
                         let recv = stack.pop().ok_or("stack underflow")?;
-                        let out = self.emit_outcall(b, &fx, recv, "at:", &[key])?;
+                        let out = self.emit_outcall(b, &fx, recv, "at:", &[key], ip)?;
                         stack.push(out);
                     }
                     Instruction::MapSet => {
                         let val = stack.pop().ok_or("stack underflow")?;
                         let key = stack.pop().ok_or("stack underflow")?;
                         let recv = stack.pop().ok_or("stack underflow")?;
-                        let out = self.emit_outcall(b, &fx, recv, "at:put:", &[key, val])?;
+                        let out = self.emit_outcall(b, &fx, recv, "at:put:", &[key, val], ip)?;
                         stack.push(out);
                     }
                     Instruction::Jump(off) => {
@@ -1146,7 +1316,7 @@ impl<'a> Translator<'a> {
                                 stack.push(v);
                             }
                             Instruction::SendConst(c, ..) => {
-                                let v = self.const_av(b, &fx, c, ip)?;
+                                let v = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
                             }
                             Instruction::SendLocalLocal(a, bb, ..) => {
@@ -1158,7 +1328,7 @@ impl<'a> Translator<'a> {
                             Instruction::SendLocalConst(a, c, ..) => {
                                 let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
                                 stack.push(v);
-                                let v = self.const_av(b, &fx, c, ip)?;
+                                let v = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
                             }
                             _ => {}
@@ -1166,10 +1336,31 @@ impl<'a> Translator<'a> {
                         let args: Vec<AV> =
                             stack.split_off(stack.len().checked_sub(n).ok_or("underflow")?);
                         let recv = stack.pop().ok_or("stack underflow")?;
-                        let out = self.emit_send(b, &fx, recv, sel, &args, ip)?;
+                        // B3a: the combinator seam — `valueWithSelfOrArg:` routes
+                        // through the block-call helper, invoking a COMPILED block
+                        // template directly on a registry hit (else the interpreted
+                        // body, else the full send for non-block receivers).
+                        let out = if sel.as_str() == "valueWithSelfOrArg:" && args.len() == 1 {
+                            self.emit_block_call(b, &fx, recv, args[0], ip)?
+                        } else {
+                            self.emit_send(b, &fx, recv, sel, &args, ip)?
+                        };
+                        self.flush_writebacks(b, &fx, &args)?;
                         stack.push(out);
                     }
-                    Instruction::Return | Instruction::BlockReturn => {
+                    // Within one method's bytecode, `MethodReturn` (`^^`) always
+                    // targets THIS method's frame — a real nested block is a separate
+                    // `StaticBlock` never translated inline, and a fused-`each:` body
+                    // (B1) is spliced into this very frame. So all three return forms
+                    // are the compiled function's return.
+                    // In a BLOCK TEMPLATE (B3a) a `^^` must unwind interpreter
+                    // frames the compiled world doesn't have — refused.
+                    Instruction::MethodReturn if self.cand.role == AotRole::BlockTemplate => {
+                        return Err(format!(
+                            "non-local return (^^) from a compiled block at ip {ip}"
+                        ));
+                    }
+                    Instruction::Return | Instruction::BlockReturn | Instruction::MethodReturn => {
                         let v = stack.pop().ok_or("stack underflow")?;
                         self.emit_return(b, &fx, v)?;
                         break 'block;
@@ -1203,10 +1394,250 @@ impl<'a> Translator<'a> {
         }
     }
 
+    /// Is `sym` a FREE variable of a block template — not a param, not a
+    /// block-own local, not `self`? (Method role: never — unknown names there
+    /// are compile errors, as before.)
+    fn free_in_block(
+        &self,
+        vars: &HashMap<Symbol, VarSlot>,
+        obj_params: &HashMap<Symbol, CVal>,
+        sym: Symbol,
+    ) -> bool {
+        self.cand.role == AotRole::BlockTemplate
+            && sym != self_symbol()
+            && !vars.contains_key(&sym)
+            && !obj_params.contains_key(&sym)
+    }
+
+    /// Read a captured variable through the closure's EnvFrame chain (B3a).
+    fn emit_env_get(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        sym: Symbol,
+    ) -> Result<AV, String> {
+        let block_idx = self.abs_slot(b, fx, 2);
+        let leaked: &'static Symbol = Box::leak(Box::new(sym));
+        self.sym_consts.push(leaked);
+        let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
+        let out = self.alloc_scratch()?;
+        let out_idx = self.abs_slot(b, fx, out);
+        let f = self.func_ref(b, self.helpers.env_get);
+        let call = b
+            .ins()
+            .call(f, &[fx.vm, fx.mc, block_idx, sym_ptr, out_idx]);
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(AV::Dyn(out_idx))
+    }
+
+    /// Write a captured variable through the closure's EnvFrame chain (B3a) —
+    /// the same shared cell the enclosing frame reads.
+    fn emit_env_set(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        sym: Symbol,
+        v: AV,
+    ) -> Result<(), String> {
+        let block_idx = self.abs_slot(b, fx, 2);
+        let leaked: &'static Symbol = Box::leak(Box::new(sym));
+        self.sym_consts.push(leaked);
+        let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
+        let (k, bits) = self.encode(b, fx, v);
+        let f = self.func_ref(b, self.helpers.env_set);
+        let call = b
+            .ins()
+            .call(f, &[fx.vm, fx.mc, block_idx, sym_ptr, k, bits]);
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(())
+    }
+
+    /// Per-element block invocation (B3a): registry hit → the compiled block
+    /// template directly; miss → the interpreted body; non-block receiver →
+    /// the full `valueWithSelfOrArg:` send. One helper call either way.
+    fn emit_block_call(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        recv: AV,
+        arg: AV,
+        ip: usize,
+    ) -> Result<AV, String> {
+        let (rk, rbits) = self.encode(b, fx, recv);
+        let (ak, abits) = self.encode(b, fx, arg);
+        let out = self.alloc_scratch()?;
+        let out_idx = self.abs_slot(b, fx, out);
+        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
+        let f = self.func_ref(b, self.helpers.block_call);
+        let call = b.ins().call(
+            f,
+            &[
+                fx.vm, fx.mc, tid_v, ip_v, len_v, rk, rbits, ak, abits, out_idx,
+            ],
+        );
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        Ok(AV::Dyn(out_idx))
+    }
+
+    /// B3b: materialize a closure at a compiled cold-path `Push(Block)` site.
+    /// The snapshot env carries EVERY frame binding (scalars, slots, obj
+    /// params, `self`) — exactly the visibility the interpreter's live env
+    /// chain would give — and the gates guarantee the block only READS its
+    /// captures (a captured-var write would mutate the snapshot, invisible to
+    /// the compiled frame). Known accepted edge (documented): a closure that
+    /// ESCAPES its consuming send (a custom `if:` storing it) sees the
+    /// snapshot, not later frame writes.
+    fn materialize_closure(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        vars: &HashMap<Symbol, VarSlot>,
+        obj_params: &HashMap<Symbol, CVal>,
+        rc: &Rc<StaticBlock>,
+        ip: usize,
+    ) -> Result<AV, String> {
+        // Gates: scan the template's bytecode once.
+        if rc.decl_block.is_some() {
+            return Err(format!("guarded block materialization at ip {ip}"));
+        }
+        let mut defined: HashSet<Symbol> = rc.param_syms.iter().copied().collect();
+        let mut written_frees: Vec<Symbol> = Vec::new();
+        for inst in rc.bytecode.0.iter() {
+            if let Instruction::DefineLocal(s) | Instruction::DefineLocalKeep(s) = inst {
+                defined.insert(*s);
+            }
+        }
+        for inst in rc.bytecode.0.iter() {
+            match inst {
+                Instruction::MethodReturn => {
+                    return Err(format!(
+                        "materialized block with a non-local return (^^) at ip {ip}"
+                    ));
+                }
+                Instruction::Push(Constant::Block(_))
+                | Instruction::SendConst(Constant::Block(_), ..)
+                | Instruction::SendLocalConst(_, Constant::Block(_), ..) => {
+                    return Err(format!("nested literal in a materialized block at ip {ip}"));
+                }
+                Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s) => {
+                    if !defined.contains(s) {
+                        written_frees.push(*s);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // A write to a FRAME local mutates the snapshot — read back after the
+        // consuming send. A write that resolves DEEPER than this frame walks
+        // past the snapshot into the real env cells (exact as-is). A write to
+        // a param/self has no writable home — refuse.
+        let mut writebacks: Vec<(Symbol, VarSlot)> = Vec::new();
+        for s in written_frees {
+            if let Some(&slot) = vars.get(&s) {
+                writebacks.push((s, slot));
+            } else if obj_params.contains_key(&s) || s == self_symbol() {
+                return Err(format!(
+                    "materialized block writes parameter/self '{}' at ip {ip}",
+                    s.as_str()
+                ));
+            }
+        }
+        // Build the closure in a scratch slot (rooted throughout), then bind
+        // the whole frame environment into its snapshot env.
+        let tmpl: &'static Rc<StaticBlock> = Box::leak(Box::new(rc.clone()));
+        self.tmpl_consts.push(tmpl);
+        let tmpl_ptr = b
+            .ins()
+            .iconst(types::I64, tmpl as *const Rc<StaticBlock> as i64);
+        let out = self.alloc_scratch()?;
+        let out_idx = self.abs_slot(b, fx, out);
+        let f = self.func_ref(b, self.helpers.make_closure);
+        let call = b.ins().call(f, &[fx.vm, fx.mc, tmpl_ptr, out_idx]);
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        let mut bind = |tr: &mut Self, b: &mut FunctionBuilder, sym: Symbol, v: AV| {
+            let leaked: &'static Symbol = Box::leak(Box::new(sym));
+            tr.sym_consts.push(leaked);
+            let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
+            let (k, bits) = tr.encode(b, fx, v);
+            let f = tr.func_ref(b, tr.helpers.closure_bind);
+            let call = b.ins().call(f, &[fx.vm, fx.mc, out_idx, sym_ptr, k, bits]);
+            let tag = b.inst_results(call)[0];
+            tr.tag_check(b, fx, tag);
+        };
+        bind(self, b, self_symbol(), AV::SelfRef);
+        for (&sym, &cv) in obj_params.iter() {
+            bind(self, b, sym, AV::Dyn(cv));
+        }
+        let entries: Vec<(Symbol, VarSlot)> = vars.iter().map(|(&s, &v)| (s, v)).collect();
+        for (sym, slot) in entries {
+            let av = match slot {
+                VarSlot::Scalar(var, k) => AV::C(b.use_var(var), k),
+                VarSlot::Obj(w, _) => {
+                    let idx = self.abs_slot(b, fx, w);
+                    AV::Dyn(idx)
+                }
+            };
+            bind(self, b, sym, av);
+        }
+        if !writebacks.is_empty() {
+            self.pending_writebacks.insert(out_idx, writebacks);
+        }
+        Ok(AV::Dyn(out_idx))
+    }
+
+    /// Flush a consumed closure's captured-write read-backs (B3b): each
+    /// written frame local is read from the snapshot env and stored back into
+    /// its SSA/slot home. Called right after the consuming send returns.
+    fn flush_writebacks(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        consumed: &[AV],
+    ) -> Result<(), String> {
+        for v in consumed {
+            let AV::Dyn(idx) = v else { continue };
+            let Some(wbs) = self.pending_writebacks.remove(idx) else {
+                continue;
+            };
+            for (sym, slot) in wbs {
+                let leaked: &'static Symbol = Box::leak(Box::new(sym));
+                self.sym_consts.push(leaked);
+                let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
+                let tmp = self.alloc_scratch()?;
+                let tmp_idx = self.abs_slot(b, fx, tmp);
+                let f = self.func_ref(b, self.helpers.env_get);
+                let call = b.ins().call(f, &[fx.vm, fx.mc, *idx, sym_ptr, tmp_idx]);
+                let tag = b.inst_results(call)[0];
+                self.tag_check(b, fx, tag);
+                match slot {
+                    VarSlot::Scalar(var, k) => {
+                        let val = self.narrow_to_scalar(b, fx, tmp_idx, k);
+                        b.def_var(var, val);
+                    }
+                    VarSlot::Obj(w, _) => {
+                        let dst = self.abs_slot(b, fx, w);
+                        let kind = b.ins().iconst(types::I64, KIND_SLOT);
+                        let f = self.func_ref(b, self.helpers.slot_set);
+                        let call = b.ins().call(f, &[fx.vm, fx.mc, dst, kind, tmp_idx]);
+                        let tag = b.inst_results(call)[0];
+                        self.tag_check(b, fx, tag);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn const_av(
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
+        vars: &HashMap<Symbol, VarSlot>,
+        obj_params: &HashMap<Symbol, CVal>,
         c: &Constant,
         ip: usize,
     ) -> Result<AV, String> {
@@ -1228,12 +1659,13 @@ impl<'a> Translator<'a> {
                 self.tag_check(b, fx, tag);
                 AV::Dyn(out_idx)
             }
-            Constant::Block(_) => {
-                return Err(format!(
-                    "capturing block materialization at ip {ip} (an inlined-if cold \
-                     path or a block argument) — not compilable until checked \
-                     generics remove the dynamic branch (AOT_ARCH.md §9)"
-                ));
+            Constant::Block(rc) => {
+                // B3b: materialize a real closure over a SNAPSHOT of the whole
+                // frame environment (docs/BLOCK_AOT_ARCH.md §3). Gated to
+                // read-only captures, no `^^`, no nested literals, no guard
+                // block — anything else still refuses.
+                let rc = rc.clone();
+                return self.materialize_closure(b, fx, vars, obj_params, &rc, ip);
             }
             _ => return Err(format!("unsupported constant at ip {ip}")),
         })
@@ -1262,6 +1694,10 @@ impl<'a> Translator<'a> {
                     self.proofs.insert(idx, pr);
                 }
                 Ok(AV::Dyn(idx))
+            }
+            None if self.cand.role == AotRole::BlockTemplate => {
+                // B3a: a free variable — read the closure's real EnvFrame cell.
+                self.emit_env_get(b, fx, sym)
             }
             None => Err(format!(
                 "read of unknown/uninitialized local '{}' at ip {ip}",
@@ -1405,6 +1841,7 @@ impl<'a> Translator<'a> {
         recv: AV,
         selector: &str,
         args: &[AV],
+        ip: usize,
     ) -> Result<AV, String> {
         let (rk, rb) = self.encode(b, fx, recv);
         self.fill_lanes(b, fx, args)?;
@@ -1416,13 +1853,29 @@ impl<'a> Translator<'a> {
         let ka = b.ins().stack_addr(types::I64, fx.kinds_buf, 0);
         let ba = b.ins().stack_addr(types::I64, fx.bits_buf, 0);
         let argc = b.ins().iconst(types::I64, args.len() as i64);
+        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
         let f = self.func_ref(b, self.helpers.outcall);
-        let call = b
-            .ins()
-            .call(f, &[fx.vm, fx.mc, rk, rb, sel, argc, ka, ba, out_idx]);
+        let call = b.ins().call(
+            f,
+            &[
+                fx.vm, fx.mc, tid_v, ip_v, len_v, rk, rb, sel, argc, ka, ba, out_idx,
+            ],
+        );
         let tag = b.inst_results(call)[0];
         self.tag_check(b, fx, tag);
         Ok(AV::Dyn(out_idx))
+    }
+
+    /// The `(template_id, ip, bytecode-len)` constants identifying this send
+    /// site — the interpreted send's own inline-cache identity, shared with it.
+    fn site_consts(&mut self, b: &mut FunctionBuilder, ip: usize) -> (CVal, CVal, CVal) {
+        let tid = self.cand.block.template_id.unwrap_or(u32::MAX);
+        (
+            b.ins().iconst(types::I64, i64::from(tid)),
+            b.ins().iconst(types::I64, ip as i64),
+            b.ins()
+                .iconst(types::I64, self.cand.block.bytecode.0.len() as i64),
+        )
     }
 
     /// A send site: direct native call when the callee is a scalar-pure
@@ -1437,7 +1890,11 @@ impl<'a> Translator<'a> {
         ip: usize,
     ) -> Result<AV, String> {
         let key = (self.cand.group_id, sel.as_str().to_string());
-        if matches!(recv, AV::SelfRef)
+        // An OPEN owner (B2) never emits direct calls: the frozen-callee-set
+        // assumption behind them is exactly what a reopen would violate. Every
+        // send goes through the outcall (dispatch-equivalent) seam instead.
+        if !self.cand.open_owner
+            && matches!(recv, AV::SelfRef)
             && let Some((psig, pret, callee_tid)) = self.siblings.get(&key)
             && self.pure.contains(callee_tid)
             && psig.len() == args.len()
@@ -1467,7 +1924,7 @@ impl<'a> Translator<'a> {
                 return Ok(AV::C(val, *rk));
             }
         }
-        self.emit_outcall(b, fx, recv, sel.as_str(), args)
+        self.emit_outcall(b, fx, recv, sel.as_str(), args, ip)
     }
 
     /// Checked narrow of a slot-resident value to a scalar kind: peek the
@@ -1563,12 +2020,26 @@ impl<'a> Translator<'a> {
     /// boundary as jump arguments (a statement-position inlined `if:` joins an
     /// arm value with the nil of the not-taken path). Scalars and slot values
     /// pass through untouched.
+    fn assert_no_pending_writebacks(&self, stack: &[AV], where_: &str) -> Result<(), String> {
+        for v in stack {
+            if let AV::Dyn(idx) = v
+                && self.pending_writebacks.contains_key(idx)
+            {
+                return Err(format!(
+                    "write-captured closure crosses a block boundary ({where_})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn norm_stack(
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
         stack: &[AV],
     ) -> Result<Vec<AV>, String> {
+        self.assert_no_pending_writebacks(stack, "norm_stack")?;
         let mut out = Vec::with_capacity(stack.len());
         for v in stack {
             match v {

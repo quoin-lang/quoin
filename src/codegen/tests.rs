@@ -267,7 +267,11 @@ fn multimethod_variants_and_guards_are_not_candidates() {
 }
 
 #[test]
-fn unsealed_class_is_not_a_candidate() {
+fn unsealed_class_is_an_open_owner_candidate() {
+    // B2 (docs/BLOCK_AOT_ARCH.md §3): an OPEN owner's method may compile, marked
+    // `open_owner` so the translator emits no direct sibling calls — every send
+    // crosses a dispatch-equivalent seam, and a reopen simply dispatches to its
+    // new template (per-dispatch minting; the stale entry stops being reachable).
     let ast = try_parse_quoin_string_named(
         "U <- { .meta <-- { f: -> { |a: Integer ^Integer| a } } }",
         "<aot-test>",
@@ -278,5 +282,10 @@ fn unsealed_class_is_not_a_candidate() {
     };
     let mut compiler = Compiler::new().with_template_ids().with_aot();
     compiler.compile_program(p).expect("compile");
-    assert!(compiler.take_aot_candidates().is_empty());
+    let cands = compiler.take_aot_candidates();
+    assert_eq!(cands.len(), 1, "open owners are candidates now");
+    assert!(
+        cands[0].open_owner,
+        "…marked so direct calls are suppressed"
+    );
 }

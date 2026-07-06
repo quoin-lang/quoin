@@ -341,8 +341,10 @@ var c = e.call:'new' with:'';
 
 "* drop the only reference and churn allocations so GC reclaims the ExtResource (its Drop
 "* queues the id); the release piggybacks on the next call, which frees it extension-side.
+"* The churn allocates a list + strings per element so it forces collection debt in ANY
+"* execution tier (a compiled block body allocates no per-element frame/env — B3a).
 c = nil;
-(1..5000).each:{{ |i| i.s }};
+(1..5000).each:{{ |i| #( i.s i.s ) }};
 e.call:'live' with:'';
 ((e.call:'live' with:'') == '0').else:{{ ok = false }};
 
@@ -576,7 +578,7 @@ var c = e.call:'new' with:'';
 ((e.call:'inc' with:'' args:#( c )) == '2').else:{{ ok = false }};
 ((e.call:'live' with:'') == '1').else:{{ ok = false }};
 c = nil;
-(1..5000).each:{{ |i| i.s }};
+(1..5000).each:{{ |i| #( i.s i.s ) }};
 e.call:'live' with:'';
 ((e.call:'live' with:'') == '0').else:{{ ok = false }};
 
