@@ -721,11 +721,21 @@ impl Compiler {
         // unreachable). Sealed owners keep the direct-call fast path.
         let open_owner = !sealed;
         let mut params = Vec::new();
+        let mut spec_params = Vec::new();
         for arg in &block_node.arguments {
             if arg.identifier.identifier_type == IdentifierType::Instance {
                 return; // not a plain method parameter list
             }
-            let Some(hint) = &arg.type_hint else { return };
+            let Some(hint) = &arg.type_hint else {
+                // Speculative-AOT (S0): an UNANNOTATED param no longer ends
+                // candidacy — it rides as an Obj placeholder whose real kind
+                // the runtime profile supplies at compile time (with an entry
+                // precondition, S1). An annotation stays a dispatch GUARANTEE
+                // and is preferred whenever present.
+                params.push(crate::codegen::AotParam::Obj);
+                spec_params.push(true);
+                continue;
+            };
             // The ERASED dispatch name (`List(Integer)` → `List`), exactly what the
             // runtime guarantees about the arg; the element tag rides separately in
             // `StaticBlock.param_elem_tags`, where the translator picks it up as a
@@ -736,16 +746,28 @@ impl Compiler {
                 return;
             };
             params.push(k);
+            spec_params.push(false);
         }
-        let Some(rt) = &block_node.return_type else {
-            return;
-        };
-        // Same erasure as params: `^List(U)` returns a List at runtime (the
-        // variables are checker-only); a type-var return erases to `Object`
-        // and stays a non-candidate.
-        let Some(ret) = crate::codegen::AotRet::from_annotation(&self.dispatch_type_name(rt))
-        else {
-            return;
+        let mut spec_ret = false;
+        let ret = match &block_node.return_type {
+            // Same erasure as params: `^List(U)` returns a List at runtime
+            // (the variables are checker-only); a type-var return erases to
+            // `Object` and stays a non-candidate.
+            Some(rt) => {
+                let Some(ret) =
+                    crate::codegen::AotRet::from_annotation(&self.dispatch_type_name(rt))
+                else {
+                    return;
+                };
+                ret
+            }
+            // An absent return annotation was ALSO a candidacy cliff before
+            // S0; the profile observes the real return kind for S2 (Obj until
+            // then).
+            None => {
+                spec_ret = true;
+                crate::codegen::AotRet::Obj
+            }
         };
         // `compile_block` just pushed the compiled body as a block constant.
         let Some(Instruction::Push(Constant::Block(rc))) = bytecode.bytecode.last() else {
@@ -760,6 +782,8 @@ impl Compiler {
             ret,
             open_owner,
             role: crate::codegen::AotRole::Method,
+            spec_params,
+            spec_ret,
         });
     }
 
@@ -798,6 +822,8 @@ impl Compiler {
             ret: crate::codegen::AotRet::Obj,
             open_owner: true,
             role: crate::codegen::AotRole::BlockTemplate,
+            spec_params: vec![false],
+            spec_ret: false,
         });
     }
 
@@ -2155,6 +2181,7 @@ impl Compiler {
 
         let (bytecode, source_map) = fuse_bytecode(cb.bytecode, cb.source_map);
         Ok(StaticBlock {
+            spec_state: Default::default(),
             name: None,
             is_nested_block: false,
             param_syms: Vec::new(),
@@ -3036,6 +3063,7 @@ impl Compiler {
         let (fused_bytecode, fused_source_map) =
             fuse_bytecode(block_bytecode.bytecode, block_bytecode.source_map);
         let static_block = StaticBlock {
+            spec_state: Default::default(),
             name: block_name,
             is_nested_block: true,
             param_syms: crate::value::intern_param_syms(&param_names),

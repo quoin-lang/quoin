@@ -164,6 +164,12 @@ pub struct Frame<'gc> {
     pub selector: Option<Symbol>,
     pub args: Vec<Value<'gc>>,
     pub stack_base: usize,
+    /// Speculative-AOT (S0): the template id iff this is a method frame
+    /// whose template was OBSERVING at push time (0 = not observing; real ids
+    /// start at 1) — computed once at push, so the pop-side return
+    /// observation is an in-struct integer test, not a pointer chase. Packed
+    /// as a bare u32 to ride Frame padding.
+    pub spec_tid: u32,
     pub return_receiver: bool,
     /// Calls queued (e.g. by `mix:`) to run when this frame returns normally.
     pub defers: Vec<DeferredCall<'gc>>,
@@ -392,6 +398,17 @@ pub struct VmState<'gc> {
     pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, crate::codegen::AotCandidate)>,
     #[collect(require_static)]
     pub aot_refused_blocks: rustc_hash::FxHashSet<u32>,
+    /// Speculative pending methods: template id → warmth + kind profile +
+    /// the candidate S1 will compile from it. The fast-path observation gate
+    /// is NOT here — it is `aot_spec_obs_left` below plus the `spec_state`
+    /// Cell on each `StaticBlock`.
+    #[collect(require_static)]
+    pub aot_pending_spec: crate::codegen::spec::SpecPendingMap,
+    /// Remaining process-wide observation budget (spec::OBSERVE_BUDGET).
+    /// Checked FIRST at method entry — one load from this hot struct — so
+    /// once spent, observation costs one predicted branch per call, total.
+    #[collect(require_static)]
+    pub aot_spec_obs_left: u32,
     /// The ENCLOSING lexical environment of the currently-executing compiled
     /// frame (the invoked block/method's own `parent_env`) — the parent a
     /// cold-path `make_closure` snapshot must chain to, so a materialized
@@ -517,6 +534,8 @@ impl<'gc> VmState<'gc> {
             aot_pending_error: None,
             aot_pending_blocks: rustc_hash::FxHashMap::default(),
             aot_refused_blocks: rustc_hash::FxHashSet::default(),
+            aot_pending_spec: crate::codegen::spec::SpecPendingMap::default(),
+            aot_spec_obs_left: crate::codegen::spec::OBSERVE_BUDGET,
             aot_enclosing_env: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
@@ -1804,6 +1823,7 @@ impl<'gc> VmState<'gc> {
             selector: None,
             args: Vec::new(),
             stack_base: base_stack,
+            spec_tid: 0,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -1875,6 +1895,7 @@ impl<'gc> VmState<'gc> {
             selector: None,
             args: args.to_vec(),
             stack_base: self.stack.len(),
+            spec_tid: 0,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -2138,6 +2159,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args,
             stack_base: self.stack.len(),
+            spec_tid: 0,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -2155,6 +2177,15 @@ impl<'gc> VmState<'gc> {
     ) {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
+
+        let spec_tid = if is_method_call
+            && self.aot_spec_obs_left != 0
+            && block.template.spec_state.get() == crate::codegen::spec::OBSERVING
+        {
+            self.spec_observe_entry(&block.template, &args)
+        } else {
+            0
+        };
 
         let mut env_frame = EnvFrame::new(block.parent_env);
         // Bind self
@@ -2187,6 +2218,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args,
             stack_base: self.stack.len(),
+            spec_tid,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -2232,6 +2264,7 @@ impl<'gc> VmState<'gc> {
             selector,
             args: Vec::new(),
             stack_base: self.stack.len(),
+            spec_tid: 0,
             return_receiver: false,
             defers: Vec::new(),
             unregister_on_defer_failure: None,
@@ -3068,6 +3101,129 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Register unit-load AOT candidates (S0): classic annotated methods
+    /// compile eagerly, block templates and speculative methods go pending
+    /// (blocks tier by invocation count at the vWSOA seams; speculative
+    /// methods first OBSERVE their param/return kinds here).
+    pub fn register_aot_candidates(&mut self, cands: Vec<crate::codegen::AotCandidate>) {
+        use crate::codegen::{AotRole, spec};
+        let mut immediate = Vec::new();
+        for cand in cands {
+            let Some(tid) = cand.block.template_id else {
+                continue;
+            };
+            if cand.role == AotRole::BlockTemplate {
+                self.aot_pending_blocks.insert(tid, (0, cand));
+            } else if cand.speculative() {
+                cand.block.spec_state.set(spec::OBSERVING);
+                let n_params = cand.params.len();
+                self.aot_pending_spec.insert(
+                    tid,
+                    spec::SpecPending {
+                        count: 0,
+                        param_kinds: vec![spec::K_UNKNOWN; n_params],
+                        ret_kind: spec::K_UNKNOWN,
+                        cand,
+                    },
+                );
+            } else {
+                immediate.push(cand);
+            }
+        }
+        if !immediate.is_empty() {
+            crate::codegen::compile_candidates(immediate);
+        }
+    }
+
+    /// The kind lattice value of a runtime value (spec-AOT observation).
+    fn spec_kind(v: Value<'gc>) -> u8 {
+        use crate::codegen::spec;
+        match v {
+            Value::Int(_) => spec::K_INT,
+            Value::Double(_) => spec::K_DOUBLE,
+            Value::Bool(_) => spec::K_BOOL,
+            _ => spec::K_OBJ,
+        }
+    }
+
+    /// Merge a method entry's arg kinds into its speculative profile and
+    /// return the tid for the frame to stash (`Frame.spec_tid`) — so the
+    /// pop-side return observation never re-chases the template. Called on
+    /// every method-frame push; the common case (template not OBSERVING) is
+    /// one bounds-checked byte load.
+    /// Cold path: the caller has already checked the template's `spec_state`
+    /// Cell (the hot-path gate is inline at the push site). Returns the tid
+    /// for `Frame.spec_tid`, or 0.
+    #[cold]
+    fn spec_observe_entry(&mut self, template: &Rc<StaticBlock>, args: &[Value<'gc>]) -> u32 {
+        use crate::codegen::spec;
+        let Some(tid) = template.template_id else {
+            return 0;
+        };
+        let Some(p) = self.aot_pending_spec.get_mut(&tid) else {
+            return 0;
+        };
+        for (lat, arg) in p.param_kinds.iter_mut().zip(args.iter()) {
+            *lat = spec::merge(*lat, Self::spec_kind(*arg));
+        }
+        p.count += 1;
+        if p.count >= spec::OBSERVE_CAP {
+            template.spec_state.set(spec::SATURATED);
+        }
+        self.aot_spec_obs_left -= 1;
+        tid
+    }
+
+    /// Merge a method's return kind into its speculative profile. `tid` comes
+    /// from the popped frame's `spec_tid` (set at push), so this only runs
+    /// for frames that were observing; the state re-check tolerates
+    /// saturation between push and pop.
+    #[cold]
+    fn spec_observe_return(&mut self, tid: u32, ret: Value<'gc>) {
+        use crate::codegen::spec;
+        if let Some(p) = self.aot_pending_spec.get_mut(&tid) {
+            p.ret_kind = spec::merge(p.ret_kind, Self::spec_kind(ret));
+        }
+    }
+
+    /// One-line profile summary for `QN_AOT_STATS=1`.
+    pub fn aot_spec_stats(&self) -> String {
+        use crate::codegen::spec;
+        let observing = self
+            .aot_pending_spec
+            .values()
+            .filter(|p| p.cand.block.spec_state.get() == spec::OBSERVING)
+            .count();
+        let saturated = self
+            .aot_pending_spec
+            .values()
+            .filter(|p| p.cand.block.spec_state.get() == spec::SATURATED)
+            .count();
+        let mut lines = vec![format!(
+            "spec-aot: {} pending ({} observing, {} saturated)",
+            self.aot_pending_spec.len(),
+            observing,
+            saturated
+        )];
+        let mut profiled: Vec<_> = self
+            .aot_pending_spec
+            .values()
+            .filter(|p| p.count > 0)
+            .collect();
+        profiled.sort_by_key(|p| std::cmp::Reverse(p.count));
+        for p in profiled.iter().take(12) {
+            let kinds: Vec<&str> = p.param_kinds.iter().map(|&k| spec::kind_name(k)).collect();
+            lines.push(format!(
+                "  {} x{}: ({}) -> {}",
+                p.cand.selector,
+                p.count,
+                kinds.join(", "),
+                spec::kind_name(p.ret_kind)
+            ));
+        }
+        lines.join("\n")
+    }
+
     /// Materialize a runtime closure from a compiled template: the thin
     /// `{template, captured state}` pair plus the (possibly registry-shared)
     /// inline-cache cell. Shared by the runner entry points, eval, and string
@@ -3721,6 +3877,9 @@ impl<'gc> VmState<'gc> {
                 // Implicit return Nil
                 let ret_val = self.new_nil(mc);
                 let popped = self.frames.pop().unwrap();
+                if popped.spec_tid != 0 {
+                    self.spec_observe_return(popped.spec_tid, ret_val);
+                }
                 self.last_popped_env = Some(popped.env);
                 self.push(ret_val);
                 return Ok(VmStatus::Running);
@@ -4345,6 +4504,11 @@ impl<'gc> VmState<'gc> {
                 }
                 let mut ret_val = self.pop()?;
                 let popped_frame = self.frames.pop().unwrap();
+                // Copied out NOW: `finalize_instantiation` below can park (an
+                // init that sleeps), and a collection while parked leaves
+                // `popped_frame`'s Gc pointers dangling on this suspended
+                // stack — only the plain u32 id may be used after it.
+                let spec_tid = popped_frame.spec_tid;
                 self.last_popped_env = Some(popped_frame.env);
                 self.stack.truncate(popped_frame.stack_base);
                 if let Some(obj) = popped_frame.instantiating_obj {
@@ -4356,6 +4520,9 @@ impl<'gc> VmState<'gc> {
                         ret_val = rx;
                     }
                 }
+                if spec_tid != 0 {
+                    self.spec_observe_return(spec_tid, ret_val);
+                }
                 self.push(ret_val);
             }
             Instruction::MethodReturn => {
@@ -4366,6 +4533,10 @@ impl<'gc> VmState<'gc> {
                     let mut ret_val = ret_val;
                     let mut target_stack_base = None;
                     while let Some(f) = self.frames.pop() {
+                        // Same discipline as the `Return` arm: the plain id
+                        // is copied before `finalize_instantiation` can park
+                        // and let a collection invalidate `f`'s Gc pointers.
+                        let spec_tid = f.spec_tid;
                         self.last_popped_env = Some(f.env);
                         if let Some(obj) = f.instantiating_obj {
                             self.push(Value::Object(obj));
@@ -4377,6 +4548,9 @@ impl<'gc> VmState<'gc> {
                             }
                         }
                         if f.id == target_id {
+                            if spec_tid != 0 {
+                                self.spec_observe_return(spec_tid, ret_val);
+                            }
                             target_stack_base = Some(f.stack_base);
                             break;
                         }

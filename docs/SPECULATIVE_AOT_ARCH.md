@@ -1,6 +1,6 @@
 # Speculative AOT: type-feedback compilation for untyped code
 
-*Status: DESIGN — no slices shipped.*
+*Status: S0 SHIPPED (observation). S1-S3 not started.*
 
 ## 1. Why: the measured shape of the untyped gap
 
@@ -65,16 +65,34 @@ Everything speculation needs already exists; nothing observes-and-connects:
 
 ## 3. The slices
 
-### S0 — observe (no behavior change)
+### S0 — observe (no behavior change) — SHIPPED
 
 Collect unannotated single-dispatch methods of AOT-eligible units as
 *speculative pending*: template id → (warmth count, per-param kind
 lattice, return kind lattice, candidate). Lattices are `Unknown →
-Int|Double|Bool|Obj → Poly`, merged at `start_block_as_method` (args)
-and method return (result), only while the template stays pending.
-Ship with `QN_AOT_STATS`-style counters; acceptance = zero measurable
-overhead on the bench suite (the counting hash lookup must stay
-miss-fast).
+Int|Double|Bool|Obj(Poly)`, merged at `start_block_as_method` (args)
+and the three method-return sites, only while the template observes.
+`QN_AOT_STATS=1` dumps the profiles (fib_untyped: `value: x64: (Int)
+-> Int`).
+
+What shipping taught (all in the commit):
+- **Hot-path cost is a three-stage gate**: a process-wide observation
+  budget on `VmState` (`OBSERVE_BUDGET` = 8192 events; checked first,
+  one load from a hot struct — once spent, observation is one predicted
+  branch per call forever) → a `spec_state` Cell ON `StaticBlock`
+  (same cache line entry binding already touches; a tid-indexed side
+  table cost a dependent pointer chase per call) → the cold merge.
+  Partial profiles are FINE: S1's guards never trust a profile, so an
+  incomplete one is merely conservative.
+- **Return observation must obey no_gc_across_yield**: the popped
+  frame's Gc pointers are dead after `finalize_instantiation` parks (an
+  init that sleeps) — the tid is stashed as a plain u32 in the Frame at
+  PUSH time (`Frame.spec_tid`, 0 = none, riding padding). The borrow
+  regression suite caught the violation as a segfault.
+- **Measurement at this delta scale needs an interleaved A/B *and* a
+  same-binary control**: sequential runs drifted ±3-7% thermally; the
+  same-binary control bounded true noise at ±1.5-2%, inside which S0's
+  residual deltas sit. Acceptance: no resolvable overhead.
 
 ### S1 — speculate on parameters (entry guards)
 

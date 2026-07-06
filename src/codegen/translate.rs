@@ -1558,7 +1558,7 @@ impl<'a> Translator<'a> {
         let call = b.ins().call(f, &[fx.vm, fx.mc, tmpl_ptr, out_idx]);
         let tag = b.inst_results(call)[0];
         self.tag_check(b, fx, tag);
-        let mut bind = |tr: &mut Self, b: &mut FunctionBuilder, sym: Symbol, v: AV| {
+        let bind = |tr: &mut Self, b: &mut FunctionBuilder, sym: Symbol, v: AV| {
             let leaked: &'static Symbol = Box::leak(Box::new(sym));
             tr.sym_consts.push(leaked);
             let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);

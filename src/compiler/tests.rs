@@ -1371,6 +1371,7 @@ fn test_compile_blocks() {
         vec![None; 4],
     );
     let inner_static = StaticBlock {
+        spec_state: Default::default(),
         name: None,
         is_nested_block: true,
         param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
@@ -1510,6 +1511,7 @@ fn test_compile_class_and_method_definitions() {
 
     let res = compile(vec![class_def]).unwrap();
     let expected_block = StaticBlock {
+        spec_state: Default::default(),
         name: None,
         is_nested_block: true,
         param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),

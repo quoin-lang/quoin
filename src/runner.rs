@@ -65,16 +65,7 @@ fn compile_unit_aot(vm: &mut VmState, compiler: &mut Compiler) {
     if !crate::tuning::aot_enabled() {
         return;
     }
-    let (blocks, methods): (Vec<_>, Vec<_>) = compiler
-        .take_aot_candidates()
-        .into_iter()
-        .partition(|c| c.role == crate::codegen::AotRole::BlockTemplate);
-    for b in blocks {
-        if let Some(tid) = b.block.template_id {
-            vm.aot_pending_blocks.insert(tid, (0, b));
-        }
-    }
-    crate::codegen::compile_candidates(methods);
+    vm.register_aot_candidates(compiler.take_aot_candidates());
 }
 
 pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) {

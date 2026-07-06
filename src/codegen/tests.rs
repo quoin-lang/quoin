@@ -289,3 +289,79 @@ fn unsealed_class_is_an_open_owner_candidate() {
         "…marked so direct calls are suppressed"
     );
 }
+
+#[test]
+fn unannotated_method_is_a_speculative_candidate() {
+    // S0 (docs/SPECULATIVE_AOT_ARCH.md): an unannotated param or an absent
+    // return annotation no longer ends candidacy — the candidate collects as
+    // SPECULATIVE (Obj placeholders, spec flags set) and waits on a runtime
+    // kind profile instead of compiling at unit load.
+    let ast = try_parse_quoin_string_named(
+        "S <- { .meta <-- { f: -> { |a| a }; g: -> { |b: Integer ^Integer| b } } }",
+        "<aot-test>",
+    )
+    .expect("parse");
+    let NodeValue::Program(p) = &ast.value else {
+        panic!("not a program");
+    };
+    let mut compiler = Compiler::new().with_template_ids().with_aot();
+    compiler.compile_program(p).expect("compile");
+    let cands = compiler.take_aot_candidates();
+    let f = cands
+        .iter()
+        .find(|c| c.selector == "f:")
+        .expect("f: collected");
+    assert!(
+        f.speculative(),
+        "unannotated params make a speculative candidate"
+    );
+    assert_eq!(f.spec_params, vec![true]);
+    assert!(f.spec_ret, "absent return annotation is speculated too");
+    assert!(
+        matches!(f.params[0], AotParam::Obj),
+        "placeholder until profiled"
+    );
+    let g = cands
+        .iter()
+        .find(|c| c.selector == "g:")
+        .expect("g: collected");
+    assert!(!g.speculative(), "fully annotated candidates are classic");
+}
+
+#[test]
+fn mixed_annotations_speculate_only_the_gaps() {
+    // Annotations are dispatch GUARANTEES and win over observation; only the
+    // unannotated slots ride as speculative.
+    let ast = try_parse_quoin_string_named(
+        "M <- { .meta <-- { f:g: -> { |a: Integer b ^Integer| a } } }",
+        "<aot-test>",
+    )
+    .expect("parse");
+    let NodeValue::Program(p) = &ast.value else {
+        panic!("not a program");
+    };
+    let mut compiler = Compiler::new().with_template_ids().with_aot();
+    compiler.compile_program(p).expect("compile");
+    let cands = compiler.take_aot_candidates();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].spec_params, vec![false, true]);
+    assert!(!cands[0].spec_ret);
+    assert!(
+        matches!(cands[0].params[0], AotParam::Scalar(AotKind::Int)),
+        "annotated slot keeps its kind"
+    );
+}
+
+#[test]
+fn spec_kind_lattice_merges() {
+    use super::spec::{K_BOOL, K_DOUBLE, K_INT, K_OBJ, K_UNKNOWN, merge};
+    assert_eq!(
+        merge(K_UNKNOWN, K_INT),
+        K_INT,
+        "unknown rises to the first kind"
+    );
+    assert_eq!(merge(K_INT, K_INT), K_INT, "agreement is stable");
+    assert_eq!(merge(K_INT, K_DOUBLE), K_OBJ, "conflict lands on Obj");
+    assert_eq!(merge(K_BOOL, K_OBJ), K_OBJ, "Obj absorbs");
+    assert_eq!(merge(K_OBJ, K_INT), K_OBJ, "Obj never narrows back");
+}

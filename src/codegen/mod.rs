@@ -19,6 +19,7 @@
 //! rule — gc-arena collects only between coroutine resumes).
 
 mod helpers;
+pub mod spec;
 mod translate;
 
 #[cfg(test)]
@@ -130,6 +131,21 @@ pub struct AotCandidate {
     /// new template and the stale entry stops being reachable (the same
     /// per-dispatch minting argument as §6.2's no-deopt case).
     pub open_owner: bool,
+    /// Speculative-AOT (S0, docs/SPECULATIVE_AOT_ARCH.md): `true` per param
+    /// whose kind is UNANNOTATED — `params[i]` holds an Obj placeholder and
+    /// the runtime profile supplies the real kind at compile time. All-false
+    /// for classic annotated candidates.
+    pub spec_params: Vec<bool>,
+    /// The return annotation is absent; `ret` is an Obj placeholder.
+    pub spec_ret: bool,
+}
+
+impl AotCandidate {
+    /// A candidate that must wait for a runtime type profile (any observed
+    /// slot) rather than compiling at unit load.
+    pub fn speculative(&self) -> bool {
+        self.spec_ret || self.spec_params.iter().any(|&b| b)
+    }
 }
 
 /// Raw ABI of a compiled trampoline. `args`/`ret` carry bit patterns (`f64` via
