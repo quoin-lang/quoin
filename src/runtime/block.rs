@@ -259,6 +259,16 @@ fn do_catch<'gc>(
             unwind(vm, initial);
             Err(QuoinError::Cancelled)
         }
+        // A `^^` in flight to a live COMPILED frame (S5): the delivered value
+        // already sits at that frame's window base and only its
+        // `codegen::invoke` may stop the unwind — uncatchable in flight, like
+        // cancellation. (The syntactic `{ ^^ … }.catch:` shape is refused at
+        // translation, so interpreted catch-all semantics are preserved there;
+        // this dynamic arm covers a `^^` closure that ESCAPED into a catch.)
+        Err(QuoinError::NonLocalReturn) if vm.aot_nlr_target.is_some() => {
+            unwind(vm, initial);
+            Err(QuoinError::NonLocalReturn)
+        }
         Err(e) => {
             unwind(vm, initial);
             let exc = exception_value(vm, mc, &e);
@@ -317,6 +327,14 @@ fn do_catch_finally<'gc>(
             let _ = vm.execute_block(mc, finally, Vec::new(), None);
             unwind(vm, initial);
             Err(QuoinError::Cancelled)
+        }
+        // A `^^` in flight to a live COMPILED frame (S5): uncatchable, but
+        // `finally` still runs — see the matching arm in `do_catch`.
+        Err(QuoinError::NonLocalReturn) if vm.aot_nlr_target.is_some() => {
+            unwind(vm, initial);
+            let _ = vm.execute_block(mc, finally, Vec::new(), None);
+            unwind(vm, initial);
+            Err(QuoinError::NonLocalReturn)
         }
         Err(e) => {
             unwind(vm, initial);

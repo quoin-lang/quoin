@@ -585,4 +585,197 @@ SpecCell <- { | @v @w |
         };
         .is:{ total } equalTo:3
     }
+};
+
+"* --- S5a: non-local return (^^) from compiled frames --------------------
+"* A compiled method has no interpreter frame; a `^^` whose home is a live
+"* compiled invocation delivers through its frame mark (vm.aot_frame_marks)
+"* and the AOT error channel. These pin the four shapes: a direct cold-arm
+"* early exit, stores before the exit, nested compiled frames unwinding to
+"* the RIGHT home, and a `^^` passing THROUGH a compiled frame to a home
+"* below it.
+NlrClassify <- {
+    classify: -> { |n|
+        (n < 10).if:{ ^^'small' };
+        ^'big'
+    }
+};
+
+NlrTask <- { | @count @hold |
+    init: -> { |count| @count = count; @hold = 0 };
+    step -> {
+        @count = @count - 1;
+        (@count == 0).if:{ @hold = @hold + 1; ^^'held' };
+        ^'ran'
+    };
+    hold -> { ^@hold }
+};
+
+NlrInner <- {
+    pick: -> { |n| (n < 0).if:{ ^^'neg' }; ^'pos' }
+};
+
+NlrOuter <- {
+    combo: -> { |n| var r = NlrInner.new.pick:n; ^'got-' + r }
+};
+
+NlrRunner <- {
+    run: -> { |b| b.value; ^'not-escaped' }
+};
+
+NlrCaller <- {
+    tryIt -> {
+        var s = 'escaped';
+        var blk = { ^^ s };
+        var r = NlrRunner.new.run:blk;
+        ^'after-' + r
+    }
+};
+
+NlrCatcher <- {
+    m -> {
+        var v = 'early';
+        { ^^ v }.catch:{ |e| 'caught' };
+        ^'late'
+    }
+};
+
+(TestSuite.new:{ var name = 'AotParityNlr' }).add:{
+    .test:coldArmReturnsFromTheMethod -> {
+        var c = NlrClassify.new;
+        var i = 0;
+        var acc = '';
+        { i < 6 }.whileDo:{ acc = acc + (c.classify:(i * 4)); i = i + 1 };
+        .is:{ acc } equalTo:'smallsmallsmallbigbigbig'
+    };
+
+    .test:coldArmWithStoresBeforeReturn -> {
+        var k = 0;
+        var held = 0;
+        var acc = '';
+        { k < 4 }.whileDo:{
+            var t = NlrTask.new:{ var count = 5 };
+            var j = 0;
+            { j < 5 }.whileDo:{ acc = acc + (t.step); j = j + 1 };
+            held = held + t.hold;
+            k = k + 1
+        };
+        .is:{ held } equalTo:4;
+        .is:{ acc } equalTo:'ranranranranheldranranranranheldranranranranheldranranranranheld'
+    };
+
+    .test:nestedCompiledFramesUnwindToTheRightHome -> {
+        var o = NlrOuter.new;
+        var i = 0;
+        var acc = '';
+        { i < 12 }.whileDo:{
+            acc = acc + (o.combo:(5 - i)) + ' ';
+            i = i + 1
+        };
+        "* inner's ^^ returns from INNER only — outer always appends its prefix
+        .is:{ acc } equalTo:'got-pos got-pos got-pos got-pos got-pos got-pos got-neg got-neg got-neg got-neg got-neg got-neg '
+    };
+
+    .test:nlrThroughACompiledFrameToTheHomeBelow -> {
+        var c = NlrCaller.new;
+        var i = 0;
+        var acc = '';
+        { i < 12 }.whileDo:{ acc = acc + (c.tryIt) + ' '; i = i + 1 };
+        "* the ^^ unwinds THROUGH run:'s frame — tryIt never reaches 'after-'
+        .is:{ acc } equalTo:'escaped escaped escaped escaped escaped escaped escaped escaped escaped escaped escaped escaped '
+    };
+
+    .test:nlrUnderCatchMatchesInterpreted -> {
+        "* interpreted, a catch-all CATCHES a ^^ crossing it (and the unwound
+        "* loop below observes the interpreter's exact pop-arm artifact) —
+        "* compiled must match byte-for-byte, which the translation refusal
+        "* ('non-local return (^^) under a catch') guarantees.
+        var t = NlrCatcher.new;
+        .is:{ t.m } equalTo:'caught';
+        var i = 0;
+        var acc = '';
+        { i < 5 }.whileDo:{ acc = acc + (t.m); i = i + 1 };
+        .is:{ acc } equalTo:'earlycaught'
+    };
+
+    .test:taskInterleavedNlrHomesStayPerTask -> {
+        "* two tasks park INSIDE compiled bodies, then ^^ from cold arms —
+        "* each must come home to ITS OWN invocation (per-task frame marks).
+        var w = NlrWorker.new;
+        var i = 0;
+        { i < 3 }.whileDo:{ w.work:'warm' sleep:1; i = i + 1 };
+        var ta = Task.spawn:{ w.work:'A' sleep:20 };
+        var tb = Task.spawn:{ Async.sleep:5; w.work:'B' sleep:40 };
+        .is:{ ta.join } equalTo:'ok-A';
+        .is:{ tb.join } equalTo:'ok-B'
+    }
+};
+
+NlrWorker <- {
+    work:sleep: -> { |label ms|
+        Async.sleep:ms;
+        (label.length > 0).if:{ ^^'ok-' + label };
+        ^'fell-through'
+    }
+};
+
+"* --- S5b: nested literals in materialized cold arms ----------------------
+"* The materialized closure runs interpreted, so nested blocks execute
+"* naturally; the gate scan is transitive (free writes -> writebacks, ^^
+"* anywhere -> the S5a home machinery, inherited through the closure's
+"* frame). HandlerTask#run: (richards) is the motivating shape: a ^^ two
+"* arms deep.
+NlrHandler <- { | @v1 @v2 |
+    init: -> { |v1| @v1 = v1; @v2 = 0 };
+    handle: -> { |limit|
+        @v1.defined?.if:{
+            var have = @v1;
+            (have < limit).if:{
+                (@v2 < 100).if:{
+                    @v2 = @v2 + have;
+                    ^^'queued'
+                }
+            }
+            else:{
+                @v1 = nil;
+                ^^'drained'
+            }
+        };
+        ^'idle'
+    };
+    v2 -> { ^@v2 }
+};
+
+NlrNestWriter <- {
+    tally: -> { |n|
+        var seen = 0;
+        (n > 0).if:{ (n > 10).if:{ seen = n * 2 } else:{ seen = n } };
+        ^seen
+    }
+};
+
+(TestSuite.new:{ var name = 'AotParityNlrNested' }).add:{
+    .test:nestedArmReturnsThroughTwoLevels -> {
+        var acc = '';
+        var i = 0;
+        { i < 12 }.whileDo:{
+            var h = NlrHandler.new:{ var v1 = 5 };
+            acc = acc + (h.handle:10) + ' ';
+            acc = acc + (h.handle:3) + ' ';
+            i = i + 1;
+            (i == 12).if:{ acc = acc + h.v2 }
+        };
+        "* first call: 5 < 10, @v2 0->5, 'queued'; second: 5 >= 3, 'drained'
+        .is:{ acc.contains?:'queued drained' } equalTo:true;
+        .is:{ acc.contains?:' 5' } equalTo:true
+    };
+
+    .test:nestedFreeWritesFlushBack -> {
+        var w = NlrNestWriter.new;
+        var i = 0;
+        var total = 0;
+        { i < 15 }.whileDo:{ total = total + (w.tally:i); i = i + 1 };
+        "* 1..10 -> n, 11..14 -> 2n : 55 + 2*(11+12+13+14) = 155
+        .is:{ total } equalTo:155
+    }
 }

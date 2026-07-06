@@ -1,6 +1,6 @@
 # Speculative AOT: type-feedback compilation for untyped code
 
-*Status: S0-S3 SHIPPED. Remaining: S4 quickening (deferred), cold-arm-^^ (recorded), btrees profitability heuristic (btrees turned net-positive at S3; deprioritized).*
+*Status: S0-S3 + S5 (cold-arm `^^` + nested-literal materialization) SHIPPED. Remaining: S4 quickening (deferred), S5c template-role `^^` (recorded), btrees profitability heuristic (btrees turned net-positive at S3; deprioritized).*
 
 ## 1. Why: the measured shape of the untyped gap
 
@@ -211,6 +211,61 @@ release basis. What remains: the four task `run:` bodies refuse on
 `@task.run:packet` megamorphic dispatch stays an outcall by design.
 Cold-arm-`^^` support (e.g. cold paths that Bail the frame instead of
 materializing) is the recorded follow-up if richards' weight matters.
+
+### S5 — cold-arm `^^` + nested-literal materialization — SHIPPED
+
+The B3b boundary is gone: a materialized cold arm may carry `^^`, and
+may contain nested literals. richards compiles with **zero refusals**
+(all four task `run:` bodies, `release:`/`queue:`/`addTo:`, and
+HandlerTask's two-deep arms).
+
+Mechanism (S5a): a compiled METHOD invocation that materializes a
+`^^`-carrying nest mints a real frame id (same `next_frame_id`
+counter) and pushes an `AotFrameMark {id, frames_len, stack_base}` —
+per-task, like the frames/stack it indexes. `make_closure` stamps the
+id as the closure's `enclosing_method_id` (`want_home`); the
+`MethodReturn` unwind, finding the home among the marks, pops outcall
+frames to the mark, delivers the value at the window base, and sets
+`aot_nlr_target`; the AOT error channel unwinds the native frames and
+the owning `invoke` consumes the value as its ordinary return. An
+in-flight compiled-target `^^` is never absorbed: nested run loops at
+their baselines propagate it (a compiled frame has no interpreter
+frame of its own to pop, so "all callee frames gone" is delivery, not
+completion), and `do_catch`/`do_catch_finally` treat it like
+cancellation. Parity for the syntactic `{ ^^ … }.catch:` shape (a
+catch-all CATCHES a `^^` interpreted) is kept by refusing
+catch-family consumers of `^^` nests at translation.
+
+S5b: the materialization gate scan is TRANSITIVE
+(`scan_materialized_nest`) — nested literals execute naturally in the
+interpreted closure; only whole-nest free writes (→ writebacks), `^^`
+presence, guarded blocks, and the trampoline signature matter.
+
+Three lessons the A/B taught, the hard way (first measure: sieve
++482%, combinators +60%):
+
+- **The old refusal was accidentally load-bearing.** Un-refusing `^^`
+  promoted qnlib's own glue: `Block#whileDo:` (the `^^s.whileDo:block`
+  TRAMPOLINE — a recursive compiled call and a full-frame arm snapshot
+  per iteration) and `any?:` (the blessed `each:{ .if:{ ^^ } }` search
+  idiom — an arm snapshot per element). `^^`-arm materialization is
+  now gated to sites that run at most once per invocation: refused
+  inside a fused-loop span and when the arm re-sends the candidate's
+  own selector. Compiling those shapes WELL (tail-calls, hoisted arm
+  closures) is the recorded S5c-adjacent follow-up.
+- **Per-task state, again**: `aot_enclosing_env` was a bare `VmState`
+  field — two tasks parked inside compiled bodies contaminated each
+  other's `make_closure` lexical chains (pre-existing; the regression
+  test parks at a direct `Async.sleep:` outcall so no nested invoke's
+  exit-path restore masks the read). All compiled-frame `^^` context
+  now rides the task context like `aot_fuel`.
+- **The honest headline: a COVERAGE slice, not a perf slice.** With
+  richards fully compiled, the 15-run interleaved A/B says richards
+  −1.7%/−2.0% (min/med), sieve −1%, combinators +1.4% residual
+  (bounded bookkeeping + layout jitter; interpreted-only A/B ±0.2%),
+  rest noise. richards' remaining weight is the megamorphic
+  `@task.run:` outcall and allocation — the CROSS.md frontier order
+  (alloc/GC first) stands. Artifacts: `profiling/cold-arm-nlr/`.
 
 ### S4 (deferred) — interpreter quickening
 

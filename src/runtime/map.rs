@@ -306,6 +306,12 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
                         )));
                     }
                     Err(QuoinError::NonLocalReturn) => {
+                        // At the baseline with `aot_nlr_target` set, the `^^`
+                        // came home to a live COMPILED frame (S5) — delivery,
+                        // not completion; propagate (see `run_nested`).
+                        if vm.aot_nlr_target.is_some() {
+                            return Err(QuoinError::NonLocalReturn);
+                        }
                         if vm.frames.len() > initial_frame_count {
                             continue;
                         } else if vm.frames.len() == initial_frame_count {

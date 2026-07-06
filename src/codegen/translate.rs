@@ -370,7 +370,7 @@ aot_helpers! {
         *mut c_void, *const c_void, i64, i64, i64, i64, i64, i64, i64, i64,
     ) -> u8,
     make_closure: helpers::make_closure as fn(
-        *mut c_void, *const c_void, *const Rc<StaticBlock>, i64,
+        *mut c_void, *const c_void, *const Rc<StaticBlock>, i64, i64,
     ) -> u8,
     closure_bind: helpers::closure_bind as fn(*mut c_void, *const c_void, i64, *const Symbol, i64, i64) -> u8,
     field_get: helpers::field_get as fn(
@@ -436,7 +436,7 @@ fn compile_group(
     }
 
     let mut fb_ctx = FunctionBuilderContext::new();
-    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool, bool)> = Vec::new();
+    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool, bool, bool)> = Vec::new();
 
     for m in members {
         let tid = m.block.template_id.unwrap();
@@ -458,6 +458,7 @@ fn compile_group(
         let n_scratch;
         let needs_list_self;
         let direct_self;
+        let materializes_nlr;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
             static EMPTY_MERGES: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
@@ -485,11 +486,13 @@ fn compile_group(
 
                 pending_writebacks: HashMap::new(),
                 materialized: HashSet::new(),
+                materialized_nlr: HashSet::new(),
             };
             tr.build_inner(&mut b).map_err(|e| fail(tid, e))?;
             n_scratch = tr.next_scratch;
             needs_list_self = tr.needs_list_self;
             direct_self = tr.used_direct_self;
+            materializes_nlr = !tr.materialized_nlr.is_empty();
             b.seal_all_blocks();
             b.finalize();
         }
@@ -519,14 +522,22 @@ fn compile_group(
         module
             .define_function(tramp_id, &mut tctx)
             .map_err(|e| fail(tid, e.to_string()))?;
-        tramp_ids.push((tid, tramp_id, m, n_scratch, needs_list_self, direct_self));
+        tramp_ids.push((
+            tid,
+            tramp_id,
+            m,
+            n_scratch,
+            needs_list_self,
+            direct_self,
+            materializes_nlr,
+        ));
     }
 
     module
         .finalize_definitions()
         .map_err(|e| fail(any_tid, e.to_string()))?;
     let mut out = Vec::new();
-    for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self) in tramp_ids {
+    for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self, materializes_nlr) in tramp_ids {
         let addr = module.get_finalized_function(tramp_id);
         let raw: AotRawFn = unsafe { std::mem::transmute(addr) };
         out.push((
@@ -543,6 +554,7 @@ fn compile_group(
                 spec_bails: std::sync::atomic::AtomicU32::new(0),
                 direct_self,
                 compile_epoch: super::redef_epoch(),
+                materializes_nlr,
             },
         ));
     }
@@ -735,6 +747,87 @@ struct Translator<'a> {
     /// unfused-`whileDo:` bug: the body's `i` advanced while the condition's
     /// stayed frozen).
     materialized: HashSet<CVal>,
+    /// The materialized closures whose bodies contain a `^^` (S5). A
+    /// `catch`-family send consuming one must refuse: interpreted, a
+    /// catch-all can catch the `^^` crossing it — a compiled home cannot
+    /// reproduce that (the runtime treats an in-flight compiled-target `^^`
+    /// as uncatchable), so the method stays interpreted.
+    materialized_nlr: HashSet<CVal>,
+}
+
+/// What a whole materialized NEST (a cold-path block plus every literal
+/// nested inside it, transitively — S5b) does to the enclosing compiled
+/// frame. The nest runs INTERPRETED, so nested execution needs no compiled
+/// support; the translator only needs these facts for its gates.
+#[derive(Default)]
+struct NestScan {
+    /// Symbols written that are free through the WHOLE nest — they resolve
+    /// to the snapshot env, so the consuming send must flush them back.
+    written_frees: Vec<Symbol>,
+    /// A `^^` anywhere in the nest (profitability + catch-parity gates).
+    has_nlr: bool,
+    /// A `catch`-family send anywhere in the nest.
+    has_catch_send: bool,
+    /// A send of the enclosing candidate's own selector anywhere in the
+    /// nest (the `^^s.whileDo:block` trampoline signature).
+    sends_own_selector: bool,
+}
+
+/// Recursive gate scan for [`Translator::materialize_closure`]: each level's
+/// params + `DefineLocal`s shadow the levels above, so only writes free
+/// through EVERY level reach the snapshot.
+fn scan_materialized_nest(
+    rc: &StaticBlock,
+    inherited: &HashSet<Symbol>,
+    own_selector: &str,
+    out: &mut NestScan,
+) -> Result<(), String> {
+    if rc.decl_block.is_some() {
+        return Err("guarded block in a materialized nest".to_string());
+    }
+    let mut defined = inherited.clone();
+    defined.extend(rc.param_syms.iter().copied());
+    for inst in rc.bytecode.0.iter() {
+        if let Instruction::DefineLocal(s) | Instruction::DefineLocalKeep(s) = inst {
+            defined.insert(*s);
+        }
+    }
+    for inst in rc.bytecode.0.iter() {
+        match inst {
+            Instruction::MethodReturn => out.has_nlr = true,
+            Instruction::Push(Constant::Block(nb)) => {
+                scan_materialized_nest(nb, &defined, own_selector, out)?;
+            }
+            Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s) => {
+                if !defined.contains(s) {
+                    out.written_frees.push(*s);
+                }
+            }
+            _ => {}
+        }
+    }
+    for inst in rc.bytecode.0.iter() {
+        let (sel, block_arg) = match inst {
+            Instruction::Send(s, _)
+            | Instruction::SendLocal(_, s, _)
+            | Instruction::SendField(_, s, _)
+            | Instruction::SendLocalLocal(_, _, s, _) => (s, None),
+            Instruction::SendConst(c, s, _) | Instruction::SendLocalConst(_, c, s, _) => {
+                (s, matches!(c, Constant::Block(_)).then_some(c))
+            }
+            _ => continue,
+        };
+        if sel.as_str() == own_selector {
+            out.sends_own_selector = true;
+        }
+        if sel.as_str().starts_with("catch") {
+            out.has_catch_send = true;
+        }
+        if let Some(Constant::Block(nb)) = block_arg {
+            scan_materialized_nest(nb, &defined, own_selector, out)?;
+        }
+    }
+    Ok(())
 }
 
 struct FnCtx {
@@ -1506,6 +1599,18 @@ impl<'a> Translator<'a> {
                                 "sibling closures share written captures at ip {ip}"
                             ));
                         }
+                        // A `catch`-family send consuming a `^^`-carrying
+                        // closure: interpreted, a catch-all can CATCH the
+                        // `^^` crossing it; a compiled home cannot reproduce
+                        // that (in-flight compiled-target `^^` is
+                        // uncatchable) — the method runs interpreted.
+                        if sel.as_str().starts_with("catch")
+                            && closure_args
+                                .iter()
+                                .any(|idx| self.materialized_nlr.contains(idx))
+                        {
+                            return Err(format!("non-local return (^^) under a catch at ip {ip}"));
+                        }
                         let out = if sel.as_str() == "valueWithSelfOrArg:" && args.len() == 1 {
                             self.emit_block_call(b, &fx, recv, args[0], ip)?
                         } else {
@@ -1737,9 +1842,10 @@ impl<'a> Translator<'a> {
     /// B3b: materialize a closure at a compiled cold-path `Push(Block)` site.
     /// The snapshot env carries EVERY frame binding (scalars, slots, obj
     /// params, `self`) — exactly the visibility the interpreter's live env
-    /// chain would give — and the gates guarantee the block only READS its
-    /// captures (a captured-var write would mutate the snapshot, invisible to
-    /// the compiled frame). Known accepted edge (documented): a closure that
+    /// chain would give — and the gates guarantee the whole NEST only READS
+    /// its frame captures (a captured-var write would mutate the snapshot,
+    /// invisible to the compiled frame) or writes ones flushed back after the
+    /// consuming send. Known accepted edge (documented): a closure that
     /// ESCAPES its consuming send (a custom `if:` storing it) sees the
     /// snapshot, not later frame writes.
     fn materialize_closure(
@@ -1768,35 +1874,59 @@ impl<'a> Translator<'a> {
             vars.insert(sym, VarSlot::Obj(w, None));
         }
 
-        // Gates: scan the template's bytecode once.
-        if rc.decl_block.is_some() {
-            return Err(format!("guarded block materialization at ip {ip}"));
+        // Gates: scan the template's bytecode — TRANSITIVELY through nested
+        // literals (S5b). The materialized closure runs INTERPRETED, so
+        // nested blocks execute naturally (their env chain threads through
+        // the closure's frame into the snapshot, and their `^^` home is
+        // inherited from the closure's frame — the S5a machinery); the gate
+        // only needs whole-nest knowledge of free WRITES (for writebacks),
+        // `^^` presence, guarded blocks, and the trampoline signature.
+        let mut scan = NestScan::default();
+        scan_materialized_nest(rc, &HashSet::new(), self.cand.selector.as_str(), &mut scan)
+            .map_err(|e| format!("{e} at ip {ip}"))?;
+        let written_frees = scan.written_frees;
+        let has_nlr = scan.has_nlr;
+        // A `^^` with a catch-family send anywhere in the same nest: the
+        // interpreted method would let a catch-all CATCH the `^^` crossing
+        // it, which a compiled home cannot reproduce — refuse (mirrors the
+        // send-head gate for method-level catch consumers).
+        if has_nlr && scan.has_catch_send {
+            return Err(format!(
+                "non-local return (^^) with a catch in a materialized nest at ip {ip}"
+            ));
         }
-        let mut defined: HashSet<Symbol> = rc.param_syms.iter().copied().collect();
-        let mut written_frees: Vec<Symbol> = Vec::new();
-        for inst in rc.bytecode.0.iter() {
-            if let Instruction::DefineLocal(s) | Instruction::DefineLocalKeep(s) = inst {
-                defined.insert(*s);
-            }
-        }
-        for inst in rc.bytecode.0.iter() {
-            match inst {
-                Instruction::MethodReturn => {
-                    return Err(format!(
-                        "materialized block with a non-local return (^^) at ip {ip}"
-                    ));
-                }
-                Instruction::Push(Constant::Block(_))
-                | Instruction::SendConst(Constant::Block(_), ..)
-                | Instruction::SendLocalConst(_, Constant::Block(_), ..) => {
-                    return Err(format!("nested literal in a materialized block at ip {ip}"));
-                }
-                Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s) => {
-                    if !defined.contains(s) {
-                        written_frees.push(*s);
+        // PROFITABILITY (S5a, empirical): a `^^` cold arm pays a snapshot
+        // materialization (fresh EnvFrame + a bind per frame binding) each
+        // time its site executes, so it is only worth compiling where it
+        // runs AT MOST ONCE per invocation. Two shapes make it per-ITERATION
+        // and pessimize the whole method — found by A/B: qnlib's `whileDo:`
+        // trampoline made sieve 5.8x slower, `any?:` cost combinators 60%:
+        // - the site sits inside a fused-loop span (a backward jump crosses
+        //   it): one arm snapshot per element;
+        // - the arm re-sends the candidate's OWN selector (the
+        //   `^^s.whileDo:block` tail-recursive trampoline): one recursive
+        //   call — and one snapshot — per iteration.
+        // Straight-line early exits (richards' task bodies) pass both.
+        if has_nlr {
+            let insts = &self.cand.block.bytecode.0;
+            let in_loop = insts.iter().enumerate().any(|(j, inst)| match inst {
+                Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => {
+                    *o < 0 && {
+                        let target = (j as isize + *o) as usize;
+                        target <= ip && ip <= j
                     }
                 }
-                _ => {}
+                _ => false,
+            });
+            if in_loop {
+                return Err(format!(
+                    "per-iteration ^^ materialization (fused loop) at ip {ip}"
+                ));
+            }
+            if scan.sends_own_selector {
+                return Err(format!(
+                    "per-iteration ^^ materialization (recursive trampoline) at ip {ip}"
+                ));
             }
         }
         // A write to a FRAME local mutates the snapshot — read back after the
@@ -1805,6 +1935,9 @@ impl<'a> Translator<'a> {
         // a param/self has no writable home — refuse.
         let mut writebacks: Vec<(Symbol, VarSlot)> = Vec::new();
         for s in written_frees {
+            if writebacks.iter().any(|(w, _)| *w == s) {
+                continue;
+            }
             if let Some(&slot) = vars.get(&s) {
                 writebacks.push((s, slot));
             } else if obj_params.contains_key(&s) || s == self_symbol() {
@@ -1823,8 +1956,11 @@ impl<'a> Translator<'a> {
             .iconst(types::I64, tmpl as *const Rc<StaticBlock> as i64);
         let out = self.alloc_scratch()?;
         let out_idx = self.abs_slot(b, fx, out);
+        let want_home = b.ins().iconst(types::I64, i64::from(has_nlr));
         let f = self.func_ref(b, self.helpers.make_closure);
-        let call = b.ins().call(f, &[fx.vm, fx.mc, tmpl_ptr, out_idx]);
+        let call = b
+            .ins()
+            .call(f, &[fx.vm, fx.mc, tmpl_ptr, out_idx, want_home]);
         let tag = b.inst_results(call)[0];
         self.tag_check(b, fx, tag);
         let bind = |tr: &mut Self, b: &mut FunctionBuilder, sym: Symbol, v: AV| {
@@ -1856,6 +1992,9 @@ impl<'a> Translator<'a> {
             self.pending_writebacks.insert(out_idx, writebacks);
         }
         self.materialized.insert(out_idx);
+        if has_nlr {
+            self.materialized_nlr.insert(out_idx);
+        }
         Ok(AV::Dyn(out_idx))
     }
 

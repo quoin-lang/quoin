@@ -214,6 +214,13 @@ pub struct AotEntry {
     /// `invoke` Bails otherwise.
     pub direct_self: bool,
     pub compile_epoch: u64,
+    /// The body materializes at least one closure whose nest carries a `^^`
+    /// (B3b/S5). Only such a frame can ever be a `^^` target — the compiled
+    /// home id travels solely inside `^^`-carrying closures it materializes
+    /// (`make_closure`'s `want_home`) — so `invoke` skips the S5 frame-mark
+    /// and home-id bookkeeping entirely when this is false (the hot
+    /// majority, including every `count:`-style write-back arm).
+    pub materializes_nlr: bool,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -424,6 +431,25 @@ pub fn invoke<'gc>(
     }
     vm.aot_pending_error = None;
     let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
+    // S5: a frame that materializes closures is a potential `^^` target (the
+    // compiled home id travels only inside closures it materializes). Mint a
+    // frame id from the shared counter (so it can never collide with an
+    // interpreter frame's), publish it as the home for those closures, and
+    // mark where the frame's outcall frames and slot window begin — the
+    // `MethodReturn` unwind stops there when a `^^` comes home. Frames that
+    // materialize nothing skip all of it.
+    let nlr_mark = if entry.materializes_nlr {
+        let id = vm.next_frame_id;
+        vm.next_frame_id += 1;
+        vm.aot_frame_marks.push(crate::vm::AotFrameMark {
+            id,
+            frames_len: vm.frames.len(),
+            stack_base: base,
+        });
+        Some((id, std::mem::replace(&mut vm.aot_home_frame_id, Some(id))))
+    } else {
+        None
+    };
     let fuel_ptr = &raw mut vm.aot_fuel;
     let depth_ptr = &raw mut vm.aot_depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
@@ -441,6 +467,10 @@ pub fn invoke<'gc>(
         )
     };
     vm.aot_enclosing_env = saved_env;
+    if let Some((_, saved_home)) = nlr_mark {
+        vm.aot_home_frame_id = saved_home;
+        vm.aot_frame_marks.pop();
+    }
     let outcome = match tag {
         TAG_OK => AotOutcome::Value(match entry.ret {
             AotRet::Scalar(AotKind::Int) => Value::Int(ret),
@@ -462,6 +492,26 @@ pub fn invoke<'gc>(
             "AOT: compiled method returned unknown tag {other}"
         ))),
     };
+    // S5: a `^^` whose home is THIS invocation. The unwind already popped the
+    // outcall frames to our mark, truncated the stack to our window base, and
+    // pushed the delivered value there — consume it as this method's ordinary
+    // return value (to the caller, `^^v` from a cold arm IS the method
+    // returning `v`).
+    if let Some((frame_id, _)) = nlr_mark
+        && vm.aot_nlr_target == Some(frame_id)
+    {
+        vm.aot_nlr_target = None;
+        debug_assert!(matches!(
+            &outcome,
+            AotOutcome::Err(QuoinError::NonLocalReturn)
+        ));
+        debug_assert_eq!(vm.stack.len(), base + 1);
+        if let AotOutcome::Err(QuoinError::NonLocalReturn) = &outcome
+            && let Some(v) = vm.stack.pop()
+        {
+            return AotOutcome::Value(v);
+        }
+    }
     // Window teardown — EXCEPT when a non-local return escaped through this
     // frame: the `^^` unwind already truncated past the window and pushed the
     // delivered value at its target's stack base, which can sit AT `base`
@@ -525,12 +575,16 @@ pub fn invoke_block<'gc>(
     if vm.sched.current_fiber.is_some() {
         return AotOutcome::Bail;
     }
-    let enclosing_env = match block_val {
+    // The invoked closure's lexical parent AND its `^^` home: a closure the
+    // template's cold path materializes belongs to the same home method this
+    // closure does (S5) — including `None` (a homeless block's `^^` errors,
+    // exactly as interpreted).
+    let (enclosing_env, home_id) = match block_val {
         Value::Object(obj) => match &obj.borrow().payload {
-            crate::value::ObjectPayload::Block(b) => b.parent_env,
-            _ => None,
+            crate::value::ObjectPayload::Block(b) => (b.parent_env, b.enclosing_method_id),
+            _ => (None, None),
         },
-        _ => None,
+        _ => (None, None),
     };
     let base = vm.stack.len();
     vm.stack.push(arg); // slot 0: self (vWSOA binds the arg)
@@ -544,6 +598,12 @@ pub fn invoke_block<'gc>(
     }
     vm.aot_pending_error = None;
     let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
+    // S5: only a template that materializes a `^^`-carrying closure
+    // propagates its home — `make_closure`'s `want_home` path is the sole
+    // reader.
+    let saved_home = entry
+        .materializes_nlr
+        .then(|| std::mem::replace(&mut vm.aot_home_frame_id, home_id));
     let fuel_ptr = &raw mut vm.aot_fuel;
     let depth_ptr = &raw mut vm.aot_depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
@@ -562,6 +622,9 @@ pub fn invoke_block<'gc>(
         )
     };
     vm.aot_enclosing_env = saved_env;
+    if let Some(saved_home) = saved_home {
+        vm.aot_home_frame_id = saved_home;
+    }
     let outcome = match tag {
         TAG_OK => AotOutcome::Value(vm.stack[ret as usize]),
         TAG_DIV_ZERO => {

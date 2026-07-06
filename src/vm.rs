@@ -179,6 +179,20 @@ pub struct Frame<'gc> {
     pub unregister_on_defer_failure: Option<NamespacedName>,
 }
 
+/// A live compiled METHOD invocation, addressable as a `^^` target (S5).
+/// Compiled methods push no interpreter [`Frame`]; this is the sliver the
+/// `MethodReturn` unwind needs instead: `frames_len`/`stack_base` snapshot the
+/// interpreter stacks at entry, so the unwind pops outcall frames down to
+/// `frames_len` and delivers the value at `stack_base` (the frame's slot-window
+/// base). `id` is minted from `next_frame_id` — one counter for interpreter
+/// frames and compiled invocations, so a target id is never ambiguous.
+#[derive(Clone, Copy)]
+pub struct AotFrameMark {
+    pub id: usize,
+    pub frames_len: usize,
+    pub stack_base: usize,
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct BuiltinCache<'gc> {
@@ -421,8 +435,30 @@ pub struct VmState<'gc> {
     /// frame (the invoked block/method's own `parent_env`) — the parent a
     /// cold-path `make_closure` snapshot must chain to, so a materialized
     /// closure's free names resolve through the full lexical chain exactly as
-    /// interpreted (B3b). Saved/restored around each compiled invocation.
+    /// interpreted (B3b). Saved/restored around each compiled invocation, and
+    /// per-task like `aot_fuel` (a compiled body can park at a fuel checkpoint
+    /// or outcall; the next task's compiled frames must not see this one's
+    /// lexical context).
     pub aot_enclosing_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+    /// The `^^` home a `make_closure`-materialized closure must carry as its
+    /// `enclosing_method_id` (S5): compiled METHOD invocations mint a frame id
+    /// and put it here; a compiled BLOCK template propagates the invoked
+    /// closure's own home. Saved/restored around each compiled invocation and
+    /// per-task, exactly like `aot_enclosing_env` above.
+    #[collect(require_static)]
+    pub aot_home_frame_id: Option<usize>,
+    /// The live compiled METHOD invocations on this task, addressable as `^^`
+    /// targets (S5): a compiled method has no interpreter `Frame`, so the
+    /// `MethodReturn` unwind finds it here. Pushed/popped by
+    /// `codegen::invoke`; per-task (entries index this task's `frames`/
+    /// `stack`).
+    #[collect(require_static)]
+    pub aot_frame_marks: Vec<AotFrameMark>,
+    /// Set by the `MethodReturn` unwind when the `^^` home is a live compiled
+    /// invocation: the delivered value sits at that frame's window base, and
+    /// the matching `codegen::invoke` consumes both as its ordinary return.
+    #[collect(require_static)]
+    pub aot_nlr_target: Option<usize>,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
@@ -547,6 +583,9 @@ impl<'gc> VmState<'gc> {
             aot_spec_promoted: 0,
             aot_spec_obs_left: crate::codegen::spec::OBSERVE_BUDGET,
             aot_enclosing_env: None,
+            aot_home_frame_id: None,
+            aot_frame_marks: Vec::new(),
+            aot_nlr_target: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
             last_popped_env: None,
@@ -1789,9 +1828,13 @@ impl<'gc> VmState<'gc> {
                 Ok(VmStatus::Running) => {}
                 // A `^`/`^^` unwound frames: below the baseline it belongs to an
                 // enclosing loop; at/above it, the loop head re-evaluates. Counted
-                // as a step, like `run_dispatch`.
+                // as a step, like `run_dispatch`. EXACTLY AT the baseline with
+                // `aot_nlr_target` set, the `^^` came home to a live COMPILED
+                // frame (S5): it owns no interpreter frame of its own to pop, so
+                // "all callee frames gone" is delivery, not completion — only the
+                // owning `codegen::invoke` may stop that unwind.
                 Err(QuoinError::NonLocalReturn) => {
-                    if self.frames.len() < initial_frame_count {
+                    if self.frames.len() < initial_frame_count || self.aot_nlr_target.is_some() {
                         return Err(QuoinError::NonLocalReturn);
                     }
                 }
@@ -4779,9 +4822,31 @@ impl<'gc> VmState<'gc> {
                 let enclosing_id = self.frames[frame_idx].enclosing_method_id;
 
                 return if let Some(target_id) = enclosing_id {
+                    // The home may be a live COMPILED invocation (S5): it has
+                    // no interpreter frame — its mark says where its outcall
+                    // frames and slot window begin. Pop only the frames above
+                    // the mark, deliver the value at the window base, and let
+                    // the AOT error channel unwind the native frames
+                    // (`codegen::invoke` consumes `aot_nlr_target`). A dead
+                    // home matches neither a frame nor a mark (ids are never
+                    // reused) and drains like an interpreted dead home.
+                    let compiled_home = self
+                        .aot_frame_marks
+                        .iter()
+                        .rev()
+                        .find(|m| m.id == target_id)
+                        .copied();
                     let mut ret_val = ret_val;
                     let mut target_stack_base = None;
-                    while let Some(f) = self.frames.pop() {
+                    loop {
+                        if let Some(m) = compiled_home
+                            && self.frames.len() <= m.frames_len
+                        {
+                            target_stack_base = Some(m.stack_base);
+                            self.aot_nlr_target = Some(target_id);
+                            break;
+                        }
+                        let Some(f) = self.frames.pop() else { break };
                         // Same discipline as the `Return` arm: the frame is
                         // consumed completely before `finalize_instantiation`
                         // can park and let a collection invalidate its Gc
