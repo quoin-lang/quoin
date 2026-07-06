@@ -1,6 +1,12 @@
 # Allocation churn: the post-dispatch frontier
 
-*Status: DESIGN + in progress on `perf/alloc-churn`.*
+*Status: A1 + A2a-c SHIPPED on `perf/alloc-churn` (4 commits). Cumulative
+15-run A/B vs main @ `b744e53`: **strings −49% (0.192→0.098s, 1.96×)**,
+**btrees −11.5%**, maps −1.7%, richards +1.2-1.4% (at the edge of its A/A
+band — watch), rest noise. Remaining: A2d (outcall-path arg windows —
+combinators' natives originate from `call_method_cached`, which still
+clones), A2e (single-alloc String payload / collection triple-hop
+collapse), then the A3 reassessment.*
 
 ## 1. Why: the measured shape
 
