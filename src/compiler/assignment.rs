@@ -334,6 +334,13 @@ impl Compiler {
                 ));
             }
             bytecode.push(Instruction::StoreField(name.clone()));
+        } else if let Some(&sym) = self.param_override.get(name) {
+            // A fused-block body (B1 `each:` splicing) rebinding its own
+            // param: the identifier READ path substitutes the loop temp
+            // (compile_identifier); writes must follow the same override or
+            // a legal `|x| x = …` body trips strict-var — and would target
+            // the wrong symbol even when `x` happens to exist outside.
+            bytecode.push(Instruction::StoreLocal(sym));
         } else if self.is_local(name) {
             if self.is_immutable(name) {
                 return Err(format!("cannot reassign `let` binding `{}`", name));

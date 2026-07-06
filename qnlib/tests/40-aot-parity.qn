@@ -235,6 +235,17 @@ CustomEachG <- {
         .is:{ got.at:0 } equalTo:'custom-elem';
     };
 
+    .test:paramReassignmentInFusedBody -> {
+        "* B1 regression (found by `qn check` on the warnings gallery): a body
+        "* reassigning its own param must compile through the splice's
+        "* param override — reads AND writes — not trip strict-var.
+        var l = #( 1 2 3 );
+        var total = 0;
+        l.each:{ |x| x = x + 10; total = total + x };
+        .is:{ total } equalTo:36;
+        .is:{ l.collect:{ |x| x = x * 2; x } } equalTo:#( 2 4 6 );
+    };
+
     .test:nilElementsFlowThroughTheFusedLoop -> {
         var xs = #(1);
         xs.add:nil;
@@ -527,5 +538,51 @@ SpecRedef <- {
         "* keep running the old body
         SpecRedef <-- { .meta <-- { gen: -> { |n| ^100 + n } } };
         .is:{ SpecRedef.gen:10 } equalTo:110;
+    }
+};
+
+"* S3 (SPECULATIVE_AOT_ARCH): compiled field access through the interpreter's
+"* shared (template_id, ip) field-slot caches. Reads of missing fields are
+"* nil, undeclared stores raise the interpreter's exact errors, and a block
+"* template reading @fields sees the vWSOA-bound ELEMENT as self - all
+"* identical to interpreted semantics.
+
+SpecCell <- { | @v @w |
+    init: -> { |v| @v = v; @w = 0 };
+    v -> { ^@v };
+    bumpW -> { @w = @w + 1; ^@w };
+    missing -> { ^@u2 };
+    sum -> { ^@v + @w }
+};
+
+(TestSuite.new:{ var name = 'AotParityFields' }).add:{
+    .test:accessorsCompileAndStayExact -> {
+        var c = SpecCell.new:{ var v = 7 };
+        var i = 0;
+        var total = 0;
+        { i < 20 }.whileDo:{ total = total + c.v + c.bumpW; i = i + 1 };
+        .is:{ total } equalTo:350;
+        .is:{ c.sum } equalTo:27
+    };
+
+    .test:missingFieldReadsNil -> {
+        var c = SpecCell.new:{ var v = 1 };
+        var i = 0;
+        { i < 12 }.whileDo:{ c.missing; i = i + 1 };
+        .is:{ c.missing } equalTo:nil
+    };
+
+    .test:fieldsInsideBlockTemplatesUseElementSelf -> {
+        var cells = #();
+        var i = 0;
+        { i < 3 }.whileDo:{ cells.add:(SpecCell.new:{ var v = i }); i = i + 1 };
+        var k = 0;
+        var total = 0;
+        { k < 15 }.whileDo:{
+            total = 0;
+            cells.each:{ |c| total = total + c.v };
+            k = k + 1
+        };
+        .is:{ total } equalTo:3
     }
 }
