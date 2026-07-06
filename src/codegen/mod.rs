@@ -273,6 +273,7 @@ pub fn invoke<'gc>(
     entry: &'static AotEntry,
     receiver: Value<'gc>,
     args: &[Value<'gc>],
+    enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
 ) -> AotOutcome<'gc> {
     // NO COMPILED FRAMES INSIDE USER FIBERS: an abandoned fiber (a generator
     // dropped mid-iteration by `take:`) is torn down by corosensei's FORCED
@@ -325,6 +326,7 @@ pub fn invoke<'gc>(
         vm.aot_fuel = i64::from(crate::tuning::step_batch());
     }
     vm.aot_pending_error = None;
+    let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
     let fuel_ptr = &raw mut vm.aot_fuel;
     let depth_ptr = &raw mut vm.aot_depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
@@ -341,6 +343,7 @@ pub fn invoke<'gc>(
             &mut ret,
         )
     };
+    vm.aot_enclosing_env = saved_env;
     let outcome = match tag {
         TAG_OK => AotOutcome::Value(match entry.ret {
             AotRet::Scalar(AotKind::Int) => Value::Int(ret),
@@ -379,11 +382,18 @@ pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&
     // Tiering: a once-invoked block would pay Cranelift more than it saves —
     // compile only once a template proves warm. A combinator loop crosses the
     // threshold in its first handful of elements.
-    const WARM: u32 = 8;
+    // Tunable for debugging/tests (`QN_AOT_WARM=1` compiles on first use).
+    static WARM: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let warm = *WARM.get_or_init(|| {
+        std::env::var("QN_AOT_WARM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8)
+    });
     {
         let (count, _) = vm.aot_pending_blocks.get_mut(&template_id)?;
         *count += 1;
-        if *count < WARM {
+        if *count < warm {
             return None;
         }
     }
@@ -417,6 +427,13 @@ pub fn invoke_block<'gc>(
     if vm.sched.current_fiber.is_some() {
         return AotOutcome::Bail;
     }
+    let enclosing_env = match block_val {
+        Value::Object(obj) => match &obj.borrow().payload {
+            crate::value::ObjectPayload::Block(b) => b.parent_env,
+            _ => None,
+        },
+        _ => None,
+    };
     let base = vm.stack.len();
     vm.stack.push(arg); // slot 0: self (vWSOA binds the arg)
     vm.stack.push(arg); // slot 1: the parameter (its own cell)
@@ -428,6 +445,7 @@ pub fn invoke_block<'gc>(
         vm.aot_fuel = i64::from(crate::tuning::step_batch());
     }
     vm.aot_pending_error = None;
+    let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
     let fuel_ptr = &raw mut vm.aot_fuel;
     let depth_ptr = &raw mut vm.aot_depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
@@ -445,6 +463,7 @@ pub fn invoke_block<'gc>(
             &mut ret,
         )
     };
+    vm.aot_enclosing_env = saved_env;
     let outcome = match tag {
         TAG_OK => AotOutcome::Value(vm.stack[ret as usize]),
         TAG_DIV_ZERO => {

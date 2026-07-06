@@ -26,6 +26,10 @@ use crate::symbol::Symbol;
 use crate::value::NamespacedName;
 use crate::value::{ObjectPayload, Value};
 use crate::vm::VmState;
+#[allow(unused_imports)]
+use gc_arena::Gc;
+#[allow(unused_imports)]
+use gc_arena::lock::RefLock;
 
 use super::{TAG_ERR, TAG_OK};
 
@@ -340,6 +344,65 @@ pub(super) unsafe extern "C" fn block_call(
     }
 }
 
+/// Materialize a closure from a compiled frame's cold path (B3b): a fresh
+/// snapshot `EnvFrame` (populated by the `closure_bind` calls the translator
+/// emits right after) + the leaked template + the registry-shared IC cell —
+/// the same shape `block_from_template` builds for interpreted frames.
+/// Read-only-capture and no-`^^` semantics are the translator's gates.
+pub(super) unsafe extern "C" fn make_closure(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tmpl: *const std::rc::Rc<crate::instruction::StaticBlock>,
+    out_idx: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let tmpl = unsafe { &*tmpl };
+    // Chain the snapshot to the invoking frame's enclosing environment, so a
+    // nested materialized closure's free names resolve through the FULL
+    // lexical chain, exactly as interpreted (the webapp `path` lesson).
+    let env = crate::gcl!(mc, crate::value::EnvFrame::new(vm.aot_enclosing_env));
+    let inline_cache = vm.ic_cell_for(mc, tmpl);
+    let v = vm.new_block(
+        mc,
+        crate::value::Block {
+            template: tmpl.clone(),
+            parent_env: Some(env),
+            enclosing_method_id: None,
+            decl_block: None,
+            inline_cache,
+        },
+    );
+    vm.stack[out_idx as usize] = v;
+    TAG_OK
+}
+
+/// Bind one captured value into a `make_closure`-built snapshot env. The
+/// block sits rooted in its slot throughout construction.
+pub(super) unsafe extern "C" fn closure_bind(
+    vm: *mut c_void,
+    mc: *const c_void,
+    block_idx: i64,
+    sym: *const crate::symbol::Symbol,
+    kind: i64,
+    bits: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let sym = unsafe { *sym };
+    let val = decode(vm, kind, bits);
+    let bv = vm.stack[block_idx as usize];
+    let Value::Object(obj) = bv else {
+        return invariant(vm, "closure_bind on a non-block slot");
+    };
+    let ObjectPayload::Block(block) = &obj.borrow().payload else {
+        return invariant(vm, "closure_bind on a non-block slot");
+    };
+    let Some(env) = block.parent_env else {
+        return invariant(vm, "closure_bind: snapshot env missing");
+    };
+    env.borrow_mut(mc).bind(sym, val);
+    TAG_OK
+}
+
 /// `list.at:i put:v` — `devirt_ops::list_set` semantics (IndexError OOB).
 pub(super) unsafe extern "C" fn list_set(
     vm: *mut c_void,
@@ -546,6 +609,8 @@ pub(super) fn symbols() -> Vec<(&'static str, *const u8)> {
         ("qn_aot_env_get", env_get as *const u8),
         ("qn_aot_env_set", env_set as *const u8),
         ("qn_aot_block_call", block_call as *const u8),
+        ("qn_aot_make_closure", make_closure as *const u8),
+        ("qn_aot_closure_bind", closure_bind as *const u8),
         ("qn_aot_list_set", list_set as *const u8),
         ("qn_aot_string_const", string_const as *const u8),
         ("qn_aot_outcall", outcall as *const u8),

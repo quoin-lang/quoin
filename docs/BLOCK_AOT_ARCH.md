@@ -45,9 +45,22 @@ template compilation cost +34ms startup — candidates stash per-VM and
 compile lazily at the 8th invocation; (3) fiber teardown force-unwinds
 CANNOT cross Cranelift frames (process abort) — all compiled entry Bails
 inside user fibers, closing a hazard latent since v0.2 outcalls.
-Remaining for B3b: conditional cold paths that materialize blocks (kills
-`select:`/`count:`/`sum:` compilation — read-only snapshot captures per
-§3). Acceptance: ≥3× on `combinators` for the full arc — 2.52× banked.*
+B3b SHIPPED — cold-path closure MATERIALIZATION: a compiled frame builds
+a real closure over a snapshot of its whole environment, CHAINED to the
+invoking frame's enclosing env (`vm.aot_enclosing_env`) so nested
+closures resolve free names through the full lexical chain — the corpus
+caught the unchained version turning webapp 405s into 500s (a fused
+`SendConst(Block)` slipped past the collector prescan). Gates: no `^^`,
+no guard block; captured READS are snapshot-exact; captured WRITES to
+frame locals read back after the consuming send (`count:`'s
+`{ n = n + 1 }` arm); writes past the frame hit real env cells
+unchanged. Known accepted edge: a closure ESCAPING its consuming send
+sees the snapshot, not later frame writes. `QN_AOT_WARM=1` = the
+maximal-compilation stress mode. The whole `select:`/`reject:`/`uniq`/
+`count:`/`sum:` family now compiles.
+
+**ARC ACCEPTANCE MET: combinators 0.700 → 0.234s cumulative = 2.99×**
+(maps 1.95×, strings 1.63×; every other bench at baseline).*
 
 ## 1. Why: the measured shape of combinator cost
 

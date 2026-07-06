@@ -22,6 +22,7 @@
 //! f64 `%` via an imported helper (Cranelift has no `frem`).
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -33,7 +34,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 
-use crate::instruction::{Constant, Instruction, IntBinKind};
+use crate::instruction::{Constant, Instruction, IntBinKind, StaticBlock};
 use crate::runtime::elem_tag::ElemTag;
 use crate::symbol::{Symbol, self_symbol};
 
@@ -225,6 +226,8 @@ struct Helpers {
     env_get: FuncId,
     env_set: FuncId,
     block_call: FuncId,
+    make_closure: FuncId,
+    closure_bind: FuncId,
 }
 
 fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String> {
@@ -263,6 +266,8 @@ fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String>
     let eg = sig(&[ptr, ptr, i, ptr, i], &[types::I8]);
     let es = sig(&[ptr, ptr, i, ptr, i, i], &[types::I8]);
     let bc = sig(&[ptr, ptr, i, i, i, i, i, i, i, i], &[types::I8]);
+    let mk = sig(&[ptr, ptr, i, i], &[types::I8]);
+    let cb = sig(&[ptr, ptr, i, ptr, i, i], &[types::I8]);
     Ok(Helpers {
         checkpoint: d(module, "qn_aot_checkpoint", &cp)?,
         fmod: d(module, "qn_aot_fmod", &fm)?,
@@ -283,6 +288,8 @@ fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String>
         env_get: d(module, "qn_aot_env_get", &eg)?,
         env_set: d(module, "qn_aot_env_set", &es)?,
         block_call: d(module, "qn_aot_block_call", &bc)?,
+        make_closure: d(module, "qn_aot_make_closure", &mk)?,
+        closure_bind: d(module, "qn_aot_closure_bind", &cb)?,
     })
 }
 
@@ -356,6 +363,8 @@ fn compile_group(
                 sym_consts: Vec::new(),
                 name_consts: Vec::new(),
                 needs_list_self: false,
+                tmpl_consts: Vec::new(),
+                pending_writebacks: HashMap::new(),
             };
             tr.build_inner(&mut b).map_err(|e| fail(tid, e))?;
             n_scratch = tr.next_scratch;
@@ -564,6 +573,14 @@ struct Translator<'a> {
     /// Set when a fused-`each:` guard on `self` compiled hot-path-only (B2):
     /// becomes the entry's `needs_list_self` precondition.
     needs_list_self: bool,
+    /// Leaked template `Rc`s for cold-path closure materialization (B3b) —
+    /// process-lifetime, like the code and the leaked selectors.
+    tmpl_consts: Vec<&'static Rc<StaticBlock>>,
+    /// Frame locals a materialized closure WRITES (through its snapshot env),
+    /// keyed by the closure's slot-index SSA value: after the consuming send
+    /// returns, each is read back from the snapshot into the frame local, so
+    /// `count:`-style `{ n = n + 1 }` cold arms stay exact (B3b).
+    pending_writebacks: HashMap<CVal, Vec<(Symbol, VarSlot)>>,
 }
 
 struct FnCtx {
@@ -823,7 +840,7 @@ impl<'a> Translator<'a> {
                 }
                 match &insts[ip] {
                     Instruction::Push(c) => {
-                        let av = self.const_av(b, &fx, c, ip)?;
+                        let av = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
                         stack.push(av);
                     }
                     Instruction::LoadLocal(sym) => {
@@ -1256,7 +1273,7 @@ impl<'a> Translator<'a> {
                                 stack.push(v);
                             }
                             Instruction::SendConst(c, ..) => {
-                                let v = self.const_av(b, &fx, c, ip)?;
+                                let v = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
                             }
                             Instruction::SendLocalLocal(a, bb, ..) => {
@@ -1268,7 +1285,7 @@ impl<'a> Translator<'a> {
                             Instruction::SendLocalConst(a, c, ..) => {
                                 let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
                                 stack.push(v);
-                                let v = self.const_av(b, &fx, c, ip)?;
+                                let v = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
                             }
                             _ => {}
@@ -1285,6 +1302,7 @@ impl<'a> Translator<'a> {
                         } else {
                             self.emit_send(b, &fx, recv, sel, &args, ip)?
                         };
+                        self.flush_writebacks(b, &fx, &args)?;
                         stack.push(out);
                     }
                     // Within one method's bytecode, `MethodReturn` (`^^`) always
@@ -1421,10 +1439,162 @@ impl<'a> Translator<'a> {
         Ok(AV::Dyn(out_idx))
     }
 
+    /// B3b: materialize a closure at a compiled cold-path `Push(Block)` site.
+    /// The snapshot env carries EVERY frame binding (scalars, slots, obj
+    /// params, `self`) — exactly the visibility the interpreter's live env
+    /// chain would give — and the gates guarantee the block only READS its
+    /// captures (a captured-var write would mutate the snapshot, invisible to
+    /// the compiled frame). Known accepted edge (documented): a closure that
+    /// ESCAPES its consuming send (a custom `if:` storing it) sees the
+    /// snapshot, not later frame writes.
+    fn materialize_closure(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        vars: &HashMap<Symbol, VarSlot>,
+        obj_params: &HashMap<Symbol, CVal>,
+        rc: &Rc<StaticBlock>,
+        ip: usize,
+    ) -> Result<AV, String> {
+        // Gates: scan the template's bytecode once.
+        if rc.decl_block.is_some() {
+            return Err(format!("guarded block materialization at ip {ip}"));
+        }
+        let mut defined: HashSet<Symbol> = rc.param_syms.iter().copied().collect();
+        let mut written_frees: Vec<Symbol> = Vec::new();
+        for inst in rc.bytecode.0.iter() {
+            if let Instruction::DefineLocal(s) | Instruction::DefineLocalKeep(s) = inst {
+                defined.insert(*s);
+            }
+        }
+        for inst in rc.bytecode.0.iter() {
+            match inst {
+                Instruction::MethodReturn => {
+                    return Err(format!(
+                        "materialized block with a non-local return (^^) at ip {ip}"
+                    ));
+                }
+                Instruction::Push(Constant::Block(_))
+                | Instruction::SendConst(Constant::Block(_), ..)
+                | Instruction::SendLocalConst(_, Constant::Block(_), ..) => {
+                    return Err(format!("nested literal in a materialized block at ip {ip}"));
+                }
+                Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s) => {
+                    if !defined.contains(s) {
+                        written_frees.push(*s);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // A write to a FRAME local mutates the snapshot — read back after the
+        // consuming send. A write that resolves DEEPER than this frame walks
+        // past the snapshot into the real env cells (exact as-is). A write to
+        // a param/self has no writable home — refuse.
+        let mut writebacks: Vec<(Symbol, VarSlot)> = Vec::new();
+        for s in written_frees {
+            if let Some(&slot) = vars.get(&s) {
+                writebacks.push((s, slot));
+            } else if obj_params.contains_key(&s) || s == self_symbol() {
+                return Err(format!(
+                    "materialized block writes parameter/self '{}' at ip {ip}",
+                    s.as_str()
+                ));
+            }
+        }
+        // Build the closure in a scratch slot (rooted throughout), then bind
+        // the whole frame environment into its snapshot env.
+        let tmpl: &'static Rc<StaticBlock> = Box::leak(Box::new(rc.clone()));
+        self.tmpl_consts.push(tmpl);
+        let tmpl_ptr = b
+            .ins()
+            .iconst(types::I64, tmpl as *const Rc<StaticBlock> as i64);
+        let out = self.alloc_scratch()?;
+        let out_idx = self.abs_slot(b, fx, out);
+        let f = self.func_ref(b, self.helpers.make_closure);
+        let call = b.ins().call(f, &[fx.vm, fx.mc, tmpl_ptr, out_idx]);
+        let tag = b.inst_results(call)[0];
+        self.tag_check(b, fx, tag);
+        let mut bind = |tr: &mut Self, b: &mut FunctionBuilder, sym: Symbol, v: AV| {
+            let leaked: &'static Symbol = Box::leak(Box::new(sym));
+            tr.sym_consts.push(leaked);
+            let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
+            let (k, bits) = tr.encode(b, fx, v);
+            let f = tr.func_ref(b, tr.helpers.closure_bind);
+            let call = b.ins().call(f, &[fx.vm, fx.mc, out_idx, sym_ptr, k, bits]);
+            let tag = b.inst_results(call)[0];
+            tr.tag_check(b, fx, tag);
+        };
+        bind(self, b, self_symbol(), AV::SelfRef);
+        for (&sym, &cv) in obj_params.iter() {
+            bind(self, b, sym, AV::Dyn(cv));
+        }
+        let entries: Vec<(Symbol, VarSlot)> = vars.iter().map(|(&s, &v)| (s, v)).collect();
+        for (sym, slot) in entries {
+            let av = match slot {
+                VarSlot::Scalar(var, k) => AV::C(b.use_var(var), k),
+                VarSlot::Obj(w, _) => {
+                    let idx = self.abs_slot(b, fx, w);
+                    AV::Dyn(idx)
+                }
+            };
+            bind(self, b, sym, av);
+        }
+        if !writebacks.is_empty() {
+            self.pending_writebacks.insert(out_idx, writebacks);
+        }
+        Ok(AV::Dyn(out_idx))
+    }
+
+    /// Flush a consumed closure's captured-write read-backs (B3b): each
+    /// written frame local is read from the snapshot env and stored back into
+    /// its SSA/slot home. Called right after the consuming send returns.
+    fn flush_writebacks(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        consumed: &[AV],
+    ) -> Result<(), String> {
+        for v in consumed {
+            let AV::Dyn(idx) = v else { continue };
+            let Some(wbs) = self.pending_writebacks.remove(idx) else {
+                continue;
+            };
+            for (sym, slot) in wbs {
+                let leaked: &'static Symbol = Box::leak(Box::new(sym));
+                self.sym_consts.push(leaked);
+                let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
+                let tmp = self.alloc_scratch()?;
+                let tmp_idx = self.abs_slot(b, fx, tmp);
+                let f = self.func_ref(b, self.helpers.env_get);
+                let call = b.ins().call(f, &[fx.vm, fx.mc, *idx, sym_ptr, tmp_idx]);
+                let tag = b.inst_results(call)[0];
+                self.tag_check(b, fx, tag);
+                match slot {
+                    VarSlot::Scalar(var, k) => {
+                        let val = self.narrow_to_scalar(b, fx, tmp_idx, k);
+                        b.def_var(var, val);
+                    }
+                    VarSlot::Obj(w, _) => {
+                        let dst = self.abs_slot(b, fx, w);
+                        let kind = b.ins().iconst(types::I64, KIND_SLOT);
+                        let f = self.func_ref(b, self.helpers.slot_set);
+                        let call = b.ins().call(f, &[fx.vm, fx.mc, dst, kind, tmp_idx]);
+                        let tag = b.inst_results(call)[0];
+                        self.tag_check(b, fx, tag);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn const_av(
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
+        vars: &HashMap<Symbol, VarSlot>,
+        obj_params: &HashMap<Symbol, CVal>,
         c: &Constant,
         ip: usize,
     ) -> Result<AV, String> {
@@ -1446,12 +1616,13 @@ impl<'a> Translator<'a> {
                 self.tag_check(b, fx, tag);
                 AV::Dyn(out_idx)
             }
-            Constant::Block(_) => {
-                return Err(format!(
-                    "capturing block materialization at ip {ip} (an inlined-if cold \
-                     path or a block argument) — not compilable until checked \
-                     generics remove the dynamic branch (AOT_ARCH.md §9)"
-                ));
+            Constant::Block(rc) => {
+                // B3b: materialize a real closure over a SNAPSHOT of the whole
+                // frame environment (docs/BLOCK_AOT_ARCH.md §3). Gated to
+                // read-only captures, no `^^`, no nested literals, no guard
+                // block — anything else still refuses.
+                let rc = rc.clone();
+                return self.materialize_closure(b, fx, vars, obj_params, &rc, ip);
             }
             _ => return Err(format!("unsupported constant at ip {ip}")),
         })
@@ -1806,12 +1977,26 @@ impl<'a> Translator<'a> {
     /// boundary as jump arguments (a statement-position inlined `if:` joins an
     /// arm value with the nil of the not-taken path). Scalars and slot values
     /// pass through untouched.
+    fn assert_no_pending_writebacks(&self, stack: &[AV], where_: &str) -> Result<(), String> {
+        for v in stack {
+            if let AV::Dyn(idx) = v
+                && self.pending_writebacks.contains_key(idx)
+            {
+                return Err(format!(
+                    "write-captured closure crosses a block boundary ({where_})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn norm_stack(
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
         stack: &[AV],
     ) -> Result<Vec<AV>, String> {
+        self.assert_no_pending_writebacks(stack, "norm_stack")?;
         let mut out = Vec::with_capacity(stack.len());
         for v in stack {
             match v {

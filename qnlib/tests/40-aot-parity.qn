@@ -331,4 +331,46 @@ CustomEachG <- {
         var caught = { #(1).collect:{ |x| Math.ln:0 } }.catch:{ |e| 'caught' };
         .is:{ caught } equalTo:'caught';
     }
+};
+
+"* B3b: cold-path closure materialization. A compiled frame can materialize a
+"* real closure (read-only captures, no ^^) over a SNAPSHOT env chained to the
+"* invoking frame's enclosing environment - so nested closures resolve free
+"* names through the FULL lexical chain (the webapp `path` lesson: a template
+"* whose nested literal reads a name from two frames up).
+
+NestedCaptureG <- {
+    .meta <-- {
+        "* mirrors Route#allowFor:'s shape: outer block over a Map, inner block
+        "* reading the METHOD param through both closure layers
+        tally:in: -> { |needle table|
+            var hits = 0;
+            table.each:{ |kv| (kv.value.any?:{ |entry| entry == needle }).if:{ hits = hits + 1 } };
+            ^hits
+        }
+    }
+};
+
+(TestSuite.new:{ var name = 'AotParityColdBlocks' }).add:{
+    .test:nestedClosuresResolveThroughTheFullChain -> {
+        var t = #{};
+        t.at:'a' put:#( 1 2 );
+        t.at:'b' put:#( 2 3 );
+        t.at:'c' put:#( 9 );
+        .is:{ NestedCaptureG.tally:2 in:t } equalTo:2;
+        .is:{ NestedCaptureG.tally:9 in:t } equalTo:1;
+        .is:{ NestedCaptureG.tally:0 in:t } equalTo:0
+    };
+
+    .test:selectFamilyStaysExact -> {
+        var xs: List(Integer) = #( 5 1 4 2 3 );
+        .is:{ (xs.select:{ |x| x > 2 }).count } equalTo:3;
+        .is:{ (xs.reject:{ |x| x > 2 }).count } equalTo:2;
+        .is:{ xs.uniq.count } equalTo:5;
+        .is:{ xs.sort.at:0 } equalTo:1;
+        var thrown = { xs.select:{ |x| (x == 4).if:{ ValueError.throw:'mid' }; true } }.catch:{ |e|
+            e.class.name
+        };
+        .is:{ thrown } equalTo:'ValueError'
+    }
 }

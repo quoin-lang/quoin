@@ -392,6 +392,12 @@ pub struct VmState<'gc> {
     pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, crate::codegen::AotCandidate)>,
     #[collect(require_static)]
     pub aot_refused_blocks: rustc_hash::FxHashSet<u32>,
+    /// The ENCLOSING lexical environment of the currently-executing compiled
+    /// frame (the invoked block/method's own `parent_env`) — the parent a
+    /// cold-path `make_closure` snapshot must chain to, so a materialized
+    /// closure's free names resolve through the full lexical chain exactly as
+    /// interpreted (B3b). Saved/restored around each compiled invocation.
+    pub aot_enclosing_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
@@ -511,6 +517,7 @@ impl<'gc> VmState<'gc> {
             aot_pending_error: None,
             aot_pending_blocks: rustc_hash::FxHashMap::default(),
             aot_refused_blocks: rustc_hash::FxHashSet::default(),
+            aot_enclosing_env: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
             last_popped_env: None,
@@ -3102,7 +3109,7 @@ impl<'gc> VmState<'gc> {
     /// per-template cell from `ic_registry` when the template has an id (so every
     /// closure of one literal warms the same call sites), or a fresh private cell
     /// for id-less runtime-built blocks.
-    fn ic_cell_for(
+    pub(crate) fn ic_cell_for(
         &mut self,
         mc: &Mutation<'gc>,
         template: &Rc<StaticBlock>,
