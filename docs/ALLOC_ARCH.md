@@ -1,12 +1,16 @@
 # Allocation churn: the post-dispatch frontier
 
-*Status: A1 + A2a-c SHIPPED on `perf/alloc-churn` (4 commits). Cumulative
-15-run A/B vs main @ `b744e53`: **strings −49% (0.192→0.098s, 1.96×)**,
-**btrees −11.5%**, maps −1.7%, richards +1.2-1.4% (at the edge of its A/A
-band — watch), rest noise. Remaining: A2d (outcall-path arg windows —
-combinators' natives originate from `call_method_cached`, which still
-clones), A2e (single-alloc String payload / collection triple-hop
-collapse), then the A3 reassessment.*
+*Status: A1 + A2a-d SHIPPED on `perf/alloc-churn`. Cumulative 15-run A/B
+vs main @ `b744e53` below. A2e (single-alloc String payload / collection
+triple-hop collapse) is ASSESSED AND DEFERRED with rationale (§3-A2e):
+inlining the String grows EVERY Object by the enum max-variant (~16B —
+the inline-fields cancellation effect, and btrees is the workload it
+punishes), and it breaks the copy-a-cheap-Gc-handle-out-of-the-borrow
+discipline `recv!`/`arg!` and every string native rely on — either
+guard-holding across ops (the borrow-across-yield hazard class) or a
+clone per access. Needs its own prototype + A/B, not a rider. Next: the
+A3 reassessment (escape-analysis stack envs vs btrees' sibling-closure
+compile coverage) against fresh profiles.*
 
 ## 1. Why: the measured shape
 
