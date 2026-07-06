@@ -214,6 +214,11 @@ pub struct AotEntry {
     /// `invoke` Bails otherwise.
     pub direct_self: bool,
     pub compile_epoch: u64,
+    /// The body MATERIALIZES closures (B3b `make_closure` sites). Only such a
+    /// frame can ever be a `^^` target — the compiled home id travels solely
+    /// inside closures it materializes — so `invoke` skips the S5 frame-mark
+    /// and home-id bookkeeping entirely when this is false (the hot majority).
+    pub materializes: bool,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -424,19 +429,25 @@ pub fn invoke<'gc>(
     }
     vm.aot_pending_error = None;
     let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
-    // S5: this invocation is a `^^` target. Mint a frame id from the shared
-    // counter (so it can never collide with an interpreter frame's), publish
-    // it as the home for closures this frame materializes, and mark where the
-    // frame's outcall frames and slot window begin — the `MethodReturn`
-    // unwind stops there when a `^^` comes home to a compiled frame.
-    let frame_id = vm.next_frame_id;
-    vm.next_frame_id += 1;
-    let saved_home = std::mem::replace(&mut vm.aot_home_frame_id, Some(frame_id));
-    vm.aot_frame_marks.push(crate::vm::AotFrameMark {
-        id: frame_id,
-        frames_len: vm.frames.len(),
-        stack_base: base,
-    });
+    // S5: a frame that materializes closures is a potential `^^` target (the
+    // compiled home id travels only inside closures it materializes). Mint a
+    // frame id from the shared counter (so it can never collide with an
+    // interpreter frame's), publish it as the home for those closures, and
+    // mark where the frame's outcall frames and slot window begin — the
+    // `MethodReturn` unwind stops there when a `^^` comes home. Frames that
+    // materialize nothing skip all of it.
+    let nlr_mark = if entry.materializes {
+        let id = vm.next_frame_id;
+        vm.next_frame_id += 1;
+        vm.aot_frame_marks.push(crate::vm::AotFrameMark {
+            id,
+            frames_len: vm.frames.len(),
+            stack_base: base,
+        });
+        Some((id, std::mem::replace(&mut vm.aot_home_frame_id, Some(id))))
+    } else {
+        None
+    };
     let fuel_ptr = &raw mut vm.aot_fuel;
     let depth_ptr = &raw mut vm.aot_depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
@@ -454,8 +465,10 @@ pub fn invoke<'gc>(
         )
     };
     vm.aot_enclosing_env = saved_env;
-    vm.aot_home_frame_id = saved_home;
-    vm.aot_frame_marks.pop();
+    if let Some((_, saved_home)) = nlr_mark {
+        vm.aot_home_frame_id = saved_home;
+        vm.aot_frame_marks.pop();
+    }
     let outcome = match tag {
         TAG_OK => AotOutcome::Value(match entry.ret {
             AotRet::Scalar(AotKind::Int) => Value::Int(ret),
@@ -482,7 +495,9 @@ pub fn invoke<'gc>(
     // pushed the delivered value there — consume it as this method's ordinary
     // return value (to the caller, `^^v` from a cold arm IS the method
     // returning `v`).
-    if vm.aot_nlr_target == Some(frame_id) {
+    if let Some((frame_id, _)) = nlr_mark
+        && vm.aot_nlr_target == Some(frame_id)
+    {
         vm.aot_nlr_target = None;
         debug_assert!(matches!(
             &outcome,
@@ -581,7 +596,11 @@ pub fn invoke_block<'gc>(
     }
     vm.aot_pending_error = None;
     let saved_env = std::mem::replace(&mut vm.aot_enclosing_env, enclosing_env);
-    let saved_home = std::mem::replace(&mut vm.aot_home_frame_id, home_id);
+    // S5: only a template that materializes closures propagates its home —
+    // `make_closure` is the sole reader.
+    let saved_home = entry
+        .materializes
+        .then(|| std::mem::replace(&mut vm.aot_home_frame_id, home_id));
     let fuel_ptr = &raw mut vm.aot_fuel;
     let depth_ptr = &raw mut vm.aot_depth;
     let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
@@ -600,7 +619,9 @@ pub fn invoke_block<'gc>(
         )
     };
     vm.aot_enclosing_env = saved_env;
-    vm.aot_home_frame_id = saved_home;
+    if let Some(saved_home) = saved_home {
+        vm.aot_home_frame_id = saved_home;
+    }
     let outcome = match tag {
         TAG_OK => AotOutcome::Value(vm.stack[ret as usize]),
         TAG_DIV_ZERO => {

@@ -436,7 +436,7 @@ fn compile_group(
     }
 
     let mut fb_ctx = FunctionBuilderContext::new();
-    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool, bool)> = Vec::new();
+    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool, bool, bool)> = Vec::new();
 
     for m in members {
         let tid = m.block.template_id.unwrap();
@@ -458,6 +458,7 @@ fn compile_group(
         let n_scratch;
         let needs_list_self;
         let direct_self;
+        let materializes;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
             static EMPTY_MERGES: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
@@ -491,6 +492,7 @@ fn compile_group(
             n_scratch = tr.next_scratch;
             needs_list_self = tr.needs_list_self;
             direct_self = tr.used_direct_self;
+            materializes = !tr.materialized.is_empty();
             b.seal_all_blocks();
             b.finalize();
         }
@@ -520,14 +522,22 @@ fn compile_group(
         module
             .define_function(tramp_id, &mut tctx)
             .map_err(|e| fail(tid, e.to_string()))?;
-        tramp_ids.push((tid, tramp_id, m, n_scratch, needs_list_self, direct_self));
+        tramp_ids.push((
+            tid,
+            tramp_id,
+            m,
+            n_scratch,
+            needs_list_self,
+            direct_self,
+            materializes,
+        ));
     }
 
     module
         .finalize_definitions()
         .map_err(|e| fail(any_tid, e.to_string()))?;
     let mut out = Vec::new();
-    for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self) in tramp_ids {
+    for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self, materializes) in tramp_ids {
         let addr = module.get_finalized_function(tramp_id);
         let raw: AotRawFn = unsafe { std::mem::transmute(addr) };
         out.push((
@@ -544,6 +554,7 @@ fn compile_group(
                 spec_bails: std::sync::atomic::AtomicU32::new(0),
                 direct_self,
                 compile_epoch: super::redef_epoch(),
+                materializes,
             },
         ));
     }
@@ -1819,6 +1830,50 @@ impl<'a> Translator<'a> {
                     }
                 }
                 _ => {}
+            }
+        }
+        // PROFITABILITY (S5a, empirical): a `^^` cold arm pays a snapshot
+        // materialization (fresh EnvFrame + a bind per frame binding) each
+        // time its site executes, so it is only worth compiling where it
+        // runs AT MOST ONCE per invocation. Two shapes make it per-ITERATION
+        // and pessimize the whole method — found by A/B: qnlib's `whileDo:`
+        // trampoline made sieve 5.8x slower, `any?:` cost combinators 60%:
+        // - the site sits inside a fused-loop span (a backward jump crosses
+        //   it): one arm snapshot per element;
+        // - the arm re-sends the candidate's OWN selector (the
+        //   `^^s.whileDo:block` tail-recursive trampoline): one recursive
+        //   call — and one snapshot — per iteration.
+        // Straight-line early exits (richards' task bodies) pass both.
+        if has_nlr {
+            let insts = &self.cand.block.bytecode.0;
+            let in_loop = insts.iter().enumerate().any(|(j, inst)| match inst {
+                Instruction::Jump(o) | Instruction::IfJump(o) | Instruction::ElseJump(o) => {
+                    *o < 0 && {
+                        let target = (j as isize + *o) as usize;
+                        target <= ip && ip <= j
+                    }
+                }
+                _ => false,
+            });
+            if in_loop {
+                return Err(format!(
+                    "per-iteration ^^ materialization (fused loop) at ip {ip}"
+                ));
+            }
+            let own = self.cand.selector.as_str();
+            let recursive = rc.bytecode.0.iter().any(|inst| match inst {
+                Instruction::Send(s, _)
+                | Instruction::SendLocal(_, s, _)
+                | Instruction::SendConst(_, s, _)
+                | Instruction::SendField(_, s, _)
+                | Instruction::SendLocalLocal(_, _, s, _)
+                | Instruction::SendLocalConst(_, _, s, _) => s.as_str() == own,
+                _ => false,
+            });
+            if recursive {
+                return Err(format!(
+                    "per-iteration ^^ materialization (recursive trampoline) at ip {ip}"
+                ));
             }
         }
         // A write to a FRAME local mutates the snapshot — read back after the
