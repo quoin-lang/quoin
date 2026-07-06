@@ -421,7 +421,10 @@ pub struct VmState<'gc> {
     /// frame (the invoked block/method's own `parent_env`) — the parent a
     /// cold-path `make_closure` snapshot must chain to, so a materialized
     /// closure's free names resolve through the full lexical chain exactly as
-    /// interpreted (B3b). Saved/restored around each compiled invocation.
+    /// interpreted (B3b). Saved/restored around each compiled invocation, and
+    /// per-task like `aot_fuel` (a compiled body can park at a fuel checkpoint
+    /// or outcall; the next task's compiled frames must not see this one's
+    /// lexical context).
     pub aot_enclosing_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,

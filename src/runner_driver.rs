@@ -256,6 +256,7 @@ pub(crate) fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
         native_reentry_depth: 0,
         aot_fuel: 0,
         aot_depth: 0,
+        aot_enclosing_env: None,
     })];
     vm.sched.current_task = TaskId(0);
 }
