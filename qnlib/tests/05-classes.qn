@@ -177,4 +177,26 @@
         "* ...and the rebuilt instantiation plan runs the mixin's init.
         .is:{ TSCNC_LateHost.new.stamped } equalTo:99;
     };
+
+    .test:
+    configAssignmentsBindLocally -> {
+        "* A `new:{...}` config block's assignments are the field-binding
+        "* DSL: they bind INTO THE BLOCK'S OWN frame, never the enclosing
+        "* one — statically, however the block is invoked (E). The enclosing
+        "* binding is readable on the RHS and untouched by the LHS.
+        var probe = 5;
+        TSCNC_CfgProbe <- { |@probe| v -> { ^@probe } };
+        var made = TSCNC_CfgProbe.new:{ probe = probe * 10 };
+        .is:{ made.v } equalTo:50;
+        .is:{ probe } equalTo:5;
+        "* A user-defined `new:` that runs the config block as a plain
+        "* closure gets the SAME local-binding semantics (previously the
+        "* write chain-walked into the enclosing frame — caller-dependent).
+        TSCNC_EvilNew <- {
+            .meta <-- { new: -> { |blk| blk.value; ^'evil' } }
+        };
+        var item = 7;
+        .is:{ TSCNC_EvilNew.new:{ item = 42 } } equalTo:'evil';
+        .is:{ item } equalTo:7;
+    };
 }

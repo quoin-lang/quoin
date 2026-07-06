@@ -94,6 +94,15 @@ pub struct StaticBlock {
     /// interpolation, runner entry) — keeps a private per-closure cache, since a
     /// per-evaluation compile would otherwise grow the registry without bound.
     pub template_id: Option<u32>,
+    /// A `new:{...}` CONFIG-BLOCK literal. Its assignments are the
+    /// field-binding DSL: they always BIND INTO THE BLOCK'S OWN frame — the
+    /// syntax only compiles in `new:`-argument position, and as of (E) the
+    /// semantics are STATIC (caller-independent): `store_set_local` honors
+    /// this flag even when a user-defined `new:` invokes the block as a
+    /// plain closure (previously such an invocation chain-walked the write —
+    /// a caller-dependent corner nothing could reason about, including the
+    /// AOT materialization gates).
+    pub is_init_literal: bool,
     /// Speculative-AOT observation state (spec::NOT_SPECULATIVE/OBSERVING/
     /// RESOLVED, docs/SPECULATIVE_AOT_ARCH.md S0). Lives HERE so the
     /// method-entry gate is one byte off a template line that entry binding
@@ -117,6 +126,7 @@ impl PartialEq for StaticBlock {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.is_nested_block == other.is_nested_block
+            && self.is_init_literal == other.is_init_literal
             && self.param_syms == other.param_syms
             && self.param_types == other.param_types
             && self.bytecode == other.bytecode

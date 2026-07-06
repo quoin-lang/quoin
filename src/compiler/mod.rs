@@ -802,6 +802,11 @@ impl Compiler {
             || rc.param_syms.len() > 1
             || rc.decl_block.is_some()
             || rc.name.is_some()
+            // A config literal's stores bind into its own frame (E); the
+            // template translator's free-variable write path (env_set) would
+            // chain-write instead. Configs are never invoked through the
+            // vWSOA seam anyway — this is the defensive mirror.
+            || rc.is_init_literal
         {
             return;
         }
@@ -2186,6 +2191,7 @@ impl Compiler {
             spec_state: Default::default(),
             name: None,
             is_nested_block: false,
+            is_init_literal: false,
             param_syms: Vec::new(),
             param_types: Vec::new(),
             param_elem_tags: Vec::new(),
@@ -3068,6 +3074,7 @@ impl Compiler {
             spec_state: Default::default(),
             name: block_name,
             is_nested_block: true,
+            is_init_literal: is_init,
             param_syms: crate::value::intern_param_syms(&param_names),
             param_types,
             param_elem_tags,

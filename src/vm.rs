@@ -4188,7 +4188,13 @@ impl<'gc> VmState<'gc> {
             return Err(QuoinError::Other(err_msg));
         }
         let frame = &mut self.frames[frame_idx];
-        if frame.instantiating_obj.is_some() {
+        // Init-form binding is STATIC (E): a `new:{...}` config literal's
+        // assignments bind into its own frame however it is invoked — the
+        // frame flag covers real instantiation, the template flag covers a
+        // user-defined `new:` running the block as a plain closure
+        // (previously that chain-walked the write: caller-dependent
+        // semantics nothing could reason about, the AOT gates included).
+        if frame.instantiating_obj.is_some() || frame.block.template.is_init_literal {
             frame.env.borrow_mut(mc).bind(name, val);
         } else if !EnvFrame::set(frame.env, mc, name, val) {
             frame.env.borrow_mut(mc).bind(name, val);
