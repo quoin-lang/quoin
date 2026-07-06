@@ -1,38 +1,38 @@
 warning: GC value held and used across a fiber yield point
-  --> $DIR/main.rs:15:13
+  --> $DIR/main.rs:21:13
    |
 LL |     let _ = local_val; // Use local_val after suspend!
    |             ^^^^^^^^^
    |
 help: The variable of type `Value<'_>` is held across a yield point. Consider flushing it or moving its use.
-  --> $DIR/main.rs:13:9
+  --> $DIR/main.rs:19:9
    |
-LL |     let local_val = val;
+LL |     let local_val = fresh_value();
    |         ^^^^^^^^^
    = note: `#[warn(no_gc_across_yield)]` on by default
 
 warning: GC value held and used across a fiber yield point
-  --> $DIR/main.rs:54:13
+  --> $DIR/main.rs:89:13
    |
 LL |     let _ = popped.id; // popped's Gc fields may be dangling here
    |             ^^^^^^
    |
 help: The variable of type `Frame<'_>` is held across a yield point. Consider flushing it or moving its use.
-  --> $DIR/main.rs:52:9
+  --> $DIR/main.rs:87:9
    |
-LL |     let popped = f;
+LL |     let popped = pop_frame();
    |         ^^^^^^
 
 warning: GC value held and used across a fiber yield point
-  --> $DIR/main.rs:62:13
+  --> $DIR/main.rs:97:13
    |
 LL |     let _ = local_vals.len();
    |             ^^^^^^^^^^
    |
 help: The variable of type `std::vec::Vec<Value<'_>>` is held across a yield point. Consider flushing it or moving its use.
-  --> $DIR/main.rs:60:9
+  --> $DIR/main.rs:95:9
    |
-LL |     let local_vals = vals;
+LL |     let local_vals = vec![fresh_value()];
    |         ^^^^^^^^^^
 
 warning: 3 warnings emitted

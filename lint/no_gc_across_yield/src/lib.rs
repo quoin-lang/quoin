@@ -75,9 +75,35 @@ struct GcYieldVisitor<'tcx, 'sym> {
     /// value rather than using it, so `ret_val = self.pop()?` right after a
     /// yield must not count as holding `ret_val` across it.
     assign_lhs: HashSet<rustc_hir::HirId>,
+    /// The function's parameter binding ids: locals initialized from a bare
+    /// param path (`let c = receiver;`, `if let Value::Class(c) = receiver`)
+    /// are the caller's rooted value under another name and inherit the
+    /// param exemption.
+    param_ids: HashSet<rustc_hir::HirId>,
 }
 
 impl<'tcx, 'sym> GcYieldVisitor<'tcx, 'sym> {
+    /// Is `expr` a bare path to one of this function's parameters?
+    fn is_param_path(&self, expr: &rustc_hir::Expr<'_>) -> bool {
+        if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = &expr.kind
+            && let rustc_hir::def::Res::Local(hir_id) = path.res
+        {
+            return self.param_ids.contains(&hir_id);
+        }
+        false
+    }
+
+    /// Register `pat`'s bindings as exempt (never GC-flagged) — used for
+    /// patterns destructuring a parameter.
+    fn exempt_pat_bindings(&mut self, pat: &'tcx rustc_hir::Pat<'tcx>) {
+        pat.walk(|p| {
+            if let rustc_hir::PatKind::Binding(_, hir_id, _, _) = p.kind {
+                self.registered_locals.insert(hir_id);
+            }
+            true
+        });
+    }
+
     fn register_pat_bindings(
         &mut self,
         pat: &'tcx rustc_hir::Pat<'tcx>,
@@ -113,6 +139,11 @@ impl<'tcx, 'sym> GcYieldVisitor<'tcx, 'sym> {
 
 impl<'tcx, 'sym> rustc_hir::intravisit::Visitor<'tcx> for GcYieldVisitor<'tcx, 'sym> {
     fn visit_local(&mut self, local: &'tcx rustc_hir::LetStmt<'tcx>) {
+        if let Some(init) = local.init
+            && self.is_param_path(init)
+        {
+            self.exempt_pat_bindings(local.pat);
+        }
         let init_span = local.init.map(|i| i.span);
         self.register_pat_bindings(local.pat, init_span);
         rustc_hir::intravisit::walk_local(self, local);
@@ -125,6 +156,27 @@ impl<'tcx, 'sym> rustc_hir::intravisit::Visitor<'tcx> for GcYieldVisitor<'tcx, '
 
     fn visit_expr(&mut self, expr: &'tcx rustc_hir::Expr<'tcx>) {
         match expr.kind {
+            // `if let PAT = SCRUT` / `while let` / `let-else`: the bindings
+            // are BORN FROM the scrutinee — a yield inside it must not flag
+            // them (same rule as a LetStmt initializer), and destructuring a
+            // parameter inherits the param exemption.
+            rustc_hir::ExprKind::Let(let_expr) => {
+                if self.is_param_path(let_expr.init) {
+                    self.exempt_pat_bindings(let_expr.pat);
+                }
+                self.register_pat_bindings(let_expr.pat, Some(let_expr.init.span));
+            }
+            // `match SCRUT { PAT => … }`: same — arm bindings are born from
+            // the scrutinee.
+            rustc_hir::ExprKind::Match(scrut, arms, _) => {
+                let from_param = self.is_param_path(scrut);
+                for arm in arms {
+                    if from_param {
+                        self.exempt_pat_bindings(arm.pat);
+                    }
+                    self.register_pat_bindings(arm.pat, Some(scrut.span));
+                }
+            }
             rustc_hir::ExprKind::Assign(lhs, _, _) => {
                 if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = &lhs.kind {
                     if let rustc_hir::def::Res::Local(hir_id) = path.res {
@@ -226,7 +278,16 @@ impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
             writes: Vec::new(),
             calls: Vec::new(),
             assign_lhs: HashSet::new(),
+            param_ids: HashSet::new(),
         };
+        for param in body.params {
+            param.pat.walk(|p| {
+                if let rustc_hir::PatKind::Binding(_, hir_id, _, _) = p.kind {
+                    visitor.param_ids.insert(hir_id);
+                }
+                true
+            });
+        }
 
         // Parameters are NOT registered (see the lint docs): their rooting is the
         // caller's contract — the hold is flagged where the value was created, and the
@@ -327,6 +388,21 @@ impl<'tcx> LateLintPass<'tcx> for NoGcAcrossYield {
                             // `ret_val = self.pop()?` after finalize). Flow-
                             // insensitive: a write on a sibling branch can
                             // over-suppress; the lint is a net, not a prover.
+                            // A local passed as an ARGUMENT to the yielding
+                            // call is rooted through it (the crate convention
+                            // the param exemption already assumes: VM entry
+                            // points bind what they're given into frames/envs
+                            // for the duration of their yields) — so uses
+                            // after THAT call are safe; a later yield still
+                            // flags via its own pair.
+                            let arg_of_yield = info_tcx.usages.iter().any(|(id, span)| {
+                                *id == hir_id
+                                    && span.lo() >= yield_span.lo()
+                                    && span.hi() <= yield_span.hi()
+                            });
+                            if arg_of_yield {
+                                continue;
+                            }
                             if let Some((_, usage_span)) = info_tcx
                                 .usages
                                 .iter()

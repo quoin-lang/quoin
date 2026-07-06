@@ -862,7 +862,6 @@ impl<'gc> VmState<'gc> {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    #[allow(no_gc_across_yield)]
     pub fn to_s(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1239,7 +1238,6 @@ impl<'gc> VmState<'gc> {
         self.invalidate_method_cache();
     }
 
-    #[allow(no_gc_across_yield)]
     /// NO borrow may be held while an initializer runs: `call_method_value` executes
     /// arbitrary Quoin that can cooperatively yield (an `init` that resumes a fiber or
     /// does I/O parks the whole task mid-call), and a Class/env borrow living on this
@@ -1277,7 +1275,32 @@ impl<'gc> VmState<'gc> {
         self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
 
         let receiver = Value::Object(obj);
-        for clz in classes {
+        // Root the collected chain across the user init calls below: an init
+        // that reopens its own class can drop the class table's reference to
+        // an old class object, leaving this Vec the only (unrooted) holder.
+        let root_base = self.stack.len();
+        for &clz in &classes {
+            self.push(Value::Class(clz));
+        }
+        let result = self.run_init_chain_rooted(mc, receiver, &classes, env);
+        self.stack.truncate(root_base);
+        result
+    }
+
+    /// The init-chain body of [`Self::finalize_instantiation`], split out so
+    /// the caller can root `classes` around its early `?` exits.
+    // The caller has pushed every class in `classes` onto the VM stack for
+    // this whole call; `clz` and the method values fetched from it are rooted
+    // by that contract across the user init calls.
+    #[allow(no_gc_across_yield)]
+    fn run_init_chain_rooted(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        classes: &[Gc<'gc, RefLock<Class<'gc>>>],
+        env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
+    ) -> Result<(), QuoinError> {
+        for &clz in classes {
             let init_colon = clz
                 .borrow()
                 .instance_methods
@@ -1495,7 +1518,6 @@ impl<'gc> VmState<'gc> {
         // A class's method tables just changed — drop any memoized resolutions.
         self.invalidate_method_cache();
     }
-    #[allow(no_gc_across_yield)]
     pub fn start_method_call(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1517,7 +1539,6 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    #[allow(no_gc_across_yield)]
     pub fn call_method(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1589,7 +1610,6 @@ impl<'gc> VmState<'gc> {
         result
     }
 
-    #[allow(no_gc_across_yield)]
     fn call_method_value_inner(
         &mut self,
         mc: &Mutation<'gc>,
@@ -1694,13 +1714,23 @@ impl<'gc> VmState<'gc> {
         self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
 
         let receiver = Value::Object(obj);
-        for clz in classes {
-            let method_opt = clz.borrow().instance_methods.get(&init_symbol()).copied();
-            if let Some(method_val) = method_opt {
-                self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
-            }
+        // Same rooting as `finalize_instantiation`: the chain must survive an
+        // init that reopens its own class.
+        let root_base = self.stack.len();
+        for &clz in &classes {
+            self.push(Value::Class(clz));
         }
-        Ok(())
+        let result = (|| {
+            for &clz in &classes {
+                let method_opt = clz.borrow().instance_methods.get(&init_symbol()).copied();
+                if let Some(method_val) = method_opt {
+                    self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+                }
+            }
+            Ok(())
+        })();
+        self.stack.truncate(root_base);
+        result
     }
 
     /// Drive nested execution (a native-initiated block or method call) until the frame
@@ -1715,7 +1745,6 @@ impl<'gc> VmState<'gc> {
     /// coverage is unchanged. Errors are returned raw (un-annotated), exactly as the
     /// per-step loops returned them; `context` names the caller in the uncaught-throw
     /// message, byte-identical to the old per-site strings.
-    #[allow(no_gc_across_yield)]
     fn run_nested(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3579,7 +3608,6 @@ impl<'gc> VmState<'gc> {
     // parameter into the guard env frame before it steps — so both are rooted through
     // any yield. `caller_block` is a copy of `self.frames[frame_idx].block`, rooted by
     // the live frame stack. Nothing here is held across a yield unrooted.
-    #[allow(no_gc_across_yield)]
     fn exec_send(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3594,9 +3622,9 @@ impl<'gc> VmState<'gc> {
         args.reverse();
 
         let receiver = self.pop()?;
-        // Call-site identity for the inline cache: the executing block + the Send's own `ip`,
-        // captured before we advance it.
-        let caller_block = self.frames[frame_idx].block;
+        // Call-site identity for the inline cache: the executing frame's cache cell + the
+        // Send's own `ip`, captured before we advance it (the block itself is re-read at
+        // fill time — see the note at `ic_fill` below).
         let caller_ic = self.frames[frame_idx].ic;
         let site_ip = self.frames[frame_idx].ip;
         self.frames[frame_idx].ip += 1; // Advance caller frame IP
@@ -3630,9 +3658,12 @@ impl<'gc> VmState<'gc> {
             }
         };
         if let Some(callable) = method_opt {
+            // Re-read rather than reuse `caller_block`: `lookup_method` above
+            // can run guard blocks (yield-capable); the frame itself stays in
+            // the traced `self.frames`, so the fresh read is always rooted.
             self.ic_fill(
                 mc,
-                caller_block,
+                self.frames[frame_idx].block,
                 site_ip,
                 receiver,
                 selector,
@@ -3783,7 +3814,6 @@ impl<'gc> VmState<'gc> {
     /// sub-execution loops, the debugger, and `qn benchmark`; it clones the current frame's
     /// bytecode `Rc` per call. The hot path (`run_vm_loop`) uses `run_dispatch`, which hoists
     /// that clone out of the per-instruction path.
-    #[allow(no_gc_across_yield)]
     pub(crate) fn step_internal(
         &mut self,
         mc: &Mutation<'gc>,
@@ -3810,7 +3840,6 @@ impl<'gc> VmState<'gc> {
     /// `step_internal` do per instruction, so the result feeds `run_vm_loop` directly. Returns
     /// `Running` once the budget is spent (i.e. "yield now"). The held `Rc` keeps the bytecode
     /// alive across frame changes and GC, exactly as the per-step clone did.
-    #[allow(no_gc_across_yield)]
     pub(crate) fn run_dispatch(
         &mut self,
         mc: &Mutation<'gc>,

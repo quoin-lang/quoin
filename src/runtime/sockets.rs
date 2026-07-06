@@ -568,7 +568,6 @@ fn accept_one<'gc>(
 /// GC-rooting: `conn` is handed *into* `execute_block` (`vec![conn]`), so it is reachable
 /// through the callee frame for the whole block — including its yields; the following
 /// `reap_handle` does not suspend. So `conn` is never held across a yield unrooted.
-#[allow(no_gc_across_yield)]
 fn accept_loop<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,

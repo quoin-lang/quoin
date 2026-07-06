@@ -262,7 +262,6 @@ impl<'gc> VmState<'gc> {
         self.globals.borrow().get(&key).copied()
     }
 
-    #[allow(no_gc_across_yield)]
     pub fn lookup_method(
         &mut self,
         mc: &Mutation<'gc>,
@@ -400,7 +399,6 @@ impl<'gc> VmState<'gc> {
         }
     }
 
-    #[allow(no_gc_across_yield)]
     /// Drop every memoized method resolution. Called whenever a class's method
     /// table changes (method def/override, native registration, class unregister),
     /// which only happens at class-definition time — never inside a hot loop — so
@@ -502,7 +500,6 @@ impl<'gc> VmState<'gc> {
 
     // `receiver` is the subject of the send (the value `self` resolves to inside a
     // guard block); it's threaded down to `match_score`/`execute_validation_block`.
-    #[allow(no_gc_across_yield)]
     fn lookup_method_in_class_hierarchy_rec(
         &mut self,
         mc: &Mutation<'gc>,
@@ -529,14 +526,67 @@ impl<'gc> VmState<'gc> {
         let parent = class_borrow.parent;
         drop(class_borrow);
 
-        if let Some(chain_start) = method_chain_start {
-            let mut candidates = Vec::new();
-            let mut curr = Some(chain_start);
-            while let Some(method_val) = curr {
-                candidates.push(method_val);
-                curr = self.get_next_method_in_chain(method_val);
-            }
+        let mut candidates = Vec::new();
+        let mut curr = method_chain_start;
+        while let Some(method_val) = curr {
+            candidates.push(method_val);
+            curr = self.get_next_method_in_chain(method_val);
+        }
 
+        // Root our CLONES of the class's edges for the rest of the resolution:
+        // scoring runs guard blocks and the walk recurses into more of them,
+        // and a guard that REOPENS this class can drop the class's own
+        // reference to a candidate method, a mixin, or the parent — leaving
+        // these locals the only (unrooted, collectible) holders mid-dispatch.
+        let root_base = self.stack.len();
+        for &c in &candidates {
+            self.push(c);
+        }
+        for &m in &mixins {
+            self.push(Value::Class(m));
+        }
+        if let Some(p) = parent {
+            self.push(Value::Class(p));
+        }
+        let result = self.resolve_in_class(
+            mc,
+            receiver,
+            selector,
+            class_side,
+            args,
+            visited,
+            class_ref,
+            &candidates,
+            &mixins,
+            parent,
+        );
+        self.stack.truncate(root_base);
+        result
+    }
+
+    /// The scoring + hierarchy-walk tail of
+    /// [`Self::lookup_method_in_class_hierarchy_rec`], split out so the caller
+    /// can root `candidates`/`mixins`/`parent` around ALL of its early
+    /// returns with one `truncate`.
+    // The caller has pushed `candidates`/`mixins`/`parent` onto the VM stack
+    // for this whole call — everything held here across guard-block yields
+    // (including the `applicable` copies) is rooted by that contract.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(no_gc_across_yield)]
+    fn resolve_in_class(
+        &mut self,
+        mc: &Mutation<'gc>,
+        receiver: Value<'gc>,
+        selector: Symbol,
+        class_side: bool,
+        args: &[Value<'gc>],
+        visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
+        class_ref: Gc<'gc, RefLock<Class<'gc>>>,
+        candidates: &[Value<'gc>],
+        mixins: &[Gc<'gc, RefLock<Class<'gc>>>],
+        parent: Option<Gc<'gc, RefLock<Class<'gc>>>>,
+    ) -> Result<Option<Value<'gc>>, QuoinError> {
+        if !candidates.is_empty() {
             // Score every applicable candidate; the lowest `(Σ type_distance,
             // guarded?)` wins. Two distinct candidates sharing the lowest score are
             // equally specific with no tiebreaker -> `AmbiguousMethodError`. A guarded
@@ -546,7 +596,7 @@ impl<'gc> VmState<'gc> {
             // fallback, exempt from ambiguity. The hierarchy walk below still lets a
             // derived class override a base regardless of score.
             let mut applicable: Vec<(Value<'gc>, (i64, u8))> = Vec::new();
-            for &method_val in &candidates {
+            for &method_val in candidates {
                 if let Some(score) = self.match_score(mc, receiver, method_val, args)? {
                     applicable.push((method_val, score));
                 }
@@ -564,7 +614,7 @@ impl<'gc> VmState<'gc> {
             }
         }
 
-        for mixin in mixins {
+        for &mixin in mixins {
             if let Some(method) = self.lookup_method_in_class_hierarchy_rec(
                 mc, mixin, receiver, selector, class_side, args, visited,
             )? {

@@ -221,6 +221,10 @@ fn handler_type_names(handlers: &[Value<'_>]) -> Vec<String> {
 // GC-rooting: `res` is safe across the handler run — an `Ok` value crosses no yield
 // (it returns before any handler executes), and an `Err` is plain data whose thrown
 // Quoin value rides rooted in `vm.exceptions.active` until a handler consumes it.
+// The `Result` held across `debug_check_throw` (debugger-only yield) is
+// dynamically `Err` there — guarded by `let Err(e) = &res` — and `Thrown`
+// carries no payload: the thrown VALUE is rooted in `exceptions.active`
+// (vm.rs). The lint's span model can't see the Ok/Err exclusivity.
 #[allow(no_gc_across_yield)]
 fn do_catch<'gc>(
     vm: &mut VmState<'gc>,
@@ -269,6 +273,10 @@ fn do_catch<'gc>(
 /// the result it runs after.
 // GC-rooting: as in `do_catch` — plus every `Ok` value that must survive the `finally`
 // run is explicitly pushed onto the VM stack first (see the in-body comments).
+// The `Result` held across `debug_check_throw` (debugger-only yield) is
+// dynamically `Err` there — guarded by `let Err(e) = &res` — and `Thrown`
+// carries no payload: the thrown VALUE is rooted in `exceptions.active`
+// (vm.rs). The lint's span model can't see the Ok/Err exclusivity.
 #[allow(no_gc_across_yield)]
 fn do_catch_finally<'gc>(
     vm: &mut VmState<'gc>,

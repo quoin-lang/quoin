@@ -286,7 +286,6 @@ impl<'gc> VmState<'gc> {
 
     /// Resume `fiber_val`, delivering `arg`. Returns the value the fiber yields,
     /// or its final return value when it completes. Called from `f.resume[:]`.
-    #[allow(no_gc_across_yield)]
     pub fn fiber_resume(
         &mut self,
         mc: &Mutation<'gc>,
@@ -361,7 +360,6 @@ impl<'gc> VmState<'gc> {
 
     /// Suspend the running fiber, handing `value` to whoever resumed it. Returns
     /// the value passed to the next `resume:`. Called from `Fiber.yield[:]`.
-    #[allow(no_gc_across_yield)]
     pub fn fiber_yield(
         &mut self,
         mc: &Mutation<'gc>,
@@ -412,7 +410,6 @@ impl<'gc> VmState<'gc> {
     /// `YieldReason::AwaitIo`, and on resume the driver has stashed the answer in
     /// `self.sched.wake`. Only plain data crosses the yield. Works from the main
     /// program too (it runs as a task whose root coroutine has its own `root_yielder`).
-    #[allow(no_gc_across_yield)]
     pub fn await_io(&mut self, req: IoRequest) -> Result<IoResult, QuoinError> {
         if let Some(yielder) = unsafe { self.get_yielder() } {
             yielder.suspend(YieldReason::AwaitIo { req });
@@ -438,7 +435,6 @@ impl<'gc> VmState<'gc> {
     /// them (`Async.gather:`). The blocks bubble up as `YieldReason::Gather`; the
     /// scheduler runs the children concurrently and resumes this task with the list of
     /// results in `self.sched.wake` (or the first child error). See `docs/ASYNC_ARCH.md`.
-    #[allow(no_gc_across_yield)]
     pub fn await_gather(
         &mut self,
         blocks: Vec<Gc<'gc, Block<'gc>>>,
@@ -469,7 +465,6 @@ impl<'gc> VmState<'gc> {
     /// returning its result — or re-raising its exception (a catchable throw). Called
     /// from `handle.join` only when the handle's status is `Running`; the join of an
     /// already-finished task reads the outcome straight off the handle without parking.
-    #[allow(no_gc_across_yield)]
     pub fn await_join(&mut self, target: TaskId) -> Result<Value<'gc>, QuoinError> {
         // Register as a waiter on the target before suspending (same step, so the
         // target cannot complete in between); record the target so `cancel` can dequeue
@@ -519,7 +514,6 @@ impl<'gc> VmState<'gc> {
     /// fires first (the join machinery for `Async.timeout:do:`). Registers as a waiter so
     /// completion wakes us, then bubbles `JoinTimed`; the driver arms the deadline timer
     /// and resumes us with whichever won in `wake`. `Wake::TimedOut` means the deadline.
-    #[allow(no_gc_across_yield)]
     fn await_join_timed(&mut self, target: TaskId, ms: u64) -> Result<TimedJoin<'gc>, QuoinError> {
         let me = self.sched.current_task;
         match self.sched.tasks.get_mut(target.0).and_then(|t| t.as_mut()) {
@@ -603,7 +597,6 @@ impl<'gc> VmState<'gc> {
     /// outcome — so its `finally` runs and its resources free before we move on. The
     /// `request_cancel`/`await_join` pair is atomic w.r.t. the child (single-threaded:
     /// nothing runs between them), so the child cannot vanish in the gap.
-    #[allow(no_gc_across_yield)]
     fn drain_cancelled(&mut self, child: TaskId) {
         if self
             .sched
