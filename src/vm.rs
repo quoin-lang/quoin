@@ -404,6 +404,14 @@ pub struct VmState<'gc> {
     /// Cell on each `StaticBlock`.
     #[collect(require_static)]
     pub aot_pending_spec: crate::codegen::spec::SpecPendingMap,
+    /// Rust-stack nesting depth of compiled-call re-entries (outcalls into
+    /// `call_method_cached`); dispatch stops entering compiled bodies past
+    /// `spec::MAX_OUTCALL_NESTING` (see there).
+    #[collect(require_static)]
+    pub outcall_nesting: u32,
+    /// Speculative methods promoted to compiled entries (S1) — stats only.
+    #[collect(require_static)]
+    pub aot_spec_promoted: u32,
     /// Remaining process-wide observation budget (spec::OBSERVE_BUDGET).
     /// Checked FIRST at method entry — one load from this hot struct — so
     /// once spent, observation costs one predicted branch per call, total.
@@ -535,6 +543,8 @@ impl<'gc> VmState<'gc> {
             aot_pending_blocks: rustc_hash::FxHashMap::default(),
             aot_refused_blocks: rustc_hash::FxHashSet::default(),
             aot_pending_spec: crate::codegen::spec::SpecPendingMap::default(),
+            outcall_nesting: 0,
+            aot_spec_promoted: 0,
             aot_spec_obs_left: crate::codegen::spec::OBSERVE_BUDGET,
             aot_enclosing_env: None,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
@@ -3196,11 +3206,63 @@ impl<'gc> VmState<'gc> {
             *lat = spec::merge(*lat, Self::spec_kind(*arg));
         }
         p.count += 1;
-        if p.count >= spec::OBSERVE_CAP {
-            template.spec_state.set(spec::SATURATED);
-        }
         self.aot_spec_obs_left -= 1;
+        if p.count >= crate::codegen::warm_threshold() {
+            self.spec_promote(tid);
+            return 0; // promoted (or refused): no frame stash needed
+        }
         tid
+    }
+
+    /// S1 promotion: compile a warm speculative method with its OBSERVED
+    /// kinds. Scalar observations become the compiled params AND entry
+    /// preconditions (checked by the dispatch arm; mismatch Bails to the
+    /// interpreted body); `Obj`/unknown observations ride as Obj with no
+    /// check. Annotated params were never speculated — dispatch guarantees
+    /// them, exactly as before. The method-cache epoch bumps so call sites
+    /// whose inline caches hold the interpreted callable re-fill with the
+    /// compiled entry.
+    fn spec_promote(&mut self, tid: u32) {
+        use crate::codegen::spec;
+        // Bisection debug hooks (they found every S1 seam bug):
+        // QN_AOT_SPEC_MAX=<n> promotes only tids <= n;
+        // QN_AOT_SPEC_ONLY=<csv> promotes only the listed tids.
+        if let Ok(max) = std::env::var("QN_AOT_SPEC_MAX")
+            && max.parse::<u32>().map(|m| tid > m).unwrap_or(false)
+        {
+            return;
+        }
+        if let Ok(only) = std::env::var("QN_AOT_SPEC_ONLY")
+            && !only.split(',').any(|t| t.trim() == tid.to_string())
+        {
+            return;
+        }
+        let Some(pending) = self.aot_pending_spec.remove(&tid) else {
+            return;
+        };
+        let mut cand = pending.cand;
+        cand.block.spec_state.set(spec::RESOLVED);
+        let mut preconds = vec![None; cand.params.len()];
+        for i in 0..cand.params.len() {
+            if cand.spec_params[i]
+                && let Some(kind) = spec::scalar_kind(*pending.param_kinds.get(i).unwrap_or(&0))
+            {
+                cand.params[i] = crate::codegen::AotParam::Scalar(kind);
+                preconds[i] = Some(kind);
+            }
+        }
+        if preconds.iter().any(|p| p.is_some()) {
+            cand.spec_preconditions = preconds;
+        }
+        let sel = cand.selector.clone();
+        crate::codegen::compile_candidates(vec![cand]);
+        if crate::codegen::block_registered(tid) {
+            if std::env::var("QN_AOT_VERBOSE").is_ok_and(|v| v == "1") {
+                eprintln!("qn aot: promoted {sel} (tid {tid})");
+            }
+            self.aot_spec_promoted += 1;
+            self.invalidate_method_cache();
+        }
     }
 
     /// Merge a method's return kind into its speculative profile. `tid` comes
@@ -3229,10 +3291,11 @@ impl<'gc> VmState<'gc> {
             .filter(|p| p.cand.block.spec_state.get() == spec::SATURATED)
             .count();
         let mut lines = vec![format!(
-            "spec-aot: {} pending ({} observing, {} saturated)",
+            "spec-aot: {} pending ({} observing, {} saturated), {} promoted",
             self.aot_pending_spec.len(),
             observing,
-            saturated
+            saturated,
+            self.aot_spec_promoted
         )];
         let mut profiled: Vec<_> = self
             .aot_pending_spec
@@ -3345,9 +3408,15 @@ impl<'gc> VmState<'gc> {
         selector: Symbol,
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, QuoinError> {
-        self.enter_native_reentry()?;
+        // No `enter_native_reentry` here (unlike `call_method`): charging the
+        // 12-deep hook-recursion budget per outcall made a 12-deep chain of
+        // PROMOTED methods (S1: everything unannotated compiles) a spurious
+        // "recursion too deep". Instead, `outcall_nesting` counts the REAL
+        // hazard — Rust-stack frames per compiled<->interpreted alternation —
+        // and dispatch degrades to interpreted bodies past the cap.
+        self.outcall_nesting += 1;
         let result = self.call_method_cached_inner(mc, tid, ip, bc_len, receiver, selector, args);
-        self.native_reentry_depth = self.native_reentry_depth.saturating_sub(1);
+        self.outcall_nesting = self.outcall_nesting.saturating_sub(1);
         result
     }
 

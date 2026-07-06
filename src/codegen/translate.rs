@@ -407,7 +407,9 @@ fn compile_group(
                 name_consts: Vec::new(),
                 needs_list_self: false,
                 tmpl_consts: Vec::new(),
+                nil_deferred: HashSet::new(),
                 pending_writebacks: HashMap::new(),
+                materialized: HashSet::new(),
             };
             tr.build_inner(&mut b).map_err(|e| fail(tid, e))?;
             n_scratch = tr.next_scratch;
@@ -419,6 +421,9 @@ fn compile_group(
         module
             .define_function(fid, &mut ctx)
             .map_err(|e| fail(tid, format!("{e:?}\nIR:\n{}", ctx.func.display())))?;
+        if std::env::var("QN_AOT_DUMP").is_ok_and(|v| v == m.selector || v == "1") {
+            eprintln!("=== {} (tid {tid}) ===\n{}", m.selector, ctx.func.display());
+        }
 
         let mut tctx = module.make_context();
         tctx.func.signature = tramp_sig(&mut module, ptr);
@@ -457,6 +462,9 @@ fn compile_group(
                 n_scratch,
                 needs_list_self,
                 role: m.role,
+                template_id: tid,
+                param_preconditions: m.spec_preconditions.clone().into_boxed_slice(),
+                spec_bails: std::sync::atomic::AtomicU32::new(0),
             },
         ));
     }
@@ -619,11 +627,21 @@ struct Translator<'a> {
     /// Leaked template `Rc`s for cold-path closure materialization (B3b) —
     /// process-lifetime, like the code and the leaked selectors.
     tmpl_consts: Vec<&'static Rc<StaticBlock>>,
+    /// `var x = nil` declarations whose slot type is still DEFERRED to the
+    /// first store. A closure materialization forces these into Obj slots
+    /// first — see the DefineLocal arm.
+    nil_deferred: HashSet<Symbol>,
     /// Frame locals a materialized closure WRITES (through its snapshot env),
     /// keyed by the closure's slot-index SSA value: after the consuming send
     /// returns, each is read back from the snapshot into the frame local, so
     /// `count:`-style `{ n = n + 1 }` cold arms stay exact (B3b).
     pending_writebacks: HashMap<CVal, Vec<(Symbol, VarSlot)>>,
+    /// Every materialized closure's slot value: a send consuming TWO OR MORE
+    /// of these where any writes a capture must refuse — sibling snapshots
+    /// are INDEPENDENT envs, but interpreted siblings share one cell (the
+    /// unfused-`whileDo:` bug: the body's `i` advanced while the condition's
+    /// stayed frozen).
+    materialized: HashSet<CVal>,
 }
 
 struct FnCtx {
@@ -883,7 +901,7 @@ impl<'a> Translator<'a> {
                 }
                 match &insts[ip] {
                     Instruction::Push(c) => {
-                        let av = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
+                        let av = self.const_av(b, &fx, &mut vars, &obj_param_avs, c, ip)?;
                         stack.push(av);
                     }
                     Instruction::LoadLocal(sym) => {
@@ -909,7 +927,13 @@ impl<'a> Translator<'a> {
                             && !vars.contains_key(sym)
                             && !obj_param_avs.contains_key(sym)
                         {
-                            // declaration prologue: type decided at first store
+                            // declaration prologue: type decided at first store —
+                            // TRACKED, because a closure materialization must
+                            // force still-deferred vars into real slots (a
+                            // write-captured block stores them OUT-OF-BAND
+                            // through its snapshot env, invisible to "first
+                            // store"; the S1 recordResult nil-capture bug).
+                            self.nil_deferred.insert(*sym);
                         } else if self.free_in_block(&vars, &obj_param_avs, *sym)
                             && matches!(&insts[ip], Instruction::StoreLocal(_))
                         {
@@ -1316,7 +1340,7 @@ impl<'a> Translator<'a> {
                                 stack.push(v);
                             }
                             Instruction::SendConst(c, ..) => {
-                                let v = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
+                                let v = self.const_av(b, &fx, &mut vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
                             }
                             Instruction::SendLocalLocal(a, bb, ..) => {
@@ -1328,7 +1352,7 @@ impl<'a> Translator<'a> {
                             Instruction::SendLocalConst(a, c, ..) => {
                                 let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
                                 stack.push(v);
-                                let v = self.const_av(b, &fx, &vars, &obj_param_avs, c, ip)?;
+                                let v = self.const_av(b, &fx, &mut vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
                             }
                             _ => {}
@@ -1340,12 +1364,35 @@ impl<'a> Translator<'a> {
                         // through the block-call helper, invoking a COMPILED block
                         // template directly on a registry hit (else the interpreted
                         // body, else the full send for non-block receivers).
+                        // Sibling-closure interference: 2+ materialized
+                        // closures consumed together, any of which WRITES a
+                        // capture, cannot keep exact shared-cell semantics
+                        // across independent snapshots — refuse (unfused
+                        // `whileDo:`-shaped methods run interpreted).
+                        let closure_args: Vec<CVal> = std::iter::once(&recv)
+                            .chain(args.iter())
+                            .filter_map(|v| match v {
+                                AV::Dyn(idx) if self.materialized.contains(idx) => Some(*idx),
+                                _ => None,
+                            })
+                            .collect();
+                        if closure_args.len() >= 2
+                            && closure_args
+                                .iter()
+                                .any(|idx| self.pending_writebacks.contains_key(idx))
+                        {
+                            return Err(format!(
+                                "sibling closures share written captures at ip {ip}"
+                            ));
+                        }
                         let out = if sel.as_str() == "valueWithSelfOrArg:" && args.len() == 1 {
                             self.emit_block_call(b, &fx, recv, args[0], ip)?
                         } else {
                             self.emit_send(b, &fx, recv, sel, &args, ip)?
                         };
-                        self.flush_writebacks(b, &fx, &args)?;
+                        let mut consumed = args.clone();
+                        consumed.push(recv);
+                        self.flush_writebacks(b, &fx, &consumed)?;
                         stack.push(out);
                     }
                     // Within one method's bytecode, `MethodReturn` (`^^`) always
@@ -1494,11 +1541,28 @@ impl<'a> Translator<'a> {
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
-        vars: &HashMap<Symbol, VarSlot>,
+        vars: &mut HashMap<Symbol, VarSlot>,
         obj_params: &HashMap<Symbol, CVal>,
         rc: &Rc<StaticBlock>,
         ip: usize,
     ) -> Result<AV, String> {
+        // Force still-deferred `var x = nil` locals into REAL slots before
+        // snapshotting: the closure may read or write them through its
+        // snapshot env, which "type decided at first store" cannot see. The
+        // slot init to nil is exact — any earlier store would have typed the
+        // var already.
+        let deferred: Vec<Symbol> = self.nil_deferred.drain().collect();
+        for sym in deferred {
+            let w = self.alloc_scratch()?;
+            let idx = self.abs_slot(b, fx, w);
+            let (k, bits) = self.encode(b, fx, AV::Nil);
+            let f = self.func_ref(b, self.helpers.slot_set);
+            let call = b.ins().call(f, &[fx.vm, fx.mc, idx, k, bits]);
+            let tag = b.inst_results(call)[0];
+            self.tag_check(b, fx, tag);
+            vars.insert(sym, VarSlot::Obj(w, None));
+        }
+
         // Gates: scan the template's bytecode once.
         if rc.decl_block.is_some() {
             return Err(format!("guarded block materialization at ip {ip}"));
@@ -1586,6 +1650,7 @@ impl<'a> Translator<'a> {
         if !writebacks.is_empty() {
             self.pending_writebacks.insert(out_idx, writebacks);
         }
+        self.materialized.insert(out_idx);
         Ok(AV::Dyn(out_idx))
     }
 
@@ -1636,7 +1701,7 @@ impl<'a> Translator<'a> {
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
-        vars: &HashMap<Symbol, VarSlot>,
+        vars: &mut HashMap<Symbol, VarSlot>,
         obj_params: &HashMap<Symbol, CVal>,
         c: &Constant,
         ip: usize,
@@ -1737,6 +1802,7 @@ impl<'a> Translator<'a> {
         if obj_params.contains_key(&sym) || sym == self_symbol() {
             return Err(format!("store to parameter/self '{}'", sym.as_str()));
         }
+        self.nil_deferred.remove(&sym);
         match v {
             AV::C(cv, k) => match vars.get(&sym) {
                 Some(&VarSlot::Scalar(var, vk)) => {

@@ -373,4 +373,122 @@ NestedCaptureG <- {
         };
         .is:{ thrown } equalTo:'ValueError'
     }
+};
+
+"* S1 (SPECULATIVE_AOT_ARCH): unannotated methods compile at warmth from their
+"* OBSERVED kinds, with entry preconditions that Bail to the interpreter on a
+"* kind mismatch - and tombstone after enough consecutive mispredictions.
+"* Every shape below crosses the promotion boundary mid-test.
+
+SpecArith <- {
+    .meta <-- {
+        triple: -> { |x| ^(x * 3) + 1 };
+        addBoth:and: -> { |a b: Integer| ^a + b };
+        orNil: -> { |v| v.defined?.if:{ ^v } else:{ ^0 } }
+    }
+};
+
+(TestSuite.new:{ var name = 'AotParitySpeculation' }).add:{
+    .test:promotionKeepsResults -> {
+        var total = 0;
+        var i = 0;
+        { i < 40 }.whileDo:{ total = total + (SpecArith.triple:i); i = i + 1 };
+        .is:{ total } equalTo:2380;
+    };
+
+    .test:kindMismatchBailsExactly -> {
+        var warm = 0;
+        var i = 0;
+        { i < 20 }.whileDo:{ warm = warm + (SpecArith.triple:i); i = i + 1 };
+        .is:{ warm } equalTo:590;
+        "* the speculation observed Int; Doubles must Bail to the interpreter
+        "* and keep exact semantics
+        .is:{ SpecArith.triple:1.5 } equalTo:5.5;
+        .is:{ SpecArith.triple:2 } equalTo:7;
+    };
+
+    .test:tombstoneStaysCorrect -> {
+        var i = 0;
+        { i < 20 }.whileDo:{ SpecArith.orNil:i; i = i + 1 };
+        "* hammer the mispredicted kind past the tombstone threshold
+        i = 0;
+        var s = '';
+        { i < 12 }.whileDo:{ s = SpecArith.orNil:'x'; i = i + 1 };
+        .is:{ s } equalTo:'x';
+        .is:{ SpecArith.orNil:nil } equalTo:0;
+        .is:{ SpecArith.orNil:7 } equalTo:7;
+    };
+
+    .test:mixedAnnotationsKeepGuarantees -> {
+        var total = 0;
+        var i = 0;
+        { i < 20 }.whileDo:{ total = total + (SpecArith.addBoth:i and:2); i = i + 1 };
+        .is:{ total } equalTo:230;
+        .is:{ SpecArith.addBoth:0.5 and:2 } equalTo:2.5;
+    }
+};
+
+"* S1 seam regressions, each found by promotion sweeping qnlib (docs/
+"* SPECULATIVE_AOT_ARCH.md): value-as-real-method, ^^ escaping through a
+"* compiled frame whose caller had an empty operand stack, nil-declared vars
+"* captured by write-back blocks, and sibling closures sharing written
+"* captures (unfused whileDo: refuses compilation and stays interpreted).
+
+SpecSeams <- {
+    .meta <-- {
+        callIt: -> { |b| ^b.value };
+        pick: -> { |v| v.else:{ ^^'from-arm' }; ^'fell-through' };
+        recordish: -> { |testBlock|
+            var result = nil;
+            var elapsed = Timer.time:{ result = testBlock.value };
+            ^(result == true)
+        };
+        scan: -> { |s|
+            var src = s.asBytes;
+            var n = src.count;
+            var i = 0;
+            var steps = 0;
+            { i < n }.whileDo:{
+                var b = src.at:i;
+                (b == 37).if:{ i = i + 3 } else:{ i = i + 1 };
+                steps = steps + 1
+            };
+            ^steps
+        }
+    }
+};
+
+(TestSuite.new:{ var name = 'AotParitySpecSeams' }).add:{
+    .test:valueDispatchesAsARealMethod -> {
+        var total = 0;
+        var i = 0;
+        { i < 20 }.whileDo:{ total = total + (SpecSeams.callIt:{ 3 }); i = i + 1 };
+        .is:{ total } equalTo:60;
+        .is:{ false.else:{ 42 } } equalTo:42
+    };
+
+    .test:nonLocalReturnCrossesCompiledFrames -> {
+        var i = 0;
+        var r = '';
+        { i < 20 }.whileDo:{ r = SpecSeams.pick:false; i = i + 1 };
+        .is:{ r } equalTo:'from-arm';
+        .is:{ SpecSeams.pick:true } equalTo:'fell-through'
+    };
+
+    .test:nilDeclaredCaptureWritesBack -> {
+        var i = 0;
+        var ok = 0;
+        { i < 20 }.whileDo:{
+            (SpecSeams.recordish:{ 1 < 2 }).if:{ ok = ok + 1 };
+            i = i + 1
+        };
+        .is:{ ok } equalTo:20
+    };
+
+    .test:siblingClosuresShareCells -> {
+        var i = 0;
+        var last = 0;
+        { i < 20 }.whileDo:{ last = SpecSeams.scan:'ab%41cd'; i = i + 1 };
+        .is:{ last } equalTo:5
+    }
 }

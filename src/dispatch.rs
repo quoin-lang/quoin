@@ -196,6 +196,41 @@ impl<'gc> Callable<'gc> {
                 let receiver = receiver.ok_or_else(|| {
                     QuoinError::Other("Method call is missing a receiver".to_string())
                 })?;
+                // Depth gate: past the nesting cap the interpreted body
+                // runs instead (flat frames) — deep untyped recursion must
+                // not overflow the coroutine stack via per-level outcall
+                // re-entries, and must not error where the interpreter works.
+                if vm.outcall_nesting >= crate::codegen::spec::MAX_OUTCALL_NESTING {
+                    vm.start_block_as_method(mc, block, receiver, args, selector, true);
+                    return Ok(());
+                }
+                // S1 speculation gate: observed-kind preconditions, checked
+                // before any state changes. A mismatch Bails to the
+                // interpreted body; BAIL_TOMBSTONE consecutive mismatches
+                // remove the entry (the speculation was wrong about this
+                // program — it runs interpreted from then on).
+                if !entry.0.param_preconditions.is_empty() {
+                    use std::sync::atomic::Ordering;
+                    let holds =
+                        entry
+                            .0
+                            .param_preconditions
+                            .iter()
+                            .zip(args.iter())
+                            .all(|(pre, arg)| match pre {
+                                None => true,
+                                Some(k) => crate::codegen::scalar_matches(*k, *arg),
+                            });
+                    if !holds {
+                        let bails = entry.0.spec_bails.fetch_add(1, Ordering::Relaxed) + 1;
+                        if bails >= crate::codegen::spec::BAIL_TOMBSTONE {
+                            crate::codegen::tombstone(entry.0.template_id);
+                        }
+                        vm.start_block_as_method(mc, block, receiver, args, selector, true);
+                        return Ok(());
+                    }
+                    entry.0.spec_bails.store(0, Ordering::Relaxed);
+                }
                 // Root (receiver, args) exactly like the Native arm: the compiled
                 // body may suspend at a fuel checkpoint, and the rooted snapshot is
                 // what makes the shim's locals safe across it (scalars carry no Gc,

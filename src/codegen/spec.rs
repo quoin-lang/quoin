@@ -34,6 +34,8 @@ pub fn merge(lat: u8, observed: u8) -> u8 {
 pub const NOT_SPECULATIVE: u8 = 0;
 pub const OBSERVING: u8 = 1;
 pub const SATURATED: u8 = 2;
+/// Promoted (compiled, or refused by the translator) — never observed again.
+pub const RESOLVED: u8 = 3;
 
 /// Observations after which a profile stops merging (S0 has no compile
 /// trigger yet; the cap bounds the observation cost on hot methods to a
@@ -48,6 +50,30 @@ pub const OBSERVE_CAP: u32 = 64;
 /// it, so an incomplete profile is merely conservative (more Bails), never
 /// wrong.
 pub const OBSERVE_BUDGET: u32 = 8192;
+
+/// Entry-precondition Bails before a promoted entry is TOMBSTONED (registry
+/// removal; the method runs interpreted from then on). Counted per entry in
+/// `AotEntry::spec_bails`, reset on every passing entry — so only CONSECUTIVE
+/// mispredictions kill a speculation.
+pub const BAIL_TOMBSTONE: u32 = 8;
+
+/// The scalar `AotKind` a saturated lattice slot speculates as (`None` =
+/// ride as Obj, no precondition).
+pub fn scalar_kind(lat: u8) -> Option<crate::codegen::AotKind> {
+    match lat {
+        K_INT => Some(crate::codegen::AotKind::Int),
+        K_DOUBLE => Some(crate::codegen::AotKind::Double),
+        K_BOOL => Some(crate::codegen::AotKind::Bool),
+        _ => None,
+    }
+}
+
+/// Compiled-call Rust-stack nesting cap: each compiled->interpreted
+/// alternation (outcall -> call_method_cached -> ... -> AotCall) nests real
+/// Rust frames on a fixed-size coroutine stack, so past this depth dispatch
+/// runs the INTERPRETED body instead (flat frames; deep untyped recursion
+/// degrades to the interpreter rather than overflowing or erroring).
+pub const MAX_OUTCALL_NESTING: u32 = 48;
 
 /// A speculative method waiting on its profile.
 pub struct SpecPending {

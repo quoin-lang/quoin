@@ -1,6 +1,6 @@
 # Speculative AOT: type-feedback compilation for untyped code
 
-*Status: S0 SHIPPED (observation). S1-S3 not started.*
+*Status: S0+S1 SHIPPED (observation + parameter speculation). S2-S3 next.*
 
 ## 1. Why: the measured shape of the untyped gap
 
@@ -94,15 +94,54 @@ What shipping taught (all in the commit):
   same-binary control bounded true noise at ±1.5-2%, inside which S0's
   residual deltas sit. Acceptance: no resolvable overhead.
 
-### S1 — speculate on parameters (entry guards)
+### S1 — speculate on parameters (entry guards) — SHIPPED
 
-At warmth, compile the candidate with observed `AotParam`s; scalar
-observations become **entry kind preconditions** (`needs_list_self`
-generalizes to `preconditions: params`) checked by `invoke()` before
-any state changes — mismatch Bails to the interpreted body. `Poly` or
-`Obj` params ride as Obj (still compilable — B2 proved Obj-param
-bodies win). K consecutive entry Bails → tombstone (v1; demote-recompile
-is a later refinement). Returns stay Obj in this slice.
+At warmth (`warm_threshold`, shared with block tiering), a pending
+speculative method compiles with its OBSERVED kinds: scalar
+observations become the compiled params AND entry preconditions
+(checked in the dispatch arm before `invoke`; mismatch Bails);
+`BAIL_TOMBSTONE` consecutive mispredictions remove the entry. The
+method-cache epoch bumps at promotion so warm inline caches re-fill
+with the compiled callable. Returns stay Obj (fib's `value:` refuses
+on an arm-shape merge until S2's return speculation).
+
+Interleaved A/B vs main (7 runs): **fib_untyped −17.4%, strings
+−16.5%, combinators −8.5%** (new post-arc best), maps −2.6%; btrees
++2.8% — promoted bodies that are PURE OUTCALLS (makeTree-shaped: no
+arithmetic to unbox) pay entry/outcall overhead without a win; a
+promotion-profitability heuristic is the known refinement.
+
+Promotion swept every unannotated qnlib method into compilation and
+found SIX latent seam bugs, each now pinned in `40-aot-parity.qn`
+(AotParitySpeculation + AotParitySpecSeams):
+- `Block#value`/`value:` existed only as `exec_send`'s fast path —
+  every `call_method`-family caller (compiled outcalls included) got
+  nil. They are real methods again.
+- `invoke`'s exit `truncate(base)` CHOPPED a non-local return's
+  delivered value when the `^^` unwind had truncated below the window
+  and re-pushed at exactly `base`. NLR outcomes skip the teardown.
+- `call_method_cached` charged the 12-deep native-reentry budget per
+  outcall — 12 promoted frames = spurious "recursion too deep".
+  Replaced by `outcall_nesting` + a cap (`MAX_OUTCALL_NESTING`) past
+  which dispatch runs the INTERPRETED body (deep untyped recursion
+  degrades, never errors), plus 16 MiB coroutine stacks (the 1 MiB
+  default overflowed under promoted alternation depth — SIGBUS).
+- `var x = nil` slot-typing was deferred to "first store", which a
+  write-captured closure performs OUT-OF-BAND through its snapshot —
+  the var was never slotted, snapshotted, or written back
+  (recordResult read nil forever). Materialization now forces deferred
+  vars into initialized Obj slots.
+- Sibling closures consumed by ONE send got INDEPENDENT snapshot envs
+  where interpreted siblings share cells: an unfused `whileDo:`'s body
+  advanced ITS `i` while the condition's stayed frozen (one extra
+  iteration, `at:` out of range). A send consuming 2+ materialized
+  closures where any WRITES a capture now refuses — those methods run
+  interpreted.
+- The write-back flush skipped RECEIVER-position closures.
+
+Debug surface that made the hunt tractable (kept): `QN_AOT_SPEC_MAX` /
+`QN_AOT_SPEC_ONLY` (promotion bisection), `QN_AOT_DUMP=<selector>`
+(CLIF dump), promotion lines under `QN_AOT_VERBOSE`.
 
 ### S2 — speculate on returns (the fib unlock)
 

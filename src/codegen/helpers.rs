@@ -328,7 +328,8 @@ pub(super) unsafe extern "C" fn block_call(
             Err(e) => store_err(vm, e),
         };
     };
-    if let Some(tid) = block.template.template_id
+    if vm.outcall_nesting < super::spec::MAX_OUTCALL_NESTING
+        && let Some(tid) = block.template.template_id
         && let Some(entry) = super::block_entry_for(vm, tid)
     {
         match super::invoke_block(vm, mc, entry, recv, arg) {

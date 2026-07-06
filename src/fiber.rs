@@ -215,7 +215,12 @@ impl<'gc> Fiber<'gc> {
     where
         F: FnOnce(&VMYielder<'gc>, VMContext<'gc>) -> Result<Value<'gc>, QuoinError> + 'gc,
     {
-        let coroutine = VMCoroutine::new(move |yielder, ctx| f(yielder, ctx));
+        // 16 MiB virtual (lazily committed): compiled<->interpreted
+        // alternations nest real Rust frames per level (bounded by
+        // spec::MAX_OUTCALL_NESTING), and `dispatch_one`'s frame is large —
+        // the corosensei default (1 MiB) overflowed under S1 promotion.
+        let stack = DefaultStack::new(16 * 1024 * 1024).expect("coroutine stack");
+        let coroutine = VMCoroutine::with_stack(stack, move |yielder, ctx| f(yielder, ctx));
         Self {
             coroutine: RefCell::new(Some(coroutine)),
         }

@@ -784,6 +784,7 @@ impl Compiler {
             role: crate::codegen::AotRole::Method,
             spec_params,
             spec_ret,
+            spec_preconditions: Vec::new(),
         });
     }
 
@@ -824,6 +825,7 @@ impl Compiler {
             role: crate::codegen::AotRole::BlockTemplate,
             spec_params: vec![false],
             spec_ret: false,
+            spec_preconditions: Vec::new(),
         });
     }
 
