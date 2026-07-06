@@ -130,6 +130,14 @@ pub struct Task<'gc> {
     /// This task's AOT fuel/depth counters (see `VmState::aot_fuel`).
     pub aot_fuel: i64,
     pub aot_depth: i64,
+    /// This task's compiled-call Rust-stack nesting depth (see
+    /// `VmState::outcall_nesting`), stashed while parked — same per-task
+    /// character as `native_reentry_depth`: the frames it counts are frozen
+    /// on THIS task's coroutine stack, so leaking the count to the next task
+    /// degrades its compiled dispatch early, and a foreign task's balanced
+    /// ++/-- would let this one resume under-counted (re-opening the
+    /// coroutine-overflow hazard the cap exists to prevent).
+    pub outcall_nesting: u32,
     /// This task's enclosing-env slot for compiled frames (see
     /// `VmState::aot_enclosing_env`), stashed while parked. A task that parks
     /// *inside* a compiled body (fuel checkpoint, outcall I/O) must not leak
@@ -893,6 +901,7 @@ impl<'gc> VmState<'gc> {
         self.native_reentry_depth = 0;
         self.aot_fuel = 0;
         self.aot_depth = 0;
+        self.outcall_nesting = 0;
         self.aot_enclosing_env = None;
         self.aot_home_frame_id = None;
         self.aot_frame_marks.clear();
@@ -927,6 +936,7 @@ impl<'gc> VmState<'gc> {
         t.native_reentry_depth = self.native_reentry_depth;
         t.aot_fuel = self.aot_fuel;
         t.aot_depth = self.aot_depth;
+        t.outcall_nesting = self.outcall_nesting;
         t.aot_enclosing_env = self.aot_enclosing_env.take();
         t.aot_home_frame_id = self.aot_home_frame_id.take();
         t.aot_frame_marks = std::mem::take(&mut self.aot_frame_marks);
@@ -968,6 +978,7 @@ impl<'gc> VmState<'gc> {
             self.native_reentry_depth = t.native_reentry_depth;
             self.aot_fuel = t.aot_fuel;
             self.aot_depth = t.aot_depth;
+            self.outcall_nesting = t.outcall_nesting;
             self.aot_enclosing_env = t.aot_enclosing_env.take();
             self.aot_home_frame_id = t.aot_home_frame_id.take();
             self.aot_frame_marks = std::mem::take(&mut t.aot_frame_marks);
@@ -986,6 +997,7 @@ impl<'gc> VmState<'gc> {
             self.native_reentry_depth = 0;
             self.aot_fuel = 0;
             self.aot_depth = 0;
+            self.outcall_nesting = 0;
             self.aot_enclosing_env = None;
             self.aot_home_frame_id = None;
             self.aot_frame_marks = Vec::new();
@@ -1094,6 +1106,7 @@ impl<'gc> VmState<'gc> {
             native_reentry_depth: 0,
             aot_fuel: 0,
             aot_depth: 0,
+            outcall_nesting: 0,
             aot_enclosing_env: None,
             aot_home_frame_id: None,
             aot_frame_marks: Vec::new(),
