@@ -298,4 +298,37 @@ CustomEachG <- {
         };
         .is:{ (#(1 2).collect:{ |x| x + 1 }).at:1 } equalTo:3;
     }
+};
+
+"* B3a: compiled block templates. Blocks invoked via valueWithSelfOrArg: run
+"* natively when the registry has an entry - and NEVER inside a user Fiber
+"* (forced unwind on fiber teardown cannot cross compiled frames, so entry
+"* Bails to the interpreted body there). The abandoned-generator shape below
+"* is the exact abort repro: a lazy pipeline suspended mid-iteration, then
+"* dropped by take:.
+
+(TestSuite.new:{ var name = 'AotParityBlockTemplates' }).add:{
+    .test:abandonedGeneratorWithCompiledBlocks -> {
+        var lazy = (1..100).lazyCollect:{ |x| x * 3 };
+        var got = lazy.take:4;
+        .is:{ got.count } equalTo:4;
+        .is:{ got.at:3 } equalTo:12;
+    };
+
+    .test:capturedCellWritesAreShared -> {
+        "a compiled template's free-variable write mutates the SAME cell the
+        enclosing frame reads (env_set through the closure chain)"
+        var sum = 0;
+        var addTo = { |x| sum = sum + x };
+        #(1 2 3).each:addTo;
+        .is:{ sum } equalTo:6;
+        sum = 100;
+        addTo.valueWithSelfOrArg:5;
+        .is:{ sum } equalTo:105;
+    };
+
+    .test:throwingCompiledBlockPropagatesCatchably -> {
+        var caught = { #(1).collect:{ |x| Math.ln:0 } }.catch:{ |e| 'caught' };
+        .is:{ caught } equalTo:'caught';
+    }
 }

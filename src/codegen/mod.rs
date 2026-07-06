@@ -105,12 +105,25 @@ impl AotRet {
 /// all-scalar params and return, unguarded, single-variant selector. `group_id`
 /// identifies the class-body (or `.meta` extension) context it was defined in, so
 /// self-calls resolve only among true siblings (same table, same receiver shape).
+/// What kind of unit a candidate/entry compiles (B3a). A METHOD's params are
+/// dispatch-guaranteed and its `^^` is its own return; a BLOCK TEMPLATE is a
+/// literal invoked via `valueWithSelfOrArg:` — its param is an arbitrary
+/// value (slot-resident `Obj`), its free names resolve through the closure's
+/// real `EnvFrame` chain (`env_get`/`env_set` helpers — exact shared-cell
+/// semantics), and a `^^` refuses (no frame to unwind to).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AotRole {
+    Method,
+    BlockTemplate,
+}
+
 pub struct AotCandidate {
     pub group_id: u32,
     pub selector: String,
     pub block: Rc<StaticBlock>,
     pub params: Vec<AotParam>,
     pub ret: AotRet,
+    pub role: AotRole,
     /// The owner class is OPEN (B2, docs/BLOCK_AOT_ARCH.md §3): the compiled
     /// form must contain no direct sibling calls — every send crosses a
     /// dispatch-equivalent seam, so a later reopen simply dispatches to its
@@ -164,6 +177,7 @@ pub struct AotEntry {
     /// `invoke` Bails to the interpreted body (whose guarded loop handles any
     /// receiver exactly) when it isn't. Checked before any state changes.
     pub needs_list_self: bool,
+    pub role: AotRole,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -260,6 +274,17 @@ pub fn invoke<'gc>(
     receiver: Value<'gc>,
     args: &[Value<'gc>],
 ) -> AotOutcome<'gc> {
+    // NO COMPILED FRAMES INSIDE USER FIBERS: an abandoned fiber (a generator
+    // dropped mid-iteration by `take:`) is torn down by corosensei's FORCED
+    // UNWIND, which cannot cross Cranelift frames (no unwind info) — the
+    // process aborts. A compiled body may suspend at any outcall or fuel
+    // checkpoint, so the only sound rule is entry-level: inside a fiber,
+    // Bail to the interpreted body (identical semantics, unwindable frames).
+    // The main task and spawned tasks are torn down gracefully (cancellation
+    // errors / process exit), so they keep compiled execution.
+    if vm.sched.current_fiber.is_some() {
+        return AotOutcome::Bail;
+    }
     if args.len() != entry.params.len() {
         return AotOutcome::Bail;
     }
@@ -335,6 +360,105 @@ pub fn invoke<'gc>(
         })),
         other => AotOutcome::Err(QuoinError::Other(format!(
             "AOT: compiled method returned unknown tag {other}"
+        ))),
+    };
+    vm.stack.truncate(base);
+    outcome
+}
+
+/// The compiled entry for a block template, compiling LAZILY on first use
+/// (B3a): registry hit → done; else a pending candidate stashed at unit load
+/// compiles now (once — a refusal tombstones). `None` = run interpreted.
+pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&'static AotEntry> {
+    if let Some(entry) = lookup(template_id) {
+        return (entry.role == AotRole::BlockTemplate).then_some(entry);
+    }
+    if vm.aot_refused_blocks.contains(&template_id) {
+        return None;
+    }
+    // Tiering: a once-invoked block would pay Cranelift more than it saves —
+    // compile only once a template proves warm. A combinator loop crosses the
+    // threshold in its first handful of elements.
+    const WARM: u32 = 8;
+    {
+        let (count, _) = vm.aot_pending_blocks.get_mut(&template_id)?;
+        *count += 1;
+        if *count < WARM {
+            return None;
+        }
+    }
+    let (_, cand) = vm.aot_pending_blocks.remove(&template_id)?;
+    compile_candidates(vec![cand]);
+    match lookup(template_id) {
+        Some(entry) if entry.role == AotRole::BlockTemplate => Some(entry),
+        _ => {
+            vm.aot_refused_blocks.insert(template_id);
+            None
+        }
+    }
+}
+
+/// Invoke a compiled BLOCK TEMPLATE (B3a) with `valueWithSelfOrArg:`
+/// semantics: the argument is bound as BOTH `self` (slot 0) and the block's
+/// parameter (slot 1 — a SEPARATE cell, so a param reassignment doesn't move
+/// `self`, matching the interpreter's two env bindings); slot 2 roots the
+/// block object itself, through which the `env_get`/`env_set` helpers reach
+/// the closure's captured `EnvFrame` chain. Same fuel/depth regime as
+/// `invoke` (nested compiled calls share one budget).
+pub fn invoke_block<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    entry: &'static AotEntry,
+    block_val: Value<'gc>,
+    arg: Value<'gc>,
+) -> AotOutcome<'gc> {
+    debug_assert!(entry.role == AotRole::BlockTemplate);
+    // Same fiber gate as `invoke` — see the comment there.
+    if vm.sched.current_fiber.is_some() {
+        return AotOutcome::Bail;
+    }
+    let base = vm.stack.len();
+    vm.stack.push(arg); // slot 0: self (vWSOA binds the arg)
+    vm.stack.push(arg); // slot 1: the parameter (its own cell)
+    vm.stack.push(block_val); // slot 2: the block object (env access)
+    for _ in 0..entry.n_scratch {
+        vm.stack.push(Value::Nil);
+    }
+    if vm.aot_depth == 0 {
+        vm.aot_fuel = i64::from(crate::tuning::step_batch());
+    }
+    vm.aot_pending_error = None;
+    let fuel_ptr = &raw mut vm.aot_fuel;
+    let depth_ptr = &raw mut vm.aot_depth;
+    let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
+    let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
+    let raw_args: [i64; 1] = [base as i64 + 1];
+    let mut ret: i64 = 0;
+    let tag = unsafe {
+        (entry.raw)(
+            vm_ptr,
+            mc_ptr,
+            fuel_ptr,
+            depth_ptr,
+            base as i64,
+            raw_args.as_ptr(),
+            &mut ret,
+        )
+    };
+    let outcome = match tag {
+        TAG_OK => AotOutcome::Value(vm.stack[ret as usize]),
+        TAG_DIV_ZERO => {
+            AotOutcome::Err(QuoinError::ArithmeticError("Division by zero".to_string()))
+        }
+        TAG_DEPTH => AotOutcome::Err(QuoinError::Other(
+            "Maximum compiled-call depth exceeded (recursion too deep for native code)".to_string(),
+        )),
+        TAG_CANCELLED => AotOutcome::Err(vm.take_cancellation()),
+        TAG_ERR => AotOutcome::Err(vm.aot_pending_error.take().unwrap_or_else(|| {
+            QuoinError::Other("AOT: TAG_ERR with no pending error".to_string())
+        })),
+        other => AotOutcome::Err(QuoinError::Other(format!(
+            "AOT: compiled block returned unknown tag {other}"
         ))),
     };
     vm.stack.truncate(base);

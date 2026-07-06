@@ -30,12 +30,24 @@ entry precondition (a fused self-loop compiles hot-path-only; `invoke`
 Bails non-List receivers to the interpreted body — Range/Generator
 parity-tested). Startup +~1.5–2ms for the qnlib compile (now ~3.4ms
 total vs kill switch — visible on short whole-process benches).
-Remaining for B3, the two measured blockers: conditional cold paths that
-materialize blocks (kills `select:`/`count:`/`sum:` compilation — needs
-closure materialization from compiled frames, i.e. the captures ABI) and
-the per-element outcall → interpreted block body (needs compiled block
-templates + a fast invocation seam). Acceptance: ≥3× on `combinators`
-for the full arc — 2.04× banked.*
+B3a SHIPPED — combinators −19.2% more (cumulative 0.700→0.278s, 2.52×):
+block LITERALS compile as registry entries under their template_id
+(method ABI + slot 0 = self≡arg, slot 1 = the param's own cell, slot 2 =
+the block object; free names through `env_get`/`env_set` against the
+closure's real EnvFrame chain — exact shared-cell semantics; `^^`
+refuses), invoked from both seams (`valueWithSelfOrArg:` native and the
+compiled `block_call` helper). Three hard lessons, each measured: (1)
+compiled bodies MUST share the interpreter's inline caches —
+`call_method_cached` keys outcalls by `(template_id, ip)`, the same
+identity the interpreted send uses, or compiled code loses to the warm
+IC it replaced (+4.2% regression before; −19.2% after); (2) eager
+template compilation cost +34ms startup — candidates stash per-VM and
+compile lazily at the 8th invocation; (3) fiber teardown force-unwinds
+CANNOT cross Cranelift frames (process abort) — all compiled entry Bails
+inside user fibers, closing a hazard latent since v0.2 outcalls.
+Remaining for B3b: conditional cold paths that materialize blocks (kills
+`select:`/`count:`/`sum:` compilation — read-only snapshot captures per
+§3). Acceptance: ≥3× on `combinators` for the full arc — 2.52× banked.*
 
 ## 1. Why: the measured shape of combinator cost
 

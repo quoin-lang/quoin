@@ -759,6 +759,45 @@ impl Compiler {
             params,
             ret,
             open_owner,
+            role: crate::codegen::AotRole::Method,
+        });
+    }
+
+    /// Collect a nested block LITERAL as a block-template candidate (B3a,
+    /// docs/BLOCK_AOT_ARCH.md §3): invoked via `valueWithSelfOrArg:` from the
+    /// combinator seams when the registry has a compiled entry. Cheap
+    /// prefilter only — translation refusals do the real gating; the prescan
+    /// skips the two shapes that always refuse (a nested literal push, a
+    /// non-local return) to keep unit-load compile time down.
+    fn maybe_collect_block_candidate(&mut self, rc: &Rc<StaticBlock>) {
+        if !self.collect_aot || !self.mint_template_ids {
+            return;
+        }
+        if rc.template_id.is_none()
+            || rc.param_syms.len() > 1
+            || rc.decl_block.is_some()
+            || rc.name.is_some()
+        {
+            return;
+        }
+        let hopeless = rc.bytecode.0.iter().any(|i| {
+            matches!(
+                i,
+                Instruction::Push(Constant::Block(_)) | Instruction::MethodReturn
+            )
+        });
+        if hopeless {
+            return;
+        }
+        self.aot_candidates.push(crate::codegen::AotCandidate {
+            // Blocks have no sibling group (no direct calls either way).
+            group_id: u32::MAX,
+            selector: format!("block@{}", rc.template_id.unwrap()),
+            block: rc.clone(),
+            params: vec![crate::codegen::AotParam::Obj],
+            ret: crate::codegen::AotRet::Obj,
+            open_owner: true,
+            role: crate::codegen::AotRole::BlockTemplate,
         });
     }
 
@@ -2216,6 +2255,12 @@ impl Compiler {
             }
             NodeValue::Block(block) => {
                 self.compile_block(block, bytecode)?;
+                // B3a: a block LITERAL is a block-template candidate (method
+                // bodies are collected as Method candidates at their def site).
+                if let Some(Instruction::Push(Constant::Block(rc))) = bytecode.bytecode.last() {
+                    let rc = rc.clone();
+                    self.maybe_collect_block_candidate(&rc);
+                }
             }
             NodeValue::BlockReturn(ret) => {
                 self.compile_return_value(&ret.value, bytecode)?;

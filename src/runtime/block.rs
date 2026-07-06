@@ -93,6 +93,18 @@ pub fn build_block_class() -> NativeClassBuilder {
         .instance_method("valueWithSelfOrArg:", |vm, mc, receiver, args| {
             let block = recv!(receiver, Block);
             let arg_val = args[0];
+            // B3a: the interpreted-side seam — a compiled block template runs
+            // natively even under an interpreted combinator loop. Bail (arity
+            // or precondition mismatch) falls through to the interpreted body.
+            if let Some(tid) = block.template.template_id
+                && let Some(entry) = crate::codegen::block_entry_for(vm, tid)
+            {
+                match crate::codegen::invoke_block(vm, mc, entry, receiver, arg_val) {
+                    crate::codegen::AotOutcome::Value(v) => return Ok(v),
+                    crate::codegen::AotOutcome::Err(e) => return Err(e),
+                    crate::codegen::AotOutcome::Bail => {}
+                }
+            }
             vm.execute_block(mc, block, vec![arg_val], Some(arg_val))
         })
         .instance_method("==:", |vm, mc, receiver, args| {

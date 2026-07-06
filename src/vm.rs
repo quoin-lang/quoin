@@ -383,6 +383,15 @@ pub struct VmState<'gc> {
     /// exactly as across any native boundary.
     #[collect(require_static)]
     pub aot_pending_error: Option<QuoinError>,
+    /// Block templates collected at unit load but NOT yet compiled (B3a lazy
+    /// compilation): most literals are never invoked, and eager Cranelift
+    /// work for all of them cost ~+34ms startup. A template compiles on its
+    /// FIRST `valueWithSelfOrArg:` invocation (`codegen::block_entry_for`),
+    /// once; refusals tombstone so they never retry.
+    #[collect(require_static)]
+    pub aot_pending_blocks: rustc_hash::FxHashMap<u32, (u32, crate::codegen::AotCandidate)>,
+    #[collect(require_static)]
+    pub aot_refused_blocks: rustc_hash::FxHashSet<u32>,
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
@@ -500,6 +509,8 @@ impl<'gc> VmState<'gc> {
             aot_fuel: 0,
             aot_depth: 0,
             aot_pending_error: None,
+            aot_pending_blocks: rustc_hash::FxHashMap::default(),
+            aot_refused_blocks: rustc_hash::FxHashSet::default(),
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
             last_popped_env: None,
@@ -3110,6 +3121,75 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// The shared IC cell for a template id directly — the compiled-code twin of
+    /// `ic_cell_for` (outcall sites pass their `(template_id, ip)`, which is the
+    /// same call-site identity the interpreted send at that instruction uses, so
+    /// compiled and interpreted execution warm ONE cache).
+    pub(crate) fn ic_cell_by_id(
+        &mut self,
+        mc: &Mutation<'gc>,
+        id: u32,
+    ) -> Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>> {
+        if let Some(cell) = self.ic_registry.get(&id) {
+            *cell
+        } else {
+            let cell = gcl!(mc, None);
+            self.ic_registry.insert(id, cell);
+            cell
+        }
+    }
+
+    /// `call_method`, with the caller's inline cache consulted and filled — the
+    /// compiled-code outcall path (B3a): without it every compiled operator send
+    /// paid an uncached `lookup_method` while the interpreted body it replaced
+    /// had warm ICs, which measurably REGRESSED arithmetic-heavy blocks.
+    pub fn call_method_cached(
+        &mut self,
+        mc: &Mutation<'gc>,
+        tid: u32,
+        ip: usize,
+        bc_len: usize,
+        receiver: Value<'gc>,
+        selector: Symbol,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        self.enter_native_reentry()?;
+        let result = self.call_method_cached_inner(mc, tid, ip, bc_len, receiver, selector, args);
+        self.native_reentry_depth = self.native_reentry_depth.saturating_sub(1);
+        result
+    }
+
+    fn call_method_cached_inner(
+        &mut self,
+        mc: &Mutation<'gc>,
+        tid: u32,
+        ip: usize,
+        bc_len: usize,
+        receiver: Value<'gc>,
+        selector: Symbol,
+        args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, QuoinError> {
+        let ic = self.ic_cell_by_id(mc, tid);
+        let method = match self.ic_probe(ic, ip, receiver, &args) {
+            Some(c) => Some(c),
+            None => {
+                let m = self.lookup_method(mc, receiver, selector, &args)?;
+                if let Some(c) = &m {
+                    self.ic_fill_cell(mc, ic, bc_len, ip, receiver, selector, &args, c.clone());
+                }
+                m
+            }
+        };
+        if let Some(method) = method {
+            let initial_frame_count = self.frames.len();
+            method.call(self, mc, Some(receiver), args, Some(selector))?;
+            self.run_nested(mc, initial_frame_count, "method call")?;
+            Ok(self.pop()?)
+        } else {
+            Ok(self.new_nil(mc))
+        }
+    }
+
     /// Probe the executing `block`'s inline cache at `ip` for a *field-slot* entry
     /// (see [`IC_FIELD_KIND`]): a hit returns the receiver-class's slot index for the
     /// field named at this instruction, skipping the `field_slots` hash lookup and
@@ -3240,12 +3320,12 @@ impl<'gc> VmState<'gc> {
         // The cache cell is its own `Gc<RefLock<…>>` (shared across every closure of
         // the same template via `ic_registry`), so mutate it directly through the
         // write barrier, same idiom as `globals`.
-        let mut cache = block.inline_cache.borrow_mut(mc);
-        if cache.is_none() {
-            *cache = Some(vec![ICSlot::empty(); block.template.bytecode.len()].into_boxed_slice());
-        }
-        if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
-            *slot = ICSlot {
+        Self::ic_write_slot(
+            mc,
+            block.inline_cache,
+            block.template.bytecode.len(),
+            ip,
+            ICSlot {
                 epoch,
                 recv_kind,
                 recv_ptr,
@@ -3253,8 +3333,77 @@ impl<'gc> VmState<'gc> {
                 arg_kinds,
                 arg_ptrs,
                 callable: Some(callable),
-            };
+            },
+        );
+    }
+
+    fn ic_write_slot(
+        mc: &Mutation<'gc>,
+        cell: Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>,
+        bc_len: usize,
+        ip: usize,
+        new_slot: ICSlot<'gc>,
+    ) {
+        let mut cache = cell.borrow_mut(mc);
+        if cache.is_none() {
+            *cache = Some(vec![ICSlot::empty(); bc_len].into_boxed_slice());
         }
+        if let Some(slot) = cache.as_mut().and_then(|slots| slots.get_mut(ip)) {
+            *slot = new_slot;
+        }
+    }
+
+    /// `ic_fill` for a cell reached by template id (the compiled outcall path) —
+    /// the same guards and cacheability rules, no `Gc<Block>` needed.
+    #[allow(clippy::too_many_arguments)]
+    fn ic_fill_cell(
+        &mut self,
+        mc: &Mutation<'gc>,
+        cell: Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>,
+        bc_len: usize,
+        ip: usize,
+        receiver: Value<'gc>,
+        selector: Symbol,
+        args: &[Value<'gc>],
+        callable: Callable<'gc>,
+    ) {
+        if args.len() > IC_MAX_ARGS {
+            return;
+        }
+        let class_side = matches!(receiver, Value::Class(_));
+        let Some(class_ref) = self.get_class_for_lookup(receiver) else {
+            return;
+        };
+        let Some(key) = self.method_cache_key(class_ref, selector, class_side, args) else {
+            return;
+        };
+        if !matches!(self.dispatch_cache.entries.get(&key), Some(Some(_))) {
+            return; // uncacheable (guarded/tag-requiring) — never inline-cache
+        }
+        let epoch = self.dispatch_epoch;
+        let (recv_kind, recv_ptr) = value_type_guard(receiver);
+        let mut arg_kinds = [0u8; IC_MAX_ARGS];
+        let mut arg_ptrs = [0usize; IC_MAX_ARGS];
+        for (i, a) in args.iter().enumerate() {
+            let (ak, ap) = value_type_guard(*a);
+            arg_kinds[i] = ak;
+            arg_ptrs[i] = ap;
+        }
+        Self::ic_write_slot(
+            mc,
+            cell,
+            bc_len,
+            ip,
+            ICSlot {
+                epoch,
+                recv_kind,
+                recv_ptr,
+                n_args: args.len() as u8,
+                arg_kinds,
+                arg_ptrs,
+                callable: Some(callable),
+            },
+        );
     }
 
     // GC-rooting: the only yield reachable from here is a *guarded* method's guard
