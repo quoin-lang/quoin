@@ -131,7 +131,76 @@ Acceptance: btrees ≥1.3× vs branch base (validated projection: 1.47×);
 every other bench within noise; corpus green ×5 modes; `qn check
 qnlib/warnings.qn` canary healthy.
 
-### M2 — thin materialization: the frame env-home (codegen)
+### Post-M1 reassessment (measured; supersedes the M2/M3 plan below)
+
+The M1 profiles re-rank the levers:
+
+- **btrees residual** (653 samples): the interpreted-config seam is
+  ~35-40% — `Callable::call` 8.9 + `dispatch_one` 8.3 +
+  `call_method_cached` 6.3 + `ic_probe` 4.4 + `run_nested` 3.1 +
+  `collect_instance_vars` 2.3 + `finalize_instantiation` 2.1 +
+  `store_set_local` 1.4 + frame starts ~2.4. The env-home's target —
+  `closure_bind` — is down to 3.4%, ALL of it the config snapshot.
+- **richards residual**: compiled-to-compiled outcall dispatch
+  (`Callable::call` 20.4%, IC machinery ~15%), zero materialization.
+  Not this arc's lever (future: direct calls for IC-stable sites).
+
+So the arc pivots: **M2 becomes FUSED INSTANTIATION** (the config seam,
+btrees' dominant cost), and **env-home is DROPPED** — once configs stop
+materializing, btrees' `closure_bind` goes to ~0 and no bench has a
+measurable materialization residue left to justify the machinery.
+
+### M2 (revised) — fused instantiation (compiler superinstruction; both tiers win)
+
+`X.new:{ f1=e1; …; fn=en }` on the plain-shape path compiles to a
+guarded dual form, exactly the option-C/`each:` pattern:
+
+    <receiver>
+    BranchIfNotPlainNew(→cold)     // new IC kind: (class_ptr, epoch) → verdict
+    <e1> … <en>                    // field rvalues inline in the METHOD frame
+    NewWithFields([f1…fn])         // new_object + bind fields by name + push obj
+    Jump(→end)
+    cold: Push(Block(config)); Send(new:, 1)
+    end:
+
+The check runs BEFORE the rvalues evaluate (the cold path re-evaluates
+them inside the real config closure — no double evaluation). The
+verdict is cached per site like the field-slot IC: `new:` on this class
+resolves to `Callable::New` (a user meta `new:` → cold — the evil-new
+case), `ensure_instantiable` passes, and the memoized `InitPlan` (A2a)
+has NO init methods (classes with `init:`/`init` → cold, v1). Hot path
+kills, per instantiation: the closure materialization (AOT tier), the
+config `Frame`+`EnvFrame`, the nested `run_nested` drive, the
+interpreted stores, and the `collect_instance_vars` walk — replaced by
+inline expr evaluation + one helper doing `new_object` + n field
+writes. The AOT tier translates the same bytecode naturally (exprs are
+ordinary inline code; the branch + `NewWithFields` become helper calls
+with a stack-window root, A2c pattern).
+
+Compile-time eligibility (AST, in `compile_method_call`; anything else
+keeps today's form): the arg is a 0-arg, header-decl-free init literal
+whose top-level statements are ALL single-target plain assignments to
+bare lowercase names; no `Declaration` statements; rvalues contain no
+`self`, no `@field`, no bare `.sends` (config `self` IS the new
+object), no `^^`/`^>`, no nested block literals (a literal's captures
+of config-bound names resolve differently without the config frame),
+and no read of a name a PRIOR statement in the same config stored
+(read-after-store sees the config-local binding today when the name
+shadows an outer local). Exception mid-evaluation is equivalent either
+way: today the half-populated frame is discarded unfinalized; fused,
+the object was never allocated.
+
+Acceptance: btrees ≥1.25× further (the seam is ~35-40%); interpreted
+tier (`QN_AOT=0`) improves too — the fusion is bytecode-level; corpus
+×5 incl. an evil-`new:` + init-carrying-class + non-class-receiver
+cold-path battery; every other bench within noise.
+
+### M3 — gate-lift audit (unchanged, after M2)
+
+Re-audit G3/G4 and the qnlib trampoline gates against post-M2 profiles;
+S5c template-`^^` revisit; cross-language re-measure at arc close.
+
+### ~~M2 — thin materialization: the frame env-home (codegen)~~ (DROPPED post-M1 — kept for the record)
 
 For compiled frames that still contain materialization sites: allocate
 ONE `EnvFrame` at frame entry (the env-home) holding exactly the union
