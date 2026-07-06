@@ -3959,11 +3959,15 @@ impl<'gc> VmState<'gc> {
         selector: Symbol,
         num_args: usize,
     ) -> Result<VmStatus<'gc>, QuoinError> {
-        let mut args = Vec::new();
-        for _ in 0..num_args {
-            args.push(self.pop()?);
-        }
-        args.reverse();
+        // The operands sit in ORDER at the stack top: copy the window in one
+        // exact-size allocation instead of pop-looping and reversing.
+        let start = self
+            .stack
+            .len()
+            .checked_sub(num_args)
+            .ok_or("Stack underflow")?;
+        let args: Vec<Value<'gc>> = self.stack[start..].to_vec();
+        self.stack.truncate(start);
 
         let receiver = self.pop()?;
         // Call-site identity for the inline cache: the executing frame's cache cell + the
