@@ -1,0 +1,25 @@
+"* Batched (lazy DAG, 1 round trip per iteration) vs op-by-op (forced after every op, 3 round
+"* trips + 2 intermediate handles) — the same mean-squared-error computation per array size.
+"* Run from the repo root with a release build: `target/release/qn quoin_packages/numpy/bench.qn`.
+"* Timer is in-process microseconds; the two variants pay identical driver overhead, so the
+"* RATIO is the headline. See README.md for the measured per-call floor behind the numbers.
+use numpy:*;
+
+#( #( 1000 500 ) #( 100000 200 ) #( 1000000 50 ) ).each:{ |cfg|
+    var n = cfg.at:0;
+    var k = cfg.at:1;
+    var p = [NumPy]Array.random:#( n );
+    var y = [NumPy]Array.random:#( n );
+
+    var sink = 0.0;
+    var tLazy = Timer.time:{ (1..k).each:{ |i| sink = ((p - y) * (p - y)).mean } };
+    var tEager = Timer.time:{
+        (1..k).each:{ |i|
+            var d = (p - y).eval;
+            var sq = (d * d).eval;
+            sink = sq.mean
+        }
+    };
+    var stats = #( n k tLazy tEager (tLazy / k) (tEager / k) );
+    ('n=% iters=% lazyUs=% opByOpUs=% perIterLazyUs=% perIterOpByOpUs=%' % stats).print
+}
