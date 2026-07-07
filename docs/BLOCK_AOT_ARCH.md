@@ -44,8 +44,12 @@ identity the interpreted send uses, or compiled code loses to the warm
 IC it replaced (+4.2% regression before; −19.2% after); (2) eager
 template compilation cost +34ms startup — candidates stash per-VM and
 compile lazily at the 8th invocation; (3) fiber teardown force-unwinds
-CANNOT cross Cranelift frames (process abort) — all compiled entry Bails
-inside user fibers, closing a hazard latent since v0.2 outcalls.
+CANNOT cross Cranelift frames (process abort) — originally closed by bailing
+all compiled entry inside user fibers; SUPERSEDED by the aot-fibers arc:
+fibers now carry a per-fiber AotTaskState, compiled entry marks the fiber,
+and an abandoned marked fiber leaks its suspended stack (corosensei
+force_reset) instead of force-unwinding, so compiled frames run — and
+suspend — inside fibers (see Fiber::drop for the invariant argument).
 B3b SHIPPED — cold-path closure MATERIALIZATION: a compiled frame builds
 a real closure over a snapshot of its whole environment, CHAINED to the
 invoking frame's enclosing env (`vm.aot_enclosing_env`) so nested

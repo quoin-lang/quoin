@@ -312,11 +312,12 @@ CustomEachG <- {
 };
 
 "* B3a: compiled block templates. Blocks invoked via valueWithSelfOrArg: run
-"* natively when the registry has an entry - and NEVER inside a user Fiber
-"* (forced unwind on fiber teardown cannot cross compiled frames, so entry
-"* Bails to the interpreted body there). The abandoned-generator shape below
-"* is the exact abort repro: a lazy pipeline suspended mid-iteration, then
-"* dropped by take:.
+"* natively when the registry has an entry - INCLUDING inside user Fibers
+"* (the historical entry bail is gone: an abandoned fiber that ran compiled
+"* code leaks its suspended stack via force_reset instead of force-unwinding
+"* across Cranelift frames). The abandoned-generator shape below was the
+"* exact abort repro: a lazy pipeline suspended mid-iteration, then dropped
+"* by take:.
 
 (TestSuite.new:{ var name = 'AotParityBlockTemplates' }).add:{
     .test:abandonedGeneratorWithCompiledBlocks -> {
