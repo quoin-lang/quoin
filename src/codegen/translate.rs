@@ -2025,7 +2025,23 @@ impl<'a> Translator<'a> {
                 }
                 _ => false,
             });
-            if in_loop {
+            // M3: a site inside a GUARD-FAIL COLD SPAN is exempt — it executes
+            // only when the guard fails, and then the real send it feeds
+            // dominates the snapshot cost (the interpreter-fallback economics
+            // it already chose). This is what lets qnlib's `any?:` compile:
+            // its `.if:{ ^^true }` arm splices on the hot path (an inline
+            // MethodReturn, no closure), and the only materialization left is
+            // the never-taken guarded-inline cold copy — which used to refuse
+            // the whole method (measured: compiling any?: is −17% on
+            // combinators). The own-selector rule below is deliberately NOT
+            // exempted: the `whileDo:` trampoline's cold copy re-sends its own
+            // selector, and compiling it deepens native recursion per
+            // ITERATION (the original 5.8×-sieve shape). The exemption also
+            // requires NO pending deferred-nil locals: materialization forces
+            // them into slots with a nil-init AT THIS SITE, and a cold span
+            // inside a loop would re-nil an accumulator stored on a previous
+            // iteration (the `reduce:` shape) — refuse rather than corrupt.
+            if in_loop && !(Self::in_guard_cold_span(insts, ip) && self.nil_deferred.is_empty()) {
                 return Err(format!(
                     "per-iteration ^^ materialization (fused loop) at ip {ip}"
                 ));
@@ -2037,7 +2053,8 @@ impl<'a> Translator<'a> {
         // snapshot per tree node in btrees' makeTree (compiling it measured
         // +6.8% on btrees; the interpreter's closures are a pointer share).
         // Compiling these shapes WELL (hoisted/lazy arm closures) is the
-        // recorded follow-up, shared with qnlib's whileDo:.
+        // recorded follow-up, shared with qnlib's whileDo:. Deliberately NOT
+        // cold-span-exempt — see the M3 note above.
         if scan.sends_own_selector {
             return Err(format!(
                 "per-invocation materialization in a recursive method at ip {ip}"
@@ -2046,7 +2063,9 @@ impl<'a> Translator<'a> {
         // A write to a FRAME local mutates the snapshot — read back after the
         // consuming send. A write that resolves DEEPER than this frame walks
         // past the snapshot into the real env cells (exact as-is). A write to
-        // a param/self has no writable home — refuse.
+        // a param/self has no writable home — refuse (M3 note: this and the
+        // rules below stay unexempted; only the per-iteration profitability
+        // rule above is about EXECUTION COUNT, which a cold span bounds).
         let mut writebacks: Vec<(Symbol, VarSlot)> = Vec::new();
         for s in written_frees {
             if writebacks.iter().any(|(w, _)| *w == s) {
@@ -2108,6 +2127,31 @@ impl<'a> Translator<'a> {
             self.materialized_nlr.insert(out_idx);
         }
         Ok(AV::Dyn(out_idx))
+    }
+
+    /// Is `ip` inside a GUARD-FAIL COLD SPAN — the `<cold>` half of the
+    /// option-C dual emission `Branch*(→cold); <hot>; Jump(→join); <cold>`?
+    /// Recognized structurally: a forward guard branch whose target is
+    /// preceded by an unconditional forward `Jump` (the hot path's jump over
+    /// the cold code) that lands past `ip`. Code there executes only when the
+    /// guard FAILS, so a fused loop around it does not make it per-iteration
+    /// in the common (guard-holds) case — the basis of the M3 exemption in
+    /// `materialize_closure`.
+    fn in_guard_cold_span(insts: &[Instruction], ip: usize) -> bool {
+        insts.iter().enumerate().any(|(j, inst)| match inst {
+            Instruction::BranchIfNotBool(o)
+            | Instruction::BranchIfNotList(o)
+            | Instruction::BranchIfNotPlainNew(o) => {
+                *o > 0 && {
+                    let t = (j as isize + *o) as usize;
+                    t >= 1
+                        && t <= ip
+                        && matches!(insts.get(t - 1), Some(Instruction::Jump(o2))
+                            if *o2 > 0 && ip < ((t - 1) as isize + *o2) as usize)
+                }
+            }
+            _ => false,
+        })
     }
 
     /// Flush a consumed closure's captured-write read-backs (B3b): each
