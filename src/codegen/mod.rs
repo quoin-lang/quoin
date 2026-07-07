@@ -554,10 +554,18 @@ fn finish_frame<'gc>(
     outcome
 }
 
-/// Unbox the (dispatch-guaranteed) args, reserve this frame's slot window on
-/// `vm.stack` (slot 0 = receiver, then object params, then nil-initialized
-/// scratch — all GC-rooted by construction), run the compiled body, and box
-/// the result.
+/// Unbox the (dispatch-guaranteed) args, establish this frame's slot window
+/// on `vm.stack` (slot 0 = receiver, then one slot per param, then
+/// nil-initialized scratch — all GC-rooted by construction), run the compiled
+/// body, and box the result.
+///
+/// D1 (docs/OUTCALL_ARCH.md): when the caller already pushed the
+/// `[receiver, args…]` rooting window (`window = Some(recv_start)` — every
+/// outcall and interpreted send does, A2c/A2d), that window IS the frame's
+/// slot window: nothing is re-pushed but the scratch. The translator's slot
+/// layout reserves one slot per param (scalars waste theirs) precisely so the
+/// two layouts coincide. All Bail paths fire BEFORE the scratch pushes, so a
+/// bailing windowed call leaves the caller's window exactly as it found it.
 pub fn invoke<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
@@ -565,6 +573,7 @@ pub fn invoke<'gc>(
     receiver: Value<'gc>,
     args: &[Value<'gc>],
     enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
+    window: Option<usize>,
 ) -> AotOutcome<'gc> {
     if !entry_gates(vm, entry) {
         return AotOutcome::Bail;
@@ -582,25 +591,34 @@ pub fn invoke<'gc>(
         // whose guarded loop dispatches the real `each:` — exact semantics.
         return AotOutcome::Bail;
     }
-    let base = vm.stack.len();
-    vm.stack.push(receiver); // slot 0
-    let mut raw: Vec<i64> = Vec::with_capacity(args.len());
-    for (a, k) in args.iter().zip(entry.params.iter()) {
+    // Raw lanes without a heap allocation for the common arity (compiled
+    // call sites are capped at 8 args; wider entries reach here only from
+    // interpreted seams).
+    let mut raw_buf = [0i64; 16];
+    let mut raw_vec: Vec<i64>;
+    let raw: &mut [i64] = if args.len() <= raw_buf.len() {
+        &mut raw_buf[..args.len()]
+    } else {
+        raw_vec = vec![0; args.len()];
+        &mut raw_vec
+    };
+    let base = window.unwrap_or(vm.stack.len());
+    for (i, (a, k)) in args.iter().zip(entry.params.iter()).enumerate() {
         let bits = match (k, a) {
-            (AotParam::Scalar(AotKind::Int), Value::Int(i)) => *i,
+            (AotParam::Scalar(AotKind::Int), Value::Int(v)) => *v,
             (AotParam::Scalar(AotKind::Double), Value::Double(d)) => d.to_bits() as i64,
             (AotParam::Scalar(AotKind::Bool), Value::Bool(b)) => *b as i64,
-            (AotParam::Obj, v @ Value::Object(_)) => {
-                let idx = vm.stack.len() as i64;
-                vm.stack.push(*v);
-                idx
-            }
-            _ => {
-                vm.stack.truncate(base);
-                return AotOutcome::Bail;
-            }
+            // The arg's window slot (existing or about-to-be-pushed below).
+            (AotParam::Obj, Value::Object(_)) => (base + 1 + i) as i64,
+            _ => return AotOutcome::Bail,
         };
-        raw.push(bits);
+        raw[i] = bits;
+    }
+    if window.is_none() {
+        vm.stack.push(receiver); // slot 0
+        for &a in args {
+            vm.stack.push(a); // one slot per param, scalar or not
+        }
     }
     for _ in 0..entry.n_scratch {
         vm.stack.push(Value::Nil);

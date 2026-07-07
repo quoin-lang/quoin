@@ -880,15 +880,12 @@ impl<'a> Translator<'a> {
             return Err("scalar-pure member touched the slot window".to_string());
         }
         let fixed = match self.cand.role {
-            // 0 = receiver, then obj params.
-            AotRole::Method => {
-                1 + self
-                    .cand
-                    .params
-                    .iter()
-                    .filter(|p| matches!(p, AotParam::Obj))
-                    .count() as u32
-            }
+            // 0 = receiver, then ONE slot per param — scalar params occupy
+            // (and waste) theirs, so the window layout coincides exactly with
+            // the [receiver, args…] window every outcall/send caller already
+            // pushed for rooting, letting `invoke` reuse it instead of
+            // building a second copy (D1, docs/OUTCALL_ARCH.md).
+            AotRole::Method => 1 + self.cand.params.len() as u32,
             // 0 = self (the vWSOA arg), 1 = the param's own cell, 2 = the
             // block object (env access) — see `invoke_block`.
             AotRole::BlockTemplate => 3,

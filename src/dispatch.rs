@@ -255,28 +255,23 @@ impl<'gc> Callable<'gc> {
                     }
                     entry.0.spec_bails.store(0, Ordering::Relaxed);
                 }
-                // Root (receiver, args) exactly like the Native arm: the compiled
-                // body may suspend at a fuel checkpoint, and the rooted snapshot is
-                // what makes the shim's locals safe across it (scalars carry no Gc,
-                // the receiver stays reachable here).
-                vm.active_native_args.push(NativeCall {
+                // D1: no `active_native_args` rooting entry — the slot window
+                // roots everything across compiled-body suspensions. With a
+                // caller window, `invoke` REUSES it as the frame's slot window
+                // (one push, not two); without one (re-entry callers), invoke
+                // pushes the window itself before any suspension point.
+                let outcome = crate::codegen::invoke(
+                    vm,
+                    mc,
+                    entry.0,
                     receiver,
-                    args: match args_window {
-                        Some(start) => NativeArgs::StackWindow {
-                            start,
-                            len: args.len(),
-                        },
-                        None => NativeArgs::Owned(args.clone()),
-                    },
-                });
-                let outcome =
-                    crate::codegen::invoke(vm, mc, entry.0, receiver, &args, block.parent_env);
+                    &args,
+                    block.parent_env,
+                    args_window.map(|start| start - 1),
+                );
                 if matches!(outcome, crate::codegen::AotOutcome::Err(_)) {
-                    if let Some(call) = vm.active_native_args.last() {
-                        vm.exceptions.last_send_args = call.args_vec(&vm.stack);
-                    }
+                    vm.exceptions.last_send_args = args.clone();
                 }
-                vm.active_native_args.pop();
                 match outcome {
                     crate::codegen::AotOutcome::Value(v) => {
                         vm.push(v);
