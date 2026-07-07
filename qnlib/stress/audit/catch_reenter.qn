@@ -1,0 +1,9 @@
+"* OPEN (2026-07-07): the `catch:` family runs its protected block via
+"* execute_block; a self-nesting protected block compounds Rust frames per level
+"* and SIGBUSes uncatchably (exit 138). Same fix as each_reenter.qn: the
+"* execute_block stack-watermark check.
+
+var f = nil;
+f = { { f.value }.catch:{ |e| e.throw } };
+f.value;
+'unreachable'.print

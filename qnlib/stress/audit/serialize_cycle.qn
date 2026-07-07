@@ -1,0 +1,15 @@
+"* OPEN (2026-07-07): every value serializer recurses without a bound — a CYCLIC
+"* value (two lines!) or a deep one (~500k nesting) overflows the stack with an
+"* UNCATCHABLE SIGBUS (exit 138). Reachable through JSON.generate: (its own
+"* value_to_json walk), MessagePack.pack: / TOML / YAML / extension `call:…data:`
+"* (the shared value_to_data), and the proto-side encode_dv (the symmetric belt to
+"* the existing MAX_DV_DEPTH decode cap). This WIDENS the recorded audit finding:
+"* the TODO only noted the extension encode path; the cycle variant plus the
+"* data-format serializers make it a user-facing crash with no extension involved.
+"* Fix (QUOIN_TODO.md): depth cap (~128) in value_to_data, value_to_json, and
+"* encode_dv → catchable errors naming the likely cycle.
+
+var l = #();
+l.add:l;
+(JSON.generate:l).print;
+'unreachable'.print

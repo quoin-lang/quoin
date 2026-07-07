@@ -281,7 +281,13 @@ Quoin over the current sockets/streams).
   Phase-3 residue — a fuller Arrow C Data Interface for columnar interchange — is tracked
   where its forcing function lives: `crates/adbc/DESIGN.md` §7 (the columnar `Table` value).
   Remaining refinements below.
-  - [ ] **Extension calls: fair queuing instead of a busy error.** *(audit follow-up, PR #48.)*
+  - [ ] **Extension calls: fair queuing instead of a busy error.** *(audit follow-up, PR #48;
+    DUG 2026-07-07 — settled fix design: a waiter queue on `NativeExtension` mirroring the
+    channel park model exactly — `(TaskId, park_epoch)` FIFO with park-identity staleness
+    (all machinery exists and is battle-tested), same-task re-entry still errors (track the
+    owner task), extension death wakes all waiters with the error, and `ext_end_call` hands
+    the claim to the front waiter. ~half a session incl. concurrent/cancel/death stress
+    tests.)*
     A connection serves one top-level call at a time (a single request/response socket, no
     request ids); a second *concurrent* call now fails fast with a catchable "extension busy"
     error (`in_flight` guard, `src/runtime/extension.rs`) instead of interleaving frames and
@@ -559,7 +565,16 @@ deferred `Mirror` in `## REPL`.
   (`&raw[1..raw.len() - 1]`), which is char-boundary-safe. The `us`→`µs` workaround in `qnlib/test.qn` was
   reverted. Regression test: `multibyteLiterals` (`qnlib/tests/08-strings.qn`).
 - [ ] **Native re-entry through `execute_block` can still overflow the machine stack
-  (uncatchable SIGBUS).** *(audit follow-up, PR #48.)* `call_method`/`call_method_value` now
+  (uncatchable SIGBUS).** *(audit follow-up, PR #48; DUG 2026-07-07 — confirmed live, repros
+  `qnlib/stress/audit/each_reenter.qn` + `catch_reenter.qn`, both exit 138. The dig NARROWED
+  the surface: plain `b = { b.value }` self-recursion is SAFE (flat interpreted frames), and
+  the sort-comparator shape is already caught by the >12 cap — the live hole is the
+  `valueWithSelfOrArg:` combinator seam and the `catch:` family, where each level stacks real
+  Rust frames. SETTLED FIX DESIGN: a stack WATERMARK in `execute_block` — capture the SP at
+  coroutine-body entry (`fiber.rs`), compare in `execute_block`, and past ~14 MiB of the
+  16 MiB stack raise a catchable "block re-entry exhausted the task stack" error. No fixed
+  depth cap, so deep-but-finite generator pipelines keep their current ceiling minus a safety
+  margin; no corosensei API needed. ~1-2h + regression tests.)* `call_method`/`call_method_value` now
   cap native→Quoin re-entry depth (`VmState.native_reentry_depth`, per-task, saved/restored
   across task switches), so a self-referential `==:`/`hash`/comparator that re-enters a native
   op raises a catchable error instead of aborting the process (`src/vm.rs`,
@@ -571,8 +586,16 @@ deferred `Mirror` in `## REPL`.
   stack-remaining check (stacker-style `maybe_grow`) or a larger/growable coroutine stack,
   rather than a fixed depth counter that conflates pathological recursion with deep-but-finite
   legitimate nesting.
-- [ ] **Extension `DataValue` depth cap is decode-side only — the host encode path is still
-  unbounded.** *(audit follow-up, PR #48.)* Decoding a deeply nested `DataValue` *from* an
+- [ ] **Unbounded serialization recursion — WIDER than the original encode-side finding.**
+  *(audit follow-up, PR #48; DUG 2026-07-07 — repro `qnlib/stress/audit/serialize_cycle.qn`.
+  A CYCLIC value (`var l = #(); l.add:l`) or a ~500k-deep one SIGBUSes uncatchably through
+  EVERY serializer, no extension involved: `JSON.generate:` (its own `value_to_json` walk,
+  `src/runtime/json.rs:27`), `MessagePack.pack:`/TOML/YAML/extension `call:…data:` (the
+  shared `value_to_data`, `src/runtime/data_value.rs:50`), and the proto-side `encode_dv`
+  (`crates/quoin-ext-proto`). SETTLED FIX DESIGN: a depth parameter + cap (~128) in all
+  three recursions → catchable errors naming the likely cycle ("value nesting exceeds N —
+  is the value self-referential?"); one mechanism covers both cycles and depth. ~2h incl.
+  tests for the five entry points.)* Decoding a deeply nested `DataValue` *from* an
   extension is capped (`MAX_DV_DEPTH = 64`, catchable `DecodeError` —
   `crates/quoin-ext-proto/src/lib.rs`), which stops a buggy/hostile extension from overflowing
   the host stack. The **symmetric** path — the host serializing a deeply nested Quoin value to
