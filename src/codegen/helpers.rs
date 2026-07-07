@@ -332,6 +332,7 @@ pub(super) unsafe extern "C" fn block_call(
             recv,
             crate::symbol::Symbol::intern("valueWithSelfOrArg:"),
             vec![arg],
+            None,
         ) {
             Ok(v) => slot_write(vm, out_idx, v),
             Err(e) => store_err(vm, e),
@@ -648,11 +649,12 @@ pub(super) unsafe extern "C" fn string_const(
 /// methods). Runs through `call_method` — the same nested-step-loop native
 /// re-entry every native uses, with its depth guard, suspension safety, and
 /// thrown-value transparency. The result lands in `out_idx`.
+#[allow(clippy::too_many_arguments)]
 pub(super) unsafe extern "C" fn outcall(
     vm: *mut c_void,
     mc: *const c_void,
     tid: i64,
-    ip: i64,
+    ip_site: i64,
     bc_len: i64,
     recv_kind: i64,
     recv_bits: i64,
@@ -663,17 +665,118 @@ pub(super) unsafe extern "C" fn outcall(
     out_idx: i64,
 ) -> u8 {
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    // The D2 site id rides the ip lane's high bits (bytecode ips are tiny),
+    // keeping the pre-D2 12-arg signature — the 13th argument crossed
+    // further into the ABI's stack-passing region and taxed every outcall.
+    let ip = ip_site & 0xffff_ffff;
+    let site = (ip_site >> 32) as u32;
     let receiver = decode(vm, recv_kind, recv_bits);
-    let mut args = Vec::with_capacity(argc as usize);
-    for i in 0..argc as usize {
+    let n = argc as usize;
+    // D2 fast path (docs/OUTCALL_ARCH.md), receiver phase FIRST — a site
+    // whose target is not compiled (native, polymorphic) pays a few loads
+    // here and then takes the classic path untouched. On a receiver hit the
+    // lanes decode once into a fixed window buffer (compiled sites cap at 8),
+    // arg guards + S1 preconditions check per call, and the entry is invoked
+    // directly — no registry hash, no IC borrow/probe, no Callable dispatch.
+    if site != u32::MAX
+        && n <= 8
+        && vm.aot.outcall_nesting < crate::codegen::spec::MAX_OUTCALL_NESTING
+        && let Some(cell) = vm.aot_site_peek(site as usize, receiver, n)
+    {
+        let mut argv = [Value::Nil; 8];
+        for (i, slot) in argv.iter_mut().enumerate().take(n) {
+            let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
+            *slot = decode(vm, k, b);
+        }
+        let args = &argv[..n];
+        let entry = cell.entry.expect("peeked cell has an entry");
+        if VmState::aot_site_args_match(&cell, args)
+            && entry
+                .param_preconditions
+                .iter()
+                .zip(args.iter())
+                .all(|(pre, a)| pre.is_none_or(|k| crate::codegen::scalar_matches(k, *a)))
+        {
+            let recv_start = vm.stack.len();
+            vm.stack.push(receiver);
+            for &a in args {
+                vm.stack.push(a);
+            }
+            vm.aot.outcall_nesting += 1;
+            let outcome = crate::codegen::invoke(
+                vm,
+                mc,
+                entry,
+                receiver,
+                args,
+                cell.parent_env,
+                Some(recv_start),
+            );
+            vm.aot.outcall_nesting = vm.aot.outcall_nesting.saturating_sub(1);
+            match outcome {
+                crate::codegen::AotOutcome::Value(v) => return slot_write(vm, out_idx, v),
+                crate::codegen::AotOutcome::Err(e) => {
+                    // The S1/finish_frame rule: an escaping `^^` already
+                    // delivered at (possibly) the window start — only non-NLR
+                    // errors tear the window down here.
+                    if !matches!(e, QuoinError::NonLocalReturn) {
+                        vm.stack.truncate(recv_start.min(vm.stack.len()));
+                    }
+                    vm.exceptions.last_send_args = args.to_vec();
+                    return store_err(vm, e);
+                }
+                crate::codegen::AotOutcome::Bail => {
+                    // Bails fire before invoke's scratch pushes: only our own
+                    // window is on the stack. The slow path re-resolves.
+                    vm.stack.truncate(recv_start.min(vm.stack.len()));
+                }
+            }
+        }
+        // Arg-shape / precondition miss (or Bail): classic path, args ready.
+        return outcall_classic(
+            vm,
+            mc,
+            tid,
+            ip,
+            bc_len,
+            receiver,
+            selector,
+            args.to_vec(),
+            out_idx,
+            site,
+        );
+    }
+    let mut args = Vec::with_capacity(n);
+    for i in 0..n {
         let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
         args.push(decode(vm, k, b));
     }
+    outcall_classic(
+        vm, mc, tid, ip, bc_len, receiver, selector, args, out_idx, site,
+    )
+}
+
+/// The classic outcall path, out of line so the hot fast path above stays
+/// small (interpreter-heavy programs are sensitive to the helper's code
+/// footprint). `(tid, ip)` is the SAME call-site identity the interpreted
+/// send at this instruction uses, so compiled and interpreted execution
+/// share one warm inline cache — without it every compiled operator send
+/// paid an uncached lookup and lost to the interpreted body it replaced.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn outcall_classic(
+    vm: &mut VmState<'static>,
+    mc: &gc_arena::Mutation<'static>,
+    tid: i64,
+    ip: i64,
+    bc_len: i64,
+    receiver: Value<'static>,
+    selector: *const Symbol,
+    args: Vec<Value<'static>>,
+    out_idx: i64,
+    site: u32,
+) -> u8 {
     let selector = unsafe { *selector };
-    // `(tid, ip)` is the SAME call-site identity the interpreted send at this
-    // instruction uses, so compiled and interpreted execution share one warm
-    // inline cache — without it every compiled operator send paid an uncached
-    // lookup and lost to the interpreted body it replaced.
     match vm.call_method_cached(
         mc,
         tid as u32,
@@ -682,6 +785,7 @@ pub(super) unsafe extern "C" fn outcall(
         receiver,
         selector,
         args,
+        (site != u32::MAX).then_some(site),
     ) {
         Ok(v) => slot_write(vm, out_idx, v),
         Err(e) => store_err(vm, e),

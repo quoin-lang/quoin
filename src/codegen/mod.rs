@@ -287,6 +287,14 @@ pub fn bump_redef_epoch() {
 /// tombstone): new dispatches stop minting `AotCall`; call sites whose
 /// inline caches still hold the entry keep failing its precondition and
 /// Bailing — correct, just interpreted.
+/// Mint a D2 outcall-site id (docs/OUTCALL_ARCH.md): the index of this
+/// compiled call site's cell in `VmState::aot_sites`. Monotonic and never
+/// reused; retried translations waste a few — harmless.
+pub fn next_outcall_site() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn tombstone(template_id: u32) {
     registry().write().unwrap().remove(&template_id);
 }

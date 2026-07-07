@@ -328,6 +328,7 @@ impl_helper_sig!(A B C D E F G H I);
 impl_helper_sig!(A B C D E F G H I J);
 impl_helper_sig!(A B C D E F G H I J K);
 impl_helper_sig!(A B C D E F G H I J K L);
+impl_helper_sig!(A B C D E F G H I J K L M);
 
 /// One row per helper: `field: path as fn(params) -> ret`. Generates the `Helpers`
 /// struct, `declare_helpers`, and `helper_symbols` (the JIT symbol table);
@@ -1451,7 +1452,7 @@ impl<'a> Translator<'a> {
                         let key = stack.pop().ok_or("stack underflow")?;
                         self.refuse_tracked_escape(key, ip, "a map key")?;
                         let recv = stack.pop().ok_or("stack underflow")?;
-                        let out = self.emit_outcall(b, &fx, recv, "at:", &[key], ip)?;
+                        let out = self.emit_outcall_nosite(b, &fx, recv, "at:", &[key], ip)?;
                         stack.push(out);
                     }
                     Instruction::MapSet => {
@@ -1463,7 +1464,8 @@ impl<'a> Translator<'a> {
                         self.refuse_tracked_escape(val, ip, "a map")?;
                         self.refuse_tracked_escape(key, ip, "a map key")?;
                         let recv = stack.pop().ok_or("stack underflow")?;
-                        let out = self.emit_outcall(b, &fx, recv, "at:put:", &[key, val], ip)?;
+                        let out =
+                            self.emit_outcall_nosite(b, &fx, recv, "at:put:", &[key, val], ip)?;
                         stack.push(out);
                     }
                     Instruction::Jump(off) => {
@@ -2484,6 +2486,35 @@ impl<'a> Translator<'a> {
         args: &[AV],
         ip: usize,
     ) -> Result<AV, String> {
+        self.emit_outcall_inner(b, fx, recv, selector, args, ip, true)
+    }
+
+    /// `emit_outcall` for sites whose target can never be a compiled entry
+    /// (the devirt-op native fallbacks — `at:`/`at:put:` on a Map): no D2
+    /// site is minted, so the helper skips the always-miss peek.
+    fn emit_outcall_nosite(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        recv: AV,
+        selector: &str,
+        args: &[AV],
+        ip: usize,
+    ) -> Result<AV, String> {
+        self.emit_outcall_inner(b, fx, recv, selector, args, ip, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_outcall_inner(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        recv: AV,
+        selector: &str,
+        args: &[AV],
+        ip: usize,
+        with_site: bool,
+    ) -> Result<AV, String> {
         let (rk, rb) = self.encode(b, fx, recv);
         self.fill_lanes(b, fx, args)?;
         let sym: &'static Symbol = Box::leak(Box::new(Symbol::intern(selector)));
@@ -2493,12 +2524,25 @@ impl<'a> Translator<'a> {
         let ka = b.ins().stack_addr(types::I64, fx.kinds_buf, 0);
         let ba = b.ins().stack_addr(types::I64, fx.bits_buf, 0);
         let argc = b.ins().iconst(types::I64, args.len() as i64);
-        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
+        let (tid_v, _ip_v, len_v) = self.site_consts(b, ip);
+        // D2: every dispatch-reachable outcall site gets a cell in
+        // `VmState::aot_sites` (the "AOT IC") — a warm hit dispatches
+        // straight to the compiled entry. The site id rides the ip lane's
+        // high bits (see helpers::outcall) so the helper keeps its pre-D2
+        // 12-argument ABI; `u32::MAX` = no site (never peek).
+        let site = if with_site {
+            crate::codegen::next_outcall_site()
+        } else {
+            u32::MAX
+        };
+        let ip_site = b
+            .ins()
+            .iconst(types::I64, (ip as i64) | ((i64::from(site)) << 32));
         let f = self.func_ref(b, self.helpers.outcall);
         let call = b.ins().call(
             f,
             &[
-                fx.vm, fx.mc, tid_v, ip_v, len_v, rk, rb, sel, argc, ka, ba, out_idx,
+                fx.vm, fx.mc, tid_v, ip_site, len_v, rk, rb, sel, argc, ka, ba, out_idx,
             ],
         );
         let tag = b.inst_results(call)[0];
