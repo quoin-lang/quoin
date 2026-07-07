@@ -278,10 +278,22 @@
         var argIdxs = #();
         v.operands.each:{ |o| argIdxs.add:(me.indexOf:o) };
         var op = v.op;
+        "* structural CSE: two syntactically separate but identical subexpressions (the classic
+        "* `(a - b) * (a - b)`) collapse into ONE node — every graph op is pure, so same op over
+        "* the same child indices (+ same extras) is the same value. Keys can't collide with the
+        "* serial ('7')/base ('b3') keys (distinct 'n' prefix).
+        var skey = 'n' + op + argIdxs.s;
+        v.extra.defined?.if:{ skey = skey + v.extra.s };
+        (@seen.at:skey).defined?.if:{
+            var idx = @seen.at:skey;
+            @seen.at:key put:idx;
+            ^^ idx
+        };
         var node = #{ 'op': op 'a': argIdxs };
         v.extra.defined?.if:{ v.extra.each:{ |kv| node.at:(kv.key) put:(kv.value) } };
         var idx = .pushNode:node;
         @seen.at:key put:idx;
+        @seen.at:skey put:idx;
         idx
     };
 

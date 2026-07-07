@@ -33,12 +33,15 @@ try:
 except ImportError:  # optional accelerator — the plain-NumPy path is complete on its own
     numexpr = None
 
-# Fused evaluation is on when numexpr imports, unless QN_NUMPY_NO_NUMEXPR disables it. Graphs
-# whose largest base array is below QN_NUMPY_NUMEXPR_MIN elements stay on the plain path:
-# numexpr's per-evaluate overhead beats the fusion win on small arrays (the default is the
-# measured crossover — profiling/numexpr/notes.md).
+# Fused evaluation is on when numexpr imports, unless QN_NUMPY_NO_NUMEXPR disables it. Two
+# measured gates keep it to where it actually wins (profiling/numexpr/notes.md): the graph's
+# largest base array must reach QN_NUMPY_NUMEXPR_MIN elements (numexpr's ~90µs per-evaluate
+# floor — thread coordination — dwarfs small arrays), and the graph must contain at least
+# QN_NUMPY_NUMEXPR_MIN_OPS fusible ops (short chains are memory-pass-bound either way; fusion
+# pays on WIDE elementwise chains, ~7x on an 11-op chain at 1M).
 _NUMEXPR_ENABLED = numexpr is not None and not os.environ.get("QN_NUMPY_NO_NUMEXPR")
-_NUMEXPR_MIN = int(os.environ.get("QN_NUMPY_NUMEXPR_MIN", "32768"))
+_NUMEXPR_MIN = int(os.environ.get("QN_NUMPY_NUMEXPR_MIN", "262144"))
+_NUMEXPR_MIN_OPS = int(os.environ.get("QN_NUMPY_NUMEXPR_MIN_OPS", "4"))
 
 _RNG = np.random.default_rng()
 
@@ -267,28 +270,32 @@ def _eval_op(n, op, child):
 
 
 def _fusion_wanted(nodes):
-    """Fuse only when enabled AND the graph touches a base array big enough that one numexpr
-    pass beats its per-evaluate overhead (the QN_NUMPY_NUMEXPR_MIN crossover)."""
+    """Fuse only when enabled AND both measured gates pass: a base array big enough that one
+    numexpr pass beats its per-evaluate floor (QN_NUMPY_NUMEXPR_MIN), and a chain wide enough
+    that fusing passes actually saves memory traffic (QN_NUMPY_NUMEXPR_MIN_OPS)."""
     if not _NUMEXPR_ENABLED:
         return False
     biggest = 0
+    fusible = 0
     for n in nodes:
-        if n.get("op") == "base":
+        op = n.get("op")
+        if op == "base":
             b = n.get("v")
             if isinstance(b, NdArray) and b.a.size > biggest:
                 biggest = b.a.size
-    return biggest >= _NUMEXPR_MIN
+        elif op in _NX_BINOPS or op in _NX_UNOPS or op == "where":
+            fusible += 1
+    return biggest >= _NUMEXPR_MIN and fusible >= _NUMEXPR_MIN_OPS
 
 
 def _eval_fused(nodes, root_idx):
     """The fused evaluator: fusible elementwise nodes accumulate a numexpr expression string
     instead of executing; a fused region materializes — ONE numexpr.evaluate, a single
     blocked + multithreaded pass with no intermediate temporaries — only when something
-    non-fusible needs its value: a plain-path consumer, a diamond (shared node, still
-    evaluated exactly once), the input-count cap, or the graph root. A whole-array sum/prod
-    at the ROOT folds into the fused pass itself (numexpr allows a full reduction only
-    outermost, so reductions are never inlined into a bigger expression). Node semantics are
-    `_eval_op`'s; fusion only changes how many passes run."""
+    non-fusible needs its value: a plain-path consumer (reductions included — see the note
+    in `try_fuse`), a diamond (shared node, still evaluated exactly once), the input-count
+    cap, or the graph root. Node semantics are `_eval_op`'s; fusion only changes how many
+    passes run."""
     uses = [0] * len(nodes)
     for n in nodes:
         for j in n.get("a", ()):
@@ -347,13 +354,10 @@ def _eval_fused(nodes, root_idx):
             if kc != "bool":
                 return None
             return (f"where({ec}, {ex}, {ey})", "num", {**vc, **vx, **vy})
-        if op in ("sum", "prod") and len(a) == 1 and n.get("axis") is None:
-            # Reached only for the root (see the loop below): fold the whole-array
-            # reduction over a deferred single-use child into one fused pass.
-            j = a[0]
-            if not have[j] and fused[j] is not None and uses[j] == 1:
-                ej, _, vj = fused[j]
-                return (f"{op}({ej})", "num", vj)
+        # Reductions are deliberately NOT fused: numexpr's own sum()/prod() reductions are
+        # single-threaded and measured SLOWER than materializing the fused elementwise pass
+        # and letting np.sum reduce it (profiling/numexpr/notes.md) — so a reduction node
+        # just forces its (fused) child like any other plain-path consumer.
         return None
 
     for i, n in enumerate(nodes):
@@ -365,8 +369,7 @@ def _eval_fused(nodes, root_idx):
             vals[i] = n["v"]
             have[i] = True
         else:
-            fusible = i == root_idx or op not in ("sum", "prod")
-            f = try_fuse(n, op) if fusible else None
+            f = try_fuse(n, op)
             if f is not None and len(f[2]) <= _NX_MAX_VARS:
                 fused[i] = f
             else:
