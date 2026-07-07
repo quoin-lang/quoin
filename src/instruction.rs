@@ -348,6 +348,21 @@ pub enum Instruction {
     // performing the real `each:` send (a custom class's own `each:`, Set/Map/Generator,
     // or MNU — exact semantics), with the receiver left on the stack. Never pops.
     BranchIfNotList(isize),
+    /// Guard for fused instantiation (M2, docs/MATERIALIZATION_ARCH.md). Peeks the stack
+    /// top (the `new:` receiver): if `new:` on it resolves to the BUILT-IN
+    /// `Callable::New` — no user `new:` anywhere in the class-side chain — and the class
+    /// is instantiable, fall through to the inline field-expression path; otherwise jump
+    /// by the offset to a cold path performing the real `new:` send with a materialized
+    /// config closure (a user meta `new:`, an abstract class' error, a non-class
+    /// receiver's MNU — exact semantics). Never pops; the verdict is cached per site
+    /// ((class-ptr, epoch)-guarded, `IC_PLAINNEW_KIND`).
+    BranchIfNotPlainNew(isize),
+    /// Fused instantiation body (M2): the stack holds the receiver class then the n
+    /// field values named here, in order. Allocates the object, binds the named fields
+    /// (unknown names silently dropped — `finalize_instantiation`'s exact contract),
+    /// runs the init chain through the memoized plan when one exists, and replaces the
+    /// window with the finished object. Reached only via `BranchIfNotPlainNew`.
+    NewWithFields(Rc<Vec<Symbol>>),
     /// The devirtualized `count` of a native List (the fused `each:` loop bound). Pops
     /// the receiver, pushes its element count; a non-List receiver falls back to the
     /// real `count` send, like every devirt op.

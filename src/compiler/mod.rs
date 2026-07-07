@@ -142,7 +142,8 @@ fn jump_offset(inst: &Instruction) -> Option<isize> {
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
         | Instruction::BranchIfNotBool(o)
-        | Instruction::BranchIfNotList(o) => Some(*o),
+        | Instruction::BranchIfNotList(o)
+        | Instruction::BranchIfNotPlainNew(o) => Some(*o),
         _ => None,
     }
 }
@@ -153,7 +154,8 @@ fn set_jump_offset(inst: &mut Instruction, off: isize) {
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
         | Instruction::BranchIfNotBool(o)
-        | Instruction::BranchIfNotList(o) => *o = off,
+        | Instruction::BranchIfNotList(o)
+        | Instruction::BranchIfNotPlainNew(o) => *o = off,
         _ => {}
     }
 }
@@ -2660,6 +2662,12 @@ impl Compiler {
         // native index loop — closure-free per element on any native-List receiver,
         // with the real send as the cold path (the guard IS the dispatch).
         if self.try_compile_inlined_each(call, bytecode)? {
+            return Ok(());
+        }
+        // M2 (docs/MATERIALIZATION_ARCH.md): fuse `X.new:{ f=e; … }` on the plain-config
+        // shape into a guarded inline instantiation — no config closure, no config frame,
+        // no interpreted stores, with the real send as the cold path.
+        if self.try_compile_fused_instantiation(call, bytecode)? {
             return Ok(());
         }
         // Phase 5·1/5·2: inline a self-send to a sealed class's own method with an inline-safe body

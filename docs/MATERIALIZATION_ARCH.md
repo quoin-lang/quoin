@@ -1,12 +1,17 @@
 # Cheap materialization: fusion first, thin closures second
 
-*Status: M1 SHIPPED on `perf/cheap-materialization` (stacked on
-`perf/alloc-churn`, PR #59) — measured btrees −31.8% (1.47×), richards
-−14.4% (1.17×), json −2.6%, rest noise; corpus 1611/0 ×5 modes. The
-alpha-renaming lives in `Compiler::declare_local`/`local_symbol`
-(splice scopes) + `devirt.rs` `spliceable_arm`/`splice_hazard_free`;
-shape pins in `src/compiler/tests.rs`, semantic pins in
-`qnlib/tests/45-controlflow-inline.qn`. M2/M3 not started. Baselines +
+*Status: M1 + M2 SHIPPED on `perf/cheap-materialization` (stacked on
+`perf/alloc-churn`, PR #59). M1 (alpha-renamed fusion): btrees −31.8%,
+richards −14.4%, json −2.6%. M2 (fused instantiation): btrees a further
+**−34.6%** — arc cumulative **2.31×** on btrees — all else noise;
+corpus 1627/0 ×5 modes. M1 lives in `Compiler::declare_local`/
+`local_symbol` + `devirt.rs` `spliceable_arm`/`splice_hazard_free`;
+M2 in `devirt.rs` `try_compile_fused_instantiation`/`fusable_config`,
+the `BranchIfNotPlainNew`/`NewWithFields` instructions, `vm.rs`
+`plain_new_check_cached`/`exec_new_with_fields` (+`IC_PLAINNEW_KIND`),
+and the two AOT helpers. Post-M2 btrees is outcall-bound like richards
+(the next frontier: direct calls for IC-stable sites — a future arc).
+M3 (gate-lift audit + CROSS re-measure) remains. Baselines +
 experiments in `profiling/cheap-materialization/`.*
 
 ## 1. Why: the measured shape
@@ -150,7 +155,7 @@ btrees' dominant cost), and **env-home is DROPPED** — once configs stop
 materializing, btrees' `closure_bind` goes to ~0 and no bench has a
 measurable materialization residue left to justify the machinery.
 
-### M2 (revised) — fused instantiation (compiler superinstruction; both tiers win)
+### M2 (revised) — fused instantiation (compiler superinstruction; both tiers win) — SHIPPED
 
 `X.new:{ f1=e1; …; fn=en }` on the plain-shape path compiles to a
 guarded dual form, exactly the option-C/`each:` pattern:

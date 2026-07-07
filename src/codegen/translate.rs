@@ -395,6 +395,12 @@ aot_helpers! {
     make_closure: helpers::make_closure as fn(
         *mut c_void, *const c_void, *const Rc<StaticBlock>, i64, i64,
     ) -> u8,
+    plain_new_check: helpers::plain_new_check as fn(
+        *mut c_void, *const c_void, i64, i64, i64, i64, i64,
+    ) -> i64,
+    new_with_fields: helpers::new_with_fields as fn(
+        *mut c_void, *const c_void, *const Symbol, i64, i64, i64, *const i64, *const i64, i64,
+    ) -> u8,
     closure_bind: helpers::closure_bind as fn(*mut c_void, *const c_void, i64, *const Symbol, i64, i64) -> u8,
     field_get: helpers::field_get as fn(
         *mut c_void, *const c_void, i64, i64, i64, i64, *const u8, i64, i64,
@@ -1047,7 +1053,8 @@ impl<'a> Translator<'a> {
                 | Instruction::IfJump(o)
                 | Instruction::ElseJump(o)
                 | Instruction::BranchIfNotBool(o)
-                | Instruction::BranchIfNotList(o) => *o,
+                | Instruction::BranchIfNotList(o)
+                | Instruction::BranchIfNotPlainNew(o) => *o,
                 _ => continue,
             };
             let target = ip as isize + off;
@@ -1562,6 +1569,66 @@ impl<'a> Translator<'a> {
                             }
                         }
                     }
+                    Instruction::BranchIfNotPlainNew(off) => {
+                        let target = (ip as isize + off) as usize;
+                        let recv = *stack.last().ok_or("stack underflow")?;
+                        if !matches!(recv, AV::Dyn(_)) {
+                            // Statically never a plain class value (scalar/nil —
+                            // and conservatively self): always the cold path,
+                            // which performs the real send with exact semantics.
+                            let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                            let (bl, _) = self.block_for(
+                                b,
+                                &fx,
+                                &mut blocks,
+                                &mut work,
+                                target,
+                                &mut nstack,
+                            )?;
+                            let args = Self::stack_args(&nstack)?;
+                            b.ins().jump(bl, &args);
+                            break 'block;
+                        }
+                        // The verdict helper shares the interpreted site's
+                        // (template, ip) cache cell; the receiver stays on the
+                        // stack for BOTH paths.
+                        let (rk, rb) = self.encode(b, &fx, recv);
+                        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
+                        let f = self.func_ref(b, self.helpers.plain_new_check);
+                        let call = b.ins().call(f, &[fx.vm, fx.mc, tid_v, ip_v, len_v, rk, rb]);
+                        let verdict = b.inst_results(call)[0];
+                        let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                        let (hot, _) =
+                            self.block_for(b, &fx, &mut blocks, &mut work, ip + 1, &mut nstack)?;
+                        let (cold, _) =
+                            self.block_for(b, &fx, &mut blocks, &mut work, target, &mut nstack)?;
+                        let args = Self::stack_args(&nstack)?;
+                        b.ins().brif(verdict, hot, &args, cold, &args);
+                        break 'block;
+                    }
+                    Instruction::NewWithFields(names) => {
+                        let n = names.len();
+                        let args: Vec<AV> =
+                            stack.split_off(stack.len().checked_sub(n).ok_or("underflow")?);
+                        let recv = stack.pop().ok_or("stack underflow")?;
+                        let (rk, rb) = self.encode(b, &fx, recv);
+                        self.fill_lanes(b, &fx, &args)?;
+                        let leaked: &'static [Symbol] =
+                            Box::leak(names.iter().copied().collect::<Vec<_>>().into_boxed_slice());
+                        let names_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
+                        let n_v = b.ins().iconst(types::I64, n as i64);
+                        let out = self.alloc_scratch()?;
+                        let out_idx = self.abs_slot(b, &fx, out);
+                        let ka = b.ins().stack_addr(types::I64, fx.kinds_buf, 0);
+                        let ba = b.ins().stack_addr(types::I64, fx.bits_buf, 0);
+                        let f = self.func_ref(b, self.helpers.new_with_fields);
+                        let call = b
+                            .ins()
+                            .call(f, &[fx.vm, fx.mc, names_ptr, n_v, rk, rb, ka, ba, out_idx]);
+                        let tag = b.inst_results(call)[0];
+                        self.tag_check(b, &fx, tag);
+                        stack.push(AV::Dyn(out_idx));
+                    }
                     // Fused sends push their folded operand(s), then share the
                     // generic path: `exec_send` semantics pop n args, then the
                     // receiver (the fused operand is the receiver only for
@@ -1949,7 +2016,8 @@ impl<'a> Translator<'a> {
                 | Instruction::IfJump(o)
                 | Instruction::ElseJump(o)
                 | Instruction::BranchIfNotBool(o)
-                | Instruction::BranchIfNotList(o) => {
+                | Instruction::BranchIfNotList(o)
+                | Instruction::BranchIfNotPlainNew(o) => {
                     *o < 0 && {
                         let target = (j as isize + *o) as usize;
                         target <= ip && ip <= j

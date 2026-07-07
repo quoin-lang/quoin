@@ -2628,3 +2628,88 @@ fn declaring_arm_inside_config_refuses() {
         }
     }
 }
+
+// ---- M2: fused instantiation ----
+
+#[test]
+fn plain_config_new_fuses() {
+    let insts = program_instructions("N <- { |@a @b| }; var x = 5; N.new:{ a = x * 2; b = 'hi' }");
+    assert!(
+        insts
+            .iter()
+            .any(|i| matches!(i, Instruction::BranchIfNotPlainNew(_))),
+        "guard must be emitted"
+    );
+    let nwf = insts
+        .iter()
+        .find_map(|i| match i {
+            Instruction::NewWithFields(names) => Some(names),
+            _ => None,
+        })
+        .expect("hot path must use NewWithFields");
+    let names: Vec<&str> = nwf.iter().map(|s| s.as_str()).collect();
+    assert_eq!(names, vec!["a", "b"]);
+    // The cold path keeps the REAL config literal for the fallback send.
+    assert!(
+        insts.iter().any(|i| match i {
+            Instruction::Push(Constant::Block(b))
+            | Instruction::SendConst(Constant::Block(b), ..)
+            | Instruction::SendLocalConst(_, Constant::Block(b), ..) => b.is_init_literal,
+            _ => false,
+        }),
+        "cold path must keep the config literal"
+    );
+}
+
+#[test]
+fn empty_config_new_fuses() {
+    let insts = program_instructions("N <- { |@a| }; N.new:{ }");
+    assert!(
+        insts
+            .iter()
+            .any(|i| matches!(i, Instruction::NewWithFields(n) if n.is_empty())),
+        "empty config fuses with zero names"
+    );
+}
+
+#[test]
+fn unfusable_configs_keep_the_classic_form() {
+    let no_fuse = |src: &str, why: &str| {
+        let insts = program_instructions(src);
+        assert!(
+            !insts
+                .iter()
+                .any(|i| matches!(i, Instruction::NewWithFields(_))),
+            "{why}: {src}"
+        );
+    };
+    // Read-after-store: the read sees the config-local binding today.
+    no_fuse(
+        "N <- { |@a @b| }; var a = 1; N.new:{ a = 5; b = a }",
+        "read-after-store must refuse",
+    );
+    // A nested literal's captures resolve through the config frame.
+    no_fuse(
+        "N <- { |@cb| }; N.new:{ cb = { 1 } }",
+        "block-literal rvalue must refuse",
+    );
+    // Config `self` is the new object.
+    no_fuse(
+        "N <- { |@a| }; N.new:{ a = self }",
+        "self rvalue must refuse",
+    );
+    // A bare send targets the new object too.
+    no_fuse(
+        "N <- { |@a| }; N.new:{ a = .probe }",
+        "bare-send rvalue must refuse",
+    );
+    // Declarations and non-assignment statements aren't the plain shape.
+    no_fuse(
+        "N <- { |@a| }; N.new:{ var t = 1; a = t }",
+        "declaration must refuse",
+    );
+    no_fuse(
+        "N <- { |@a| }; var l = #(1); N.new:{ l.count; a = 1 }",
+        "non-assignment statement must refuse",
+    );
+}

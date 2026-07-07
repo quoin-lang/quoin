@@ -355,6 +355,69 @@ pub(super) unsafe extern "C" fn block_call(
     }
 }
 
+/// Fused-instantiation guard (M2, `BranchIfNotPlainNew`) for a compiled site,
+/// sharing the interpreted site's `(template, ip)` cache cell. Returns 1 =
+/// plain new (hot path), 0 = cold path. Never errors — every failure mode is
+/// "cold", where the real send raises it.
+pub(super) unsafe extern "C" fn plain_new_check(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tid: i64,
+    ip: i64,
+    bc_len: i64,
+    recv_kind: i64,
+    recv_bits: i64,
+) -> i64 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let receiver = decode(vm, recv_kind, recv_bits);
+    let cell =
+        (tid as u32 != u32::MAX).then(|| (vm.ic_cell_by_id(mc, tid as u32), bc_len as usize));
+    i64::from(vm.plain_new_check_cached(mc, cell, ip as usize, receiver))
+}
+
+/// Fused-instantiation body (M2, `NewWithFields`) for a compiled site: decode
+/// the receiver class and the n field values, push `[class, v1..vn]` as a
+/// rooted stack window (the A2d pattern — the init chain can park), and run
+/// the interpreter's own core; the finished object lands in `out_idx`.
+pub(super) unsafe extern "C" fn new_with_fields(
+    vm: *mut c_void,
+    mc: *const c_void,
+    names: *const Symbol,
+    n: i64,
+    recv_kind: i64,
+    recv_bits: i64,
+    kinds: *const i64,
+    bits: *const i64,
+    out_idx: i64,
+) -> u8 {
+    let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    let names = unsafe { std::slice::from_raw_parts(names, n as usize) };
+    let recv_at = vm.stack.len();
+    let receiver = decode(vm, recv_kind, recv_bits);
+    vm.stack.push(receiver);
+    for i in 0..n as usize {
+        let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
+        let v = decode(vm, k, b);
+        vm.stack.push(v);
+    }
+    match vm.exec_new_with_fields(mc, recv_at + 1, names) {
+        Ok(()) => {
+            // The core replaced the window with the finished object.
+            let v = vm.stack[recv_at];
+            vm.stack.truncate(recv_at);
+            slot_write(vm, out_idx, v)
+        }
+        Err(e) => {
+            // The S1/finish_frame rule: a `^^` escaping an init has already
+            // truncated to its target and delivered its value — never chop it.
+            if !matches!(e, crate::error::QuoinError::NonLocalReturn) {
+                vm.stack.truncate(recv_at.min(vm.stack.len()));
+            }
+            store_err(vm, e)
+        }
+    }
+}
+
 /// Materialize a closure from a compiled frame's cold path (B3b): a fresh
 /// snapshot `EnvFrame` (populated by the `closure_bind` calls the translator
 /// emits right after) + the leaked template + the registry-shared IC cell —

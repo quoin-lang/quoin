@@ -411,6 +411,162 @@ impl Compiler {
         }
     }
 
+    /// M2 fused instantiation (docs/MATERIALIZATION_ARCH.md): compile
+    /// `X.new:{ f1=e1; …; fn=en }` on the plain-config shape into the guarded
+    /// dual form — the option-C pattern applied to the instantiation seam:
+    ///
+    /// ```text
+    /// <receiver>
+    /// BranchIfNotPlainNew(→cold)
+    /// <e1> … <en>              // field rvalues inline in the METHOD frame
+    /// NewWithFields([f1…fn])
+    /// Jump(→end)
+    /// cold: Push(Block(config)); Send(new:, 1)
+    /// ```
+    ///
+    /// The guard runs BEFORE the rvalues evaluate, so the cold path (a user
+    /// meta `new:`, an abstract class, a non-class receiver) re-evaluates them
+    /// inside the real config closure — no double evaluation on either path.
+    /// Returns false (emitting nothing) for any shape `fusable_config` refuses.
+    pub(super) fn try_compile_fused_instantiation(
+        &mut self,
+        call: &MethodCallNode,
+        bytecode: &mut CodeBlock,
+    ) -> Result<bool, String> {
+        let kws: Vec<&str> = call
+            .arguments
+            .signature
+            .identifiers
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        if kws.as_slice() != ["new"] || call.arguments.expressions.len() != 1 {
+            return Ok(false);
+        }
+        let Some(subject) = &call.subject else {
+            return Ok(false);
+        };
+        let Some(pairs) = Self::fusable_config(&call.arguments.expressions[0]) else {
+            return Ok(false);
+        };
+
+        // Receiver first — evaluated once; both paths read it from the stack.
+        self.compile_node(subject, bytecode)?;
+
+        let mut hot = CodeBlock::new();
+        hot.current_source = bytecode.current_source.clone();
+        for (_, rvalue) in &pairs {
+            self.compile_node(rvalue, &mut hot)?;
+        }
+        let names: Vec<Symbol> = pairs.iter().map(|(s, _)| *s).collect();
+        hot.push(Instruction::NewWithFields(Rc::new(names)));
+
+        let mut cold = CodeBlock::new();
+        cold.current_source = bytecode.current_source.clone();
+        self.next_block_is_init = true;
+        self.compile_node(&call.arguments.expressions[0], &mut cold)?;
+        self.emit_call(&mut cold, "new:", 1);
+
+        let h = hot.len() as isize;
+        let k = cold.len() as isize;
+        bytecode.push(Instruction::BranchIfNotPlainNew(h + 2));
+        bytecode.extend(hot);
+        bytecode.push(Instruction::Jump(k + 1));
+        bytecode.extend(cold);
+        Ok(true)
+    }
+
+    /// A config literal whose fused evaluation is indistinguishable from
+    /// running it in an instantiation frame: 0-arg, unnamed, unguarded, no
+    /// header decls; every top-level statement a single-target plain
+    /// assignment to a bare lowercase name; every rvalue self-free (config
+    /// `self` IS the new object), field-free, bare-send-free, literal-free (a
+    /// nested literal's captures of config-bound names would resolve
+    /// differently without the config frame), fiber-yield-free — and reading
+    /// no name a PRIOR statement in the same config stored (such a read sees
+    /// the config-local binding today when the name shadows an outer local).
+    /// Returns the (field, rvalue) pairs in source order.
+    fn fusable_config(node: &Node) -> Option<Vec<(Symbol, &Node)>> {
+        let NodeValue::Block(b) = &node.value else {
+            return None;
+        };
+        if !b.arguments.is_empty()
+            || !b.decls.is_empty()
+            || b.name.is_some()
+            || b.decl_block.is_some()
+        {
+            return None;
+        }
+        let mut pairs = Vec::with_capacity(b.statements.len());
+        let mut stored: Vec<String> = Vec::new();
+        for stmt in &b.statements {
+            let NodeValue::Assignment(a) = &stmt.value else {
+                return None;
+            };
+            let [lval] = a.lvalues.as_slice() else {
+                return None;
+            };
+            let NodeValue::IdentLValue(l) = &lval.value else {
+                return None;
+            };
+            let id = &l.identifier;
+            if id.namespace.is_some()
+                || id.identifier_type != IdentifierType::Local
+                || !id
+                    .name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase())
+            {
+                return None;
+            }
+            if !Self::fusable_field_rvalue(&a.rvalue) || Self::mentions_any(&a.rvalue, &stored) {
+                return None;
+            }
+            stored.push(id.name.clone());
+            pairs.push((Symbol::intern(&id.name), &*a.rvalue));
+        }
+        Some(pairs)
+    }
+
+    /// An rvalue safe to evaluate in the METHOD frame instead of the config
+    /// frame (see `fusable_config`). Unrecognized node kinds conservatively
+    /// refuse — the `escapes_inlined_frame` discipline.
+    fn fusable_field_rvalue(node: &Node) -> bool {
+        match &node.value {
+            NodeValue::Identifier(id) => {
+                id.identifier_type != IdentifierType::Instance && id.name != "self"
+            }
+            NodeValue::MethodCall(mc) => {
+                mc.subject
+                    .as_deref()
+                    .is_some_and(Self::fusable_field_rvalue)
+                    && mc
+                        .arguments
+                        .expressions
+                        .iter()
+                        .all(|e| Self::fusable_field_rvalue(e))
+            }
+            NodeValue::BinaryOperator(op) => {
+                Self::fusable_field_rvalue(&op.left) && Self::fusable_field_rvalue(&op.right)
+            }
+            NodeValue::UnaryOperator(u) => Self::fusable_field_rvalue(&u.right),
+            NodeValue::List(l) => l.values.iter().all(|e| Self::fusable_field_rvalue(e)),
+            NodeValue::Set(s) => s.values.iter().all(|e| Self::fusable_field_rvalue(e)),
+            NodeValue::Map(m) => m
+                .keys
+                .iter()
+                .chain(&m.values)
+                .all(|e| Self::fusable_field_rvalue(e)),
+            NodeValue::Integer(_)
+            | NodeValue::Double(_)
+            | NodeValue::Str(_)
+            | NodeValue::Symbol(_)
+            | NodeValue::Regex(_) => true,
+            _ => false,
+        }
+    }
+
     /// Compile an inlined control-flow block body into `out`: its statements spliced
     /// inline (value-on-stack like a block, but no frame and no trailing `Return`), with
     /// each top-level `^expr` redirected to a `Jump` past the body (patched here). `^^`

@@ -13,7 +13,7 @@ use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
-use crate::symbol::{Symbol, init_colon_symbol, init_symbol, self_symbol};
+use crate::symbol::{Symbol, init_colon_symbol, init_symbol, new_colon_symbol, self_symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, Fields, InitEntry, InitPlan, NamespacedName, NativeCall,
     NativeClass, NativeFunc, Object, ObjectPayload, Value,
@@ -66,6 +66,13 @@ pub type InlineCacheCell<'gc> = Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>;
 /// so one per-template array serves both; a field entry can never satisfy `ic_probe`
 /// (its `callable` is `None`), and `value_type_guard` kinds are tiny, far from this.
 pub const IC_FIELD_KIND: u8 = u8::MAX;
+
+/// `ICSlot::recv_kind` value marking a *fused-instantiation verdict* entry
+/// (`BranchIfNotPlainNew`, M2): `recv_ptr` holds the receiver-class pointer and
+/// `arg_ptrs[0]` the cached verdict (1 = plain `Callable::New` + instantiable).
+/// Same sharing rules as field entries: the branch instruction never shares an
+/// `ip` with a send, and a verdict entry can never satisfy `ic_probe`.
+pub const IC_PLAINNEW_KIND: u8 = u8::MAX - 1;
 
 /// A monomorphic inline-cache entry: a resolved method memoized at one call site. Lives in the
 /// executing [`Block`]'s per-`ip` cache array ([`Block::inline_cache`]), so the block+ip *is*
@@ -3829,6 +3836,167 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Probe a site's cache for a fused-instantiation verdict (`IC_PLAINNEW_KIND`):
+    /// a hit is (class-ptr, epoch)-guarded, same protocol as `field_probe`.
+    #[inline]
+    fn plain_new_probe(
+        &self,
+        ic: InlineCacheCell<'gc>,
+        ip: usize,
+        class_ptr: usize,
+    ) -> Option<bool> {
+        let cache = ic.borrow();
+        let slot = cache.as_ref()?.get(ip)?;
+        if slot.epoch != self.dispatch_epoch
+            || slot.recv_kind != IC_PLAINNEW_KIND
+            || slot.recv_ptr != class_ptr
+        {
+            return None;
+        }
+        Some(slot.arg_ptrs[0] != 0)
+    }
+
+    /// Does any class in the class-side chain (own, ancestors, mixins —
+    /// transitively) define a `new:` method? Over-approximates dispatch on
+    /// purpose: a typed user variant that would NOT match a Block argument
+    /// still answers true here, which only sends the site to the cold path
+    /// (the real send then falls through to `Callable::New` exactly as today).
+    fn hierarchy_defines_class_new(
+        &self,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+        visited: &mut Vec<Gc<'gc, RefLock<Class<'gc>>>>,
+    ) -> bool {
+        if visited.iter().any(|c| Gc::ptr_eq(*c, class)) {
+            return false;
+        }
+        visited.push(class);
+        let c = class.borrow();
+        if c.class_methods.contains_key(&new_colon_symbol()) {
+            return true;
+        }
+        if let Some(parent) = c.parent
+            && self.hierarchy_defines_class_new(parent, visited)
+        {
+            return true;
+        }
+        c.mixin_classes
+            .iter()
+            .any(|m| self.hierarchy_defines_class_new(*m, visited))
+    }
+
+    /// The fused-instantiation verdict (M2, `BranchIfNotPlainNew`): does `new:`
+    /// on this receiver resolve to the BUILT-IN `Callable::New` — the fallback
+    /// `lookup_method` returns only when NO user `new:` exists anywhere in the
+    /// class-side chain — with an instantiable class? False sends the site to
+    /// the cold path (the real send), so a conservative false is never wrong.
+    fn plain_new_verdict(&self, receiver: Value<'gc>) -> bool {
+        let Value::Class(class) = receiver else {
+            return false;
+        };
+        let mut visited = Vec::new();
+        if self.hierarchy_defines_class_new(class, &mut visited) {
+            return false;
+        }
+        self.ensure_instantiable(class).is_ok()
+    }
+
+    /// Cached `plain_new_verdict`: probe/fill `cell` at `ip` when the receiver
+    /// is a (non-eigenclass) class; other receivers recompute (always false).
+    pub(crate) fn plain_new_check_cached(
+        &mut self,
+        mc: &Mutation<'gc>,
+        cell: Option<(InlineCacheCell<'gc>, usize)>,
+        ip: usize,
+        receiver: Value<'gc>,
+    ) -> bool {
+        if let (Some((cell, _)), Value::Class(class)) = (cell, receiver)
+            && let Some(v) = self.plain_new_probe(cell, ip, Gc::as_ptr(class) as usize)
+        {
+            return v;
+        }
+        let verdict = self.plain_new_verdict(receiver);
+        if let (Some((cell, bc_len)), Value::Class(class)) = (cell, receiver)
+            && !class.borrow().is_eigenclass
+        {
+            Self::ic_write_slot(
+                mc,
+                cell,
+                bc_len,
+                ip,
+                ICSlot {
+                    epoch: self.dispatch_epoch,
+                    recv_kind: IC_PLAINNEW_KIND,
+                    recv_ptr: Gc::as_ptr(class) as usize,
+                    n_args: 0,
+                    arg_kinds: [0; IC_MAX_ARGS],
+                    arg_ptrs: [usize::from(verdict), 0],
+                    callable: None,
+                },
+            );
+        }
+        verdict
+    }
+
+    /// The fused-instantiation body (M2, `NewWithFields`): the stack holds
+    /// `[class, v1..vn]` with the class at `base - 1` and `names[i]` naming
+    /// `v(i+1)`'s field; the window is replaced by the finished object.
+    /// Reached only through a true `BranchIfNotPlainNew` verdict, so the
+    /// receiver was a plain-instantiable class when the field expressions
+    /// started evaluating — exactly the point `Callable::New` commits today.
+    /// `instantiation_plan` re-derives per epoch, so a field expression that
+    /// mutated the class mid-evaluation (adding an `init`) is still honored:
+    /// the non-empty-plan path below IS `finalize_instantiation`, fed an env
+    /// holding exactly the named bindings (`lookup_str` is local-only, so a
+    /// parentless env is indistinguishable from the config frame's).
+    pub(crate) fn exec_new_with_fields(
+        &mut self,
+        mc: &Mutation<'gc>,
+        base: usize,
+        names: &[Symbol],
+    ) -> Result<(), QuoinError> {
+        let recv_at = base
+            .checked_sub(1)
+            .ok_or_else(|| QuoinError::Other("Stack underflow".to_string()))?;
+        let Value::Class(class) = self.stack[recv_at] else {
+            return Err(QuoinError::Other(
+                "NewWithFields: receiver is not a class".to_string(),
+            ));
+        };
+        let obj = self.new_object(mc, class);
+        let plan = self.instantiation_plan(mc, class);
+        if plan.inits.is_empty() {
+            // Direct field binds: `finalize_instantiation` with an empty chain
+            // reduces to exactly this (unknown names silently dropped there
+            // too — it iterates ivar_slots and looks each up in the env).
+            for (i, sym) in names.iter().enumerate() {
+                let val = self.stack[base + i];
+                if let Some((_, slot)) = plan
+                    .ivar_slots
+                    .iter()
+                    .find(|(n, _)| n.as_str() == sym.as_str())
+                {
+                    obj.borrow_mut(mc).fields[*slot] = val;
+                }
+            }
+            self.stack.truncate(recv_at);
+            self.push(Value::Object(obj));
+        } else {
+            // Root the object in the receiver slot across the init chain (an
+            // init can park); the values stay rooted in the window and env.
+            self.stack[recv_at] = Value::Object(obj);
+            let mut env = EnvFrame::new(None);
+            for (i, sym) in names.iter().enumerate() {
+                env.bind(*sym, self.stack[base + i]);
+            }
+            let env = gcl!(mc, env);
+            self.finalize_instantiation(mc, obj, env)?;
+            let out = self.stack[recv_at];
+            self.stack.truncate(recv_at);
+            self.push(out);
+        }
+        Ok(())
+    }
+
     /// Probe the executing `block`'s inline cache at `ip`: a hit requires a live epoch (method
     /// tables unchanged) and matching receiver + argument type-shape guards. Immediates match on
     /// their cheap `Value` discriminant with no class derivation — the whole point. Sound with no
@@ -5216,6 +5384,36 @@ impl<'gc> VmState<'gc> {
                 } else {
                     ip = (ip as isize + offset) as usize;
                 }
+            }
+            Instruction::BranchIfNotPlainNew(offset) => {
+                let offset = *offset;
+                // Peek the `new:` receiver (do not pop): a plain-instantiable class falls
+                // through to the fused field-expression path; anything else takes the
+                // cold path (the real send: user meta `new:`, abstract-class error,
+                // non-class MNU), which needs it on the stack.
+                let receiver = *self
+                    .stack
+                    .last()
+                    .ok_or_else(|| QuoinError::Other("Stack underflow".to_string()))?;
+                let (cell, bc_len) = {
+                    let frame = &self.frames[frame_idx];
+                    (frame.ic, frame.block.template.bytecode.len())
+                };
+                if self.plain_new_check_cached(mc, Some((cell, bc_len)), ip, receiver) {
+                    ip += 1;
+                } else {
+                    ip = (ip as isize + offset) as usize;
+                }
+            }
+            Instruction::NewWithFields(names) => {
+                let names = names.clone();
+                let base = self
+                    .stack
+                    .len()
+                    .checked_sub(names.len())
+                    .ok_or_else(|| QuoinError::Other("Stack underflow".to_string()))?;
+                self.exec_new_with_fields(mc, base, &names)?;
+                ip += 1;
             }
             Instruction::ListLen => {
                 let n = self.stack.len();
