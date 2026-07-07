@@ -71,6 +71,22 @@
     round -> { [NumPy]Expr.op:'round' with:#( self ) };
     sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
 
+    "* comparisons are ELEMENTWISE (NumPy semantics): they build bool-mask nodes, not truths.
+    "* (Identity comparison of two arrays is gone — that is the NumPy trade.)
+    #'==:' -> { |rhs| [NumPy]Expr.op:'eq' with:#( self rhs ) };
+    #'!=:' -> { |rhs| [NumPy]Expr.op:'ne' with:#( self rhs ) };
+    #'<:' -> { |rhs| [NumPy]Expr.op:'lt' with:#( self rhs ) };
+    #'<=:' -> { |rhs| [NumPy]Expr.op:'le' with:#( self rhs ) };
+    #'>:' -> { |rhs| [NumPy]Expr.op:'gt' with:#( self rhs ) };
+    #'>=:' -> { |rhs| [NumPy]Expr.op:'ge' with:#( self rhs ) };
+    and: -> { |rhs| [NumPy]Expr.op:'and' with:#( self rhs ) };
+    or: -> { |rhs| [NumPy]Expr.op:'or' with:#( self rhs ) };
+    not -> { [NumPy]Expr.op:'not' with:#( self ) };
+    select: -> { |mask| [NumPy]Expr.op:'select' with:#( self mask ) };
+    where:else: -> { |ifTrue ifFalse| [NumPy]Expr.op:'where' with:#( self ifTrue ifFalse ) };
+    any -> { ([NumPy]Expr.op:'any' with:#( self )).eval };
+    all -> { ([NumPy]Expr.op:'all' with:#( self )).eval };
+
     "* shape ops and slicing are ordinary lazy nodes too
     transpose -> { [NumPy]Expr.op:'transpose' with:#( self ) };
     flatten -> { [NumPy]Expr.op:'flatten' with:#( self ) };
@@ -234,6 +250,22 @@
     ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
     round -> { [NumPy]Expr.op:'round' with:#( self ) };
     sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
+
+    "* comparisons are ELEMENTWISE (NumPy semantics): they build bool-mask nodes, not truths.
+    "* (Identity comparison of two arrays is gone — that is the NumPy trade.)
+    #'==:' -> { |rhs| [NumPy]Expr.op:'eq' with:#( self rhs ) };
+    #'!=:' -> { |rhs| [NumPy]Expr.op:'ne' with:#( self rhs ) };
+    #'<:' -> { |rhs| [NumPy]Expr.op:'lt' with:#( self rhs ) };
+    #'<=:' -> { |rhs| [NumPy]Expr.op:'le' with:#( self rhs ) };
+    #'>:' -> { |rhs| [NumPy]Expr.op:'gt' with:#( self rhs ) };
+    #'>=:' -> { |rhs| [NumPy]Expr.op:'ge' with:#( self rhs ) };
+    and: -> { |rhs| [NumPy]Expr.op:'and' with:#( self rhs ) };
+    or: -> { |rhs| [NumPy]Expr.op:'or' with:#( self rhs ) };
+    not -> { [NumPy]Expr.op:'not' with:#( self ) };
+    select: -> { |mask| [NumPy]Expr.op:'select' with:#( self mask ) };
+    where:else: -> { |ifTrue ifFalse| [NumPy]Expr.op:'where' with:#( self ifTrue ifFalse ) };
+    any -> { ([NumPy]Expr.op:'any' with:#( self )).eval };
+    all -> { ([NumPy]Expr.op:'all' with:#( self )).eval };
 
     "* shape ops and slicing are ordinary lazy nodes too
     transpose -> { [NumPy]Expr.op:'transpose' with:#( self ) };

@@ -8,9 +8,9 @@ explicit exit ramps (`toArray` / `toList`) — whole-array ops keep the data res
 (docs/FUTURE_EXT_ARCH.md §8). The lazy expression DAG (`evalGraph:`) and operators arrive in the
 next slice; the Quoin-side glue lives in `init.qn`.
 
-Dtype policy (v1): every array is `float64` or `int64` (the two wire `ArrowDType`s). Other
-integer/float widths are widened on entry; bool (masks) arrives with comparisons in a later
-slice; anything else is a clear error.
+Dtype policy: every array is `float64`, `int64`, or `bool` (masks, born from comparisons).
+Other integer/float widths are widened on entry; anything else is a clear error. `toArray`
+crosses a mask as int64 0/1 (the wire has no bool dtype); `toList` yields real Booleans.
 
 Dev-arrangement note: the SDK is imported from the in-repo `sdk/python` (the same arrangement as
 `sdk/python/examples/*`); a published package would vendor or pip-install it instead.
@@ -43,6 +43,14 @@ _BINOPS = {
     "pow": np.power,
     "mod": np.mod,
     "matmul": np.matmul,
+    "eq": np.equal,
+    "ne": np.not_equal,
+    "lt": np.less,
+    "le": np.less_equal,
+    "gt": np.greater,
+    "ge": np.greater_equal,
+    "and": np.logical_and,
+    "or": np.logical_or,
 }
 _UNOPS = {
     "neg": np.negative,
@@ -57,6 +65,7 @@ _UNOPS = {
     "ceil": np.ceil,
     "round": np.round,
     "sign": np.sign,
+    "not": np.logical_not,
 }
 _REDUCERS = {
     "sum": np.sum,
@@ -67,15 +76,16 @@ _REDUCERS = {
     "argmax": np.argmax,
     "std": np.std,
     "prod": np.prod,
+    "any": np.any,
+    "all": np.all,
 }
 
 
 def _coerce(a):
-    """Coerce an ndarray to the v1 dtype policy (float64 | int64), or raise a clear error."""
-    if a.dtype == np.float64 or a.dtype == np.int64:
+    """Coerce an ndarray to the dtype policy (float64 | int64 | bool — the last from
+    comparisons/masks), or raise a clear error."""
+    if a.dtype == np.float64 or a.dtype == np.int64 or a.dtype == np.bool_:
         return a
-    if a.dtype == np.bool_:
-        raise ValueError("bool arrays arrive with comparisons/masks (not yet supported)")
     if np.issubdtype(a.dtype, np.integer):
         return a.astype(np.int64)
     if np.issubdtype(a.dtype, np.floating):
@@ -174,6 +184,12 @@ class NdArray:
                 vals[i] = vals[n["a"][0]][n["i"]]
             elif op == "col":
                 vals[i] = vals[n["a"][0]][:, n["i"]]
+            elif op == "select":
+                x, mask = n["a"]
+                vals[i] = vals[x][np.asarray(vals[mask], dtype=bool)]
+            elif op == "where":
+                c, x, y = n["a"]
+                vals[i] = np.where(vals[c], vals[x], vals[y])
             else:
                 raise ValueError(f"evalGraph: unknown op '{op}'")
         root = vals[tree["root"]]
@@ -190,8 +206,11 @@ class NdArray:
 
     def toArray(self):
         # The host bulk `Array` is a 1-D column; n-D flattens row-major (shape travels via
-        # `shape`). `<f8`/`<i8` pins little-endian (the Arrow layout contract) — a no-op copy
-        # on LE hosts.
+        # `shape`), and a bool mask crosses as int64 0/1 (the wire has no bool dtype).
+        # `<f8`/`<i8` pins little-endian (the Arrow layout contract) — a no-op copy on LE hosts.
+        if self.a.dtype == np.bool_:
+            flat = np.ascontiguousarray(self.a).astype("<i8")
+            return quoin_ext.ArrowArray(quoin_ext.ArrowArray.INT64, flat.tobytes())
         if self.a.dtype == np.float64:
             flat = np.ascontiguousarray(self.a).astype("<f8", copy=False)
             return quoin_ext.ArrowArray(quoin_ext.ArrowArray.FLOAT64, flat.tobytes())

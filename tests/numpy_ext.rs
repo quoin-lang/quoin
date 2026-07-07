@@ -288,6 +288,58 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_numpy_shapes_test.qn", &script);
 }
 
+/// Slice-5 masks: comparisons on arrays/exprs are ELEMENTWISE (NumPy semantics) and build lazy
+/// bool-mask nodes; and:/or:/not combine them; select: does boolean indexing; where:else: is the
+/// functional conditional; any/all/sum reduce them. Masks materialize as Booleans via toList and
+/// as int64 0/1 via toArray (the wire has no bool dtype).
+#[test]
+fn numpy_masks() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_masks: python3 with `flatbuffers` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var a = [NumPy]Array.fromList:#( 3.0 1.0 4.0 1.0 5.0 );
+
+"* comparisons build masks
+((a > 2.0).toList == #( true false true false true )).else:{{ ok = false }};
+((a > 2.0).dtype == 'bool').else:{{ ok = false }};
+((a == 1.0).toList == #( false true false true false )).else:{{ ok = false }};
+
+"* mask reductions: count via sum, any, all
+((a > 2.0).sum == 3).else:{{ ok = false }};
+((a > 10.0).any == false).else:{{ ok = false }};
+((a > 0.0).all == true).else:{{ ok = false }};
+
+"* combinators
+(((a > 1.0).and:(a < 5.0)).toList == #( true false true false false )).else:{{ ok = false }};
+(((a == 1.0).or:(a == 5.0)).toList == #( false true false true true )).else:{{ ok = false }};
+(((a > 2.0).not).toList == #( false true false true false )).else:{{ ok = false }};
+
+"* boolean selection + the functional conditional
+((a.select:(a > 2.0)).toList == #( 3.0 4.0 5.0 )).else:{{ ok = false }};
+(((a > 2.0).where:a else:0.0).toList == #( 3.0 0.0 4.0 0.0 5.0 )).else:{{ ok = false }};
+(((a > 2.0).where:1.0 else:(-1.0)).toList == #( 1.0 (-1.0) 1.0 (-1.0) 1.0 ))
+    .else:{{ ok = false }};
+
+"* masks cross the border: toArray -> a host int64 0/1 column
+var mask = (a > 2.0).eval;
+(mask.toArray.sum == 3).else:{{ ok = false }};
+
+"* composed: mean of the elements above the mean (mean forces, select+mean is one send)
+((a.select:(a > a.mean)).mean == 4.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_masks_test.qn", &script);
+}
+
 /// `use numpy:*` resolves the package folder from the default search root (`./quoin_packages/`),
 /// relative to the VM's cwd — which under `cargo test` is the workspace root.
 #[test]
