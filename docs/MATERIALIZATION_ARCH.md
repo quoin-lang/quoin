@@ -1,10 +1,14 @@
 # Cheap materialization: fusion first, thin closures second
 
-*Status: M1 + M2 SHIPPED on `perf/cheap-materialization` (stacked on
-`perf/alloc-churn`, PR #59). M1 (alpha-renamed fusion): btrees −31.8%,
-richards −14.4%, json −2.6%. M2 (fused instantiation): btrees a further
-**−34.6%** — arc cumulative **2.31×** on btrees — all else noise;
-corpus 1627/0 ×5 modes. M1 lives in `Compiler::declare_local`/
+*Status: ARC COMPLETE — M1 + M2 + M3 SHIPPED on
+`perf/cheap-materialization` (stacked on `perf/alloc-churn`, PR #59).
+M1 (alpha-renamed fusion): btrees −31.8%, richards −14.4%, json −2.6%.
+M2 (fused instantiation): btrees a further −34.6%. M3 (cold-span gate
+lift): combinators −16.3%. Arc cumulative: **btrees 2.31×,
+combinators 1.20×**; corpus 1627/0 ×5 modes. Cross-language re-measured
+(bench/CROSS.md): **suite geomean vs CPython crossed 1.0** (0.83 →
+1.05); strings at Ruby parity; btrees 0.895 → 0.361 across the two
+pre-merge arcs. M1 lives in `Compiler::declare_local`/
 `local_symbol` + `devirt.rs` `spliceable_arm`/`splice_hazard_free`;
 M2 in `devirt.rs` `try_compile_fused_instantiation`/`fusable_config`,
 the `BranchIfNotPlainNew`/`NewWithFields` instructions, `vm.rs`
@@ -200,10 +204,43 @@ tier (`QN_AOT=0`) improves too — the fusion is bytecode-level; corpus
 ×5 incl. an evil-`new:` + init-carrying-class + non-class-receiver
 cold-path battery; every other bench within noise.
 
-### M3 — gate-lift audit (unchanged, after M2)
+### M3 — gate-lift audit (unchanged, after M2) — DONE
 
-Re-audit G3/G4 and the qnlib trampoline gates against post-M2 profiles;
-S5c template-`^^` revisit; cross-language re-measure at arc close.
+The post-M2 refusal sweep found the WHOLE SUITE down to four refusals.
+Verdicts, each measured or re-derived:
+
+- **G3 → lifted for guard-fail cold spans** (`in_guard_cold_span`).
+  qnlib's `any?:` fuses its `each:` loop and splices the `^^` arm; the
+  only materialization left was the never-taken guarded-inline COLD
+  copy, refusing the whole method. The exemption is structural
+  (option-C span: guard branch → hot → jump-over → cold): cold code is
+  pay-per-guard-fail, and a failing guard feeds a real send that
+  dominates the snapshot. **combinators −16.3%**; all else noise. Two
+  deliberate non-exemptions: the own-selector rule (the `whileDo:`
+  trampoline's cold copy re-sends its own selector — compiling it
+  deepens native recursion per ITERATION, the 5.8×-sieve shape), and
+  sites with pending deferred-nil locals (the force emits a nil-init
+  AT the site; in a loop that re-nils a `reduce:`-style accumulator).
+- **G4 stays.** Snapshot economics are unchanged (env-home was
+  dropped); the remaining G4 refusals are exactly the qnlib `whileDo:`
+  trampoline (strings/maps reach it through non-literal-block call
+  sites), where compiling regresses by construction. M1's call-site
+  fusion is the real fix for literal shapes and already landed.
+- **G5/G6/G8 stay** — they were consequences of the snapshot model,
+  which still exists on residual paths; nothing hot refuses through
+  them anymore (btrees' `run:` G6 case dissolved under M1).
+- **S5c template-`^^` — closed as moot for now.** User `^^` blocks in
+  fusible `each:` positions splice (no template needed); the seam only
+  matters for non-fusable receivers (Set/Map/custom `each:`) with `^^`
+  blocks, which no bench and no qnlib hot path exhibits. Reopen if a
+  profile ever shows it.
+- **Remaining refusals in the suite** (both recorded, neither a gate):
+  `whileDo:` (correct, above) and `sum:`/`reduce:` — "read of
+  unknown/uninitialized local": a deferred-nil local (`var sum = nil`)
+  READ before any store has no slot. The sound fix is ENTRY-HOISTED
+  slot init for deferred-nil locals (a small future slice); forcing at
+  the read site is unsound in loops (per-iteration re-nil of the
+  accumulator — the same hazard the cold-span exemption guards).
 
 ### ~~M2 — thin materialization: the frame env-home (codegen)~~ (DROPPED post-M1 — kept for the record)
 
