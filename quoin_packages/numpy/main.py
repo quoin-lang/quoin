@@ -207,6 +207,18 @@ class NdArray:
             elif op == "clip":
                 x, lo, hi = n["a"]
                 vals[i] = np.clip(vals[x], vals[lo], vals[hi])
+            elif op == "sort":
+                vals[i] = np.sort(vals[n["a"][0]], axis=n.get("axis", -1))
+            elif op == "argsort":
+                vals[i] = np.argsort(vals[n["a"][0]], axis=n.get("axis", -1))
+            elif op == "unique":
+                vals[i] = np.unique(vals[n["a"][0]])
+            elif op == "searchsorted":
+                a, v = n["a"]
+                vals[i] = np.searchsorted(vals[a], vals[v])
+            elif op == "take":
+                x, idx = n["a"]
+                vals[i] = np.take(vals[x], vals[idx])
             elif op == "transpose":
                 vals[i] = np.transpose(vals[n["a"][0]])
             elif op == "flatten":
@@ -235,6 +247,11 @@ class NdArray:
         return root
 
     # --- structure ---
+
+    def non_zero(self):
+        """The indices of the non-zero elements, one index array per dimension (NumPy's
+        `nonzero` tuple) — a List of live instances on the wire."""
+        return [NdArray(ix) for ix in np.nonzero(self.a)]
 
     def split(self, n):
         """Split into `n` near-equal parts along axis 0 (`np.array_split`), returned as a List of
@@ -326,6 +343,7 @@ if __name__ == "__main__":
             # live-instance references, so there is no argument-arity ceiling.
             "evalGraph:": NdArray.eval_graph,
             "split:": NdArray.split,
+            "nonZero": NdArray.non_zero,
             "toList": NdArray.toList,
             "toArray": NdArray.toArray,
         },

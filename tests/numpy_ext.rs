@@ -500,3 +500,57 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_numpy_roundout_test.qn", &script);
 }
+
+/// P2 parity: sorting & searching — lazy sort/argSort (NumPy's last-axis default + axis forms),
+/// unique, searchSorted:, fancy indexing via takeAt:, and nonZero (a List of index arrays, one
+/// per dimension — live instances on the wire).
+#[test]
+fn numpy_sort_search() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_sort_search: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var v = [NumPy]Array.fromList:#( 3.0 1.0 2.0 );
+(v.sort.toList == #( 1.0 2.0 3.0 )).else:{{ ok = false }};
+(v.argSort.toList == #( 1 2 0 )).else:{{ ok = false }};
+
+"* argSort composes with takeAt: (fancy indexing) inside one graph
+((v.takeAt:(v.argSort)).toList == #( 1.0 2.0 3.0 )).else:{{ ok = false }};
+(((v * 10.0).takeAt:([NumPy]Array.fromList:#( 2 0 ))).toList == #( 20.0 30.0 ))
+    .else:{{ ok = false }};
+
+((([NumPy]Array.fromList:#( 1 2 2 3 1 )).unique).toList == #( 1 2 3 )).else:{{ ok = false }};
+
+"* searchSorted: — array probe stays lazy; scalar probe forces to an index
+var srt = [NumPy]Array.fromList:#( 1.0 3.0 5.0 );
+((srt.searchSorted:([NumPy]Array.fromList:#( 0.0 4.0 6.0 ))).toList == #( 0 2 3 ))
+    .else:{{ ok = false }};
+(((srt.searchSorted:4.0).eval) == 2).else:{{ ok = false }};
+
+"* axis-form sort on 2-D (columns here), composing back into the graph
+var m = [NumPy]Array.fromList:#( #( 3.0 1.0 ) #( 2.0 4.0 ) );
+(((m.sort:0).col:0).toList == #( 2.0 3.0 )).else:{{ ok = false }};
+
+"* nonZero: one index array per dimension, each a live [NumPy]Array
+var nz = ([NumPy]Array.fromList:#( 0 7 0 9 )).nonZero;
+(nz.count == 1).else:{{ ok = false }};
+((nz.at:0).toList == #( 1 3 )).else:{{ ok = false }};
+var nz2 = ([NumPy]Array.fromList:#( #( 1 0 ) #( 0 2 ) )).nonZero;
+(nz2.count == 2).else:{{ ok = false }};
+((nz2.at:0).toList == #( 0 1 )).else:{{ ok = false }};
+((nz2.at:1).toList == #( 0 1 )).else:{{ ok = false }};
+
+"* nonZero on a lazy mask expression forces first (an Expr delegate)
+(((v > 1.5).nonZero.at:0).toList == #( 0 2 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_sort_search_test.qn", &script);
+}

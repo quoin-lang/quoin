@@ -117,6 +117,16 @@
     row: -> { |i:Integer| [NumPy]Expr.op:'index' with:#( self ) extra:#{ 'i': i } };
     col: -> { |i:Integer| [NumPy]Expr.op:'col' with:#( self ) extra:#{ 'i': i } };
 
+    "* sorting & searching: array-shaped, so lazy like everything else. `sort`/`argSort`
+    "* follow NumPy's default (along the LAST axis); the keyword forms pick an axis.
+    sort -> { [NumPy]Expr.op:'sort' with:#( self ) };
+    sort: -> { |axis| [NumPy]Expr.op:'sort' with:#( self ) axis:axis };
+    argSort -> { [NumPy]Expr.op:'argsort' with:#( self ) };
+    argSort: -> { |axis| [NumPy]Expr.op:'argsort' with:#( self ) axis:axis };
+    unique -> { [NumPy]Expr.op:'unique' with:#( self ) };
+    searchSorted: -> { |v| [NumPy]Expr.op:'searchsorted' with:#( self v ) };
+    takeAt: -> { |idx| [NumPy]Expr.op:'take' with:#( self idx ) };
+
     "* whole-array reductions force: the chain collapses to a scalar in one round trip
     sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
     mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
@@ -170,6 +180,8 @@
     size -> { .eval.size };
     ndim -> { .eval.ndim };
     at: -> { |i| .eval.at:i };
+    nonZero -> { .eval.nonZero };
+    split: -> { |n| .eval.split:n };
     s -> { .eval.s }
 };
 
@@ -294,6 +306,16 @@
     };
     row: -> { |i:Integer| [NumPy]Expr.op:'index' with:#( self ) extra:#{ 'i': i } };
     col: -> { |i:Integer| [NumPy]Expr.op:'col' with:#( self ) extra:#{ 'i': i } };
+
+    "* sorting & searching: array-shaped, so lazy like everything else. `sort`/`argSort`
+    "* follow NumPy's default (along the LAST axis); the keyword forms pick an axis.
+    sort -> { [NumPy]Expr.op:'sort' with:#( self ) };
+    sort: -> { |axis| [NumPy]Expr.op:'sort' with:#( self ) axis:axis };
+    argSort -> { [NumPy]Expr.op:'argsort' with:#( self ) };
+    argSort: -> { |axis| [NumPy]Expr.op:'argsort' with:#( self ) axis:axis };
+    unique -> { [NumPy]Expr.op:'unique' with:#( self ) };
+    searchSorted: -> { |v| [NumPy]Expr.op:'searchsorted' with:#( self v ) };
+    takeAt: -> { |idx| [NumPy]Expr.op:'take' with:#( self idx ) };
 
     sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
     mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
