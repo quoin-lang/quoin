@@ -81,6 +81,10 @@ pub enum IoRequest {
     ReadTimed { id: StreamId, max: usize, ms: u64 },
     /// Write all of `bytes`.
     Write { id: StreamId, bytes: Vec<u8> },
+    /// Offload a pure, self-contained CPU-bound op to the compute pool
+    /// (docs/CONCURRENCY_ARCH.md §4). Plain owned data both ways, like
+    /// every other variant; the caller parks exactly as for IO.
+    Compute(crate::compute::ComputeOp),
     /// Close and deregister the stream.
     Close { id: StreamId },
     /// Upgrade the stream at `id` to TLS *in place*: take it out of the registry, run
@@ -121,6 +125,10 @@ pub enum IoResult {
     },
     /// Bytes read; empty = EOF.
     Read(Vec<u8>),
+    /// A `Compute` op finished: the pure function's own result. `Err` is the
+    /// op's domain error (e.g. malformed gzip), NOT an IO failure — callers
+    /// wrap it in the same error type their inline path uses.
+    Computed(Result<Vec<u8>, String>),
     Wrote(usize),
     Closed,
     Err(IoError),
@@ -543,6 +551,9 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
+            IoRequest::Compute(op) => {
+                Box::pin(async move { IoResult::Computed(crate::compute::offload(op).await) })
+            }
             IoRequest::Write { id, bytes } => Box::pin(async move {
                 // Leased like Read. An aborted write may leave the peer with a
                 // partial message — the canceller's problem — but the stream itself
@@ -732,6 +743,7 @@ impl IoBackend for MockBackend {
     fn perform(&self, req: IoRequest) -> IoFuture {
         let result = match req {
             IoRequest::Sleep { .. } => IoResult::Slept,
+            IoRequest::Compute(op) => IoResult::Computed(op.run()),
             IoRequest::Connect { .. } | IoRequest::ConnectUnix { .. } => {
                 let id = StreamId(self.next_id.get());
                 self.next_id.set(self.next_id.get() + 1);

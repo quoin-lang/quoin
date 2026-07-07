@@ -33,9 +33,26 @@ Two value conventions coexist (noted per flag below):
 | `QN_SCHED_STRESS` | seed or truthy (off) | randomized preemptive scheduling |
 | `QN_BATCH` | integer ≥1 (256) | steps per cooperative yield |
 | `QN_BATCH_STATS` | truthy (off) | per-batch wall/alloc summary |
+| `QN_COMPUTE_THREADS` | integer (cores−2) | compute-offload pool size; `0` disables |
+| `QN_COMPUTE_MIN` | bytes (262144) | offload gate: smaller inputs run inline |
 | `QN_EXT_HANDSHAKE_TIMEOUT_MS` | integer ≥1 (10000) | extension spawn handshake timeout |
 | `QN_NO_BANNER` | truthy (off) | suppress the REPL greeting |
 | `QN_PROMPT` | string (`qn> `) | REPL prompt override |
+
+## Compute offload
+
+### `QN_COMPUTE_THREADS` / `QN_COMPUTE_MIN`
+
+The C1 compute-offload pool (docs/CONCURRENCY_ARCH.md §4): gated CPU-bound
+native ops on detached buffers — today the `Bytes` codec family
+(`encodeGz`/`decodeGz`/`encodeDeflate`/`decodeDeflate`/`decodeZstd`) — run on
+a small fixed thread pool while the calling task parks like an IO wait, so
+concurrent tasks overlap (`Async.gather:` over 8 × 4 MB encodes measured
+4.4× faster). The round trip is a flat ~10 µs and a single op never wins
+from offloading, so inputs under `QN_COMPUTE_MIN` run inline
+(default 262 KiB ≈ where the serial tax reaches noise);
+`QN_COMPUTE_THREADS=0` is the kill switch. Counters surface as
+`VM.stats` → `'compute'`.
 
 ## AOT compilation
 

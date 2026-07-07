@@ -1,5 +1,5 @@
-//! `VM` — runtime self-introspection. v1 ships the AOT coverage counters the
-//! codegen module has kept process-wide since the structural pass:
+//! `VM` — runtime self-introspection: the AOT coverage counters the codegen
+//! module keeps process-wide, plus the compute-offload pool's counters:
 //!
 //! - `VM.stats` -> a Map of sections (only `'aot'` today, shaped so `'gc'` /
 //!   `'dispatch'` can join later without breaking callers):
@@ -55,6 +55,22 @@ fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'g
     vm.new_map(mc, aot)
 }
 
+/// The `'compute'` section: the offload pool's counters (submitted /
+/// completed jobs, plus gated ops that ran inline — below `QN_COMPUTE_MIN`
+/// or with the pool disabled).
+fn compute_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
+    let (submitted, completed, inline) = crate::compute::stats();
+    let mut m = IndexMap::new();
+    m.insert("submitted".to_string(), vm.new_int(mc, submitted as i64));
+    m.insert("completed".to_string(), vm.new_int(mc, completed as i64));
+    m.insert("inline".to_string(), vm.new_int(mc, inline as i64));
+    m.insert(
+        "threads".to_string(),
+        vm.new_int(mc, crate::compute::threads() as i64),
+    );
+    vm.new_map(mc, m)
+}
+
 pub fn build_vm_stats_class() -> NativeClassBuilder {
     NativeClassBuilder::new("VM", Some("Object"))
         // `VM.stats` -> the section Map (see the module doc for the shape and
@@ -62,6 +78,7 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
         .class_method("stats", |vm, mc, _receiver, _args| {
             let mut sections = IndexMap::new();
             sections.insert("aot".to_string(), aot_section(vm, mc));
+            sections.insert("compute".to_string(), compute_section(vm, mc));
             Ok(vm.new_map(mc, sections))
         })
         // `VM.aotRefusals` -> one Map per distinct refusal/skip, for finding

@@ -1917,6 +1917,7 @@ dependencies = [
 name = "quoin"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "async-fs",
  "async-io",
  "async-net",

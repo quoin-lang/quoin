@@ -80,9 +80,10 @@ spends:
 - **C0 (shipped):** async-io's reactor thread + blocking pool; out-of-process
   extensions as multicore-across-processes. The status quo already overlaps
   IO and Python-side compute with the VM thread.
-- **C1 (decided, first):** a compute-offload pool behind the `IoBackend`
+- **C1 (v1 SHIPPED):** a compute-offload pool behind the `IoBackend`
   seam — parallelism for bulk native ops on detachable data, zero semantic
-  surface.
+  surface. v1 = the `Bytes` codec family (`src/compute.rs`; gather of
+  8 × 4 MB encodes measured 4.4×; gates in `ENV_FLAGS.md`).
 - **C2 (decided, second):** worker isolates — one arena + one `VmState` + one
   cooperative scheduler per OS thread; message passing by deep copy through
   the wire walkers; tasks pinned to their worker.

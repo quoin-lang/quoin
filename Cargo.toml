@@ -69,6 +69,9 @@ async-io = "2"
 async-net = "2"
 async-fs = "2"
 futures-lite = "2"
+# The compute-offload pool's completion bridge (docs/CONCURRENCY_ARCH.md §4);
+# already in-tree transitively via the smol family.
+async-channel = "2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 # TLS: rustls core is sync; futures-rustls drives it on our futures executor. `ring`
 # (not the default aws-lc-rs) keeps the build C-toolchain-free and WASM-friendlier.
