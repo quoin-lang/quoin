@@ -1,5 +1,5 @@
 use crate::arg;
-use crate::compute::{self, ComputeOp};
+use crate::compute::{self, ComputeJob, ComputeOut};
 use crate::error::QuoinError;
 use crate::io_backend::{IoRequest, IoResult};
 use crate::recv;
@@ -121,54 +121,19 @@ pub fn build_bytes_class() -> NativeClassBuilder {
         // `await_io` — below `QN_COMPUTE_MIN` (or with the pool disabled) they run
         // inline exactly as before.
         .instance_method("decodeGz", |vm, mc, receiver, _args| {
-            run_codec(
-                vm,
-                mc,
-                receiver,
-                "decodeGz",
-                compress::gzip_decode,
-                ComputeOp::GzipDecode,
-            )
+            run_codec(vm, mc, receiver, "decodeGz", compress::gzip_decode)
         })
         .instance_method("encodeGz", |vm, mc, receiver, _args| {
-            run_codec(
-                vm,
-                mc,
-                receiver,
-                "encodeGz",
-                compress::gzip_encode,
-                ComputeOp::GzipEncode,
-            )
+            run_codec(vm, mc, receiver, "encodeGz", compress::gzip_encode)
         })
         .instance_method("decodeDeflate", |vm, mc, receiver, _args| {
-            run_codec(
-                vm,
-                mc,
-                receiver,
-                "decodeDeflate",
-                compress::deflate_decode,
-                ComputeOp::DeflateDecode,
-            )
+            run_codec(vm, mc, receiver, "decodeDeflate", compress::deflate_decode)
         })
         .instance_method("encodeDeflate", |vm, mc, receiver, _args| {
-            run_codec(
-                vm,
-                mc,
-                receiver,
-                "encodeDeflate",
-                compress::deflate_encode,
-                ComputeOp::DeflateEncode,
-            )
+            run_codec(vm, mc, receiver, "encodeDeflate", compress::deflate_encode)
         })
         .instance_method("decodeZstd", |vm, mc, receiver, _args| {
-            run_codec(
-                vm,
-                mc,
-                receiver,
-                "decodeZstd",
-                compress::zstd_decode,
-                ComputeOp::ZstdDecode,
-            )
+            run_codec(vm, mc, receiver, "decodeZstd", compress::zstd_decode)
         })
         // s -> the inspect string: length + a short hex preview.
         .sdk_instance_method("s", |host, receiver, _args| {
@@ -182,16 +147,19 @@ fn run_codec<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
-    label: &str,
-    inline: impl Fn(&[u8]) -> Result<Vec<u8>, String>,
-    op: impl FnOnce(Vec<u8>) -> ComputeOp,
+    label: &'static str,
+    f: impl Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static,
 ) -> Result<Value<'gc>, QuoinError> {
     // Detach the buffer FIRST: nothing borrowed (and no Gc beyond the rooted
     // receiver) is held across the park below.
     let bytes = recv!(receiver, Bytes).to_vec();
     let out = if compute::should_offload(bytes.len()) {
-        match vm.await_io(IoRequest::Compute(op(bytes)))? {
-            IoResult::Computed(r) => r,
+        // The job owns the detached buffer; the `Send + Sync` bound is what
+        // enforces the eligibility rule at compile time.
+        let job = ComputeJob::new(label, move || f(&bytes).map(ComputeOut::Bytes));
+        match vm.await_io(IoRequest::Compute(job))? {
+            IoResult::Computed(Ok(ComputeOut::Bytes(out))) => Ok(out),
+            IoResult::Computed(Err(msg)) => Err(msg),
             other => {
                 return Err(QuoinError::Other(format!(
                     "Bytes.{label}: unexpected compute result {other:?}"
@@ -200,7 +168,7 @@ fn run_codec<'gc>(
         }
     } else {
         compute::note_inline();
-        inline(&bytes)
+        f(&bytes)
     };
     match out {
         Ok(out) => Ok(vm.new_bytes(mc, out)),

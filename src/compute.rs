@@ -29,31 +29,51 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
-use crate::runtime::compress;
-
-/// One offloadable operation: pure, self-contained, plain data in and out.
-/// `Clone`/`Debug` to match the `IoRequest` posture (owned buffers).
-#[derive(Clone, Debug)]
-pub enum ComputeOp {
-    GzipEncode(Vec<u8>),
-    GzipDecode(Vec<u8>),
-    DeflateEncode(Vec<u8>),
-    DeflateDecode(Vec<u8>),
-    ZstdDecode(Vec<u8>),
+/// One offloadable job: a LABEL (Debug/stats identity) plus a pure function
+/// over inputs the call site already detached. The pool is pure transport —
+/// it never learns what the job does — and the `Send + Sync + 'static`
+/// bound makes the eligibility rule (owned data, no `Gc`, no VM handles) a
+/// COMPILE ERROR rather than a review convention. `Arc<dyn Fn>` rather than
+/// `Box<dyn FnOnce>` keeps `IoRequest`'s `Clone` derive honest (a clone
+/// re-shares the same pure job; re-running it is semantically fine).
+#[derive(Clone)]
+pub struct ComputeJob {
+    pub label: &'static str,
+    run: Arc<dyn Fn() -> Result<ComputeOut, String> + Send + Sync>,
 }
 
-impl ComputeOp {
-    /// Run the pure function. Called on a pool thread (or inline by the
-    /// mock backend) — must never touch VM state.
-    pub fn run(self) -> Result<Vec<u8>, String> {
-        match self {
-            ComputeOp::GzipEncode(b) => compress::gzip_encode(&b),
-            ComputeOp::GzipDecode(b) => compress::gzip_decode(&b),
-            ComputeOp::DeflateEncode(b) => compress::deflate_encode(&b),
-            ComputeOp::DeflateDecode(b) => compress::deflate_decode(&b),
-            ComputeOp::ZstdDecode(b) => compress::zstd_decode(&b),
+impl std::fmt::Debug for ComputeJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ComputeJob({})", self.label)
+    }
+}
+
+impl ComputeJob {
+    pub fn new(
+        label: &'static str,
+        run: impl Fn() -> Result<ComputeOut, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            label,
+            run: Arc::new(run),
         }
     }
+
+    /// Run the pure function. Called on a pool thread (or inline by the
+    /// mock backend) — must never touch VM state.
+    pub fn run(&self) -> Result<ComputeOut, String> {
+        (self.run)()
+    }
+}
+
+/// Plain-data result shapes. Ops are OPEN (any closure); results stay a
+/// small CLOSED enum because result shapes are structurally boring — data
+/// is data — and keeping them plain preserves `IoResult`'s derives. Grow a
+/// variant when a family genuinely needs one (e.g. dtype-tagged buffers for
+/// `[Num]`), not per op.
+#[derive(Clone, Debug)]
+pub enum ComputeOut {
+    Bytes(Vec<u8>),
 }
 
 /// Pool size: `QN_COMPUTE_THREADS`, default `cores - 2` (leave the VM
@@ -149,15 +169,15 @@ fn pool() -> &'static Pool {
     })
 }
 
-/// Submit `op` to the pool; resolve with its result. The returned future is
+/// Submit `job` to the pool; resolve with its result. The returned future is
 /// the driver-local half of the bridge (see the module doc) — it holds no
 /// VM state and is safe to drop at any point (cancellation).
-pub async fn offload(op: ComputeOp) -> Result<Vec<u8>, String> {
+pub async fn offload(job: ComputeJob) -> Result<ComputeOut, String> {
     SUBMITTED.fetch_add(1, Ordering::Relaxed);
-    let (tx, rx) = async_channel::bounded::<Result<Vec<u8>, String>>(1);
+    let (tx, rx) = async_channel::bounded::<Result<ComputeOut, String>>(1);
     let job: Job = Box::new(move || {
         // The receiver may be gone (cancelled await) — deliver-and-ignore.
-        let _ = tx.send_blocking(op.run());
+        let _ = tx.send_blocking(job.run());
     });
     pool()
         .tx

@@ -101,9 +101,16 @@ spends:
 An offloadable native op does today what `Connect`'s DNS lookup already does:
 park the task, run elsewhere, wake with plain data. Concretely:
 
-- `IoRequest::Compute(ComputeOp)` where `ComputeOp` is an enum of
-  **pure, self-contained ops over owned data** — the same plain-data
-  discipline as the rest of `IoRequest` (everything `Send + 'static`).
+- `IoRequest::Compute(ComputeJob)` where a job is **a label plus a pure
+  `Send + Sync` closure over inputs the call site already detached** — a
+  JOB, not an op: the pool is pure transport and never learns what the job
+  does, so new families never touch the seam. The bound makes the
+  eligibility rule a compile error rather than a review convention.
+  Results stay a small closed plain-data enum (`ComputeOut`) — result
+  shapes are structurally boring, and keeping them plain preserves
+  `IoResult`'s derives. (v1 shipped as a closed op enum; replaced the same
+  day — the enum walls in the input shape and centralizes what should be
+  local.)
 - The guest side never sees a new mechanism: a native method (say
   `Bytes.sha256` on a 100 MB buffer, or a `[Num]` matmul) detaches its
   buffer, calls `await_io(IoRequest::Compute(...))`, and rebuilds a Value
@@ -471,6 +478,11 @@ dependency with the C2/library line.
 - C1 rides the `IoBackend` seam as a request variant; offload eligibility =
   detachable owned inputs, no VM callbacks, plain-data result.
 - Offloaded ops are not interruptible; cancel = abandon the wait.
+- Compute requests are label+closure jobs (`ComputeJob`), not a central op
+  enum; ops are open, result shapes (`ComputeOut`) are a small closed
+  plain-data enum. No registration mechanism — in-tree families write
+  closures; out-of-tree code is extensions, which are out-of-process and
+  bring their own parallelism.
 - C2 = arena-per-worker isolates; tasks pinned at spawn; messages deep-copy
   through the `DataValue` walkers; blocks refuse; worker entry is
   source-shaped, not closure-shaped.
@@ -499,8 +511,6 @@ dependency with the C2/library line.
 - Resource handles across workers (socket handoff for an accept-and-dispatch
   server is the likely forcing function; the `DvResource` ownership pattern
   is the template).
-- `ComputeOp` extensibility: closed enum vs a registration mechanism for
-  out-of-tree native ops.
 - C3 freeze semantics (explicit `freeze` vs frozen-by-construction literals)
   — defer until C2 data exists.
 - Snapshot/fork worker boot (only if fleet startup cost measures as real).
