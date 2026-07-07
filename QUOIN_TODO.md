@@ -275,8 +275,12 @@ Quoin over the current sockets/streams).
 - [x] **(Separate, larger track) Polyglot extension system.** Out-of-process extensions over a
   unix-domain socket — design in `docs/FUTURE_EXT_ARCH.md`. Shipped: Tier 0 (gc-free `Host`
   trait) + Tier 1 transport, structured values, host-reach, crash/timeout isolation, and
-  extension-backed classes; Rust + Python SDKs at parity (`crates/quoin-ext`,
-  `crates/quoin-ext-proto`, `src/runtime/extension.rs`). Remaining refinements below.
+  extension-backed classes — INCLUDING the Python-SDK class-registration parity slice (3b:
+  `sdk/python/quoin_ext`, `ext_vector.py` example), so Rust + Python SDKs are at parity
+  (`crates/quoin-ext`, `crates/quoin-ext-proto`, `src/runtime/extension.rs`). The optional
+  Phase-3 residue — a fuller Arrow C Data Interface for columnar interchange — is tracked
+  where its forcing function lives: `crates/adbc/DESIGN.md` §7 (the columnar `Table` value).
+  Remaining refinements below.
   - [ ] **Extension calls: fair queuing instead of a busy error.** *(audit follow-up, PR #48.)*
     A connection serves one top-level call at a time (a single request/response socket, no
     request ids); a second *concurrent* call now fails fast with a catchable "extension busy"
@@ -429,23 +433,20 @@ hand-rolled parser may be preferable to taking on a dependency's surface. Cross-
 primitives live under `## Networking & Async I/O`, and reflection-over-the-*running*-program is the
 deferred `Mirror` in `## REPL`.
 
-**Numbers & math**
-- [ ] ⭐ **Math** — `sqrt`/`pow:`/`exp`/`ln`/`log:`, trig (`sin:`/`cos:`/`tan:` + inverses),
-  `floor`/`ceil`/`round`/`abs`, `min:`/`max:`, constants `pi`/`e`/`tau`. Native methods on
-  `Integer`/`Double` plus a `Math` namespace. Clearly missing; broadly depended on.
-- [ ] **Decimal** — arbitrary-precision / exact decimal arithmetic (money, etc.) (`rust_decimal`).
-- [ ] **BigInt** — arbitrary-precision integers (`num-bigint`). Open design Q: does `Integer`
-  auto-promote on overflow, or is `BigInt` a distinct type?
-- [ ] **Statistics** — `sum`/`mean`/`median`/`mode`/`variance`/`stddev`/`percentile:` on `List`
-  (pure `qnlib` over the collection protocol — no native needed).
+**Numbers & math** — all four shipped; see `docs/STDLIB_NUMBERS.md` for the build record.
+- [x] ⭐ **Math** — number methods + `Math` namespace + `closeTo:` test assertion.
+- [x] **Decimal** — `BigDecimal` (`src/runtime/big_decimal.rs`, `rust_decimal`).
+- [x] **BigInt** — `BigInteger` (`src/runtime/big_integer.rs`, `num-bigint`); distinct type,
+  no auto-promotion (the settled §5 decision).
+- [x] **Statistics** — `qnlib/core/07-statistics.qn` (pure qnlib over the collection protocol).
 
-**Data formats & serialization**
-- [ ] **JSON** — `parse`/`generate` mapping to Map/List/String/Number/Bool/Nil, with a pretty
-  option (`serde_json`, or hand-rolled to avoid the serde surface).
-- [ ] ⭐ **base64 / hex** — encode/decode between `Bytes` and `String`.
-- [ ] **CSV** — read/write with quoting/escaping.
-- [ ] **TOML**/**YAML** (config)
-- [ ] **MessagePack** (binary, pairs with `Bytes`).
+**Data formats & serialization** — parsers/generators all shipped; see
+`docs/STDLIB_DATA_FORMATS.md` for the build record.
+- [x] **JSON** — parse/generate with pretty option.
+- [x] ⭐ **base64 / hex** — `Bytes` ↔ `String` codecs.
+- [x] **CSV** — read/write with quoting/escaping.
+- [x] **TOML**/**YAML** (config)
+- [x] **MessagePack** (binary, pairs with `Bytes`).
 - [ ] **Custom serialization** — a configurable way for users to serialize non-trivial types
   (`DateTime`, `BigDecimal`, custom classes, …) into the structured formats, rather than the
   Phase-1 behavior of erroring on anything outside the core value tree. Design a serialization
@@ -463,11 +464,12 @@ deferred `Mirror` in `## REPL`.
 - [ ] **Logging** — leveled logger (`debug`/`info`/`warn`/`error`), formatting, pluggable sinks,
   defaulting to `[IO]Stderr`.
 
-**Time**
-- [ ] **DateTime** — civil date/time + instants, RFC 3339 parse/format, components, arithmetic,
-  time zones (`jiff`, or `time`).
-- [ ] **Duration & monotonic clock** — a `Duration` value type and `Instant.now`/elapsed
-  (generalizes the millisecond-only `Timer`).
+**Time** — Phases 1+2 shipped (`docs/STDLIB_TIME.md`); the civil-types residual remains.
+- [x] **DateTime** — zone-aware instants, RFC 3339, components, arithmetic (`jiff`).
+- [x] **Duration & monotonic clock** — `Duration` value type + `Instant.now`/elapsed.
+- [ ] **Civil `Date`/`Time` + first-class `Span`/`Period`** — ISO-8601 duration parsing
+  (`P1Y2M…`), mixed-unit arithmetic, calendar diffs (the `plus…`/`minus…` methods cover the
+  common case today; see `docs/STDLIB_TIME.md` deferred).
 
 **Crypto & hashing**
 - [ ] ⭐ **Digests** — `sha256`/`sha1`/`md5`/`blake3` + HMAC over `Bytes`/`String` (`sha2`, `blake3`).
@@ -494,10 +496,12 @@ deferred `Mirror` in `## REPL`.
   `VmOptions.arguments`.
 
 **Networking** (built on the async arc — see `## Networking & Async I/O`)
-- [ ] **HTTP client (high-level)** — `get:`/`post:…`/`request:`, headers/body, redirects, over
-  sockets + the `[HTTP]Parser` + TLS. The natural next layer above the raw sockets/parser.
-- [ ] ⭐ **URL** — parse/build (scheme/host/port/path/query); `qnlib/net/http.qn` already splits
-  URLs ad hoc.
+- [x] **HTTP client (high-level)** — `[HTTP]Client.get:`/`post:`/`request:` builder over
+  sockets + parser + TLS (`qnlib/net/http.qn`, PR #14: content-encoding, unified body/JSON,
+  streaming, redirects). Remaining refinements (keep-alive pooling, cookies) tracked under
+  `## Networking & Async I/O`.
+- [x] ⭐ **URL** — `[Web]Url` parse/build + percent/query/form codecs (`qnlib/web/`,
+  tests/47-url.qn).
 - [ ] **DNS** resolution (async) and **WebSocket** (over the HTTP upgrade) — later.
 
 **Metaprogramming**
@@ -506,8 +510,10 @@ deferred `Mirror` in `## REPL`.
   (reflection over the running program) and `Runtime.eval:`.
 
 **Concurrency** (on the async scheduler)
-- [ ] **Channels** — buffered/unbuffered async queues passing values between tasks (send/receive
-  park on the scheduler); enables CSP-style structured concurrency above raw `gather`/`spawn`.
+- [x] **Channels** — buffered/unbuffered async queues with scheduler park/wake
+  (`src/runtime/channel.rs`, PR #10; the extension fair-queuing item above mirrors its park
+  model). Remaining in this family: the structured-concurrency API itself (nurseries,
+  deadlines, detached spawn+join — `docs/ASYNC_ARCH.md` Stage 2b).
 
 ## Bugs/Odd Behavior
 - [x] **`List.new` / `Map.new` / `Set.new` produce broken shells.** FIXED for the

@@ -1,9 +1,8 @@
 # Stdlib: Numbers & Math — implementation outline
 
-Status: **Outline, not started.** Plan for the four `## Standard Library → Numbers & math`
-bullets in `QUOIN_TODO.md`. Branch: `feat/stdlib-numbers-math`. Each item is sized to land
-on its own; do them in the order in §6 (Math → Statistics → BigDecimal → BigInteger). Most
-§5 decisions are settled (below); the few that remain don't block starting on Math.
+Status: **ALL FOUR DONE** (Math → Statistics → BigDecimal → BigInteger; see §6 for the
+per-item build record). This document is retained as the design record for the settled §5
+decisions (BigInteger as a distinct type, no auto-promotion; the `closeTo:` assertion; etc.).
 
 The four deliverables, mapped to the TODO bullets:
 
