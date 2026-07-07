@@ -20,21 +20,25 @@
 [NumPy]ExprSerial <- [NumPy]Serial.new;
 
 "* One lazy node: an op name (from main.py's tables) + operands, each a [NumPy]Expr, a
-"* [NumPy]Array, or a number — plus an optional reduction axis. Forcing memoizes (@cache), so a
-"* forced node re-enters later graphs as a cheap base leaf instead of recomputing.
-[NumPy]Expr <- { |@op @operands @axis @cache @serial|
+"* [NumPy]Array, or a number — plus optional extra node fields (a reduction axis, a reshape
+"* shape, slice bounds, ...) merged into the wire node. Forcing memoizes (@cache), so a forced
+"* node re-enters later graphs as a cheap base leaf instead of recomputing.
+[NumPy]Expr <- { |@op @operands @extra @cache @serial|
     .meta <-- {
         op:with: -> { |o:String elems:List|
-            [NumPy]Expr.new:{ var op = o; var operands = elems; var axis = nil }
+            [NumPy]Expr.new:{ var op = o; var operands = elems; var extra = nil }
+        };
+        op:with:extra: -> { |o:String elems:List ex:Map|
+            [NumPy]Expr.new:{ var op = o; var operands = elems; var extra = ex }
         };
         op:with:axis: -> { |o:String elems:List ax:Integer|
-            [NumPy]Expr.new:{ var op = o; var operands = elems; var axis = ax }
+            [NumPy]Expr.op:o with:elems extra:#{ 'axis': ax }
         }
     };
-    init: -> { |op:String operands:List axis|
+    init: -> { |op:String operands:List extra|
         @op = op;
         @operands = operands;
-        @axis = axis;
+        @extra = extra;
         @serial = [NumPy]ExprSerial.next;
         @cache = nil
     };
@@ -42,7 +46,7 @@
     numpyKind -> { 'expr' };
     op -> { @op };
     operands -> { @operands };
-    axis -> { @axis };
+    extra -> { @extra };
     serial -> { @serial };
     cached -> { @cache };
 
@@ -66,6 +70,16 @@
     ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
     round -> { [NumPy]Expr.op:'round' with:#( self ) };
     sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
+
+    "* shape ops and slicing are ordinary lazy nodes too
+    transpose -> { [NumPy]Expr.op:'transpose' with:#( self ) };
+    flatten -> { [NumPy]Expr.op:'flatten' with:#( self ) };
+    reshape: -> { |shape:List| [NumPy]Expr.op:'reshape' with:#( self ) extra:#{ 'shape': shape } };
+    from:to: -> { |start:Integer stop:Integer|
+        [NumPy]Expr.op:'slice' with:#( self ) extra:#{ 'start': start 'stop': stop }
+    };
+    row: -> { |i:Integer| [NumPy]Expr.op:'index' with:#( self ) extra:#{ 'i': i } };
+    col: -> { |i:Integer| [NumPy]Expr.op:'col' with:#( self ) extra:#{ 'i': i } };
 
     "* whole-array reductions force: the chain collapses to a scalar in one round trip
     sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
@@ -137,7 +151,7 @@
         v.operands.each:{ |o| argIdxs.add:(me.indexOf:o) };
         var op = v.op;
         var node = #{ 'op': op 'a': argIdxs };
-        v.axis.defined?.if:{ node.at:'axis' put:v.axis };
+        v.extra.defined?.if:{ v.extra.each:{ |kv| node.at:(kv.key) put:(kv.value) } };
         var idx = .pushNode:node;
         @seen.at:key put:idx;
         idx
@@ -220,6 +234,16 @@
     ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
     round -> { [NumPy]Expr.op:'round' with:#( self ) };
     sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
+
+    "* shape ops and slicing are ordinary lazy nodes too
+    transpose -> { [NumPy]Expr.op:'transpose' with:#( self ) };
+    flatten -> { [NumPy]Expr.op:'flatten' with:#( self ) };
+    reshape: -> { |shape:List| [NumPy]Expr.op:'reshape' with:#( self ) extra:#{ 'shape': shape } };
+    from:to: -> { |start:Integer stop:Integer|
+        [NumPy]Expr.op:'slice' with:#( self ) extra:#{ 'start': start 'stop': stop }
+    };
+    row: -> { |i:Integer| [NumPy]Expr.op:'index' with:#( self ) extra:#{ 'i': i } };
+    col: -> { |i:Integer| [NumPy]Expr.op:'col' with:#( self ) extra:#{ 'i': i } };
 
     sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
     mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };

@@ -162,6 +162,18 @@ class NdArray:
                     vals[i] = _REDUCERS[op](vals[n["a"][0]])
                 else:
                     vals[i] = _REDUCERS[op](vals[n["a"][0]], axis=axis)
+            elif op == "transpose":
+                vals[i] = np.transpose(vals[n["a"][0]])
+            elif op == "flatten":
+                vals[i] = np.ravel(vals[n["a"][0]])
+            elif op == "reshape":
+                vals[i] = np.reshape(vals[n["a"][0]], tuple(n["shape"]))
+            elif op == "slice":
+                vals[i] = vals[n["a"][0]][n["start"] : n["stop"]]
+            elif op == "index":
+                vals[i] = vals[n["a"][0]][n["i"]]
+            elif op == "col":
+                vals[i] = vals[n["a"][0]][:, n["i"]]
             else:
                 raise ValueError(f"evalGraph: unknown op '{op}'")
         root = vals[tree["root"]]

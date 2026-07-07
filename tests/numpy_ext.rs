@@ -240,6 +240,54 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_numpy_vocab_test.qn", &script);
 }
 
+/// Slice-4 shape ops and slicing — all lazy nodes: transpose/flatten/reshape:, from:to: (first
+/// axis), row:/col:. Shape errors (e.g. a broadcast mismatch) surface AT FORCE TIME as catchable
+/// errors carrying numpy's message, and the extension survives them. (Host-side shape inference
+/// was deliberately cut: base shapes would cost a round trip each without a host-side cache.)
+#[test]
+fn numpy_shapes_and_slicing() {
+    if !numpy_fixture_runnable() {
+        eprintln!(
+            "skipping numpy_shapes_and_slicing: python3 with `flatbuffers` + `numpy` unavailable"
+        );
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var m = [NumPy]Array.fromList:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
+(m.transpose.toList == #( #( 1.0 3.0 ) #( 2.0 4.0 ) )).else:{{ ok = false }};
+((([NumPy]Array.arange:6).reshape:#( 2 3 )).toList == #( #( 0 1 2 ) #( 3 4 5 ) ))
+    .else:{{ ok = false }};
+((([NumPy]Array.arange:6).reshape:#( 2 3 )).flatten.toList == #( 0 1 2 3 4 5 ))
+    .else:{{ ok = false }};
+
+var a = [NumPy]Array.arange:10;
+((a.from:2 to:5).toList == #( 2 3 4 )).else:{{ ok = false }};
+((m.row:1).toList == #( 3.0 4.0 )).else:{{ ok = false }};
+((m.col:0).toList == #( 1.0 3.0 )).else:{{ ok = false }};
+
+"* shape ops compose lazily with the rest of the graph — still one send per force
+((m.transpose.matMul:m).toList == #( #( 10.0 14.0 ) #( 14.0 20.0 ) )).else:{{ ok = false }};
+(((a.from:0 to:3) + (a.from:3 to:6)).toList == #( 3 5 7 )).else:{{ ok = false }};
+(((([NumPy]Array.arange:6).reshape:#( 2 3 )).sum:1).toList == #( 3 12 )).else:{{ ok = false }};
+
+"* a broadcast mismatch errors at force, catchably, and the extension survives
+var b3 = [NumPy]Array.fromList:#( 1.0 2.0 3.0 );
+var b2 = [NumPy]Array.fromList:#( 1.0 2.0 );
+var caught = {{ (b3 + b2).toList; 'no-throw' }}.catch:{{ |ex| 'caught' }};
+(caught == 'caught').else:{{ ok = false }};
+(b3.sum == 6.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_shapes_test.qn", &script);
+}
+
 /// `use numpy:*` resolves the package folder from the default search root (`./quoin_packages/`),
 /// relative to the VM's cwd — which under `cargo test` is the workspace root.
 #[test]
