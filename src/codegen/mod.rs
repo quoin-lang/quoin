@@ -28,7 +28,7 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
@@ -121,7 +121,7 @@ pub enum AotRole {
 pub struct AotCandidate {
     pub group_id: u32,
     pub selector: String,
-    pub block: Rc<StaticBlock>,
+    pub block: Arc<StaticBlock>,
     pub params: Vec<AotParam>,
     pub ret: AotRet,
     pub role: AotRole,

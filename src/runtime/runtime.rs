@@ -9,7 +9,7 @@ use crate::runtime::map::NativeMapState;
 use crate::symbol::Symbol;
 use crate::value::{Block, EnvFrame, NativeClassBuilder, Value};
 use crate::vm::VmState;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use gc_arena::lock::RefLock;
 use gc_arena::{Gc, Mutation};
@@ -102,7 +102,7 @@ pub(crate) fn build_block_with_env<'gc>(
     crate::gc!(
         mc,
         Block {
-            template: Rc::new(static_block.clone()),
+            template: Arc::new(static_block.clone()),
             parent_env,
             enclosing_method_id: None,
             decl_block,

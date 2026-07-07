@@ -18,7 +18,7 @@ use crate::runtime::{
 };
 use crate::value::{EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use corosensei::CoroutineResult;
 use futures_lite::StreamExt;
@@ -976,7 +976,7 @@ impl VmRunner {
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
 
-                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
+                let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 // Run this program unit as scheduler task #0; driven to completion below.
                 install_main_task(mc, vm);
@@ -1064,7 +1064,7 @@ impl VmRunner {
                 };
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
-                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
+                let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 install_main_task(mc, vm);
             });
@@ -1271,7 +1271,7 @@ impl VmRunner {
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
 
-                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
+                let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
             });
 

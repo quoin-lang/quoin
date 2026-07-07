@@ -13,7 +13,6 @@ use crate::types::{SeenTypes, Type};
 use crate::value::{NamespacedName, SourceInfo};
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
 
 mod assignment;
@@ -845,7 +844,7 @@ impl Compiler {
     /// prefilter only — translation refusals do the real gating; the prescan
     /// skips the two shapes that always refuse (a nested literal push, a
     /// non-local return) to keep unit-load compile time down.
-    fn maybe_collect_block_candidate(&mut self, rc: &Rc<StaticBlock>) {
+    fn maybe_collect_block_candidate(&mut self, rc: &Arc<StaticBlock>) {
         if !self.collect_aot || !self.mint_template_ids {
             return;
         }
@@ -2328,10 +2327,10 @@ impl Compiler {
             param_syms: Vec::new(),
             param_types: Vec::new(),
             param_elem_tags: Vec::new(),
-            bytecode: SharedBytecode(Rc::new(bytecode)),
+            bytecode: SharedBytecode(Arc::new(bytecode)),
             source_info: program.source_info.clone(),
             decl_block: None,
-            source_map: SharedSourceMap(Rc::new(source_map)),
+            source_map: SharedSourceMap(Arc::new(source_map)),
             template_id: self
                 .mint_template_ids
                 .then(crate::instruction::fresh_template_id),
@@ -3217,17 +3216,17 @@ impl Compiler {
             param_syms: crate::value::intern_param_syms(&param_names),
             param_types,
             param_elem_tags,
-            bytecode: SharedBytecode(Rc::new(fused_bytecode)),
+            bytecode: SharedBytecode(Arc::new(fused_bytecode)),
             source_info: block.source_info.clone(),
             decl_block,
-            source_map: SharedSourceMap(Rc::new(fused_source_map)),
+            source_map: SharedSourceMap(Arc::new(fused_source_map)),
             // Every closure of this literal shares one inline-cache array via this id.
             template_id: self
                 .mint_template_ids
                 .then(crate::instruction::fresh_template_id),
         };
 
-        bytecode.push(Instruction::Push(Constant::Block(Rc::new(static_block))));
+        bytecode.push(Instruction::Push(Constant::Block(Arc::new(static_block))));
         self.inline_carets = saved_inline;
         Ok(())
     }

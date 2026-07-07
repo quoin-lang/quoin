@@ -432,7 +432,7 @@ pub(super) unsafe extern "C" fn new_with_fields(
 pub(super) unsafe extern "C" fn make_closure(
     vm: *mut c_void,
     mc: *const c_void,
-    tmpl: *const std::rc::Rc<crate::instruction::StaticBlock>,
+    tmpl: *const std::sync::Arc<crate::instruction::StaticBlock>,
     out_idx: i64,
     want_home: i64,
 ) -> u8 {

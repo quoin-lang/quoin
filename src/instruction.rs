@@ -3,10 +3,10 @@ use crate::value::{NamespacedName, SourceInfo};
 
 use gc_arena::Collect;
 use std::ops::Deref;
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SharedBytecode(pub Rc<Vec<Instruction>>);
+pub struct SharedBytecode(pub Arc<Vec<Instruction>>);
 
 unsafe impl<'gc> Collect<'gc> for SharedBytecode {
     const NEEDS_TRACE: bool = false;
@@ -21,7 +21,7 @@ impl Deref for SharedBytecode {
 
 impl From<Vec<Instruction>> for SharedBytecode {
     fn from(v: Vec<Instruction>) -> Self {
-        SharedBytecode(Rc::new(v))
+        SharedBytecode(Arc::new(v))
     }
 }
 
@@ -38,7 +38,7 @@ impl PartialEq<SharedBytecode> for Vec<Instruction> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SharedSourceMap(pub Rc<Vec<Option<SourceInfo>>>);
+pub struct SharedSourceMap(pub Arc<Vec<Option<SourceInfo>>>);
 
 unsafe impl<'gc> Collect<'gc> for SharedSourceMap {
     const NEEDS_TRACE: bool = false;
@@ -53,7 +53,7 @@ impl Deref for SharedSourceMap {
 
 impl From<Vec<Option<SourceInfo>>> for SharedSourceMap {
     fn from(v: Vec<Option<SourceInfo>>) -> Self {
-        SharedSourceMap(Rc::new(v))
+        SharedSourceMap(Arc::new(v))
     }
 }
 
@@ -85,7 +85,7 @@ pub struct StaticBlock {
     pub param_elem_tags: Vec<Option<crate::runtime::elem_tag::ElemTag>>,
     pub bytecode: SharedBytecode,
     pub source_info: Option<SourceInfo>,
-    pub decl_block: Option<Rc<StaticBlock>>,
+    pub decl_block: Option<Arc<StaticBlock>>,
     pub source_map: SharedSourceMap,
     /// Compiler-minted unique id for this block literal. Every closure
     /// materialized from the same literal shares one inline-cache array keyed by
@@ -107,8 +107,37 @@ pub struct StaticBlock {
     /// RESOLVED, docs/SPECULATIVE_AOT_ARCH.md S0). Lives HERE so the
     /// method-entry gate is one byte off a template line that entry binding
     /// touches anyway — a side table would cost a dependent pointer chase on
-    /// every method call. Shared by all closures of the literal (one `Rc`).
-    pub spec_state: std::cell::Cell<u8>,
+    /// every method call. Shared by all closures of the literal (one `Arc`).
+    pub spec_state: SpecState,
+}
+
+/// One atomic byte (was `Cell<u8>`): the flag is shared by every closure of
+/// the literal through the template `Arc`, which must be `Send` for C2's
+/// portable blocks (docs/CONCURRENCY_ARCH.md §5/§10). Relaxed everywhere —
+/// the flag is advisory tiering state; a racing observer only costs a
+/// conservative re-check. `Clone` gives the copy an independent flag, the
+/// same semantics `Cell` had under `#[derive(Clone)]`.
+#[derive(Debug, Default)]
+pub struct SpecState(std::sync::atomic::AtomicU8);
+
+impl SpecState {
+    pub fn get(&self) -> u8 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set(&self, v: u8) {
+        self.0.store(v, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Clone for SpecState {
+    fn clone(&self) -> Self {
+        SpecState(std::sync::atomic::AtomicU8::new(self.get()))
+    }
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for SpecState {
+    const NEEDS_TRACE: bool = false;
 }
 
 /// Mint a globally unique template id (compile time only; ids are never reused,
@@ -145,14 +174,14 @@ pub enum Constant {
     Double(f64),
     String(String),
     Symbol(String),
-    Block(Rc<StaticBlock>),
+    Block(Arc<StaticBlock>),
 }
 
 impl Constant {
     /// Wrap a [`StaticBlock`] into a `Constant::Block` (the variant carries an `Rc`
     /// so materialization is a refcount bump). Convenience for tests/builders.
     pub fn block(sb: StaticBlock) -> Constant {
-        Constant::Block(Rc::new(sb))
+        Constant::Block(Arc::new(sb))
     }
 
     /// The integer value if this is an `Int` literal — for `IntBinLC`'s fast path.
@@ -362,7 +391,7 @@ pub enum Instruction {
     /// (unknown names silently dropped — `finalize_instantiation`'s exact contract),
     /// runs the init chain through the memoized plan when one exists, and replaces the
     /// window with the finished object. Reached only via `BranchIfNotPlainNew`.
-    NewWithFields(Rc<Vec<Symbol>>),
+    NewWithFields(Arc<Vec<Symbol>>),
     /// The devirtualized `count` of a native List (the fused `each:` loop bound). Pops
     /// the receiver, pushes its element count; a non-List receiver falls back to the
     /// real `count` send, like every devirt op.

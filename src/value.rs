@@ -7,7 +7,7 @@ use crate::runtime::regex::NativeRegexState;
 use crate::runtime::set::NativeSetState;
 use crate::symbol::Symbol;
 use crate::vm::{ICSlot, VmState};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use gc_arena::collect::Trace;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
@@ -613,7 +613,7 @@ pub struct Block<'gc> {
     /// closure creation is an `Rc` bump plus the captured runtime state below,
     /// not a deep clone of the param vectors.
     #[collect(require_static)]
-    pub template: Rc<StaticBlock>,
+    pub template: Arc<StaticBlock>,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     pub enclosing_method_id: Option<usize>,
     pub decl_block: Option<Gc<'gc, Block<'gc>>>,
