@@ -173,10 +173,12 @@ taxonomy, in-memory:
 - **Resources** (worker-owned sockets, extensions, big handles) cross as
   handles only if/when a use case demands it (open question; the `DvResource`
   ownership discipline — reap queues, owner checks — is the template).
-- **Blocks/closures refuse**, exactly as they do on the extension wire. A
-  worker's entry point is therefore source-shaped: a unit path or a
-  class+selector, not a closure (`Worker.spawn:'jobs/resize.qn'` — same
-  decision the extension manifest made, and for the same reason).
+- **Arbitrary blocks/closures refuse**, exactly as they do on the extension
+  wire — but §10's PORTABLE BLOCKS carve out the restricted-capture subset
+  that can cross, which is what the ergonomic layer is built on. The raw
+  worker entry point stays source-shaped: a unit path or a class+selector
+  (`Worker.spawn:'jobs/resize.qn'` — same decision the extension manifest
+  made, and for the same reason).
 
 **Tasks pin to their worker.** Task migration means migrating a Gc graph —
 that is the shared-heap problem in disguise, and it is what makes
@@ -207,17 +209,18 @@ Do the `Rc→Arc` migration as its own perf-measured slice: it swaps some
 refcount traffic to atomic on clone-heavy paths (closure creation bumps the
 template refcount — `bench.qn`/CROSS before/after per house rules).
 
-Strictly speaking, v1 workers could skip even this by compiling their own
-source (share nothing, not even bytecode). `Rc→Arc` is what allows shipping
-*compiled units* to workers and, later, snapshot-style boot. Decide by
-measuring worker boot cost first.
+Strictly speaking, raw source-entry workers could skip even this by
+compiling their own source (share nothing, not even bytecode). But §10's
+portable blocks — the mechanism the whole ergonomic layer stands on — ship
+*template references* across workers, which puts `Rc→Arc` on the critical
+path rather than leaving it a boot-time optimization (build order, §11).
 
 ### Cross-worker channels
 
 Today's CSP channels are arena-local: `Value<'static>` buffers inside a `Gc`
 object, single-scheduler waiter queues (`channel.rs:33-47`). A cross-worker
 channel is a different animal and should be a different type (worker mailbox
-first, generalized channels later — open question §11):
+first, generalized channels later — open question §12):
 
 - Payloads are `DataValue` trees (converted at send time — so send cost is
   explicit and the sender's arena is never touched by the receiver).
@@ -323,23 +326,142 @@ Record it, don't build it.
   interesting for a far-future C3 extension (send-by-move of isolated
   subgraphs), not v1.
 
-## 10. Build order
+## 10. The library: portable blocks and the disappearing pool
+
+Raw workers (`Worker.spawn:` + mailbox) are the L0 primitive almost no
+program should touch. The question that shapes everything above them: can a
+BLOCK cross a worker boundary? If yes — with restrictions — then pooling,
+placement, and lifecycle all disappear into combinators.
+
+### Portable blocks — the one new mechanism
+
+A block is code (`StaticBlock` — `Send` after the §5 `Arc` migration) + a
+captured env chain (`Gc`, can never cross) + `self`/home. Only the middle is
+hostile. Define a **portable block**: every free name is either
+
+- a **read-only capture of a wire-representable value** (numbers, strings,
+  Bytes, data collections — anything `value_to_wire` accepts), or
+- a **global** (class/constant), or
+- nothing.
+
+Write-captures, `^^`, and a data-bearing `self` refuse, loudly, at submit
+time. A portable block crosses as `(template reference, deep-copied capture
+snapshot)` — captures ride the same walkers as any message.
+
+Every piece already exists somewhere in this VM: the compiler's capture
+analysis (the AOT candidacy prescans classify free names, write-captures,
+`^^` — `compiler/mod.rs`), the B3b cold-path materialization already builds
+closures over environment *snapshots*, and the wire walkers are the copy
+codec with the refusal taxonomy worked out. Ruby's Ractors proved the
+semantics (isolated Procs with shareable captures) are ergonomic enough in
+practice.
+
+The wrinkle to design early: a portable block referencing a user global
+(`{ |u| Fetcher.checksum:u }`) needs `Fetcher` defined in the worker. The
+free-global set is statically knowable, so the pool checks at submit time:
+v1 errors naming the missing global (or the program preloads via
+`pool.use:'fetcher'`); the later magic version auto-ships the defining unit,
+BEAM-code-loading style (units know their source).
+
+### The layers
+
+- **L0 — `Worker`** (§5): spawn by unit path, mailbox, join. Explicit
+  everything. The floor, not the surface.
+- **L1 — `WorkerPool`**: hides lifecycle and placement — lazy boot, warm
+  reuse (qnlib compiled once per worker, not per job), idle reaping,
+  crash-respawn with the in-flight job failing as a catchable error
+  (supervision-lite; Erlang-style supervision trees are a later library, not
+  runtime). `pool.run:` takes a portable block, returns a handle.
+- **L2 — the handle IS a parked task.** The highest-leverage decision in the
+  layer: `pool.run:` returns something that parks on the mailbox bridge
+  exactly like an IO-parked task — so **every existing async combinator
+  composes for free**: `Async.gather:` over worker jobs, `Async.timeout:do:`
+  around one, cancellation propagating as a cooperative cancel-request to
+  the worker-side task. Zero new control-flow vocabulary. Worker errors
+  return as catchable errors (the wire's `CallReturnError` shape).
+- **L3 — parallel combinators**, where pooling vanishes:
+
+  ```quoin
+  "* the 90% case - no pool, no worker, no placement visible anywhere
+  var thumbs = images.parallelCollect:{ |img| renderThumb:img };
+  var total = readings.parallelReduce:0 with:{ |acc x| acc + (score:x) };
+
+  "* explicit pool only for isolation or sizing; composes with Async
+  var pool = WorkerPool.size:4;
+  var jobs = urls.collect:{ |u| pool.run:{ checksum:u } };
+  var sums = Async.gather:jobs;
+  ```
+
+  Combinators run on an implicit default pool, auto-chunk (amortize
+  per-message copy), preserve order, and — the numexpr lesson transferring
+  directly — **gate on size**: `parallelCollect:` over ten cheap items runs
+  serially. Same measured-crossover discipline, instrumented through a
+  `VM.stats` `'workers'` section (jobs, bytes copied, per-job µs) so gates
+  are tuned from data. `parallelReduce:` documents its associativity
+  requirement (per-worker partials, then combine). `parallelEach:` is
+  deliberately absent in v1: worker-side effects don't touch the caller's
+  heap, so it only makes sense for IO and invites confusion.
+- **L4 — `WorkerService`**, the stateful story — and the extension system
+  pays off again: Phase-3 extension-backed classes already install proxy
+  classes whose method sends dispatch over a wire with the
+  data/resource/refused argument taxonomy. A service is the identical
+  machinery with the socket swapped for a mailbox: host a class in a
+  dedicated worker, get a proxy whose sends are RPC — sticky state,
+  serialized access (an actor, effectively).
+
+  ```quoin
+  var index = WorkerService.host:'search/index.qn' class:SearchIndex;
+  index.add:doc;
+  var hits = index.query:'quoin';
+  ```
+
+  *Extensions : processes :: services : workers* — the proxying, argument
+  classification, error transparency, and ownership/reap discipline are
+  already designed and stress-tested; C2 reuses rather than invents.
+
+### What stays visible, on purpose
+
+Copy semantics leak deliberately: arguments and results are deep copies —
+identity lost, mutations don't travel; user-class instances refuse until C3
+gives them a story. The posture is the wire's posture: loud, early errors
+("this block captures a mutable binding", "Fetcher is not defined in the
+worker — preload its unit") over silent surprises. Scheduling is
+nondeterministic; results of order-preserving combinators are not. And the
+C1/C2 lanes stay distinct in v1 — `parallelCollect:` over a `[Num]` buffer
+should eventually route to the offload pool instead of workers, but lane
+unification behind one combinator is an optimization to earn with data, not
+a founding requirement.
+
+## 11. Build order
 
 1. **C1 offload pool** — `IoRequest::Compute`, the Send bridge, 2-3 op
    families (Bytes hashing/codec, regex, msgpack encode), crossover
    measurement. Small, self-contained, immediately useful — and it builds
-   the oneshot-bridge machinery C2's wakeups reuse.
-2. **`[Num]` on C1** — revisit the shelved native backend WITH offload in
-   its design (the evaluator becomes a `ComputeOp`), so its big-array wins
-   use cores from day one.
-3. **C2 prerequisite slice** — `Rc→Arc`/`AtomicU8` for code objects, perf-
-   verified; worker boot-cost measurement.
-4. **C2 v1** — `Worker.spawn:` (unit path entry), mailbox send/receive with
-   `DataValue` copy, deadlock-message honesty, `VM.stats` workers section,
-   stress under `QN_SCHED_STRESS` per worker.
-5. **C3** — only when C2 traffic data demands it.
+   the oneshot-bridge machinery C2's wakeups and the L2 handle reuse.
+2. **`Rc→Arc`/`AtomicU8` for code objects** — PROMOTED onto the critical
+   path (it was "decide by boot cost" until §10: portable blocks ship
+   template references, so the whole ergonomic layer stands on `Send` code
+   objects). Perf-verified per house rules — closure creation bumps template
+   refcounts, so the atomic swap gets measured before anything builds on it.
+3. **C2 v1** — `Worker` (L0, unit-path entry) + `WorkerPool` (L1), mailbox
+   send/receive with `DataValue` copy, **the job handle designed as a parked
+   task from day one** (L2 — retrofitting composition later would mean two
+   handle kinds forever), deadlock-message honesty, `VM.stats` `'workers'`
+   section, stress under `QN_SCHED_STRESS` per worker.
+4. **Portable blocks** — the capture-snapshot spawn path + submit-time
+   free-global check; `pool.run:{...}` and block-shaped `Worker.start:{...}`
+   become real.
+5. **L3 combinators** — `parallelCollect:`/`parallelReduce:with:` on the
+   default pool, auto-chunking + size gates with measured crossovers.
+6. **L4 `WorkerService`** — the ext-class proxy machinery over a mailbox.
+7. **C3** — only when C2 traffic data demands it.
 
-## 11. Decided vs open
+Parallel track, any time after (1): **`[Num]` on C1** — revisit the shelved
+native backend WITH offload in its design (the evaluator becomes a
+`ComputeOp`), so its big-array wins use cores from day one. It shares no
+dependency with the C2/library line.
+
+## 12. Decided vs open
 
 **Decided**
 
@@ -353,7 +475,18 @@ Record it, don't build it.
   source-shaped, not closure-shaped.
 - Post-boot definitions are worker-local; workers boot full qnlib.
 - Per-worker extension processes; no cross-worker resource sharing in v1.
-- Pool/worker tunables use `QN_*` naming (`QN_COMPUTE_THREADS`, ...).
+- Pool/worker tunables use `QN_*` naming (`QN_COMPUTE_THREADS`,
+  `QN_WORKERS`, ...).
+- **Portable blocks** are the block-crossing mechanism (read-only
+  wire-representable captures + globals; write-captures/`^^`/data-`self`
+  refuse at submit time); arbitrary blocks still refuse.
+- **Worker/pool job handles are awaitable tasks** — they compose with
+  `Async.gather:`/`timeout:do:`/cancellation with no new vocabulary.
+- Parallel combinators auto-chunk, size-gate on measured crossovers, and
+  preserve order; `parallelReduce:` requires associativity; no
+  `parallelEach:` in v1.
+- `WorkerService` reuses the extension-backed-class proxy machinery.
+- `Rc→Arc` for code objects is on the C2 critical path (not optional).
 
 **Open**
 
@@ -370,3 +503,13 @@ Record it, don't build it.
 - C3 freeze semantics (explicit `freeze` vs frozen-by-construction literals)
   — defer until C2 data exists.
 - Snapshot/fork worker boot (only if fleet startup cost measures as real).
+- Free-global provisioning for portable blocks: error + `pool.use:` preload
+  (v1) vs auto-shipping the defining unit (the BEAM-style magic; needs units
+  to carry provenance).
+- Default-pool sizing and idle-reaping policy.
+- Lane unification: routing `parallelCollect:` over offload-eligible data
+  (`[Num]`/Bytes) to C1 instead of workers behind one combinator.
+- Supervision beyond crash-respawn-with-catchable-error (restart strategies,
+  linked workers) — a library concern, deliberately not runtime.
+- Fire-and-forget service sends: ordering/delivery guarantees, backpressure
+  on the service mailbox.
