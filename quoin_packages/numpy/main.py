@@ -56,6 +56,8 @@ _BINOPS = {
     "minimum": np.minimum,
     "arctan2": np.arctan2,
     "hypot": np.hypot,
+    "solve": np.linalg.solve,
+    "outer": np.outer,
 }
 _UNOPS = {
     "neg": np.negative,
@@ -85,6 +87,7 @@ _UNOPS = {
     "isnan": np.isnan,
     "isinf": np.isinf,
     "isfinite": np.isfinite,
+    "inv": np.linalg.inv,
 }
 _REDUCERS = {
     "sum": np.sum,
@@ -101,6 +104,12 @@ _REDUCERS = {
     "prod": np.prod,
     "any": np.any,
     "all": np.all,
+    # Linalg scalars ride the reducer path too. `norm` also takes an axis (row/column norms);
+    # `trace`/`det` do not — an axis form would TypeError into a catchable error, and init.qn
+    # doesn't expose one.
+    "trace": np.trace,
+    "det": np.linalg.det,
+    "norm": np.linalg.norm,
 }
 # Running (cumulative) forms: array-shaped results, so they stay IN the graph — with no axis
 # NumPy flattens first (its own convention), with an axis they run along it.
@@ -274,6 +283,28 @@ class NdArray:
         `nonzero` tuple) — a List of live instances on the wire."""
         return [NdArray(ix) for ix in np.nonzero(self.a)]
 
+    def eig(self):
+        """Eigenvalues + right eigenvectors (`np.linalg.eig`) as a List of two live arrays.
+        Complex results with (numerically) zero imaginary parts are realified; a genuinely
+        complex spectrum is outside the dtype policy and raises a clear, catchable error."""
+        w, v = np.linalg.eig(self.a)
+
+        def realify(x):
+            if np.iscomplexobj(x):
+                if np.abs(x.imag).max() > 1e-9:
+                    raise ValueError(
+                        "eig: complex eigenvalues are not representable (float64/int64 only)"
+                    )
+                x = x.real
+            return NdArray(x)
+
+        return [realify(w), realify(v)]
+
+    def svd(self):
+        """Singular value decomposition (`np.linalg.svd`): a List of [U, S, Vt] live arrays."""
+        u, s, vt = np.linalg.svd(self.a)
+        return [NdArray(u), NdArray(s), NdArray(vt)]
+
     def split(self, n):
         """Split into `n` near-equal parts along axis 0 (`np.array_split`), returned as a List of
         new resident arrays — instances inside a structured value (live references on the wire)."""
@@ -423,6 +454,8 @@ if __name__ == "__main__":
             "evalGraph:": NdArray.eval_graph,
             "split:": NdArray.split,
             "nonZero": NdArray.non_zero,
+            "eig": NdArray.eig,
+            "svd": NdArray.svd,
             "toList": NdArray.toList,
             "toArray": NdArray.toArray,
         },

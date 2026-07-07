@@ -671,3 +671,62 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_numpy_creation_random_test.qn", &script);
 }
+
+/// P5 parity: linalg — lazy solve:/outer:/inv, forcing trace/det/norm (+ lazy row norms), and
+/// the multi-return eig/svd (Lists of live arrays — decompositions verified by reconstruction,
+/// which also exercises diag: on returned instances).
+#[test]
+fn numpy_linalg() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_linalg: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+var tol = 0.000000001;
+
+"* trace / det / norm (scalar-forcing); row norms stay lazy
+var dgi = [NumPy]Array.fromList:#( #( 2 0 ) #( 0 3 ) );
+(dgi.trace == 5).else:{{ ok = false }};
+(((dgi.det - 6.0).abs) < tol).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 3.0 4.0 )).norm) == 5.0).else:{{ ok = false }};
+var nm = [NumPy]Array.fromList:#( #( 3.0 4.0 ) #( 6.0 8.0 ) );
+(((nm.norm:1) * 1.0).toList == #( 5.0 10.0 )).else:{{ ok = false }};
+
+"* outer product
+((([NumPy]Array.fromList:#( 1.0 2.0 )).outer:([NumPy]Array.fromList:#( 3.0 4.0 ))).toList
+    == #( #( 3.0 4.0 ) #( 6.0 8.0 ) )).else:{{ ok = false }};
+
+"* solve / inv, verified by residuals (LU results aren't binary-exact)
+var ma = [NumPy]Array.fromList:#( #( 2.0 1.0 ) #( 1.0 3.0 ) );
+var vb = [NumPy]Array.fromList:#( 3.0 5.0 );
+var x = (ma.solve:vb).eval;
+((((ma.matMul:x) - vb).abs.max) < tol).else:{{ ok = false }};
+((((ma.matMul:(ma.inv)) - ([NumPy]Array.eye:2)).abs.max) < tol).else:{{ ok = false }};
+
+"* eig: a List of [values, vectors]; A·V ~= V·diag(w)
+var sym = [NumPy]Array.fromList:#( #( 2.0 0.0 ) #( 0.0 3.0 ) );
+var ev = sym.eig;
+(ev.count == 2).else:{{ ok = false }};
+(((((ev.at:0).sort - ([NumPy]Array.fromList:#( 2.0 3.0 ))).abs.max)) < tol).else:{{ ok = false }};
+var lhs = sym.matMul:(ev.at:1);
+var rhs = (ev.at:1).matMul:([NumPy]Array.diag:(ev.at:0));
+((((lhs - rhs).abs.max)) < tol).else:{{ ok = false }};
+
+"* svd: [U, S, Vt]; U·diag(S)·Vt reconstructs the input
+var msvd = [NumPy]Array.fromList:#( #( 3.0 0.0 ) #( 0.0 4.0 ) );
+var usv = msvd.svd;
+(usv.count == 3).else:{{ ok = false }};
+var s = usv.at:1;
+((((s - ([NumPy]Array.fromList:#( 4.0 3.0 ))).abs.max)) < tol).else:{{ ok = false }};
+var rec = ((usv.at:0).matMul:([NumPy]Array.diag:s)).matMul:(usv.at:2);
+((((rec - msvd).abs.max)) < tol).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_linalg_test.qn", &script);
+}

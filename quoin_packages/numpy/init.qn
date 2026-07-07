@@ -180,6 +180,15 @@
     ptp -> { ([NumPy]Expr.op:'ptp' with:#( self )).eval };
     median -> { ([NumPy]Expr.op:'median' with:#( self )).eval };
     countNonZero -> { ([NumPy]Expr.op:'countnonzero' with:#( self )).eval };
+
+    "* linear algebra: lazy where the result is a single array; scalar forms force
+    solve: -> { |rhs| [NumPy]Expr.op:'solve' with:#( self rhs ) };
+    outer: -> { |rhs| [NumPy]Expr.op:'outer' with:#( self rhs ) };
+    inv -> { [NumPy]Expr.op:'inv' with:#( self ) };
+    trace -> { ([NumPy]Expr.op:'trace' with:#( self )).eval };
+    det -> { ([NumPy]Expr.op:'det' with:#( self )).eval };
+    norm -> { ([NumPy]Expr.op:'norm' with:#( self )).eval };
+    norm: -> { |axis| [NumPy]Expr.op:'norm' with:#( self ) axis:axis };
     prod -> { ([NumPy]Expr.op:'prod' with:#( self )).eval };
 
     "* axis reductions produce arrays, so they STAY lazy
@@ -222,6 +231,8 @@
     at: -> { |i| .eval.at:i };
     nonZero -> { .eval.nonZero };
     split: -> { |n| .eval.split:n };
+    eig -> { .eval.eig };
+    svd -> { .eval.svd };
     s -> { .eval.s }
 };
 
@@ -409,6 +420,15 @@
     ptp -> { ([NumPy]Expr.op:'ptp' with:#( self )).eval };
     median -> { ([NumPy]Expr.op:'median' with:#( self )).eval };
     countNonZero -> { ([NumPy]Expr.op:'countnonzero' with:#( self )).eval };
+
+    "* linear algebra: lazy where the result is a single array; scalar forms force
+    solve: -> { |rhs| [NumPy]Expr.op:'solve' with:#( self rhs ) };
+    outer: -> { |rhs| [NumPy]Expr.op:'outer' with:#( self rhs ) };
+    inv -> { [NumPy]Expr.op:'inv' with:#( self ) };
+    trace -> { ([NumPy]Expr.op:'trace' with:#( self )).eval };
+    det -> { ([NumPy]Expr.op:'det' with:#( self )).eval };
+    norm -> { ([NumPy]Expr.op:'norm' with:#( self )).eval };
+    norm: -> { |axis| [NumPy]Expr.op:'norm' with:#( self ) axis:axis };
     prod -> { ([NumPy]Expr.op:'prod' with:#( self )).eval };
 
     sum: -> { |axis| [NumPy]Expr.op:'sum' with:#( self ) axis:axis };
