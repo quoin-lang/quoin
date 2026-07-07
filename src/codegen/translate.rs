@@ -43,7 +43,7 @@ use crate::value::NamespacedName;
 use super::helpers::{self, KIND_BOOL, KIND_DOUBLE, KIND_INT, KIND_NIL, KIND_SLOT};
 use super::{
     AOT_MAX_CALL_DEPTH, AotCandidate, AotEntry, AotKind, AotParam, AotRawFn, AotRet, AotRole,
-    TAG_DEPTH, TAG_DIV_ZERO,
+    Refusal, RefusalKind, TAG_DEPTH, TAG_DIV_ZERO,
 };
 
 /// `%` on doubles: Rust's truncated remainder (what `devirt_ops::double_bin`
@@ -54,6 +54,11 @@ unsafe extern "C" fn aot_fmod(a: f64, b: f64) -> f64 {
 
 /// Outcall arity cap: lane buffers are fixed-size native stack slots.
 const MAX_OUTCALL_ARGS: usize = 8;
+
+/// Tag a refusal with its `VM.stats` bucket; the message stays free-form.
+fn refuse(kind: RefusalKind, why: String) -> Refusal {
+    Refusal { kind, why }
+}
 
 type SiblingMap = HashMap<(u32, String), (Vec<AotParam>, AotRet, u32)>;
 
@@ -67,9 +72,10 @@ type SiblingMap = HashMap<(u32, String), (Vec<AotParam>, AotRet, u32)>;
 /// same moment the aborting `Err` is returned), so the refusal strings stay
 /// free-form messages.
 enum TranslateAbort {
-    /// A real refusal: the member runs interpreted; the string is the
-    /// human-readable reason (surfaced under `QN_AOT_VERBOSE`).
-    Refuse(String),
+    /// A real refusal: the member runs interpreted; the [`Refusal`] carries
+    /// the `VM.stats` bucket plus the human-readable reason (surfaced under
+    /// `QN_AOT_VERBOSE`).
+    Refuse(Refusal),
     /// The member used the slot window while marked scalar-pure — demote it
     /// from the direct-call set and retry.
     PurityDemote,
@@ -88,7 +94,7 @@ enum TranslateAbort {
 pub(super) fn compile_all(
     cands: &[AotCandidate],
     siblings: &SiblingMap,
-) -> (Vec<(u32, AotEntry)>, Vec<(String, String)>) {
+) -> (Vec<(u32, AotEntry)>, Vec<(String, Refusal)>) {
     let mut groups: HashMap<u32, Vec<&AotCandidate>> = HashMap::new();
     for c in cands {
         groups.entry(c.group_id).or_default().push(c);
@@ -344,7 +350,7 @@ macro_rules! aot_helpers {
             $($field: FuncId,)+
         }
 
-        fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, String> {
+        fn declare_helpers(module: &mut JITModule, ptr: Type) -> Result<Helpers, Refusal> {
             Ok(Helpers {
                 $($field: {
                     // The coercion checks the table row against the definition.
@@ -427,17 +433,17 @@ fn compile_group(
     ret_demoted: &HashSet<u32>,
     dyn_merges: &HashMap<u32, HashSet<usize>>,
 ) -> Result<Vec<(u32, AotEntry)>, (u32, TranslateAbort)> {
-    let fail = |tid: u32, e: String| (tid, TranslateAbort::Refuse(e));
+    let fail = |tid: u32, e: Refusal| (tid, TranslateAbort::Refuse(e));
     let any_tid = members[0].block.template_id.unwrap_or(0);
 
     let mut flags = settings::builder();
     flags
         .set("opt_level", "speed")
-        .map_err(|e| fail(any_tid, e.to_string()))?;
+        .map_err(|e| fail(any_tid, e.to_string().into()))?;
     let isa = cranelift_native::builder()
-        .map_err(|e| fail(any_tid, e.to_string()))?
+        .map_err(|e| fail(any_tid, e.to_string().into()))?
         .finish(settings::Flags::new(flags))
-        .map_err(|e| fail(any_tid, e.to_string()))?;
+        .map_err(|e| fail(any_tid, e.to_string().into()))?;
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     for (name, addr) in helper_symbols() {
         jb.symbol(name, addr);
@@ -461,7 +467,7 @@ fn compile_group(
         let sig = inner_sig(&mut module, ptr, m, eff_ret(m, ret_demoted));
         let fid = module
             .declare_function(&format!("t{tid}"), Linkage::Local, &sig)
-            .map_err(|e| fail(tid, e.to_string()))?;
+            .map_err(|e| fail(tid, e.to_string().into()))?;
         inner_ids.insert(tid, fid);
     }
 
@@ -532,7 +538,7 @@ fn compile_group(
         let fid = inner_ids[&tid];
         module
             .define_function(fid, &mut ctx)
-            .map_err(|e| fail(tid, format!("{e:?}\nIR:\n{}", ctx.func.display())))?;
+            .map_err(|e| fail(tid, format!("{e:?}\nIR:\n{}", ctx.func.display()).into()))?;
         if std::env::var("QN_AOT_DUMP").is_ok_and(|v| v == m.selector || v == "1") {
             eprintln!("=== {} (tid {tid}) ===\n{}", m.selector, ctx.func.display());
         }
@@ -545,7 +551,7 @@ fn compile_group(
                 Linkage::Local,
                 &tctx.func.signature,
             )
-            .map_err(|e| fail(tid, e.to_string()))?;
+            .map_err(|e| fail(tid, e.to_string().into()))?;
         {
             let mut b = FunctionBuilder::new(&mut tctx.func, &mut fb_ctx);
             build_trampoline(&mut module, &mut b, m, fid, eff_ret(m, ret_demoted));
@@ -554,7 +560,7 @@ fn compile_group(
         }
         module
             .define_function(tramp_id, &mut tctx)
-            .map_err(|e| fail(tid, e.to_string()))?;
+            .map_err(|e| fail(tid, e.to_string().into()))?;
         tramp_ids.push((
             tid,
             tramp_id,
@@ -568,7 +574,7 @@ fn compile_group(
 
     module
         .finalize_definitions()
-        .map_err(|e| fail(any_tid, e.to_string()))?;
+        .map_err(|e| fail(any_tid, e.to_string().into()))?;
     let mut out = Vec::new();
     for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self, materializes_nlr) in tramp_ids {
         let addr = module.get_finalized_function(tramp_id);
@@ -808,9 +814,12 @@ fn scan_materialized_nest(
     inherited: &HashSet<Symbol>,
     own_selector: &str,
     out: &mut NestScan,
-) -> Result<(), String> {
+) -> Result<(), Refusal> {
     if rc.decl_block.is_some() {
-        return Err("guarded block in a materialized nest".to_string());
+        return Err(refuse(
+            RefusalKind::MaterializationGate,
+            "guarded block in a materialized nest".to_string(),
+        ));
     }
     let mut defined = inherited.clone();
     defined.extend(rc.param_syms.iter().copied());
@@ -872,13 +881,13 @@ struct FnCtx {
 }
 
 impl<'a> Translator<'a> {
-    fn alloc_scratch(&mut self) -> Result<u32, String> {
+    fn alloc_scratch(&mut self) -> Result<u32, Refusal> {
         if self.is_pure {
             // Translation-verified purity: the syntactic pure-set scan missed a
             // slot use (e.g. a sibling-selector send on a non-self receiver).
             // The caller demotes this member from the pure set and retries.
             self.pending_abort = Some(TranslateAbort::PurityDemote);
-            return Err("scalar-pure member touched the slot window".to_string());
+            return Err("scalar-pure member touched the slot window".into());
         }
         let fixed = match self.cand.role {
             // 0 = receiver, then ONE slot per param — scalar params occupy
@@ -937,7 +946,7 @@ impl<'a> Translator<'a> {
         b.switch_to_block(ok_bl);
     }
 
-    fn build_inner(&mut self, b: &mut FunctionBuilder) -> Result<(), String> {
+    fn build_inner(&mut self, b: &mut FunctionBuilder) -> Result<(), Refusal> {
         let insts = &self.cand.block.bytecode.0.clone();
 
         let entry = b.create_block();
@@ -1057,7 +1066,7 @@ impl<'a> Translator<'a> {
             };
             let target = ip as isize + off;
             if target < 0 || target as usize >= insts.len() {
-                return Err(format!("jump out of range at ip {ip}"));
+                return Err(format!("jump out of range at ip {ip}").into());
             }
             leaders.push(target as usize);
             if !matches!(inst, Instruction::Jump(_)) {
@@ -1101,7 +1110,7 @@ impl<'a> Translator<'a> {
             let mut ip = start_ip;
             'block: loop {
                 if ip >= insts.len() {
-                    return Err("fell off the end of bytecode".to_string());
+                    return Err("fell off the end of bytecode".into());
                 }
                 if ip != start_ip && leaders.binary_search(&ip).is_ok() {
                     let mut nstack = self.norm_stack(b, &fx, &stack)?;
@@ -1306,7 +1315,12 @@ impl<'a> Translator<'a> {
                         let cd = match c {
                             Constant::Double(d) => *d,
                             Constant::Int(i) => *i as f64,
-                            _ => return Err("DoubleBinLC without numeric constant".into()),
+                            _ => {
+                                return Err(refuse(
+                                    RefusalKind::UnsupportedConstant,
+                                    "DoubleBinLC without numeric constant".to_string(),
+                                ));
+                            }
                         };
                         let rb = b.ins().f64const(cd);
                         let out = self.emit_double_bin(b, *kind, ra, rb);
@@ -1323,7 +1337,10 @@ impl<'a> Translator<'a> {
                             self.tag_check(b, &fx, tag);
                         } else {
                             if n > MAX_OUTCALL_ARGS {
-                                return Err("list literal too long for v0.2".into());
+                                return Err(refuse(
+                                    RefusalKind::ArityCap,
+                                    "list literal too long for v0.2".to_string(),
+                                ));
                             }
                             let elems: Vec<AV> =
                                 stack.split_off(stack.len().checked_sub(n).ok_or("underflow")?);
@@ -1378,10 +1395,13 @@ impl<'a> Translator<'a> {
                             _ => false,
                         };
                         if !proven {
-                            return Err(format!(
-                                "fused each: on an unproven receiver at ip {ip} — a \
-                                 `List`-annotated param, a fresh/checked list, or `self` \
-                                 (entry-gated) compiles"
+                            return Err(refuse(
+                                RefusalKind::UnprovenReceiver,
+                                format!(
+                                    "fused each: on an unproven receiver at ip {ip} — a \
+                                     `List`-annotated param, a fresh/checked list, or `self` \
+                                     (entry-gated) compiles"
+                                ),
                             ));
                         }
                     }
@@ -1418,12 +1438,18 @@ impl<'a> Translator<'a> {
                         // (same helper contract as the interpreter arm), and
                         // record the PROOF — this is a tag the runtime enforces.
                         let AV::Dyn(idx) = *stack.last().ok_or("stack underflow")? else {
-                            return Err("TagCollection on a non-slot value".into());
+                            return Err(refuse(
+                                RefusalKind::UnprovenReceiver,
+                                "TagCollection on a non-slot value".to_string(),
+                            ));
                         };
                         let Some(code) = tag.code() else {
-                            return Err("user-class element tags in compiled literals are not \
+                            return Err(refuse(
+                                RefusalKind::UnprovenReceiver,
+                                "user-class element tags in compiled literals are not \
                                  supported yet"
-                                .into());
+                                    .to_string(),
+                            ));
                         };
                         let code_v = b.ins().iconst(types::I64, code);
                         let f = self.func_ref(b, self.helpers.tag_collection);
@@ -1732,8 +1758,9 @@ impl<'a> Translator<'a> {
                                 .iter()
                                 .any(|idx| self.pending_writebacks.contains_key(idx))
                         {
-                            return Err(format!(
-                                "sibling closures share written captures at ip {ip}"
+                            return Err(refuse(
+                                RefusalKind::WriteCapture,
+                                format!("sibling closures share written captures at ip {ip}"),
                             ));
                         }
                         // A `catch`-family send consuming a `^^`-carrying
@@ -1748,7 +1775,10 @@ impl<'a> Translator<'a> {
                                 .iter()
                                 .any(|idx| self.materialized_nlr.contains(idx))
                         {
-                            return Err(format!("non-local return (^^) under a catch at ip {ip}"));
+                            return Err(refuse(
+                                RefusalKind::NlrCatch,
+                                format!("non-local return (^^) under a catch at ip {ip}"),
+                            ));
                         }
                         let out = if sel.as_str() == "valueWithSelfOrArg:" && args.len() == 1 {
                             self.emit_block_call(b, &fx, recv, args[0], ip)?
@@ -1768,8 +1798,9 @@ impl<'a> Translator<'a> {
                     // In a BLOCK TEMPLATE (B3a) a `^^` must unwind interpreter
                     // frames the compiled world doesn't have — refused.
                     Instruction::MethodReturn if self.cand.role == AotRole::BlockTemplate => {
-                        return Err(format!(
-                            "non-local return (^^) from a compiled block at ip {ip}"
+                        return Err(refuse(
+                            RefusalKind::NlrTemplate,
+                            format!("non-local return (^^) from a compiled block at ip {ip}"),
                         ));
                     }
                     Instruction::LoadField(name) => {
@@ -1792,7 +1823,10 @@ impl<'a> Translator<'a> {
                         break 'block;
                     }
                     other => {
-                        return Err(format!("unsupported instruction at ip {ip}: {other:?}"));
+                        return Err(refuse(
+                            RefusalKind::UnsupportedInstruction,
+                            format!("unsupported instruction at ip {ip}: {other:?}"),
+                        ));
                     }
                 }
                 ip += 1;
@@ -1812,11 +1846,14 @@ impl<'a> Translator<'a> {
         fx: &FnCtx,
         v: AV,
         what: &str,
-    ) -> Result<CVal, String> {
+    ) -> Result<CVal, Refusal> {
         match v {
             AV::Dyn(idx) => Ok(idx),
             AV::SelfRef => Ok(self.abs_slot(b, fx, 0)),
-            _ => Err(format!("{what} is not slot-resident")),
+            _ => Err(refuse(
+                RefusalKind::SlotResidency,
+                format!("{what} is not slot-resident"),
+            )),
         }
     }
 
@@ -1841,7 +1878,7 @@ impl<'a> Translator<'a> {
         b: &mut FunctionBuilder,
         fx: &FnCtx,
         sym: Symbol,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         let block_idx = self.abs_slot(b, fx, 2);
         let leaked: &'static Symbol = Box::leak(Box::new(sym));
         let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
@@ -1864,7 +1901,7 @@ impl<'a> Translator<'a> {
         fx: &FnCtx,
         sym: Symbol,
         v: AV,
-    ) -> Result<(), String> {
+    ) -> Result<(), Refusal> {
         let block_idx = self.abs_slot(b, fx, 2);
         let leaked: &'static Symbol = Box::leak(Box::new(sym));
         let sym_ptr = b.ins().iconst(types::I64, leaked as *const Symbol as i64);
@@ -1888,7 +1925,7 @@ impl<'a> Translator<'a> {
         recv: AV,
         arg: AV,
         ip: usize,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         let (rk, rbits) = self.encode(b, fx, recv);
         let (ak, abits) = self.encode(b, fx, arg);
         let out = self.alloc_scratch()?;
@@ -1917,7 +1954,7 @@ impl<'a> Translator<'a> {
         b: &mut FunctionBuilder,
         fx: &FnCtx,
         name: &str,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         let sentinel = self.cand.block.bytecode.0.len();
         self.emit_field_get(b, fx, name, sentinel)
     }
@@ -1928,7 +1965,7 @@ impl<'a> Translator<'a> {
         fx: &FnCtx,
         name: &str,
         ip: usize,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
         let name_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
         let name_len = b.ins().iconst(types::I64, leaked.len() as i64);
@@ -1957,7 +1994,7 @@ impl<'a> Translator<'a> {
         name: &str,
         v: AV,
         ip: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Refusal> {
         let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
         let name_ptr = b.ins().iconst(types::I64, leaked.as_ptr() as i64);
         let name_len = b.ins().iconst(types::I64, leaked.len() as i64);
@@ -1993,7 +2030,7 @@ impl<'a> Translator<'a> {
         obj_params: &HashMap<Symbol, CVal>,
         rc: &Rc<StaticBlock>,
         ip: usize,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         // Force still-deferred `var x = nil` locals into REAL slots before
         // snapshotting: the closure may read or write them through its
         // snapshot env, which "type decided at first store" cannot see. No
@@ -2015,7 +2052,10 @@ impl<'a> Translator<'a> {
         // `^^` presence, guarded blocks, and the trampoline signature.
         let mut scan = NestScan::default();
         scan_materialized_nest(rc, &HashSet::new(), self.cand.selector.as_str(), &mut scan)
-            .map_err(|e| format!("{e} at ip {ip}"))?;
+            .map_err(|e| Refusal {
+                kind: e.kind,
+                why: format!("{} at ip {ip}", e.why),
+            })?;
         let written_frees = scan.written_frees;
         let has_nlr = scan.has_nlr;
         // A `^^` with a catch-family send anywhere in the same nest: the
@@ -2023,8 +2063,9 @@ impl<'a> Translator<'a> {
         // it, which a compiled home cannot reproduce — refuse (mirrors the
         // send-head gate for method-level catch consumers).
         if has_nlr && scan.has_catch_send {
-            return Err(format!(
-                "non-local return (^^) with a catch in a materialized nest at ip {ip}"
+            return Err(refuse(
+                RefusalKind::NlrCatch,
+                format!("non-local return (^^) with a catch in a materialized nest at ip {ip}"),
             ));
         }
         // PROFITABILITY (S5a, empirical): a `^^` cold arm pays a snapshot
@@ -2058,8 +2099,9 @@ impl<'a> Translator<'a> {
             // entry-nil slots — so a cold span can no longer re-nil a live
             // accumulator.)
             if in_loop && !Self::in_guard_cold_span(insts, ip) {
-                return Err(format!(
-                    "per-iteration ^^ materialization (fused loop) at ip {ip}"
+                return Err(refuse(
+                    RefusalKind::MaterializationGate,
+                    format!("per-iteration ^^ materialization (fused loop) at ip {ip}"),
                 ));
             }
         }
@@ -2072,8 +2114,9 @@ impl<'a> Translator<'a> {
         // recorded follow-up, shared with qnlib's whileDo:. Deliberately NOT
         // cold-span-exempt — see the M3 note above.
         if scan.sends_own_selector {
-            return Err(format!(
-                "per-invocation materialization in a recursive method at ip {ip}"
+            return Err(refuse(
+                RefusalKind::RecursionGate,
+                format!("per-invocation materialization in a recursive method at ip {ip}"),
             ));
         }
         // A write to a FRAME local mutates the snapshot — read back after the
@@ -2090,9 +2133,12 @@ impl<'a> Translator<'a> {
             if let Some(&slot) = vars.get(&s) {
                 writebacks.push((s, slot));
             } else if obj_params.contains_key(&s) || s == self_symbol() {
-                return Err(format!(
-                    "materialized block writes parameter/self '{}' at ip {ip}",
-                    s.as_str()
+                return Err(refuse(
+                    RefusalKind::WriteCapture,
+                    format!(
+                        "materialized block writes parameter/self '{}' at ip {ip}",
+                        s.as_str()
+                    ),
                 ));
             }
         }
@@ -2199,7 +2245,7 @@ impl<'a> Translator<'a> {
         b: &mut FunctionBuilder,
         fx: &FnCtx,
         consumed: &[AV],
-    ) -> Result<(), String> {
+    ) -> Result<(), Refusal> {
         for v in consumed {
             let AV::Dyn(idx) = v else { continue };
             let Some(wbs) = self.pending_writebacks.remove(idx) else {
@@ -2243,16 +2289,18 @@ impl<'a> Translator<'a> {
     /// closures must flow DIRECTLY from materialization to their consuming
     /// send; any escape refuses. Obligation-free closures may escape (their
     /// only divergence is the documented snapshot-vs-live-env edge).
-    fn refuse_tracked_escape(&self, v: AV, ip: usize, what: &str) -> Result<(), String> {
+    fn refuse_tracked_escape(&self, v: AV, ip: usize, what: &str) -> Result<(), Refusal> {
         if let AV::Dyn(idx) = v {
             if self.pending_writebacks.contains_key(&idx) {
-                return Err(format!(
-                    "write-capturing closure escapes to {what} at ip {ip}"
+                return Err(refuse(
+                    RefusalKind::WriteCapture,
+                    format!("write-capturing closure escapes to {what} at ip {ip}"),
                 ));
             }
             if self.materialized_nlr.contains(&idx) {
-                return Err(format!(
-                    "non-local-return closure escapes to {what} at ip {ip}"
+                return Err(refuse(
+                    RefusalKind::NlrEscape,
+                    format!("non-local-return closure escapes to {what} at ip {ip}"),
                 ));
             }
         }
@@ -2267,7 +2315,7 @@ impl<'a> Translator<'a> {
         obj_params: &HashMap<Symbol, CVal>,
         c: &Constant,
         ip: usize,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         Ok(match c {
             Constant::Int(i) => AV::C(b.ins().iconst(types::I64, *i), AotKind::Int),
             Constant::Double(d) => AV::C(b.ins().f64const(*d), AotKind::Double),
@@ -2294,7 +2342,12 @@ impl<'a> Translator<'a> {
                 let rc = rc.clone();
                 return self.materialize_closure(b, fx, vars, obj_params, &rc, ip);
             }
-            _ => return Err(format!("unsupported constant at ip {ip}")),
+            _ => {
+                return Err(refuse(
+                    RefusalKind::UnsupportedConstant,
+                    format!("unsupported constant at ip {ip}"),
+                ));
+            }
         })
     }
 
@@ -2306,7 +2359,7 @@ impl<'a> Translator<'a> {
         obj_params: &HashMap<Symbol, CVal>,
         sym: Symbol,
         ip: usize,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         if sym == self_symbol() {
             return Ok(AV::SelfRef);
         }
@@ -2341,9 +2394,12 @@ impl<'a> Translator<'a> {
                 // B3a: a free variable — read the closure's real EnvFrame cell.
                 self.emit_env_get(b, fx, sym)
             }
-            None => Err(format!(
-                "read of unknown/uninitialized local '{}' at ip {ip}",
-                sym.as_str()
+            None => Err(refuse(
+                RefusalKind::LocalTyping,
+                format!(
+                    "read of unknown/uninitialized local '{}' at ip {ip}",
+                    sym.as_str()
+                ),
             )),
         }
     }
@@ -2357,12 +2413,12 @@ impl<'a> Translator<'a> {
         sym: Symbol,
         want: AotKind,
         ip: usize,
-    ) -> Result<CVal, String> {
+    ) -> Result<CVal, Refusal> {
         match self.local_av(b, fx, vars, obj_params, sym, ip)? {
             AV::C(v, k) if k == want => Ok(v),
-            _ => Err(format!(
-                "local '{}' is not a {want:?} at ip {ip}",
-                sym.as_str()
+            _ => Err(refuse(
+                RefusalKind::LocalTyping,
+                format!("local '{}' is not a {want:?} at ip {ip}", sym.as_str()),
             )),
         }
     }
@@ -2375,21 +2431,30 @@ impl<'a> Translator<'a> {
         obj_params: &HashMap<Symbol, CVal>,
         sym: Symbol,
         v: AV,
-    ) -> Result<(), String> {
+    ) -> Result<(), Refusal> {
         if obj_params.contains_key(&sym) || sym == self_symbol() {
-            return Err(format!("store to parameter/self '{}'", sym.as_str()));
+            return Err(refuse(
+                RefusalKind::LocalTyping,
+                format!("store to parameter/self '{}'", sym.as_str()),
+            ));
         }
         self.nil_deferred.remove(&sym);
         match v {
             AV::C(cv, k) => match vars.get(&sym) {
                 Some(&VarSlot::Scalar(var, vk)) => {
                     if vk != k {
-                        return Err(format!("local '{}' changes kind", sym.as_str()));
+                        return Err(refuse(
+                            RefusalKind::LocalTyping,
+                            format!("local '{}' changes kind", sym.as_str()),
+                        ));
                     }
                     b.def_var(var, cv);
                     Ok(())
                 }
-                Some(VarSlot::Obj(..)) => Err(format!("local '{}' changes kind", sym.as_str())),
+                Some(VarSlot::Obj(..)) => Err(refuse(
+                    RefusalKind::LocalTyping,
+                    format!("local '{}' changes kind", sym.as_str()),
+                )),
                 None => {
                     let var = b.declare_var(kind_type(k));
                     b.def_var(var, cv);
@@ -2419,7 +2484,10 @@ impl<'a> Translator<'a> {
                         slot
                     }
                     Some(VarSlot::Scalar(..)) => {
-                        return Err(format!("local '{}' changes kind", sym.as_str()));
+                        return Err(refuse(
+                            RefusalKind::LocalTyping,
+                            format!("local '{}' changes kind", sym.as_str()),
+                        ));
                     }
                     None => {
                         let slot = self.alloc_scratch()?;
@@ -2441,7 +2509,7 @@ impl<'a> Translator<'a> {
     /// The selector + block-arg count of the cold path's re-materialized send
     /// (the real `if:`/`if:else:` an inlined conditional falls back to) — what
     /// the proven-nil MNU stub must name to match the interpreter exactly.
-    fn cold_send(insts: &[Instruction], target: usize) -> Result<(Symbol, i64), String> {
+    fn cold_send(insts: &[Instruction], target: usize) -> Result<(Symbol, i64), Refusal> {
         for inst in insts.iter().skip(target).take(8) {
             if let Some((sel, n, _)) = inst.send_parts() {
                 return Ok((*sel, n as i64));
@@ -2452,8 +2520,9 @@ impl<'a> Translator<'a> {
         // ("if:", 1) — a wrong error message waiting for the first cold
         // shape this scan doesn't recognize. Refuse instead (the member runs
         // interpreted, which raises the real MNU).
-        Err(format!(
-            "cold-path send at ip {target} not identifiable for the nil-MNU stub"
+        Err(refuse(
+            RefusalKind::SlotResidency,
+            format!("cold-path send at ip {target} not identifiable for the nil-MNU stub"),
         ))
     }
 
@@ -2463,9 +2532,12 @@ impl<'a> Translator<'a> {
         b: &mut FunctionBuilder,
         fx: &FnCtx,
         vals: &[AV],
-    ) -> Result<(), String> {
+    ) -> Result<(), Refusal> {
         if vals.len() > MAX_OUTCALL_ARGS {
-            return Err("too many arguments for the compiled ABI".into());
+            return Err(refuse(
+                RefusalKind::ArityCap,
+                "too many arguments for the compiled ABI".to_string(),
+            ));
         }
         for (i, &v) in vals.iter().enumerate() {
             let (k, bits) = self.encode(b, fx, v);
@@ -2485,7 +2557,7 @@ impl<'a> Translator<'a> {
         selector: &str,
         args: &[AV],
         ip: usize,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         self.emit_outcall_inner(b, fx, recv, selector, args, ip, true)
     }
 
@@ -2500,7 +2572,7 @@ impl<'a> Translator<'a> {
         selector: &str,
         args: &[AV],
         ip: usize,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         self.emit_outcall_inner(b, fx, recv, selector, args, ip, false)
     }
 
@@ -2514,7 +2586,7 @@ impl<'a> Translator<'a> {
         args: &[AV],
         ip: usize,
         with_site: bool,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         let (rk, rb) = self.encode(b, fx, recv);
         self.fill_lanes(b, fx, args)?;
         let sym: &'static Symbol = Box::leak(Box::new(Symbol::intern(selector)));
@@ -2572,7 +2644,7 @@ impl<'a> Translator<'a> {
         sel: Symbol,
         args: &[AV],
         ip: usize,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         // Sealed scalar operators devirtualize when both operands PROVE
         // scalar (S2): Integer/Double are startup-sealed, so `Int +: Int` is
         // frozen semantics — the same guarantee the compiler's typed devirt
@@ -2633,7 +2705,10 @@ impl<'a> Translator<'a> {
                 let (tag, val) = (res[0], res[1]);
                 self.tag_check(b, fx, tag);
                 let AotRet::Scalar(rk) = effective else {
-                    return Err(format!("pure sibling with non-scalar ret at ip {ip}"));
+                    return Err(refuse(
+                        RefusalKind::LocalTyping,
+                        format!("pure sibling with non-scalar ret at ip {ip}"),
+                    ));
                 };
                 return Ok(AV::C(val, rk));
             }
@@ -2684,7 +2759,7 @@ impl<'a> Translator<'a> {
     /// Return: narrow to the declared shape. A `Dyn` flowing into a scalar
     /// return is runtime-checked (the one deliberate divergence: a lying
     /// annotation raises a clear TypeError instead of corrupting callers).
-    fn emit_return(&mut self, b: &mut FunctionBuilder, fx: &FnCtx, v: AV) -> Result<(), String> {
+    fn emit_return(&mut self, b: &mut FunctionBuilder, fx: &FnCtx, v: AV) -> Result<(), Refusal> {
         let tag0 = b.ins().iconst(types::I8, 0);
         match (fx.ret, v) {
             (AotRet::Scalar(want), AV::C(cv, k)) if k == want => {
@@ -2695,14 +2770,17 @@ impl<'a> Translator<'a> {
             // error the interpreter wouldn't. Demote to Obj and retry.
             (AotRet::Scalar(_), _) if self.cand.spec_ret => {
                 self.pending_abort = Some(TranslateAbort::RetDemote);
-                return Err("speculated scalar return not provable on this path".to_string());
+                return Err("speculated scalar return not provable on this path".into());
             }
             (AotRet::Scalar(want), AV::Dyn(idx)) => {
                 let val = self.narrow_to_scalar(b, fx, idx, want);
                 b.ins().jump(fx.exit, &[tag0.into(), val.into()]);
             }
             (AotRet::Scalar(_), _) => {
-                return Err("return value does not match the declared scalar type".into());
+                return Err(refuse(
+                    RefusalKind::LocalTyping,
+                    "return value does not match the declared scalar type".to_string(),
+                ));
             }
             (AotRet::Obj, v) => {
                 let idx = match v {
@@ -2728,12 +2806,12 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
-    fn pop_kind(stack: &mut Vec<AV>, want: AotKind) -> Result<CVal, String> {
+    fn pop_kind(stack: &mut Vec<AV>, want: AotKind) -> Result<CVal, Refusal> {
         match stack.pop() {
             Some(AV::C(v, k)) if k == want => Ok(v),
-            Some(AV::C(_, k)) => Err(format!("operand kind {k:?}, wanted {want:?}")),
-            Some(_) => Err("non-scalar operand where a scalar was proven".to_string()),
-            None => Err("stack underflow".to_string()),
+            Some(AV::C(_, k)) => Err(format!("operand kind {k:?}, wanted {want:?}").into()),
+            Some(_) => Err("non-scalar operand where a scalar was proven".into()),
+            None => Err("stack underflow".into()),
         }
     }
 
@@ -2741,13 +2819,14 @@ impl<'a> Translator<'a> {
     /// boundary as jump arguments (a statement-position inlined `if:` joins an
     /// arm value with the nil of the not-taken path). Scalars and slot values
     /// pass through untouched.
-    fn assert_no_pending_writebacks(&self, stack: &[AV], where_: &str) -> Result<(), String> {
+    fn assert_no_pending_writebacks(&self, stack: &[AV], where_: &str) -> Result<(), Refusal> {
         for v in stack {
             if let AV::Dyn(idx) = v
                 && self.pending_writebacks.contains_key(idx)
             {
-                return Err(format!(
-                    "write-captured closure crosses a block boundary ({where_})"
+                return Err(refuse(
+                    RefusalKind::WriteCapture,
+                    format!("write-captured closure crosses a block boundary ({where_})"),
                 ));
             }
         }
@@ -2759,7 +2838,7 @@ impl<'a> Translator<'a> {
         b: &mut FunctionBuilder,
         fx: &FnCtx,
         stack: &[AV],
-    ) -> Result<Vec<AV>, String> {
+    ) -> Result<Vec<AV>, Refusal> {
         self.assert_no_pending_writebacks(stack, "norm_stack")?;
         let mut out = Vec::with_capacity(stack.len());
         for v in stack {
@@ -2781,24 +2860,24 @@ impl<'a> Translator<'a> {
         Ok(out)
     }
 
-    fn stack_args(stack: &[AV]) -> Result<Vec<BlockArg>, String> {
+    fn stack_args(stack: &[AV]) -> Result<Vec<BlockArg>, Refusal> {
         stack
             .iter()
             .map(|v| match v {
                 AV::C(cv, _) => Ok((*cv).into()),
                 AV::Dyn(idx) => Ok((*idx).into()),
-                _ => Err("self/nil live at block boundary".to_string()),
+                _ => Err("self/nil live at block boundary".into()),
             })
             .collect()
     }
 
-    fn stack_bkinds(stack: &[AV]) -> Result<Vec<BKind>, String> {
+    fn stack_bkinds(stack: &[AV]) -> Result<Vec<BKind>, Refusal> {
         stack
             .iter()
             .map(|v| match v {
                 AV::C(_, k) => Ok(BKind::S(*k)),
                 AV::Dyn(_) => Ok(BKind::Dyn),
-                _ => Err("self/nil live at block boundary".to_string()),
+                _ => Err("self/nil live at block boundary".into()),
             })
             .collect()
     }
@@ -2811,7 +2890,7 @@ impl<'a> Translator<'a> {
         work: &mut Vec<usize>,
         ip: usize,
         stack: &mut Vec<AV>,
-    ) -> Result<(CBlock, Vec<BKind>), String> {
+    ) -> Result<(CBlock, Vec<BKind>), Refusal> {
         // A merge FORCED to all-Dyn by an earlier retry (mixed scalar/Dyn
         // predecessors, S3): box scalars before shape computation, so every
         // predecessor unifies. The interpreted value world is uniform —
@@ -2830,7 +2909,8 @@ impl<'a> Translator<'a> {
                 if expect.len() != kinds.len() {
                     return Err(format!(
                         "stack shape mismatch at merge ip {ip}: {expect:?} vs {kinds:?}"
-                    ));
+                    )
+                    .into());
                 }
                 for i in 0..kinds.len() {
                     match (&expect[i], &kinds[i]) {
@@ -2844,7 +2924,7 @@ impl<'a> Translator<'a> {
                         // all-Dyn — signal the retry.
                         _ => {
                             self.pending_abort = Some(TranslateAbort::MergeDemote(ip));
-                            return Err(format!("merge at ip {ip} re-planned as Dyn"));
+                            return Err(format!("merge at ip {ip} re-planned as Dyn").into());
                         }
                     }
                 }
@@ -2861,7 +2941,7 @@ impl<'a> Translator<'a> {
     }
 
     /// Box any AV into a fresh scratch slot (merge-shape unification).
-    fn box_av(&mut self, b: &mut FunctionBuilder, fx: &FnCtx, v: AV) -> Result<AV, String> {
+    fn box_av(&mut self, b: &mut FunctionBuilder, fx: &FnCtx, v: AV) -> Result<AV, Refusal> {
         let slot = self.alloc_scratch()?;
         let dst = self.abs_slot(b, fx, slot);
         let (k, bits) = self.encode(b, fx, v);
@@ -2897,7 +2977,7 @@ impl<'a> Translator<'a> {
         b: &mut FunctionBuilder,
         fx: &FnCtx,
         stack: &[AV],
-    ) -> Result<Vec<AV>, String> {
+    ) -> Result<Vec<AV>, Refusal> {
         let keep = Self::stack_args(stack)?;
         let kinds = Self::stack_bkinds(stack)?;
         let f0 = b
@@ -2947,7 +3027,7 @@ impl<'a> Translator<'a> {
         kind: IntBinKind,
         a: CVal,
         rb: CVal,
-    ) -> Result<AV, String> {
+    ) -> Result<AV, Refusal> {
         use IntBinKind::*;
         let out = match kind {
             Add => AV::C(b.ins().iadd(a, rb), AotKind::Int),

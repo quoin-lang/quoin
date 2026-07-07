@@ -384,12 +384,15 @@ minimizes how often hot paths cross it.
    (IC hits/misses, global-cache hits, megamorphic sites), compile-time
    decisions (methods inlined, devirt ops emitted), and AOT (candidates
    found/compiled/refused + why, fuel yields, depth-guard trips,
-   registry size). Surfaced to Quoin as a native class (e.g. `VM.stats`
-   returning a Map, in the `introspect` spirit of docs/INTROSPECTION.md)
-   so programs, tests, and benchmarks can export or track them — a
-   regression test could assert "this method compiled" or "zero
-   megamorphic sites", and `bench/run.py` could collect them per run.
-   AOT should land its counters from v0.0 rather than retrofitting;
+   registry size). The AOT slice of this SHIPPED as `VM.stats` (a Map of
+   sections; `'aot'` = compiled/refused/skipped + per-kind counts) and
+   `VM.aotRefusals` (the per-member drill-down) — src/runtime/vm_stats.rs,
+   backed by `RefusalKind`-tagged refusals and recorded candidacy skips in
+   src/codegen/mod.rs. GC/dispatch/compile-time sections remain future
+   work and slot into the same section Map. A regression test can assert
+   "this method compiled" (tests/vm_stats.rs), and `bench/run.py` could
+   collect the counters per run.
+   AOT landed its counters early rather than retrofitting;
    the full surface is its own small design pass.
 8. **Block templates.** Blocks passed to combinators are never candidates:
    `value:` enforces nothing, so their typed params are beliefs, not the

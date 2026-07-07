@@ -43,4 +43,5 @@ pub mod time_zone;
 pub mod timer;
 pub mod timestamp;
 pub mod toml_fmt;
+pub mod vm_stats;
 pub mod yaml;
