@@ -1,8 +1,12 @@
 # Extension Architecture — out-of-process, polyglot, unix-socket extensions
 
-Status: **Design capture — all §11 open questions resolved; not started.** This records the
-reasoning and the decisions from a design discussion; no code exists yet and none should be written
-without a fresh explain-then-pause. Next build per §11: **Tier 0 (`quoin-sdk`)**. Companion to `docs/ASYNC_ARCH.md` (the I/O waist, the scheduler, the
+Status: **SHIPPED through extension-backed classes** — Tier 0 (gc-free `Host` trait),
+Tier 1 (UDS transport, structured values, host reach, crash/timeout isolation), and
+extension-backed classes with Rust + Python SDKs at parity (PRs #17-#22 and follow-ons; see
+`QUOIN_TODO.md` `## Networking & Async I/O` for the live remaining-refinements list).
+Remaining from this design: **Tier 0.5** (publish the `quoin-ext`/`quoin-ext-proto` SDK
+crates), and the explicitly deferred SCM_RIGHTS fd-passing + WASM tiers. Retained as the
+architecture record. Companion to `docs/ASYNC_ARCH.md` (the I/O waist, the scheduler, the
 reap queue, and cancellation — all of which this design reuses).
 
 ---

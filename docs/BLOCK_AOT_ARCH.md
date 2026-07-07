@@ -1,6 +1,7 @@
 # Block-template AOT: compiling the combinator tier
 
-*Status: B0 + B1 SHIPPED. B0 — batched nested block-execution loops:
+*Status: B0-B3 ALL SHIPPED (PR #54; the narrative below records each
+slice in landing order). B0 — batched nested block-execution loops:
 combinators −27.9%, maps −26.0%, strings −18.9%; the driver-stepping
 profile category eliminated outright. B1 — guarded fused `each:` loops:
 combinators −28.5% more, maps −30.8%, strings −22.4%; cumulative

@@ -1,0 +1,16 @@
+"* OPEN (2026-07-07): an `each:` body that re-iterates its own receiver re-enters
+"* the native `valueWithSelfOrArg:` seam per element — each level stacks real Rust
+"* frames (native handler + execute_block + run_nested), the coroutine stack (16 MiB)
+"* exhausts, and the process dies with an UNCATCHABLE SIGBUS (exit 138).
+"* Contrast: a plain `b = { b.value }; b.value` self-call is SAFE (flat interpreted
+"* frames — an ordinary infinite loop), and a sort comparator that re-sorts is
+"* already caught by the >12 native-reentry cap. The fix (QUOIN_TODO.md): a stack
+"* WATERMARK check in execute_block (SP captured at coroutine entry; past ~14 MiB
+"* raise a catchable error), not a fixed depth cap — deep-but-finite generator
+"* pipelines must keep working.
+
+var l = #( 1 2 3 );
+var body = nil;
+body = { |x| l.each:body };
+l.each:body;
+'unreachable'.print

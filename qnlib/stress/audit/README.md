@@ -52,3 +52,11 @@ cargo regression tests.
 | file | bug | status |
 |---|---|---|
 | `native_reentry_recursion.qn` | unbounded native re-entrant recursion (`set_add → == : → set_add …`) overflows the real C stack — uncatchable SIGBUS (pure-Quoin recursion is fine) | **FIXED** (per-task re-entry depth cap on method dispatch) |
+| `each_reenter.qn` | an `each:` body re-iterating its receiver compounds native frames through the `valueWithSelfOrArg:`/`execute_block` seam — uncatchable SIGBUS | **OPEN** (2026-07-07 dig; fix = execute_block stack-watermark check, QUOIN_TODO.md) |
+| `catch_reenter.qn` | a self-nesting `catch:` protected block compounds native frames the same way — uncatchable SIGBUS | **OPEN** (same fix) |
+| `serialize_cycle.qn` | a CYCLIC (or ~500k-deep) value SIGBUSes every serializer: `JSON.generate:`, `MessagePack.pack:`, TOML/YAML, extension `call:…data:` — widens the encode-side audit finding to a no-extension, two-line user crash | **OPEN** (fix = depth cap in `value_to_data` + `value_to_json` + proto `encode_dv`, QUOIN_TODO.md) |
+
+Verified-safe contrasts from the same dig (no repro files needed): a plain
+`b = { b.value }; b.value` self-call runs as FLAT interpreted frames (an ordinary
+infinite loop, not a crash), and a sort comparator that re-sorts its own receiver
+is already caught by the >12 native-reentry cap.
