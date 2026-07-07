@@ -72,12 +72,13 @@ n-D), `s` (shape + dtype + preview).
 
 ## Performance model
 
-Measured on this machine (release build, `bench.qn`): a minimal extension call is **~45µs**
-(pure-Python FlatBuffers SDK; the raw UDS round trip is 2.3µs), and each DAG node adds roughly
-**50–75µs** of serialization. Batching therefore wins ~1.4–1.6× on a 3-op chain today and more on
-deeper chains; transport tuning (binary node encoding, C-accelerated flatbuffers, or the native
-`[Num]` backend) multiplies the win — the architecture (one round trip per force, no
-intermediate handles) is the durable part.
+Measured on this machine (release build, `bench.qn`, after the packed-DataValue wire work —
+`profiling/wire-encoding/notes.md`): a minimal extension call is **~40µs** (the raw UDS round
+trip is 2.3µs; the remainder is the FlatBuffers envelope path and host scheduling), and each DAG
+node adds only **~3.5µs** — expression graphs travel as one MessagePack blob, decoded by the C
+`msgpack` codec. A 3-op chain forces in ~79µs vs ~151µs op-by-op (1.9×); deeper chains amortize
+further. The architecture (one round trip per force, no intermediate handles) is the durable
+part; the remaining per-call floor is the next tuning target.
 
 **Anti-patterns:**
 - Per-element access in a loop (`(1..n).each:{ |i| a.at:i }`) pays the full call cost per
