@@ -14,7 +14,7 @@ use crate::runtime::{
     array, async_rt, big_decimal, big_integer, block, boolean, bytes, channel, class, codecs,
     csv_fmt, date_time, double, duration, extension, fiber as fiber_class, http, ids, instant,
     integer, io, json, list, map, math, method, msgpack, nil, object, pretty, regex, runtime, set,
-    sockets, streams, string, symbol, task, time_zone, timer, timestamp, toml_fmt, yaml,
+    sockets, streams, string, symbol, task, time_zone, timer, timestamp, toml_fmt, vm_stats, yaml,
 };
 use crate::value::{EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
@@ -93,6 +93,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, io::build_io_folder_class());
     vm.register_native_class(mc, io::build_io_file_class());
     vm.register_native_class(mc, io::build_io_handle_class());
+    vm.register_native_class(mc, vm_stats::build_vm_stats_class());
     vm.register_native_class(mc, list::build_list_class());
     vm.register_native_class(mc, set::build_set_class());
     vm.register_native_class(mc, array::build_array_class());

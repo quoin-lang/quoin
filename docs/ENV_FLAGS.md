@@ -66,9 +66,10 @@ to reach for when asking "did this method compile, and if not why not".
 **Set and not `0`.** Read in `src/runner_driver.rs` (`maybe_print_spec_stats`).
 After the main task finishes, prints the speculative-AOT summary: pending/
 observing counts, promotions, the top observed kind-profiles, and the
-process-wide `N compiled, M refused` totals (the seed of the future VM.stats
-surface — the only record that a coverage regression happened without
-re-running under `QN_AOT_VERBOSE`).
+process-wide `N compiled, M refused` totals. The same aggregates — plus the
+per-kind refusal/skip breakdown and the per-member drill-down — are available
+to programs as `VM.stats` / `VM.aotRefusals` (src/runtime/vm_stats.rs), so a
+test can assert "this method compiled" without scraping stderr.
 
 ### `QN_AOT_DUMP`
 **A selector name, or `1`.** Read in `src/codegen/translate.rs`. With a

@@ -866,7 +866,10 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes_env(
         "qn_numpy_numexpr_on_test.qn",
         &script,
-        &[("QN_NUMPY_NUMEXPR_MIN", "1"), ("QN_NUMPY_NUMEXPR_MIN_OPS", "1")],
+        &[
+            ("QN_NUMPY_NUMEXPR_MIN", "1"),
+            ("QN_NUMPY_NUMEXPR_MIN_OPS", "1"),
+        ],
     );
     assert_script_passes_env(
         "qn_numpy_numexpr_off_test.qn",

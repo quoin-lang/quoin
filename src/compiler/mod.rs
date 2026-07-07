@@ -735,7 +735,20 @@ impl Compiler {
                 .rev()
                 .find(|c| !c.name.is_empty())
                 .is_some_and(|c| c.sealed);
-        if imm.multi.contains(selector) || block_node.decl_block.is_some() {
+        if imm.multi.contains(selector) {
+            crate::codegen::record_refusal(
+                selector,
+                crate::codegen::RefusalKind::PrecheckMultiVariant,
+                "multi-variant (typed multimethod) selector",
+            );
+            return;
+        }
+        if block_node.decl_block.is_some() {
+            crate::codegen::record_refusal(
+                selector,
+                crate::codegen::RefusalKind::PrecheckDeclBlock,
+                "method has a guard/decl block",
+            );
             return;
         }
         // B2 (docs/BLOCK_AOT_ARCH.md §3): an OPEN owner's method may compile —
@@ -748,6 +761,11 @@ impl Compiler {
         let mut spec_params = Vec::new();
         for arg in &block_node.arguments {
             if arg.identifier.identifier_type == IdentifierType::Instance {
+                crate::codegen::record_refusal(
+                    selector,
+                    crate::codegen::RefusalKind::PrecheckSignature,
+                    "instance-variable parameter",
+                );
                 return; // not a plain method parameter list
             }
             let Some(hint) = &arg.type_hint else {
@@ -765,8 +783,13 @@ impl Compiler {
             // `StaticBlock.param_elem_tags`, where the translator picks it up as a
             // `CollectionOf` proof (B1). A type-var param erases to `Object` and
             // stays a non-candidate, as before.
-            let Some(k) = crate::codegen::AotParam::from_annotation(&self.dispatch_type_name(hint))
-            else {
+            let name = self.dispatch_type_name(hint);
+            let Some(k) = crate::codegen::AotParam::from_annotation(&name) else {
+                crate::codegen::record_refusal(
+                    selector,
+                    crate::codegen::RefusalKind::PrecheckSignature,
+                    &format!("param annotation '{name}' has no scalar/Obj mapping"),
+                );
                 return;
             };
             params.push(k);
@@ -778,9 +801,13 @@ impl Compiler {
             // (the variables are checker-only); a type-var return erases to
             // `Object` and stays a non-candidate.
             Some(rt) => {
-                let Some(ret) =
-                    crate::codegen::AotRet::from_annotation(&self.dispatch_type_name(rt))
-                else {
+                let name = self.dispatch_type_name(rt);
+                let Some(ret) = crate::codegen::AotRet::from_annotation(&name) else {
+                    crate::codegen::record_refusal(
+                        selector,
+                        crate::codegen::RefusalKind::PrecheckSignature,
+                        &format!("return annotation '{name}' has no scalar/Obj mapping"),
+                    );
                     return;
                 };
                 ret
@@ -822,25 +849,52 @@ impl Compiler {
         if !self.collect_aot || !self.mint_template_ids {
             return;
         }
-        if rc.template_id.is_none()
-            || rc.param_syms.len() > 1
-            || rc.decl_block.is_some()
-            || rc.name.is_some()
-            // A config literal's stores bind into its own frame (E); the
-            // template translator's free-variable write path (env_set) would
-            // chain-write instead. Configs are never invoked through the
-            // vWSOA seam anyway — this is the defensive mirror.
-            || rc.is_init_literal
-        {
+        let Some(tid) = rc.template_id else {
+            return;
+        };
+        let skip = |why: &str| {
+            crate::codegen::record_refusal(
+                &format!("block@{tid}"),
+                crate::codegen::RefusalKind::PrecheckBlockShape,
+                why,
+            );
+        };
+        if rc.param_syms.len() > 1 {
+            skip("block takes more than one parameter");
             return;
         }
-        let hopeless = rc.bytecode.0.iter().any(|i| {
-            matches!(
-                i,
-                Instruction::Push(Constant::Block(_)) | Instruction::MethodReturn
-            )
-        });
-        if hopeless {
+        if rc.decl_block.is_some() {
+            skip("block has a guard/decl block");
+            return;
+        }
+        if rc.name.is_some() {
+            skip("named block");
+            return;
+        }
+        // A config literal's stores bind into its own frame (E); the
+        // template translator's free-variable write path (env_set) would
+        // chain-write instead. Configs are never invoked through the
+        // vWSOA seam anyway — this is the defensive mirror.
+        if rc.is_init_literal {
+            skip("init-literal config block");
+            return;
+        }
+        if rc
+            .bytecode
+            .0
+            .iter()
+            .any(|i| matches!(i, Instruction::Push(Constant::Block(_))))
+        {
+            skip("nested block literal");
+            return;
+        }
+        if rc
+            .bytecode
+            .0
+            .iter()
+            .any(|i| matches!(i, Instruction::MethodReturn))
+        {
+            skip("non-local return (^^) inside the block");
             return;
         }
         self.aot_candidates.push(crate::codegen::AotCandidate {
