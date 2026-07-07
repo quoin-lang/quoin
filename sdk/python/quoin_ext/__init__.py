@@ -173,6 +173,174 @@ def _byte_vector(tbl, slot):
     return bytes(t.Bytes[start : start + t.VectorLen(o)])
 
 
+# ---------------------------------------------------------------------------------------------
+# Hand-rolled FlatBuffers hot paths
+#
+# Going through the generated pure-python bindings costs ~50 wrapped accessor calls (~0.5-1us
+# each) per MINIMAL frame — roughly a third of the whole per-call budget in each direction
+# (profiling/wire-encoding/notes.md). Every inbound frame after the manifest is a `Call`, and
+# nearly every reply is one of three fixed shapes, so those paths read/write the FlatBuffers
+# bytes directly; everything else stays on the generated code. The vtable slots mirror
+# `ext_generated.py` (Call.Op -> 4 ... Call.DataPacked -> 24); the end-to-end extension tests
+# cover every shape against the host's planus reader.
+# ---------------------------------------------------------------------------------------------
+
+_U16 = struct.Struct("<H")
+_I32 = struct.Struct("<i")
+_U32 = struct.Struct("<I")
+_U64 = struct.Struct("<Q")
+
+
+def _fb_field(buf, tpos, slot):
+    """Absolute position of the field at vtable `slot` of the table at `tpos` (0 = absent)."""
+    vt = tpos - _I32.unpack_from(buf, tpos)[0]
+    if slot >= _U16.unpack_from(buf, vt)[0]:
+        return 0
+    off = _U16.unpack_from(buf, vt + slot)[0]
+    return tpos + off if off else 0
+
+
+def _fb_indirect(buf, pos):
+    """Follow the uoffset at `pos` (a string/vector/table field) to its target position."""
+    return pos + _U32.unpack_from(buf, pos)[0]
+
+
+def _fb_str(buf, pos, default=""):
+    if pos == 0:
+        return default
+    p = _fb_indirect(buf, pos)
+    n = _U32.unpack_from(buf, p)[0]
+    return buf[p + 4 : p + 4 + n].decode("utf-8")
+
+
+def _fb_bytes(buf, pos):
+    if pos == 0:
+        return b""
+    p = _fb_indirect(buf, pos)
+    n = _U32.unpack_from(buf, p)[0]
+    return bytes(buf[p + 4 : p + 4 + n])
+
+
+def _fb_u64_vec(buf, pos):
+    if pos == 0:
+        return []
+    p = _fb_indirect(buf, pos)
+    n = _U32.unpack_from(buf, p)[0]
+    return list(struct.unpack_from(f"<{n}Q", buf, p + 4))
+
+
+def _fb_tables(buf, pos):
+    """The table positions of a `[Table]` vector field at `pos`."""
+    if pos == 0:
+        return []
+    p = _fb_indirect(buf, pos)
+    n = _U32.unpack_from(buf, p)[0]
+    return [_fb_indirect(buf, p + 4 + 4 * j) for j in range(n)]
+
+
+def _fb_msg_type(frame):
+    """The `Envelope.msg` union type of a frame (g.Message.*), without generated-code cost."""
+    epos = _U32.unpack_from(frame, 0)[0]
+    tf = _fb_field(frame, epos, 4)
+    return frame[tf] if tf else g.Message.NONE
+
+
+def _fb_root_call(frame):
+    """The `Call` table position of `frame`, or `None` when the frame isn't a Call envelope."""
+    epos = _U32.unpack_from(frame, 0)[0]
+    tf = _fb_field(frame, epos, 4)
+    if tf == 0 or frame[tf] != g.Message.Call:
+        return None
+    return _fb_indirect(frame, _fb_field(frame, epos, 6))
+
+
+def _fb_boxed_dv(buf, pos):
+    """Decode the boxed `DataValueBox` at field `pos` via the generated walker (the negotiated
+    fallback path — packed peers never hit this)."""
+    box = g.DataValueBox()
+    box.Init(buf, _fb_indirect(buf, pos))
+    return _decode_dv(box)
+
+
+# Reply frames, laid out by hand (see the layout notes on each). All offsets are u32-aligned;
+# vtables sit after their tables (negative soffsets), payload bytes last.
+
+# [root=4][Envelope 4..16: soffset -12, type u8 @8.. wait see below][EV 16..24][inner 24..][...]
+# Envelope table: [soffset i32][msg_type u8 + 3 pad][msg uoffset] -> 12 bytes, vtable (8,12,4,8).
+_FAST_ENV = _U32.pack(4) + _I32.pack(-12)  # root uoffset; Envelope soffset (vtable at 16)
+_FAST_EV = struct.pack("<4H", 8, 12, 4, 8)
+
+
+def _fast_str_reply(msg_type, s):
+    """`CallReturn { result }` / `CallReturnError { message }`: one string field at slot 4.
+    Layout: [root:0..4][E:4..16][EV:16..24][C:24..32][CV:32..38][pad:2][str:40..]."""
+    sb = s.encode("utf-8")
+    return (
+        _FAST_ENV
+        + bytes((msg_type,))
+        + b"\x00\x00\x00"
+        + _U32.pack(12)  # msg uoffset @12 -> C at 24
+        + _FAST_EV
+        + _I32.pack(-8)  # C soffset (vtable at 32)
+        + _U32.pack(12)  # result uoffset @28 -> str at 40
+        + struct.pack("<3H", 6, 8, 4)
+        + b"\x00\x00"
+        + _U32.pack(len(sb))
+        + sb
+        + b"\x00"
+    )
+
+
+def _fast_packed_reply(payload):
+    """`CallReturnData { packed }`: one [ubyte] field at slot 6 (slot 4 = the boxed form, absent).
+    Layout: [root][E][EV][C:24..32][CV:32..40][vec:40..]."""
+    return (
+        _FAST_ENV
+        + bytes((g.Message.CallReturnData,))
+        + b"\x00\x00\x00"
+        + _U32.pack(12)
+        + _FAST_EV
+        + _I32.pack(-8)  # C soffset (vtable at 32)
+        + _U32.pack(12)  # packed uoffset @28 -> vec at 40
+        + struct.pack("<4H", 8, 8, 0, 4)  # vt_len, tbl_len, value(4)=absent, packed(6)=@4
+        + _U32.pack(len(payload))
+        + payload
+    )
+
+
+def _fast_resource_reply(resource_id, class_name):
+    """`CallReturnResource { resource u64 @4, class_name str @6 }`. The u64 sits at C+8 (an
+    8-aligned buffer position); an empty class_name is omitted, like the generated encoder.
+    Layout: [root][E][EV][C:24..40][CV:40..48][str:48..]."""
+    if class_name:
+        sb = class_name.encode("utf-8")
+        return (
+            _FAST_ENV
+            + bytes((g.Message.CallReturnResource,))
+            + b"\x00\x00\x00"
+            + _U32.pack(12)
+            + _FAST_EV
+            + _I32.pack(-16)  # C soffset (vtable at 40)
+            + _U32.pack(20)  # class_name uoffset @28 -> str at 48
+            + _U64.pack(resource_id)  # @32, 8-aligned
+            + struct.pack("<4H", 8, 16, 8, 4)
+            + _U32.pack(len(sb))
+            + sb
+            + b"\x00"
+        )
+    return (
+        _FAST_ENV
+        + bytes((g.Message.CallReturnResource,))
+        + b"\x00\x00\x00"
+        + _U32.pack(12)
+        + _FAST_EV
+        + _I32.pack(-16)  # C soffset (vtable at 40)
+        + b"\x00\x00\x00\x00"  # pad so the u64 lands 8-aligned at C+8
+        + _U64.pack(resource_id)
+        + struct.pack("<4H", 8, 16, 8, 0)
+    )
+
+
 def _decode_dv(box):
     """Decode a `DataValueBox` reader into a native Python value."""
     K = g.DataValueKind
@@ -443,33 +611,19 @@ def _encode_invoke_block(block, batches):
 
 
 def _encode_call_return(result):
-    b = flatbuffers.Builder(64)
-    r = b.CreateString(result)
-    g.CallReturnStart(b)
-    g.CallReturnAddResult(b, r)
-    return _envelope(b, g.Message.CallReturn, g.CallReturnEnd(b))
+    return _fast_str_reply(g.Message.CallReturn, result)
 
 
 def _encode_call_return_error(message):
     """A call failed recoverably: the host raises a catchable Quoin error and the extension keeps
     running. A terminal frame, like the other ``CallReturn*`` replies."""
-    b = flatbuffers.Builder(64)
-    m = b.CreateString(message)
-    g.CallReturnErrorStart(b)
-    g.CallReturnErrorAddMessage(b, m)
-    return _envelope(b, g.Message.CallReturnError, g.CallReturnErrorEnd(b))
+    return _fast_str_reply(g.Message.CallReturnError, message)
 
 
 def _encode_call_return_resource(resource_id, class_name=""):
-    b = flatbuffers.Builder(64)
     # `class_name` (Phase 3) names the registered class the resource is an instance of, so a method
     # can return an instance of any of the extension's classes (cross-class returns); "" = ExtResource.
-    name_off = b.CreateString(class_name) if class_name else None
-    g.CallReturnResourceStart(b)
-    g.CallReturnResourceAddResource(b, resource_id)
-    if name_off is not None:
-        g.CallReturnResourceAddClassName(b, name_off)
-    return _envelope(b, g.Message.CallReturnResource, g.CallReturnResourceEnd(b))
+    return _fast_resource_reply(resource_id, class_name)
 
 
 def _encode_call_return_array(array):
@@ -481,12 +635,9 @@ def _encode_call_return_array(array):
 
 
 def _encode_call_return_data(obj, packed=False):
-    b = flatbuffers.Builder(64)
     if packed:
-        v = b.CreateByteVector(_pack_dv(obj))
-        g.CallReturnDataStart(b)
-        g.CallReturnDataAddPacked(b, v)
-        return _envelope(b, g.Message.CallReturnData, g.CallReturnDataEnd(b))
+        return _fast_packed_reply(_pack_dv(obj))
+    b = flatbuffers.Builder(64)
     box = _encode_dv(b, obj)
     g.CallReturnDataStart(b)
     g.CallReturnDataAddValue(b, box)
@@ -561,23 +712,30 @@ def _msg(buf, expected, name):
 
 
 def _decode_call(buf):
-    table = _msg(buf, g.Message.Call, "Call")
-    call = g.Call()
-    call.Init(table.Bytes, table.Pos)
-    handles = [call.Handles(j) for j in range(call.HandlesLength())]
-    resources = [call.Resources(j) for j in range(call.ResourcesLength())]
-    releases = [call.Releases(j) for j in range(call.ReleasesLength())]
+    c = _fb_root_call(buf)
+    if c is None:
+        raise ValueError(f"extension: expected Call, got msg type {_fb_msg_type(buf)}")
     arrays = []
-    for j in range(call.ArraysLength()):
-        a = call.Arrays(j)
-        arrays.append(ArrowArray(a.Dtype(), _byte_vector(a, 8)))
-    pb = _byte_vector(call, 24)  # Call.data_packed
+    for a in _fb_tables(buf, _fb_field(buf, c, 14)):
+        dt = _fb_field(buf, a, 4)
+        arrays.append(ArrowArray(buf[dt] if dt else 0, _fb_bytes(buf, _fb_field(buf, a, 8))))
+    pb = _fb_field(buf, c, 24)  # data_packed
+    df = _fb_field(buf, c, 16)  # boxed data (the fallback representation)
     if pb:
-        data = _unpack_dv(pb)
+        data = _unpack_dv(_fb_bytes(buf, pb))
+    elif df:
+        data = _fb_boxed_dv(buf, df)
     else:
-        box = call.Data()
-        data = _decode_dv(box) if box is not None else None
-    return (_text(call.Op()), _text(call.Arg()), handles, resources, releases, arrays, data)
+        data = None
+    return (
+        _fb_str(buf, _fb_field(buf, c, 4)),
+        _fb_str(buf, _fb_field(buf, c, 6)),
+        _fb_u64_vec(buf, _fb_field(buf, c, 8)),
+        _fb_u64_vec(buf, _fb_field(buf, c, 10)),
+        _fb_u64_vec(buf, _fb_field(buf, c, 12)),
+        arrays,
+        data,
+    )
 
 
 def _decode_class_call(buf):
@@ -765,7 +923,7 @@ def serve(path, handler):
                     break
                 # Phase 3: the host asks for a class manifest once, right after connect. A
                 # generic-handler extension provides none; everything else is a Call.
-                if g.Envelope.GetRootAs(frame, 0).MsgType() == g.Message.GetManifest:
+                if _fb_msg_type(frame) == g.Message.GetManifest:
                     packed = _read_get_manifest_packed(frame) and _packed_available()
                     write_frame(conn, _encode_manifest_return([]))
                     continue
@@ -872,7 +1030,7 @@ class Extension:
                     frame = read_frame(conn)
                     if frame is None:
                         break
-                    if g.Envelope.GetRootAs(frame, 0).MsgType() == g.Message.GetManifest:
+                    if _fb_msg_type(frame) == g.Message.GetManifest:
                         packed = _read_get_manifest_packed(frame) and _packed_available()
                         write_frame(conn, _encode_manifest_return(self._manifest()))
                         continue
