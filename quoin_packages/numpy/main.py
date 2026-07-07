@@ -31,17 +31,43 @@ import quoin_ext
 _RNG = np.random.default_rng()
 
 # The expression-DAG op tables (`evalGraph:`). Elementwise ops broadcast NumPy-style; reducers
-# collapse the whole array to a scalar. The Quoin-side layer (init.qn) only ever names ops from
-# these tables, so an unknown op is a glue bug, not a user error.
+# collapse an array to a scalar (no axis) or reduce along one axis (an `'axis'` key on the node),
+# staying in the graph as an array. `matmul` is binary but not elementwise; it shares the binary
+# table shape. The Quoin-side layer (init.qn) only ever names ops from these tables, so an
+# unknown op is a glue bug, not a user error.
 _BINOPS = {
     "add": np.add,
     "sub": np.subtract,
     "mul": np.multiply,
     "div": np.true_divide,
     "pow": np.power,
+    "mod": np.mod,
+    "matmul": np.matmul,
 }
-_UNOPS = {"neg": np.negative, "sqrt": np.sqrt, "exp": np.exp, "log": np.log, "abs": np.abs}
-_REDUCERS = {"sum": np.sum, "mean": np.mean, "min": np.min, "max": np.max}
+_UNOPS = {
+    "neg": np.negative,
+    "sqrt": np.sqrt,
+    "exp": np.exp,
+    "log": np.log,
+    "abs": np.abs,
+    "sin": np.sin,
+    "cos": np.cos,
+    "tan": np.tan,
+    "floor": np.floor,
+    "ceil": np.ceil,
+    "round": np.round,
+    "sign": np.sign,
+}
+_REDUCERS = {
+    "sum": np.sum,
+    "mean": np.mean,
+    "min": np.min,
+    "max": np.max,
+    "argmin": np.argmin,
+    "argmax": np.argmax,
+    "std": np.std,
+    "prod": np.prod,
+}
 
 
 def _coerce(a):
@@ -131,7 +157,11 @@ class NdArray:
             elif op in _UNOPS:
                 vals[i] = _UNOPS[op](vals[n["a"][0]])
             elif op in _REDUCERS:
-                vals[i] = _REDUCERS[op](vals[n["a"][0]])
+                axis = n.get("axis")
+                if axis is None:
+                    vals[i] = _REDUCERS[op](vals[n["a"][0]])
+                else:
+                    vals[i] = _REDUCERS[op](vals[n["a"][0]], axis=axis)
             else:
                 raise ValueError(f"evalGraph: unknown op '{op}'")
         root = vals[tree["root"]]

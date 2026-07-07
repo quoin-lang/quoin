@@ -20,15 +20,21 @@
 [NumPy]ExprSerial <- [NumPy]Serial.new;
 
 "* One lazy node: an op name (from main.py's tables) + operands, each a [NumPy]Expr, a
-"* [NumPy]Array, or a number. Forcing memoizes (@cache), so a forced node re-enters later
-"* graphs as a cheap base leaf instead of recomputing.
-[NumPy]Expr <- { |@op @operands @serial @cache|
+"* [NumPy]Array, or a number — plus an optional reduction axis. Forcing memoizes (@cache), so a
+"* forced node re-enters later graphs as a cheap base leaf instead of recomputing.
+[NumPy]Expr <- { |@op @operands @axis @cache @serial|
     .meta <-- {
-        op:with: -> { |o:String elems:List| [NumPy]Expr.new:{ var op = o; var operands = elems } }
+        op:with: -> { |o:String elems:List|
+            [NumPy]Expr.new:{ var op = o; var operands = elems; var axis = nil }
+        };
+        op:with:axis: -> { |o:String elems:List ax:Integer|
+            [NumPy]Expr.new:{ var op = o; var operands = elems; var axis = ax }
+        }
     };
-    init: -> { |op:String operands:List|
+    init: -> { |op:String operands:List axis|
         @op = op;
         @operands = operands;
+        @axis = axis;
         @serial = [NumPy]ExprSerial.next;
         @cache = nil
     };
@@ -36,6 +42,7 @@
     numpyKind -> { 'expr' };
     op -> { @op };
     operands -> { @operands };
+    axis -> { @axis };
     serial -> { @serial };
     cached -> { @cache };
 
@@ -45,17 +52,40 @@
     #'*:' -> { |rhs| [NumPy]Expr.op:'mul' with:#( self rhs ) };
     #'/:' -> { |rhs| [NumPy]Expr.op:'div' with:#( self rhs ) };
     pow: -> { |rhs| [NumPy]Expr.op:'pow' with:#( self rhs ) };
+    mod: -> { |rhs| [NumPy]Expr.op:'mod' with:#( self rhs ) };
+    matMul: -> { |rhs| [NumPy]Expr.op:'matmul' with:#( self rhs ) };
     neg -> { [NumPy]Expr.op:'neg' with:#( self ) };
     sqrt -> { [NumPy]Expr.op:'sqrt' with:#( self ) };
     exp -> { [NumPy]Expr.op:'exp' with:#( self ) };
     log -> { [NumPy]Expr.op:'log' with:#( self ) };
     abs -> { [NumPy]Expr.op:'abs' with:#( self ) };
+    sin -> { [NumPy]Expr.op:'sin' with:#( self ) };
+    cos -> { [NumPy]Expr.op:'cos' with:#( self ) };
+    tan -> { [NumPy]Expr.op:'tan' with:#( self ) };
+    floor -> { [NumPy]Expr.op:'floor' with:#( self ) };
+    ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
+    round -> { [NumPy]Expr.op:'round' with:#( self ) };
+    sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
 
-    "* reductions force: the whole chain collapses to a scalar in one round trip
+    "* whole-array reductions force: the chain collapses to a scalar in one round trip
     sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
     mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
     min -> { ([NumPy]Expr.op:'min' with:#( self )).eval };
     max -> { ([NumPy]Expr.op:'max' with:#( self )).eval };
+    argMin -> { ([NumPy]Expr.op:'argmin' with:#( self )).eval };
+    argMax -> { ([NumPy]Expr.op:'argmax' with:#( self )).eval };
+    std -> { ([NumPy]Expr.op:'std' with:#( self )).eval };
+    prod -> { ([NumPy]Expr.op:'prod' with:#( self )).eval };
+
+    "* axis reductions produce arrays, so they STAY lazy
+    sum: -> { |axis| [NumPy]Expr.op:'sum' with:#( self ) axis:axis };
+    mean: -> { |axis| [NumPy]Expr.op:'mean' with:#( self ) axis:axis };
+    min: -> { |axis| [NumPy]Expr.op:'min' with:#( self ) axis:axis };
+    max: -> { |axis| [NumPy]Expr.op:'max' with:#( self ) axis:axis };
+    argMin: -> { |axis| [NumPy]Expr.op:'argmin' with:#( self ) axis:axis };
+    argMax: -> { |axis| [NumPy]Expr.op:'argmax' with:#( self ) axis:axis };
+    std: -> { |axis| [NumPy]Expr.op:'std' with:#( self ) axis:axis };
+    prod: -> { |axis| [NumPy]Expr.op:'prod' with:#( self ) axis:axis };
 
     "* the force point: serialize the DAG, one evalGraph: send, memoize the result
     eval -> {
@@ -106,7 +136,9 @@
         var argIdxs = #();
         v.operands.each:{ |o| argIdxs.add:(me.indexOf:o) };
         var op = v.op;
-        var idx = .pushNode:#{ 'op': op 'a': argIdxs };
+        var node = #{ 'op': op 'a': argIdxs };
+        v.axis.defined?.if:{ node.at:'axis' put:v.axis };
+        var idx = .pushNode:node;
         @seen.at:key put:idx;
         idx
     };
@@ -164,6 +196,8 @@
 };
 
 "* The resident array joins the lazy world: operators build Exprs; reductions are a 1-node graph.
+"* (Kept textually in sync with [NumPy]Expr's builders — an ext-backed reopen can't share a
+"* mixin, and the duplication is declarative one-liners.)
 [NumPy]Array <-- {
     numpyKind -> { 'base' };
 
@@ -172,16 +206,38 @@
     #'*:' -> { |rhs| [NumPy]Expr.op:'mul' with:#( self rhs ) };
     #'/:' -> { |rhs| [NumPy]Expr.op:'div' with:#( self rhs ) };
     pow: -> { |rhs| [NumPy]Expr.op:'pow' with:#( self rhs ) };
+    mod: -> { |rhs| [NumPy]Expr.op:'mod' with:#( self rhs ) };
+    matMul: -> { |rhs| [NumPy]Expr.op:'matmul' with:#( self rhs ) };
     neg -> { [NumPy]Expr.op:'neg' with:#( self ) };
     sqrt -> { [NumPy]Expr.op:'sqrt' with:#( self ) };
     exp -> { [NumPy]Expr.op:'exp' with:#( self ) };
     log -> { [NumPy]Expr.op:'log' with:#( self ) };
     abs -> { [NumPy]Expr.op:'abs' with:#( self ) };
+    sin -> { [NumPy]Expr.op:'sin' with:#( self ) };
+    cos -> { [NumPy]Expr.op:'cos' with:#( self ) };
+    tan -> { [NumPy]Expr.op:'tan' with:#( self ) };
+    floor -> { [NumPy]Expr.op:'floor' with:#( self ) };
+    ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
+    round -> { [NumPy]Expr.op:'round' with:#( self ) };
+    sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
 
     sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
     mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
     min -> { ([NumPy]Expr.op:'min' with:#( self )).eval };
     max -> { ([NumPy]Expr.op:'max' with:#( self )).eval };
+    argMin -> { ([NumPy]Expr.op:'argmin' with:#( self )).eval };
+    argMax -> { ([NumPy]Expr.op:'argmax' with:#( self )).eval };
+    std -> { ([NumPy]Expr.op:'std' with:#( self )).eval };
+    prod -> { ([NumPy]Expr.op:'prod' with:#( self )).eval };
+
+    sum: -> { |axis| [NumPy]Expr.op:'sum' with:#( self ) axis:axis };
+    mean: -> { |axis| [NumPy]Expr.op:'mean' with:#( self ) axis:axis };
+    min: -> { |axis| [NumPy]Expr.op:'min' with:#( self ) axis:axis };
+    max: -> { |axis| [NumPy]Expr.op:'max' with:#( self ) axis:axis };
+    argMin: -> { |axis| [NumPy]Expr.op:'argmin' with:#( self ) axis:axis };
+    argMax: -> { |axis| [NumPy]Expr.op:'argmax' with:#( self ) axis:axis };
+    std: -> { |axis| [NumPy]Expr.op:'std' with:#( self ) axis:axis };
+    prod: -> { |axis| [NumPy]Expr.op:'prod' with:#( self ) axis:axis };
 
     "* an already-materialized array 'forces' to itself, so Array/Expr mix freely
     eval -> { self }

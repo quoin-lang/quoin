@@ -176,6 +176,70 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_numpy_lazy_test.qn", &script);
 }
 
+/// Slice-3 vocabulary: `matMul:` (matrix/vector/dot), axis reductions (which return arrays and
+/// so STAY lazy, composing into the same graph), the scalar reductions (argMin/argMax/std/prod),
+/// the widened unary set, `mod:`, and dtype promotion through int ops.
+#[test]
+fn numpy_vocabulary() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_vocabulary: python3 with `flatbuffers` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+"* matMul: matrix x matrix, matrix x vector, and 1-D dot (a scalar)
+var m = [NumPy]Array.fromList:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
+var m2 = [NumPy]Array.fromList:#( #( 5.0 6.0 ) #( 7.0 8.0 ) );
+((m.matMul:m2).toList == #( #( 19.0 22.0 ) #( 43.0 50.0 ) )).else:{{ ok = false }};
+var v = [NumPy]Array.fromList:#( 1.0 1.0 );
+((m.matMul:v).toList == #( 3.0 7.0 )).else:{{ ok = false }};
+"* a 1-D dot yields a scalar only at force time — matMul: itself is lazy, so eval it
+(((v.matMul:v).eval) == 2.0).else:{{ ok = false }};
+
+"* matmul composes lazily with elementwise ops — still one send
+(((m.matMul:v) + 1.0).toList == #( 4.0 8.0 )).else:{{ ok = false }};
+
+"* axis reductions return arrays and stay in the graph
+((m.sum:0).toList == #( 4.0 6.0 )).else:{{ ok = false }};
+((m.sum:1).toList == #( 3.0 7.0 )).else:{{ ok = false }};
+((m.mean:0).toList == #( 2.0 3.0 )).else:{{ ok = false }};
+(((m.sum:0) * 10.0).toList == #( 40.0 60.0 )).else:{{ ok = false }};
+
+"* scalar reductions force
+var a = [NumPy]Array.fromList:#( 3.0 1.0 4.0 1.0 5.0 );
+(a.argMax == 4).else:{{ ok = false }};
+(a.argMin == 1).else:{{ ok = false }};
+(a.prod == 60.0).else:{{ ok = false }};
+(a.std == 1.6).else:{{ ok = false }};
+
+"* widened elementwise set
+(([NumPy]Array.fromList:#( 0.0 )).cos.toList == #( 1.0 )).else:{{ ok = false }};
+(([NumPy]Array.fromList:#( 1.4 2.6 )).floor.toList == #( 1.0 2.0 )).else:{{ ok = false }};
+(([NumPy]Array.fromList:#( 1.4 2.6 )).ceil.toList == #( 2.0 3.0 )).else:{{ ok = false }};
+(([NumPy]Array.fromList:#( 1.4 2.6 )).round.toList == #( 1.0 3.0 )).else:{{ ok = false }};
+(([NumPy]Array.fromList:#( (-3.0) 0.0 5.0 )).sign.toList == #( (-1.0) 0.0 1.0 ))
+    .else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 7 8 9 )).mod:3).toList == #( 1 2 0 )).else:{{ ok = false }};
+
+"* promotion: int ops keep int64; mean promotes to float
+var ints = [NumPy]Array.arange:5;
+((ints * 2).dtype == 'int64').else:{{ ok = false }};
+(ints.mean == 2.0).else:{{ ok = false }};
+
+"* centering: the forced scalar re-enters the next graph as a constant
+var c = [NumPy]Array.fromList:#( 1.0 2.0 3.0 );
+((c - c.mean).toList == #( (-1.0) 0.0 1.0 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_vocab_test.qn", &script);
+}
+
 /// `use numpy:*` resolves the package folder from the default search root (`./quoin_packages/`),
 /// relative to the VM's cwd — which under `cargo test` is the workspace root.
 #[test]
