@@ -1,7 +1,7 @@
 //! Integration tests for the `numpy` extension package (`quoin_packages/numpy`) — NumPy-backed
 //! n-dimensional arrays as `[NumPy]Array`, over the Python SDK (Phase 3 extension-backed classes).
 //!
-//! Gated on a `python3` that can import `flatbuffers` (the SDK runtime) *and* `numpy`; skips
+//! Gated on a `python3` that can import `msgpack` (the SDK's wire codec) *and* `numpy`; skips
 //! cleanly otherwise (e.g. CI without Python set up), like the polyglot tests in `extension.rs`.
 
 use std::process::Command;
@@ -36,10 +36,10 @@ fn assert_script_passes(name: &str, script: &str) {
     panic!("numpy script did not pass after {ATTEMPTS} attempts.\n{last_diag}");
 }
 
-/// True if `python3` can import both `flatbuffers` and `numpy` — the package's dependencies.
+/// True if `python3` can import both `msgpack` and `numpy` — the package's dependencies.
 fn numpy_fixture_runnable() -> bool {
     Command::new("python3")
-        .args(["-c", "import flatbuffers, numpy"])
+        .args(["-c", "import msgpack, numpy"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -51,9 +51,7 @@ fn numpy_fixture_runnable() -> bool {
 #[test]
 fn numpy_array_skeleton() {
     if !numpy_fixture_runnable() {
-        eprintln!(
-            "skipping numpy_array_skeleton: python3 with `flatbuffers` + `numpy` unavailable"
-        );
+        eprintln!("skipping numpy_array_skeleton: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
@@ -109,14 +107,12 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 /// The lazy expression layer (init.qn): operators build a host-side DAG with no socket traffic;
 /// a force point (a reduction / toList / eval) ships the whole graph in ONE `evalGraph:` send.
 /// Covers: broadcasting with scalars, chained arith, diamonds (shared subexpressions), memoized
-/// `eval` results re-entering later graphs, NumPy promotion (int / float), the multi-base selector
-/// ladder, and the >8-distinct-arrays error.
+/// `eval` results re-entering later graphs, NumPy promotion (int / float), and a 9-distinct-base
+/// graph in one send (base nodes carry live-instance references; no arity ceiling).
 #[test]
 fn numpy_lazy_expressions() {
     if !numpy_fixture_runnable() {
-        eprintln!(
-            "skipping numpy_lazy_expressions: python3 with `flatbuffers` + `numpy` unavailable"
-        );
+        eprintln!("skipping numpy_lazy_expressions: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
@@ -156,7 +152,8 @@ var m = (a + b).eval;
 "* NumPy promotion: int64 / float -> float64
 ((([NumPy]Array.arange:4) / 2.0).toList == #( 0.0 0.5 1.0 1.5 )).else:{{ ok = false }};
 
-"* the selector ladder carries up to 8 distinct arrays; more is a clear, catchable error
+"* base nodes carry live-instance references, so one send spans ANY number of distinct
+"* arrays (the old 8-slot selector ladder is gone — 9 bases here, one round trip)
 var c1 = [NumPy]Array.fromList:#( 1.0 );
 var c2 = [NumPy]Array.fromList:#( 2.0 );
 var c3 = [NumPy]Array.fromList:#( 3.0 );
@@ -167,8 +164,7 @@ var c6 = [NumPy]Array.fromList:#( 6.0 );
     .else:{{ ok = false }};
 var c7 = [NumPy]Array.fromList:#( 7.0 );
 var wide = (((((((a + b) + c1) + c2) + c3) + c4) + c5) + c6) + c7;
-var caught = {{ wide.toList; 'no-throw' }}.catch:{{ |ex| 'caught' }};
-(caught == 'caught').else:{{ ok = false }};
+(wide.toList == #( 33.0 35.0 37.0 )).else:{{ ok = false }};
 
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
@@ -182,7 +178,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn numpy_vocabulary() {
     if !numpy_fixture_runnable() {
-        eprintln!("skipping numpy_vocabulary: python3 with `flatbuffers` + `numpy` unavailable");
+        eprintln!("skipping numpy_vocabulary: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
@@ -248,7 +244,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 fn numpy_shapes_and_slicing() {
     if !numpy_fixture_runnable() {
         eprintln!(
-            "skipping numpy_shapes_and_slicing: python3 with `flatbuffers` + `numpy` unavailable"
+            "skipping numpy_shapes_and_slicing: python3 with `msgpack` + `numpy` unavailable"
         );
         return;
     }
@@ -295,7 +291,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn numpy_masks() {
     if !numpy_fixture_runnable() {
-        eprintln!("skipping numpy_masks: python3 with `flatbuffers` + `numpy` unavailable");
+        eprintln!("skipping numpy_masks: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
@@ -347,7 +343,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 fn numpy_repeated_base_dedup() {
     if !numpy_fixture_runnable() {
         eprintln!(
-            "skipping numpy_repeated_base_dedup: python3 with `flatbuffers` + `numpy` unavailable"
+            "skipping numpy_repeated_base_dedup: python3 with `msgpack` + `numpy` unavailable"
         );
         return;
     }
@@ -380,9 +376,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn numpy_package_via_use() {
     if !numpy_fixture_runnable() {
-        eprintln!(
-            "skipping numpy_package_via_use: python3 with `flatbuffers` + `numpy` unavailable"
-        );
+        eprintln!("skipping numpy_package_via_use: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let script = r#"
@@ -391,4 +385,45 @@ var ok = ([NumPy]Array.arange:10).size == 10;
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     assert_script_passes("qn_numpy_use_test.qn", script);
+}
+
+/// The data plane both ways plus live instances inside structured returns: `fromArray:` builds a
+/// resident array from a host bulk `Array` (an `Array` method argument on the wire — no
+/// per-element exploding), and `split:` returns a List of live `[NumPy]Array` instances
+/// (resource references inside a data value), each usable in new lazy expressions.
+#[test]
+fn numpy_array_args_and_instance_lists() {
+    if !numpy_fixture_runnable() {
+        eprintln!(
+            "skipping numpy_array_args_and_instance_lists: python3 with `msgpack` + `numpy` unavailable"
+        );
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+"* fromArray: — a host bulk Array crosses whole-buffer and becomes a resident ndarray
+var v = [NumPy]Array.fromArray:(Array.ofFloats:#( 1.5 2.5 3.5 ));
+(v.toList == #( 1.5 2.5 3.5 )).else:{{ ok = false }};
+((v + 1.0).toList == #( 2.5 3.5 4.5 )).else:{{ ok = false }};
+
+"* an int column keeps its dtype
+var iv = [NumPy]Array.fromArray:(Array.ofInts:#( 1 2 3 ));
+(iv.dtype == 'int64').else:{{ ok = false }};
+
+"* split: — a List of live instances returned inside one structured value
+var parts = ([NumPy]Array.arange:7).split:3;
+(parts.count == 3).else:{{ ok = false }};
+((parts.at:0).toList == #( 0 1 2 )).else:{{ ok = false }};
+((parts.at:2).toList == #( 5 6 )).else:{{ ok = false }};
+"* each part is a real resident array: it joins new lazy expressions
+(((parts.at:1) + 1).toList == #( 4 5 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_array_args_test.qn", &script);
 }

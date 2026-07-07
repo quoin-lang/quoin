@@ -239,8 +239,8 @@ genuinely different needs:
 
 1. **Control / RPC messages** — "open connection", "run query with params", "here's an
    error", "call handle H". Small, heterogeneous, request/response, latency-sensitive.
-   → **Record format** (**FlatBuffers**, decided §11). *Not* Arrow — a one-row columnar table
-   is all overhead. This is the bulk of category-(a) glue.
+   → **Record format** (**MessagePack** — §11; originally FlatBuffers, revised 2026-07). *Not*
+   Arrow — a one-row columnar table is all overhead. This is the bulk of category-(a) glue.
 2. **Opaque blobs** — an image, a gzip stream, a file chunk. Just `bytes`: a length-framed
    byte run the extension interprets itself. Arrow adds nothing for a single blob.
 3. **Bulk tabular / array data** — many homogeneous rows, numeric arrays, dataframes, result
@@ -370,8 +370,9 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
 - **io_uring** — SQ/CQ rings in shared memory + eventfd wakeups. Considered as the transport
   and **dropped**: its edge needs busy-polling, which the async scheduler can't spend (§3). A
   reference for the submit/complete *shape*, not the mechanism.
-- **FlatBuffers** — schema-driven, in-place access, verifier, schema evolution. The **decided**
-  control-plane record format (§11), chosen over Cap'n Proto for polyglot binding breadth.
+- **FlatBuffers** — schema-driven, in-place access, verifier, schema evolution. The *original*
+  control-plane record format, chosen over Cap'n Proto for polyglot binding breadth — later
+  revised to MessagePack (§11).
 - **Apache Arrow** — the data-plane format; zero-copy columnar interchange across languages
   and processes. The **C Data Interface** (a tiny stable ABI) is the decided contract; **ADBC**
   (DB connectivity), **Plasma** (shared-memory object store), and **Flight** (RPC) are
@@ -406,11 +407,16 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
   (where the energy and hardest perf cases are; Go a distant third).
 - **Transport is format-agnostic** (framed socket messages + handles); **payload format is
   per-message**: records (control) + raw bytes (blobs) + **Arrow C Data Interface (columnar)**.
-- **Control-plane record format: FlatBuffers.** In-place access + schema evolution + a verifier
-  (debug-only against a trusted peer, §4), chosen for the **broadest, most-uniform polyglot
-  bindings** — the "protocol + per-language SDKs" strategy (§5) needs a low bar for community SDKs.
-  Cap'n Proto's built-in RPC/promise-pipelining is its main edge and we don't use it (we own the
-  transport, §7); its non-C++/Rust bindings are also less mature.
+- **Control-plane record format: MessagePack** (revised 2026-07; originally FlatBuffers, chosen
+  over Cap'n Proto for polyglot binding breadth). The wire-perf arc (profiling/wire-encoding,
+  profiling/msgpack-wire) showed the FlatBuffers envelope earned none of its keep against a
+  trusted peer: pure-python table machinery cost ~1µs/accessor (forcing hand-rolled vtable
+  readers), structured values already traveled as negotiated MessagePack blobs (two formats on
+  one wire), and in-place access buys nothing at control-frame sizes. Now one format end to end:
+  a frame is a length-prefixed MessagePack array; the contract is `quoin-ext-proto/PROTOCOL.md`
+  (append-only fields + a version handshake replace vtable evolution); the Rust codec is
+  hand-rolled and dependency-free, and any language with a MessagePack library clears the
+  community-SDK bar — which is *lower* than FlatBuffers' codegen toolchain.
 - **Bulk data transfer: copy-through-the-socket baseline; `SCM_RIGHTS` fd-passing deferred.** One
   `write`/`read` per bulk payload (noise next to the native work). True in-place sharing (a shared
   buffer fd + `mmap`) is added only if a *measured* high-bandwidth workload (video, large-array
@@ -460,5 +466,5 @@ Deno is a reasonable north star for the overall shape (small core + a guarded na
 
 The design questions captured in this document are now **all resolved** (this pass). What remains is
 **implementation-level** and will surface during the Tier-0 (`quoin-sdk`) build — e.g. the exact host
-operation / op-code list, the FlatBuffers control schema, and the wire shape of batched handle
-release and batched callbacks. Capture new questions here as they arise.
+operation / op-code list, the control-plane message table (now `quoin-ext-proto/PROTOCOL.md`),
+and the wire shape of batched handle release and batched callbacks. Capture new questions here as they arise.

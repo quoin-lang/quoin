@@ -1,8 +1,8 @@
 # The `numpy` extension package — a `use`-able folder (docs/EXT_PACKAGING.md). From the repo root
 # `use numpy:*` loads it (the resolver synthesizes `Extension loadPackage: '<this-dir>'`).
 #
-# The extension is a Python process wrapping real NumPy (sdk/python SDK over the ext.fbs wire
-# protocol), so it needs a `python3` on PATH with `numpy` and `flatbuffers` importable.
+# The extension is a Python process wrapping real NumPy (sdk/python SDK over the extension wire
+# protocol, crates/quoin-ext-proto/PROTOCOL.md), so it needs a `python3` on PATH with `numpy` and `msgpack` importable.
 
 [package]
 name = "numpy"

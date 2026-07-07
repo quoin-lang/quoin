@@ -28,12 +28,16 @@
 //!   `v map:` a host block).
 //! - `extension_backed_classes_python` (Phase 3b): the same, but the `Vector`-providing extension is
 //!   a *Python* process (`ext_vector.py`) — proving the manifest + class-dispatch protocol is
-//!   polyglot. Gated on `python3` + `flatbuffers`.
+//!   polyglot. Gated on `python3` + `msgpack`.
 //! - `extension_python_sdk` (Slice 7): the extension is a *Python* process (`sdk/python`) speaking
-//!   the same `ext.fbs` wire protocol — the polyglot proof. Gated on `python3` + `flatbuffers`.
-//! - `extension_packed_payloads_and_fallback`: the packed-DataValue negotiation — the same
-//!   structured round-trips (incl. BigInt/Decimal fidelity via ext types) run once on the packed
-//!   (MessagePack) path and once forced onto the boxed-tree fallback via `QUOIN_EXT_NO_MSGPACK`.
+//!   the same MessagePack wire protocol (`quoin-ext-proto/PROTOCOL.md`) — the polyglot proof.
+//!   Gated on `python3` + `msgpack`.
+//! - `extension_structured_value_fidelity`: structured round-trips through the Python SDK,
+//!   including the two ext-typed kinds the wire must preserve exactly (BigInteger = ext 1,
+//!   decimal = ext 2), nesting, and bytes.
+//! - `extension_protocol_version_mismatch`: an extension whose `ManifestReturn` names a protocol
+//!   version this host doesn't speak is refused at the handshake with a catchable error naming
+//!   both versions (not garbage decoding, not a hang).
 //!
 //! Each script decides pass/fail and prints PASS/FAIL.
 
@@ -461,6 +465,11 @@ var vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
 var mapped = va.map:{{ |x| x * 10.0 }};
 (mapped.sum == 60.0).else:{{ ok = false }};
 
+"* a bulk `Array` argument: the whole column crosses the data plane into a constructor
+var fromCol = Vector.ofArray:(Array.ofFloats:#( 2.0 4.0 6.0 ));
+(fromCol.sum == 12.0).else:{{ ok = false }};
+(fromCol.length == 3).else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
@@ -496,11 +505,11 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_ext_class_error_test.qn", &script);
 }
 
-/// True if `python3` can import the `flatbuffers` runtime — the Python SDK's only external
+/// True if `python3` can import `msgpack` — the Python SDK's only external
 /// dependency. When false, the polyglot tests skip cleanly (e.g. CI without Python set up).
 fn python_fixture_runnable() -> bool {
     Command::new("python3")
-        .args(["-c", "import flatbuffers"])
+        .args(["-c", "import msgpack"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -523,7 +532,7 @@ fn ensure_executable(path: &str) {
 #[test]
 fn extension_python_sdk() {
     if !python_fixture_runnable() {
-        eprintln!("skipping extension_python_sdk: python3 with `flatbuffers` runtime unavailable");
+        eprintln!("skipping extension_python_sdk: python3 with `msgpack` unavailable");
         return;
     }
     let fixture = concat!(
@@ -550,9 +559,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn extension_python_parity() {
     if !python_fixture_runnable() {
-        eprintln!(
-            "skipping extension_python_parity: python3 with `flatbuffers` runtime unavailable"
-        );
+        eprintln!("skipping extension_python_parity: python3 with `msgpack` unavailable");
         return;
     }
     let fixture = concat!(
@@ -611,9 +618,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn extension_backed_classes_python() {
     if !python_fixture_runnable() {
-        eprintln!(
-            "skipping extension_backed_classes_python: python3 with `flatbuffers` runtime unavailable"
-        );
+        eprintln!("skipping extension_backed_classes_python: python3 with `msgpack` unavailable");
         return;
     }
     let fixture = concat!(
@@ -790,48 +795,13 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
     panic!("use-package script did not pass after 4 attempts.\n{last}");
 }
 
-/// Run one script through `qn` with extra environment variables (inherited by the spawned
-/// extension), asserting it prints `PASS`. Same retry rationale as [`assert_script_passes`].
-fn assert_script_passes_env(name: &str, script: &str, envs: &[(&str, &str)]) {
-    const ATTEMPTS: u32 = 4;
-    let mut last_diag = String::new();
-    for attempt in 1..=ATTEMPTS {
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, script).unwrap();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_qn"));
-        cmd.arg(&path);
-        for (k, v) in envs {
-            cmd.env(k, v);
-        }
-        let out = cmd.output().expect("run qn");
-        let _ = std::fs::remove_file(&path);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout.contains("PASS") {
-            return;
-        }
-        last_diag = format!(
-            "status: {:?}\nstdout:\n{stdout}\nstderr:\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if attempt < ATTEMPTS {
-            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
-        }
-    }
-    panic!("extension script did not pass after {ATTEMPTS} attempts.\n{last_diag}");
-}
-
-/// The packed-DataValue negotiation, both ways: identical structured round-trips through the
-/// Python `ext_full` fixture on (a) the packed MessagePack path (msgpack available — the default
-/// on this machine) and (b) the boxed-tree fallback, forced via `QUOIN_EXT_NO_MSGPACK` so the
-/// extension declines the capability. Covers nesting, bytes, and the two ext-typed kinds whose
-/// fidelity the packed contract must preserve: BigInteger (ext 1) and a decimal (ext 2).
+/// Structured round-trips through the Python `ext_full` fixture: nesting, bytes, and the two
+/// ext-typed kinds whose fidelity the wire contract must preserve exactly — BigInteger
+/// (MessagePack ext 1) and a decimal (ext 2).
 #[test]
-fn extension_packed_payloads_and_fallback() {
+fn extension_structured_value_fidelity() {
     if !python_fixture_runnable() {
-        eprintln!(
-            "skipping extension_packed_payloads_and_fallback: python3 + `flatbuffers` unavailable"
-        );
+        eprintln!("skipping extension_structured_value_fidelity: python3 + `msgpack` unavailable");
         return;
     }
     let fixture = concat!(
@@ -866,12 +836,64 @@ var rec = e.call:'mkRecord' with:'';
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
-    // (a) packed path (msgpack present on this machine — the fixture advertises packed_ok).
-    assert_script_passes("qn_ext_packed_test.qn", &script);
-    // (b) boxed fallback: the extension declines packing; everything must still round-trip.
-    assert_script_passes_env(
-        "qn_ext_packed_fallback_test.qn",
-        &script,
-        &[("QUOIN_EXT_NO_MSGPACK", "1")],
+    assert_script_passes("qn_ext_fidelity_test.qn", &script);
+}
+
+/// Ownership of live-instance references: an extension-backed instance can only cross to the
+/// extension that owns it. Sending another extension's instance inside a structured value is a
+/// catchable error naming the cause — its resource id would be misread in the wrong extension's
+/// object table.
+#[test]
+fn extension_cross_extension_instance_refused() {
+    let vector_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let data_bin = env!("CARGO_BIN_EXE_ext_data");
+    let script = format!(
+        r#"
+var ev = Extension.spawn:'{vector_bin}';
+var v = Vector.ofFloats:#( 1.0 2.0 );
+var ed = Extension.spawn:'{data_bin}';
+var msg = {{ ed.call:'echoData' with:'' data:#( v ); 'no-error' }}.catch:{{ |ex| ex.s }};
+(msg.contains?:'different extension').if:{{ 'PASS'.print }} else:{{ ('FAIL: ' + msg).print }};
+"#
     );
+    assert_script_passes("qn_ext_cross_ownership_test.qn", &script);
+}
+
+/// The protocol-version handshake: a peer whose `ManifestReturn` names a version this host
+/// doesn't speak must be refused at spawn with a catchable error naming both versions — never
+/// garbage-decoded, never hung. The fixture is a minimal inline Python peer that answers the
+/// `GetManifest` with version 99 and then just holds the socket.
+#[test]
+fn extension_protocol_version_mismatch() {
+    if !python_fixture_runnable() {
+        eprintln!("skipping extension_protocol_version_mismatch: python3 + `msgpack` unavailable");
+        return;
+    }
+    let fixture_src = r#"#!/usr/bin/env python3
+import socket, struct, sys
+import msgpack
+
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sys.argv[1])
+srv.listen(1)
+conn, _ = srv.accept()
+n = struct.unpack("<I", conn.recv(4))[0]
+conn.recv(n)  # the GetManifest; answer with a bogus protocol version
+payload = msgpack.packb([8, 99, []])  # [ManifestReturn, version, classes]
+conn.sendall(struct.pack("<I", len(payload)) + payload)
+conn.recv(4)  # hold the connection until the host gives up and kills us
+"#;
+    let fixture = std::env::temp_dir().join("qn_ext_version99.py");
+    std::fs::write(&fixture, fixture_src).unwrap();
+    ensure_executable(fixture.to_str().unwrap());
+    let script = format!(
+        r#"
+var msg = {{ Extension.spawn:'{}'; 'no-error' }}.catch:{{ |ex| ex.s }};
+var ok = (msg.contains?:'protocol version 99') && (msg.contains?:'this host speaks');
+ok.if:{{ 'PASS'.print }} else:{{ ('FAIL: ' + msg).print }};
+"#,
+        fixture.display()
+    );
+    assert_script_passes("qn_ext_version_mismatch_test.qn", &script);
+    let _ = std::fs::remove_file(&fixture);
 }

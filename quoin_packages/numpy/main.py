@@ -139,25 +139,26 @@ class NdArray:
 
     # --- the batching core: evaluate a whole expression DAG in ONE round trip ---
 
-    def eval_graph(self, tree, *rest):
+    def eval_graph(self, tree):
         """Evaluate a serialized expression DAG (built lazily by init.qn's operator layer):
         `#{ 'nodes': #( node... ), 'root': i }`, each node one of
-        `{'op':'base','i':k}` (the k-th base array: the receiver, then the extra args),
-        `{'op':'const','v':x}`, or `{'op':<table op>,'a':#( child-indices )}`. Nodes arrive in
-        dependency order (children first) and each is evaluated once — a shared subexpression
-        (diamond) costs one evaluation, and intermediates never become handles on either side.
-        Returns a new NdArray instance (array root) or a scalar (reduction root)."""
+        `{'op':'base','v':<array>}` (a live-instance reference on the wire, already resolved to
+        the NdArray by the SDK's table-aware decode — so a graph references any number of
+        distinct arrays), `{'op':'const','v':x}`, or `{'op':<table op>,'a':#( child-indices )}`.
+        Nodes arrive in dependency order (children first) and each is evaluated once — a shared
+        subexpression (diamond) costs one evaluation, and intermediates never become handles on
+        either side. Returns a new NdArray instance (array root) or a scalar (reduction root).
+        The receiver is just the dispatch anchor (it also appears as a base node)."""
         if not isinstance(tree, dict) or "nodes" not in tree or "root" not in tree:
             raise ValueError("evalGraph: expects #{ 'nodes': ..., 'root': ... }")
-        bases = (self,) + rest
         nodes = tree["nodes"]
         vals = [None] * len(nodes)
         for i, n in enumerate(nodes):
             op = n["op"]
             if op == "base":
-                b = bases[n["i"]]
+                b = n.get("v")
                 if not isinstance(b, NdArray):
-                    raise ValueError(f"evalGraph: base {n['i']} is not a [NumPy]Array")
+                    raise ValueError("evalGraph: base node does not carry a [NumPy]Array")
                 vals[i] = b.a
             elif op == "const":
                 vals[i] = n["v"]
@@ -198,6 +199,15 @@ class NdArray:
         if isinstance(root, np.generic):
             return root.item()
         return root
+
+    # --- structure ---
+
+    def split(self, n):
+        """Split into `n` near-equal parts along axis 0 (`np.array_split`), returned as a List of
+        new resident arrays — instances inside a structured value (live references on the wire)."""
+        if not isinstance(n, int) or n < 1:
+            raise ValueError("split: expects a positive Integer")
+        return [NdArray(p) for p in np.array_split(self.a, n)]
 
     # --- materialization exit ramps (bulk leaves this process here, and only here) ---
 
@@ -247,25 +257,17 @@ def random(shape):
     return NdArray(_RNG.random(_shape(shape)))
 
 
+def from_array(arr):
+    """A host bulk `Array` (the data plane) as a resident ndarray — the inverse of `toArray`.
+    The buffer is little-endian by the wire contract; `frombuffer` wraps it without a copy
+    (read-only, which is fine: every operation here produces a new array)."""
+    if not isinstance(arr, quoin_ext.ArrowArray):
+        raise ValueError("fromArray: expects an Array")
+    dt = "<f8" if arr.dtype == quoin_ext.ArrowArray.FLOAT64 else "<i8"
+    return NdArray(np.frombuffer(arr.data, dtype=dt))
+
+
 if __name__ == "__main__":
-    methods = {
-        "shape": NdArray.shape,
-        "dtype": NdArray.dtype,
-        "size": NdArray.size,
-        "ndim": NdArray.ndim,
-        "s": NdArray.s,
-        "at:": NdArray.at,
-        "toList": NdArray.toList,
-        "toArray": NdArray.toArray,
-    }
-    # The evalGraph selector family: `evalGraph:` dispatches on one base (the receiver) and each
-    # extra keyword (`a:` .. `g:`) carries one more, so a DAG over up to 8 distinct arrays ships
-    # in a single send. The keywords must be *distinct* — a repeated keyword is a variadic run,
-    # which folds its args into one List (and a List can't carry live instances).
-    sel = "evalGraph:"
-    for k in range(8):
-        methods[sel] = NdArray.eval_graph
-        sel += chr(ord("a") + k) + ":"
     ext = quoin_ext.Extension()
     ext.register(
         "Array",
@@ -274,10 +276,24 @@ if __name__ == "__main__":
             "zeros:": zeros,
             "ones:": ones,
             "fromList:": from_list,
+            "fromArray:": from_array,
             "arange:": arange,
             "linspace:to:count:": linspace,
             "random:": random,
         },
-        methods=methods,
+        methods={
+            "shape": NdArray.shape,
+            "dtype": NdArray.dtype,
+            "size": NdArray.size,
+            "ndim": NdArray.ndim,
+            "s": NdArray.s,
+            "at:": NdArray.at,
+            # One selector, any number of distinct arrays: the graph's base nodes carry
+            # live-instance references, so there is no argument-arity ceiling.
+            "evalGraph:": NdArray.eval_graph,
+            "split:": NdArray.split,
+            "toList": NdArray.toList,
+            "toArray": NdArray.toArray,
+        },
     )
     ext.serve(sys.argv[1])
