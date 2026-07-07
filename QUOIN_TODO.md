@@ -182,6 +182,16 @@ both under `## Misc`.)
   type-based multi-catch (`{x}.catch:{|e:IoError| …} catch:{|e:Error| …} finally:{…}`); the native
   `catch+:`/`catch+:finally:` handlers + break-on-uncaught are the follow-on (see exception-handling).
 - [ ] Implement `...` / `???` / `!!!`.
+- [ ] **Full Unicode identifiers.** Today `IDENT_PREFIX`/`IDENT_REST` are ASCII-closed
+  (`[a-zA-Z_][a-zA-Z0-9?_]*`); eventually identifiers should support full Unicode (UAX #31
+  `XID_Start`/`XID_Continue` or similar). **Coupling to watch:** the compiler's alpha-renaming
+  for control-flow fusion (docs/MATERIALIZATION_ARCH.md, M1) mints *source-unspellable* local
+  names by using a character outside the identifier charset (e.g. `·` U+00B7) — the
+  collision-freedom/invisibility guarantee is pure grammar closure. U+00B7 is `XID_Continue`
+  (Catalan), so naive Unicode identifiers would make the minted names spellable and break the
+  guarantee. Any Unicode identifier design must preserve a reserved compiler namespace: either
+  explicitly exclude one sigil from the identifier grammar forever, or switch the renamer to a
+  scheme the parser structurally rejects (e.g. a reserved prefix the grammar refuses).
 
 ## Networking & Async I/O
 
@@ -500,6 +510,16 @@ deferred `Mirror` in `## REPL`.
   park on the scheduler); enables CSP-style structured concurrency above raw `gather`/`spawn`.
 
 ## Bugs/Odd Behavior
+- [ ] **`List.new` / `Map.new` / `Set.new` produce broken shells.** The generic `Callable::New`
+  instantiation path builds a plain `Object` of the class *without* the `NativeState` payload, so
+  the very first native method call on it fails with the internal `"Not a native state of the
+  requested type"` error (`value.rs` `with_native_state`): `List.new.add:1` errors; so do
+  `Map.new.at:put:` and `Set.new.add:`. Never noticed because qnlib and every bench construct
+  collections via literals (`#()`, `#{}`, `#< >`), which build the native payload. Found writing
+  the control-flow-inline v2 tests (2026-07). Fix direction to decide: make class-side `new` on
+  the native collection classes construct the real native value (nice UX, matches `List.of:`), or
+  refuse instantiation with a clear "use `#()`" error — silently minting a poison object is the
+  one wrong behavior. Repro: `var l = List.new; l.add:1`.
 - [x] **Operator precedence was inverted for arithmetic.** In the pest Pratt parser (`src/parser/pest/parser.rs`), `+`/`-` bound *tighter* than `*`/`/`/`%`, and `..` bound tighter than all arithmetic (`2 + 3 * 4 == 20`; `2 .. 3 + 1` errored as `(2..3) + 1`). Fixed by reordering the `.op(...)` levels to the conventional ordering — loosest→tightest: `||` · `&&` · `== !=` · comparison · `~` · `..` · `+ -` · `* / %`, with postfix `.method` tighter than any infix and prefix tightest. Now `2 + 3 * 4 == 14` and `2 .. n + 1` is `2 .. (n + 1)`. Full `qnlib` test suite passes (0 regressions); docs updated (`docs/language/01-foundations.md` §6 and appendices A/C).
 - [x] **`-->` / `->` didn't override a same-signature method.** Both appended a variant to the selector's multimethod chain; equal-specificity ties resolved to the *first-defined*, so a plain redefinition (`Foo <- { bar -> { 1 } }; Foo <-- { bar --> { 2 } }`) was dead code and `bar` returned `1`. The originally-planned fix (reverse the equal-specificity tie-break) turned out **wrong** — it breaks ordered guard dispatch (the `dispatchByBlock` test relies on first-defined guards winning over a later `.class==Object` catch-all). Fixed instead by **replace-at-definition**: a new *unguarded* variant whose `param_types` match an existing unguarded variant replaces that variant's block in place (`replace_or_append_method_in_chain`, `src/vm.rs`); guard- and type-differentiated variants still append and dispatch by specificity. `Foo.new.bar` now returns `2`; full suite passes; regression test `overridesSameSignature` added; docs updated (`docs/language/03-objects.md` §10/§13, appendix C). **Known limitation:** overriding a *guarded* variant with an identical guard does not replace (guards aren't compared for equality) — subsumed by the scoring overhaul below.
 - [x] **`Runtime.eval:` panics on a syntax error instead of throwing.** A syntactically-invalid source string panicked the whole VM in the pest parser (`parse_quoin_string_named` → `crates/quoin-syntax/src/pest/parser.rs`, which unwraps the `PestError`) rather than surfacing a catchable error, so `{ Runtime.eval:'1 +' }.catch:{…}` aborted the process instead of recovering. Found during the structured-error work (Tranche 4b): the typed `ParseError` raised by `compile_and_execute_source` (`runtime.rs`) only covered *semantic* compile failures of already-parseable source; the parse step upstream still panicked. **Fixed:** `compile_and_execute_source` now calls the already-existing fallible `try_parse_quoin_string_named` and maps its `ParseError` to `QuoinError::ParseError` — sidestepping the feared `quoin-syntax` signature ripple (the panicking entry stays for the main-program path, which fails the process by design). One call site changed; `eval:`/`eval:self:`/`use` all recover now. Test: `evalSyntaxErrorIsCatchable` (`qnlib/tests/07-errors.qn`). Done as the debugger-v0 prerequisite (evaluate-in-frame must not crash on a malformed watch expression).

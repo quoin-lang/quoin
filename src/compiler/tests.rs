@@ -2431,3 +2431,285 @@ fn each_fusion_gates_refuse() {
     let (guards, _) = each_shapes("Foo <- { m: -> { |l: List b: Block| l.each:b; 0 } }");
     assert_eq!(guards, 0, "non-literal arg keeps the plain send");
 }
+
+// ---- Slice 2d v2: alpha-renamed declaration-carrying splices ----
+
+/// Every instruction of a compiled program, nested block constants included.
+fn program_instructions(src: &str) -> Vec<Instruction> {
+    let node = crate::parser::parse_quoin_string(src);
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    let code = c.compile_program(p).unwrap();
+    fn collect(insts: &[Instruction], out: &mut Vec<Instruction>) {
+        for i in insts {
+            out.push(i.clone());
+            match i {
+                Instruction::Push(Constant::Block(b)) => collect(&b.bytecode, out),
+                Instruction::SendConst(c, ..) | Instruction::SendLocalConst(_, c, ..) => {
+                    if let Constant::Block(b) = c {
+                        collect(&b.bytecode, out)
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut v = Vec::new();
+    collect(&code.bytecode, &mut v);
+    v
+}
+
+fn renamed_defines(insts: &[Instruction]) -> Vec<&'static str> {
+    insts
+        .iter()
+        .filter_map(|i| match i {
+            Instruction::DefineLocal(s) | Instruction::DefineLocalKeep(s) => {
+                let n = s.as_str();
+                n.contains('\u{b7}').then_some(n)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn sends_selector(insts: &[Instruction], sel: &str) -> bool {
+    insts
+        .iter()
+        .any(|i| i.send_parts().is_some_and(|(s, ..)| s.as_str() == sel))
+}
+
+#[test]
+fn declaring_arms_fuse_with_renames() {
+    // Statically-Bool receiver + declaring arms: fully inlined, no block literal
+    // survives, and both `t`s get DISTINCT unspellable names.
+    let insts =
+        program_instructions("var x = 5; (x > 3).if:{ var t = 7; t * 2 } else:{ var t = 1; t }");
+    assert!(
+        !insts
+            .iter()
+            .any(|i| matches!(i, Instruction::Push(Constant::Block(_)))),
+        "declaring arms must splice, not materialize"
+    );
+    assert!(!sends_selector(&insts, "if:else:"), "construct must inline");
+    let renames = renamed_defines(&insts);
+    assert_eq!(
+        renames.len(),
+        2,
+        "one rename per arm declaration: {renames:?}"
+    );
+    assert_ne!(renames[0], renames[1], "sibling arms must not share a cell");
+    assert!(renames.iter().all(|n| n.starts_with('t')), "{renames:?}");
+}
+
+#[test]
+fn declaring_while_body_fuses() {
+    let insts = program_instructions(
+        "var total = 0; var i = 0; \
+         { i < 3 }.whileDo:{ var sq = i * i; total = total + sq; i = i + 1 }",
+    );
+    assert!(
+        !sends_selector(&insts, "whileDo:"),
+        "declaring body must fuse into the native jump loop"
+    );
+    assert_eq!(renamed_defines(&insts).len(), 1);
+}
+
+#[test]
+fn loop_capture_hazard_refuses_fusion() {
+    // A literal surviving past the iteration captures the body-declared `mine`:
+    // the loop must keep real per-iteration block frames (binding generations).
+    let insts = program_instructions(
+        "var fns = #(); var i = 0; \
+         { i < 3 }.whileDo:{ var mine = i; fns.add:{ mine }; i = i + 1 }",
+    );
+    assert!(
+        sends_selector(&insts, "whileDo:"),
+        "capturing declaring body must stay a real send"
+    );
+    assert!(renamed_defines(&insts).is_empty(), "nothing may rename");
+}
+
+#[test]
+fn nested_declaring_loops_fuse_bottom_up() {
+    // The btrees run: shape — the inner loop's blocks read the outer body's
+    // declarations, but the inner loop itself fuses, so nothing survives.
+    let insts = program_instructions(
+        "var acc = 0; var d = 1; \
+         { d <= 3 }.whileDo:{ var lim = d * 2; var i = 0; \
+           { i < lim }.whileDo:{ var st = d + i; acc = acc + st; i = i + 1 }; \
+           d = d + 1 }",
+    );
+    assert!(
+        !sends_selector(&insts, "whileDo:"),
+        "the whole loop nest must fuse"
+    );
+    assert_eq!(renamed_defines(&insts).len(), 3, "lim, i, st all rename");
+}
+
+#[test]
+fn config_store_targets_stay_field_names() {
+    // The makeTree shape: the config literal's STORE target is the field name
+    // (never renamed); its rvalue READ resolves to the arm's renamed cell.
+    let insts = program_instructions(
+        "N <- { |@a| }; var x = 5; \
+         (x > 3).if:{ var a = 9; N.new:{ a=a } } else:{ nil }",
+    );
+    let config = insts
+        .iter()
+        .find_map(|i| match i {
+            Instruction::Push(Constant::Block(b))
+            | Instruction::SendConst(Constant::Block(b), ..)
+            | Instruction::SendLocalConst(_, Constant::Block(b), ..)
+                if b.is_init_literal =>
+            {
+                Some(b)
+            }
+            _ => None,
+        })
+        .expect("the config literal must survive as a block");
+    let stores: Vec<&str> = config
+        .bytecode
+        .iter()
+        .filter_map(|i| match i {
+            Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stores, vec!["a"], "field bind must keep the source name");
+    let loads: Vec<&str> = config
+        .bytecode
+        .iter()
+        .filter_map(|i| match i {
+            Instruction::LoadLocal(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        loads.iter().any(|n| n.starts_with("a\u{b7}")),
+        "the rvalue read must target the arm's renamed cell: {loads:?}"
+    );
+}
+
+#[test]
+fn declaring_arm_inside_config_refuses() {
+    // A spliced `var` in an init frame would become a stray FIELD on the new
+    // object under (E); the arm must keep its real block frame (and today that
+    // shape is independently a compile error for its bare store — either way,
+    // no renamed define may land in the config frame).
+    let node = crate::parser::parse_quoin_string(
+        "N <- { |@a @b| }; N.new:{ a=1; (true).if:{ var t = 2; b=t } }",
+    );
+    let NodeValue::Program(p) = &node.value else {
+        panic!("expected a program");
+    };
+    let mut c = Compiler::new();
+    match c.compile_program(p) {
+        Err(e) => assert!(e.contains("undeclared local"), "{e}"),
+        Ok(code) => {
+            fn no_renamed(insts: &[Instruction]) {
+                for i in insts {
+                    if let Instruction::DefineLocal(s) | Instruction::DefineLocalKeep(s) = i {
+                        assert!(!s.as_str().contains('\u{b7}'), "renamed define in config");
+                    }
+                    match i {
+                        Instruction::Push(Constant::Block(b)) => no_renamed(&b.bytecode),
+                        Instruction::SendConst(c, ..) | Instruction::SendLocalConst(_, c, ..) => {
+                            if let Constant::Block(b) = c {
+                                no_renamed(&b.bytecode)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            no_renamed(&code.bytecode);
+        }
+    }
+}
+
+// ---- M2: fused instantiation ----
+
+#[test]
+fn plain_config_new_fuses() {
+    let insts = program_instructions("N <- { |@a @b| }; var x = 5; N.new:{ a = x * 2; b = 'hi' }");
+    assert!(
+        insts
+            .iter()
+            .any(|i| matches!(i, Instruction::BranchIfNotPlainNew(_))),
+        "guard must be emitted"
+    );
+    let nwf = insts
+        .iter()
+        .find_map(|i| match i {
+            Instruction::NewWithFields(names) => Some(names),
+            _ => None,
+        })
+        .expect("hot path must use NewWithFields");
+    let names: Vec<&str> = nwf.iter().map(|s| s.as_str()).collect();
+    assert_eq!(names, vec!["a", "b"]);
+    // The cold path keeps the REAL config literal for the fallback send.
+    assert!(
+        insts.iter().any(|i| match i {
+            Instruction::Push(Constant::Block(b))
+            | Instruction::SendConst(Constant::Block(b), ..)
+            | Instruction::SendLocalConst(_, Constant::Block(b), ..) => b.is_init_literal,
+            _ => false,
+        }),
+        "cold path must keep the config literal"
+    );
+}
+
+#[test]
+fn empty_config_new_fuses() {
+    let insts = program_instructions("N <- { |@a| }; N.new:{ }");
+    assert!(
+        insts
+            .iter()
+            .any(|i| matches!(i, Instruction::NewWithFields(n) if n.is_empty())),
+        "empty config fuses with zero names"
+    );
+}
+
+#[test]
+fn unfusable_configs_keep_the_classic_form() {
+    let no_fuse = |src: &str, why: &str| {
+        let insts = program_instructions(src);
+        assert!(
+            !insts
+                .iter()
+                .any(|i| matches!(i, Instruction::NewWithFields(_))),
+            "{why}: {src}"
+        );
+    };
+    // Read-after-store: the read sees the config-local binding today.
+    no_fuse(
+        "N <- { |@a @b| }; var a = 1; N.new:{ a = 5; b = a }",
+        "read-after-store must refuse",
+    );
+    // A nested literal's captures resolve through the config frame.
+    no_fuse(
+        "N <- { |@cb| }; N.new:{ cb = { 1 } }",
+        "block-literal rvalue must refuse",
+    );
+    // Config `self` is the new object.
+    no_fuse(
+        "N <- { |@a| }; N.new:{ a = self }",
+        "self rvalue must refuse",
+    );
+    // A bare send targets the new object too.
+    no_fuse(
+        "N <- { |@a| }; N.new:{ a = .probe }",
+        "bare-send rvalue must refuse",
+    );
+    // Declarations and non-assignment statements aren't the plain shape.
+    no_fuse(
+        "N <- { |@a| }; N.new:{ var t = 1; a = t }",
+        "declaration must refuse",
+    );
+    no_fuse(
+        "N <- { |@a| }; var l = #(1); N.new:{ l.count; a = 1 }",
+        "non-assignment statement must refuse",
+    );
+}

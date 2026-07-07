@@ -199,4 +199,81 @@
         .is:{ TSCNC_EvilNew.new:{ item = 42 } } equalTo:'evil';
         .is:{ item } equalTo:7;
     };
+
+    "* M2 fused instantiation (docs/MATERIALIZATION_ARCH.md): a plain-config
+    "* `new:{ f=e; ... }` compiles to a guarded inline path - these pin that the
+    "* hot path, the cold fallbacks, and the refused shapes all behave exactly
+    "* as the classic config-frame path.
+    .test:
+    fusedInstantiationBindsFields -> {
+        TSFI_Node <- { |@a @b @c|
+            a -> { ^@a };
+            b -> { ^@b };
+            c -> { ^@c }
+        };
+        var x = 5;
+        var n = TSFI_Node.new:{ a = x * 2; b = 'hi'; c = #(1 2 3) };
+        .is:{ n.a } equalTo:10;
+        .is:{ n.b } equalTo:'hi';
+        .is:{ (n.c).count } equalTo:3;
+        "* empty config; unknown names silently dropped; duplicate stores last-wins.
+        .is:{ (TSFI_Node.new:{ }).a } equalTo:nil;
+        .is:{ (TSFI_Node.new:{ zz = 9; a = 3 }).a } equalTo:3;
+        .is:{ (TSFI_Node.new:{ a = 1; a = 2 }).a } equalTo:2;
+    };
+
+    .test:
+    fusedInstantiationRunsInitChain -> {
+        "* A class with `init` still initializes on the fused path (the plan
+        "* is consulted per instantiation, epoch-fresh).
+        TSFI_Init <- { |@n @dbl|
+            init -> { @dbl = @n * 2 };
+            n -> { ^@n };
+            dbl -> { ^@dbl }
+        };
+        var o = TSFI_Init.new:{ n = 21 };
+        .is:{ o.n } equalTo:21;
+        .is:{ o.dbl } equalTo:42;
+        "* ...and `init:` receives the config fields it names.
+        TSFI_InitColon <- { |@w @tag|
+            init: -> { |w| @tag = 'w=' + w };
+            tag -> { ^@tag }
+        };
+        .is:{ (TSFI_InitColon.new:{ w = 9 }).tag } equalTo:'w=9';
+    };
+
+    .test:
+    fusedInstantiationColdPaths -> {
+        "* A user meta `new:` receives the REAL config closure (the guard sends
+        "* the site cold before any field expression evaluates).
+        TSFI_Evil <- { .meta <-- { new: -> { |blk| blk.value; ^'evil' } } };
+        .is:{ TSFI_Evil.new:{ q = 1 } } equalTo:'evil';
+        "* An abstract class errors exactly as the classic path.
+        TSFI_Abs <- { .abstract! };
+        var caught = 'no';
+        { TSFI_Abs.new:{ } }.catch:{ |e| caught = 'yes' };
+        .is:{ caught } equalTo:'yes';
+        "* A non-class receiver errors exactly as the classic path.
+        var caught2 = 'no';
+        { 5.new:{ a = 1 } }.catch:{ |e| caught2 = 'yes' };
+        .is:{ caught2 } equalTo:'yes';
+    };
+
+    .test:
+    fusedInstantiationRefusedShapesKeepSemantics -> {
+        "* Read-after-store sees the config-local binding (the shape refuses
+        "* fusion, keeping the classic frame semantics).
+        TSFI_RAS <- { |@a @b| a -> { ^@a }; b -> { ^@b } };
+        var a = 1;
+        var o = TSFI_RAS.new:{ a = 5; b = a };
+        .is:{ o.b } equalTo:5;
+        .is:{ a } equalTo:1;
+        "* Fields inherited from a parent bind on the fused path (the plan's
+        "* ivar slots span the hierarchy).
+        TSFI_Parent <- { |@p| p -> { ^@p } };
+        TSFI_Parent <- TSFI_Child <- { |@q| q -> { ^@q } };
+        var c = TSFI_Child.new:{ p = 1; q = 2 };
+        .is:{ c.p } equalTo:1;
+        .is:{ c.q } equalTo:2;
+    };
 }

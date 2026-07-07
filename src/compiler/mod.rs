@@ -142,7 +142,8 @@ fn jump_offset(inst: &Instruction) -> Option<isize> {
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
         | Instruction::BranchIfNotBool(o)
-        | Instruction::BranchIfNotList(o) => Some(*o),
+        | Instruction::BranchIfNotList(o)
+        | Instruction::BranchIfNotPlainNew(o) => Some(*o),
         _ => None,
     }
 }
@@ -153,7 +154,8 @@ fn set_jump_offset(inst: &mut Instruction, off: isize) {
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
         | Instruction::BranchIfNotBool(o)
-        | Instruction::BranchIfNotList(o) => *o = off,
+        | Instruction::BranchIfNotList(o)
+        | Instruction::BranchIfNotPlainNew(o) => *o = off,
         _ => {}
     }
 }
@@ -553,6 +555,16 @@ struct Scope {
     /// True for the top-level scope of an object-initializer block (`X.new:{ … }`),
     /// where a bare `field = value` binds an instance field (no `var` required).
     is_init: bool,
+    /// True for a SPLICE scope — pushed around an inlined control-flow arm/body that
+    /// carries local declarations (Slice 2d v2). Not a frame: `in_init_frame` skips it,
+    /// and `declare_local` alpha-renames declarations made in it (see `renames`).
+    renaming: bool,
+    /// Alpha-rename map for declarations made in a splice scope: original name → the
+    /// fresh minted Symbol emitted in instructions. The name is source-unspellable
+    /// (contains `·`, outside the identifier grammar), so user code can neither collide
+    /// with nor reference it. Keyed by original name; every checker table above stays
+    /// original-name-keyed — only instruction emission consults this (`local_symbol`).
+    renames: HashMap<String, Symbol>,
 }
 
 pub struct Compiler {
@@ -602,6 +614,14 @@ pub struct Compiler {
     /// While splicing a body that has parameters (Phase 5·4): each param name → the temp holding its
     /// argument, so a bare param reference in the body loads that temp. Saved/restored across nesting.
     param_override: HashMap<String, Symbol>,
+    /// Monotonic mint counter for splice alpha-renames (Slice 2d v2): `name·N`. Never reset —
+    /// uniqueness must hold across every splice site in the compile, not per method.
+    splice_rename_counter: u32,
+    /// Depth of enclosing PER-ITERATION splices (fused `whileDo:` cond/body, fused `each:`
+    /// body) at the current compile point. >0 means a declaring arm spliced here re-executes
+    /// in the same frame, so its declarations rebind one cell instead of minting per-execution
+    /// generations — observable only if a surviving closure captures one (the v2 hazard check).
+    fused_loop_depth: u32,
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
@@ -651,6 +671,8 @@ impl Compiler {
                 narrowed: HashMap::new(),
                 provenance: HashMap::new(),
                 is_init: false,
+                renaming: false,
+                renames: HashMap::new(),
             }],
             temp_counter: 0,
             value_type_def_depth: 0,
@@ -665,6 +687,8 @@ impl Compiler {
             class_bodies: HashMap::new(),
             self_override: None,
             param_override: HashMap::new(),
+            splice_rename_counter: 0,
+            fused_loop_depth: 0,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -856,6 +880,8 @@ impl Compiler {
                 narrowed: HashMap::new(),
                 provenance: HashMap::new(),
                 is_init: false,
+                renaming: false,
+                renames: HashMap::new(),
             }],
             temp_counter: 0,
             value_type_def_depth: 0,
@@ -870,6 +896,8 @@ impl Compiler {
             class_bodies: HashMap::new(),
             self_override: None,
             param_override: HashMap::new(),
+            splice_rename_counter: 0,
+            fused_loop_depth: 0,
             class_ctx: Vec::new(),
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
@@ -935,6 +963,8 @@ impl Compiler {
             narrowed: HashMap::new(),
             provenance: HashMap::new(),
             is_init: false,
+            renaming: false,
+            renames: HashMap::new(),
         });
     }
 
@@ -942,10 +972,56 @@ impl Compiler {
         self.scopes.pop();
     }
 
+    /// Push a SPLICE scope (Slice 2d v2) around an inlined declaration-carrying arm/body:
+    /// declarations made in it are alpha-renamed (`declare_local`), and it is transparent
+    /// to `in_init_frame` (a splice is not a frame).
+    fn push_splice_scope(&mut self) {
+        self.push_scope(HashSet::new());
+        self.scopes.last_mut().unwrap().renaming = true;
+    }
+
+    /// Is the nearest REAL frame scope an object-initializer (`X.new:{…}`) scope?
+    /// Splice scopes are transparent — an arm spliced inside a config literal still
+    /// executes in the instantiating frame.
+    fn in_init_frame(&self) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if !scope.renaming {
+                return scope.is_init;
+            }
+        }
+        false
+    }
+
+    /// The Symbol to EMIT for a plain-local `name`: the innermost scope that binds it
+    /// decides — its alpha-rename if it is a splice scope, else the name itself. All
+    /// checker tables stay original-name-keyed; only instruction emission calls this.
+    fn local_symbol(&self, name: &str) -> Symbol {
+        for scope in self.scopes.iter().rev() {
+            if scope.locals.contains(name) {
+                if let Some(&sym) = scope.renames.get(name) {
+                    return sym;
+                }
+                return Symbol::intern(name);
+            }
+        }
+        Symbol::intern(name)
+    }
+
     /// Declare a fresh local in the current (innermost) scope. Errors if the name is
     /// already declared *in this scope* (redeclaration); shadowing an outer scope is
-    /// allowed. `let` bindings are recorded as immutable.
+    /// allowed. `let` bindings are recorded as immutable. In a splice scope (an inlined
+    /// declaration-carrying arm, Slice 2d v2) the emitted Symbol is alpha-renamed to a
+    /// source-unspellable `name·N` — the block frame that used to isolate this binding
+    /// is gone, so the fresh name is what prevents collision with same-named siblings
+    /// and the enclosing frame.
     fn declare_local(&mut self, name: &str, mutable: bool) -> Result<(), String> {
+        let minted = if self.scopes.last().unwrap().renaming {
+            let n = self.splice_rename_counter;
+            self.splice_rename_counter += 1;
+            Some(Symbol::intern(&format!("{name}\u{b7}{n}")))
+        } else {
+            None
+        };
         let scope = self.scopes.last_mut().unwrap();
         if scope.locals.contains(name) {
             return Err(format!("`{}` is already declared in this scope", name));
@@ -953,6 +1029,9 @@ impl Compiler {
         scope.locals.insert(name.to_string());
         if !mutable {
             scope.immutable.insert(name.to_string());
+        }
+        if let Some(sym) = minted {
+            scope.renames.insert(name.to_string(), sym);
         }
         Ok(())
     }
@@ -2265,7 +2344,7 @@ impl Compiler {
                     // Phase 5·3c: inside a spliced computed body, a bare `self` is the override.
                     let sym = match self.self_override {
                         Some(over) if id.name == "self" => over,
-                        _ => Symbol::intern(&id.name),
+                        _ => self.local_symbol(&id.name),
                     };
                     bytecode.push(Instruction::LoadLocal(sym));
                 } else {
@@ -2583,6 +2662,12 @@ impl Compiler {
         // native index loop — closure-free per element on any native-List receiver,
         // with the real send as the cold path (the guard IS the dispatch).
         if self.try_compile_inlined_each(call, bytecode)? {
+            return Ok(());
+        }
+        // M2 (docs/MATERIALIZATION_ARCH.md): fuse `X.new:{ f=e; … }` on the plain-config
+        // shape into a guarded inline instantiation — no config closure, no config frame,
+        // no interpreted stores, with the real send as the cold path.
+        if self.try_compile_fused_instantiation(call, bytecode)? {
             return Ok(());
         }
         // Phase 5·1/5·2: inline a self-send to a sealed class's own method with an inline-safe body

@@ -74,6 +74,13 @@ pub fn init_colon_symbol() -> Symbol {
     *INIT_COLON.get_or_init(|| Symbol::intern("init:"))
 }
 
+/// The interned `new:` selector — probed by the fused-instantiation verdict
+/// (M2) on its cache-miss path.
+pub fn new_colon_symbol() -> Symbol {
+    static NEW_COLON: OnceLock<Symbol> = OnceLock::new();
+    *NEW_COLON.get_or_init(|| Symbol::intern("new:"))
+}
+
 impl PartialEq for Symbol {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
