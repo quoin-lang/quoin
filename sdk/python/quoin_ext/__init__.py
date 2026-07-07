@@ -108,6 +108,19 @@ def _encode_dv_kind(b, obj):
     raise TypeError(f"cannot serialize {type(obj).__name__} as a structured value")
 
 
+def _byte_vector(tbl, slot):
+    """A `[ubyte]` field as ONE buffer slice. Never read byte vectors through the per-element
+    accessor (`x.V(i)` / `a.Data(k)`): each call is ~1µs of pure-python flatbuffers machinery,
+    which turned a 32 KB Array argument into 31ms. `slot` mirrors the field's generated
+    accessor (`DvBytes.V` -> 4, `ArrowArray.Data` -> 8)."""
+    t = tbl._tab
+    o = flatbuffers.number_types.UOffsetTFlags.py_type(t.Offset(slot))
+    if o == 0:
+        return b""
+    start = t.Vector(o)
+    return bytes(t.Bytes[start : start + t.VectorLen(o)])
+
+
 def _decode_dv(box):
     """Decode a `DataValueBox` reader into a native Python value."""
     K = g.DataValueKind
@@ -134,8 +147,7 @@ def _decode_dv(box):
     if t == K.DvStr:
         return _text(as_table(g.DvStr).V())
     if t == K.DvBytes:
-        x = as_table(g.DvBytes)
-        return bytes(x.V(i) for i in range(x.VLength()))
+        return _byte_vector(as_table(g.DvBytes), 4)
     if t == K.DvList:
         x = as_table(g.DvList)
         return [_decode_dv(x.Items(i)) for i in range(x.ItemsLength())]
@@ -495,8 +507,7 @@ def _decode_call(buf):
     arrays = []
     for j in range(call.ArraysLength()):
         a = call.Arrays(j)
-        data = bytes(a.Data(k) for k in range(a.DataLength()))
-        arrays.append(ArrowArray(a.Dtype(), data))
+        arrays.append(ArrowArray(a.Dtype(), _byte_vector(a, 8)))
     box = call.Data()
     data = _decode_dv(box) if box is not None else None
     return (_text(call.Op()), _text(call.Arg()), handles, resources, releases, arrays, data)
