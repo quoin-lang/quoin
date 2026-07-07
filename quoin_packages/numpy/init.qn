@@ -1,0 +1,188 @@
+"* numpy package glue — the LAZY EXPRESSION layer, loaded by `Extension loadPackage:` right after
+"* the extension's classes are installed (like adbc's init.qn).
+"*
+"* Operators on [NumPy]Array / [NumPy]Expr never call the extension: they build a host-side
+"* expression DAG ([NumPy]Expr nodes) with zero socket traffic. A force point — eval, a reduction
+"* (sum/mean/min/max), or a materialization (toList/toArray/at:/shape/s) — serializes the DAG once
+"* and ships it in ONE `evalGraph:` round trip; the extension runs NumPy over the whole graph and
+"* returns a new resident array (or a scalar). Shared subexpressions (diamonds) are sent and
+"* evaluated once, and intermediates never exist as handles on either side.
+"*
+"* Scalars mix in as constants (`a * 2.0 + 1.0`), with the array on the LEFT of each operator
+"* (`2.0 * a` would dispatch to Double, which knows nothing of arrays). NumPy broadcasting and
+"* promotion rules apply — the extension is the semantics, this layer is only the graph.
+
+"* DAG-node identity for dedup (Map keys are Strings, so serials key as `serial.s`).
+[NumPy]Serial <- { |@n|
+    init -> { @n = 0 };
+    next -> { @n = @n + 1; @n }
+};
+[NumPy]ExprSerial <- [NumPy]Serial.new;
+
+"* One lazy node: an op name (from main.py's tables) + operands, each a [NumPy]Expr, a
+"* [NumPy]Array, or a number. Forcing memoizes (@cache), so a forced node re-enters later
+"* graphs as a cheap base leaf instead of recomputing.
+[NumPy]Expr <- { |@op @operands @serial @cache|
+    .meta <-- {
+        op:with: -> { |o:String elems:List| [NumPy]Expr.new:{ var op = o; var operands = elems } }
+    };
+    init: -> { |op:String operands:List|
+        @op = op;
+        @operands = operands;
+        @serial = [NumPy]ExprSerial.next;
+        @cache = nil
+    };
+
+    numpyKind -> { 'expr' };
+    op -> { @op };
+    operands -> { @operands };
+    serial -> { @serial };
+    cached -> { @cache };
+
+    "* operators / elementwise methods: just more lazy nodes
+    #'+:' -> { |rhs| [NumPy]Expr.op:'add' with:#( self rhs ) };
+    #'-:' -> { |rhs| [NumPy]Expr.op:'sub' with:#( self rhs ) };
+    #'*:' -> { |rhs| [NumPy]Expr.op:'mul' with:#( self rhs ) };
+    #'/:' -> { |rhs| [NumPy]Expr.op:'div' with:#( self rhs ) };
+    pow: -> { |rhs| [NumPy]Expr.op:'pow' with:#( self rhs ) };
+    neg -> { [NumPy]Expr.op:'neg' with:#( self ) };
+    sqrt -> { [NumPy]Expr.op:'sqrt' with:#( self ) };
+    exp -> { [NumPy]Expr.op:'exp' with:#( self ) };
+    log -> { [NumPy]Expr.op:'log' with:#( self ) };
+    abs -> { [NumPy]Expr.op:'abs' with:#( self ) };
+
+    "* reductions force: the whole chain collapses to a scalar in one round trip
+    sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
+    mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
+    min -> { ([NumPy]Expr.op:'min' with:#( self )).eval };
+    max -> { ([NumPy]Expr.op:'max' with:#( self )).eval };
+
+    "* the force point: serialize the DAG, one evalGraph: send, memoize the result
+    eval -> {
+        @cache.defined?.if:{ ^^ @cache };
+        var b = [NumPy]GraphBuilder.new;
+        var root = b.indexOf:self;
+        @cache = b.send:root;
+        @cache
+    };
+
+    "* materializations force, then delegate to the resident array
+    toList -> { .eval.toList };
+    toArray -> { .eval.toArray };
+    shape -> { .eval.shape };
+    dtype -> { .eval.dtype };
+    size -> { .eval.size };
+    ndim -> { .eval.ndim };
+    at: -> { |i| .eval.at:i };
+    s -> { .eval.s }
+};
+
+"* Serializes one DAG walk: nodes in dependency order (each once, by serial), distinct base
+"* arrays collected for the send. The selector ladder carries the receiver + up to 7 more bases;
+"* a wider expression must force a subexpression first (.eval) to fold it into one base.
+[NumPy]GraphBuilder <- { |@nodes @bases @seen|
+    init -> { @nodes = #(); @bases = #(); @seen = Map.new };
+
+    pushNode: -> { |n| @nodes.add:n; @nodes.count - 1 };
+
+    "* the node index for any operand: a number constant, a base array, or a memoized Expr
+    indexOf: -> { |v|
+        (v.can?:#numpyKind).else:{ ^^ .pushNode:#{ 'op': 'const' 'v': v } };
+        (v.numpyKind == 'base').if:{
+            @bases.add:v;
+            var i = @bases.count - 1;
+            ^^ .pushNode:#{ 'op': 'base' 'i': i }
+        };
+        var key = v.serial.s;
+        (@seen.at:key).defined?.if:{ ^^ @seen.at:key };
+        "* an already-forced subexpression re-enters as its materialized value, not a recompute
+        v.cached.defined?.if:{
+            var idx = .indexOf:v.cached;
+            @seen.at:key put:idx;
+            ^^ idx
+        };
+        "* `each:` rebinds self to the element, so capture the builder for the block
+        var me = self;
+        var argIdxs = #();
+        v.operands.each:{ |o| argIdxs.add:(me.indexOf:o) };
+        var op = v.op;
+        var idx = .pushNode:#{ 'op': op 'a': argIdxs };
+        @seen.at:key put:idx;
+        idx
+    };
+
+    send: -> { |root|
+        var t = #{ 'nodes': @nodes 'root': root };
+        var n = @bases.count;
+        (n == 0).if:{ '[NumPy] expression has no array operand'.throw };
+        (n == 1).if:{ ^^ (@bases.at:0).evalGraph:t };
+        (n == 2).if:{ ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) };
+        (n == 3).if:{ ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) b:(@bases.at:2) };
+        (n == 4).if:{
+            ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) b:(@bases.at:2) c:(@bases.at:3)
+        };
+        (n == 5).if:{
+            ^^ (@bases.at:0)
+                .evalGraph:t
+                 a:(@bases.at:1)
+                 b:(@bases.at:2)
+                 c:(@bases.at:3)
+                 d:(@bases.at:4)
+        };
+        (n == 6).if:{
+            ^^ (@bases.at:0)
+                .evalGraph:t
+                 a:(@bases.at:1)
+                 b:(@bases.at:2)
+                 c:(@bases.at:3)
+                 d:(@bases.at:4)
+                 e:(@bases.at:5)
+        };
+        (n == 7).if:{
+            ^^ (@bases.at:0)
+                .evalGraph:t
+                 a:(@bases.at:1)
+                 b:(@bases.at:2)
+                 c:(@bases.at:3)
+                 d:(@bases.at:4)
+                 e:(@bases.at:5)
+                 f:(@bases.at:6)
+        };
+        (n == 8).if:{
+            ^^ (@bases.at:0)
+                .evalGraph:t
+                 a:(@bases.at:1)
+                 b:(@bases.at:2)
+                 c:(@bases.at:3)
+                 d:(@bases.at:4)
+                 e:(@bases.at:5)
+                 f:(@bases.at:6)
+                 g:(@bases.at:7)
+        };
+        '[NumPy] expression uses more than 8 distinct arrays; force a subexpression with .eval first'.throw
+    }
+};
+
+"* The resident array joins the lazy world: operators build Exprs; reductions are a 1-node graph.
+[NumPy]Array <-- {
+    numpyKind -> { 'base' };
+
+    #'+:' -> { |rhs| [NumPy]Expr.op:'add' with:#( self rhs ) };
+    #'-:' -> { |rhs| [NumPy]Expr.op:'sub' with:#( self rhs ) };
+    #'*:' -> { |rhs| [NumPy]Expr.op:'mul' with:#( self rhs ) };
+    #'/:' -> { |rhs| [NumPy]Expr.op:'div' with:#( self rhs ) };
+    pow: -> { |rhs| [NumPy]Expr.op:'pow' with:#( self rhs ) };
+    neg -> { [NumPy]Expr.op:'neg' with:#( self ) };
+    sqrt -> { [NumPy]Expr.op:'sqrt' with:#( self ) };
+    exp -> { [NumPy]Expr.op:'exp' with:#( self ) };
+    log -> { [NumPy]Expr.op:'log' with:#( self ) };
+    abs -> { [NumPy]Expr.op:'abs' with:#( self ) };
+
+    sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
+    mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
+    min -> { ([NumPy]Expr.op:'min' with:#( self )).eval };
+    max -> { ([NumPy]Expr.op:'max' with:#( self )).eval };
+
+    "* an already-materialized array 'forces' to itself, so Array/Expr mix freely
+    eval -> { self }
+}

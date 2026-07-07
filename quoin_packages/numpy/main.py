@@ -30,6 +30,19 @@ import quoin_ext
 
 _RNG = np.random.default_rng()
 
+# The expression-DAG op tables (`evalGraph:`). Elementwise ops broadcast NumPy-style; reducers
+# collapse the whole array to a scalar. The Quoin-side layer (init.qn) only ever names ops from
+# these tables, so an unknown op is a glue bug, not a user error.
+_BINOPS = {
+    "add": np.add,
+    "sub": np.subtract,
+    "mul": np.multiply,
+    "div": np.true_divide,
+    "pow": np.power,
+}
+_UNOPS = {"neg": np.negative, "sqrt": np.sqrt, "exp": np.exp, "log": np.log, "abs": np.abs}
+_REDUCERS = {"sum": np.sum, "mean": np.mean, "min": np.min, "max": np.max}
+
 
 def _coerce(a):
     """Coerce an ndarray to the v1 dtype policy (float64 | int64), or raise a clear error."""
@@ -88,6 +101,46 @@ class NdArray:
             return NdArray(v)
         return v.item()
 
+    # --- the batching core: evaluate a whole expression DAG in ONE round trip ---
+
+    def eval_graph(self, tree, *rest):
+        """Evaluate a serialized expression DAG (built lazily by init.qn's operator layer):
+        `#{ 'nodes': #( node... ), 'root': i }`, each node one of
+        `{'op':'base','i':k}` (the k-th base array: the receiver, then the extra args),
+        `{'op':'const','v':x}`, or `{'op':<table op>,'a':#( child-indices )}`. Nodes arrive in
+        dependency order (children first) and each is evaluated once — a shared subexpression
+        (diamond) costs one evaluation, and intermediates never become handles on either side.
+        Returns a new NdArray instance (array root) or a scalar (reduction root)."""
+        if not isinstance(tree, dict) or "nodes" not in tree or "root" not in tree:
+            raise ValueError("evalGraph: expects #{ 'nodes': ..., 'root': ... }")
+        bases = (self,) + rest
+        nodes = tree["nodes"]
+        vals = [None] * len(nodes)
+        for i, n in enumerate(nodes):
+            op = n["op"]
+            if op == "base":
+                b = bases[n["i"]]
+                if not isinstance(b, NdArray):
+                    raise ValueError(f"evalGraph: base {n['i']} is not a [NumPy]Array")
+                vals[i] = b.a
+            elif op == "const":
+                vals[i] = n["v"]
+            elif op in _BINOPS:
+                a, b = n["a"]
+                vals[i] = _BINOPS[op](vals[a], vals[b])
+            elif op in _UNOPS:
+                vals[i] = _UNOPS[op](vals[n["a"][0]])
+            elif op in _REDUCERS:
+                vals[i] = _REDUCERS[op](vals[n["a"][0]])
+            else:
+                raise ValueError(f"evalGraph: unknown op '{op}'")
+        root = vals[tree["root"]]
+        if isinstance(root, np.ndarray):
+            return NdArray(root)
+        if isinstance(root, np.generic):
+            return root.item()
+        return root
+
     # --- materialization exit ramps (bulk leaves this process here, and only here) ---
 
     def toList(self):
@@ -134,6 +187,24 @@ def random(shape):
 
 
 if __name__ == "__main__":
+    methods = {
+        "shape": NdArray.shape,
+        "dtype": NdArray.dtype,
+        "size": NdArray.size,
+        "ndim": NdArray.ndim,
+        "s": NdArray.s,
+        "at:": NdArray.at,
+        "toList": NdArray.toList,
+        "toArray": NdArray.toArray,
+    }
+    # The evalGraph selector family: `evalGraph:` dispatches on one base (the receiver) and each
+    # extra keyword (`a:` .. `g:`) carries one more, so a DAG over up to 8 distinct arrays ships
+    # in a single send. The keywords must be *distinct* — a repeated keyword is a variadic run,
+    # which folds its args into one List (and a List can't carry live instances).
+    sel = "evalGraph:"
+    for k in range(8):
+        methods[sel] = NdArray.eval_graph
+        sel += chr(ord("a") + k) + ":"
     ext = quoin_ext.Extension()
     ext.register(
         "Array",
@@ -146,15 +217,6 @@ if __name__ == "__main__":
             "linspace:to:count:": linspace,
             "random:": random,
         },
-        methods={
-            "shape": NdArray.shape,
-            "dtype": NdArray.dtype,
-            "size": NdArray.size,
-            "ndim": NdArray.ndim,
-            "s": NdArray.s,
-            "at:": NdArray.at,
-            "toList": NdArray.toList,
-            "toArray": NdArray.toArray,
-        },
+        methods=methods,
     )
     ext.serve(sys.argv[1])

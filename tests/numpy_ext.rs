@@ -106,6 +106,76 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_numpy_skeleton_test.qn", &script);
 }
 
+/// The lazy expression layer (init.qn): operators build a host-side DAG with no socket traffic;
+/// a force point (a reduction / toList / eval) ships the whole graph in ONE `evalGraph:` send.
+/// Covers: broadcasting with scalars, chained arith, diamonds (shared subexpressions), memoized
+/// `eval` results re-entering later graphs, NumPy promotion (int / float), the multi-base selector
+/// ladder, and the >8-distinct-arrays error.
+#[test]
+fn numpy_lazy_expressions() {
+    if !numpy_fixture_runnable() {
+        eprintln!(
+            "skipping numpy_lazy_expressions: python3 with `flatbuffers` + `numpy` unavailable"
+        );
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var a = [NumPy]Array.fromList:#( 1.0 2.0 3.0 );
+var b = [NumPy]Array.fromList:#( 4.0 5.0 6.0 );
+
+"* chained elementwise ops + scalar broadcasting -> one round trip at toList
+(((a + b) * 2.0).toList == #( 10.0 14.0 18.0 )).else:{{ ok = false }};
+((a / 2.0).toList == #( 0.5 1.0 1.5 )).else:{{ ok = false }};
+(a.neg.toList == #( (-1.0) (-2.0) (-3.0) )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 4.0 9.0 )).sqrt).toList == #( 2.0 3.0 )).else:{{ ok = false }};
+
+"* reductions collapse the whole chain to a scalar in one send
+((a * a).sum == 14.0).else:{{ ok = false }};
+(((a - b) * (a - b)).mean == 9.0).else:{{ ok = false }};
+((a.pow:2.0).sum == 14.0).else:{{ ok = false }};
+
+"* eager reductions directly on a resident array
+(a.sum == 6.0).else:{{ ok = false }};
+(a.mean == 2.0).else:{{ ok = false }};
+(a.max == 3.0).else:{{ ok = false }};
+
+"* a diamond: d is referenced twice but serialized/evaluated once
+var d = a + b;
+(((d * d).sum) == 155.0).else:{{ ok = false }};
+
+"* eval materializes + memoizes; the result mixes back into new expressions as a base
+var m = (a + b).eval;
+(m.toList == #( 5.0 7.0 9.0 )).else:{{ ok = false }};
+((d + 1.0).toList == #( 6.0 8.0 10.0 )).else:{{ ok = false }};
+
+"* NumPy promotion: int64 / float -> float64
+((([NumPy]Array.arange:4) / 2.0).toList == #( 0.0 0.5 1.0 1.5 )).else:{{ ok = false }};
+
+"* the selector ladder carries up to 8 distinct arrays; more is a clear, catchable error
+var c1 = [NumPy]Array.fromList:#( 1.0 );
+var c2 = [NumPy]Array.fromList:#( 2.0 );
+var c3 = [NumPy]Array.fromList:#( 3.0 );
+var c4 = [NumPy]Array.fromList:#( 4.0 );
+var c5 = [NumPy]Array.fromList:#( 5.0 );
+var c6 = [NumPy]Array.fromList:#( 6.0 );
+((((((((a + b) + c1) + c2) + c3) + c4) + c5) * 1.0).toList == #( 20.0 22.0 24.0 ))
+    .else:{{ ok = false }};
+var c7 = [NumPy]Array.fromList:#( 7.0 );
+var wide = (((((((a + b) + c1) + c2) + c3) + c4) + c5) + c6) + c7;
+var caught = {{ wide.toList; 'no-throw' }}.catch:{{ |ex| 'caught' }};
+(caught == 'caught').else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_lazy_test.qn", &script);
+}
+
 /// `use numpy:*` resolves the package folder from the default search root (`./quoin_packages/`),
 /// relative to the VM's cwd — which under `cargo test` is the workspace root.
 #[test]
