@@ -72,4 +72,17 @@
         { KeyValuePair.new:{ Error.throw:'boom' } }.catch:{ |e| caught = e };
         .isTrue:{ caught.defined? };
     };
+
+    "* `Map.new` constructs a REAL native map (QUOIN_TODO broken-shell fix);
+    "* `new:` is refused clearly.
+    .test:
+    classNewConstructs -> {
+        var m = Map.new;
+        m.at:'k' put:7;
+        .is:{ m.at:'k' } equalTo:7;
+        var caught = 'no';
+        { Map.new:{ a = 1 } }.catch:{ |e| caught = 'yes' };
+        .is:{ caught } equalTo:'yes';
+    }
+
 }

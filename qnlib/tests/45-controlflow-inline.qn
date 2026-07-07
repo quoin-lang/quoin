@@ -253,5 +253,33 @@
              Runtime.eval:'CFIV2E2 <- { .meta <-- { go -> { (true).if:{ let q = 1; q = 2; ^q } } } }'
          }
          throw:ParseError
+    };
+
+    "* An in-loop `var x = nil` mints a FRESH binding per iteration — a later
+    "* iteration must never read an earlier one's value, interpreted and
+    "* compiled alike (F2, docs/OUTCALL_ARCH.md: in-loop declarations never
+    "* defer; they take a slot re-nil'd at the declaration site).
+    .test:inLoopNilDeclarationRenilsPerIteration -> {
+        CFIV2Renil <- {
+            .meta <-- {
+                go -> {
+                    var out = #();
+                    var i = 0;
+                    { i < 3 }.whileDo:{
+                        var x = nil;
+                        (i == 0).if:{ x = 5 };
+                        out.add:x;
+                        i = i + 1
+                    };
+                    ^out
+                }
+            }
+        };
+        var k = 0;
+        var last = nil;
+        { k < 20 }.whileDo:{ last = CFIV2Renil.go; k = k + 1 };
+        .is:{ last.at:0 } equalTo:5;
+        .is:{ last.at:1 } equalTo:nil;
+        .is:{ last.at:2 } equalTo:nil
     }
 }

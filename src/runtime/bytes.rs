@@ -37,6 +37,11 @@ pub fn build_bytes_class() -> NativeClassBuilder {
         .sdk_class_method("empty", |host, _receiver, _args| {
             Ok(host.new_bytes(Vec::new()))
         })
+        // Bytes new -> same as `empty` (the generic fallback would mint a
+        // payload-less shell; QUOIN_TODO.md).
+        .sdk_class_method("new", |host, _receiver, _args| {
+            Ok(host.new_bytes(Vec::new()))
+        })
         // size / count -> the number of bytes.
         .sdk_instance_method("size", |host, receiver, _args| {
             Ok(host.new_int(recv!(receiver, Bytes).len() as i64))

@@ -125,6 +125,21 @@ pub fn build_list_class() -> NativeClassBuilder {
             Ok(vm.new_int(mc, len as i64))
         })
         .returns("Integer")
+        // `List.new` — a fresh empty native list. Without this, the generic
+        // `Callable::NewNoBlock` fallback mints a payload-less Object shell of
+        // class List whose first native method call dies with the internal
+        // "Not a native state" error (QUOIN_TODO.md). A `new:` config block is
+        // meaningless on a native collection — refuse it clearly rather than
+        // mint the same poison object.
+        .class_method("new", |vm, mc, _receiver, _args| {
+            Ok(vm.new_list(mc, Vec::new()))
+        })
+        .class_method("new:", |_vm, _mc, _receiver, _args| {
+            Err(QuoinError::Other(
+                "List has no instance fields — construct with `#()`, `List.new`, or `List.of:`"
+                    .to_string(),
+            ))
+        })
         // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6) ---
         // `List.of:Integer` — a fresh empty list tagged with the element class.
         .class_method("of:", |vm, mc, _receiver, args| {

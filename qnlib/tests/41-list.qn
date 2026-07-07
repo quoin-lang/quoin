@@ -48,4 +48,20 @@
         .is:{ #(3 1 2).sort:{ |a b| a < b } } equalTo:#( 1 2 3 );
         .is:{ #(1 2 3).sort:{ |a b| a > b } } equalTo:#( 3 2 1 );
     };
+
+    "* `List.new` constructs a REAL native list (the generic fallback used to
+    "* mint a payload-less shell whose first native call errored); `new:` is
+    "* refused clearly — a config block is meaningless on a native collection.
+    .test:
+    classNewConstructs -> {
+        var l = List.new;
+        l.add:1;
+        l.add:{ 5 };
+        .is:{ l.count } equalTo:2;
+        .is:{ (l.at:1).value } equalTo:5;
+        var caught = 'no';
+        { List.new:{ a = 1 } }.catch:{ |e| caught = 'yes' };
+        .is:{ caught } equalTo:'yes';
+    }
+
 }

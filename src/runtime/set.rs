@@ -83,6 +83,20 @@ pub fn build_set_class() -> NativeClassBuilder {
             Ok(receiver)
         })
         // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6) ---
+        .sdk_class_method("new", |host, _receiver, _args| {
+            Ok(host.new_native_state(
+                host.get_or_create_builtin_class("Set"),
+                NativeSetState::new(Vec::new()),
+            ))
+        })
+        // `Set.new:` — a config block on a native set is meaningless; refuse
+        // clearly instead of minting a payload-less shell (QUOIN_TODO.md).
+        .sdk_class_method("new:", |_host, _receiver, _args| {
+            Err(QuoinError::Other(
+                "Set has no instance fields — construct with `#< >`, `Set.new`, or `Set.of:`"
+                    .to_string(),
+            ))
+        })
         .sdk_class_method("of:", |host, _receiver, args| {
             let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
                 expected: "Class".to_string(),

@@ -74,6 +74,45 @@ pub const IC_FIELD_KIND: u8 = u8::MAX;
 /// `ip` with a send, and a verdict entry can never satisfy `ic_probe`.
 pub const IC_PLAINNEW_KIND: u8 = u8::MAX - 1;
 
+/// One compiled outcall site's direct-dispatch cache (D2, the "AOT IC" —
+/// docs/OUTCALL_ARCH.md): the same epoch + receiver/arg type-shape guards as
+/// [`ICSlot`] (dispatch is multimethod — arg shapes select typed variants),
+/// but resolving straight to the compiled entry plus the callee block's
+/// lexical env, so a warm compiled→compiled call skips the `ic_registry`
+/// hash, the IC borrow/probe, and the whole `Callable` dispatch. Filled only
+/// when the interpreted IC at the same `(template, ip)` also filled
+/// (probe-after-fill), so the cacheability rules can never drift from
+/// `ic_fill_cell`'s. Indexed by a translation-minted site id — an array
+/// index, never a hash.
+#[derive(Collect, Clone, Copy)]
+#[collect(no_drop)]
+pub struct AotSiteCell<'gc> {
+    epoch: u64,
+    recv_kind: u8,
+    recv_ptr: usize,
+    n_args: u8,
+    arg_kinds: [u8; IC_MAX_ARGS],
+    arg_ptrs: [usize; IC_MAX_ARGS],
+    #[collect(require_static)]
+    pub entry: Option<&'static crate::codegen::AotEntry>,
+    pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+}
+
+impl Default for AotSiteCell<'_> {
+    fn default() -> Self {
+        AotSiteCell {
+            epoch: 0,
+            recv_kind: 0,
+            recv_ptr: 0,
+            n_args: 0,
+            arg_kinds: [0; IC_MAX_ARGS],
+            arg_ptrs: [0; IC_MAX_ARGS],
+            entry: None,
+            parent_env: None,
+        }
+    }
+}
+
 /// A monomorphic inline-cache entry: a resolved method memoized at one call site. Lives in the
 /// executing [`Block`]'s per-`ip` cache array ([`Block::inline_cache`]), so the block+ip *is*
 /// the call-site identity — and because the executing block roots its own array, there is no
@@ -529,6 +568,8 @@ pub struct VmState<'gc> {
     /// never reused, so `(template_id, ip)` is a stable call-site identity (no ABA);
     /// stale entries self-evict via `dispatch_epoch`.
     pub ic_registry: FxHashMap<u32, Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>>,
+    /// D2 site-cache cells, indexed by translation-minted outcall-site id.
+    pub aot_sites: Vec<AotSiteCell<'gc>>,
     /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts every
     /// per-`Block` [`ICSlot`] at once, giving O(1) inline-cache invalidation.
     #[collect(require_static)]
@@ -656,6 +697,7 @@ impl<'gc> VmState<'gc> {
                 chunks: Vec::new(),
             },
             ic_registry: FxHashMap::default(),
+            aot_sites: Vec::new(),
             dispatch_cache: DispatchCache {
                 entries: FxHashMap::default(),
                 uncacheable: false,
@@ -3646,6 +3688,81 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// Receiver-phase probe of a D2 site cell: live epoch + receiver guard,
+    /// checked BEFORE the caller decodes any argument lanes, so a site whose
+    /// target is not compiled (a native, a polymorphic receiver) pays a few
+    /// loads and nothing else. Returns the cell BY COPY (it is `Copy`; the
+    /// `parent_env` Gc stays rooted in the traced `aot_sites` vec) for the
+    /// argument-phase check.
+    #[inline]
+    pub(crate) fn aot_site_peek(
+        &self,
+        site: usize,
+        receiver: Value<'gc>,
+        n_args: usize,
+    ) -> Option<AotSiteCell<'gc>> {
+        let cell = self.aot_sites.get(site)?;
+        cell.entry?;
+        if cell.epoch != self.dispatch_epoch || cell.n_args as usize != n_args {
+            return None;
+        }
+        let (rk, rp) = value_type_guard(receiver);
+        if cell.recv_kind != rk || cell.recv_ptr != rp {
+            return None;
+        }
+        Some(*cell)
+    }
+
+    /// Argument-phase check for a peeked D2 cell (see [`Self::aot_site_peek`]).
+    #[inline]
+    pub(crate) fn aot_site_args_match(cell: &AotSiteCell<'gc>, args: &[Value<'gc>]) -> bool {
+        for (i, a) in args.iter().enumerate() {
+            let (ak, ap) = value_type_guard(*a);
+            if cell.arg_kinds[i] != ak || cell.arg_ptrs[i] != ap {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Fill a D2 site cell. The caller gates this on the interpreted IC
+    /// having filled for the same resolution (probe-after-fill), which
+    /// carries over every cacheability rule (guard-free, non-eigenclass,
+    /// arg-count bound) without restating them.
+    pub(crate) fn aot_site_fill(
+        &mut self,
+        site: usize,
+        receiver: Value<'gc>,
+        args: &[Value<'gc>],
+        entry: &'static crate::codegen::AotEntry,
+        parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+    ) {
+        if args.len() > IC_MAX_ARGS {
+            return;
+        }
+        if site >= self.aot_sites.len() {
+            self.aot_sites.resize(site + 1, AotSiteCell::default());
+        }
+        let (recv_kind, recv_ptr) = value_type_guard(receiver);
+        let mut arg_kinds = [0u8; IC_MAX_ARGS];
+        let mut arg_ptrs = [0usize; IC_MAX_ARGS];
+        for (i, a) in args.iter().enumerate() {
+            let (ak, ap) = value_type_guard(*a);
+            arg_kinds[i] = ak;
+            arg_ptrs[i] = ap;
+        }
+        self.aot_sites[site] = AotSiteCell {
+            epoch: self.dispatch_epoch,
+            recv_kind,
+            recv_ptr,
+            n_args: args.len() as u8,
+            arg_kinds,
+            arg_ptrs,
+            entry: Some(entry),
+            parent_env,
+        };
+    }
+
     /// `call_method`, with the caller's inline cache consulted and filled — the
     /// compiled-code outcall path (B3a): without it every compiled operator send
     /// paid an uncached `lookup_method` while the interpreted body it replaced
@@ -3659,6 +3776,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         selector: Symbol,
         args: Vec<Value<'gc>>,
+        site: Option<u32>,
     ) -> Result<Value<'gc>, QuoinError> {
         // No `enter_native_reentry` here (unlike `call_method`): charging the
         // 12-deep hook-recursion budget per outcall made a 12-deep chain of
@@ -3667,7 +3785,8 @@ impl<'gc> VmState<'gc> {
         // hazard — Rust-stack frames per compiled<->interpreted alternation —
         // and dispatch degrades to interpreted bodies past the cap.
         self.aot.outcall_nesting += 1;
-        let result = self.call_method_cached_inner(mc, tid, ip, bc_len, receiver, selector, args);
+        let result =
+            self.call_method_cached_inner(mc, tid, ip, bc_len, receiver, selector, args, site);
         self.aot.outcall_nesting = self.aot.outcall_nesting.saturating_sub(1);
         result
     }
@@ -3685,6 +3804,7 @@ impl<'gc> VmState<'gc> {
         receiver: Value<'gc>,
         selector: Symbol,
         args: Vec<Value<'gc>>,
+        site: Option<u32>,
     ) -> Result<Value<'gc>, QuoinError> {
         let ic = self.ic_cell_by_id(mc, tid);
         let method = match self.ic_probe(ic, ip, receiver, &args) {
@@ -3693,6 +3813,28 @@ impl<'gc> VmState<'gc> {
                 let m = self.lookup_method(mc, receiver, selector, &args)?;
                 if let Some(c) = &m {
                     self.ic_fill_cell(mc, ic, bc_len, ip, receiver, selector, &args, c.clone());
+                    // D2: mirror the resolution into the site cell — but only
+                    // when the IC actually filled (probe-after-fill), so the
+                    // site cache inherits ic_fill_cell's cacheability rules;
+                    // and only ONCE PER EPOCH per site — a polymorphic site
+                    // re-resolves cold on every receiver flip, and re-running
+                    // the probe + rewriting the cell each time taxed exactly
+                    // the sites that can never benefit.
+                    if let (Some(site), crate::dispatch::Callable::AotCall { block, entry }) =
+                        (site, c)
+                        && self.aot_sites.get(site as usize).is_none_or(|cell| {
+                            cell.entry.is_none() || cell.epoch != self.dispatch_epoch
+                        })
+                        && self.ic_probe(ic, ip, receiver, &args).is_some()
+                    {
+                        self.aot_site_fill(
+                            site as usize,
+                            receiver,
+                            &args,
+                            entry.0,
+                            block.parent_env,
+                        );
+                    }
                 }
                 m
             }
