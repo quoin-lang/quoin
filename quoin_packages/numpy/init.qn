@@ -102,6 +102,11 @@
     isNan -> { [NumPy]Expr.op:'isnan' with:#( self ) };
     isInf -> { [NumPy]Expr.op:'isinf' with:#( self ) };
     isFinite -> { [NumPy]Expr.op:'isfinite' with:#( self ) };
+
+    "* dtype casts within the float64/int64/bool policy — lazy nodes like any other
+    toFloat -> { [NumPy]Expr.op:'tofloat' with:#( self ) };
+    toInt -> { [NumPy]Expr.op:'toint' with:#( self ) };
+    toBool -> { [NumPy]Expr.op:'tobool' with:#( self ) };
     select: -> { |mask| [NumPy]Expr.op:'select' with:#( self mask ) };
     where:else: -> { |ifTrue ifFalse| [NumPy]Expr.op:'where' with:#( self ifTrue ifFalse ) };
     any -> { ([NumPy]Expr.op:'any' with:#( self )).eval };
@@ -343,6 +348,11 @@
     isNan -> { [NumPy]Expr.op:'isnan' with:#( self ) };
     isInf -> { [NumPy]Expr.op:'isinf' with:#( self ) };
     isFinite -> { [NumPy]Expr.op:'isfinite' with:#( self ) };
+
+    "* dtype casts within the float64/int64/bool policy — lazy nodes like any other
+    toFloat -> { [NumPy]Expr.op:'tofloat' with:#( self ) };
+    toInt -> { [NumPy]Expr.op:'toint' with:#( self ) };
+    toBool -> { [NumPy]Expr.op:'tobool' with:#( self ) };
     select: -> { |mask| [NumPy]Expr.op:'select' with:#( self mask ) };
     where:else: -> { |ifTrue ifFalse| [NumPy]Expr.op:'where' with:#( self ifTrue ifFalse ) };
     any -> { ([NumPy]Expr.op:'any' with:#( self )).eval };

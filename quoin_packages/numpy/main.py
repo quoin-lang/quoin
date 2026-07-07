@@ -88,6 +88,11 @@ _UNOPS = {
     "isinf": np.isinf,
     "isfinite": np.isfinite,
     "inv": np.linalg.inv,
+    # Casts within the dtype policy (float64 | int64 | bool). float -> int truncates toward
+    # zero (NumPy astype); anything -> bool is the != 0 test.
+    "tofloat": lambda x: np.asarray(x).astype(np.float64),
+    "toint": lambda x: np.asarray(x).astype(np.int64),
+    "tobool": lambda x: np.asarray(x).astype(np.bool_),
 }
 _REDUCERS = {
     "sum": np.sum,

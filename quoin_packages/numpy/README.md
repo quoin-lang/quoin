@@ -38,23 +38,42 @@ resident array — or a scalar, for a reduction root.
 
 ## API
 
-**Creation** (class-side): `zeros:` `ones:` `fromList:` `fromArray:` (a host bulk `Array`,
-whole-buffer — the inverse of `toArray`) `arange:` `linspace:to:count:` `random:` — shapes are
-an Integer or a List (`#( 2 3 )`).
+**Creation** (class-side): `zeros:` `ones:` `eye:` `full:with:` `diag:` (from a 1-D array)
+`fromList:` `fromArray:` (a host bulk `Array`, whole-buffer — the inverse of `toArray`)
+`arange:` `linspace:to:count:` `logSpace:to:count:` `geomSpace:to:count:` `meshgrid:with:`
+(→ a List of two grids) — shapes are an Integer or a List (`#( 2 3 )`). Random: `random:`
+`randomNormal:` `randomInt:to:shape:` (`to:` exclusive, like Quoin ranges), reproducible via
+`seed:`.
 
-**Elementwise** (lazy): `+ - * /` `pow:` `mod:` `neg` `sqrt` `exp` `log` `abs` `sin` `cos` `tan`
-`floor` `ceil` `round` `sign` — NumPy broadcasting and promotion rules.
+**Elementwise** (lazy): `+ - * /` `pow:` `mod:` `floorDiv:` `neg` `sqrt` `cbrt` `exp` `expm1`
+`log` `log2` `log10` `log1p` `abs` `sin` `cos` `tan` `sinh` `cosh` `tanh` `arcSin` `arcCos`
+`arcTan` `arcTan2:` `floor` `ceil` `round` `sign` `maximum:` `minimum:` `hypot:` `clip:to:`
+(bounds are ordinary operands — scalars or arrays) — NumPy broadcasting and promotion rules.
+Lazy dtype casts within the policy: `toFloat` `toInt` `toBool`.
 
 **Comparisons → masks** (lazy, ELEMENTWISE — NumPy semantics): `== != < <= > >=` build bool
-masks; `and:` `or:` `not` combine them; `select:` (boolean indexing); `mask.where:x else:y`
-(functional conditional); `mask.sum` counts; `any` / `all` reduce to a Boolean.
+masks; `and:` `or:` `not` combine them; `isNan` `isInf` `isFinite` inspect floats; `select:`
+(boolean indexing); `mask.where:x else:y` (functional conditional); `mask.sum` counts;
+`any` / `all` reduce to a Boolean.
 
-**Reductions:** whole-array forms force to a scalar; axis forms (`sum: 0`, `mean: 1`, …) return
-arrays and stay lazy.
+**Reductions:** `sum mean min max argMin argMax std variance ptp median prod countNonZero`
+(plus linalg's `trace det norm`) — whole-array forms force to a scalar; axis forms (`sum: 0`,
+`mean: 1`, …) return arrays and stay lazy. The running forms `cumSum`/`cumProd` (+axis) are
+array-shaped and always stay in the graph.
 
-**Shape & slicing** (lazy): `transpose` `flatten` `reshape:` `from:to:` (first axis) `row:`
-`col:`; `matMul:` for matrix/vector products (1-D dot yields a scalar at force); `split:` (eager)
-divides along axis 0 into a List of live arrays, each of which joins new lazy expressions.
+**Shape & manipulation** (lazy): `transpose` `flatten` `reshape:` `from:to:` / `from:to:by:`
+(first axis) `row:` `col:` `squeeze` `expandDims:` `swapAxes:with:` `flip`(+axis) `roll:`(+axis)
+`tile:` `repeat:`(+axis); `concat:` / `stack:` (+`axis:`) take a List of further arrays — any
+count, in one graph; `split:` (eager) divides along axis 0 into a List of live arrays, each of
+which joins new lazy expressions.
+
+**Sorting & searching** (lazy): `sort` / `argSort` (NumPy's last-axis default; keyword forms
+pick an axis), `unique`, `searchSorted:`, `takeAt:` (fancy indexing by an index array);
+`nonZero` (eager) returns one index array per dimension as a List.
+
+**Linalg:** `matMul:` (1-D dot yields a scalar at force), lazy `solve:` `inv` `outer:`, forcing
+`trace` `det` `norm` (+ lazy `norm:` for row/column norms), and the eager multi-returns `eig`
+(→ `#( values vectors )`; complex spectra raise) and `svd` (→ `#( u s vt )`).
 
 **Materialization:** `toList` (nested Lists; masks become Booleans), `toArray` (the host bulk
 `Array`, 1-D row-major; masks cross as int64 0/1), `at:` (scalar for 1-D, a row instance for
@@ -74,20 +93,19 @@ n-D), `s` (shape + dtype + preview).
 
 ## Performance model
 
-Measured on this machine (release build, `bench.qn`, after the packed-DataValue wire work —
-`profiling/wire-encoding/notes.md`): a minimal extension call is **~40µs** (the raw UDS round
-trip is 2.3µs; the remainder is the FlatBuffers envelope path and host scheduling), and each DAG
-node adds only **~3.5µs** — expression graphs travel as one MessagePack blob, decoded by the C
-`msgpack` codec. A 3-op chain forces in ~79µs vs ~151µs op-by-op (1.9×); deeper chains amortize
-further. The architecture (one round trip per force, no intermediate handles) is the durable
-part; the remaining per-call floor is the next tuning target.
+Measured on this machine (release build, `bench.qn`, on the MessagePack-only wire —
+`profiling/msgpack-wire/notes.md`): a minimal class-dispatch call is **~15µs** (the raw UDS
+round trip is 2.3µs; the rest is the ~12µs syscall/scheduling floor plus Python dispatch), and
+each DAG node adds only ~3µs — the whole frame is one C-`msgpack` codec pass. The batched MSE
+iteration forces in ~45µs vs ~72µs op-by-op at n=1k; deeper chains amortize further. The
+architecture (one round trip per force, no intermediate handles) is the durable part; the
+remaining per-call floor is architectural (syscalls), not codec.
 
 **Anti-patterns:**
 - Per-element access in a loop (`(1..n).each:{ |i| a.at:i }`) pays the full call cost per
   element — materialize once with `toList`/`toArray` instead.
 - Forcing mid-chain (`.eval` between every op) reintroduces per-op round trips — force once at
-  the end. `.eval` is for reusing a subexpression across many later graphs, or splitting a
-  >8-array graph.
+  the end. `.eval` is for reusing a subexpression across many later graphs.
 
 The extension evaluates graphs with plain NumPy today; swapping in a fusing evaluator (numexpr)
 is invisible to Quoin — `eval_graph` in `main.py` is the seam.

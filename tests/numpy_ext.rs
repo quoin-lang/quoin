@@ -730,3 +730,40 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_numpy_linalg_test.qn", &script);
 }
+
+/// P6 parity: lazy dtype casts within the float64/int64/bool policy — toFloat/toInt/toBool
+/// compose in the graph like any other node (float -> int truncates toward zero; -> bool is
+/// the != 0 test; a mask cast to int counts via sum).
+#[test]
+fn numpy_dtype_casts() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_dtype_casts: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var f = ([NumPy]Array.arange:3).toFloat;
+(f.dtype == 'float64').else:{{ ok = false }};
+(f.toList == #( 0.0 1.0 2.0 )).else:{{ ok = false }};
+
+"* float -> int truncates toward zero
+var iv = ([NumPy]Array.fromList:#( 1.9 (-1.9) )).toInt;
+(iv.dtype == 'int64').else:{{ ok = false }};
+(iv.toList == #( 1 (-1) )).else:{{ ok = false }};
+
+var bm = ([NumPy]Array.fromList:#( 0 2 0 )).toBool;
+(bm.toList == #( false true false )).else:{{ ok = false }};
+
+"* casts are lazy and compose in one graph
+((([NumPy]Array.arange:3).toFloat / 2.0).toList == #( 0.0 0.5 1.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 5.0 )) > 2.0).toInt.sum == 1).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_dtype_casts_test.qn", &script);
+}
