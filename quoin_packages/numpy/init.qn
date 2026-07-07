@@ -1,0 +1,308 @@
+"* numpy package glue — the LAZY EXPRESSION layer, loaded by `Extension loadPackage:` right after
+"* the extension's classes are installed (like adbc's init.qn).
+"*
+"* Operators on [NumPy]Array / [NumPy]Expr never call the extension: they build a host-side
+"* expression DAG ([NumPy]Expr nodes) with zero socket traffic. A force point — eval, a reduction
+"* (sum/mean/min/max), or a materialization (toList/toArray/at:/shape/s) — serializes the DAG once
+"* and ships it in ONE `evalGraph:` round trip; the extension runs NumPy over the whole graph and
+"* returns a new resident array (or a scalar). Shared subexpressions (diamonds) are sent and
+"* evaluated once, and intermediates never exist as handles on either side.
+"*
+"* Scalars mix in as constants (`a * 2.0 + 1.0`), with the array on the LEFT of each operator
+"* (`2.0 * a` would dispatch to Double, which knows nothing of arrays). NumPy broadcasting and
+"* promotion rules apply — the extension is the semantics, this layer is only the graph.
+
+"* DAG-node identity for dedup (Map keys are Strings, so serials key as `serial.s`).
+[NumPy]Serial <- { |@n|
+    init -> { @n = 0 };
+    next -> { @n = @n + 1; @n }
+};
+[NumPy]ExprSerial <- [NumPy]Serial.new;
+
+"* One lazy node: an op name (from main.py's tables) + operands, each a [NumPy]Expr, a
+"* [NumPy]Array, or a number — plus optional extra node fields (a reduction axis, a reshape
+"* shape, slice bounds, ...) merged into the wire node. Forcing memoizes (@cache), so a forced
+"* node re-enters later graphs as a cheap base leaf instead of recomputing.
+[NumPy]Expr <- { |@op @operands @extra @cache @serial|
+    .meta <-- {
+        op:with: -> { |o:String elems:List|
+            [NumPy]Expr.new:{ var op = o; var operands = elems; var extra = nil }
+        };
+        op:with:extra: -> { |o:String elems:List ex:Map|
+            [NumPy]Expr.new:{ var op = o; var operands = elems; var extra = ex }
+        };
+        op:with:axis: -> { |o:String elems:List ax:Integer|
+            [NumPy]Expr.op:o with:elems extra:#{ 'axis': ax }
+        }
+    };
+    init: -> { |op:String operands:List extra|
+        @op = op;
+        @operands = operands;
+        @extra = extra;
+        @serial = [NumPy]ExprSerial.next;
+        @cache = nil
+    };
+
+    numpyKind -> { 'expr' };
+    op -> { @op };
+    operands -> { @operands };
+    extra -> { @extra };
+    serial -> { @serial };
+    cached -> { @cache };
+
+    "* operators / elementwise methods: just more lazy nodes
+    #'+:' -> { |rhs| [NumPy]Expr.op:'add' with:#( self rhs ) };
+    #'-:' -> { |rhs| [NumPy]Expr.op:'sub' with:#( self rhs ) };
+    #'*:' -> { |rhs| [NumPy]Expr.op:'mul' with:#( self rhs ) };
+    #'/:' -> { |rhs| [NumPy]Expr.op:'div' with:#( self rhs ) };
+    pow: -> { |rhs| [NumPy]Expr.op:'pow' with:#( self rhs ) };
+    mod: -> { |rhs| [NumPy]Expr.op:'mod' with:#( self rhs ) };
+    matMul: -> { |rhs| [NumPy]Expr.op:'matmul' with:#( self rhs ) };
+    neg -> { [NumPy]Expr.op:'neg' with:#( self ) };
+    sqrt -> { [NumPy]Expr.op:'sqrt' with:#( self ) };
+    exp -> { [NumPy]Expr.op:'exp' with:#( self ) };
+    log -> { [NumPy]Expr.op:'log' with:#( self ) };
+    abs -> { [NumPy]Expr.op:'abs' with:#( self ) };
+    sin -> { [NumPy]Expr.op:'sin' with:#( self ) };
+    cos -> { [NumPy]Expr.op:'cos' with:#( self ) };
+    tan -> { [NumPy]Expr.op:'tan' with:#( self ) };
+    floor -> { [NumPy]Expr.op:'floor' with:#( self ) };
+    ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
+    round -> { [NumPy]Expr.op:'round' with:#( self ) };
+    sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
+
+    "* comparisons are ELEMENTWISE (NumPy semantics): they build bool-mask nodes, not truths.
+    "* (Identity comparison of two arrays is gone — that is the NumPy trade.)
+    #'==:' -> { |rhs| [NumPy]Expr.op:'eq' with:#( self rhs ) };
+    #'!=:' -> { |rhs| [NumPy]Expr.op:'ne' with:#( self rhs ) };
+    #'<:' -> { |rhs| [NumPy]Expr.op:'lt' with:#( self rhs ) };
+    #'<=:' -> { |rhs| [NumPy]Expr.op:'le' with:#( self rhs ) };
+    #'>:' -> { |rhs| [NumPy]Expr.op:'gt' with:#( self rhs ) };
+    #'>=:' -> { |rhs| [NumPy]Expr.op:'ge' with:#( self rhs ) };
+    and: -> { |rhs| [NumPy]Expr.op:'and' with:#( self rhs ) };
+    or: -> { |rhs| [NumPy]Expr.op:'or' with:#( self rhs ) };
+    not -> { [NumPy]Expr.op:'not' with:#( self ) };
+    select: -> { |mask| [NumPy]Expr.op:'select' with:#( self mask ) };
+    where:else: -> { |ifTrue ifFalse| [NumPy]Expr.op:'where' with:#( self ifTrue ifFalse ) };
+    any -> { ([NumPy]Expr.op:'any' with:#( self )).eval };
+    all -> { ([NumPy]Expr.op:'all' with:#( self )).eval };
+
+    "* shape ops and slicing are ordinary lazy nodes too
+    transpose -> { [NumPy]Expr.op:'transpose' with:#( self ) };
+    flatten -> { [NumPy]Expr.op:'flatten' with:#( self ) };
+    reshape: -> { |shape:List| [NumPy]Expr.op:'reshape' with:#( self ) extra:#{ 'shape': shape } };
+    from:to: -> { |start:Integer stop:Integer|
+        [NumPy]Expr.op:'slice' with:#( self ) extra:#{ 'start': start 'stop': stop }
+    };
+    row: -> { |i:Integer| [NumPy]Expr.op:'index' with:#( self ) extra:#{ 'i': i } };
+    col: -> { |i:Integer| [NumPy]Expr.op:'col' with:#( self ) extra:#{ 'i': i } };
+
+    "* whole-array reductions force: the chain collapses to a scalar in one round trip
+    sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
+    mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
+    min -> { ([NumPy]Expr.op:'min' with:#( self )).eval };
+    max -> { ([NumPy]Expr.op:'max' with:#( self )).eval };
+    argMin -> { ([NumPy]Expr.op:'argmin' with:#( self )).eval };
+    argMax -> { ([NumPy]Expr.op:'argmax' with:#( self )).eval };
+    std -> { ([NumPy]Expr.op:'std' with:#( self )).eval };
+    prod -> { ([NumPy]Expr.op:'prod' with:#( self )).eval };
+
+    "* axis reductions produce arrays, so they STAY lazy
+    sum: -> { |axis| [NumPy]Expr.op:'sum' with:#( self ) axis:axis };
+    mean: -> { |axis| [NumPy]Expr.op:'mean' with:#( self ) axis:axis };
+    min: -> { |axis| [NumPy]Expr.op:'min' with:#( self ) axis:axis };
+    max: -> { |axis| [NumPy]Expr.op:'max' with:#( self ) axis:axis };
+    argMin: -> { |axis| [NumPy]Expr.op:'argmin' with:#( self ) axis:axis };
+    argMax: -> { |axis| [NumPy]Expr.op:'argmax' with:#( self ) axis:axis };
+    std: -> { |axis| [NumPy]Expr.op:'std' with:#( self ) axis:axis };
+    prod: -> { |axis| [NumPy]Expr.op:'prod' with:#( self ) axis:axis };
+
+    "* the force point: serialize the DAG, one evalGraph: send, memoize the result
+    eval -> {
+        @cache.defined?.if:{ ^^ @cache };
+        var b = [NumPy]GraphBuilder.new;
+        var root = b.indexOf:self;
+        @cache = b.send:root;
+        @cache
+    };
+
+    "* materializations force, then delegate to the resident array
+    toList -> { .eval.toList };
+    toArray -> { .eval.toArray };
+    shape -> { .eval.shape };
+    dtype -> { .eval.dtype };
+    size -> { .eval.size };
+    ndim -> { .eval.ndim };
+    at: -> { |i| .eval.at:i };
+    s -> { .eval.s }
+};
+
+"* Serializes one DAG walk: nodes in dependency order (each once, by serial), distinct base
+"* arrays collected for the send. The selector ladder carries the receiver + up to 7 more bases;
+"* a wider expression must force a subexpression first (.eval) to fold it into one base.
+[NumPy]GraphBuilder <- { |@nodes @bases @seen|
+    init -> { @nodes = #(); @bases = #(); @seen = Map.new };
+
+    pushNode: -> { |n| @nodes.add:n; @nodes.count - 1 };
+
+    "* the node index for any operand: a number constant, a base array, or a memoized Expr
+    indexOf: -> { |v|
+        (v.can?:#numpyKind).else:{ ^^ .pushNode:#{ 'op': 'const' 'v': v } };
+        (v.numpyKind == 'base').if:{
+            "* dedup repeated references to the SAME resident array (an iteration loop can
+            "* reference one array dozens of times): identity comes from the host
+            "* (Extension.resourceIdOf: — `==` is elementwise here). Base keys ('b3') and
+            "* Expr serial keys ('17') share @seen but can never collide.
+            var key = 'b' + (Extension.resourceIdOf:v).s;
+            (@seen.at:key).defined?.if:{ ^^ @seen.at:key };
+            @bases.add:v;
+            var i = @bases.count - 1;
+            var idx = .pushNode:#{ 'op': 'base' 'i': i };
+            @seen.at:key put:idx;
+            ^^ idx
+        };
+        var key = v.serial.s;
+        (@seen.at:key).defined?.if:{ ^^ @seen.at:key };
+        "* an already-forced subexpression re-enters as its materialized value, not a recompute
+        v.cached.defined?.if:{
+            var idx = .indexOf:v.cached;
+            @seen.at:key put:idx;
+            ^^ idx
+        };
+        "* `each:` rebinds self to the element, so capture the builder for the block
+        var me = self;
+        var argIdxs = #();
+        v.operands.each:{ |o| argIdxs.add:(me.indexOf:o) };
+        var op = v.op;
+        var node = #{ 'op': op 'a': argIdxs };
+        v.extra.defined?.if:{ v.extra.each:{ |kv| node.at:(kv.key) put:(kv.value) } };
+        var idx = .pushNode:node;
+        @seen.at:key put:idx;
+        idx
+    };
+
+    send: -> { |root|
+        var t = #{ 'nodes': @nodes 'root': root };
+        var n = @bases.count;
+        (n == 0).if:{ '[NumPy] expression has no array operand'.throw };
+        (n == 1).if:{ ^^ (@bases.at:0).evalGraph:t };
+        (n == 2).if:{ ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) };
+        (n == 3).if:{ ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) b:(@bases.at:2) };
+        (n == 4).if:{
+            ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) b:(@bases.at:2) c:(@bases.at:3)
+        };
+        (n == 5).if:{
+            ^^ (@bases.at:0)
+                .evalGraph:t
+                 a:(@bases.at:1)
+                 b:(@bases.at:2)
+                 c:(@bases.at:3)
+                 d:(@bases.at:4)
+        };
+        (n == 6).if:{
+            ^^ (@bases.at:0)
+                .evalGraph:t
+                 a:(@bases.at:1)
+                 b:(@bases.at:2)
+                 c:(@bases.at:3)
+                 d:(@bases.at:4)
+                 e:(@bases.at:5)
+        };
+        (n == 7).if:{
+            ^^ (@bases.at:0)
+                .evalGraph:t
+                 a:(@bases.at:1)
+                 b:(@bases.at:2)
+                 c:(@bases.at:3)
+                 d:(@bases.at:4)
+                 e:(@bases.at:5)
+                 f:(@bases.at:6)
+        };
+        (n == 8).if:{
+            ^^ (@bases.at:0)
+                .evalGraph:t
+                 a:(@bases.at:1)
+                 b:(@bases.at:2)
+                 c:(@bases.at:3)
+                 d:(@bases.at:4)
+                 e:(@bases.at:5)
+                 f:(@bases.at:6)
+                 g:(@bases.at:7)
+        };
+        '[NumPy] expression uses more than 8 distinct arrays; force a subexpression with .eval first'.throw
+    }
+};
+
+"* The resident array joins the lazy world: operators build Exprs; reductions are a 1-node graph.
+"* (Kept textually in sync with [NumPy]Expr's builders — an ext-backed reopen can't share a
+"* mixin, and the duplication is declarative one-liners.)
+[NumPy]Array <-- {
+    numpyKind -> { 'base' };
+
+    #'+:' -> { |rhs| [NumPy]Expr.op:'add' with:#( self rhs ) };
+    #'-:' -> { |rhs| [NumPy]Expr.op:'sub' with:#( self rhs ) };
+    #'*:' -> { |rhs| [NumPy]Expr.op:'mul' with:#( self rhs ) };
+    #'/:' -> { |rhs| [NumPy]Expr.op:'div' with:#( self rhs ) };
+    pow: -> { |rhs| [NumPy]Expr.op:'pow' with:#( self rhs ) };
+    mod: -> { |rhs| [NumPy]Expr.op:'mod' with:#( self rhs ) };
+    matMul: -> { |rhs| [NumPy]Expr.op:'matmul' with:#( self rhs ) };
+    neg -> { [NumPy]Expr.op:'neg' with:#( self ) };
+    sqrt -> { [NumPy]Expr.op:'sqrt' with:#( self ) };
+    exp -> { [NumPy]Expr.op:'exp' with:#( self ) };
+    log -> { [NumPy]Expr.op:'log' with:#( self ) };
+    abs -> { [NumPy]Expr.op:'abs' with:#( self ) };
+    sin -> { [NumPy]Expr.op:'sin' with:#( self ) };
+    cos -> { [NumPy]Expr.op:'cos' with:#( self ) };
+    tan -> { [NumPy]Expr.op:'tan' with:#( self ) };
+    floor -> { [NumPy]Expr.op:'floor' with:#( self ) };
+    ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
+    round -> { [NumPy]Expr.op:'round' with:#( self ) };
+    sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
+
+    "* comparisons are ELEMENTWISE (NumPy semantics): they build bool-mask nodes, not truths.
+    "* (Identity comparison of two arrays is gone — that is the NumPy trade.)
+    #'==:' -> { |rhs| [NumPy]Expr.op:'eq' with:#( self rhs ) };
+    #'!=:' -> { |rhs| [NumPy]Expr.op:'ne' with:#( self rhs ) };
+    #'<:' -> { |rhs| [NumPy]Expr.op:'lt' with:#( self rhs ) };
+    #'<=:' -> { |rhs| [NumPy]Expr.op:'le' with:#( self rhs ) };
+    #'>:' -> { |rhs| [NumPy]Expr.op:'gt' with:#( self rhs ) };
+    #'>=:' -> { |rhs| [NumPy]Expr.op:'ge' with:#( self rhs ) };
+    and: -> { |rhs| [NumPy]Expr.op:'and' with:#( self rhs ) };
+    or: -> { |rhs| [NumPy]Expr.op:'or' with:#( self rhs ) };
+    not -> { [NumPy]Expr.op:'not' with:#( self ) };
+    select: -> { |mask| [NumPy]Expr.op:'select' with:#( self mask ) };
+    where:else: -> { |ifTrue ifFalse| [NumPy]Expr.op:'where' with:#( self ifTrue ifFalse ) };
+    any -> { ([NumPy]Expr.op:'any' with:#( self )).eval };
+    all -> { ([NumPy]Expr.op:'all' with:#( self )).eval };
+
+    "* shape ops and slicing are ordinary lazy nodes too
+    transpose -> { [NumPy]Expr.op:'transpose' with:#( self ) };
+    flatten -> { [NumPy]Expr.op:'flatten' with:#( self ) };
+    reshape: -> { |shape:List| [NumPy]Expr.op:'reshape' with:#( self ) extra:#{ 'shape': shape } };
+    from:to: -> { |start:Integer stop:Integer|
+        [NumPy]Expr.op:'slice' with:#( self ) extra:#{ 'start': start 'stop': stop }
+    };
+    row: -> { |i:Integer| [NumPy]Expr.op:'index' with:#( self ) extra:#{ 'i': i } };
+    col: -> { |i:Integer| [NumPy]Expr.op:'col' with:#( self ) extra:#{ 'i': i } };
+
+    sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
+    mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
+    min -> { ([NumPy]Expr.op:'min' with:#( self )).eval };
+    max -> { ([NumPy]Expr.op:'max' with:#( self )).eval };
+    argMin -> { ([NumPy]Expr.op:'argmin' with:#( self )).eval };
+    argMax -> { ([NumPy]Expr.op:'argmax' with:#( self )).eval };
+    std -> { ([NumPy]Expr.op:'std' with:#( self )).eval };
+    prod -> { ([NumPy]Expr.op:'prod' with:#( self )).eval };
+
+    sum: -> { |axis| [NumPy]Expr.op:'sum' with:#( self ) axis:axis };
+    mean: -> { |axis| [NumPy]Expr.op:'mean' with:#( self ) axis:axis };
+    min: -> { |axis| [NumPy]Expr.op:'min' with:#( self ) axis:axis };
+    max: -> { |axis| [NumPy]Expr.op:'max' with:#( self ) axis:axis };
+    argMin: -> { |axis| [NumPy]Expr.op:'argmin' with:#( self ) axis:axis };
+    argMax: -> { |axis| [NumPy]Expr.op:'argmax' with:#( self ) axis:axis };
+    std: -> { |axis| [NumPy]Expr.op:'std' with:#( self ) axis:axis };
+    prod: -> { |axis| [NumPy]Expr.op:'prod' with:#( self ) axis:axis };
+
+    "* an already-materialized array 'forces' to itself, so Array/Expr mix freely
+    eval -> { self }
+}

@@ -17,6 +17,9 @@
 // use; the unused half trips dead-code lints. It is machine-generated — don't hand-edit.
 #[allow(dead_code, unused)]
 mod generated;
+mod packed;
+
+pub use packed::{pack_dv, unpack_dv};
 
 use generated::quoin_ext_proto as g;
 use planus::{Builder, ReadAsRoot};
@@ -112,9 +115,16 @@ pub enum Msg {
     /// ext -> host: the call returns a live host value (the host resolves the handle to its value).
     CallReturnHandle { handle: u64 },
     /// host -> ext: sent once right after connect — asks the extension which classes it provides.
-    GetManifest,
-    /// ext -> host: the reply to `GetManifest`; the extension's provided classes (empty if none).
-    ManifestReturn { classes: Vec<ClassDecl> },
+    /// `packed_ok` advertises that this host accepts and may emit PACKED DataValue payloads
+    /// (one MessagePack blob per value — see `packed.rs` — instead of the boxed table tree).
+    GetManifest { packed_ok: bool },
+    /// ext -> host: the reply to `GetManifest`; the extension's provided classes (empty if none)
+    /// plus its side of the packed negotiation. Each side sends packed payloads only to a peer
+    /// that advertised `packed_ok` (an old peer reads absent as false and never sees one).
+    ManifestReturn {
+        classes: Vec<ClassDecl>,
+        packed_ok: bool,
+    },
     /// ext -> host (re-entrant): make a host String, return a handle to it.
     MakeString { value: String },
     /// ext -> host (re-entrant): read a String-handle back into a scalar string.
@@ -167,8 +177,17 @@ pub enum Msg {
 pub const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
 
 /// Encode one `Msg` as a complete FlatBuffers `Envelope` buffer (no length prefix —
-/// the transport frames it).
+/// the transport frames it), with DataValue payloads as boxed trees (the pre-negotiation form).
 pub fn encode(msg: &Msg) -> Vec<u8> {
+    encode_packed(msg, false)
+}
+
+/// [`encode`] with an explicit payload representation: `packed = true` carries every DataValue
+/// payload (`Call.data`, `Data` args, `CallReturnData`, `MakeValue`, `ReadHandleReturn`) as one
+/// MessagePack blob in the `*packed` fields instead of a boxed `DataValueBox` tree. Send packed
+/// only to a peer that advertised `packed_ok` (`GetManifest`/`ManifestReturn`); [`decode_envelope`]
+/// accepts both representations unconditionally.
+pub fn encode_packed(msg: &Msg, packed: bool) -> Vec<u8> {
     let message = match msg {
         Msg::Call {
             op,
@@ -188,10 +207,17 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             resources: Some(resources.clone()),
             releases: Some(releases.clone()),
             arrays: Some(arrays.iter().map(encode_arrow).collect()),
-            data: data.as_ref().map(|dv| Box::new(encode_dv(dv))),
+            data: match (packed, data) {
+                (false, Some(dv)) => Some(Box::new(encode_dv(dv))),
+                _ => None,
+            },
             class_name: Some(class_name.clone()),
             recv: *recv,
-            method_args: Some(method_args.iter().map(encode_arg).collect()),
+            method_args: Some(method_args.iter().map(|a| encode_arg(a, packed)).collect()),
+            data_packed: match (packed, data) {
+                (true, Some(dv)) => Some(pack_dv(dv)),
+                _ => None,
+            },
         })),
         Msg::CallReturnError { message } => {
             g::Message::CallReturnError(Box::new(g::CallReturnError {
@@ -214,15 +240,19 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             }))
         }
         Msg::CallReturnData { value } => g::Message::CallReturnData(Box::new(g::CallReturnData {
-            value: Some(Box::new(encode_dv(value))),
+            value: (!packed).then(|| Box::new(encode_dv(value))),
+            packed: packed.then(|| pack_dv(value)),
         })),
         Msg::CallReturnHandle { handle } => {
             g::Message::CallReturnHandle(Box::new(g::CallReturnHandle { handle: *handle }))
         }
-        Msg::GetManifest => g::Message::GetManifest(Box::new(g::GetManifest {})),
-        Msg::ManifestReturn { classes } => {
+        Msg::GetManifest { packed_ok } => g::Message::GetManifest(Box::new(g::GetManifest {
+            packed_ok: *packed_ok,
+        })),
+        Msg::ManifestReturn { classes, packed_ok } => {
             g::Message::ManifestReturn(Box::new(g::ManifestReturn {
                 classes: Some(classes.iter().map(encode_class_decl).collect()),
+                packed_ok: *packed_ok,
             }))
         }
         Msg::MakeString { value } => g::Message::MakeString(Box::new(g::MakeString {
@@ -265,15 +295,17 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             name: Some(name.clone()),
         })),
         Msg::MakeValue { value } => g::Message::MakeValue(Box::new(g::MakeValue {
-            value: Some(Box::new(encode_dv(value))),
+            value: (!packed).then(|| Box::new(encode_dv(value))),
+            packed: packed.then(|| pack_dv(value)),
         })),
         Msg::ReadHandle { handle } => {
             g::Message::ReadHandle(Box::new(g::ReadHandle { handle: *handle }))
         }
         Msg::ReadHandleReturn { value, error } => {
             g::Message::ReadHandleReturn(Box::new(g::ReadHandleReturn {
-                value: Some(Box::new(encode_dv(value))),
+                value: (!packed).then(|| Box::new(encode_dv(value))),
                 error: error.clone(),
+                packed: packed.then(|| pack_dv(value)),
             }))
         }
         Msg::HostOpReturn { handle, str, error } => {
@@ -315,6 +347,8 @@ const MAX_DV_DEPTH: usize = 64;
 enum DecodeError {
     Planus(planus::Error),
     TooDeep,
+    /// A malformed packed (MessagePack) DataValue payload.
+    Packed(String),
 }
 
 impl From<planus::Error> for DecodeError {
@@ -331,6 +365,7 @@ impl std::fmt::Display for DecodeError {
                 f,
                 "extension protocol: DataValue nesting exceeds the {MAX_DV_DEPTH}-level decode limit"
             ),
+            DecodeError::Packed(e) => write!(f, "{e}"),
         }
     }
 }
@@ -363,32 +398,38 @@ fn decode_class_decl(c: g::ClassDeclRef<'_>) -> Result<ClassDecl, planus::Error>
 }
 
 /// Owned [`Arg`] -> the generated `Arg` table.
-fn encode_arg(a: &Arg) -> g::Arg {
+fn encode_arg(a: &Arg, packed: bool) -> g::Arg {
     match a {
         Arg::Data(d) => g::Arg {
             kind: g::ArgKind::Data,
-            data: Some(Box::new(encode_dv(d))),
+            data: (!packed).then(|| Box::new(encode_dv(d))),
             id: 0,
+            packed: packed.then(|| pack_dv(d)),
         },
         Arg::Resource(id) => g::Arg {
             kind: g::ArgKind::Resource,
             data: None,
             id: *id,
+            packed: None,
         },
         Arg::Handle(h) => g::Arg {
             kind: g::ArgKind::Handle,
             data: None,
             id: *h,
+            packed: None,
         },
     }
 }
 
-/// A decoded `ArgRef` -> owned [`Arg`].
+/// A decoded `ArgRef` -> owned [`Arg`] (either payload representation).
 fn decode_arg(a: g::ArgRef<'_>) -> Result<Arg, DecodeError> {
     Ok(match a.kind()? {
-        g::ArgKind::Data => Arg::Data(match a.data()? {
-            Some(b) => decode_dv(b, 0)?,
-            None => DataValue::Null,
+        g::ArgKind::Data => Arg::Data(match a.packed()? {
+            Some(b) => unpack_dv(b.as_ref()).map_err(DecodeError::Packed)?,
+            None => match a.data()? {
+                Some(b) => decode_dv(b, 0)?,
+                None => DataValue::Null,
+            },
         }),
         g::ArgKind::Resource => Arg::Resource(a.id()?),
         g::ArgKind::Handle => Arg::Handle(a.id()?),
@@ -511,9 +552,12 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, DecodeError> {
                 }
                 arrays
             },
-            data: match c.data()? {
-                Some(b) => Some(decode_dv(b, 0)?),
-                None => None,
+            data: match c.data_packed()? {
+                Some(b) => Some(unpack_dv(b.as_ref()).map_err(DecodeError::Packed)?),
+                None => match c.data()? {
+                    Some(b) => Some(decode_dv(b, 0)?),
+                    None => None,
+                },
             },
             class_name: c.class_name()?.unwrap_or_default().to_string(),
             recv: c.recv()?,
@@ -548,15 +592,20 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, DecodeError> {
             },
         },
         g::MessageRef::CallReturnData(c) => Msg::CallReturnData {
-            value: match c.value()? {
-                Some(b) => decode_dv(b, 0)?,
-                None => DataValue::Null,
+            value: match c.packed()? {
+                Some(b) => unpack_dv(b.as_ref()).map_err(DecodeError::Packed)?,
+                None => match c.value()? {
+                    Some(b) => decode_dv(b, 0)?,
+                    None => DataValue::Null,
+                },
             },
         },
         g::MessageRef::CallReturnHandle(c) => Msg::CallReturnHandle {
             handle: c.handle()?,
         },
-        g::MessageRef::GetManifest(_) => Msg::GetManifest,
+        g::MessageRef::GetManifest(m) => Msg::GetManifest {
+            packed_ok: m.packed_ok()?,
+        },
         g::MessageRef::ManifestReturn(m) => Msg::ManifestReturn {
             classes: {
                 let mut classes = Vec::new();
@@ -567,6 +616,7 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, DecodeError> {
                 }
                 classes
             },
+            packed_ok: m.packed_ok()?,
         },
         g::MessageRef::MakeString(m) => Msg::MakeString {
             value: m.value()?.unwrap_or_default().to_string(),
@@ -618,18 +668,24 @@ fn decode_inner(bytes: &[u8]) -> Result<Option<Msg>, DecodeError> {
             name: g_.name()?.unwrap_or_default().to_string(),
         },
         g::MessageRef::MakeValue(m) => Msg::MakeValue {
-            value: match m.value()? {
-                Some(b) => decode_dv(b, 0)?,
-                None => DataValue::Null,
+            value: match m.packed()? {
+                Some(b) => unpack_dv(b.as_ref()).map_err(DecodeError::Packed)?,
+                None => match m.value()? {
+                    Some(b) => decode_dv(b, 0)?,
+                    None => DataValue::Null,
+                },
             },
         },
         g::MessageRef::ReadHandle(r) => Msg::ReadHandle {
             handle: r.handle()?,
         },
         g::MessageRef::ReadHandleReturn(r) => Msg::ReadHandleReturn {
-            value: match r.value()? {
-                Some(b) => decode_dv(b, 0)?,
-                None => DataValue::Null,
+            value: match r.packed()? {
+                Some(b) => unpack_dv(b.as_ref()).map_err(DecodeError::Packed)?,
+                None => match r.value()? {
+                    Some(b) => decode_dv(b, 0)?,
+                    None => DataValue::Null,
+                },
             },
             error: r.error()?.map(str::to_string),
         },

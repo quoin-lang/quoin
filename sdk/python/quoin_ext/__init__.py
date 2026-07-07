@@ -22,14 +22,66 @@ issues re-entrant host-ops (:meth:`Host.make_string`, :meth:`Host.call_method`,
 """
 
 import decimal
+import os
 import socket
 import struct
 
 import flatbuffers
 
+try:
+    # Packed-DataValue support: structured payloads as one MessagePack blob per value instead of
+    # nested DataValueBox tables (negotiated per connection; see `_packed_available`). msgpack is
+    # a C extension, so a packed payload costs one codec pass instead of ~2.5us per node of
+    # pure-python flatbuffers table machinery (profiling/wire-encoding/notes.md).
+    import msgpack
+except ImportError:  # the SDK stays fully functional on the boxed-tree path
+    msgpack = None
+
 from . import ext_generated as g
 
 _I64_MIN, _I64_MAX = -(2**63), 2**63 - 1
+
+
+def _packed_available():
+    """True if this process can speak PACKED DataValue payloads: the `msgpack` package imports
+    (it is optional — without it the boxed-tree path is used) and packing isn't disabled via
+    `QUOIN_EXT_NO_MSGPACK` (a test hook for exercising the fallback)."""
+    return msgpack is not None and not os.environ.get("QUOIN_EXT_NO_MSGPACK")
+
+
+def _pack_default(o):
+    """`msgpack.packb` hook for the two non-native DataValue kinds (the wire contract in
+    `schema/ext.fbs`): a >64-bit int -> ext type 1 (ASCII digits); Decimal -> ext type 2."""
+    if isinstance(o, decimal.Decimal):
+        return msgpack.ExtType(2, str(o).encode())
+    if isinstance(o, int):
+        return msgpack.ExtType(1, str(o).encode())
+    raise TypeError(f"cannot serialize {type(o).__name__} as a structured value")
+
+
+def _ext_hook(code, data):
+    if code == 1:
+        return int(data.decode())
+    if code == 2:
+        return decimal.Decimal(data.decode())
+    raise ValueError(f"extension: unknown packed DataValue ext type {code}")
+
+
+def _pack_dv(obj):
+    return msgpack.packb(obj, use_bin_type=True, default=_pack_default)
+
+
+def _unpack_dv(b):
+    return msgpack.unpackb(b, raw=False, strict_map_key=False, ext_hook=_ext_hook)
+
+
+def _read_get_manifest_packed(frame):
+    """The `packed_ok` capability the host advertised in its spawn-time `GetManifest`."""
+    env = g.Envelope.GetRootAs(frame, 0)
+    gm = g.GetManifest()
+    t = env.Msg()
+    gm.Init(t.Bytes, t.Pos)
+    return bool(gm.PackedOk())
 
 
 def _encode_dv(builder, obj):
@@ -108,6 +160,187 @@ def _encode_dv_kind(b, obj):
     raise TypeError(f"cannot serialize {type(obj).__name__} as a structured value")
 
 
+def _byte_vector(tbl, slot):
+    """A `[ubyte]` field as ONE buffer slice. Never read byte vectors through the per-element
+    accessor (`x.V(i)` / `a.Data(k)`): each call is ~1µs of pure-python flatbuffers machinery,
+    which turned a 32 KB Array argument into 31ms. `slot` mirrors the field's generated
+    accessor (`DvBytes.V` -> 4, `ArrowArray.Data` -> 8)."""
+    t = tbl._tab
+    o = flatbuffers.number_types.UOffsetTFlags.py_type(t.Offset(slot))
+    if o == 0:
+        return b""
+    start = t.Vector(o)
+    return bytes(t.Bytes[start : start + t.VectorLen(o)])
+
+
+# ---------------------------------------------------------------------------------------------
+# Hand-rolled FlatBuffers hot paths
+#
+# Going through the generated pure-python bindings costs ~50 wrapped accessor calls (~0.5-1us
+# each) per MINIMAL frame — roughly a third of the whole per-call budget in each direction
+# (profiling/wire-encoding/notes.md). Every inbound frame after the manifest is a `Call`, and
+# nearly every reply is one of three fixed shapes, so those paths read/write the FlatBuffers
+# bytes directly; everything else stays on the generated code. The vtable slots mirror
+# `ext_generated.py` (Call.Op -> 4 ... Call.DataPacked -> 24); the end-to-end extension tests
+# cover every shape against the host's planus reader.
+# ---------------------------------------------------------------------------------------------
+
+_U16 = struct.Struct("<H")
+_I32 = struct.Struct("<i")
+_U32 = struct.Struct("<I")
+_U64 = struct.Struct("<Q")
+
+
+def _fb_field(buf, tpos, slot):
+    """Absolute position of the field at vtable `slot` of the table at `tpos` (0 = absent)."""
+    vt = tpos - _I32.unpack_from(buf, tpos)[0]
+    if slot >= _U16.unpack_from(buf, vt)[0]:
+        return 0
+    off = _U16.unpack_from(buf, vt + slot)[0]
+    return tpos + off if off else 0
+
+
+def _fb_indirect(buf, pos):
+    """Follow the uoffset at `pos` (a string/vector/table field) to its target position."""
+    return pos + _U32.unpack_from(buf, pos)[0]
+
+
+def _fb_str(buf, pos, default=""):
+    if pos == 0:
+        return default
+    p = _fb_indirect(buf, pos)
+    n = _U32.unpack_from(buf, p)[0]
+    return buf[p + 4 : p + 4 + n].decode("utf-8")
+
+
+def _fb_bytes(buf, pos):
+    if pos == 0:
+        return b""
+    p = _fb_indirect(buf, pos)
+    n = _U32.unpack_from(buf, p)[0]
+    return bytes(buf[p + 4 : p + 4 + n])
+
+
+def _fb_u64_vec(buf, pos):
+    if pos == 0:
+        return []
+    p = _fb_indirect(buf, pos)
+    n = _U32.unpack_from(buf, p)[0]
+    return list(struct.unpack_from(f"<{n}Q", buf, p + 4))
+
+
+def _fb_tables(buf, pos):
+    """The table positions of a `[Table]` vector field at `pos`."""
+    if pos == 0:
+        return []
+    p = _fb_indirect(buf, pos)
+    n = _U32.unpack_from(buf, p)[0]
+    return [_fb_indirect(buf, p + 4 + 4 * j) for j in range(n)]
+
+
+def _fb_msg_type(frame):
+    """The `Envelope.msg` union type of a frame (g.Message.*), without generated-code cost."""
+    epos = _U32.unpack_from(frame, 0)[0]
+    tf = _fb_field(frame, epos, 4)
+    return frame[tf] if tf else g.Message.NONE
+
+
+def _fb_root_call(frame):
+    """The `Call` table position of `frame`, or `None` when the frame isn't a Call envelope."""
+    epos = _U32.unpack_from(frame, 0)[0]
+    tf = _fb_field(frame, epos, 4)
+    if tf == 0 or frame[tf] != g.Message.Call:
+        return None
+    return _fb_indirect(frame, _fb_field(frame, epos, 6))
+
+
+def _fb_boxed_dv(buf, pos):
+    """Decode the boxed `DataValueBox` at field `pos` via the generated walker (the negotiated
+    fallback path — packed peers never hit this)."""
+    box = g.DataValueBox()
+    box.Init(buf, _fb_indirect(buf, pos))
+    return _decode_dv(box)
+
+
+# Reply frames, laid out by hand (see the layout notes on each). All offsets are u32-aligned;
+# vtables sit after their tables (negative soffsets), payload bytes last.
+
+# [root=4][Envelope 4..16: soffset -12, type u8 @8.. wait see below][EV 16..24][inner 24..][...]
+# Envelope table: [soffset i32][msg_type u8 + 3 pad][msg uoffset] -> 12 bytes, vtable (8,12,4,8).
+_FAST_ENV = _U32.pack(4) + _I32.pack(-12)  # root uoffset; Envelope soffset (vtable at 16)
+_FAST_EV = struct.pack("<4H", 8, 12, 4, 8)
+
+
+def _fast_str_reply(msg_type, s):
+    """`CallReturn { result }` / `CallReturnError { message }`: one string field at slot 4.
+    Layout: [root:0..4][E:4..16][EV:16..24][C:24..32][CV:32..38][pad:2][str:40..]."""
+    sb = s.encode("utf-8")
+    return (
+        _FAST_ENV
+        + bytes((msg_type,))
+        + b"\x00\x00\x00"
+        + _U32.pack(12)  # msg uoffset @12 -> C at 24
+        + _FAST_EV
+        + _I32.pack(-8)  # C soffset (vtable at 32)
+        + _U32.pack(12)  # result uoffset @28 -> str at 40
+        + struct.pack("<3H", 6, 8, 4)
+        + b"\x00\x00"
+        + _U32.pack(len(sb))
+        + sb
+        + b"\x00"
+    )
+
+
+def _fast_packed_reply(payload):
+    """`CallReturnData { packed }`: one [ubyte] field at slot 6 (slot 4 = the boxed form, absent).
+    Layout: [root][E][EV][C:24..32][CV:32..40][vec:40..]."""
+    return (
+        _FAST_ENV
+        + bytes((g.Message.CallReturnData,))
+        + b"\x00\x00\x00"
+        + _U32.pack(12)
+        + _FAST_EV
+        + _I32.pack(-8)  # C soffset (vtable at 32)
+        + _U32.pack(12)  # packed uoffset @28 -> vec at 40
+        + struct.pack("<4H", 8, 8, 0, 4)  # vt_len, tbl_len, value(4)=absent, packed(6)=@4
+        + _U32.pack(len(payload))
+        + payload
+    )
+
+
+def _fast_resource_reply(resource_id, class_name):
+    """`CallReturnResource { resource u64 @4, class_name str @6 }`. The u64 sits at C+8 (an
+    8-aligned buffer position); an empty class_name is omitted, like the generated encoder.
+    Layout: [root][E][EV][C:24..40][CV:40..48][str:48..]."""
+    if class_name:
+        sb = class_name.encode("utf-8")
+        return (
+            _FAST_ENV
+            + bytes((g.Message.CallReturnResource,))
+            + b"\x00\x00\x00"
+            + _U32.pack(12)
+            + _FAST_EV
+            + _I32.pack(-16)  # C soffset (vtable at 40)
+            + _U32.pack(20)  # class_name uoffset @28 -> str at 48
+            + _U64.pack(resource_id)  # @32, 8-aligned
+            + struct.pack("<4H", 8, 16, 8, 4)
+            + _U32.pack(len(sb))
+            + sb
+            + b"\x00"
+        )
+    return (
+        _FAST_ENV
+        + bytes((g.Message.CallReturnResource,))
+        + b"\x00\x00\x00"
+        + _U32.pack(12)
+        + _FAST_EV
+        + _I32.pack(-16)  # C soffset (vtable at 40)
+        + b"\x00\x00\x00\x00"  # pad so the u64 lands 8-aligned at C+8
+        + _U64.pack(resource_id)
+        + struct.pack("<4H", 8, 16, 8, 0)
+    )
+
+
 def _decode_dv(box):
     """Decode a `DataValueBox` reader into a native Python value."""
     K = g.DataValueKind
@@ -134,8 +367,7 @@ def _decode_dv(box):
     if t == K.DvStr:
         return _text(as_table(g.DvStr).V())
     if t == K.DvBytes:
-        x = as_table(g.DvBytes)
-        return bytes(x.V(i) for i in range(x.VLength()))
+        return _byte_vector(as_table(g.DvBytes), 4)
     if t == K.DvList:
         x = as_table(g.DvList)
         return [_decode_dv(x.Items(i)) for i in range(x.ItemsLength())]
@@ -311,8 +543,13 @@ def _encode_get_global(name):
     return _envelope(b, g.Message.GetGlobal, g.GetGlobalEnd(b))
 
 
-def _encode_make_value(obj):
+def _encode_make_value(obj, packed=False):
     b = flatbuffers.Builder(64)
+    if packed:
+        v = b.CreateByteVector(_pack_dv(obj))
+        g.MakeValueStart(b)
+        g.MakeValueAddPacked(b, v)
+        return _envelope(b, g.Message.MakeValue, g.MakeValueEnd(b))
     box = _encode_dv(b, obj)
     g.MakeValueStart(b)
     g.MakeValueAddValue(b, box)
@@ -374,33 +611,19 @@ def _encode_invoke_block(block, batches):
 
 
 def _encode_call_return(result):
-    b = flatbuffers.Builder(64)
-    r = b.CreateString(result)
-    g.CallReturnStart(b)
-    g.CallReturnAddResult(b, r)
-    return _envelope(b, g.Message.CallReturn, g.CallReturnEnd(b))
+    return _fast_str_reply(g.Message.CallReturn, result)
 
 
 def _encode_call_return_error(message):
     """A call failed recoverably: the host raises a catchable Quoin error and the extension keeps
     running. A terminal frame, like the other ``CallReturn*`` replies."""
-    b = flatbuffers.Builder(64)
-    m = b.CreateString(message)
-    g.CallReturnErrorStart(b)
-    g.CallReturnErrorAddMessage(b, m)
-    return _envelope(b, g.Message.CallReturnError, g.CallReturnErrorEnd(b))
+    return _fast_str_reply(g.Message.CallReturnError, message)
 
 
 def _encode_call_return_resource(resource_id, class_name=""):
-    b = flatbuffers.Builder(64)
     # `class_name` (Phase 3) names the registered class the resource is an instance of, so a method
     # can return an instance of any of the extension's classes (cross-class returns); "" = ExtResource.
-    name_off = b.CreateString(class_name) if class_name else None
-    g.CallReturnResourceStart(b)
-    g.CallReturnResourceAddResource(b, resource_id)
-    if name_off is not None:
-        g.CallReturnResourceAddClassName(b, name_off)
-    return _envelope(b, g.Message.CallReturnResource, g.CallReturnResourceEnd(b))
+    return _fast_resource_reply(resource_id, class_name)
 
 
 def _encode_call_return_array(array):
@@ -411,7 +634,9 @@ def _encode_call_return_array(array):
     return _envelope(b, g.Message.CallReturnArray, g.CallReturnArrayEnd(b))
 
 
-def _encode_call_return_data(obj):
+def _encode_call_return_data(obj, packed=False):
+    if packed:
+        return _fast_packed_reply(_pack_dv(obj))
     b = flatbuffers.Builder(64)
     box = _encode_dv(b, obj)
     g.CallReturnDataStart(b)
@@ -459,10 +684,11 @@ def _encode_manifest_return(classes):
     classes_vec = b.EndVector()
     g.ManifestReturnStart(b)
     g.ManifestReturnAddClasses(b, classes_vec)
+    g.ManifestReturnAddPackedOk(b, _packed_available())
     return _envelope(b, g.Message.ManifestReturn, g.ManifestReturnEnd(b))
 
 
-def _encode_reply(reply):
+def _encode_reply(reply, packed=False):
     if isinstance(reply, Resource):
         return _encode_call_return_resource(reply.id)
     if isinstance(reply, ReturnHandle):
@@ -472,7 +698,7 @@ def _encode_reply(reply):
     if isinstance(reply, str):
         return _encode_call_return(reply)
     # Anything else (None / bool / int / float / Decimal / bytes / list / dict) is a structured value.
-    return _encode_call_return_data(reply)
+    return _encode_call_return_data(reply, packed)
 
 
 # decoders -----------------------------------------------------------------------------------
@@ -486,20 +712,30 @@ def _msg(buf, expected, name):
 
 
 def _decode_call(buf):
-    table = _msg(buf, g.Message.Call, "Call")
-    call = g.Call()
-    call.Init(table.Bytes, table.Pos)
-    handles = [call.Handles(j) for j in range(call.HandlesLength())]
-    resources = [call.Resources(j) for j in range(call.ResourcesLength())]
-    releases = [call.Releases(j) for j in range(call.ReleasesLength())]
+    c = _fb_root_call(buf)
+    if c is None:
+        raise ValueError(f"extension: expected Call, got msg type {_fb_msg_type(buf)}")
     arrays = []
-    for j in range(call.ArraysLength()):
-        a = call.Arrays(j)
-        data = bytes(a.Data(k) for k in range(a.DataLength()))
-        arrays.append(ArrowArray(a.Dtype(), data))
-    box = call.Data()
-    data = _decode_dv(box) if box is not None else None
-    return (_text(call.Op()), _text(call.Arg()), handles, resources, releases, arrays, data)
+    for a in _fb_tables(buf, _fb_field(buf, c, 14)):
+        dt = _fb_field(buf, a, 4)
+        arrays.append(ArrowArray(buf[dt] if dt else 0, _fb_bytes(buf, _fb_field(buf, a, 8))))
+    pb = _fb_field(buf, c, 24)  # data_packed
+    df = _fb_field(buf, c, 16)  # boxed data (the fallback representation)
+    if pb:
+        data = _unpack_dv(_fb_bytes(buf, pb))
+    elif df:
+        data = _fb_boxed_dv(buf, df)
+    else:
+        data = None
+    return (
+        _fb_str(buf, _fb_field(buf, c, 4)),
+        _fb_str(buf, _fb_field(buf, c, 6)),
+        _fb_u64_vec(buf, _fb_field(buf, c, 8)),
+        _fb_u64_vec(buf, _fb_field(buf, c, 10)),
+        _fb_u64_vec(buf, _fb_field(buf, c, 12)),
+        arrays,
+        data,
+    )
 
 
 def _decode_class_call(buf):
@@ -515,8 +751,12 @@ def _decode_class_call(buf):
         a = call.MethodArgs(j)
         kind = a.Kind()
         if kind == g.ArgKind.Data:
-            box = a.Data()
-            args.append(("data", _decode_dv(box) if box is not None else None))
+            pb = _byte_vector(a, 10)  # Arg.packed
+            if pb:
+                args.append(("data", _unpack_dv(pb)))
+            else:
+                box = a.Data()
+                args.append(("data", _decode_dv(box) if box is not None else None))
         elif kind == g.ArgKind.Resource:
             args.append(("resource", a.Id()))
         else:  # Handle
@@ -549,13 +789,14 @@ class Host:
     issues re-entrant host-ops over the connection (each a synchronous round-trip the host
     services while parked on the reply). Mirrors the Rust `Host`."""
 
-    def __init__(self, conn, handles, resources, releases, arrays, data):
+    def __init__(self, conn, handles, resources, releases, arrays, data, packed=False):
         self._conn = conn
         self._handles = handles
         self._resources = resources
         self._releases = releases
         self._arrays = arrays
         self._data = data
+        self._packed = packed
 
     # --- the call's arguments ---
     def handles(self):
@@ -620,7 +861,7 @@ class Host:
     def make_value(self, obj):
         """Construct any host value from a native Python value, returning a handle to it (for
         building non-string method arguments). The general form of `make_string`."""
-        handle, _ = self._host_op(_encode_make_value(obj))
+        handle, _ = self._host_op(_encode_make_value(obj, self._packed))
         return handle
 
     def read_handle(self, handle):
@@ -636,6 +877,9 @@ class Host:
         err = _opt_text(r.Error())
         if err is not None:
             raise RuntimeError(err)
+        pb = _byte_vector(r, 8)  # ReadHandleReturn.packed
+        if pb:
+            return _unpack_dv(pb)
         box = r.Value()
         return _decode_dv(box) if box is not None else None
 
@@ -669,6 +913,9 @@ def serve(path, handler):
     server.listen(1)
     try:
         conn, _ = server.accept()
+        # Packed-DataValue negotiation: send packed only if the host advertised it AND msgpack
+        # is available here (the host always accepts both representations).
+        packed = False
         try:
             while True:
                 frame = read_frame(conn)
@@ -676,14 +923,15 @@ def serve(path, handler):
                     break
                 # Phase 3: the host asks for a class manifest once, right after connect. A
                 # generic-handler extension provides none; everything else is a Call.
-                if g.Envelope.GetRootAs(frame, 0).MsgType() == g.Message.GetManifest:
+                if _fb_msg_type(frame) == g.Message.GetManifest:
+                    packed = _read_get_manifest_packed(frame) and _packed_available()
                     write_frame(conn, _encode_manifest_return([]))
                     continue
                 op, arg, handles, resources, releases, arrays, data = _decode_call(frame)
-                host = Host(conn, handles, resources, releases, arrays, data)
+                host = Host(conn, handles, resources, releases, arrays, data, packed)
                 # A handler exception becomes a catchable Quoin error; the extension keeps serving.
                 try:
-                    reply = _encode_reply(handler(host, op, arg))
+                    reply = _encode_reply(handler(host, op, arg), packed)
                 except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
                     reply = _encode_call_return_error(str(exc))
                 write_frame(conn, reply)
@@ -740,8 +988,8 @@ class _HostBlock:
     to that value over the socket, returning the result as a native Python value — so a handler can
     treat it like an ordinary function (e.g. ``[block(x) for x in self.data]``)."""
 
-    def __init__(self, conn, handle):
-        self._host = Host(conn, [], [], [], [], None)
+    def __init__(self, conn, handle, packed=False):
+        self._host = Host(conn, [], [], [], [], None, packed)
         self._handle = handle
 
     def __call__(self, value):
@@ -775,15 +1023,20 @@ class Extension:
         registered_types = tuple(reg.cls for reg in self._classes.values())
         try:
             conn, _ = server.accept()
+            # Packed-DataValue negotiation, exactly as in the generic `serve`.
+            packed = False
             try:
                 while True:
                     frame = read_frame(conn)
                     if frame is None:
                         break
-                    if g.Envelope.GetRootAs(frame, 0).MsgType() == g.Message.GetManifest:
+                    if _fb_msg_type(frame) == g.Message.GetManifest:
+                        packed = _read_get_manifest_packed(frame) and _packed_available()
                         write_frame(conn, _encode_manifest_return(self._manifest()))
                         continue
-                    write_frame(conn, self._dispatch(conn, frame, table, registered_types))
+                    write_frame(
+                        conn, self._dispatch(conn, frame, table, registered_types, packed)
+                    )
             finally:
                 conn.close()
         finally:
@@ -804,7 +1057,7 @@ class Extension:
                 return reg.name
         return ""
 
-    def _resolve_args(self, raw_args, table, conn):
+    def _resolve_args(self, raw_args, table, conn, packed=False):
         """Resolve the tagged wire args to native Python values: data passes through, an ext-instance
         id becomes the live instance, and a handle becomes a callable :class:`_HostBlock`. Order is
         preserved, so the handler receives its arguments positionally."""
@@ -818,10 +1071,10 @@ class Extension:
                     raise ValueError(f"argument references no live instance {val}")
                 out.append(obj)
             else:  # handle
-                out.append(_HostBlock(conn, val))
+                out.append(_HostBlock(conn, val, packed))
         return out
 
-    def _dispatch(self, conn, frame, table, registered_types):
+    def _dispatch(self, conn, frame, table, registered_types, packed=False):
         """Route one method ``Call`` to its handler and return the terminal reply frame."""
         op, class_name, recv, releases, raw_args = _decode_class_call(frame)
         # The host batches dropped instances onto `releases`; free them from the table.
@@ -830,7 +1083,7 @@ class Extension:
         reg = self._classes.get(class_name)
         if reg is None:
             raise ValueError(f"no extension-backed class '{class_name}'")
-        args = self._resolve_args(raw_args, table, conn)
+        args = self._resolve_args(raw_args, table, conn, packed)
         if recv == 0:
             # Class-side: a constructor builds a new instance.
             ctor = reg.constructors.get(op)
@@ -857,4 +1110,4 @@ class Extension:
         # A returned registered instance becomes a new ext-side object; anything else is data.
         if isinstance(result, registered_types):
             return _encode_call_return_resource(table.insert(result), self._class_name_of(result))
-        return _encode_reply(result)
+        return _encode_reply(result, packed)

@@ -89,6 +89,9 @@ pub struct Host<'a> {
     arrays: Vec<ArrowArray>,
     /// The structured-value payload passed via `call:with:data:`, if any.
     data: Option<DataValue>,
+    /// Whether the host advertised packed-DataValue support (`GetManifest.packed_ok`) — this
+    /// side's re-entrant host-ops (e.g. `MakeValue`) then carry packed payloads too.
+    packed: bool,
 }
 
 impl<'a> Host<'a> {
@@ -250,7 +253,10 @@ impl<'a> Host<'a> {
     /// Send one host-op and await its `HostOpReturn`, surfacing a host-reported error as an
     /// `io::Error`. Returns the reply's `(handle, str)` payload (either may be unset).
     fn host_op(&mut self, msg: &Msg) -> io::Result<(Handle, Option<String>)> {
-        write_frame(self.stream, &quoin_ext_proto::encode(msg))?;
+        write_frame(
+            self.stream,
+            &quoin_ext_proto::encode_packed(msg, self.packed),
+        )?;
         let frame = read_frame(self.stream)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
         })?;
@@ -315,15 +321,20 @@ pub fn serve<R: Into<Reply>>(
 ) -> io::Result<()> {
     let listener = UnixListener::bind(path)?;
     let (mut stream, _addr) = listener.accept()?;
+    // Packed-DataValue negotiation: send packed payloads only once the host advertised support
+    // in its `GetManifest` (an old host reads absent as false and we stay on boxed trees).
+    let mut packed = false;
     while let Some(frame) = read_frame(&mut stream)? {
         match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
             // A generic-handler extension provides no classes (Phase 3): reply with an empty
             // manifest so it stays backward-compatible under the host's spawn-time `GetManifest`.
-            Msg::GetManifest => {
+            Msg::GetManifest { packed_ok } => {
+                packed = packed_ok;
                 write_frame(
                     &mut stream,
                     &quoin_ext_proto::encode(&Msg::ManifestReturn {
                         classes: Vec::new(),
+                        packed_ok: true,
                     }),
                 )?;
             }
@@ -350,10 +361,14 @@ pub fn serve<R: Into<Reply>>(
                         releases,
                         arrays,
                         data,
+                        packed,
                     };
                     handler(&mut host, &op, &arg).into()
                 };
-                write_frame(&mut stream, &quoin_ext_proto::encode(&reply_to_msg(reply)))?;
+                write_frame(
+                    &mut stream,
+                    &quoin_ext_proto::encode_packed(&reply_to_msg(reply), packed),
+                )?;
             }
             other => {
                 return Err(invalid_data(format!(
@@ -576,9 +591,12 @@ impl Extension {
         let listener = UnixListener::bind(path)?;
         let (mut stream, _addr) = listener.accept()?;
         let mut table = ObjectTable::default();
+        // Packed-DataValue negotiation, exactly as in the generic `serve`.
+        let mut packed = false;
         while let Some(frame) = read_frame(&mut stream)? {
             match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
-                Msg::GetManifest => {
+                Msg::GetManifest { packed_ok } => {
+                    packed = packed_ok;
                     write_frame(&mut stream, &quoin_ext_proto::encode(&self.manifest()))?;
                 }
                 Msg::Call {
@@ -600,8 +618,9 @@ impl Extension {
                         &op,
                         recv,
                         &method_args,
+                        packed,
                     )?;
-                    write_frame(&mut stream, &quoin_ext_proto::encode(&reply))?;
+                    write_frame(&mut stream, &quoin_ext_proto::encode_packed(&reply, packed))?;
                 }
                 other => {
                     return Err(invalid_data(format!(
@@ -634,7 +653,10 @@ impl Extension {
                 class_selectors: c.constructors.keys().cloned().collect(),
             })
             .collect();
-        Msg::ManifestReturn { classes }
+        Msg::ManifestReturn {
+            classes,
+            packed_ok: true,
+        }
     }
 
     /// Route one method `Call` to its handler and produce the terminal reply frame.
@@ -646,6 +668,7 @@ impl Extension {
         op: &str,
         recv: u64,
         method_args: &[quoin_ext_proto::Arg],
+        packed: bool,
     ) -> io::Result<Msg> {
         let class = self
             .classes
@@ -659,6 +682,7 @@ impl Extension {
             releases: Vec::new(),
             arrays: Vec::new(),
             data: None,
+            packed,
         };
         if recv == 0 {
             // Class-side: a constructor builds a new instance.

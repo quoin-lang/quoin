@@ -1,0 +1,49 @@
+"* Mandelbrot, vectorized — ASCII escape-time rendering via [NumPy]Array.
+"*
+"* Each terminal row is ONE whole-array computation: the row's 76 complex points iterate
+"* z := z^2 + c together as a single lazy expression DAG (complex arithmetic hand-built from two
+"* float arrays), with a bool mask freezing points once they escape. Nothing is forced inside
+"* the iteration loop — 32 iterations of arithmetic build one graph of ~350 nodes, and the only
+"* socket round trip per row is the final `toList`. The zr*zr / zi*zi / mask diamonds are
+"* serialized and evaluated once each (DAG dedup).
+"*
+"* Run from the repo root:  qn quoin_packages/numpy/demos/mandelbrot.qn
+use numpy:*;
+
+var width = 76;
+var height = 24;
+var maxIter = 32;
+var ramp = #( ' ' '.' ':' ';' '+' '*' '%' '@' );
+
+"* The real parts are the same for every row: one resident array, built once.
+var cr = [NumPy]Array.linspace:(-2.2) to:0.8 count:width;
+
+var elapsed = Timer.time:{
+    (0..height).each:{ |row|
+        var ci = (row * (2.4 / (height - 1))) - 1.2;
+
+        var zr = cr * 0.0;
+        var zi = cr * 0.0;
+        var count = cr * 0.0;
+
+        (0..maxIter).each:{ |i|
+            var zr2 = zr * zr;
+            var zi2 = zi * zi;
+            var active = (zr2 + zi2) <= 4.0;
+            var nzr = (zr2 - zi2) + cr;
+            var nzi = ((zr * zi) * 2.0) + ci;
+            zr = active.where:nzr else:zr;
+            zi = active.where:nzi else:zi;
+            count = active.where:(count + 1.0) else:count
+        };
+
+        "* the row's single force: 76 escape counts back as one list
+        var counts = count.toList;
+        var chars = #();
+        counts.each:{ |c| chars.add:(ramp.at:(((c * 7.0) / maxIter).floor)) };
+        (chars.join:'').print
+    }
+};
+
+('% pixels, % iterations deep, 1 round trip per row, %ms'
+    % #( (width * height) maxIter (elapsed / 1000) )).print
