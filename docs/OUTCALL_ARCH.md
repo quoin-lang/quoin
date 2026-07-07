@@ -1,8 +1,17 @@
 # The outcall seam: three fixes on one branch
 
-*Status: DESIGN (branch `perf/ic-direct-calls` @ base `449dc84`).
-Scope agreed: the two recorded small fixes ride first, then the
-direct-call arc. Baselines in `profiling/ic-direct-calls/`.*
+*Status: F1 + F2 + D1 + D2 SHIPPED on `perf/ic-direct-calls` (base
+`449dc84`). Cumulative: **btrees −13.8%, richards −13.9%, combinators
+−7.8%**; maps +3.0% = static code layout, proven by a same-binary
+fast-path-off shim measuring maps flat and btrees −15.3% (notes.md).
+F1: List/Map/Set/Bytes class `new` constructs real natives, `new:`
+errors clearly. F2: deferred-nil locals are entry-nil (in-loop decls
+re-nil at the site); `sum`/`reduce:` promote — the suite's refusals
+are down to the two correct `whileDo:` trampolines. D2 disciplines
+learned: receiver-phase peek before lane decode; site id in the ip
+lane's high bits (a 13th ABI arg taxes every call); fills once per
+epoch (polymorphic thrash); no-site sentinel for devirt native
+fallbacks. D3 remains the recorded future arc. Corpus 1638/0 ×5.*
 
 ## Why: the measured shape
 
@@ -33,7 +42,7 @@ arm → `codegen::invoke`):
 
 ## Slices
 
-### F1 — `List.new` / `Map.new` / `Set.new` broken shells (correctness rider)
+### F1 — `List.new` / `Map.new` / `Set.new` broken shells (correctness rider) — SHIPPED
 
 `Callable::NewNoBlock`/`Callable::New` are the `lookup_method`
 FALLBACKS when no user `new`/`new:` exists — so the generic path mints
@@ -55,7 +64,7 @@ Tests: `List.new.add:1` roundtrip + Map/Set equivalents; `new:` error
 pinned; the M1-era `gen.qn` guardrail shape (closures into
 `List.new`-built lists) now passes as written.
 
-### F2 — deferred-nil locals: entry-nil semantics (un-refuses `sum:`/`reduce:`)
+### F2 — deferred-nil locals: entry-nil semantics (un-refuses `sum:`/`reduce:`) — SHIPPED
 
 Today `var x = nil` DEFERS (no slot; "type decided at first store",
 `nil_deferred`). Two problems: a READ before any store has no slot and
@@ -91,7 +100,7 @@ to two: the two correct `whileDo:` trampolines); combinators measured
 (reduce feeds `sum`); a semantics pin for the in-loop re-nil shape,
 verified against the interpreter.
 
-### D1 — lean seam (mechanical, measure before D2)
+### D1 — lean seam (mechanical, measure before D2) — SHIPPED
 
 No dispatch change; remove the itemized waste on the warm path:
 
@@ -105,7 +114,7 @@ No dispatch change; remove the itemized waste on the warm path:
   IS the rooted stack; keep the error-snapshot path working off the
   window directly.
 
-### D2 — per-site AOT entry cache (the "AOT IC")
+### D2 — per-site AOT entry cache (the "AOT IC") — SHIPPED
 
 A side-table cell per compiled outcall site `(tid, ip)` — plain
 `'static` storage like the leaked selector/name tables, NOT Gc —
