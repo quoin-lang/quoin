@@ -74,4 +74,17 @@
         .isFalse:{ #<1 2> == 5 };          "* rhs is not a Set
         .isFalse:{ #<1 2> == #<1 9> };     "* same size, differing element
     };
+
+    "* `Set.new` constructs a REAL native set (QUOIN_TODO broken-shell fix);
+    "* `new:` is refused clearly.
+    .test:
+    classNewConstructs -> {
+        var s = Set.new;
+        s.add:3;
+        .is:{ s.contains?:3 } equalTo:true;
+        var caught = 'no';
+        { Set.new:{ a = 1 } }.catch:{ |e| caught = 'yes' };
+        .is:{ caught } equalTo:'yes';
+    }
+
 }

@@ -52,5 +52,8 @@
         var bad = Bytes.of:#( 255 254 );
         .is:{ { bad.asString }.catch:{ |ex| 'threw' } } equalTo:'threw';
         .is:{ bad.asStringLossy.length } greaterThanOrEqualTo:1
-    }
+    };
+
+    "* `Bytes.new` = `Bytes.empty` (QUOIN_TODO broken-shell fix).
+    .test:classNewConstructs -> { .is:{ Bytes.new.size } equalTo:0 }
 }
