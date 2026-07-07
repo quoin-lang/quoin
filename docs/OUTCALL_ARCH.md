@@ -134,10 +134,9 @@ noise; corpus ×5 per slice; canary healthy.
 
 ### D3 (recorded, likely its own arc) — native direct inner calls
 
-For uniform-signature entries (all-Obj params), bake the guarded
-direct call into the caller's native code (fn-pointer load + epoch +
-recv guard + call), eliminating the helper hop entirely. Needs
-re-translation-on-warm-IC machinery; out of scope here.
+Detailed implementation plan: **docs/DIRECT_CALLS_ARCH.md** (D2.5
+interior specialization + the D3 direct-call tier: warmth-triggered
+retranslation, baked guards, windowless-first tiering).
 
 ## Doctrine
 
