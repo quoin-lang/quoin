@@ -607,3 +607,67 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_numpy_manipulation_test.qn", &script);
 }
+
+/// P4 parity: creation & random — eye/full:with:/diag: (an instance arg to a class-side
+/// selector), logSpace/geomSpace, meshgrid (a class-side selector returning a List of live
+/// grids), and the seeded RNG (`seed:` makes random:/randomNormal:/randomInt:to:shape: replay).
+#[test]
+fn numpy_creation_random() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_creation_random: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+"* eye / full / diag
+((([NumPy]Array.eye:2).toList) == #( #( 1.0 0.0 ) #( 0.0 1.0 ) )).else:{{ ok = false }};
+((([NumPy]Array.full:#( 2 ) with:7.0).toList) == #( 7.0 7.0 )).else:{{ ok = false }};
+((([NumPy]Array.full:3 with:1).dtype) == 'int64').else:{{ ok = false }};
+var d = [NumPy]Array.diag:([NumPy]Array.fromList:#( 2.0 3.0 ));
+(d.shape == #( 2 2 )).else:{{ ok = false }};
+((d.row:1).toList == #( 0.0 3.0 )).else:{{ ok = false }};
+
+"* logSpace exact at integer powers; geomSpace within float tolerance
+((([NumPy]Array.logSpace:0.0 to:2.0 count:3).toList) == #( 1.0 10.0 100.0 ))
+    .else:{{ ok = false }};
+var gs = [NumPy]Array.geomSpace:1.0 to:4.0 count:3;
+(((gs - ([NumPy]Array.fromList:#( 1.0 2.0 4.0 ))).abs.max) < 0.000001).else:{{ ok = false }};
+
+"* meshgrid: a class-side selector returning a List of two live grids
+var xs = [NumPy]Array.fromList:#( 1.0 2.0 3.0 );
+var ys = [NumPy]Array.fromList:#( 10.0 20.0 );
+var mg = [NumPy]Array.meshgrid:xs with:ys;
+(mg.count == 2).else:{{ ok = false }};
+((mg.at:0).shape == #( 2 3 )).else:{{ ok = false }};
+(((mg.at:0).row:0).toList == #( 1.0 2.0 3.0 )).else:{{ ok = false }};
+(((mg.at:1).col:0).toList == #( 10.0 20.0 )).else:{{ ok = false }};
+"* the grids are real arrays: they join lazy graphs
+(((mg.at:0) + (mg.at:1)).sum == 102.0).else:{{ ok = false }};
+
+"* seeded RNG replays exactly
+[NumPy]Array.seed:42;
+var r1 = ([NumPy]Array.random:#( 4 )).toList;
+[NumPy]Array.seed:42;
+var r2 = ([NumPy]Array.random:#( 4 )).toList;
+(r1 == r2).else:{{ ok = false }};
+[NumPy]Array.seed:42;
+var n1 = ([NumPy]Array.randomNormal:#( 3 )).toList;
+[NumPy]Array.seed:42;
+var n2 = ([NumPy]Array.randomNormal:#( 3 )).toList;
+(n1 == n2).else:{{ ok = false }};
+
+"* randomInt bounds: `to:` is exclusive, like Quoin ranges
+[NumPy]Array.seed:7;
+var ri = [NumPy]Array.randomInt:0 to:5 shape:#( 100 );
+(ri.dtype == 'int64').else:{{ ok = false }};
+((ri.min >= 0) && (ri.max < 5)).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_creation_random_test.qn", &script);
+}

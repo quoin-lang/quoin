@@ -339,6 +339,55 @@ def from_array(arr):
     return NdArray(np.frombuffer(arr.data, dtype=dt))
 
 
+def eye(n):
+    return NdArray(np.eye(n))
+
+
+def full(shape, value):
+    return NdArray(np.full(_shape(shape), value))
+
+
+def diag(v):
+    """A diagonal matrix from a 1-D array (or the diagonal of a 2-D one) — an instance
+    argument to a class-side selector."""
+    if not isinstance(v, NdArray):
+        raise ValueError("diag: expects a [NumPy]Array")
+    return NdArray(np.diag(v.a))
+
+
+def meshgrid(x, y):
+    """Coordinate grids for two 1-D axes — a List of two live instances (the class-side
+    non-instance-return path)."""
+    if not (isinstance(x, NdArray) and isinstance(y, NdArray)):
+        raise ValueError("meshgrid:with: expects two [NumPy]Arrays")
+    gx, gy = np.meshgrid(x.a, y.a)
+    return [NdArray(gx), NdArray(gy)]
+
+
+def log_space(start, stop, count):
+    return NdArray(np.logspace(start, stop, count))
+
+
+def geom_space(start, stop, count):
+    return NdArray(np.geomspace(start, stop, count))
+
+
+def random_normal(shape):
+    return NdArray(_RNG.standard_normal(_shape(shape)))
+
+
+def random_int(lo, hi, shape):
+    """Uniform int64 in [lo, hi) — `to:` is exclusive, like Quoin ranges."""
+    return NdArray(_RNG.integers(lo, hi, _shape(shape)))
+
+
+def seed(n):
+    """Reseed the extension's RNG so random:/randomNormal:/randomInt:to:shape: replay."""
+    global _RNG
+    _RNG = np.random.default_rng(n)
+    return None
+
+
 if __name__ == "__main__":
     ext = quoin_ext.Extension()
     ext.register(
@@ -347,11 +396,20 @@ if __name__ == "__main__":
         constructors={
             "zeros:": zeros,
             "ones:": ones,
+            "eye:": eye,
+            "full:with:": full,
+            "diag:": diag,
             "fromList:": from_list,
             "fromArray:": from_array,
             "arange:": arange,
             "linspace:to:count:": linspace,
+            "logSpace:to:count:": log_space,
+            "geomSpace:to:count:": geom_space,
+            "meshgrid:with:": meshgrid,
             "random:": random,
+            "randomNormal:": random_normal,
+            "randomInt:to:shape:": random_int,
+            "seed:": seed,
         },
         methods={
             "shape": NdArray.shape,
