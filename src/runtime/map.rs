@@ -105,7 +105,9 @@ pub fn build_map_class() -> NativeClassBuilder {
         })
         // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6): the VALUE type
         // is generic (`Map(String V)`); keys are pinned String. ---
-        .class_method("new", |vm, mc, _receiver, _args| Ok(vm.new_map(mc, IndexMap::new())))
+        .class_method("new", |vm, mc, _receiver, _args| {
+            Ok(vm.new_map(mc, IndexMap::new()))
+        })
         // `Map.new:` — a config block on a native map is meaningless; refuse
         // clearly instead of minting a payload-less shell (QUOIN_TODO.md).
         .class_method("new:", |_vm, _mc, _receiver, _args| {

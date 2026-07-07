@@ -1119,7 +1119,7 @@ impl<'a> Translator<'a> {
                         stack.push(av);
                     }
                     Instruction::LoadLocal(sym) => {
-                        let av = self.local_av(b, &fx, &vars, &obj_param_avs, *sym, ip)?;
+                        let av = self.local_av(b, &fx, &mut vars, &obj_param_avs, *sym, ip)?;
                         stack.push(av);
                     }
                     Instruction::LoadGlobal(name) => {
@@ -1141,13 +1141,37 @@ impl<'a> Translator<'a> {
                             && !vars.contains_key(sym)
                             && !obj_param_avs.contains_key(sym)
                         {
-                            // declaration prologue: type decided at first store —
-                            // TRACKED, because a closure materialization must
-                            // force still-deferred vars into real slots (a
-                            // write-captured block stores them OUT-OF-BAND
-                            // through its snapshot env, invisible to "first
-                            // store"; the S1 recordResult nil-capture bug).
-                            self.nil_deferred.insert(*sym);
+                            if Self::in_loop_span(insts, ip) {
+                                // F2: an IN-LOOP `var x = nil` re-executes per
+                                // iteration — give it a real slot and re-nil it
+                                // HERE, the interpreter's fresh-binding-per-
+                                // execution semantics. Deferral would leave
+                                // iteration 2 reading iteration 1's value
+                                // (unreachable today only because M1's survival
+                                // walk refuses the conditional-store shapes
+                                // that would expose it — this makes the
+                                // semantics right by construction, not by
+                                // shield).
+                                self.nil_deferred.remove(sym);
+                                let w = self.alloc_scratch()?;
+                                let idx = self.abs_slot(b, &fx, w);
+                                let (k, bits) = self.encode(b, &fx, AV::Nil);
+                                let f = self.func_ref(b, self.helpers.slot_set);
+                                let call = b.ins().call(f, &[fx.vm, fx.mc, idx, k, bits]);
+                                let tag = b.inst_results(call)[0];
+                                self.tag_check(b, &fx, tag);
+                                vars.insert(*sym, VarSlot::Obj(w, None));
+                            } else {
+                                // declaration prologue: type decided at first
+                                // store — TRACKED: a read forces a slot (F2,
+                                // entry-nil), and a closure materialization
+                                // must force still-deferred vars too (a
+                                // write-captured block stores them OUT-OF-BAND
+                                // through its snapshot env, invisible to
+                                // "first store"; the S1 recordResult
+                                // nil-capture bug).
+                                self.nil_deferred.insert(*sym);
+                            }
                         } else if self.free_in_block(&vars, &obj_param_avs, *sym)
                             && matches!(&insts[ip], Instruction::StoreLocal(_))
                         {
@@ -1196,12 +1220,19 @@ impl<'a> Translator<'a> {
                         stack.push(out);
                     }
                     Instruction::IntBinLL(a, bb, kind) => {
-                        let ra =
-                            self.local_scalar(b, &fx, &vars, &obj_param_avs, *a, AotKind::Int, ip)?;
+                        let ra = self.local_scalar(
+                            b,
+                            &fx,
+                            &mut vars,
+                            &obj_param_avs,
+                            *a,
+                            AotKind::Int,
+                            ip,
+                        )?;
                         let rb = self.local_scalar(
                             b,
                             &fx,
-                            &vars,
+                            &mut vars,
                             &obj_param_avs,
                             *bb,
                             AotKind::Int,
@@ -1211,8 +1242,15 @@ impl<'a> Translator<'a> {
                         stack.push(out);
                     }
                     Instruction::IntBinLC(a, c, kind) => {
-                        let ra =
-                            self.local_scalar(b, &fx, &vars, &obj_param_avs, *a, AotKind::Int, ip)?;
+                        let ra = self.local_scalar(
+                            b,
+                            &fx,
+                            &mut vars,
+                            &obj_param_avs,
+                            *a,
+                            AotKind::Int,
+                            ip,
+                        )?;
                         let ci = c.as_int().ok_or("IntBinLC without int constant")?;
                         let rb = b.ins().iconst(types::I64, ci);
                         let out = self.emit_int_bin(b, &fx, *kind, ra, rb)?;
@@ -1239,7 +1277,7 @@ impl<'a> Translator<'a> {
                         let ra = self.local_scalar(
                             b,
                             &fx,
-                            &vars,
+                            &mut vars,
                             &obj_param_avs,
                             *a,
                             AotKind::Double,
@@ -1248,7 +1286,7 @@ impl<'a> Translator<'a> {
                         let rb = self.local_scalar(
                             b,
                             &fx,
-                            &vars,
+                            &mut vars,
                             &obj_param_avs,
                             *bb,
                             AotKind::Double,
@@ -1261,7 +1299,7 @@ impl<'a> Translator<'a> {
                         let ra = self.local_scalar(
                             b,
                             &fx,
-                            &vars,
+                            &mut vars,
                             &obj_param_avs,
                             *a,
                             AotKind::Double,
@@ -1642,7 +1680,7 @@ impl<'a> Translator<'a> {
                         let (sel, n) = (*sel, *n);
                         match &insts[ip] {
                             Instruction::SendLocal(a, ..) => {
-                                let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
+                                let v = self.local_av(b, &fx, &mut vars, &obj_param_avs, *a, ip)?;
                                 stack.push(v);
                             }
                             Instruction::SendField(field, ..) => {
@@ -1657,13 +1695,14 @@ impl<'a> Translator<'a> {
                                 stack.push(v);
                             }
                             Instruction::SendLocalLocal(a, bb, ..) => {
-                                let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
+                                let v = self.local_av(b, &fx, &mut vars, &obj_param_avs, *a, ip)?;
                                 stack.push(v);
-                                let v = self.local_av(b, &fx, &vars, &obj_param_avs, *bb, ip)?;
+                                let v =
+                                    self.local_av(b, &fx, &mut vars, &obj_param_avs, *bb, ip)?;
                                 stack.push(v);
                             }
                             Instruction::SendLocalConst(a, c, ..) => {
-                                let v = self.local_av(b, &fx, &vars, &obj_param_avs, *a, ip)?;
+                                let v = self.local_av(b, &fx, &mut vars, &obj_param_avs, *a, ip)?;
                                 stack.push(v);
                                 let v = self.const_av(b, &fx, &mut vars, &obj_param_avs, c, ip)?;
                                 stack.push(v);
@@ -1958,18 +1997,13 @@ impl<'a> Translator<'a> {
     ) -> Result<AV, String> {
         // Force still-deferred `var x = nil` locals into REAL slots before
         // snapshotting: the closure may read or write them through its
-        // snapshot env, which "type decided at first store" cannot see. The
-        // slot init to nil is exact — any earlier store would have typed the
-        // var already.
+        // snapshot env, which "type decided at first store" cannot see. No
+        // site init (F2): scratch slots are NIL at invocation entry, deferral
+        // implies no store was translated, and in-loop declarations never
+        // defer — so the slot already holds the declaration's value.
         let deferred: Vec<Symbol> = self.nil_deferred.drain().collect();
         for sym in deferred {
             let w = self.alloc_scratch()?;
-            let idx = self.abs_slot(b, fx, w);
-            let (k, bits) = self.encode(b, fx, AV::Nil);
-            let f = self.func_ref(b, self.helpers.slot_set);
-            let call = b.ins().call(f, &[fx.vm, fx.mc, idx, k, bits]);
-            let tag = b.inst_results(call)[0];
-            self.tag_check(b, fx, tag);
             vars.insert(sym, VarSlot::Obj(w, None));
         }
 
@@ -2008,23 +2042,7 @@ impl<'a> Translator<'a> {
         // Straight-line early exits (richards' task bodies) pass both.
         if has_nlr {
             let insts = &self.cand.block.bytecode.0;
-            // Every offset-carrying form counts (the guard branches only go
-            // forward TODAY, but a future backward fused form must not
-            // silently reopen the per-iteration hole).
-            let in_loop = insts.iter().enumerate().any(|(j, inst)| match inst {
-                Instruction::Jump(o)
-                | Instruction::IfJump(o)
-                | Instruction::ElseJump(o)
-                | Instruction::BranchIfNotBool(o)
-                | Instruction::BranchIfNotList(o)
-                | Instruction::BranchIfNotPlainNew(o) => {
-                    *o < 0 && {
-                        let target = (j as isize + *o) as usize;
-                        target <= ip && ip <= j
-                    }
-                }
-                _ => false,
-            });
+            let in_loop = Self::in_loop_span(insts, ip);
             // M3: a site inside a GUARD-FAIL COLD SPAN is exempt — it executes
             // only when the guard fails, and then the real send it feeds
             // dominates the snapshot cost (the interpreter-fallback economics
@@ -2036,12 +2054,11 @@ impl<'a> Translator<'a> {
             // combinators). The own-selector rule below is deliberately NOT
             // exempted: the `whileDo:` trampoline's cold copy re-sends its own
             // selector, and compiling it deepens native recursion per
-            // ITERATION (the original 5.8×-sieve shape). The exemption also
-            // requires NO pending deferred-nil locals: materialization forces
-            // them into slots with a nil-init AT THIS SITE, and a cold span
-            // inside a loop would re-nil an accumulator stored on a previous
-            // iteration (the `reduce:` shape) — refuse rather than corrupt.
-            if in_loop && !(Self::in_guard_cold_span(insts, ip) && self.nil_deferred.is_empty()) {
+            // ITERATION (the original 5.8×-sieve shape). (The M3-era
+            // deferred-nil condition is gone: F2 made the force init-free —
+            // entry-nil slots — so a cold span can no longer re-nil a live
+            // accumulator.)
+            if in_loop && !Self::in_guard_cold_span(insts, ip) {
                 return Err(format!(
                     "per-iteration ^^ materialization (fused loop) at ip {ip}"
                 ));
@@ -2127,6 +2144,27 @@ impl<'a> Translator<'a> {
             self.materialized_nlr.insert(out_idx);
         }
         Ok(AV::Dyn(out_idx))
+    }
+
+    /// Is `ip` inside a fused-loop span — crossed by any backward jump?
+    /// (Every offset-carrying form counts; guard branches only go forward
+    /// today, but a future backward fused form must not silently slip a
+    /// per-iteration site past the checks that consult this.)
+    fn in_loop_span(insts: &[Instruction], ip: usize) -> bool {
+        insts.iter().enumerate().any(|(j, inst)| match inst {
+            Instruction::Jump(o)
+            | Instruction::IfJump(o)
+            | Instruction::ElseJump(o)
+            | Instruction::BranchIfNotBool(o)
+            | Instruction::BranchIfNotList(o)
+            | Instruction::BranchIfNotPlainNew(o) => {
+                *o < 0 && {
+                    let target = (j as isize + *o) as usize;
+                    target <= ip && ip <= j
+                }
+            }
+            _ => false,
+        })
     }
 
     /// Is `ip` inside a GUARD-FAIL COLD SPAN — the `<cold>` half of the
@@ -2265,7 +2303,7 @@ impl<'a> Translator<'a> {
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
-        vars: &HashMap<Symbol, VarSlot>,
+        vars: &mut HashMap<Symbol, VarSlot>,
         obj_params: &HashMap<Symbol, CVal>,
         sym: Symbol,
         ip: usize,
@@ -2285,6 +2323,21 @@ impl<'a> Translator<'a> {
                 }
                 Ok(AV::Dyn(idx))
             }
+            None if self.nil_deferred.contains(&sym) => {
+                // F2: a READ of a still-deferred `var x = nil` — give it a
+                // slot and just read it. Scratch slots are NIL-initialized at
+                // invocation entry (`invoke`/`invoke_block`), and a non-loop
+                // declaration executes at most once before any read (a
+                // bytecode-order read before the decl compiles as LoadGlobal,
+                // never here), so no site init is needed — and one WOULD
+                // re-nil a live accumulator when the read sits inside a fused
+                // loop (the `reduce:` shape this un-refuses).
+                self.nil_deferred.remove(&sym);
+                let w = self.alloc_scratch()?;
+                let idx = self.abs_slot(b, fx, w);
+                vars.insert(sym, VarSlot::Obj(w, None));
+                Ok(AV::Dyn(idx))
+            }
             None if self.cand.role == AotRole::BlockTemplate => {
                 // B3a: a free variable — read the closure's real EnvFrame cell.
                 self.emit_env_get(b, fx, sym)
@@ -2300,7 +2353,7 @@ impl<'a> Translator<'a> {
         &mut self,
         b: &mut FunctionBuilder,
         fx: &FnCtx,
-        vars: &HashMap<Symbol, VarSlot>,
+        vars: &mut HashMap<Symbol, VarSlot>,
         obj_params: &HashMap<Symbol, CVal>,
         sym: Symbol,
         want: AotKind,

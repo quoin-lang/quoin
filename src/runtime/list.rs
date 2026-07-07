@@ -131,7 +131,9 @@ pub fn build_list_class() -> NativeClassBuilder {
         // "Not a native state" error (QUOIN_TODO.md). A `new:` config block is
         // meaningless on a native collection — refuse it clearly rather than
         // mint the same poison object.
-        .class_method("new", |vm, mc, _receiver, _args| Ok(vm.new_list(mc, Vec::new())))
+        .class_method("new", |vm, mc, _receiver, _args| {
+            Ok(vm.new_list(mc, Vec::new()))
+        })
         .class_method("new:", |_vm, _mc, _receiver, _args| {
             Err(QuoinError::Other(
                 "List has no instance fields — construct with `#()`, `List.new`, or `List.of:`"
