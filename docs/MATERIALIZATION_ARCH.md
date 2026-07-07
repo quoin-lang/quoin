@@ -13,9 +13,10 @@ pre-merge arcs. M1 lives in `Compiler::declare_local`/
 M2 in `devirt.rs` `try_compile_fused_instantiation`/`fusable_config`,
 the `BranchIfNotPlainNew`/`NewWithFields` instructions, `vm.rs`
 `plain_new_check_cached`/`exec_new_with_fields` (+`IC_PLAINNEW_KIND`),
-and the two AOT helpers. Post-M2 btrees is outcall-bound like richards
-(the next frontier: direct calls for IC-stable sites — a future arc).
-M3 (gate-lift audit + CROSS re-measure) remains. Baselines +
+and the two AOT helpers; M3 in `in_guard_cold_span` + the exemption in
+`materialize_closure`. Post-arc, btrees and richards share one profile
+shape: compiled-to-compiled OUTCALL dispatch — the next frontier is
+direct calls for IC-stable sites (a future arc). Baselines +
 experiments in `profiling/cheap-materialization/`.*
 
 ## 1. Why: the measured shape
