@@ -61,6 +61,16 @@ pub enum DataValue {
     Bytes(Vec<u8>),
     List(Vec<DataValue>),
     Map(Vec<(String, DataValue)>),
+    /// A live extension instance carried *inside* a structured value (MessagePack ext type 3):
+    /// `id` is the instance's ext-side object-table key. Ext -> host, `class_name` names the
+    /// registered extension-backed class so the host wraps the id as the right installed class
+    /// (a method can return e.g. a List of instances); host -> ext, `class_name` is empty — the
+    /// extension resolves `id` in its own table. Only meaningful between a host and the one
+    /// extension that owns the ids; the host refuses to send another extension's instance.
+    Resource {
+        id: u64,
+        class_name: String,
+    },
 }
 
 /// One extension-provided class (Phase 3), as declared in a [`Msg::ManifestReturn`]. The host
@@ -76,12 +86,15 @@ pub struct ClassDecl {
 /// One ordered method argument for an extension-backed-class send (Phase 3 — `Call.method_args`).
 /// `Data` is an inline structured value; `Resource` is an ext-instance's object-table id (so a
 /// method can take another of the extension's objects); `Handle` is a host-value handle for a block
-/// or other non-data host object the extension drives via `invoke_block` / `call_method`.
+/// or other non-data host object the extension drives via `invoke_block` / `call_method`; `Array`
+/// is a bulk numeric column (the data plane, inline — so an extension-backed-class method can take
+/// a host `Array` without exploding it into per-element values).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Arg {
     Data(DataValue),
     Resource(u64),
     Handle(u64),
+    Array(ArrowArray),
 }
 
 /// A single control-plane frame, in either direction. Encode with [`encode`]; decode a

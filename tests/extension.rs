@@ -465,6 +465,11 @@ var vb = Vector.ofFloats:#( 4.0 5.0 6.0 );
 var mapped = va.map:{{ |x| x * 10.0 }};
 (mapped.sum == 60.0).else:{{ ok = false }};
 
+"* a bulk `Array` argument: the whole column crosses the data plane into a constructor
+var fromCol = Vector.ofArray:(Array.ofFloats:#( 2.0 4.0 6.0 ));
+(fromCol.sum == 12.0).else:{{ ok = false }};
+(fromCol.length == 3).else:{{ ok = false }};
+
 ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
@@ -832,6 +837,26 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 "#
     );
     assert_script_passes("qn_ext_fidelity_test.qn", &script);
+}
+
+/// Ownership of live-instance references: an extension-backed instance can only cross to the
+/// extension that owns it. Sending another extension's instance inside a structured value is a
+/// catchable error naming the cause — its resource id would be misread in the wrong extension's
+/// object table.
+#[test]
+fn extension_cross_extension_instance_refused() {
+    let vector_bin = env!("CARGO_BIN_EXE_ext_vector");
+    let data_bin = env!("CARGO_BIN_EXE_ext_data");
+    let script = format!(
+        r#"
+var ev = Extension.spawn:'{vector_bin}';
+var v = Vector.ofFloats:#( 1.0 2.0 );
+var ed = Extension.spawn:'{data_bin}';
+var msg = {{ ed.call:'echoData' with:'' data:#( v ); 'no-error' }}.catch:{{ |ex| ex.s }};
+(msg.contains?:'different extension').if:{{ 'PASS'.print }} else:{{ ('FAIL: ' + msg).print }};
+"#
+    );
+    assert_script_passes("qn_ext_cross_ownership_test.qn", &script);
 }
 
 /// The protocol-version handshake: a peer whose `ManifestReturn` names a version this host

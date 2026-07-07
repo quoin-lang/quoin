@@ -66,11 +66,10 @@ use quoin_ext_proto::{
 
 use crate::arg;
 use crate::error::QuoinError;
-use crate::ext_sdk::{Host, HostCtx};
 use crate::io_backend::{IoRequest, IoResult, StreamId};
 use crate::runtime::array::{self, ArrayDType};
-use crate::runtime::big_decimal::{NativeBigDecimal, make_decimal};
-use crate::runtime::big_integer::{NativeBigInteger, make_bigint};
+use crate::runtime::big_decimal::NativeBigDecimal;
+use crate::runtime::big_integer::NativeBigInteger;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::runtime::eval_string;
@@ -99,7 +98,15 @@ fn unrepresentable(type_name: &str) -> QuoinError {
 /// intermediate tree. Errors on values with no data representation (a Block, a Symbol, a user
 /// instance, another native type like Duration/DateTime). Map pairs keep insertion order;
 /// `BigInteger`/`BigDecimal` cross as their decimal-string form.
-fn value_to_wire(v: Value<'_>) -> Result<WireData, QuoinError> {
+///
+/// `owner` is the *target* extension's resource-reap queue (its identity): an extension-backed
+/// instance owned by that extension crosses as a live `Resource` reference; one owned by a
+/// *different* extension — or any instance when `owner` is `None` (host-op channels carry plain
+/// data) — is an error, so the tree-level caller can fall back (or refuse) explicitly.
+fn value_to_wire(
+    v: Value<'_>,
+    owner: Option<&Rc<RefCell<Vec<u64>>>>,
+) -> Result<WireData, QuoinError> {
     match v {
         Value::Nil => Ok(WireData::Null),
         Value::Bool(b) => Ok(WireData::Bool(b)),
@@ -117,19 +124,39 @@ fn value_to_wire(v: Value<'_>) -> Result<WireData, QuoinError> {
                     ObjectPayload::NativeState(_) => {} // dispatched below, after dropping the borrow
                 }
             }
+            if let Ok(owned) = v.with_native_state::<NativeExtResource, _, _>(|r| {
+                owner
+                    .is_some_and(|o| Rc::ptr_eq(&r.reap, o))
+                    .then_some(r.resource_id)
+            }) {
+                return match owned {
+                    // Host -> ext, the class name is redundant (the extension resolves the id
+                    // in its own object table), so it stays empty.
+                    Some(id) => Ok(WireData::Resource {
+                        id,
+                        class_name: String::new(),
+                    }),
+                    None => Err(QuoinError::Other(
+                        "extension: cannot send this extension-backed instance here — it \
+                         belongs to a different extension (or this channel carries plain \
+                         data only)"
+                            .to_string(),
+                    )),
+                };
+            }
             if let Ok(items) =
                 v.with_native_state::<NativeListState, _, _>(|l| l.get_vec().to_vec())
             {
                 let items = items
                     .iter()
-                    .map(|e| value_to_wire(*e))
+                    .map(|e| value_to_wire(*e, owner))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(WireData::List(items));
             }
             if let Ok(map) = v.with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone()) {
                 let mut entries = Vec::with_capacity(map.len());
                 for (k, val) in map {
-                    entries.push((k, value_to_wire(val)?));
+                    entries.push((k, value_to_wire(val, owner)?));
                 }
                 return Ok(WireData::Map(entries));
             }
@@ -145,40 +172,68 @@ fn value_to_wire(v: Value<'_>) -> Result<WireData, QuoinError> {
     }
 }
 
+/// Context for materializing `Resource` leaves in a received tree: the owning extension's
+/// resource-reap queue (cloned into each wrapper, so drops release normally) and its package
+/// namespace (to resolve the declared class — cross-class returns inside data). Absent where
+/// resources are not accepted (host-op values — deferred).
+struct ResCtx<'a> {
+    reap: &'a Rc<RefCell<Vec<u64>>>,
+    namespace: Option<&'a str>,
+}
+
 /// Build a Quoin value directly from a wire `DataValue` (the receive side): `Map` → `Map`,
-/// `List` → `List`, decimal-string `BigInt`/`Decimal` parsed back to arbitrary precision.
-/// The nesting depth of a received tree is already capped by the decoder.
-fn wire_to_value<'gc>(host: &dyn Host<'gc>, dv: &WireData) -> Result<Value<'gc>, QuoinError> {
+/// `List` → `List`, decimal-string `BigInt`/`Decimal` parsed back to arbitrary precision, a
+/// `Resource` leaf wrapped as a live extension-backed instance (when `res` allows it). The
+/// nesting depth of a received tree is already capped by the decoder.
+fn wire_to_value<'gc>(
+    vm: &VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    dv: &WireData,
+    res: Option<&ResCtx<'_>>,
+) -> Result<Value<'gc>, QuoinError> {
     Ok(match dv {
-        WireData::Null => host.new_nil(),
-        WireData::Bool(b) => host.new_bool(*b),
-        WireData::Int(i) => host.new_int(*i),
-        WireData::BigInt(s) => make_bigint(
-            host,
-            s.parse()
-                .map_err(|_| QuoinError::Other(format!("extension: invalid BigInt {s:?}")))?,
-        ),
-        WireData::Float(f) => host.new_double(*f),
-        WireData::Decimal(s) => make_decimal(
-            host,
-            s.parse()
-                .map_err(|_| QuoinError::Other(format!("extension: invalid Decimal {s:?}")))?,
-        ),
-        WireData::Str(s) => host.new_string(s.clone()),
-        WireData::Bytes(b) => host.new_bytes(b.clone()),
+        WireData::Null => vm.new_nil(mc),
+        WireData::Bool(b) => vm.new_bool(mc, *b),
+        WireData::Int(i) => vm.new_int(mc, *i),
+        WireData::BigInt(s) => {
+            let n = s
+                .parse()
+                .map_err(|_| QuoinError::Other(format!("extension: invalid BigInt {s:?}")))?;
+            let class = vm.get_or_create_builtin_class(mc, "BigInteger");
+            vm.new_native_state(mc, class, NativeBigInteger(n))
+        }
+        WireData::Float(f) => vm.new_double(mc, *f),
+        WireData::Decimal(s) => {
+            let d = s
+                .parse()
+                .map_err(|_| QuoinError::Other(format!("extension: invalid Decimal {s:?}")))?;
+            let class = vm.get_or_create_builtin_class(mc, "BigDecimal");
+            vm.new_native_state(mc, class, NativeBigDecimal(d))
+        }
+        WireData::Str(s) => vm.new_string(mc, s.clone()),
+        WireData::Bytes(b) => vm.new_bytes(mc, b.clone()),
         WireData::List(items) => {
             let vals = items
                 .iter()
-                .map(|e| wire_to_value(host, e))
+                .map(|e| wire_to_value(vm, mc, e, res))
                 .collect::<Result<Vec<_>, _>>()?;
-            host.new_list(vals)
+            vm.new_list(mc, vals)
         }
         WireData::Map(entries) => {
             let mut map = IndexMap::with_capacity(entries.len());
             for (k, val) in entries {
-                map.insert(k.clone(), wire_to_value(host, val)?);
+                map.insert(k.clone(), wire_to_value(vm, mc, val, res)?);
             }
-            host.new_map(map)
+            vm.new_map(mc, map)
+        }
+        WireData::Resource { id, class_name } => {
+            let Some(res) = res else {
+                return Err(QuoinError::Other(
+                    "extension: a live extension instance cannot appear in this value".to_string(),
+                ));
+            };
+            let class = resolve_ext_class(vm, class_name, res.namespace);
+            wrap_resource(vm, mc, *id, res.reap.clone(), class)
         }
     })
 }
@@ -519,25 +574,21 @@ fn service_host_op<'gc>(
             }
             None => host_op_error(format!("get_global: no global named '{name}'")),
         },
-        Msg::MakeValue { value } => {
-            let built = {
-                let host = HostCtx::new(vm, mc);
-                wire_to_value(&host, &value)
-            };
-            match built {
-                Ok(v) => {
-                    let handle = vm.handle_table.mint_local(v, epoch, ext_id);
-                    Msg::HostOpReturn {
-                        handle,
-                        str: None,
-                        error: None,
-                    }
+        // Resources-in-data stay refused on the host-op channels (`res: None`) — a
+        // `make_value`/`read_handle` value is plain data (deferred; revisit with a use case).
+        Msg::MakeValue { value } => match wire_to_value(vm, mc, &value, None) {
+            Ok(v) => {
+                let handle = vm.handle_table.mint_local(v, epoch, ext_id);
+                Msg::HostOpReturn {
+                    handle,
+                    str: None,
+                    error: None,
                 }
-                Err(e) => host_op_error(format!("make_value: {e}")),
             }
-        }
+            Err(e) => host_op_error(format!("make_value: {e}")),
+        },
         Msg::ReadHandle { handle } => match vm.handle_table.get(handle) {
-            Ok(value) => match value_to_wire(value) {
+            Ok(value) => match value_to_wire(value, None) {
                 Ok(wire) => Msg::ReadHandleReturn {
                     value: wire,
                     error: None,
@@ -611,14 +662,35 @@ fn host_op_error(message: String) -> Msg {
     }
 }
 
-/// Classify one extension-backed-class method argument (Phase 3) into a wire [`Arg`]: an ext-instance
-/// passes its object-table id (so a method can take another of the extension's objects); a
-/// data-representable value passes its `DataValue`; anything else (a block, a non-data host object)
-/// is minted a call-local host-value handle the extension drives via `invoke_block` / `call_method`.
-fn classify_arg<'gc>(vm: &mut VmState<'gc>, value: Value<'gc>, epoch: u32, ext_id: u64) -> Arg {
-    if let Ok(resource_id) = value.with_native_state::<NativeExtResource, _, _>(|r| r.resource_id) {
+/// Classify one extension-backed-class method argument (Phase 3) into a wire [`Arg`]: an instance
+/// of *this* extension passes its object-table id (so a method can take another of the extension's
+/// objects); a bulk `Array` passes inline on the data plane; a data-representable value passes its
+/// `DataValue` (live instances of this extension allowed inside); anything else — a block, a
+/// non-data host object, or a value involving *another* extension's instance — is minted a
+/// call-local host-value handle the extension drives via `invoke_block` / `call_method`.
+fn classify_arg<'gc>(
+    vm: &mut VmState<'gc>,
+    value: Value<'gc>,
+    epoch: u32,
+    ext_id: u64,
+    owner: &Rc<RefCell<Vec<u64>>>,
+) -> Arg {
+    let owned = value
+        .with_native_state::<NativeExtResource, _, _>(|r| {
+            Rc::ptr_eq(&r.reap, owner).then_some(r.resource_id)
+        })
+        .ok()
+        .flatten();
+    if let Some(resource_id) = owned {
         Arg::Resource(resource_id)
-    } else if let Ok(wire) = value_to_wire(value) {
+    } else if let Some((dtype, data)) = array::array_parts(value) {
+        let length = (data.len() / 8) as u64;
+        Arg::Array(ArrowArray {
+            dtype: to_wire_dtype(dtype),
+            length,
+            data,
+        })
+    } else if let Ok(wire) = value_to_wire(value, Some(owner)) {
         Arg::Data(wire)
     } else {
         Arg::Handle(vm.handle_table.mint_local(value, epoch, ext_id))
@@ -634,6 +706,7 @@ fn extension_call<'gc>(
     mc: &gc_arena::Mutation<'gc>,
     id: StreamId,
     ext_id: u64,
+    owner: &Rc<RefCell<Vec<u64>>>,
     op: String,
     argv: String,
     args: Vec<Value<'gc>>,
@@ -649,13 +722,19 @@ fn extension_call<'gc>(
     let mut arrays = Vec::new();
     let mut method_args = Vec::new();
     if class_name.is_empty() {
-        // Generic `call:with:` paths: route each arg by token space — an `ExtResource` passes its
-        // (ext-side) resource id; an `Array` is serialized into the bulk data plane; any other
-        // value is minted a call-local host-value handle (a block is one of these).
+        // Generic `call:with:` paths: route each arg by token space — an `ExtResource` of *this*
+        // extension passes its (ext-side) resource id; an `Array` is serialized into the bulk
+        // data plane; any other value — including another extension's resource, whose id would
+        // be misread in this extension's table — is minted a call-local host-value handle
+        // (a block is one of these).
         for value in args {
-            if let Ok(resource_id) =
-                value.with_native_state::<NativeExtResource, _, _>(|r| r.resource_id)
-            {
+            let owned = value
+                .with_native_state::<NativeExtResource, _, _>(|r| {
+                    Rc::ptr_eq(&r.reap, owner).then_some(r.resource_id)
+                })
+                .ok()
+                .flatten();
+            if let Some(resource_id) = owned {
                 resources.push(resource_id);
             } else if let Some((dtype, data)) = array::array_parts(value) {
                 let length = (data.len() / 8) as u64;
@@ -672,7 +751,7 @@ fn extension_call<'gc>(
         // Extension-backed-class method (Phase 3): build the ordered, tagged argument list, so a
         // method can take data, another of the extension's instances, and host blocks together.
         for value in args {
-            method_args.push(classify_arg(vm, value, epoch, ext_id));
+            method_args.push(classify_arg(vm, value, epoch, ext_id, owner));
         }
     }
 
@@ -818,10 +897,22 @@ fn finish_outcome<'gc>(
             array.data,
         )),
         // Materialize a returned structured value into a nested Quoin Value with the direct
-        // walker (`HostCtx` adapts the legacy `&mut VmState` to the `Host` surface).
+        // walker. `Resource` leaves wrap as live instances of this extension (its reap queue +
+        // namespace), so a method can return e.g. a List of instances.
         Ok(CallOutcome::Data(wire)) => {
-            let host = HostCtx::new(vm, mc);
-            wire_to_value(&host, &wire)
+            let namespace = ext_receiver
+                .with_native_state::<NativeExtension, _, _>(|e| e.namespace.clone())
+                .ok()
+                .flatten();
+            wire_to_value(
+                vm,
+                mc,
+                &wire,
+                Some(&ResCtx {
+                    reap: &resource_reap,
+                    namespace: namespace.as_deref(),
+                }),
+            )
         }
         // A returned live host value (already resolved from its handle).
         Ok(CallOutcome::Value(value)) => Ok(value),
@@ -930,10 +1021,11 @@ fn run_extension_method<'gc>(
         ext_end_call(mc, receiver);
         return Err(extension_dead_error("already exited"));
     }
-    // Serialize the optional structured-value payload before opening the call. If this fails
-    // (e.g. a value with no data representation) release the in-flight claim first.
+    // Serialize the optional structured-value payload before opening the call (this extension's
+    // own live instances are allowed inside). If it fails (e.g. a value with no data
+    // representation) release the in-flight claim first.
     let data = match data_arg {
-        Some(value) => match value_to_wire(value) {
+        Some(value) => match value_to_wire(value, Some(&ctx.resource_reap)) {
             Ok(d) => Some(d),
             Err(e) => {
                 ext_end_call(mc, receiver);
@@ -947,6 +1039,7 @@ fn run_extension_method<'gc>(
         mc,
         ctx.id,
         ctx.ext_id,
+        &ctx.resource_reap,
         op,
         argv,
         args,
@@ -1012,6 +1105,7 @@ pub fn dispatch_ext_method<'gc>(
         mc,
         ctx.id,
         ctx.ext_id,
+        &ctx.resource_reap,
         selector.as_str().to_string(),
         String::new(),
         args,

@@ -96,6 +96,18 @@ fn main() {
                 data: float_list(args),
             })
         });
+        // A bulk `Array` argument (the data plane): the whole float64 column arrives as one
+        // little-endian buffer, never exploded into per-element values.
+        c.constructor("ofArray:", |_host, args| {
+            let a = args[0].array().ok_or("ofArray: expects an Array")?;
+            Ok(Vector {
+                data: a
+                    .data
+                    .chunks_exact(8)
+                    .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                    .collect(),
+            })
+        });
         c.method("sum", |v, _host, _args| Ok(DataValue::Float(v.sum())));
         c.method("length", |v, _host, _args| {
             Ok(DataValue::Int(v.data.len() as i64))

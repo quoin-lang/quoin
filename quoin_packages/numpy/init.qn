@@ -137,11 +137,12 @@
     s -> { .eval.s }
 };
 
-"* Serializes one DAG walk: nodes in dependency order (each once, by serial), distinct base
-"* arrays collected for the send. The selector ladder carries the receiver + up to 7 more bases;
-"* a wider expression must force a subexpression first (.eval) to fold it into one base.
-[NumPy]GraphBuilder <- { |@nodes @bases @seen|
-    init -> { @nodes = #(); @bases = #(); @seen = Map.new };
+"* Serializes one DAG walk: nodes in dependency order (each once, by serial). A base node
+"* carries its resident array DIRECTLY (a live-instance reference on the wire), so one
+"* `evalGraph:` send ships a graph over any number of distinct arrays — the first base found
+"* anchors the dispatch (the extension evaluates the tree; the receiver is incidental).
+[NumPy]GraphBuilder <- { |@nodes @receiver @seen|
+    init -> { @nodes = #(); @receiver = nil; @seen = Map.new };
 
     pushNode: -> { |n| @nodes.add:n; @nodes.count - 1 };
 
@@ -155,9 +156,8 @@
             "* Expr serial keys ('17') share @seen but can never collide.
             var key = 'b' + (Extension.resourceIdOf:v).s;
             (@seen.at:key).defined?.if:{ ^^ @seen.at:key };
-            @bases.add:v;
-            var i = @bases.count - 1;
-            var idx = .pushNode:#{ 'op': 'base' 'i': i };
+            @receiver.defined?.else:{ @receiver = v };
+            var idx = .pushNode:#{ 'op': 'base' 'v': v };
             @seen.at:key put:idx;
             ^^ idx
         };
@@ -182,54 +182,8 @@
     };
 
     send: -> { |root|
-        var t = #{ 'nodes': @nodes 'root': root };
-        var n = @bases.count;
-        (n == 0).if:{ '[NumPy] expression has no array operand'.throw };
-        (n == 1).if:{ ^^ (@bases.at:0).evalGraph:t };
-        (n == 2).if:{ ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) };
-        (n == 3).if:{ ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) b:(@bases.at:2) };
-        (n == 4).if:{
-            ^^ (@bases.at:0).evalGraph:t a:(@bases.at:1) b:(@bases.at:2) c:(@bases.at:3)
-        };
-        (n == 5).if:{
-            ^^ (@bases.at:0)
-                .evalGraph:t
-                 a:(@bases.at:1)
-                 b:(@bases.at:2)
-                 c:(@bases.at:3)
-                 d:(@bases.at:4)
-        };
-        (n == 6).if:{
-            ^^ (@bases.at:0)
-                .evalGraph:t
-                 a:(@bases.at:1)
-                 b:(@bases.at:2)
-                 c:(@bases.at:3)
-                 d:(@bases.at:4)
-                 e:(@bases.at:5)
-        };
-        (n == 7).if:{
-            ^^ (@bases.at:0)
-                .evalGraph:t
-                 a:(@bases.at:1)
-                 b:(@bases.at:2)
-                 c:(@bases.at:3)
-                 d:(@bases.at:4)
-                 e:(@bases.at:5)
-                 f:(@bases.at:6)
-        };
-        (n == 8).if:{
-            ^^ (@bases.at:0)
-                .evalGraph:t
-                 a:(@bases.at:1)
-                 b:(@bases.at:2)
-                 c:(@bases.at:3)
-                 d:(@bases.at:4)
-                 e:(@bases.at:5)
-                 f:(@bases.at:6)
-                 g:(@bases.at:7)
-        };
-        '[NumPy] expression uses more than 8 distinct arrays; force a subexpression with .eval first'.throw
+        @receiver.defined?.else:{ '[NumPy] expression has no array operand'.throw };
+        @receiver.evalGraph:#{ 'nodes': @nodes 'root': root }
     }
 };
 

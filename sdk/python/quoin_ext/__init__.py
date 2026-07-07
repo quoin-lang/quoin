@@ -81,12 +81,16 @@ __all__ = [
 
 
 def _pack_default(o):
-    """``msgpack.packb`` hook for the two non-native value kinds (PROTOCOL.md §Values): an int
-    beyond 64 bits -> ext type 1 (ASCII digits); Decimal -> ext type 2 (ASCII decimal string)."""
+    """``msgpack.packb`` hook for the non-native value kinds (PROTOCOL.md §Values): an int beyond
+    64 bits -> ext type 1 (ASCII digits); Decimal -> ext type 2 (ASCII decimal string); a
+    :class:`Resource` (an ext-side resource id, for the generic-`serve` extensions that manage
+    their own registry) -> ext type 3."""
     if isinstance(o, decimal.Decimal):
         return msgpack.ExtType(2, str(o).encode())
     if isinstance(o, int):
         return msgpack.ExtType(1, str(o).encode())
+    if isinstance(o, Resource):
+        return msgpack.ExtType(3, struct.pack("<Q", o.id))
     raise TypeError(f"cannot serialize {type(o).__name__} as a structured value")
 
 
@@ -95,6 +99,12 @@ def _ext_hook(code, data):
         return int(data.decode())
     if code == 2:
         return decimal.Decimal(data.decode())
+    if code == 3:
+        # A live-instance reference inside a value: 8-byte LE id (+ class name, host-bound only).
+        # On the generic path there is no SDK object table, so surface the raw id as a
+        # :class:`Resource` for the handler's own registry.
+        (rid,) = struct.unpack_from("<Q", data)
+        return Resource(rid)
     raise ValueError(f"extension: unknown value ext type {code}")
 
 
@@ -234,29 +244,31 @@ def _encode_manifest_return(classes):
     )
 
 
-def _encode_call_return_error(message):
+def _encode_call_return_error(message, pack=_pack):
     """A call failed recoverably: the host raises a catchable Quoin error and the extension keeps
     running. A terminal frame, like the other ``CallReturn*`` replies."""
-    return _pack([_T_CALL_RETURN_ERROR, message])
+    return pack([_T_CALL_RETURN_ERROR, message])
 
 
-def _encode_call_return_resource(resource_id, class_name=""):
+def _encode_call_return_resource(resource_id, class_name="", pack=_pack):
     # `class_name` (Phase 3) names the registered class the resource is an instance of, so a method
     # can return an instance of any of the extension's classes (cross-class returns); "" = ExtResource.
-    return _pack([_T_CALL_RETURN_RESOURCE, resource_id, class_name])
+    return pack([_T_CALL_RETURN_RESOURCE, resource_id, class_name])
 
 
-def _encode_reply(reply):
+def _encode_reply(reply, pack=_pack):
     if isinstance(reply, Resource):
-        return _encode_call_return_resource(reply.id)
+        return _encode_call_return_resource(reply.id, pack=pack)
     if isinstance(reply, ReturnHandle):
-        return _pack([_T_CALL_RETURN_HANDLE, reply.handle])
+        return pack([_T_CALL_RETURN_HANDLE, reply.handle])
     if isinstance(reply, ArrowArray):
-        return _pack([_T_CALL_RETURN_ARRAY, reply._wire()])
+        return pack([_T_CALL_RETURN_ARRAY, reply._wire()])
     if isinstance(reply, str):
-        return _pack([_T_CALL_RETURN, reply])
-    # Anything else (None / bool / int / float / Decimal / bytes / list / dict) is a structured value.
-    return _pack([_T_CALL_RETURN_DATA, reply])
+        return pack([_T_CALL_RETURN, reply])
+    # Anything else (None / bool / int / float / Decimal / bytes / list / dict) is a structured
+    # value — under a class extension's `pack`, registered instances nested inside it become
+    # live-instance references (ext type 3), so a method can return e.g. a list of instances.
+    return pack([_T_CALL_RETURN_DATA, reply])
 
 
 def _decode_arrow(wire):
@@ -291,6 +303,8 @@ def _decode_class_call(msg):
             args.append(("resource", payload))
         elif kind == 2:
             args.append(("handle", payload))
+        elif kind == 3:
+            args.append(("array", _decode_arrow(payload)))
         else:
             raise ValueError(f"extension: unknown Arg kind {kind}")
     return (op, class_name, recv, releases, args)
@@ -534,7 +548,7 @@ class Extension:
                     frame = read_frame(conn)
                     if frame is None:
                         break
-                    msg = _unpack(frame)
+                    msg = self._unpack_frame(table, frame)
                     if msg[0] == _T_GET_MANIFEST:
                         write_frame(conn, _encode_manifest_return(self._manifest()))
                         continue
@@ -543,6 +557,43 @@ class Extension:
                 conn.close()
         finally:
             server.close()
+
+    # --- the table-aware codec: live-instance references (ext type 3) inside values ---
+
+    def _unpack_frame(self, table, frame):
+        """Like the module-level ``_unpack``, but a live-instance reference inside a value
+        resolves to the live object from this extension's table — so a data payload (e.g. an
+        expression graph) can carry instances directly."""
+
+        def ext_hook(code, data):
+            if code == 3:
+                (rid,) = struct.unpack_from("<Q", data)
+                obj = table.get(rid)
+                if obj is None:
+                    raise ValueError(f"extension: data references no live instance {rid}")
+                return obj
+            return _ext_hook(code, data)
+
+        msg = msgpack.unpackb(
+            frame, raw=False, strict_map_key=False, ext_hook=ext_hook, use_list=True
+        )
+        if not isinstance(msg, list) or not msg:
+            raise ValueError("extension: malformed frame (not a message array)")
+        return msg
+
+    def _pack_frame(self, table, fields):
+        """Like the module-level ``_pack``, but an instance of a registered class nested inside a
+        value is inserted into the table and crosses as a live-instance reference (ext type 3,
+        id + class name) — so a method can return e.g. a list of instances."""
+
+        def default(o):
+            name = self._class_name_of(o)
+            if name:
+                rid = table.insert(o)
+                return msgpack.ExtType(3, struct.pack("<Q", rid) + name.encode())
+            return _pack_default(o)
+
+        return msgpack.packb(fields, use_bin_type=True, default=default)
 
     def _manifest(self):
         """``(name, instance_selectors, class_selectors)`` for each registered class."""
@@ -560,12 +611,14 @@ class Extension:
         return ""
 
     def _resolve_args(self, raw_args, table, conn):
-        """Resolve the tagged wire args to native Python values: data passes through, an ext-instance
-        id becomes the live instance, and a handle becomes a callable :class:`_HostBlock`. Order is
-        preserved, so the handler receives its arguments positionally."""
+        """Resolve the tagged wire args to native Python values: data passes through (any live-
+        instance references inside were already resolved by the table-aware unpack), an
+        ext-instance id becomes the live instance, an ``Array`` stays an :class:`ArrowArray`, and
+        a handle becomes a callable :class:`_HostBlock`. Order is preserved, so the handler
+        receives its arguments positionally."""
         out = []
         for kind, val in raw_args:
-            if kind == "data":
+            if kind in ("data", "array"):
                 out.append(val)
             elif kind == "resource":
                 obj = table.get(val)
@@ -578,6 +631,7 @@ class Extension:
 
     def _dispatch(self, conn, msg, table, registered_types):
         """Route one method ``Call`` to its handler and return the terminal reply frame."""
+        pack = lambda fields: self._pack_frame(table, fields)  # noqa: E731 — bound reply codec
         op, class_name, recv, releases, raw_args = _decode_class_call(msg)
         # The host batches dropped instances onto `releases`; free them from the table.
         for rid in releases:
@@ -609,7 +663,8 @@ class Extension:
             result = method(instance, *args)
         except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
             return _encode_call_return_error(str(exc))
-        # A returned registered instance becomes a new ext-side object; anything else is data.
+        # A returned registered instance becomes a new ext-side object; anything else is data
+        # (registered instances nested inside it cross as live references — `_pack_frame`).
         if isinstance(result, registered_types):
             return _encode_call_return_resource(table.insert(result), self._class_name_of(result))
-        return _encode_reply(result)
+        return _encode_reply(result, pack=pack)

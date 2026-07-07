@@ -62,7 +62,8 @@ Composite fields (also MessagePack arrays):
   Value), 1 = **Resource** (payload is an ext-instance's object-table id, so a method can
   take another of the extension's objects), 2 = **Handle** (payload is a host-value
   handle for a block or other non-data host object the extension drives via
-  InvokeBlock / CallMethodOnHandle).
+  InvokeBlock / CallMethodOnHandle), 3 = **Array** (payload is an inline ArrowArray —
+  the data plane as a method argument).
 - **ClassDecl** = `[name:str, instance_selectors:[str], class_selectors:[str]]` — one
   extension-provided class; the host installs a real Quoin class named `name` whose
   selectors dispatch over the socket (instance-side on instances, class-side on the
@@ -77,6 +78,14 @@ objects):
   must be strings.
 - **BigInt** is ext type **1**, payload = the ASCII decimal digits.
 - **Decimal** is ext type **2**, payload = the ASCII decimal string.
+- **Resource** is ext type **3**, payload = an 8-byte little-endian object-table id
+  followed by the UTF-8 class name — a *live extension instance* inside a value.
+  Host → ext, the class name is empty (the extension resolves the id in its own table);
+  ext → host, it names the registered class so the host wraps the id as the right
+  installed class (e.g. a method returning a list of instances). Resource references are
+  only meaningful between the host and the one extension that owns the ids: the host
+  refuses to send another extension's instance, and refuses resources entirely on the
+  re-entrant host-op channels (MakeValue / ReadHandleReturn values are plain data).
 - A uint64 above `i64::MAX` (marker `0xcf`) should be accepted as a BigInt, not rejected —
   a C-side packer may emit it.
 

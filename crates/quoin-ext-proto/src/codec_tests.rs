@@ -41,6 +41,14 @@ fn every_message_round_trips() {
                 Arg::Data(Dv::Str("s".into())),
                 Arg::Resource(9),
                 Arg::Handle(u64::MAX),
+                Arg::Array(arrow.clone()),
+                Arg::Data(Dv::List(vec![
+                    Dv::Resource {
+                        id: 12,
+                        class_name: String::new(),
+                    },
+                    Dv::Int(1),
+                ])),
             ],
         },
         Msg::Call {
@@ -307,4 +315,33 @@ fn float32_from_foreign_packer_decodes() {
     let mut b = vec![0xca];
     b.extend_from_slice(&1.5f32.to_be_bytes());
     assert_eq!(unpack_dv(&b).unwrap(), Dv::Float(1.5));
+}
+
+#[test]
+fn resource_values_round_trip() {
+    round_trip(Dv::Resource {
+        id: 7,
+        class_name: "Array".into(),
+    });
+    round_trip(Dv::Resource {
+        id: u64::MAX,
+        class_name: String::new(),
+    });
+    round_trip(Dv::List(vec![
+        Dv::Resource {
+            id: 1,
+            class_name: "Vector".into(),
+        },
+        Dv::Map(vec![(
+            "m".into(),
+            Dv::Resource {
+                id: 2,
+                class_name: "Matrix".into(),
+            },
+        )]),
+    ]));
+    // A truncated Resource payload (shorter than its 8-byte id) is a clear error.
+    let short = vec![0xc7, 0x03, 0x03, 0x01, 0x02, 0x03]; // ext8, len 3, type 3
+    let err = unpack_dv(&short).expect_err("short Resource must be rejected");
+    assert!(err.contains("Resource"), "unexpected error: {err}");
 }

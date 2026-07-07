@@ -234,6 +234,13 @@ fn write_dv(out: &mut Vec<u8>, dv: &DataValue) {
         DataValue::Bytes(b) => write_bin(out, b),
         DataValue::BigInt(s) => write_ext(out, 1, s.as_bytes()),
         DataValue::Decimal(s) => write_ext(out, 2, s.as_bytes()),
+        // Ext type 3: 8-byte little-endian object-table id, then the UTF-8 class name.
+        DataValue::Resource { id, class_name } => {
+            let mut payload = Vec::with_capacity(8 + class_name.len());
+            payload.extend_from_slice(&id.to_le_bytes());
+            payload.extend_from_slice(class_name.as_bytes());
+            write_ext(out, 3, &payload);
+        }
         DataValue::List(items) => {
             write_array_header(out, items.len());
             for it in items {
@@ -399,7 +406,8 @@ fn write_arrow(out: &mut Vec<u8>, a: &ArrowArray) {
 }
 
 /// `Arg` = `[kind, payload]` — kind 0 = Data (payload is a DataValue), 1 = Resource
-/// (payload is the ext-side object-table id), 2 = Handle (payload is a host-value handle).
+/// (payload is the ext-side object-table id), 2 = Handle (payload is a host-value handle),
+/// 3 = Array (payload is an inline `ArrowArray` — the data plane as a method argument).
 fn write_arg(out: &mut Vec<u8>, a: &Arg) {
     write_array_header(out, 2);
     match a {
@@ -414,6 +422,10 @@ fn write_arg(out: &mut Vec<u8>, a: &Arg) {
         Arg::Handle(h) => {
             write_uint(out, 2);
             write_uint(out, *h);
+        }
+        Arg::Array(a) => {
+            write_uint(out, 3);
+            write_arrow(out, a);
         }
     }
 }
@@ -879,6 +891,7 @@ fn read_arg(rd: &mut &[u8]) -> Result<Arg, String> {
         0 => Arg::Data(read_dv(rd, 0)?),
         1 => Arg::Resource(read_uint(rd)?),
         2 => Arg::Handle(read_uint(rd)?),
+        3 => Arg::Array(read_arrow(rd)?),
         other => return Err(format!("extension protocol: unknown Arg kind {other}")),
     };
     skip_extra(rd, extra)?;
@@ -1036,6 +1049,19 @@ fn read_ext(rd: &mut &[u8], n: usize) -> Result<DataValue, String> {
     match ty {
         1 => Ok(DataValue::BigInt(digits("BigInt")?)),
         2 => Ok(DataValue::Decimal(digits("Decimal")?)),
+        3 => {
+            let (id, name) = payload.split_at_checked(8).ok_or_else(|| {
+                "extension protocol: Resource payload shorter than its 8-byte id".to_string()
+            })?;
+            Ok(DataValue::Resource {
+                id: u64::from_le_bytes(id.try_into().unwrap()),
+                class_name: std::str::from_utf8(name)
+                    .map_err(|_| {
+                        "extension protocol: Resource class name is not UTF-8".to_string()
+                    })?
+                    .to_string(),
+            })
+        }
         other => Err(format!(
             "extension protocol: unknown value ext type {other}"
         )),

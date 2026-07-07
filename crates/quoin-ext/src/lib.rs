@@ -395,11 +395,13 @@ fn reply_to_msg(reply: Reply) -> Msg {
 /// One resolved method argument handed to a handler (Phase 3 — richer args). `Data` is a decoded
 /// value; `Object` is another of *this extension's* live instances (resolved from the object table —
 /// downcast with [`Arg::object`]); `Handle` is a host-value handle for a block or other host object
-/// the handler drives via [`Host::apply_block`] / the [`Host`] callbacks.
+/// the handler drives via [`Host::apply_block`] / the [`Host`] callbacks; `Array` is a bulk numeric
+/// column passed on the data plane (a host `Array` argument, whole-buffer).
 pub enum Arg<'a> {
     Data(DataValue),
     Object(&'a dyn Any),
     Handle(Handle),
+    Array(ArrowArray),
 }
 
 impl<'a> Arg<'a> {
@@ -423,6 +425,14 @@ impl<'a> Arg<'a> {
     pub fn handle(&self) -> Option<Handle> {
         match self {
             Arg::Handle(h) => Some(*h),
+            _ => None,
+        }
+    }
+
+    /// The bulk column behind an `Array` argument (read `dtype`/`data` and crunch the buffer).
+    pub fn array(&self) -> Option<&ArrowArray> {
+        match self {
+            Arg::Array(a) => Some(a),
             _ => None,
         }
     }
@@ -742,6 +752,7 @@ fn resolve_args<'t>(
                 .map(Arg::Object)
                 .ok_or_else(|| invalid_data(format!("argument references no live instance {id}"))),
             quoin_ext_proto::Arg::Handle(h) => Ok(Arg::Handle(*h)),
+            quoin_ext_proto::Arg::Array(a) => Ok(Arg::Array(a.clone())),
         })
         .collect()
 }

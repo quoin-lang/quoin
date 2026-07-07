@@ -33,13 +33,14 @@ resident array — or a scalar, for a reduction root.
 - **Diamonds evaluate once:** a shared subexpression is serialized and computed a single time.
 - **`eval` memoizes:** a forced expr holds its materialized array and re-enters later graphs as a
   cheap leaf.
-- One graph carries at most **8 distinct arrays** (the base-argument selector ladder). Wider
-  expressions get a catchable error — `.eval` a subexpression to fold it into one base.
+- **No arity ceiling:** a graph's base nodes carry live-instance references (wire ext type 3),
+  so one send spans any number of distinct arrays.
 
 ## API
 
-**Creation** (class-side): `zeros:` `ones:` `fromList:` `arange:` `linspace:to:count:` `random:`
-— shapes are an Integer or a List (`#( 2 3 )`).
+**Creation** (class-side): `zeros:` `ones:` `fromList:` `fromArray:` (a host bulk `Array`,
+whole-buffer — the inverse of `toArray`) `arange:` `linspace:to:count:` `random:` — shapes are
+an Integer or a List (`#( 2 3 )`).
 
 **Elementwise** (lazy): `+ - * /` `pow:` `mod:` `neg` `sqrt` `exp` `log` `abs` `sin` `cos` `tan`
 `floor` `ceil` `round` `sign` — NumPy broadcasting and promotion rules.
@@ -52,7 +53,8 @@ masks; `and:` `or:` `not` combine them; `select:` (boolean indexing); `mask.wher
 arrays and stay lazy.
 
 **Shape & slicing** (lazy): `transpose` `flatten` `reshape:` `from:to:` (first axis) `row:`
-`col:`; `matMul:` for matrix/vector products (1-D dot yields a scalar at force).
+`col:`; `matMul:` for matrix/vector products (1-D dot yields a scalar at force); `split:` (eager)
+divides along axis 0 into a List of live arrays, each of which joins new lazy expressions.
 
 **Materialization:** `toList` (nested Lists; masks become Booleans), `toArray` (the host bulk
 `Array`, 1-D row-major; masks cross as int64 0/1), `at:` (scalar for 1-D, a row instance for
@@ -94,7 +96,7 @@ is invisible to Quoin — `eval_graph` in `main.py` is the seam.
 
 The extension (`main.py`, ~300 lines) is deliberately dumb: creation, `evalGraph:`,
 materialization. The brains — operators, DAG building, dedup, memoization — are pure Quoin in
-`init.qn`, and are meant to be reused verbatim by the future native `[Num]` backend. Known
-protocol gaps tracked for later: `fromArray:` (host bulk `Array` as a *method argument*) needs an
-`ArgKind.Array` wire extension; a `DvResource` DataValue kind would retire the 8-base selector
-ladder and allow returning lists of arrays.
+`init.qn`, and are meant to be reused verbatim by the future native `[Num]` backend. The two
+wire gaps this package originally tracked are closed: `fromArray:` rides the `Array` argument
+kind, and live-instance references inside values (ext type 3) retired the old 8-base selector
+ladder and let `split:` return a List of arrays.
