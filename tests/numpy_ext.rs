@@ -554,3 +554,56 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_numpy_sort_search_test.qn", &script);
 }
+
+/// P3 parity: manipulation — n-ary concat:/stack: (a List of arrays, any count), tile/repeat,
+/// flip/roll, squeeze/expandDims, swapAxes:with:, and stepped slicing — all lazy nodes that
+/// compose with arithmetic in one graph.
+#[test]
+fn numpy_manipulation() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_manipulation: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var a = [NumPy]Array.fromList:#( 1.0 2.0 );
+var b = [NumPy]Array.fromList:#( 3.0 4.0 );
+var c = [NumPy]Array.fromList:#( 5.0 6.0 );
+
+"* concat/stack are the first n-ary graph nodes: a List of arrays, any count
+((a.concat:#( b c )).toList == #( 1.0 2.0 3.0 4.0 5.0 6.0 )).else:{{ ok = false }};
+var st = a.stack:#( b c );
+(st.shape == #( 3 2 )).else:{{ ok = false }};
+((st.row:2).toList == #( 5.0 6.0 )).else:{{ ok = false }};
+((a.stack:#( b ) axis:1).toList == #( #( 1.0 3.0 ) #( 2.0 4.0 ) )).else:{{ ok = false }};
+var m = [NumPy]Array.fromList:#( #( 1.0 ) #( 2.0 ) );
+var m2 = [NumPy]Array.fromList:#( #( 3.0 ) #( 4.0 ) );
+((m.concat:#( m2 ) axis:1).toList == #( #( 1.0 3.0 ) #( 2.0 4.0 ) )).else:{{ ok = false }};
+
+((a.tile:2).toList == #( 1.0 2.0 1.0 2.0 )).else:{{ ok = false }};
+((a.repeat:2).toList == #( 1.0 1.0 2.0 2.0 )).else:{{ ok = false }};
+(a.flip.toList == #( 2.0 1.0 )).else:{{ ok = false }};
+((([NumPy]Array.arange:5).roll:2).toList == #( 3 4 0 1 2 )).else:{{ ok = false }};
+
+"* squeeze / expandDims round-trip; swapAxes == transpose for 2-D
+var col2 = a.expandDims:1;
+(col2.shape == #( 2 1 )).else:{{ ok = false }};
+(col2.squeeze.toList == #( 1.0 2.0 )).else:{{ ok = false }};
+var mm = [NumPy]Array.fromList:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
+(((mm.swapAxes:0 with:1).col:0).toList == #( 1.0 2.0 )).else:{{ ok = false }};
+
+"* stepped slicing
+((([NumPy]Array.arange:6).from:0 to:6 by:2).toList == #( 0 2 4 )).else:{{ ok = false }};
+
+"* manipulation composes lazily with arithmetic in one graph
+(((a.concat:#( b )) * 2.0).sum == 20.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_manipulation_test.qn", &script);
+}

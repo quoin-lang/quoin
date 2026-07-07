@@ -127,6 +127,46 @@
     searchSorted: -> { |v| [NumPy]Expr.op:'searchsorted' with:#( self v ) };
     takeAt: -> { |idx| [NumPy]Expr.op:'take' with:#( self idx ) };
 
+    "* manipulation: concat/stack take a LIST of further arrays (any count — base nodes carry
+    "* live references); the rest are unary nodes with extras. All lazy.
+    concat: -> { |others:List|
+        var elems = #( self );
+        others.each:{ |o| elems.add:o };
+        [NumPy]Expr.op:'concat' with:elems
+    };
+    concat:axis: -> { |others:List ax:Integer|
+        var elems = #( self );
+        others.each:{ |o| elems.add:o };
+        [NumPy]Expr.op:'concat' with:elems extra:#{ 'axis': ax }
+    };
+    stack: -> { |others:List|
+        var elems = #( self );
+        others.each:{ |o| elems.add:o };
+        [NumPy]Expr.op:'stack' with:elems
+    };
+    stack:axis: -> { |others:List ax:Integer|
+        var elems = #( self );
+        others.each:{ |o| elems.add:o };
+        [NumPy]Expr.op:'stack' with:elems extra:#{ 'axis': ax }
+    };
+    tile: -> { |reps| [NumPy]Expr.op:'tile' with:#( self ) extra:#{ 'reps': reps } };
+    repeat: -> { |n:Integer| [NumPy]Expr.op:'repeat' with:#( self ) extra:#{ 'n': n } };
+    repeat:axis: -> { |n:Integer ax:Integer|
+        [NumPy]Expr.op:'repeat' with:#( self ) extra:#{ 'n': n 'axis': ax }
+    };
+    flip -> { [NumPy]Expr.op:'flip' with:#( self ) };
+    flip: -> { |axis| [NumPy]Expr.op:'flip' with:#( self ) axis:axis };
+    roll: -> { |shift:Integer| [NumPy]Expr.op:'roll' with:#( self ) extra:#{ 'shift': shift } };
+    roll:axis: -> { |shift:Integer ax:Integer|
+        [NumPy]Expr.op:'roll' with:#( self ) extra:#{ 'shift': shift 'axis': ax }
+    };
+    squeeze -> { [NumPy]Expr.op:'squeeze' with:#( self ) };
+    expandDims: -> { |axis| [NumPy]Expr.op:'expanddims' with:#( self ) axis:axis };
+    swapAxes:with: -> { |a b| [NumPy]Expr.op:'swapaxes' with:#( self ) extra:#{ 'a1': a 'a2': b } };
+    from:to:by: -> { |start:Integer stop:Integer step:Integer|
+        [NumPy]Expr.op:'slice' with:#( self ) extra:#{ 'start': start 'stop': stop 'step': step }
+    };
+
     "* whole-array reductions force: the chain collapses to a scalar in one round trip
     sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
     mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };
@@ -316,6 +356,46 @@
     unique -> { [NumPy]Expr.op:'unique' with:#( self ) };
     searchSorted: -> { |v| [NumPy]Expr.op:'searchsorted' with:#( self v ) };
     takeAt: -> { |idx| [NumPy]Expr.op:'take' with:#( self idx ) };
+
+    "* manipulation: concat/stack take a LIST of further arrays (any count — base nodes carry
+    "* live references); the rest are unary nodes with extras. All lazy.
+    concat: -> { |others:List|
+        var elems = #( self );
+        others.each:{ |o| elems.add:o };
+        [NumPy]Expr.op:'concat' with:elems
+    };
+    concat:axis: -> { |others:List ax:Integer|
+        var elems = #( self );
+        others.each:{ |o| elems.add:o };
+        [NumPy]Expr.op:'concat' with:elems extra:#{ 'axis': ax }
+    };
+    stack: -> { |others:List|
+        var elems = #( self );
+        others.each:{ |o| elems.add:o };
+        [NumPy]Expr.op:'stack' with:elems
+    };
+    stack:axis: -> { |others:List ax:Integer|
+        var elems = #( self );
+        others.each:{ |o| elems.add:o };
+        [NumPy]Expr.op:'stack' with:elems extra:#{ 'axis': ax }
+    };
+    tile: -> { |reps| [NumPy]Expr.op:'tile' with:#( self ) extra:#{ 'reps': reps } };
+    repeat: -> { |n:Integer| [NumPy]Expr.op:'repeat' with:#( self ) extra:#{ 'n': n } };
+    repeat:axis: -> { |n:Integer ax:Integer|
+        [NumPy]Expr.op:'repeat' with:#( self ) extra:#{ 'n': n 'axis': ax }
+    };
+    flip -> { [NumPy]Expr.op:'flip' with:#( self ) };
+    flip: -> { |axis| [NumPy]Expr.op:'flip' with:#( self ) axis:axis };
+    roll: -> { |shift:Integer| [NumPy]Expr.op:'roll' with:#( self ) extra:#{ 'shift': shift } };
+    roll:axis: -> { |shift:Integer ax:Integer|
+        [NumPy]Expr.op:'roll' with:#( self ) extra:#{ 'shift': shift 'axis': ax }
+    };
+    squeeze -> { [NumPy]Expr.op:'squeeze' with:#( self ) };
+    expandDims: -> { |axis| [NumPy]Expr.op:'expanddims' with:#( self ) axis:axis };
+    swapAxes:with: -> { |a b| [NumPy]Expr.op:'swapaxes' with:#( self ) extra:#{ 'a1': a 'a2': b } };
+    from:to:by: -> { |start:Integer stop:Integer step:Integer|
+        [NumPy]Expr.op:'slice' with:#( self ) extra:#{ 'start': start 'stop': stop 'step': step }
+    };
 
     sum -> { ([NumPy]Expr.op:'sum' with:#( self )).eval };
     mean -> { ([NumPy]Expr.op:'mean' with:#( self )).eval };

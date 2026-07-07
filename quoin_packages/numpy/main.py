@@ -219,6 +219,27 @@ class NdArray:
             elif op == "take":
                 x, idx = n["a"]
                 vals[i] = np.take(vals[x], vals[idx])
+            elif op == "concat":
+                vals[i] = np.concatenate([vals[j] for j in n["a"]], axis=n.get("axis", 0))
+            elif op == "stack":
+                vals[i] = np.stack([vals[j] for j in n["a"]], axis=n.get("axis", 0))
+            elif op == "tile":
+                reps = n["reps"]
+                vals[i] = np.tile(
+                    vals[n["a"][0]], tuple(reps) if isinstance(reps, list) else reps
+                )
+            elif op == "repeat":
+                vals[i] = np.repeat(vals[n["a"][0]], n["n"], axis=n.get("axis"))
+            elif op == "flip":
+                vals[i] = np.flip(vals[n["a"][0]], axis=n.get("axis"))
+            elif op == "roll":
+                vals[i] = np.roll(vals[n["a"][0]], n["shift"], axis=n.get("axis"))
+            elif op == "squeeze":
+                vals[i] = np.squeeze(vals[n["a"][0]])
+            elif op == "expanddims":
+                vals[i] = np.expand_dims(vals[n["a"][0]], n["axis"])
+            elif op == "swapaxes":
+                vals[i] = np.swapaxes(vals[n["a"][0]], n["a1"], n["a2"])
             elif op == "transpose":
                 vals[i] = np.transpose(vals[n["a"][0]])
             elif op == "flatten":
@@ -226,7 +247,7 @@ class NdArray:
             elif op == "reshape":
                 vals[i] = np.reshape(vals[n["a"][0]], tuple(n["shape"]))
             elif op == "slice":
-                vals[i] = vals[n["a"][0]][n["start"] : n["stop"]]
+                vals[i] = vals[n["a"][0]][n["start"] : n["stop"] : n.get("step")]
             elif op == "index":
                 vals[i] = vals[n["a"][0]][n["i"]]
             elif op == "col":
