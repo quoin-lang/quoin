@@ -31,6 +31,9 @@
 //!   polyglot. Gated on `python3` + `flatbuffers`.
 //! - `extension_python_sdk` (Slice 7): the extension is a *Python* process (`sdk/python`) speaking
 //!   the same `ext.fbs` wire protocol — the polyglot proof. Gated on `python3` + `flatbuffers`.
+//! - `extension_packed_payloads_and_fallback`: the packed-DataValue negotiation — the same
+//!   structured round-trips (incl. BigInt/Decimal fidelity via ext types) run once on the packed
+//!   (MessagePack) path and once forced onto the boxed-tree fallback via `QUOIN_EXT_NO_MSGPACK`.
 //!
 //! Each script decides pass/fail and prints PASS/FAIL.
 
@@ -785,4 +788,90 @@ ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
     }
     let _ = std::fs::remove_dir_all(&root);
     panic!("use-package script did not pass after 4 attempts.\n{last}");
+}
+
+/// Run one script through `qn` with extra environment variables (inherited by the spawned
+/// extension), asserting it prints `PASS`. Same retry rationale as [`assert_script_passes`].
+fn assert_script_passes_env(name: &str, script: &str, envs: &[(&str, &str)]) {
+    const ATTEMPTS: u32 = 4;
+    let mut last_diag = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, script).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_qn"));
+        cmd.arg(&path);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run qn");
+        let _ = std::fs::remove_file(&path);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.contains("PASS") {
+            return;
+        }
+        last_diag = format!(
+            "status: {:?}\nstdout:\n{stdout}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if attempt < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+        }
+    }
+    panic!("extension script did not pass after {ATTEMPTS} attempts.\n{last_diag}");
+}
+
+/// The packed-DataValue negotiation, both ways: identical structured round-trips through the
+/// Python `ext_full` fixture on (a) the packed MessagePack path (msgpack available — the default
+/// on this machine) and (b) the boxed-tree fallback, forced via `QUOIN_EXT_NO_MSGPACK` so the
+/// extension declines the capability. Covers nesting, bytes, and the two ext-typed kinds whose
+/// fidelity the packed contract must preserve: BigInteger (ext 1) and a decimal (ext 2).
+#[test]
+fn extension_packed_payloads_and_fallback() {
+    if !python_fixture_runnable() {
+        eprintln!(
+            "skipping extension_packed_payloads_and_fallback: python3 + `flatbuffers` unavailable"
+        );
+        return;
+    }
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/sdk/python/examples/ext_full.py"
+    );
+    ensure_executable(fixture);
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.spawn:'{fixture}';
+
+"* nested structure round-trips unchanged
+var m = #{{ 'xs': #( 1 2.5 'three' true nil ) 'blob': (Bytes.of:#( 1 2 255 )) }};
+((e.call:'echoData' with:'' data:m) == m).else:{{ ok = false }};
+
+"* BigInteger fidelity (must come back a BigInteger, not a string or truncated int)
+var big = BigInteger.of:'123456789012345678901234567890';
+var backBig = e.call:'echoData' with:'' data:big;
+(backBig == big).else:{{ ok = false }};
+((backBig + 1.asBigInteger) == (BigInteger.of:'123456789012345678901234567891'))
+    .else:{{ ok = false }};
+
+"* decimal fidelity (a BigDecimal beyond f64 precision)
+var dec = JSON.parse:'0.12345678901234567890123';
+((e.call:'echoData' with:'' data:dec) == dec).else:{{ ok = false }};
+
+"* a structured value built extension-side still materializes
+var rec = e.call:'mkRecord' with:'';
+(rec.defined?).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    // (a) packed path (msgpack present on this machine — the fixture advertises packed_ok).
+    assert_script_passes("qn_ext_packed_test.qn", &script);
+    // (b) boxed fallback: the extension declines packing; everything must still round-trip.
+    assert_script_passes_env(
+        "qn_ext_packed_fallback_test.qn",
+        &script,
+        &[("QUOIN_EXT_NO_MSGPACK", "1")],
+    );
 }

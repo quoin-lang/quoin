@@ -182,6 +182,11 @@ pub struct NativeExtension {
     /// extension as `Call.releases`. Cloned into each `ExtResource` this extension hands out so
     /// its `Drop` can enqueue here (a GC `Drop` can't send a frame; mirrors the fd-reap pattern).
     resource_reap: Rc<RefCell<Vec<u64>>>,
+    /// Whether this extension advertised packed-DataValue support in its `ManifestReturn`
+    /// (`packed_ok`): structured payloads then travel as one MessagePack blob per value instead
+    /// of the boxed table tree (see `quoin-ext-proto/src/packed.rs`). The host always accepts
+    /// both representations; this only gates what it *sends*.
+    packed: bool,
     /// The package namespace this extension's classes were installed under (`loadPackage:`), or
     /// `None` for the raw `spawn:` escape hatch (verbatim names). The extension itself only ever
     /// speaks *simple* class names (`EXT_PACKAGING.md` §4); the host translates — stripping the
@@ -347,8 +352,14 @@ fn read_reply_frame<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>,
 }
 
 /// Encode `msg` and write it as one length-prefixed frame, parking the fiber on the socket.
-fn write_msg<'gc>(vm: &mut VmState<'gc>, id: StreamId, msg: &Msg) -> Result<(), QuoinError> {
-    let payload = quoin_ext_proto::encode(msg);
+/// `packed` selects the negotiated DataValue payload representation (per peer).
+fn write_msg<'gc>(
+    vm: &mut VmState<'gc>,
+    id: StreamId,
+    msg: &Msg,
+    packed: bool,
+) -> Result<(), QuoinError> {
+    let payload = quoin_ext_proto::encode_packed(msg, packed);
     let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&payload);
     match vm.await_io(IoRequest::Write { id, bytes: frame })? {
@@ -394,6 +405,7 @@ fn service_host_op<'gc>(
     id: StreamId,
     epoch: u32,
     ext_id: u64,
+    packed: bool,
     msg: Msg,
 ) -> Result<(), QuoinError> {
     let reply = match msg {
@@ -512,7 +524,7 @@ fn service_host_op<'gc>(
             )));
         }
     };
-    write_msg(vm, id, &reply)
+    write_msg(vm, id, &reply, packed)
 }
 
 /// Invoke the host block behind `block_handle` once per tuple in `batches`, minting a
@@ -588,6 +600,7 @@ fn extension_call<'gc>(
     mc: &gc_arena::Mutation<'gc>,
     id: StreamId,
     ext_id: u64,
+    packed: bool,
     op: String,
     argv: String,
     args: Vec<Value<'gc>>,
@@ -646,6 +659,7 @@ fn extension_call<'gc>(
                 recv,
                 method_args,
             },
+            packed,
         )?;
         loop {
             let frame = read_reply_frame(vm, id)?;
@@ -677,7 +691,7 @@ fn extension_call<'gc>(
                 Msg::CallReturnError { message } => {
                     return Err(QuoinError::ExtensionError(message));
                 }
-                host_op => service_host_op(vm, mc, id, epoch, ext_id, host_op)?,
+                host_op => service_host_op(vm, mc, id, epoch, ext_id, packed, host_op)?,
             }
         }
     })();
@@ -817,6 +831,8 @@ struct ExtCall {
     id: StreamId,
     ext_id: u64,
     dead: bool,
+    /// The peer's packed-DataValue capability (what this call's frames are encoded with).
+    packed: bool,
     /// Shared reap queue — to flush dropped-resource releases and to clone into a returned resource.
     resource_reap: Rc<RefCell<Vec<u64>>>,
     /// The dropped-resource ids drained from the reap queue, flushed to the extension as this
@@ -843,6 +859,7 @@ fn ext_prelude<'gc>(
                 id: e.id,
                 ext_id: e.ext_id,
                 dead: e.dead,
+                packed: e.packed,
                 resource_reap: e.resource_reap.clone(),
                 releases: e.resource_reap.borrow_mut().drain(..).collect(),
             })
@@ -902,6 +919,7 @@ fn run_extension_method<'gc>(
         mc,
         ctx.id,
         ctx.ext_id,
+        ctx.packed,
         op,
         argv,
         args,
@@ -967,6 +985,7 @@ pub fn dispatch_ext_method<'gc>(
         mc,
         ctx.id,
         ctx.ext_id,
+        ctx.packed,
         selector.as_str().to_string(),
         String::new(),
         args,
@@ -1035,14 +1054,18 @@ fn read_reply_frame_timed<'gc>(
 /// Fetch an extension's class manifest right after connect (Phase 3): send `GetManifest` and read
 /// the single `ManifestReturn`. An extension that provides no classes returns an empty list, so the
 /// generic `call:with:` extensions stay backward-compatible. The read is time-bounded so a silent
-/// extension fails the spawn instead of hanging the VM.
-fn fetch_manifest<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<ClassDecl>, QuoinError> {
-    write_msg(vm, id, &Msg::GetManifest)?;
+/// extension fails the spawn instead of hanging the VM. Also performs the packed-DataValue
+/// negotiation: the host always advertises `packed_ok` and returns whether the extension did.
+fn fetch_manifest<'gc>(
+    vm: &mut VmState<'gc>,
+    id: StreamId,
+) -> Result<(Vec<ClassDecl>, bool), QuoinError> {
+    write_msg(vm, id, &Msg::GetManifest { packed_ok: true }, false)?;
     let frame = read_reply_frame_timed(vm, id, crate::tuning::ext_handshake_timeout_ms())?;
     match quoin_ext_proto::decode_envelope(&frame)
         .map_err(|e| QuoinError::Other(format!("Extension manifest: malformed frame: {e}")))?
     {
-        Msg::ManifestReturn { classes } => Ok(classes),
+        Msg::ManifestReturn { classes, packed_ok } => Ok((classes, packed_ok)),
         other => Err(QuoinError::Other(format!(
             "Extension manifest: expected ManifestReturn, got {other:?}"
         ))),
@@ -1113,7 +1136,7 @@ fn spawn_and_connect<'gc>(
     // point), so no GC value may be held across it. A generic extension returns an empty manifest.
     // On any handshake failure (including the timeout) the child isn't owned by an `Extension` value
     // yet, so kill it here rather than orphan it.
-    let manifest = match fetch_manifest(vm, id) {
+    let (manifest, peer_packed) = match fetch_manifest(vm, id) {
         Ok(m) => m,
         Err(e) => {
             let _ = child.kill();
@@ -1136,6 +1159,7 @@ fn spawn_and_connect<'gc>(
             dead: false,
             in_flight: false,
             resource_reap: Rc::new(RefCell::new(Vec::new())),
+            packed: peer_packed,
             namespace,
         },
     );

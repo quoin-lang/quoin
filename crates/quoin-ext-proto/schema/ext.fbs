@@ -64,6 +64,10 @@ table Arg {
     kind: ArgKind;
     data: DataValueBox;
     id: uint64;
+    // Packed transport of a `Data` arg (negotiated; see `GetManifest.packed_ok`): the whole
+    // structured value as one MessagePack blob instead of a nested DataValueBox tree. Set only
+    // when both peers advertised packed support; `data` is then absent.
+    packed: [ubyte];
 }
 
 // host -> ext: invoke op `op` with scalar argument `arg`, plus typed handle arguments
@@ -93,6 +97,8 @@ table Call {
     // The method's arguments, in order — data, ext-instances, and host handles (blocks) mixed
     // (Phase 3). The generic `call:with:` paths use the channels above instead.
     method_args: [Arg];
+    // Packed transport of `data` (negotiated): one MessagePack blob instead of the boxed tree.
+    data_packed: [ubyte];
 }
 
 // A tuple of handles — one invocation's argument list in a batched callback.
@@ -130,6 +136,8 @@ table CallReturnArray {
 // ext -> host: the call returns a structured value (Phase 1), materialized as a nested Quoin Value.
 table CallReturnData {
     value: DataValueBox;
+    // Packed transport of `value` (negotiated): one MessagePack blob instead of the boxed tree.
+    packed: [ubyte];
 }
 
 // ext -> host (re-entrant, mid-call): make a host String value, return a handle to it.
@@ -198,6 +206,8 @@ table GetGlobal {
 // returning a handle to it. Answered with `HostOpReturn`.
 table MakeValue {
     value: DataValueBox;
+    // Packed transport of `value` (negotiated).
+    packed: [ubyte];
 }
 
 // ext -> host (re-entrant, mid-call): project the value behind `handle` to a `DataValue` tree.
@@ -211,6 +221,8 @@ table ReadHandle {
 table ReadHandleReturn {
     value: DataValueBox;
     error: string;
+    // Packed transport of `value` (negotiated).
+    packed: [ubyte];
 }
 
 // ext -> host: the call returns a live host value (the host resolves the handle to its value).
@@ -228,12 +240,25 @@ table ClassDecl {
 }
 
 // host -> ext: sent once right after connect. Asks the extension which classes it provides.
-table GetManifest {}
+// `packed_ok` advertises that this host accepts and may emit PACKED DataValue payloads: the
+// whole structured value as one MessagePack blob (`data_packed` / `Arg.packed` /
+// `CallReturnData.packed` / `MakeValue.packed` / `ReadHandleReturn.packed`) instead of the
+// nested DataValueBox tree — one codec pass per payload rather than two pure-python/planus
+// table objects per node (see profiling/wire-encoding/notes.md). Packed value mapping:
+// nil/bool/int64/float64/str/bin/array/map are native MessagePack; BigInt is ext type 1
+// (ASCII decimal digits); Decimal is ext type 2 (ASCII decimal string). An old peer ignores
+// the field and never sees a packed payload.
+table GetManifest {
+    packed_ok: bool;
+}
 
 // ext -> host: the reply to `GetManifest`. An extension that provides no classes returns an empty
 // list (so the generic `call:with:` extensions stay backward-compatible).
 table ManifestReturn {
     classes: [ClassDecl];
+    // The extension's side of the packed negotiation: it accepts and may emit packed payloads.
+    // The host sends packed only to an advertising extension (and vice versa).
+    packed_ok: bool;
 }
 
 union Message {

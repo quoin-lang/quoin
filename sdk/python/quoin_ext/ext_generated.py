@@ -688,8 +688,35 @@ class Arg(object):
             return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
         return 0
 
+    # Arg
+    def Packed(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 1))
+        return 0
+
+    # Arg
+    def PackedAsNumpy(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Uint8Flags, o)
+        return 0
+
+    # Arg
+    def PackedLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # Arg
+    def PackedIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        return o == 0
+
 def ArgStart(builder):
-    builder.StartObject(3)
+    builder.StartObject(4)
 
 def ArgAddKind(builder, kind):
     builder.PrependUint8Slot(0, kind, 0)
@@ -699,6 +726,12 @@ def ArgAddData(builder, data):
 
 def ArgAddId(builder, id):
     builder.PrependUint64Slot(2, id, 0)
+
+def ArgAddPacked(builder, packed):
+    builder.PrependUOffsetTRelativeSlot(3, flatbuffers.number_types.UOffsetTFlags.py_type(packed), 0)
+
+def ArgStartPackedVector(builder, numElems):
+    return builder.StartVector(1, numElems, 1)
 
 def ArgEnd(builder):
     return builder.EndObject()
@@ -890,8 +923,35 @@ class Call(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(22))
         return o == 0
 
+    # Call
+    def DataPacked(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(24))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 1))
+        return 0
+
+    # Call
+    def DataPackedAsNumpy(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(24))
+        if o != 0:
+            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Uint8Flags, o)
+        return 0
+
+    # Call
+    def DataPackedLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(24))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # Call
+    def DataPackedIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(24))
+        return o == 0
+
 def CallStart(builder):
-    builder.StartObject(10)
+    builder.StartObject(11)
 
 def CallAddOp(builder, op):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(op), 0)
@@ -937,6 +997,12 @@ def CallAddMethodArgs(builder, methodArgs):
 
 def CallStartMethodArgsVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def CallAddDataPacked(builder, dataPacked):
+    builder.PrependUOffsetTRelativeSlot(10, flatbuffers.number_types.UOffsetTFlags.py_type(dataPacked), 0)
+
+def CallStartDataPackedVector(builder, numElems):
+    return builder.StartVector(1, numElems, 1)
 
 def CallEnd(builder):
     return builder.EndObject()
@@ -1187,11 +1253,44 @@ class CallReturnData(object):
             return obj
         return None
 
+    # CallReturnData
+    def Packed(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 1))
+        return 0
+
+    # CallReturnData
+    def PackedAsNumpy(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Uint8Flags, o)
+        return 0
+
+    # CallReturnData
+    def PackedLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # CallReturnData
+    def PackedIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        return o == 0
+
 def CallReturnDataStart(builder):
-    builder.StartObject(1)
+    builder.StartObject(2)
 
 def CallReturnDataAddValue(builder, value):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(value), 0)
+
+def CallReturnDataAddPacked(builder, packed):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(packed), 0)
+
+def CallReturnDataStartPackedVector(builder, numElems):
+    return builder.StartVector(1, numElems, 1)
 
 def CallReturnDataEnd(builder):
     return builder.EndObject()
@@ -1699,11 +1798,44 @@ class MakeValue(object):
             return obj
         return None
 
+    # MakeValue
+    def Packed(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 1))
+        return 0
+
+    # MakeValue
+    def PackedAsNumpy(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Uint8Flags, o)
+        return 0
+
+    # MakeValue
+    def PackedLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # MakeValue
+    def PackedIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        return o == 0
+
 def MakeValueStart(builder):
-    builder.StartObject(1)
+    builder.StartObject(2)
 
 def MakeValueAddValue(builder, value):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(value), 0)
+
+def MakeValueAddPacked(builder, packed):
+    builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(packed), 0)
+
+def MakeValueStartPackedVector(builder, numElems):
+    return builder.StartVector(1, numElems, 1)
 
 def MakeValueEnd(builder):
     return builder.EndObject()
@@ -1781,14 +1913,47 @@ class ReadHandleReturn(object):
             return self._tab.String(o + self._tab.Pos)
         return None
 
+    # ReadHandleReturn
+    def Packed(self, j):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            a = self._tab.Vector(o)
+            return self._tab.Get(flatbuffers.number_types.Uint8Flags, a + flatbuffers.number_types.UOffsetTFlags.py_type(j * 1))
+        return 0
+
+    # ReadHandleReturn
+    def PackedAsNumpy(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.GetVectorAsNumpy(flatbuffers.number_types.Uint8Flags, o)
+        return 0
+
+    # ReadHandleReturn
+    def PackedLength(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        if o != 0:
+            return self._tab.VectorLen(o)
+        return 0
+
+    # ReadHandleReturn
+    def PackedIsNone(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
+        return o == 0
+
 def ReadHandleReturnStart(builder):
-    builder.StartObject(2)
+    builder.StartObject(3)
 
 def ReadHandleReturnAddValue(builder, value):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(value), 0)
 
 def ReadHandleReturnAddError(builder, error):
     builder.PrependUOffsetTRelativeSlot(1, flatbuffers.number_types.UOffsetTFlags.py_type(error), 0)
+
+def ReadHandleReturnAddPacked(builder, packed):
+    builder.PrependUOffsetTRelativeSlot(2, flatbuffers.number_types.UOffsetTFlags.py_type(packed), 0)
+
+def ReadHandleReturnStartPackedVector(builder, numElems):
+    return builder.StartVector(1, numElems, 1)
 
 def ReadHandleReturnEnd(builder):
     return builder.EndObject()
@@ -1937,8 +2102,18 @@ class GetManifest(object):
     def Init(self, buf, pos):
         self._tab = flatbuffers.table.Table(buf, pos)
 
+    # GetManifest
+    def PackedOk(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
 def GetManifestStart(builder):
-    builder.StartObject(0)
+    builder.StartObject(1)
+
+def GetManifestAddPackedOk(builder, packedOk):
+    builder.PrependBoolSlot(0, packedOk, 0)
 
 def GetManifestEnd(builder):
     return builder.EndObject()
@@ -1987,14 +2162,24 @@ class ManifestReturn(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(4))
         return o == 0
 
+    # ManifestReturn
+    def PackedOk(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(6))
+        if o != 0:
+            return bool(self._tab.Get(flatbuffers.number_types.BoolFlags, o + self._tab.Pos))
+        return False
+
 def ManifestReturnStart(builder):
-    builder.StartObject(1)
+    builder.StartObject(2)
 
 def ManifestReturnAddClasses(builder, classes):
     builder.PrependUOffsetTRelativeSlot(0, flatbuffers.number_types.UOffsetTFlags.py_type(classes), 0)
 
 def ManifestReturnStartClassesVector(builder, numElems):
     return builder.StartVector(4, numElems, 4)
+
+def ManifestReturnAddPackedOk(builder, packedOk):
+    builder.PrependBoolSlot(1, packedOk, 0)
 
 def ManifestReturnEnd(builder):
     return builder.EndObject()
