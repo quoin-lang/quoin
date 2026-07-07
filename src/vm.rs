@@ -676,6 +676,7 @@ impl<'gc> VmState<'gc> {
                 main_saved_stack: Vec::new(),
                 main_saved_frames: Vec::new(),
                 main_saved_native_args: Vec::new(),
+                main_saved_aot: AotTaskState::default(),
                 fiber_error: None,
                 wake: None,
                 cancel_current: false,

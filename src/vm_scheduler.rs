@@ -11,7 +11,7 @@ use crate::io_backend::{IoRequest, IoResult};
 use crate::runtime::fiber::{FiberStatus, NativeFiberState};
 use crate::runtime::task::NativeTaskHandle;
 use crate::value::{Block, NativeCall, ObjectPayload, Value};
-use crate::vm::{Frame, VmState};
+use crate::vm::{AotTaskState, Frame, VmState};
 
 use futures_util::future::AbortHandle;
 use gc_arena::{Collect, Gc, Mutation};
@@ -65,6 +65,7 @@ pub struct Task<'gc> {
     pub saved_root_stack: Vec<Value<'gc>>,
     pub saved_root_frames: Vec<Frame<'gc>>,
     pub saved_root_native_args: Vec<NativeCall<'gc>>,
+    pub saved_root_aot: AotTaskState<'gc>,
     /// Result to deliver when this task is next resumed (an I/O result, or a gather
     /// outcome). Stashed here while parked; moved into `Scheduler::wake` by
     /// `load_task_context`, then taken by `await_io`/`await_gather`.
@@ -254,6 +255,11 @@ pub struct Scheduler<'gc> {
     pub main_saved_stack: Vec<Value<'gc>>,
     pub main_saved_frames: Vec<Frame<'gc>>,
     pub main_saved_native_args: Vec<NativeCall<'gc>>,
+    /// The `vm.aot` counterpart of the `main_saved_*` slots: the root
+    /// context's AOT state (frame marks, enclosing env, fuel/depth) while a
+    /// guest fiber runs. Compiled frames may live inside fibers, so their
+    /// AOT state travels with the same swap discipline as `stack`/`frames`.
+    pub main_saved_aot: AotTaskState<'gc>,
     /// An error raised inside a guest fiber, delivered to its resumer.
     #[collect(require_static)]
     pub fiber_error: Option<QuoinError>,
@@ -686,15 +692,17 @@ impl<'gc> VmState<'gc> {
         let stack = std::mem::take(&mut self.stack);
         let frames = std::mem::take(&mut self.frames);
         let native_args = std::mem::take(&mut self.active_native_args);
+        let aot = std::mem::take(&mut self.aot);
         match who {
             None => {
                 self.sched.main_saved_stack = stack;
                 self.sched.main_saved_frames = frames;
                 self.sched.main_saved_native_args = native_args;
+                self.sched.main_saved_aot = aot;
             }
             Some(f) => {
                 f.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
-                    s.set_context(stack, frames, native_args)
+                    s.set_context(stack, frames, native_args, aot)
                 })
                 .map_err(QuoinError::Other)?;
             }
@@ -708,11 +716,12 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         who: Option<Value<'gc>>,
     ) -> Result<(), QuoinError> {
-        let (stack, frames, native_args) = match who {
+        let (stack, frames, native_args, aot) = match who {
             None => (
                 std::mem::take(&mut self.sched.main_saved_stack),
                 std::mem::take(&mut self.sched.main_saved_frames),
                 std::mem::take(&mut self.sched.main_saved_native_args),
+                std::mem::take(&mut self.sched.main_saved_aot),
             ),
             Some(f) => f
                 .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.take_context())
@@ -721,6 +730,7 @@ impl<'gc> VmState<'gc> {
         self.stack = stack;
         self.frames = frames;
         self.active_native_args = native_args;
+        self.aot = aot;
         Ok(())
     }
 
@@ -872,6 +882,7 @@ impl<'gc> VmState<'gc> {
         self.sched.main_saved_stack.clear();
         self.sched.main_saved_frames.clear();
         self.sched.main_saved_native_args.clear();
+        self.sched.main_saved_aot = AotTaskState::default();
         self.sched.fiber_error = None;
         self.sched.wake = None;
         self.sched.cancel_current = false;
@@ -895,6 +906,7 @@ impl<'gc> VmState<'gc> {
         let saved_root_stack = std::mem::take(&mut self.sched.main_saved_stack);
         let saved_root_frames = std::mem::take(&mut self.sched.main_saved_frames);
         let saved_root_native_args = std::mem::take(&mut self.sched.main_saved_native_args);
+        let saved_root_aot = std::mem::take(&mut self.sched.main_saved_aot);
         let t = self.sched.tasks[tid.0]
             .as_mut()
             .expect("save_task_context: task slot is empty");
@@ -906,6 +918,7 @@ impl<'gc> VmState<'gc> {
         t.saved_root_stack = saved_root_stack;
         t.saved_root_frames = saved_root_frames;
         t.saved_root_native_args = saved_root_native_args;
+        t.saved_root_aot = saved_root_aot;
         t.native_reentry_depth = self.native_reentry_depth;
         t.aot = std::mem::take(&mut self.aot);
     }
@@ -941,6 +954,7 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_stack = std::mem::take(&mut t.saved_root_stack);
             self.sched.main_saved_frames = std::mem::take(&mut t.saved_root_frames);
             self.sched.main_saved_native_args = std::mem::take(&mut t.saved_root_native_args);
+            self.sched.main_saved_aot = std::mem::take(&mut t.saved_root_aot);
             self.sched.wake = t.wake.take();
             self.native_reentry_depth = t.native_reentry_depth;
             self.aot = std::mem::take(&mut t.aot);
@@ -954,6 +968,7 @@ impl<'gc> VmState<'gc> {
             self.sched.main_saved_stack = Vec::new();
             self.sched.main_saved_frames = Vec::new();
             self.sched.main_saved_native_args = Vec::new();
+            self.sched.main_saved_aot = AotTaskState::default();
             self.sched.wake = None;
             self.native_reentry_depth = 0;
             self.aot = crate::vm::AotTaskState::default();
@@ -1047,6 +1062,7 @@ impl<'gc> VmState<'gc> {
             saved_root_stack: Vec::new(),
             saved_root_frames: Vec::new(),
             saved_root_native_args: Vec::new(),
+            saved_root_aot: AotTaskState::default(),
             wake: None,
             parent,
             gather: None,

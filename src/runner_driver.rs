@@ -242,6 +242,7 @@ pub(crate) fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
         saved_root_stack: Vec::new(),
         saved_root_frames: Vec::new(),
         saved_root_native_args: Vec::new(),
+        saved_root_aot: Default::default(),
         wake: None,
         parent: None,
         gather: None,
