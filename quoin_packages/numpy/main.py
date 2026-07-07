@@ -28,6 +28,21 @@ import numpy as np
 
 import quoin_ext
 
+try:
+    import numexpr
+except ImportError:  # optional accelerator — the plain-NumPy path is complete on its own
+    numexpr = None
+
+# Fused evaluation is on when numexpr imports, unless QN_NUMPY_NO_NUMEXPR disables it. Two
+# measured gates keep it to where it actually wins (profiling/numexpr/notes.md): the graph's
+# largest base array must reach QN_NUMPY_NUMEXPR_MIN elements (numexpr's ~90µs per-evaluate
+# floor — thread coordination — dwarfs small arrays), and the graph must contain at least
+# QN_NUMPY_NUMEXPR_MIN_OPS fusible ops (short chains are memory-pass-bound either way; fusion
+# pays on WIDE elementwise chains, ~7x on an 11-op chain at 1M).
+_NUMEXPR_ENABLED = numexpr is not None and not os.environ.get("QN_NUMPY_NO_NUMEXPR")
+_NUMEXPR_MIN = int(os.environ.get("QN_NUMPY_NUMEXPR_MIN", "262144"))
+_NUMEXPR_MIN_OPS = int(os.environ.get("QN_NUMPY_NUMEXPR_MIN_OPS", "4"))
+
 _RNG = np.random.default_rng()
 
 # The expression-DAG op tables (`evalGraph:`). Elementwise ops broadcast NumPy-style; reducers
@@ -123,6 +138,245 @@ _CUMS = {
     "cumprod": np.cumprod,
 }
 
+# --- numexpr fusion: the seam `eval_graph` was designed for --------------------------------
+# Ops with a numexpr spelling whose semantics match the NumPy tables above EXACTLY (probed:
+# int/int division -> float64, `%` follows np.mod's sign, int**int stays int64, floor/ceil
+# present). Anything not here — log2/cbrt/sign/round/the is*-masks/maximum/minimum/hypot/
+# floordiv/clip, axis reductions, shape ops, sorting — evaluates on the plain NumPy path
+# mid-graph. Fusion only ever changes how many passes run, never what is computed.
+_NX_BINOPS = {
+    "add": "({0} + {1})",
+    "sub": "({0} - {1})",
+    "mul": "({0} * {1})",
+    "div": "({0} / {1})",
+    "pow": "({0} ** {1})",
+    "mod": "({0} % {1})",
+    "eq": "({0} == {1})",
+    "ne": "({0} != {1})",
+    "lt": "({0} < {1})",
+    "le": "({0} <= {1})",
+    "gt": "({0} > {1})",
+    "ge": "({0} >= {1})",
+    "and": "({0} & {1})",
+    "or": "({0} | {1})",
+    "arctan2": "arctan2({0}, {1})",
+}
+_NX_UNOPS = {
+    "neg": "(-{0})",
+    "sqrt": "sqrt({0})",
+    "exp": "exp({0})",
+    "expm1": "expm1({0})",
+    "log": "log({0})",
+    "log10": "log10({0})",
+    "log1p": "log1p({0})",
+    "abs": "abs({0})",
+    "sin": "sin({0})",
+    "cos": "cos({0})",
+    "tan": "tan({0})",
+    "arcsin": "arcsin({0})",
+    "arccos": "arccos({0})",
+    "arctan": "arctan({0})",
+    "sinh": "sinh({0})",
+    "cosh": "cosh({0})",
+    "tanh": "tanh({0})",
+    "floor": "floor({0})",
+    "ceil": "ceil({0})",
+    "not": "(~{0})",
+}
+# Ops whose result is a bool mask. `and`/`or`/`not` and a `where` condition fuse only over
+# known-bool operands: numexpr's & | ~ are BITWISE, which is only "logical" on real masks.
+_NX_BOOL_OPS = {"eq", "ne", "lt", "le", "gt", "ge", "and", "or"}
+# numexpr caps the inputs of one compiled expression; past this we materialize a subregion
+# and keep going rather than erroring.
+_NX_MAX_VARS = 30
+
+
+def _base_value(n):
+    b = n.get("v")
+    if not isinstance(b, NdArray):
+        raise ValueError("evalGraph: base node does not carry a [NumPy]Array")
+    return b.a
+
+
+def _eval_op(n, op, child):
+    """Evaluate one interior graph node, with `child(j)` yielding operand j's value. The single
+    source of op semantics, shared by the plain evaluator (child = list lookup) and the fused
+    evaluator (child = materialize-on-demand) — so fusion can never change WHAT is computed."""
+    if op in _BINOPS:
+        a, b = n["a"]
+        return _BINOPS[op](child(a), child(b))
+    if op in _UNOPS:
+        return _UNOPS[op](child(n["a"][0]))
+    if op in _REDUCERS:
+        axis = n.get("axis")
+        if axis is None:
+            return _REDUCERS[op](child(n["a"][0]))
+        return _REDUCERS[op](child(n["a"][0]), axis=axis)
+    if op in _CUMS:
+        return _CUMS[op](child(n["a"][0]), axis=n.get("axis"))
+    if op == "clip":
+        x, lo, hi = n["a"]
+        return np.clip(child(x), child(lo), child(hi))
+    if op == "sort":
+        return np.sort(child(n["a"][0]), axis=n.get("axis", -1))
+    if op == "argsort":
+        return np.argsort(child(n["a"][0]), axis=n.get("axis", -1))
+    if op == "unique":
+        return np.unique(child(n["a"][0]))
+    if op == "searchsorted":
+        a, v = n["a"]
+        return np.searchsorted(child(a), child(v))
+    if op == "take":
+        x, idx = n["a"]
+        return np.take(child(x), child(idx))
+    if op == "concat":
+        return np.concatenate([child(j) for j in n["a"]], axis=n.get("axis", 0))
+    if op == "stack":
+        return np.stack([child(j) for j in n["a"]], axis=n.get("axis", 0))
+    if op == "tile":
+        reps = n["reps"]
+        return np.tile(child(n["a"][0]), tuple(reps) if isinstance(reps, list) else reps)
+    if op == "repeat":
+        return np.repeat(child(n["a"][0]), n["n"], axis=n.get("axis"))
+    if op == "flip":
+        return np.flip(child(n["a"][0]), axis=n.get("axis"))
+    if op == "roll":
+        return np.roll(child(n["a"][0]), n["shift"], axis=n.get("axis"))
+    if op == "squeeze":
+        return np.squeeze(child(n["a"][0]))
+    if op == "expanddims":
+        return np.expand_dims(child(n["a"][0]), n["axis"])
+    if op == "swapaxes":
+        return np.swapaxes(child(n["a"][0]), n["a1"], n["a2"])
+    if op == "transpose":
+        return np.transpose(child(n["a"][0]))
+    if op == "flatten":
+        return np.ravel(child(n["a"][0]))
+    if op == "reshape":
+        return np.reshape(child(n["a"][0]), tuple(n["shape"]))
+    if op == "slice":
+        return child(n["a"][0])[n["start"] : n["stop"] : n.get("step")]
+    if op == "index":
+        return child(n["a"][0])[n["i"]]
+    if op == "col":
+        return child(n["a"][0])[:, n["i"]]
+    if op == "select":
+        x, mask = n["a"]
+        return child(x)[np.asarray(child(mask), dtype=bool)]
+    if op == "where":
+        c, x, y = n["a"]
+        return np.where(child(c), child(x), child(y))
+    raise ValueError(f"evalGraph: unknown op '{op}'")
+
+
+def _fusion_wanted(nodes):
+    """Fuse only when enabled AND both measured gates pass: a base array big enough that one
+    numexpr pass beats its per-evaluate floor (QN_NUMPY_NUMEXPR_MIN), and a chain wide enough
+    that fusing passes actually saves memory traffic (QN_NUMPY_NUMEXPR_MIN_OPS)."""
+    if not _NUMEXPR_ENABLED:
+        return False
+    biggest = 0
+    fusible = 0
+    for n in nodes:
+        op = n.get("op")
+        if op == "base":
+            b = n.get("v")
+            if isinstance(b, NdArray) and b.a.size > biggest:
+                biggest = b.a.size
+        elif op in _NX_BINOPS or op in _NX_UNOPS or op == "where":
+            fusible += 1
+    return biggest >= _NUMEXPR_MIN and fusible >= _NUMEXPR_MIN_OPS
+
+
+def _eval_fused(nodes, root_idx):
+    """The fused evaluator: fusible elementwise nodes accumulate a numexpr expression string
+    instead of executing; a fused region materializes — ONE numexpr.evaluate, a single
+    blocked + multithreaded pass with no intermediate temporaries — only when something
+    non-fusible needs its value: a plain-path consumer (reductions included — see the note
+    in `try_fuse`), a diamond (shared node, still evaluated exactly once), the input-count
+    cap, or the graph root. Node semantics are `_eval_op`'s; fusion only changes how many
+    passes run."""
+    uses = [0] * len(nodes)
+    for n in nodes:
+        for j in n.get("a", ()):
+            uses[j] += 1
+
+    vals = [None] * len(nodes)
+    have = [False] * len(nodes)
+    fused = [None] * len(nodes)  # i -> (expr, kind, {var name: node idx}) while deferred
+
+    def force(i):
+        """The node's VALUE, running its deferred fused region now if it still has one."""
+        if have[i]:
+            return vals[i]
+        expr, _, var_map = fused[i]
+        vals[i] = numexpr.evaluate(
+            expr, local_dict={nm: force(j) for nm, j in var_map.items()}
+        )
+        have[i] = True
+        return vals[i]
+
+    def operand(i):
+        """A child's contribution to its consumer's expression: the child's own
+        (expr, kind, vars) inlined when deferred and single-use; otherwise a bound
+        variable, 'bool'-kinded only when statically or runtime-known."""
+        if not have[i] and fused[i] is not None and uses[i] == 1:
+            return fused[i]
+        name = f"v{i}"
+        if have[i]:
+            v = vals[i]
+            kind = "bool" if isinstance(v, np.ndarray) and v.dtype == np.bool_ else "num"
+        elif fused[i] is not None:
+            kind = fused[i][1]
+        else:
+            kind = "num"
+        return (name, kind, {name: i})
+
+    def try_fuse(n, op):
+        """(expr, kind, vars) for a fusible node, or None to leave it on the plain path."""
+        a = n.get("a", ())
+        if op in _NX_BINOPS and len(a) == 2:
+            ea, ka, va = operand(a[0])
+            eb, kb, vb = operand(a[1])
+            if op in ("and", "or") and not (ka == "bool" and kb == "bool"):
+                return None
+            kind = "bool" if op in _NX_BOOL_OPS else "num"
+            return (_NX_BINOPS[op].format(ea, eb), kind, {**va, **vb})
+        if op in _NX_UNOPS and len(a) == 1:
+            ea, ka, va = operand(a[0])
+            if op == "not" and ka != "bool":
+                return None
+            return (_NX_UNOPS[op].format(ea), "bool" if op == "not" else "num", va)
+        if op == "where" and len(a) == 3:
+            ec, kc, vc = operand(a[0])
+            ex, _, vx = operand(a[1])
+            ey, _, vy = operand(a[2])
+            if kc != "bool":
+                return None
+            return (f"where({ec}, {ex}, {ey})", "num", {**vc, **vx, **vy})
+        # Reductions are deliberately NOT fused: numexpr's own sum()/prod() reductions are
+        # single-threaded and measured SLOWER than materializing the fused elementwise pass
+        # and letting np.sum reduce it (profiling/numexpr/notes.md) — so a reduction node
+        # just forces its (fused) child like any other plain-path consumer.
+        return None
+
+    for i, n in enumerate(nodes):
+        op = n["op"]
+        if op == "base":
+            vals[i] = _base_value(n)
+            have[i] = True
+        elif op == "const":
+            vals[i] = n["v"]
+            have[i] = True
+        else:
+            f = try_fuse(n, op)
+            if f is not None and len(f[2]) <= _NX_MAX_VARS:
+                fused[i] = f
+            else:
+                vals[i] = _eval_op(n, op, force)
+                have[i] = True
+    return force(root_idx)
+
 
 def _coerce(a):
     """Coerce an ndarray to the dtype policy (float64 | int64 | bool — the last from
@@ -190,92 +444,31 @@ class NdArray:
         distinct arrays), `{'op':'const','v':x}`, or `{'op':<table op>,'a':#( child-indices )}`.
         Nodes arrive in dependency order (children first) and each is evaluated once — a shared
         subexpression (diamond) costs one evaluation, and intermediates never become handles on
-        either side. Returns a new NdArray instance (array root) or a scalar (reduction root).
-        The receiver is just the dispatch anchor (it also appears as a base node)."""
+        either side. When numexpr is importable and the graph is big enough to profit
+        (QN_NUMPY_NUMEXPR_MIN elements; QN_NUMPY_NO_NUMEXPR=1 disables), maximal elementwise
+        regions run as single fused passes (`_eval_fused`) instead of node-at-a-time. Returns a
+        new NdArray instance (array root) or a scalar (reduction root). The receiver is just
+        the dispatch anchor (it also appears as a base node)."""
         if not isinstance(tree, dict) or "nodes" not in tree or "root" not in tree:
             raise ValueError("evalGraph: expects #{ 'nodes': ..., 'root': ... }")
         nodes = tree["nodes"]
-        vals = [None] * len(nodes)
-        for i, n in enumerate(nodes):
-            op = n["op"]
-            if op == "base":
-                b = n.get("v")
-                if not isinstance(b, NdArray):
-                    raise ValueError("evalGraph: base node does not carry a [NumPy]Array")
-                vals[i] = b.a
-            elif op == "const":
-                vals[i] = n["v"]
-            elif op in _BINOPS:
-                a, b = n["a"]
-                vals[i] = _BINOPS[op](vals[a], vals[b])
-            elif op in _UNOPS:
-                vals[i] = _UNOPS[op](vals[n["a"][0]])
-            elif op in _REDUCERS:
-                axis = n.get("axis")
-                if axis is None:
-                    vals[i] = _REDUCERS[op](vals[n["a"][0]])
+        if _fusion_wanted(nodes):
+            root = _eval_fused(nodes, tree["root"])
+        else:
+            vals = [None] * len(nodes)
+            for i, n in enumerate(nodes):
+                op = n["op"]
+                if op == "base":
+                    vals[i] = _base_value(n)
+                elif op == "const":
+                    vals[i] = n["v"]
                 else:
-                    vals[i] = _REDUCERS[op](vals[n["a"][0]], axis=axis)
-            elif op in _CUMS:
-                vals[i] = _CUMS[op](vals[n["a"][0]], axis=n.get("axis"))
-            elif op == "clip":
-                x, lo, hi = n["a"]
-                vals[i] = np.clip(vals[x], vals[lo], vals[hi])
-            elif op == "sort":
-                vals[i] = np.sort(vals[n["a"][0]], axis=n.get("axis", -1))
-            elif op == "argsort":
-                vals[i] = np.argsort(vals[n["a"][0]], axis=n.get("axis", -1))
-            elif op == "unique":
-                vals[i] = np.unique(vals[n["a"][0]])
-            elif op == "searchsorted":
-                a, v = n["a"]
-                vals[i] = np.searchsorted(vals[a], vals[v])
-            elif op == "take":
-                x, idx = n["a"]
-                vals[i] = np.take(vals[x], vals[idx])
-            elif op == "concat":
-                vals[i] = np.concatenate([vals[j] for j in n["a"]], axis=n.get("axis", 0))
-            elif op == "stack":
-                vals[i] = np.stack([vals[j] for j in n["a"]], axis=n.get("axis", 0))
-            elif op == "tile":
-                reps = n["reps"]
-                vals[i] = np.tile(
-                    vals[n["a"][0]], tuple(reps) if isinstance(reps, list) else reps
-                )
-            elif op == "repeat":
-                vals[i] = np.repeat(vals[n["a"][0]], n["n"], axis=n.get("axis"))
-            elif op == "flip":
-                vals[i] = np.flip(vals[n["a"][0]], axis=n.get("axis"))
-            elif op == "roll":
-                vals[i] = np.roll(vals[n["a"][0]], n["shift"], axis=n.get("axis"))
-            elif op == "squeeze":
-                vals[i] = np.squeeze(vals[n["a"][0]])
-            elif op == "expanddims":
-                vals[i] = np.expand_dims(vals[n["a"][0]], n["axis"])
-            elif op == "swapaxes":
-                vals[i] = np.swapaxes(vals[n["a"][0]], n["a1"], n["a2"])
-            elif op == "transpose":
-                vals[i] = np.transpose(vals[n["a"][0]])
-            elif op == "flatten":
-                vals[i] = np.ravel(vals[n["a"][0]])
-            elif op == "reshape":
-                vals[i] = np.reshape(vals[n["a"][0]], tuple(n["shape"]))
-            elif op == "slice":
-                vals[i] = vals[n["a"][0]][n["start"] : n["stop"] : n.get("step")]
-            elif op == "index":
-                vals[i] = vals[n["a"][0]][n["i"]]
-            elif op == "col":
-                vals[i] = vals[n["a"][0]][:, n["i"]]
-            elif op == "select":
-                x, mask = n["a"]
-                vals[i] = vals[x][np.asarray(vals[mask], dtype=bool)]
-            elif op == "where":
-                c, x, y = n["a"]
-                vals[i] = np.where(vals[c], vals[x], vals[y])
-            else:
-                raise ValueError(f"evalGraph: unknown op '{op}'")
-        root = vals[tree["root"]]
+                    vals[i] = _eval_op(n, op, vals.__getitem__)
+            root = vals[tree["root"]]
         if isinstance(root, np.ndarray):
+            # A 0-d array IS a scalar to Quoin (numexpr's full reductions come back 0-d).
+            if root.ndim == 0:
+                return root.item()
             return NdArray(root)
         if isinstance(root, np.generic):
             return root.item()

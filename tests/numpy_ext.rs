@@ -767,3 +767,111 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_numpy_dtype_casts_test.qn", &script);
 }
+
+/// Run one script through `qn` with extra env vars (inherited by the spawned extension),
+/// asserting it prints `PASS`. Same retry rationale as [`assert_script_passes`].
+fn assert_script_passes_env(name: &str, script: &str, envs: &[(&str, &str)]) {
+    const ATTEMPTS: u32 = 4;
+    let mut last_diag = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, script).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_qn"));
+        cmd.arg(&path);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run qn");
+        let _ = std::fs::remove_file(&path);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.contains("PASS") {
+            return;
+        }
+        last_diag = format!(
+            "status: {:?}\nstdout:\n{stdout}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if attempt < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+        }
+    }
+    panic!("numpy script did not pass after {ATTEMPTS} attempts.\n{last_diag}");
+}
+
+/// numexpr fusion: the same value-exact expressions run on three configurations — fusion
+/// forced onto tiny arrays (threshold 1), fusion disabled, and the default — and must agree.
+/// Exercises fused chains, diamonds (evaluated once), bool-gated logicals + where, the
+/// root-level sum fold, fused/unfused interleaving (unfused ops mid-graph), and int dtype
+/// preservation through fused ** and %.
+#[test]
+fn numpy_numexpr_fusion() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_numexpr_fusion: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let numexpr_available = Command::new("python3")
+        .args(["-c", "import numexpr"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !numexpr_available {
+        eprintln!("skipping numpy_numexpr_fusion: python3 `numexpr` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var a = [NumPy]Array.fromList:#( 1.0 2.0 3.0 );
+var b = [NumPy]Array.fromList:#( 4.0 5.0 6.0 );
+
+"* a pure elementwise chain (one fused pass when fusion is on)
+((((a + b) * 2.0 - 1.0).sqrt.toList) == #( 3.0 (13.0.sqrt) (17.0.sqrt) )).else:{{ ok = false }};
+
+"* diamond: the shared node is evaluated once and reused
+var d = a + b;
+(((d * d).sum) == 155.0).else:{{ ok = false }};
+
+"* root-level sum folds into the fused pass (the MSE shape)
+(((a - b) * (a - b)).sum == 27.0).else:{{ ok = false }};
+
+"* bool-gated fusion: comparisons -> masks -> and/not/where
+var m1 = (a > 1.5).and:(b < 6.5);
+(m1.toList == #( false true true )).else:{{ ok = false }};
+(m1.not.toList == #( true false false )).else:{{ ok = false }};
+((m1.where:a else:(a.neg)).toList == #( (-1.0) 2.0 3.0 )).else:{{ ok = false }};
+
+"* unfused ops interleave mid-graph: fused chain -> sort (plain) -> fused again
+((((a.neg).sort + 1.0).toList) == #( (-2.0) (-1.0) 0.0 )).else:{{ ok = false }};
+"* clip stays on the plain path but composes with fused neighbours
+((((a * 2.0).clip:3.0 to:5.0) + 0.5).toList == #( 3.5 4.5 5.5 )).else:{{ ok = false }};
+
+"* int dtype survives fused ** and % (numexpr semantics probed == numpy)
+var iv = [NumPy]Array.fromList:#( 2 3 4 );
+(((iv.pow:2) + 0).dtype == 'int64').else:{{ ok = false }};
+((iv.pow:2).toList == #( 4 9 16 )).else:{{ ok = false }};
+((iv.mod:3).toList == #( 2 0 1 )).else:{{ ok = false }};
+
+"* trig/exp/log fused equivalences at exact points
+((([NumPy]Array.fromList:#( 0.0 )).exp.toList) == #( 1.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 )).log.toList) == #( 0.0 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    // Fusion forced onto the tiny test arrays (both gates floored); disabled; and the default.
+    assert_script_passes_env(
+        "qn_numpy_numexpr_on_test.qn",
+        &script,
+        &[("QN_NUMPY_NUMEXPR_MIN", "1"), ("QN_NUMPY_NUMEXPR_MIN_OPS", "1")],
+    );
+    assert_script_passes_env(
+        "qn_numpy_numexpr_off_test.qn",
+        &script,
+        &[("QN_NUMPY_NO_NUMEXPR", "1")],
+    );
+    assert_script_passes("qn_numpy_numexpr_default_test.qn", &script);
+}

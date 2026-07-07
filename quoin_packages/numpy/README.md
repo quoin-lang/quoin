@@ -6,7 +6,9 @@ opaque handles, and bulk data crosses the socket only at explicit materializatio
 `[NumPy]` namespace marks this as the Python-backed implementation — `[Num]` is reserved for a
 future native (Rust) backend behind the same Quoin-side surface.
 
-**Requires:** a `python3` on PATH that can `import numpy, msgpack`.
+**Requires:** a `python3` on PATH that can `import numpy, msgpack`. Optionally `numexpr` —
+when importable, big elementwise graphs evaluate as fused multithreaded passes (see the
+performance model below).
 
 ```quoin
 use numpy:*;
@@ -107,13 +109,21 @@ remaining per-call floor is architectural (syscalls), not codec.
 - Forcing mid-chain (`.eval` between every op) reintroduces per-op round trips — force once at
   the end. `.eval` is for reusing a subexpression across many later graphs.
 
-The extension evaluates graphs with plain NumPy today; swapping in a fusing evaluator (numexpr)
-is invisible to Quoin — `eval_graph` in `main.py` is the seam.
+When `numexpr` is importable, maximal elementwise regions of a graph evaluate as single
+blocked, multithreaded passes instead of node-at-a-time NumPy — measured 1.5-2.7× through the
+wire on wide chains at ≥256K elements (7× in-process; `profiling/numexpr/notes.md`). Two
+measured gates keep fusion where it wins: `QN_NUMPY_NUMEXPR_MIN` (largest base array,
+default 262144 elements) and `QN_NUMPY_NUMEXPR_MIN_OPS` (fusible ops, default 4);
+`QN_NUMPY_NO_NUMEXPR=1` disables. Fusion never changes results: the fusibility table only
+holds ops probed semantically identical to the NumPy path, and everything else evaluates
+unfused mid-graph. Separately, the graph builder dedups structurally identical
+subexpressions (`((a - b) * (a - b))` computes the difference once — on every path).
 
 ## Design notes
 
-The extension (`main.py`, ~300 lines) is deliberately dumb: creation, `evalGraph:`,
-materialization. The brains — operators, DAG building, dedup, memoization — are pure Quoin in
+The extension (`main.py`) stays deliberately thin: creation, `evalGraph:` (plain or fused —
+one shared table of op semantics), materialization. The brains — operators, DAG building,
+dedup/CSE, memoization — are pure Quoin in
 `init.qn`, and are meant to be reused verbatim by the future native `[Num]` backend. The two
 wire gaps this package originally tracked are closed: `fromArray:` rides the `Array` argument
 kind, and live-instance references inside values (ext type 3) retired the old 8-base selector
