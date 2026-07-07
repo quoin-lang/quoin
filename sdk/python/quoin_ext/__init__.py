@@ -641,7 +641,7 @@ class Extension:
             raise ValueError(f"no extension-backed class '{class_name}'")
         args = self._resolve_args(raw_args, table, conn)
         if recv == 0:
-            # Class-side: a constructor builds a new instance.
+            # Class-side: usually a constructor building a new instance.
             ctor = reg.constructors.get(op)
             if ctor is None:
                 raise ValueError(f"no constructor '{op}' on class '{class_name}'")
@@ -652,7 +652,12 @@ class Extension:
                 obj = ctor(*args)
             except Exception as exc:  # noqa: BLE001 — any handler error maps to a catchable error
                 return _encode_call_return_error(str(exc))
-            return _encode_call_return_resource(table.insert(obj), self._class_name_of(obj))
+            # A class-side selector returning a non-instance replies as data, same as the
+            # instance-method rule below — so a "constructor" can return a List of instances
+            # (numpy's `meshgrid:with:`) or nothing at all (`seed:`).
+            if isinstance(obj, registered_types):
+                return _encode_call_return_resource(table.insert(obj), self._class_name_of(obj))
+            return _encode_reply(obj, pack=pack)
         method = reg.methods.get(op)
         if method is None:
             raise ValueError(f"no method '{op}' on class '{class_name}'")

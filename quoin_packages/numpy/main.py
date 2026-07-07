@@ -42,6 +42,7 @@ _BINOPS = {
     "div": np.true_divide,
     "pow": np.power,
     "mod": np.mod,
+    "floordiv": np.floor_divide,
     "matmul": np.matmul,
     "eq": np.equal,
     "ne": np.not_equal,
@@ -51,21 +52,47 @@ _BINOPS = {
     "ge": np.greater_equal,
     "and": np.logical_and,
     "or": np.logical_or,
+    "maximum": np.maximum,
+    "minimum": np.minimum,
+    "arctan2": np.arctan2,
+    "hypot": np.hypot,
+    "solve": np.linalg.solve,
+    "outer": np.outer,
 }
 _UNOPS = {
     "neg": np.negative,
     "sqrt": np.sqrt,
+    "cbrt": np.cbrt,
     "exp": np.exp,
+    "expm1": np.expm1,
     "log": np.log,
+    "log2": np.log2,
+    "log10": np.log10,
+    "log1p": np.log1p,
     "abs": np.abs,
     "sin": np.sin,
     "cos": np.cos,
     "tan": np.tan,
+    "sinh": np.sinh,
+    "cosh": np.cosh,
+    "tanh": np.tanh,
+    "arcsin": np.arcsin,
+    "arccos": np.arccos,
+    "arctan": np.arctan,
     "floor": np.floor,
     "ceil": np.ceil,
     "round": np.round,
     "sign": np.sign,
     "not": np.logical_not,
+    "isnan": np.isnan,
+    "isinf": np.isinf,
+    "isfinite": np.isfinite,
+    "inv": np.linalg.inv,
+    # Casts within the dtype policy (float64 | int64 | bool). float -> int truncates toward
+    # zero (NumPy astype); anything -> bool is the != 0 test.
+    "tofloat": lambda x: np.asarray(x).astype(np.float64),
+    "toint": lambda x: np.asarray(x).astype(np.int64),
+    "tobool": lambda x: np.asarray(x).astype(np.bool_),
 }
 _REDUCERS = {
     "sum": np.sum,
@@ -75,9 +102,25 @@ _REDUCERS = {
     "argmin": np.argmin,
     "argmax": np.argmax,
     "std": np.std,
+    "var": np.var,
+    "ptp": np.ptp,
+    "median": np.median,
+    "countnonzero": np.count_nonzero,
     "prod": np.prod,
     "any": np.any,
     "all": np.all,
+    # Linalg scalars ride the reducer path too. `norm` also takes an axis (row/column norms);
+    # `trace`/`det` do not — an axis form would TypeError into a catchable error, and init.qn
+    # doesn't expose one.
+    "trace": np.trace,
+    "det": np.linalg.det,
+    "norm": np.linalg.norm,
+}
+# Running (cumulative) forms: array-shaped results, so they stay IN the graph — with no axis
+# NumPy flattens first (its own convention), with an axis they run along it.
+_CUMS = {
+    "cumsum": np.cumsum,
+    "cumprod": np.cumprod,
 }
 
 
@@ -173,6 +216,44 @@ class NdArray:
                     vals[i] = _REDUCERS[op](vals[n["a"][0]])
                 else:
                     vals[i] = _REDUCERS[op](vals[n["a"][0]], axis=axis)
+            elif op in _CUMS:
+                vals[i] = _CUMS[op](vals[n["a"][0]], axis=n.get("axis"))
+            elif op == "clip":
+                x, lo, hi = n["a"]
+                vals[i] = np.clip(vals[x], vals[lo], vals[hi])
+            elif op == "sort":
+                vals[i] = np.sort(vals[n["a"][0]], axis=n.get("axis", -1))
+            elif op == "argsort":
+                vals[i] = np.argsort(vals[n["a"][0]], axis=n.get("axis", -1))
+            elif op == "unique":
+                vals[i] = np.unique(vals[n["a"][0]])
+            elif op == "searchsorted":
+                a, v = n["a"]
+                vals[i] = np.searchsorted(vals[a], vals[v])
+            elif op == "take":
+                x, idx = n["a"]
+                vals[i] = np.take(vals[x], vals[idx])
+            elif op == "concat":
+                vals[i] = np.concatenate([vals[j] for j in n["a"]], axis=n.get("axis", 0))
+            elif op == "stack":
+                vals[i] = np.stack([vals[j] for j in n["a"]], axis=n.get("axis", 0))
+            elif op == "tile":
+                reps = n["reps"]
+                vals[i] = np.tile(
+                    vals[n["a"][0]], tuple(reps) if isinstance(reps, list) else reps
+                )
+            elif op == "repeat":
+                vals[i] = np.repeat(vals[n["a"][0]], n["n"], axis=n.get("axis"))
+            elif op == "flip":
+                vals[i] = np.flip(vals[n["a"][0]], axis=n.get("axis"))
+            elif op == "roll":
+                vals[i] = np.roll(vals[n["a"][0]], n["shift"], axis=n.get("axis"))
+            elif op == "squeeze":
+                vals[i] = np.squeeze(vals[n["a"][0]])
+            elif op == "expanddims":
+                vals[i] = np.expand_dims(vals[n["a"][0]], n["axis"])
+            elif op == "swapaxes":
+                vals[i] = np.swapaxes(vals[n["a"][0]], n["a1"], n["a2"])
             elif op == "transpose":
                 vals[i] = np.transpose(vals[n["a"][0]])
             elif op == "flatten":
@@ -180,7 +261,7 @@ class NdArray:
             elif op == "reshape":
                 vals[i] = np.reshape(vals[n["a"][0]], tuple(n["shape"]))
             elif op == "slice":
-                vals[i] = vals[n["a"][0]][n["start"] : n["stop"]]
+                vals[i] = vals[n["a"][0]][n["start"] : n["stop"] : n.get("step")]
             elif op == "index":
                 vals[i] = vals[n["a"][0]][n["i"]]
             elif op == "col":
@@ -201,6 +282,33 @@ class NdArray:
         return root
 
     # --- structure ---
+
+    def non_zero(self):
+        """The indices of the non-zero elements, one index array per dimension (NumPy's
+        `nonzero` tuple) — a List of live instances on the wire."""
+        return [NdArray(ix) for ix in np.nonzero(self.a)]
+
+    def eig(self):
+        """Eigenvalues + right eigenvectors (`np.linalg.eig`) as a List of two live arrays.
+        Complex results with (numerically) zero imaginary parts are realified; a genuinely
+        complex spectrum is outside the dtype policy and raises a clear, catchable error."""
+        w, v = np.linalg.eig(self.a)
+
+        def realify(x):
+            if np.iscomplexobj(x):
+                if np.abs(x.imag).max() > 1e-9:
+                    raise ValueError(
+                        "eig: complex eigenvalues are not representable (float64/int64 only)"
+                    )
+                x = x.real
+            return NdArray(x)
+
+        return [realify(w), realify(v)]
+
+    def svd(self):
+        """Singular value decomposition (`np.linalg.svd`): a List of [U, S, Vt] live arrays."""
+        u, s, vt = np.linalg.svd(self.a)
+        return [NdArray(u), NdArray(s), NdArray(vt)]
 
     def split(self, n):
         """Split into `n` near-equal parts along axis 0 (`np.array_split`), returned as a List of
@@ -267,6 +375,55 @@ def from_array(arr):
     return NdArray(np.frombuffer(arr.data, dtype=dt))
 
 
+def eye(n):
+    return NdArray(np.eye(n))
+
+
+def full(shape, value):
+    return NdArray(np.full(_shape(shape), value))
+
+
+def diag(v):
+    """A diagonal matrix from a 1-D array (or the diagonal of a 2-D one) — an instance
+    argument to a class-side selector."""
+    if not isinstance(v, NdArray):
+        raise ValueError("diag: expects a [NumPy]Array")
+    return NdArray(np.diag(v.a))
+
+
+def meshgrid(x, y):
+    """Coordinate grids for two 1-D axes — a List of two live instances (the class-side
+    non-instance-return path)."""
+    if not (isinstance(x, NdArray) and isinstance(y, NdArray)):
+        raise ValueError("meshgrid:with: expects two [NumPy]Arrays")
+    gx, gy = np.meshgrid(x.a, y.a)
+    return [NdArray(gx), NdArray(gy)]
+
+
+def log_space(start, stop, count):
+    return NdArray(np.logspace(start, stop, count))
+
+
+def geom_space(start, stop, count):
+    return NdArray(np.geomspace(start, stop, count))
+
+
+def random_normal(shape):
+    return NdArray(_RNG.standard_normal(_shape(shape)))
+
+
+def random_int(lo, hi, shape):
+    """Uniform int64 in [lo, hi) — `to:` is exclusive, like Quoin ranges."""
+    return NdArray(_RNG.integers(lo, hi, _shape(shape)))
+
+
+def seed(n):
+    """Reseed the extension's RNG so random:/randomNormal:/randomInt:to:shape: replay."""
+    global _RNG
+    _RNG = np.random.default_rng(n)
+    return None
+
+
 if __name__ == "__main__":
     ext = quoin_ext.Extension()
     ext.register(
@@ -275,11 +432,20 @@ if __name__ == "__main__":
         constructors={
             "zeros:": zeros,
             "ones:": ones,
+            "eye:": eye,
+            "full:with:": full,
+            "diag:": diag,
             "fromList:": from_list,
             "fromArray:": from_array,
             "arange:": arange,
             "linspace:to:count:": linspace,
+            "logSpace:to:count:": log_space,
+            "geomSpace:to:count:": geom_space,
+            "meshgrid:with:": meshgrid,
             "random:": random,
+            "randomNormal:": random_normal,
+            "randomInt:to:shape:": random_int,
+            "seed:": seed,
         },
         methods={
             "shape": NdArray.shape,
@@ -292,6 +458,9 @@ if __name__ == "__main__":
             # live-instance references, so there is no argument-arity ceiling.
             "evalGraph:": NdArray.eval_graph,
             "split:": NdArray.split,
+            "nonZero": NdArray.non_zero,
+            "eig": NdArray.eig,
+            "svd": NdArray.svd,
             "toList": NdArray.toList,
             "toArray": NdArray.toArray,
         },

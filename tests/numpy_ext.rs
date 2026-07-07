@@ -427,3 +427,343 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_numpy_array_args_test.qn", &script);
 }
+
+/// P1 parity round-out: the widened elementwise set (hyperbolics, inverse trig, extra logs,
+/// cbrt, maximum/minimum/arcTan2/floorDiv/hypot, the 3-operand clip), the float-inspection
+/// masks (isNan/isInf/isFinite), and the new reductions (variance/ptp/median/countNonZero as
+/// forcing scalars + lazy axis forms) plus the lazy cumulative forms (cumSum/cumProd).
+#[test]
+fn numpy_elementwise_roundout() {
+    if !numpy_fixture_runnable() {
+        eprintln!(
+            "skipping numpy_elementwise_roundout: python3 with `msgpack` + `numpy` unavailable"
+        );
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+"* new unaries, probed at exact-value points
+((([NumPy]Array.fromList:#( 8.0 )).log2).toList == #( 3.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 100.0 )).log10).toList == #( 2.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).log1p).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).expm1).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 27.0 )).cbrt).toList == #( 3.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).tanh).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).sinh).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).cosh).toList == #( 1.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).arcSin).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 )).arcCos).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).arcTan).toList == #( 0.0 )).else:{{ ok = false }};
+
+"* new binaries (elementwise, broadcasting like the rest)
+var x = [NumPy]Array.fromList:#( 1.0 5.0 );
+var y = [NumPy]Array.fromList:#( 4.0 2.0 );
+((x.maximum:y).toList == #( 4.0 5.0 )).else:{{ ok = false }};
+((x.minimum:y).toList == #( 1.0 2.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 3.0 )).hypot:4.0).toList == #( 5.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 7.0 )).floorDiv:2.0).toList == #( 3.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).arcTan2:1.0).toList == #( 0.0 )).else:{{ ok = false }};
+
+"* clip is a 3-operand graph node (scalar bounds become const leaves)
+((([NumPy]Array.fromList:#( (-1.0) 5.0 10.0 )).clip:0.0 to:6.0).toList == #( 0.0 5.0 6.0 ))
+    .else:{{ ok = false }};
+
+"* float-inspection masks
+var weird = ([NumPy]Array.fromList:#( (-1.0) 1.0 )).sqrt;
+(weird.isNan.toList == #( true false )).else:{{ ok = false }};
+(weird.isFinite.toList == #( false true )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 )) / 0.0).isInf.toList == #( true )).else:{{ ok = false }};
+
+"* new reductions: whole-array forms force to scalars...
+var a = [NumPy]Array.fromList:#( 1.0 3.0 );
+(a.variance == 1.0).else:{{ ok = false }};
+(a.ptp == 2.0).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 9.0 3.0 )).median) == 3.0).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0 3 0 5 )).countNonZero) == 2).else:{{ ok = false }};
+
+"* ...axis forms stay lazy and compose back into graphs
+var m = [NumPy]Array.fromList:#( #( 1.0 3.0 ) #( 5.0 9.0 ) );
+(((m.variance:1) * 1.0).toList == #( 1.0 4.0 )).else:{{ ok = false }};
+((m.ptp:0).toList == #( 4.0 6.0 )).else:{{ ok = false }};
+
+"* cumulative forms are array-shaped and stay in the graph
+((([NumPy]Array.fromList:#( 1 2 3 )).cumSum).toList == #( 1 3 6 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1 2 3 )).cumProd).toList == #( 1 2 6 )).else:{{ ok = false }};
+(((m.cumSum:1).row:1).toList == #( 5.0 14.0 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_roundout_test.qn", &script);
+}
+
+/// P2 parity: sorting & searching — lazy sort/argSort (NumPy's last-axis default + axis forms),
+/// unique, searchSorted:, fancy indexing via takeAt:, and nonZero (a List of index arrays, one
+/// per dimension — live instances on the wire).
+#[test]
+fn numpy_sort_search() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_sort_search: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var v = [NumPy]Array.fromList:#( 3.0 1.0 2.0 );
+(v.sort.toList == #( 1.0 2.0 3.0 )).else:{{ ok = false }};
+(v.argSort.toList == #( 1 2 0 )).else:{{ ok = false }};
+
+"* argSort composes with takeAt: (fancy indexing) inside one graph
+((v.takeAt:(v.argSort)).toList == #( 1.0 2.0 3.0 )).else:{{ ok = false }};
+(((v * 10.0).takeAt:([NumPy]Array.fromList:#( 2 0 ))).toList == #( 20.0 30.0 ))
+    .else:{{ ok = false }};
+
+((([NumPy]Array.fromList:#( 1 2 2 3 1 )).unique).toList == #( 1 2 3 )).else:{{ ok = false }};
+
+"* searchSorted: — array probe stays lazy; scalar probe forces to an index
+var srt = [NumPy]Array.fromList:#( 1.0 3.0 5.0 );
+((srt.searchSorted:([NumPy]Array.fromList:#( 0.0 4.0 6.0 ))).toList == #( 0 2 3 ))
+    .else:{{ ok = false }};
+(((srt.searchSorted:4.0).eval) == 2).else:{{ ok = false }};
+
+"* axis-form sort on 2-D (columns here), composing back into the graph
+var m = [NumPy]Array.fromList:#( #( 3.0 1.0 ) #( 2.0 4.0 ) );
+(((m.sort:0).col:0).toList == #( 2.0 3.0 )).else:{{ ok = false }};
+
+"* nonZero: one index array per dimension, each a live [NumPy]Array
+var nz = ([NumPy]Array.fromList:#( 0 7 0 9 )).nonZero;
+(nz.count == 1).else:{{ ok = false }};
+((nz.at:0).toList == #( 1 3 )).else:{{ ok = false }};
+var nz2 = ([NumPy]Array.fromList:#( #( 1 0 ) #( 0 2 ) )).nonZero;
+(nz2.count == 2).else:{{ ok = false }};
+((nz2.at:0).toList == #( 0 1 )).else:{{ ok = false }};
+((nz2.at:1).toList == #( 0 1 )).else:{{ ok = false }};
+
+"* nonZero on a lazy mask expression forces first (an Expr delegate)
+(((v > 1.5).nonZero.at:0).toList == #( 0 2 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_sort_search_test.qn", &script);
+}
+
+/// P3 parity: manipulation — n-ary concat:/stack: (a List of arrays, any count), tile/repeat,
+/// flip/roll, squeeze/expandDims, swapAxes:with:, and stepped slicing — all lazy nodes that
+/// compose with arithmetic in one graph.
+#[test]
+fn numpy_manipulation() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_manipulation: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var a = [NumPy]Array.fromList:#( 1.0 2.0 );
+var b = [NumPy]Array.fromList:#( 3.0 4.0 );
+var c = [NumPy]Array.fromList:#( 5.0 6.0 );
+
+"* concat/stack are the first n-ary graph nodes: a List of arrays, any count
+((a.concat:#( b c )).toList == #( 1.0 2.0 3.0 4.0 5.0 6.0 )).else:{{ ok = false }};
+var st = a.stack:#( b c );
+(st.shape == #( 3 2 )).else:{{ ok = false }};
+((st.row:2).toList == #( 5.0 6.0 )).else:{{ ok = false }};
+((a.stack:#( b ) axis:1).toList == #( #( 1.0 3.0 ) #( 2.0 4.0 ) )).else:{{ ok = false }};
+var m = [NumPy]Array.fromList:#( #( 1.0 ) #( 2.0 ) );
+var m2 = [NumPy]Array.fromList:#( #( 3.0 ) #( 4.0 ) );
+((m.concat:#( m2 ) axis:1).toList == #( #( 1.0 3.0 ) #( 2.0 4.0 ) )).else:{{ ok = false }};
+
+((a.tile:2).toList == #( 1.0 2.0 1.0 2.0 )).else:{{ ok = false }};
+((a.repeat:2).toList == #( 1.0 1.0 2.0 2.0 )).else:{{ ok = false }};
+(a.flip.toList == #( 2.0 1.0 )).else:{{ ok = false }};
+((([NumPy]Array.arange:5).roll:2).toList == #( 3 4 0 1 2 )).else:{{ ok = false }};
+
+"* squeeze / expandDims round-trip; swapAxes == transpose for 2-D
+var col2 = a.expandDims:1;
+(col2.shape == #( 2 1 )).else:{{ ok = false }};
+(col2.squeeze.toList == #( 1.0 2.0 )).else:{{ ok = false }};
+var mm = [NumPy]Array.fromList:#( #( 1.0 2.0 ) #( 3.0 4.0 ) );
+(((mm.swapAxes:0 with:1).col:0).toList == #( 1.0 2.0 )).else:{{ ok = false }};
+
+"* stepped slicing
+((([NumPy]Array.arange:6).from:0 to:6 by:2).toList == #( 0 2 4 )).else:{{ ok = false }};
+
+"* manipulation composes lazily with arithmetic in one graph
+(((a.concat:#( b )) * 2.0).sum == 20.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_manipulation_test.qn", &script);
+}
+
+/// P4 parity: creation & random — eye/full:with:/diag: (an instance arg to a class-side
+/// selector), logSpace/geomSpace, meshgrid (a class-side selector returning a List of live
+/// grids), and the seeded RNG (`seed:` makes random:/randomNormal:/randomInt:to:shape: replay).
+#[test]
+fn numpy_creation_random() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_creation_random: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+"* eye / full / diag
+((([NumPy]Array.eye:2).toList) == #( #( 1.0 0.0 ) #( 0.0 1.0 ) )).else:{{ ok = false }};
+((([NumPy]Array.full:#( 2 ) with:7.0).toList) == #( 7.0 7.0 )).else:{{ ok = false }};
+((([NumPy]Array.full:3 with:1).dtype) == 'int64').else:{{ ok = false }};
+var d = [NumPy]Array.diag:([NumPy]Array.fromList:#( 2.0 3.0 ));
+(d.shape == #( 2 2 )).else:{{ ok = false }};
+((d.row:1).toList == #( 0.0 3.0 )).else:{{ ok = false }};
+
+"* logSpace exact at integer powers; geomSpace within float tolerance
+((([NumPy]Array.logSpace:0.0 to:2.0 count:3).toList) == #( 1.0 10.0 100.0 ))
+    .else:{{ ok = false }};
+var gs = [NumPy]Array.geomSpace:1.0 to:4.0 count:3;
+(((gs - ([NumPy]Array.fromList:#( 1.0 2.0 4.0 ))).abs.max) < 0.000001).else:{{ ok = false }};
+
+"* meshgrid: a class-side selector returning a List of two live grids
+var xs = [NumPy]Array.fromList:#( 1.0 2.0 3.0 );
+var ys = [NumPy]Array.fromList:#( 10.0 20.0 );
+var mg = [NumPy]Array.meshgrid:xs with:ys;
+(mg.count == 2).else:{{ ok = false }};
+((mg.at:0).shape == #( 2 3 )).else:{{ ok = false }};
+(((mg.at:0).row:0).toList == #( 1.0 2.0 3.0 )).else:{{ ok = false }};
+(((mg.at:1).col:0).toList == #( 10.0 20.0 )).else:{{ ok = false }};
+"* the grids are real arrays: they join lazy graphs
+(((mg.at:0) + (mg.at:1)).sum == 102.0).else:{{ ok = false }};
+
+"* seeded RNG replays exactly
+[NumPy]Array.seed:42;
+var r1 = ([NumPy]Array.random:#( 4 )).toList;
+[NumPy]Array.seed:42;
+var r2 = ([NumPy]Array.random:#( 4 )).toList;
+(r1 == r2).else:{{ ok = false }};
+[NumPy]Array.seed:42;
+var n1 = ([NumPy]Array.randomNormal:#( 3 )).toList;
+[NumPy]Array.seed:42;
+var n2 = ([NumPy]Array.randomNormal:#( 3 )).toList;
+(n1 == n2).else:{{ ok = false }};
+
+"* randomInt bounds: `to:` is exclusive, like Quoin ranges
+[NumPy]Array.seed:7;
+var ri = [NumPy]Array.randomInt:0 to:5 shape:#( 100 );
+(ri.dtype == 'int64').else:{{ ok = false }};
+((ri.min >= 0) && (ri.max < 5)).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_creation_random_test.qn", &script);
+}
+
+/// P5 parity: linalg — lazy solve:/outer:/inv, forcing trace/det/norm (+ lazy row norms), and
+/// the multi-return eig/svd (Lists of live arrays — decompositions verified by reconstruction,
+/// which also exercises diag: on returned instances).
+#[test]
+fn numpy_linalg() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_linalg: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+var tol = 0.000000001;
+
+"* trace / det / norm (scalar-forcing); row norms stay lazy
+var dgi = [NumPy]Array.fromList:#( #( 2 0 ) #( 0 3 ) );
+(dgi.trace == 5).else:{{ ok = false }};
+(((dgi.det - 6.0).abs) < tol).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 3.0 4.0 )).norm) == 5.0).else:{{ ok = false }};
+var nm = [NumPy]Array.fromList:#( #( 3.0 4.0 ) #( 6.0 8.0 ) );
+(((nm.norm:1) * 1.0).toList == #( 5.0 10.0 )).else:{{ ok = false }};
+
+"* outer product
+((([NumPy]Array.fromList:#( 1.0 2.0 )).outer:([NumPy]Array.fromList:#( 3.0 4.0 ))).toList
+    == #( #( 3.0 4.0 ) #( 6.0 8.0 ) )).else:{{ ok = false }};
+
+"* solve / inv, verified by residuals (LU results aren't binary-exact)
+var ma = [NumPy]Array.fromList:#( #( 2.0 1.0 ) #( 1.0 3.0 ) );
+var vb = [NumPy]Array.fromList:#( 3.0 5.0 );
+var x = (ma.solve:vb).eval;
+((((ma.matMul:x) - vb).abs.max) < tol).else:{{ ok = false }};
+((((ma.matMul:(ma.inv)) - ([NumPy]Array.eye:2)).abs.max) < tol).else:{{ ok = false }};
+
+"* eig: a List of [values, vectors]; A·V ~= V·diag(w)
+var sym = [NumPy]Array.fromList:#( #( 2.0 0.0 ) #( 0.0 3.0 ) );
+var ev = sym.eig;
+(ev.count == 2).else:{{ ok = false }};
+(((((ev.at:0).sort - ([NumPy]Array.fromList:#( 2.0 3.0 ))).abs.max)) < tol).else:{{ ok = false }};
+var lhs = sym.matMul:(ev.at:1);
+var rhs = (ev.at:1).matMul:([NumPy]Array.diag:(ev.at:0));
+((((lhs - rhs).abs.max)) < tol).else:{{ ok = false }};
+
+"* svd: [U, S, Vt]; U·diag(S)·Vt reconstructs the input
+var msvd = [NumPy]Array.fromList:#( #( 3.0 0.0 ) #( 0.0 4.0 ) );
+var usv = msvd.svd;
+(usv.count == 3).else:{{ ok = false }};
+var s = usv.at:1;
+((((s - ([NumPy]Array.fromList:#( 4.0 3.0 ))).abs.max)) < tol).else:{{ ok = false }};
+var rec = ((usv.at:0).matMul:([NumPy]Array.diag:s)).matMul:(usv.at:2);
+((((rec - msvd).abs.max)) < tol).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_linalg_test.qn", &script);
+}
+
+/// P6 parity: lazy dtype casts within the float64/int64/bool policy — toFloat/toInt/toBool
+/// compose in the graph like any other node (float -> int truncates toward zero; -> bool is
+/// the != 0 test; a mask cast to int counts via sum).
+#[test]
+fn numpy_dtype_casts() {
+    if !numpy_fixture_runnable() {
+        eprintln!("skipping numpy_dtype_casts: python3 with `msgpack` + `numpy` unavailable");
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+var f = ([NumPy]Array.arange:3).toFloat;
+(f.dtype == 'float64').else:{{ ok = false }};
+(f.toList == #( 0.0 1.0 2.0 )).else:{{ ok = false }};
+
+"* float -> int truncates toward zero
+var iv = ([NumPy]Array.fromList:#( 1.9 (-1.9) )).toInt;
+(iv.dtype == 'int64').else:{{ ok = false }};
+(iv.toList == #( 1 (-1) )).else:{{ ok = false }};
+
+var bm = ([NumPy]Array.fromList:#( 0 2 0 )).toBool;
+(bm.toList == #( false true false )).else:{{ ok = false }};
+
+"* casts are lazy and compose in one graph
+((([NumPy]Array.arange:3).toFloat / 2.0).toList == #( 0.0 0.5 1.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 5.0 )) > 2.0).toInt.sum == 1).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_dtype_casts_test.qn", &script);
+}
