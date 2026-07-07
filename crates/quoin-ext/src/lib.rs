@@ -9,8 +9,8 @@
 //! ## Wire protocol
 //!
 //! Messages are length-prefixed frames: a little-endian `u32` length followed by that many
-//! payload bytes. The payload is a FlatBuffers `Message` union (schema + codec in the shared
-//! `quoin-ext-proto` crate). A `Call` carries typed handle args — host-value handles via
+//! payload bytes. The payload is one MessagePack array (codec + `PROTOCOL.md` contract in the
+//! shared `quoin-ext-proto` crate). A `Call` carries typed handle args — host-value handles via
 //! [`Host::handles`] (a block is one of these) and ext-side resource ids via [`Host::resources`].
 //! The handler may issue **re-entrant host-ops** through the [`Host`] client — `make_string`,
 //! `handle_to_string`, `retain`, `release`, `call_method` (send a Quoin message to a handle),
@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 use std::os::unix::net::{UnixListener, UnixStream};
 
 pub use quoin_ext_proto::{ArrowArray, ArrowDType, DataValue};
-use quoin_ext_proto::{ClassDecl, Msg};
+use quoin_ext_proto::{ClassDecl, Msg, PROTOCOL_VERSION};
 
 /// An opaque reference to a host value, as seen by the extension. Default lifetime is
 /// call-local (auto-released when the originating call returns); promote it with
@@ -89,9 +89,6 @@ pub struct Host<'a> {
     arrays: Vec<ArrowArray>,
     /// The structured-value payload passed via `call:with:data:`, if any.
     data: Option<DataValue>,
-    /// Whether the host advertised packed-DataValue support (`GetManifest.packed_ok`) — this
-    /// side's re-entrant host-ops (e.g. `MakeValue`) then carry packed payloads too.
-    packed: bool,
 }
 
 impl<'a> Host<'a> {
@@ -183,7 +180,7 @@ impl<'a> Host<'a> {
         let frame = read_frame(self.stream)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
         })?;
-        match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+        match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
             Msg::InvokeBlockReturn { results, error } => match error {
                 Some(e) => Err(io::Error::other(e)),
                 None => Ok(results),
@@ -239,7 +236,7 @@ impl<'a> Host<'a> {
         let frame = read_frame(self.stream)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
         })?;
-        match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+        match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
             Msg::ReadHandleReturn { value, error } => match error {
                 Some(e) => Err(io::Error::other(e)),
                 None => Ok(value),
@@ -253,14 +250,11 @@ impl<'a> Host<'a> {
     /// Send one host-op and await its `HostOpReturn`, surfacing a host-reported error as an
     /// `io::Error`. Returns the reply's `(handle, str)` payload (either may be unset).
     fn host_op(&mut self, msg: &Msg) -> io::Result<(Handle, Option<String>)> {
-        write_frame(
-            self.stream,
-            &quoin_ext_proto::encode_packed(msg, self.packed),
-        )?;
+        write_frame(self.stream, &quoin_ext_proto::encode(msg))?;
         let frame = read_frame(self.stream)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::UnexpectedEof, "host closed mid-host-op")
         })?;
-        match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+        match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
             Msg::HostOpReturn { handle, str, error } => match error {
                 Some(e) => Err(io::Error::other(e)),
                 None => Ok((handle, str)),
@@ -321,20 +315,18 @@ pub fn serve<R: Into<Reply>>(
 ) -> io::Result<()> {
     let listener = UnixListener::bind(path)?;
     let (mut stream, _addr) = listener.accept()?;
-    // Packed-DataValue negotiation: send packed payloads only once the host advertised support
-    // in its `GetManifest` (an old host reads absent as false and we stay on boxed trees).
-    let mut packed = false;
     while let Some(frame) = read_frame(&mut stream)? {
-        match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
+        match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
             // A generic-handler extension provides no classes (Phase 3): reply with an empty
-            // manifest so it stays backward-compatible under the host's spawn-time `GetManifest`.
-            Msg::GetManifest { packed_ok } => {
-                packed = packed_ok;
+            // manifest. The reply always carries this SDK's protocol version — the HOST is the
+            // enforcer of the version handshake (its error reaches the user; ours would vanish
+            // with the process).
+            Msg::GetManifest { version: _ } => {
                 write_frame(
                     &mut stream,
                     &quoin_ext_proto::encode(&Msg::ManifestReturn {
                         classes: Vec::new(),
-                        packed_ok: true,
+                        version: PROTOCOL_VERSION,
                     }),
                 )?;
             }
@@ -361,14 +353,10 @@ pub fn serve<R: Into<Reply>>(
                         releases,
                         arrays,
                         data,
-                        packed,
                     };
                     handler(&mut host, &op, &arg).into()
                 };
-                write_frame(
-                    &mut stream,
-                    &quoin_ext_proto::encode_packed(&reply_to_msg(reply), packed),
-                )?;
+                write_frame(&mut stream, &quoin_ext_proto::encode(&reply_to_msg(reply)))?;
             }
             other => {
                 return Err(invalid_data(format!(
@@ -591,12 +579,11 @@ impl Extension {
         let listener = UnixListener::bind(path)?;
         let (mut stream, _addr) = listener.accept()?;
         let mut table = ObjectTable::default();
-        // Packed-DataValue negotiation, exactly as in the generic `serve`.
-        let mut packed = false;
         while let Some(frame) = read_frame(&mut stream)? {
-            match quoin_ext_proto::decode_envelope(&frame).map_err(invalid_data)? {
-                Msg::GetManifest { packed_ok } => {
-                    packed = packed_ok;
+            match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
+                // The reply always carries this SDK's protocol version; the host enforces the
+                // handshake (see the generic `serve`).
+                Msg::GetManifest { version: _ } => {
                     write_frame(&mut stream, &quoin_ext_proto::encode(&self.manifest()))?;
                 }
                 Msg::Call {
@@ -618,9 +605,8 @@ impl Extension {
                         &op,
                         recv,
                         &method_args,
-                        packed,
                     )?;
-                    write_frame(&mut stream, &quoin_ext_proto::encode_packed(&reply, packed))?;
+                    write_frame(&mut stream, &quoin_ext_proto::encode(&reply))?;
                 }
                 other => {
                     return Err(invalid_data(format!(
@@ -655,7 +641,7 @@ impl Extension {
             .collect();
         Msg::ManifestReturn {
             classes,
-            packed_ok: true,
+            version: PROTOCOL_VERSION,
         }
     }
 
@@ -668,7 +654,6 @@ impl Extension {
         op: &str,
         recv: u64,
         method_args: &[quoin_ext_proto::Arg],
-        packed: bool,
     ) -> io::Result<Msg> {
         let class = self
             .classes
@@ -682,7 +667,6 @@ impl Extension {
             releases: Vec::new(),
             arrays: Vec::new(),
             data: None,
-            packed,
         };
         if recv == 0 {
             // Class-side: a constructor builds a new instance.

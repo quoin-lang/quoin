@@ -217,8 +217,8 @@ out-of-tree; the only difference is whether the SDK is a path dependency or a pu
 
 **Rust** — a plain binary crate depending only on the `quoin-ext` SDK. The author never names the wire
 crate: `quoin-ext` re-exports everything they touch (`DataValue` / `ArrowArray` / `Arg`), and
-`quoin-ext-proto` is a hidden transitive dep whose generated code is checked in, so there is no
-`flatc` / `planus` at build time.
+`quoin-ext-proto` is a hidden transitive dep whose MessagePack codec is hand-rolled, so there is
+no codegen and no serialization dependency at build time.
 
 ```toml
 # Cargo.toml
@@ -256,8 +256,8 @@ binary against their own SDK (`sdk/python/quoin_ext`, …); to the host it is ju
 
 **The gap — publishing the SDK.** `quoin-ext` and `quoin-ext-proto` are **in-tree path crates** today
 (`quoin-ext-proto = { path = "../quoin-ext-proto" }`), so a third party can currently only git-depend
-the whole repo. They are self-contained — they depend on the `quoin` VM crate **not at all**, only on
-`planus` + `serde` (both on crates.io) — so making them external is mechanical: publish both to
+the whole repo. They are self-contained — they depend on the `quoin` VM crate **not at all** — and on
+nothing else (`quoin-ext-proto` is dependency-free) — so making them external is mechanical: publish both to
 crates.io (turning the path dep into a version dep) so an author can write `quoin-ext = "0.1"`. This is
 the **Tier 0.5 "extract / publish the SDK crates"** item (`docs/FUTURE_EXT_ARCH.md` §9 / build-order
 note) — the missing link that makes "out-of-crate" real, and a prerequisite for third-party authoring

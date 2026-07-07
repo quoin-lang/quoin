@@ -1,7 +1,7 @@
 //! Integration tests for the `numpy` extension package (`quoin_packages/numpy`) — NumPy-backed
 //! n-dimensional arrays as `[NumPy]Array`, over the Python SDK (Phase 3 extension-backed classes).
 //!
-//! Gated on a `python3` that can import `flatbuffers` (the SDK runtime) *and* `numpy`; skips
+//! Gated on a `python3` that can import `msgpack` (the SDK's wire codec) *and* `numpy`; skips
 //! cleanly otherwise (e.g. CI without Python set up), like the polyglot tests in `extension.rs`.
 
 use std::process::Command;
@@ -36,10 +36,10 @@ fn assert_script_passes(name: &str, script: &str) {
     panic!("numpy script did not pass after {ATTEMPTS} attempts.\n{last_diag}");
 }
 
-/// True if `python3` can import both `flatbuffers` and `numpy` — the package's dependencies.
+/// True if `python3` can import both `msgpack` and `numpy` — the package's dependencies.
 fn numpy_fixture_runnable() -> bool {
     Command::new("python3")
-        .args(["-c", "import flatbuffers, numpy"])
+        .args(["-c", "import msgpack, numpy"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -51,9 +51,7 @@ fn numpy_fixture_runnable() -> bool {
 #[test]
 fn numpy_array_skeleton() {
     if !numpy_fixture_runnable() {
-        eprintln!(
-            "skipping numpy_array_skeleton: python3 with `flatbuffers` + `numpy` unavailable"
-        );
+        eprintln!("skipping numpy_array_skeleton: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
@@ -114,9 +112,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn numpy_lazy_expressions() {
     if !numpy_fixture_runnable() {
-        eprintln!(
-            "skipping numpy_lazy_expressions: python3 with `flatbuffers` + `numpy` unavailable"
-        );
+        eprintln!("skipping numpy_lazy_expressions: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
@@ -182,7 +178,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn numpy_vocabulary() {
     if !numpy_fixture_runnable() {
-        eprintln!("skipping numpy_vocabulary: python3 with `flatbuffers` + `numpy` unavailable");
+        eprintln!("skipping numpy_vocabulary: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
@@ -248,7 +244,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 fn numpy_shapes_and_slicing() {
     if !numpy_fixture_runnable() {
         eprintln!(
-            "skipping numpy_shapes_and_slicing: python3 with `flatbuffers` + `numpy` unavailable"
+            "skipping numpy_shapes_and_slicing: python3 with `msgpack` + `numpy` unavailable"
         );
         return;
     }
@@ -295,7 +291,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn numpy_masks() {
     if !numpy_fixture_runnable() {
-        eprintln!("skipping numpy_masks: python3 with `flatbuffers` + `numpy` unavailable");
+        eprintln!("skipping numpy_masks: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
@@ -347,7 +343,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 fn numpy_repeated_base_dedup() {
     if !numpy_fixture_runnable() {
         eprintln!(
-            "skipping numpy_repeated_base_dedup: python3 with `flatbuffers` + `numpy` unavailable"
+            "skipping numpy_repeated_base_dedup: python3 with `msgpack` + `numpy` unavailable"
         );
         return;
     }
@@ -380,9 +376,7 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
 #[test]
 fn numpy_package_via_use() {
     if !numpy_fixture_runnable() {
-        eprintln!(
-            "skipping numpy_package_via_use: python3 with `flatbuffers` + `numpy` unavailable"
-        );
+        eprintln!("skipping numpy_package_via_use: python3 with `msgpack` + `numpy` unavailable");
         return;
     }
     let script = r#"

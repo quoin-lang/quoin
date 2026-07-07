@@ -6,7 +6,7 @@ opaque handles, and bulk data crosses the socket only at explicit materializatio
 `[NumPy]` namespace marks this as the Python-backed implementation — `[Num]` is reserved for a
 future native (Rust) backend behind the same Quoin-side surface.
 
-**Requires:** a `python3` on PATH that can `import numpy, flatbuffers`.
+**Requires:** a `python3` on PATH that can `import numpy, msgpack`.
 
 ```quoin
 use numpy:*;

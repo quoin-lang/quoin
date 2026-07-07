@@ -1,1 +1,1 @@
-flatbuffers>=2
+msgpack>=1
