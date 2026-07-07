@@ -1,0 +1,17 @@
+# The `numpy` extension package — a `use`-able folder (docs/EXT_PACKAGING.md). From the repo root
+# `use numpy:*` loads it (the resolver synthesizes `Extension loadPackage: '<this-dir>'`).
+#
+# The extension is a Python process wrapping real NumPy (sdk/python SDK over the ext.fbs wire
+# protocol), so it needs a `python3` on PATH with `numpy` and `flatbuffers` importable.
+
+[package]
+name = "numpy"
+version = "0.1.0"
+description = "NumPy-backed n-dimensional arrays for Quoin — out-of-process, Python-powered."
+
+[extension]
+# Bare command = PATH lookup; `main.py` resolves against this package dir (the spawn cwd).
+command = "python3"
+args = ["main.py"]
+# Every provided class installs under this namespace: Array -> [NumPy]Array.
+namespace = "NumPy"
