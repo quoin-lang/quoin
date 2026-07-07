@@ -12,9 +12,9 @@ use numpy:*;
     var y = [NumPy]Array.random:#( n );
 
     var sink = 0.0;
-    var tLazy = Timer.time:{ (1..k).each:{ |i| sink = ((p - y) * (p - y)).mean } };
+    var tLazy = Timer.time:{ (0..k).each:{ |i| sink = ((p - y) * (p - y)).mean } };
     var tEager = Timer.time:{
-        (1..k).each:{ |i|
+        (0..k).each:{ |i|
             var d = (p - y).eval;
             var sq = (d * d).eval;
             sink = sq.mean

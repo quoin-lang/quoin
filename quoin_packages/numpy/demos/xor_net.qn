@@ -1,0 +1,66 @@
+"* A neural network in Quoin — a 2-8-1 MLP learning XOR by hand-written backprop over
+"* [NumPy]Array expression graphs.
+"*
+"* Everything is whole-array math: forward pass = matMul: + broadcast bias + sigmoid (built
+"* array-left as (1 + e^-x)^-1), backward pass = transposed matMuls and elementwise gradient
+"* chains. The demo idiom worth stealing: FORCE the shared intermediates (h, out, dOut, dH) with
+"* .eval once per epoch — every later expression then re-enters them as cheap materialized
+"* leaves instead of recomputing the forward pass, so one epoch is exactly 8 socket round trips.
+"*
+"* Run from the repo root:  qn quoin_packages/numpy/demos/xor_net.qn
+use numpy:*;
+
+Nn <- {
+    .meta <-- {
+        "* sigmoid(v) = 1 / (1 + e^-v), phrased array-left (scalars can't take an array rhs)
+        sigmoid: -> { |v| ((v.neg.exp) + 1.0).pow:(-1.0) }
+    }
+};
+
+var x = [NumPy]Array.fromList:#( #( 0.0 0.0 ) #( 0.0 1.0 ) #( 1.0 0.0 ) #( 1.0 1.0 ) );
+var y = [NumPy]Array.fromList:#( #( 0.0 ) #( 1.0 ) #( 1.0 ) #( 0.0 ) );
+
+var hidden = 8;
+var lr = 2.0;
+var epochs = 3000;
+var w1 = (([NumPy]Array.random:#( 2 hidden )) - 0.5).eval;
+var b1 = (([NumPy]Array.random:#( 1 hidden )) - 0.5).eval;
+var w2 = (([NumPy]Array.random:#( hidden 1 )) - 0.5).eval;
+var b2 = (([NumPy]Array.random:#( 1 1 )) - 0.5).eval;
+
+var elapsed = Timer.time:{
+    (0..epochs).each:{ |epoch|
+        "* forward
+        var h = (Nn.sigmoid:((x.matMul:w1) + b1)).eval;
+        var out = (Nn.sigmoid:((h.matMul:w2) + b2)).eval;
+
+        "* backward: dLoss/dOut chained through the two sigmoid layers
+        var dOut = ((out - y) * (out * ((out.neg) + 1.0))).eval;
+        var dH = ((dOut.matMul:(w2.transpose)) * (h * ((h.neg) + 1.0))).eval;
+
+        "* gradient step (each update is one force; the memoized intermediates are leaves)
+        w1 = (w1 - ((x.transpose.matMul:dH) * lr)).eval;
+        w2 = (w2 - ((h.transpose.matMul:dOut) * lr)).eval;
+        b1 = (b1 - ((dH.sum:0) * lr)).eval;
+        b2 = (b2 - ((dOut.sum:0) * lr)).eval;
+
+        ((epoch % 500) == 0).if:{
+            var loss = ((out - y) * (out - y)).mean;
+            ('epoch %  loss=%' % #( epoch loss )).print
+        }
+    }
+};
+
+''.print;
+'predictions after training:'.print;
+var inputs = #( #( 0 0 ) #( 0 1 ) #( 1 0 ) #( 1 1 ) );
+var hFinal = Nn.sigmoid:((x.matMul:w1) + b1);
+var preds = (Nn.sigmoid:((hFinal.matMul:w2) + b2)).toList;
+(0..4).each:{ |i|
+    var pair = inputs.at:i;
+    var p = (preds.at:i).at:0;
+    var rounded = ((p * 1000.0).floor) / 1000.0;
+    ('  % xor % -> %' % #( (pair.at:0) (pair.at:1) rounded )).print
+};
+''.print;
+('learned XOR in % epochs (8 round trips each), %ms' % #( epochs (elapsed / 1000) )).print
