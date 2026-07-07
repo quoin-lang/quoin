@@ -153,4 +153,50 @@
         "* ...and the failed class is not registered.
         .is:{ TSCNC_ReqBad.defined? } equalTo:false;
     };
+
+    .test:
+    lateMixInvalidatesCaches -> {
+        "* Mixing into a class AFTER it has dispatched and instantiated must
+        "* invalidate every cache: memoized resolutions, inline caches, and
+        "* the instantiation plan. (mix: previously invalidated nothing — a
+        "* mixin shadowing a PARENT's method left stale resolutions.)
+        TSCNC_LateParent <- { greet -> { ^'parent' } };
+        TSCNC_LateParent <- TSCNC_LateHost <- {};
+        var before = TSCNC_LateHost.new;
+        "* warm the caches through the parent's method and the init plan
+        .is:{ before.greet } equalTo:'parent';
+        .is:{ before.greet } equalTo:'parent';
+        Mixin <- TSCNC_LateShadow <- { |@stamped|
+            greet -> { ^'mixin' };
+            init -> { @stamped = 99 };
+            stamped -> { ^@stamped }
+        };
+        TSCNC_LateHost.mix:TSCNC_LateShadow;
+        "* dispatch sees the mixin immediately (was stale before the fix)...
+        .is:{ TSCNC_LateHost.new.greet } equalTo:'mixin';
+        "* ...and the rebuilt instantiation plan runs the mixin's init.
+        .is:{ TSCNC_LateHost.new.stamped } equalTo:99;
+    };
+
+    .test:
+    configAssignmentsBindLocally -> {
+        "* A `new:{...}` config block's assignments are the field-binding
+        "* DSL: they bind INTO THE BLOCK'S OWN frame, never the enclosing
+        "* one — statically, however the block is invoked (E). The enclosing
+        "* binding is readable on the RHS and untouched by the LHS.
+        var probe = 5;
+        TSCNC_CfgProbe <- { |@probe| v -> { ^@probe } };
+        var made = TSCNC_CfgProbe.new:{ probe = probe * 10 };
+        .is:{ made.v } equalTo:50;
+        .is:{ probe } equalTo:5;
+        "* A user-defined `new:` that runs the config block as a plain
+        "* closure gets the SAME local-binding semantics (previously the
+        "* write chain-walked into the enclosing frame — caller-dependent).
+        TSCNC_EvilNew <- {
+            .meta <-- { new: -> { |blk| blk.value; ^'evil' } }
+        };
+        var item = 7;
+        .is:{ TSCNC_EvilNew.new:{ item = 42 } } equalTo:'evil';
+        .is:{ item } equalTo:7;
+    };
 }

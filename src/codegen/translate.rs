@@ -819,7 +819,13 @@ fn scan_materialized_nest(
                 scan_materialized_nest(nb, &defined, own_selector, out)?;
             }
             Instruction::StoreLocal(s) | Instruction::StoreLocalKeep(s) => {
-                if !defined.contains(s) {
+                // A `new:{...}` config literal's stores BIND LOCALLY by
+                // construction (StaticBlock::is_init_literal — static
+                // semantics, (E)); they are the field-binding DSL, never
+                // capture writes, so they need no write-back. This is what
+                // un-refuses `Class.new:{ field=local }` inside cold arms
+                // (btrees' makeTree).
+                if !rc.is_init_literal && !defined.contains(s) {
                     out.written_frees.push(*s);
                 }
             }
@@ -1956,11 +1962,18 @@ impl<'a> Translator<'a> {
                     "per-iteration ^^ materialization (fused loop) at ip {ip}"
                 ));
             }
-            if scan.sends_own_selector {
-                return Err(format!(
-                    "per-iteration ^^ materialization (recursive trampoline) at ip {ip}"
-                ));
-            }
+        }
+        // The trampoline/recursion rule applies with or without a `^^`:
+        // a nest that re-sends the candidate's OWN selector makes the
+        // materialization cost recur per invocation level — one full-frame
+        // snapshot per tree node in btrees' makeTree (compiling it measured
+        // +6.8% on btrees; the interpreter's closures are a pointer share).
+        // Compiling these shapes WELL (hoisted/lazy arm closures) is the
+        // recorded follow-up, shared with qnlib's whileDo:.
+        if scan.sends_own_selector {
+            return Err(format!(
+                "per-invocation materialization in a recursive method at ip {ip}"
+            ));
         }
         // A write to a FRAME local mutates the snapshot — read back after the
         // consuming send. A write that resolves DEEPER than this frame walks

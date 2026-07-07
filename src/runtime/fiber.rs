@@ -183,9 +183,13 @@ impl AnyCollect for NativeFiberState {
         for call in &self.native_args {
             let recv_gc: &Value<'gc> = unsafe { transmute(&call.receiver) };
             recv_gc.dyn_trace(cc);
-            for val in &call.args {
-                let val_gc: &Value<'gc> = unsafe { transmute(val) };
-                val_gc.dyn_trace(cc);
+            // A StackWindow variant holds only indices — its values live in
+            // (and are traced via) the owning stack Vec.
+            if let crate::value::NativeArgs::Owned(vals) = &call.args {
+                for val in vals {
+                    let val_gc: &Value<'gc> = unsafe { transmute(val) };
+                    val_gc.dyn_trace(cc);
+                }
             }
         }
         if let Some(v) = &self.result {

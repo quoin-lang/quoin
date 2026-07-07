@@ -408,7 +408,10 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             }
 
             let active_lhs = vm.active_native_args.last().unwrap().receiver;
-            let active_rhs = vm.active_native_args.last().unwrap().args[0];
+            let active_rhs = {
+                let c = vm.active_native_args.last().unwrap();
+                c.arg(&vm.stack, 0).unwrap()
+            };
 
             let lhs_val = active_lhs
                 .with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_value())?;

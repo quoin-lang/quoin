@@ -15,8 +15,8 @@ use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
 use crate::symbol::{Symbol, init_colon_symbol, init_symbol, self_symbol};
 use crate::value::{
-    AnyCollect, Block, Class, EnvFrame, Fields, NamespacedName, NativeCall, NativeClass,
-    NativeFunc, Object, ObjectPayload, Value,
+    AnyCollect, Block, Class, EnvFrame, Fields, InitEntry, InitPlan, NamespacedName, NativeCall,
+    NativeClass, NativeFunc, Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, devirt_ops, gc, gcl};
 use std::rc::Rc;
@@ -425,6 +425,14 @@ pub struct VmState<'gc> {
     /// Intern pool for symbols: one canonical `Symbol` value per name, so symbols
     /// compare by identity. Rooted here and traced as part of `VmState`.
     pub symbol_table: Gc<'gc, RefLock<HashMap<String, Value<'gc>>>>,
+    /// Shared INNER BUFFERS for string literals: one `Gc<String>` per
+    /// distinct literal content, so materializing a literal costs one Object
+    /// alloc + a pointer instead of two GC allocs + a byte copy per push.
+    /// Only the buffer is shared — each push still mints a fresh Object
+    /// wrapper, because string VALUES have observable identity (a user can
+    /// eigenclass one: `s <-- {...}`), while the immutable payload does not.
+    /// Bounded by the program's distinct literals.
+    pub string_literal_buffers: FxHashMap<String, Gc<'gc, String>>,
     /// Name of the class just created by `DefineClass`, consumed by the next
     /// `ExecuteBlockWithSelf` to mark the class body's frame for unregister-on-
     /// defer-failure. Only a *new* class definition sets this (not an extension).
@@ -479,6 +487,11 @@ pub struct VmState<'gc> {
 
     pub builtin_cache: Gc<'gc, RefLock<BuiltinCache<'gc>>>,
     pub active_native_args: Vec<NativeCall<'gc>>,
+    /// Root slot for [`InitPlan`]s whose init chains are RUNNING: a user
+    /// init can park, and can invalidate/replace the class's cached plan
+    /// (reopen bumps the epoch) — the running iteration's plan must stay
+    /// alive regardless. Pushed/popped around each chain.
+    pub active_init_plans: Vec<Gc<'gc, InitPlan<'gc>>>,
     pub last_popped_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
 
     /// The REPL's persistent top-level environment. `Some` only under `qn repl`: each
@@ -587,6 +600,7 @@ impl<'gc> VmState<'gc> {
             frames: Vec::new(),
             globals: gcl!(mc, FxHashMap::default()),
             symbol_table: gcl!(mc, HashMap::new()),
+            string_literal_buffers: FxHashMap::default(),
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
@@ -599,6 +613,7 @@ impl<'gc> VmState<'gc> {
             aot_spec_obs_left: crate::codegen::spec::OBSERVE_BUDGET,
             builtin_cache: gcl!(mc, BuiltinCache::new()),
             active_native_args: Vec::new(),
+            active_init_plans: Vec::new(),
             last_popped_env: None,
             repl_env: None,
             sched: Scheduler {
@@ -893,6 +908,31 @@ impl<'gc> VmState<'gc> {
                 payload: ObjectPayload::String(gc!(mc, s)),
             }
         ))
+    }
+
+    /// A fresh string VALUE over an already-GC'd shared buffer — the
+    /// literal-materialization fast path (see `string_literal_buffers`).
+    pub fn new_string_shared(&self, mc: &Mutation<'gc>, buf: Gc<'gc, String>) -> Value<'gc> {
+        let class = self.builtin_cache.borrow().string_class;
+        let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "String"));
+        Value::Object(gcl!(
+            mc,
+            Object {
+                class,
+                fields: Fields::default(),
+                payload: ObjectPayload::String(buf),
+            }
+        ))
+    }
+
+    /// The shared buffer for literal content `s`, minting it on first use.
+    pub fn literal_string_buffer(&mut self, mc: &Mutation<'gc>, s: &str) -> Gc<'gc, String> {
+        if let Some(g) = self.string_literal_buffers.get(s) {
+            return *g;
+        }
+        let g = gc!(mc, s.to_string());
+        self.string_literal_buffers.insert(s.to_string(), g);
+        g
     }
 
     /// Build an immutable `Bytes` value from raw bytes (mirrors `new_string`). One
@@ -1296,6 +1336,7 @@ impl<'gc> VmState<'gc> {
                 class_methods,
                 mixin_classes: Vec::new(),
                 field_slots: FxHashMap::default(),
+                init_plan: None,
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,
@@ -1310,6 +1351,51 @@ impl<'gc> VmState<'gc> {
         // those stale entries (the contract codegen's epoch doc promises for
         // extension installs, matching the DefineMethod arms).
         crate::codegen::bump_redef_epoch();
+    }
+
+    /// The memoized instantiation recipe for `class` (see [`InitPlan`]),
+    /// rebuilt whenever the dispatch epoch has moved — every method-table,
+    /// mixin, or extension mutation bumps it (including `mix:`, fixed
+    /// alongside this cache), so a stale plan cannot survive a hierarchy
+    /// change. Field layout is append-only (`field_slots`), so resolved
+    /// slots never go stale within an epoch.
+    fn instantiation_plan(
+        &mut self,
+        mc: &Mutation<'gc>,
+        class: Gc<'gc, RefLock<Class<'gc>>>,
+    ) -> Gc<'gc, InitPlan<'gc>> {
+        if let Some((epoch, plan)) = class.borrow().init_plan
+            && epoch == self.dispatch_epoch
+        {
+            return plan;
+        }
+        let vars = self.get_all_instance_vars(class);
+        let ivar_slots: Vec<(String, usize)> = vars
+            .into_iter()
+            .filter_map(|v| self.field_slot(class, &v).map(|slot| (v, slot)))
+            .collect();
+        let mut classes = Vec::new();
+        let mut visited = Vec::new();
+        self.collect_classes_for_init(class, &mut classes, &mut visited);
+        let mut inits = Vec::new();
+        for clz in classes {
+            let init_colon = clz
+                .borrow()
+                .instance_methods
+                .get(&init_colon_symbol())
+                .copied()
+                .map(|m| (m, self.init_param_names(m).unwrap_or_default()));
+            let init_plain = clz.borrow().instance_methods.get(&init_symbol()).copied();
+            if init_colon.is_some() || init_plain.is_some() {
+                inits.push(InitEntry {
+                    init_colon,
+                    init_plain,
+                });
+            }
+        }
+        let plan = gc!(mc, InitPlan { ivar_slots, inits });
+        class.borrow_mut(mc).init_plan = Some((self.dispatch_epoch, plan));
+        plan
     }
 
     /// NO borrow may be held while an initializer runs: `call_method_value` executes
@@ -1328,77 +1414,65 @@ impl<'gc> VmState<'gc> {
         env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
     ) -> Result<(), QuoinError> {
         let class = obj.borrow().class;
-        let vars = self.get_all_instance_vars(class);
-        for var in &vars {
-            let val = env.borrow().lookup_str(var);
-            if let Some(val) = val
-                && let Some(slot) = self.field_slot(class, var)
-            {
-                obj.borrow_mut(mc).fields[slot] = val;
+        let plan = self.instantiation_plan(mc, class);
+        for (name, slot) in &plan.ivar_slots {
+            let val = env.borrow().lookup_str(name);
+            if let Some(val) = val {
+                obj.borrow_mut(mc).fields[*slot] = val;
             }
         }
 
-        // Run each class's initializer base->derived (parents, then mixins, then
-        // self), mirroring `run_all_inits` for the no-block path. A class that
-        // defines `init:` receives the block fields it names (matched by param
-        // name); otherwise its zero-arg `init` runs. Running the whole chain means
-        // an ancestor or mixin initializer is never skipped just because a more
-        // derived class happens to define `init:`.
-        let mut classes = Vec::new();
-        let mut visited = Vec::new();
-        self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
-
+        // Run each class's initializer base->derived (parents, then mixins,
+        // then self). A class that defines `init:` receives the block fields
+        // it names (matched by param name); otherwise its zero-arg `init`
+        // runs. Running the whole chain means an ancestor or mixin
+        // initializer is never skipped just because a more derived class
+        // happens to define `init:`. The plan is rooted for the chain's
+        // duration (a user init can park AND replace the cached plan).
         let receiver = Value::Object(obj);
-        // Root the collected chain across the user init calls below: an init
-        // that reopens its own class can drop the class table's reference to
-        // an old class object, leaving this Vec the only (unrooted) holder.
-        let root_base = self.stack.len();
-        for &clz in &classes {
-            self.push(Value::Class(clz));
-        }
-        let result = self.run_init_chain_rooted(mc, receiver, &classes, env);
-        self.stack.truncate(root_base);
+        self.active_init_plans.push(plan);
+        let result = self.run_init_chain_planned(mc, receiver, plan, Some(env));
+        self.active_init_plans.pop();
         result
     }
 
-    /// The init-chain body of [`Self::finalize_instantiation`], split out so
-    /// the caller can root `classes` around its early `?` exits.
-    // The caller has pushed every class in `classes` onto the VM stack for
-    // this whole call; `clz` and the method values fetched from it are rooted
-    // by that contract across the user init calls.
+    /// The init-chain body shared by [`Self::finalize_instantiation`]
+    /// (`with_env` = the `new:{}` block env feeding `init:` params) and
+    /// [`Self::run_all_inits`] (`None`: the plain-`new` path runs `init`
+    /// ONLY, exactly as before the plan existed).
+    // The caller has pushed `plan` onto `active_init_plans` for this whole
+    // call; the method Values read from it are rooted by that contract
+    // across the user init calls (which can park).
     #[allow(no_gc_across_yield)]
-    fn run_init_chain_rooted(
+    fn run_init_chain_planned(
         &mut self,
         mc: &Mutation<'gc>,
         receiver: Value<'gc>,
-        classes: &[Gc<'gc, RefLock<Class<'gc>>>],
-        env: Gc<'gc, RefLock<EnvFrame<'gc>>>,
+        plan: Gc<'gc, InitPlan<'gc>>,
+        with_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
     ) -> Result<(), QuoinError> {
-        for &clz in classes {
-            let init_colon = clz
-                .borrow()
-                .instance_methods
-                .get(&init_colon_symbol())
-                .copied();
-            if let Some(method_val) = init_colon {
-                let param_names = self.init_param_names(method_val).unwrap_or_default();
-                let mut init_args = Vec::new();
-                for param in &param_names {
-                    let val = env
-                        .borrow()
-                        .lookup_str(param)
-                        .unwrap_or_else(|| self.new_nil(mc));
-                    init_args.push(val);
+        for idx in 0..plan.inits.len() {
+            let entry = &plan.inits[idx];
+            match (with_env, &entry.init_colon) {
+                (Some(env), Some((method_val, param_names))) => {
+                    let method_val = *method_val;
+                    let mut init_args = Vec::with_capacity(param_names.len());
+                    for param in param_names {
+                        let val = env
+                            .borrow()
+                            .lookup_str(param)
+                            .unwrap_or_else(|| self.new_nil(mc));
+                        init_args.push(val);
+                    }
+                    self.call_method_value(mc, receiver, method_val, "init:", init_args)?;
                 }
-                self.call_method_value(mc, receiver, method_val, "init:", init_args)?;
-            } else {
-                let init_plain = clz.borrow().instance_methods.get(&init_symbol()).copied();
-                if let Some(method_val) = init_plain {
-                    self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+                _ => {
+                    if let Some(method_val) = entry.init_plain {
+                        self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
+                    }
                 }
             }
         }
-
         Ok(())
     }
 
@@ -1465,6 +1539,7 @@ impl<'gc> VmState<'gc> {
                     class_methods: FxHashMap::default(),
                     mixin_classes: Vec::new(),
                     field_slots: FxHashMap::default(),
+                    init_plan: None,
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
@@ -1565,6 +1640,7 @@ impl<'gc> VmState<'gc> {
                     class_methods: cls_methods,
                     mixin_classes: Vec::new(),
                     field_slots: FxHashMap::default(),
+                    init_plan: None,
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
@@ -1603,7 +1679,7 @@ impl<'gc> VmState<'gc> {
         let method = self.lookup_method(mc, receiver, sel, &args)?;
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(sel))?;
+            method.call(self, mc, Some(receiver), args, Some(sel), None)?;
             Ok(initial_frame_count)
         } else {
             Err(QuoinError::Other(format!(
@@ -1659,7 +1735,7 @@ impl<'gc> VmState<'gc> {
         let method = self.lookup_method(mc, receiver, sel, &args)?;
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(sel))?;
+            method.call(self, mc, Some(receiver), args, Some(sel), None)?;
 
             // let the VM catch up (batched — B0)
             self.run_nested(mc, initial_frame_count, "method call")?;
@@ -1730,6 +1806,7 @@ impl<'gc> VmState<'gc> {
                 Some(receiver),
                 args,
                 Some(Symbol::intern(selector)),
+                None,
             )?;
 
             // let the VM catch up (batched — B0)
@@ -1783,27 +1860,12 @@ impl<'gc> VmState<'gc> {
         mc: &Mutation<'gc>,
         obj: Gc<'gc, RefLock<Object<'gc>>>,
     ) -> Result<(), QuoinError> {
-        let mut classes = Vec::new();
-        let mut visited = Vec::new();
-        self.collect_classes_for_init(obj.borrow().class, &mut classes, &mut visited);
-
+        let class = obj.borrow().class;
+        let plan = self.instantiation_plan(mc, class);
         let receiver = Value::Object(obj);
-        // Same rooting as `finalize_instantiation`: the chain must survive an
-        // init that reopens its own class.
-        let root_base = self.stack.len();
-        for &clz in &classes {
-            self.push(Value::Class(clz));
-        }
-        let result = (|| {
-            for &clz in &classes {
-                let method_opt = clz.borrow().instance_methods.get(&init_symbol()).copied();
-                if let Some(method_val) = method_opt {
-                    self.call_method_value(mc, receiver, method_val, "init", Vec::new())?;
-                }
-            }
-            Ok(())
-        })();
-        self.stack.truncate(root_base);
+        self.active_init_plans.push(plan);
+        let result = self.run_init_chain_planned(mc, receiver, plan, None);
+        self.active_init_plans.pop();
         result
     }
 
@@ -2500,6 +2562,7 @@ impl<'gc> VmState<'gc> {
                         class_methods: FxHashMap::default(),
                         mixin_classes: Vec::new(),
                         field_slots: FxHashMap::default(),
+                        init_plan: None,
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
@@ -2535,6 +2598,7 @@ impl<'gc> VmState<'gc> {
                             class_methods: FxHashMap::default(),
                             mixin_classes: Vec::new(),
                             field_slots,
+                            init_plan: None,
                             is_eigenclass: true,
                             is_sealed: false,
                             is_abstract: false,
@@ -3062,7 +3126,10 @@ impl<'gc> VmState<'gc> {
             Constant::Bool(b) => self.new_bool(mc, *b),
             Constant::Int(i) => self.new_int(mc, *i),
             Constant::Double(f) => self.new_double(mc, *f),
-            Constant::String(s) => self.new_string(mc, s.clone()),
+            Constant::String(s) => {
+                let buf = self.literal_string_buffer(mc, s);
+                self.new_string_shared(mc, buf)
+            }
             Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
             Constant::Block(sb) => {
                 // A closure is its shared template (Rc bump) plus the captured
@@ -3625,9 +3692,54 @@ impl<'gc> VmState<'gc> {
         };
         if let Some(method) = method {
             let initial_frame_count = self.frames.len();
-            method.call(self, mc, Some(receiver), args, Some(selector))?;
-            self.run_nested(mc, initial_frame_count, "method call")?;
-            Ok(self.pop()?)
+            if matches!(
+                method,
+                crate::dispatch::Callable::Native(_) | crate::dispatch::Callable::AotCall { .. }
+            ) {
+                // Same stack-window rooting as `exec_send` (A2c): outcall
+                // args arrive in an owned Vec (decoded from compiled lanes,
+                // never on the value stack), so push them once — two stack
+                // writes beat the rooting clone. The frame-count
+                // discriminator below is exact: a synchronous call pushes no
+                // frame; the AotCall interpreter fallbacks consume the
+                // window themselves before pushing theirs.
+                let recv_start = self.stack.len();
+                self.push(receiver);
+                for &a in &args {
+                    self.push(a);
+                }
+                let res = method.call(
+                    self,
+                    mc,
+                    Some(receiver),
+                    args,
+                    Some(selector),
+                    Some(recv_start + 1),
+                );
+                if let Err(e) = res {
+                    // The S1/finish_frame rule, as in `dispatch_send_rooted`:
+                    // an escaping `^^` already delivered at (possibly) the
+                    // window start — only non-NLR errors tear down here.
+                    if !matches!(e, QuoinError::NonLocalReturn) {
+                        self.stack.truncate(recv_start.min(self.stack.len()));
+                    }
+                    return Err(e);
+                }
+                if self.frames.len() > initial_frame_count {
+                    // An interpreter fallback started a frame (window
+                    // already consumed by the dispatch arm): drive it.
+                    self.run_nested(mc, initial_frame_count, "method call")?;
+                    Ok(self.pop()?)
+                } else {
+                    let result = self.pop()?;
+                    self.stack.truncate(recv_start);
+                    Ok(result)
+                }
+            } else {
+                method.call(self, mc, Some(receiver), args, Some(selector), None)?;
+                self.run_nested(mc, initial_frame_count, "method call")?;
+                Ok(self.pop()?)
+            }
         } else {
             Ok(self.new_nil(mc))
         }
@@ -3893,13 +4005,20 @@ impl<'gc> VmState<'gc> {
         selector: Symbol,
         num_args: usize,
     ) -> Result<VmStatus<'gc>, QuoinError> {
-        let mut args = Vec::new();
-        for _ in 0..num_args {
-            args.push(self.pop()?);
-        }
-        args.reverse();
-
-        let receiver = self.pop()?;
+        // The operands sit in ORDER at the stack top. Copy the args in one
+        // exact-size allocation, but leave `[receiver, args..]` LIVE on the
+        // stack: for Native/AotCall callables that window IS the GC root for
+        // the whole call (no rooting clone — see `NativeArgs::StackWindow`),
+        // torn down in `dispatch_send_rooted` after the call returns. Frame-
+        // pushing callables consume the window before their frame instead.
+        let args_start = self
+            .stack
+            .len()
+            .checked_sub(num_args)
+            .ok_or("Stack underflow")?;
+        let recv_start = args_start.checked_sub(1).ok_or("Stack underflow")?;
+        let args: Vec<Value<'gc>> = self.stack[args_start..].to_vec();
+        let receiver = self.stack[recv_start];
         // Call-site identity for the inline cache: the executing frame's cache cell + the
         // Send's own `ip`, captured before we advance it (the block itself is re-read at
         // fill time — see the note at `ic_fill` below).
@@ -3911,15 +4030,16 @@ impl<'gc> VmState<'gc> {
             && let ObjectPayload::Block(block) = &obj.borrow().payload
         {
             if selector.as_str() == "value" || selector.as_str() == "value:" {
-                self.start_block(mc, *block, args, Some(receiver), Some(selector));
+                let block = *block;
+                self.stack.truncate(recv_start);
+                self.start_block(mc, block, args, Some(receiver), Some(selector));
                 return Ok(VmStatus::Running);
             }
         }
 
         // Inline-cache fast path: a hit skips `lookup_method`'s key-build + hash + hashmap.
         if let Some(callable) = self.ic_probe(caller_ic, site_ip, receiver, &args) {
-            callable.call(self, mc, Some(receiver), args, Some(selector))?;
-            return Ok(VmStatus::Running);
+            return self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start);
         }
 
         // `last_send_args` is read only by the stack-trace formatter, and only for an
@@ -3931,6 +4051,7 @@ impl<'gc> VmState<'gc> {
         let method_opt = match self.lookup_method(mc, receiver, selector, &args) {
             Ok(m) => m,
             Err(e) => {
+                self.stack.truncate(recv_start);
                 self.exceptions.last_send_args = args;
                 return Err(e);
             }
@@ -3948,7 +4069,7 @@ impl<'gc> VmState<'gc> {
                 &args,
                 callable,
             );
-            callable.call(self, mc, Some(receiver), args, Some(selector))?;
+            self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start)
         } else {
             // The selector may still exist with non-matching signatures; surface those
             // filtered-out variants as a hint.
@@ -3959,15 +4080,78 @@ impl<'gc> VmState<'gc> {
                 .collect();
             let receiver_name = receiver.class_name();
             let arg_names = args.iter().map(|a| a.class_name()).collect();
+            self.stack.truncate(recv_start);
             self.exceptions.last_send_args = args;
-            return Err(QuoinError::MessageNotUnderstood {
+            Err(QuoinError::MessageNotUnderstood {
                 receiver: receiver_name,
                 selector: selector.as_str().to_string(),
                 args: arg_names,
                 candidates,
-            });
+            })
         }
-        Ok(VmStatus::Running)
+    }
+
+    /// Dispatch a send whose `[receiver, args..]` window is still LIVE on the
+    /// value stack at `stack[recv_start..]` (see `exec_send`). Native and
+    /// AotCall callables run with the window as their GC root — no rooting
+    /// clone — and their pushed result is re-seated over the window
+    /// afterwards. Everything else (interpreted methods, guarded variants,
+    /// ext methods) consumes the window up front, exactly as before. The
+    /// AotCall arm's interpreter fallbacks truncate the window themselves
+    /// before pushing their frame, so after an `Ok` the discriminator is the
+    /// stack height: above `recv_start` = a synchronous result to re-seat;
+    /// at it = a frame was started and there is nothing to move.
+    fn dispatch_send_rooted(
+        &mut self,
+        mc: &Mutation<'gc>,
+        callable: crate::dispatch::Callable<'gc>,
+        receiver: Value<'gc>,
+        args: Vec<Value<'gc>>,
+        selector: Symbol,
+        recv_start: usize,
+    ) -> Result<VmStatus<'gc>, QuoinError> {
+        use crate::dispatch::Callable;
+        match callable {
+            Callable::Native(_) | Callable::AotCall { .. } => {
+                let res = callable.call(
+                    self,
+                    mc,
+                    Some(receiver),
+                    args,
+                    Some(selector),
+                    Some(recv_start + 1),
+                );
+                match res {
+                    Ok(()) => {
+                        if self.stack.len() > recv_start {
+                            let result = self.pop()?;
+                            self.stack.truncate(recv_start);
+                            self.push(result);
+                        }
+                        Ok(VmStatus::Running)
+                    }
+                    Err(e) => {
+                        // NLR-aware teardown — the S1/finish_frame rule: a
+                        // `^^` that escaped through this send has already
+                        // truncated to its target's base and pushed the
+                        // delivered value there, and that base can sit AT or
+                        // ABOVE this window's start (a caller whose operand
+                        // stack was empty at the send). Touching the stack
+                        // then chops the delivery; every OTHER error tears
+                        // the window down here.
+                        if !matches!(e, QuoinError::NonLocalReturn) {
+                            self.stack.truncate(recv_start.min(self.stack.len()));
+                        }
+                        Err(e)
+                    }
+                }
+            }
+            _ => {
+                self.stack.truncate(recv_start);
+                callable.call(self, mc, Some(receiver), args, Some(selector), None)?;
+                Ok(VmStatus::Running)
+            }
+        }
     }
 
     /// Bind `name` in the current frame to an already-obtained `val`. Shared by the
@@ -4004,7 +4188,13 @@ impl<'gc> VmState<'gc> {
             return Err(QuoinError::Other(err_msg));
         }
         let frame = &mut self.frames[frame_idx];
-        if frame.instantiating_obj.is_some() {
+        // Init-form binding is STATIC (E): a `new:{...}` config literal's
+        // assignments bind into its own frame however it is invoked — the
+        // frame flag covers real instantiation, the template flag covers a
+        // user-defined `new:` running the block as a plain closure
+        // (previously that chain-walked the write: caller-dependent
+        // semantics nothing could reason about, the AOT gates included).
+        if frame.instantiating_obj.is_some() || frame.block.template.is_init_literal {
             frame.env.borrow_mut(mc).bind(name, val);
         } else if !EnvFrame::set(frame.env, mc, name, val) {
             frame.env.borrow_mut(mc).bind(name, val);
@@ -5180,6 +5370,7 @@ impl<'gc> VmState<'gc> {
                         class_methods: FxHashMap::default(),
                         mixin_classes: Vec::new(),
                         field_slots: FxHashMap::default(),
+                        init_plan: None,
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,

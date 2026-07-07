@@ -32,6 +32,14 @@ pub fn build_class_class() -> NativeClassBuilder {
             vm.ensure_not_sealed(clz)?;
             let mixin = arg!(args, Class, 0);
             clz.borrow_mut(mc).mixin_classes.push(mixin);
+            // A mixin changes what dispatch resolves (its methods can shadow a
+            // PARENT's) and what instantiation runs (its ivars and init join
+            // the chain): stale cached resolutions, inline caches, compiled
+            // direct-self entries, and instantiation plans must all self-evict
+            // — the same pairing every DefineMethod arm does. (mix: previously
+            // invalidated NOTHING — a latent staleness bug on its own.)
+            vm.invalidate_method_cache();
+            crate::codegen::bump_redef_epoch();
             // Defer the mixin's requirement check to the end of the current block
             // (the class-definition body), when the host class is fully defined.
             // Only mixins that define a class-side assertMeetsRequirements: take part.

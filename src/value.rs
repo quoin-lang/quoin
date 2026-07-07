@@ -156,7 +156,54 @@ impl NativeFunc {
 #[collect(no_drop)]
 pub struct NativeCall<'gc> {
     pub receiver: Value<'gc>,
-    pub args: Vec<Value<'gc>>,
+    pub args: NativeArgs<'gc>,
+}
+
+/// How an in-flight native call's args are ROOTED (see
+/// `VmState::active_native_args`). The hot `exec_send` path leaves
+/// `[receiver, args..]` live on the VALUE STACK for the call's duration and
+/// records only the window — no rooting clone per native call; re-entry
+/// paths (`call_method` from inside a native) own their Vec as before.
+/// Window indices stay valid across parks and nested calls: the stack is
+/// per-task, callees only grow it above the window, and truncation back to
+/// the window happens in `exec_send` after the call returns.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub enum NativeArgs<'gc> {
+    Owned(Vec<Value<'gc>>),
+    StackWindow { start: usize, len: usize },
+}
+
+impl<'gc> NativeCall<'gc> {
+    /// The i-th argument; `stack` must be the owning VM's value stack (the
+    /// window variant indexes into it). Bounds-clamped: a `^^` unwinding
+    /// BELOW the window truncates it away mid-call, and the error paths that
+    /// then snapshot args must see "gone", not a panic.
+    pub fn arg(&self, stack: &[Value<'gc>], i: usize) -> Option<Value<'gc>> {
+        match &self.args {
+            NativeArgs::Owned(v) => v.get(i).copied(),
+            NativeArgs::StackWindow { start, len } => {
+                if i < *len {
+                    stack.get(start + i).copied()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// All arguments as an owned Vec (error-path snapshots only — the hot
+    /// path never materializes this). Bounds-clamped like [`Self::arg`].
+    pub fn args_vec(&self, stack: &[Value<'gc>]) -> Vec<Value<'gc>> {
+        match &self.args {
+            NativeArgs::Owned(v) => v.clone(),
+            NativeArgs::StackWindow { start, len } => {
+                let lo = (*start).min(stack.len());
+                let hi = (start + len).min(stack.len());
+                stack[lo..hi].to_vec()
+            }
+        }
+    }
 }
 
 unsafe impl<'gc> Collect<'gc> for NativeFunc {
@@ -660,6 +707,38 @@ pub fn intern_param_syms(names: &[String]) -> Vec<Symbol> {
     names.iter().map(|n| Symbol::intern(n)).collect()
 }
 
+/// The memoized per-class instantiation recipe (field-fill + init chain),
+/// built once per (class, dispatch_epoch) by `VmState::instantiation_plan`
+/// and cached on the class — `new:`/`new` used to re-derive all of it per
+/// instantiation (two hierarchy walks, a Vec per walk, a String clone per
+/// ivar name, and an `init:` param-name Vec per init). IMMUTABLE once built:
+/// users iterate a copied `Gc` (rooted via `VmState::active_init_plans`
+/// across the user init calls, which can park — a stale plan replaced
+/// mid-chain must stay alive for its running iteration).
+#[derive(Collect, Debug)]
+#[collect(no_drop)]
+pub struct InitPlan<'gc> {
+    /// Deduped ivar names paired with their resolved field slots, in the
+    /// same self-then-mixins-then-parent order the per-call walk produced.
+    #[collect(require_static)]
+    pub ivar_slots: Vec<(String, usize)>,
+    /// The base->derived init chain, one entry per class that defines any
+    /// initializer. `finalize_instantiation` (the `new:{}` path) runs
+    /// `init_colon` when present, else `init_plain`; `run_all_inits` (the
+    /// plain `new` path) runs `init_plain` ONLY — mirroring the two
+    /// pre-plan walks exactly.
+    pub inits: Vec<InitEntry<'gc>>,
+}
+
+/// One class's resolved initializers in an [`InitPlan`].
+#[derive(Collect, Debug)]
+#[collect(no_drop)]
+pub struct InitEntry<'gc> {
+    /// `init:` plus the param names it is fed from the `new:{}` block.
+    pub init_colon: Option<(Value<'gc>, Vec<String>)>,
+    pub init_plain: Option<Value<'gc>>,
+}
+
 #[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct Class<'gc> {
@@ -676,6 +755,10 @@ pub struct Class<'gc> {
     /// mixins + parent) at first instantiation; new ivars only ever append, so
     /// existing slots stay stable across runtime mixins. `len()` is the field count.
     pub field_slots: FxHashMap<String, usize>,
+    /// Memoized instantiation recipe (see [`InitPlan`]): valid only while
+    /// the stamped `dispatch_epoch` matches — any method/mixin/hierarchy
+    /// mutation bumps the epoch and the next instantiation rebuilds.
+    pub init_plan: Option<(u64, Gc<'gc, InitPlan<'gc>>)>,
     /// True only for per-instance *eigenclasses* (singletons synthesized by
     /// `get_target_class_for_def` for a `Value::Object` receiver). Named classes —
     /// including the `$TrueClass`/`$FalseClass` boolean singletons, which are
