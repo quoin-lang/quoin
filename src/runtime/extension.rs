@@ -1416,4 +1416,22 @@ pub fn build_extension_class() -> NativeClassBuilder {
             })?;
             run_extension_method(vm, mc, receiver, op, argv, Vec::new(), Some(data))
         })
+        // `Extension resourceIdOf: v` -> the extension-assigned instance id behind an
+        // extension-backed value (its object-table key; unique within one extension). Identity
+        // reflection for package glue: ext-backed instances can't carry Quoin-side state, and a
+        // package may overload `==` (e.g. numpy's elementwise comparisons), so this is the only
+        // stable per-instance key — numpy's init.qn dedups expression-graph leaves with it.
+        .class_method("resourceIdOf:", |vm, mc, _receiver, args| {
+            let v = *args.first().ok_or_else(|| {
+                QuoinError::Other("Extension.resourceIdOf: expects a value".to_string())
+            })?;
+            let id = v
+                .with_native_state::<NativeExtResource, _, _>(|r| r.resource_id)
+                .map_err(|_| QuoinError::TypeError {
+                    expected: "an extension-backed instance".to_string(),
+                    got: v.type_name().to_string(),
+                    msg: "Extension.resourceIdOf: expects an extension-backed instance".to_string(),
+                })?;
+            Ok(vm.new_int(mc, id as i64))
+        })
 }

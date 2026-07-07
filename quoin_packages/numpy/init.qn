@@ -149,9 +149,17 @@
     indexOf: -> { |v|
         (v.can?:#numpyKind).else:{ ^^ .pushNode:#{ 'op': 'const' 'v': v } };
         (v.numpyKind == 'base').if:{
+            "* dedup repeated references to the SAME resident array (an iteration loop can
+            "* reference one array dozens of times): identity comes from the host
+            "* (Extension.resourceIdOf: — `==` is elementwise here). Base keys ('b3') and
+            "* Expr serial keys ('17') share @seen but can never collide.
+            var key = 'b' + (Extension.resourceIdOf:v).s;
+            (@seen.at:key).defined?.if:{ ^^ @seen.at:key };
             @bases.add:v;
             var i = @bases.count - 1;
-            ^^ .pushNode:#{ 'op': 'base' 'i': i }
+            var idx = .pushNode:#{ 'op': 'base' 'i': i };
+            @seen.at:key put:idx;
+            ^^ idx
         };
         var key = v.serial.s;
         (@seen.at:key).defined?.if:{ ^^ @seen.at:key };

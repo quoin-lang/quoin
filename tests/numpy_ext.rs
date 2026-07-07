@@ -340,6 +340,41 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     assert_script_passes("qn_numpy_masks_test.qn", &script);
 }
 
+/// Regression: repeated references to the SAME resident array inside one graph must dedup to one
+/// base slot (keyed by `Extension.resourceIdOf:`), not exhaust the 8-array selector ladder. The
+/// Mandelbrot demo's iteration loop references one array ~35 times per row and exposed this.
+#[test]
+fn numpy_repeated_base_dedup() {
+    if !numpy_fixture_runnable() {
+        eprintln!(
+            "skipping numpy_repeated_base_dedup: python3 with `flatbuffers` + `numpy` unavailable"
+        );
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+"* one array referenced 20+ times across an iteration-style chain: one base slot, one graph
+var a = [NumPy]Array.fromList:#( 1.0 2.0 3.0 );
+var acc = a * 0.0;
+(0..20).each:{{ |i| acc = (acc + a) * 1.0 }};
+(acc.toList == #( 20.0 40.0 60.0 )).else:{{ ok = false }};
+
+"* mixing repeated refs to several distinct arrays still fits the ladder
+var b = [NumPy]Array.fromList:#( 8.0 16.0 32.0 );
+var m = ((a + b) + (a * b)) + ((b - a) + (a / b));
+"* at 0: (1+8) + (1*8) + (8-1) + (1/8) = 24.125 (all exact in binary)
+(((m.at:0) - 24.125).abs == 0.0).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_base_dedup_test.qn", &script);
+}
+
 /// `use numpy:*` resolves the package folder from the default search root (`./quoin_packages/`),
 /// relative to the VM's cwd — which under `cargo test` is the workspace root.
 #[test]
