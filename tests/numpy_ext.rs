@@ -427,3 +427,76 @@ ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
     );
     assert_script_passes("qn_numpy_array_args_test.qn", &script);
 }
+
+/// P1 parity round-out: the widened elementwise set (hyperbolics, inverse trig, extra logs,
+/// cbrt, maximum/minimum/arcTan2/floorDiv/hypot, the 3-operand clip), the float-inspection
+/// masks (isNan/isInf/isFinite), and the new reductions (variance/ptp/median/countNonZero as
+/// forcing scalars + lazy axis forms) plus the lazy cumulative forms (cumSum/cumProd).
+#[test]
+fn numpy_elementwise_roundout() {
+    if !numpy_fixture_runnable() {
+        eprintln!(
+            "skipping numpy_elementwise_roundout: python3 with `msgpack` + `numpy` unavailable"
+        );
+        return;
+    }
+    let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/quoin_packages/numpy");
+    let script = format!(
+        r#"
+var ok = true;
+var e = Extension.loadPackage:'{pkg}';
+
+"* new unaries, probed at exact-value points
+((([NumPy]Array.fromList:#( 8.0 )).log2).toList == #( 3.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 100.0 )).log10).toList == #( 2.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).log1p).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).expm1).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 27.0 )).cbrt).toList == #( 3.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).tanh).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).sinh).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).cosh).toList == #( 1.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).arcSin).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 )).arcCos).toList == #( 0.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).arcTan).toList == #( 0.0 )).else:{{ ok = false }};
+
+"* new binaries (elementwise, broadcasting like the rest)
+var x = [NumPy]Array.fromList:#( 1.0 5.0 );
+var y = [NumPy]Array.fromList:#( 4.0 2.0 );
+((x.maximum:y).toList == #( 4.0 5.0 )).else:{{ ok = false }};
+((x.minimum:y).toList == #( 1.0 2.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 3.0 )).hypot:4.0).toList == #( 5.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 7.0 )).floorDiv:2.0).toList == #( 3.0 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0.0 )).arcTan2:1.0).toList == #( 0.0 )).else:{{ ok = false }};
+
+"* clip is a 3-operand graph node (scalar bounds become const leaves)
+((([NumPy]Array.fromList:#( (-1.0) 5.0 10.0 )).clip:0.0 to:6.0).toList == #( 0.0 5.0 6.0 ))
+    .else:{{ ok = false }};
+
+"* float-inspection masks
+var weird = ([NumPy]Array.fromList:#( (-1.0) 1.0 )).sqrt;
+(weird.isNan.toList == #( true false )).else:{{ ok = false }};
+(weird.isFinite.toList == #( false true )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 )) / 0.0).isInf.toList == #( true )).else:{{ ok = false }};
+
+"* new reductions: whole-array forms force to scalars...
+var a = [NumPy]Array.fromList:#( 1.0 3.0 );
+(a.variance == 1.0).else:{{ ok = false }};
+(a.ptp == 2.0).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1.0 9.0 3.0 )).median) == 3.0).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 0 3 0 5 )).countNonZero) == 2).else:{{ ok = false }};
+
+"* ...axis forms stay lazy and compose back into graphs
+var m = [NumPy]Array.fromList:#( #( 1.0 3.0 ) #( 5.0 9.0 ) );
+(((m.variance:1) * 1.0).toList == #( 1.0 4.0 )).else:{{ ok = false }};
+((m.ptp:0).toList == #( 4.0 6.0 )).else:{{ ok = false }};
+
+"* cumulative forms are array-shaped and stay in the graph
+((([NumPy]Array.fromList:#( 1 2 3 )).cumSum).toList == #( 1 3 6 )).else:{{ ok = false }};
+((([NumPy]Array.fromList:#( 1 2 3 )).cumProd).toList == #( 1 2 6 )).else:{{ ok = false }};
+(((m.cumSum:1).row:1).toList == #( 5.0 14.0 )).else:{{ ok = false }};
+
+ok.if:{{ 'PASS'.print }} else:{{ 'FAIL'.print }};
+"#
+    );
+    assert_script_passes("qn_numpy_roundout_test.qn", &script);
+}

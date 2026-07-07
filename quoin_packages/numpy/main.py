@@ -42,6 +42,7 @@ _BINOPS = {
     "div": np.true_divide,
     "pow": np.power,
     "mod": np.mod,
+    "floordiv": np.floor_divide,
     "matmul": np.matmul,
     "eq": np.equal,
     "ne": np.not_equal,
@@ -51,21 +52,39 @@ _BINOPS = {
     "ge": np.greater_equal,
     "and": np.logical_and,
     "or": np.logical_or,
+    "maximum": np.maximum,
+    "minimum": np.minimum,
+    "arctan2": np.arctan2,
+    "hypot": np.hypot,
 }
 _UNOPS = {
     "neg": np.negative,
     "sqrt": np.sqrt,
+    "cbrt": np.cbrt,
     "exp": np.exp,
+    "expm1": np.expm1,
     "log": np.log,
+    "log2": np.log2,
+    "log10": np.log10,
+    "log1p": np.log1p,
     "abs": np.abs,
     "sin": np.sin,
     "cos": np.cos,
     "tan": np.tan,
+    "sinh": np.sinh,
+    "cosh": np.cosh,
+    "tanh": np.tanh,
+    "arcsin": np.arcsin,
+    "arccos": np.arccos,
+    "arctan": np.arctan,
     "floor": np.floor,
     "ceil": np.ceil,
     "round": np.round,
     "sign": np.sign,
     "not": np.logical_not,
+    "isnan": np.isnan,
+    "isinf": np.isinf,
+    "isfinite": np.isfinite,
 }
 _REDUCERS = {
     "sum": np.sum,
@@ -75,9 +94,19 @@ _REDUCERS = {
     "argmin": np.argmin,
     "argmax": np.argmax,
     "std": np.std,
+    "var": np.var,
+    "ptp": np.ptp,
+    "median": np.median,
+    "countnonzero": np.count_nonzero,
     "prod": np.prod,
     "any": np.any,
     "all": np.all,
+}
+# Running (cumulative) forms: array-shaped results, so they stay IN the graph — with no axis
+# NumPy flattens first (its own convention), with an axis they run along it.
+_CUMS = {
+    "cumsum": np.cumsum,
+    "cumprod": np.cumprod,
 }
 
 
@@ -173,6 +202,11 @@ class NdArray:
                     vals[i] = _REDUCERS[op](vals[n["a"][0]])
                 else:
                     vals[i] = _REDUCERS[op](vals[n["a"][0]], axis=axis)
+            elif op in _CUMS:
+                vals[i] = _CUMS[op](vals[n["a"][0]], axis=n.get("axis"))
+            elif op == "clip":
+                x, lo, hi = n["a"]
+                vals[i] = np.clip(vals[x], vals[lo], vals[hi])
             elif op == "transpose":
                 vals[i] = np.transpose(vals[n["a"][0]])
             elif op == "flatten":

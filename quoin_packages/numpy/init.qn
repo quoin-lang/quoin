@@ -58,6 +58,12 @@
     pow: -> { |rhs| [NumPy]Expr.op:'pow' with:#( self rhs ) };
     mod: -> { |rhs| [NumPy]Expr.op:'mod' with:#( self rhs ) };
     matMul: -> { |rhs| [NumPy]Expr.op:'matmul' with:#( self rhs ) };
+    maximum: -> { |rhs| [NumPy]Expr.op:'maximum' with:#( self rhs ) };
+    minimum: -> { |rhs| [NumPy]Expr.op:'minimum' with:#( self rhs ) };
+    arcTan2: -> { |rhs| [NumPy]Expr.op:'arctan2' with:#( self rhs ) };
+    floorDiv: -> { |rhs| [NumPy]Expr.op:'floordiv' with:#( self rhs ) };
+    hypot: -> { |rhs| [NumPy]Expr.op:'hypot' with:#( self rhs ) };
+    clip:to: -> { |lo hi| [NumPy]Expr.op:'clip' with:#( self lo hi ) };
     neg -> { [NumPy]Expr.op:'neg' with:#( self ) };
     sqrt -> { [NumPy]Expr.op:'sqrt' with:#( self ) };
     exp -> { [NumPy]Expr.op:'exp' with:#( self ) };
@@ -70,6 +76,17 @@
     ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
     round -> { [NumPy]Expr.op:'round' with:#( self ) };
     sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
+    cbrt -> { [NumPy]Expr.op:'cbrt' with:#( self ) };
+    expm1 -> { [NumPy]Expr.op:'expm1' with:#( self ) };
+    log2 -> { [NumPy]Expr.op:'log2' with:#( self ) };
+    log10 -> { [NumPy]Expr.op:'log10' with:#( self ) };
+    log1p -> { [NumPy]Expr.op:'log1p' with:#( self ) };
+    sinh -> { [NumPy]Expr.op:'sinh' with:#( self ) };
+    cosh -> { [NumPy]Expr.op:'cosh' with:#( self ) };
+    tanh -> { [NumPy]Expr.op:'tanh' with:#( self ) };
+    arcSin -> { [NumPy]Expr.op:'arcsin' with:#( self ) };
+    arcCos -> { [NumPy]Expr.op:'arccos' with:#( self ) };
+    arcTan -> { [NumPy]Expr.op:'arctan' with:#( self ) };
 
     "* comparisons are ELEMENTWISE (NumPy semantics): they build bool-mask nodes, not truths.
     "* (Identity comparison of two arrays is gone — that is the NumPy trade.)
@@ -82,6 +99,9 @@
     and: -> { |rhs| [NumPy]Expr.op:'and' with:#( self rhs ) };
     or: -> { |rhs| [NumPy]Expr.op:'or' with:#( self rhs ) };
     not -> { [NumPy]Expr.op:'not' with:#( self ) };
+    isNan -> { [NumPy]Expr.op:'isnan' with:#( self ) };
+    isInf -> { [NumPy]Expr.op:'isinf' with:#( self ) };
+    isFinite -> { [NumPy]Expr.op:'isfinite' with:#( self ) };
     select: -> { |mask| [NumPy]Expr.op:'select' with:#( self mask ) };
     where:else: -> { |ifTrue ifFalse| [NumPy]Expr.op:'where' with:#( self ifTrue ifFalse ) };
     any -> { ([NumPy]Expr.op:'any' with:#( self )).eval };
@@ -105,6 +125,11 @@
     argMin -> { ([NumPy]Expr.op:'argmin' with:#( self )).eval };
     argMax -> { ([NumPy]Expr.op:'argmax' with:#( self )).eval };
     std -> { ([NumPy]Expr.op:'std' with:#( self )).eval };
+    "* `variance` (not `var` — a keyword) is NumPy's `var`
+    variance -> { ([NumPy]Expr.op:'var' with:#( self )).eval };
+    ptp -> { ([NumPy]Expr.op:'ptp' with:#( self )).eval };
+    median -> { ([NumPy]Expr.op:'median' with:#( self )).eval };
+    countNonZero -> { ([NumPy]Expr.op:'countnonzero' with:#( self )).eval };
     prod -> { ([NumPy]Expr.op:'prod' with:#( self )).eval };
 
     "* axis reductions produce arrays, so they STAY lazy
@@ -115,7 +140,18 @@
     argMin: -> { |axis| [NumPy]Expr.op:'argmin' with:#( self ) axis:axis };
     argMax: -> { |axis| [NumPy]Expr.op:'argmax' with:#( self ) axis:axis };
     std: -> { |axis| [NumPy]Expr.op:'std' with:#( self ) axis:axis };
+    variance: -> { |axis| [NumPy]Expr.op:'var' with:#( self ) axis:axis };
+    ptp: -> { |axis| [NumPy]Expr.op:'ptp' with:#( self ) axis:axis };
+    median: -> { |axis| [NumPy]Expr.op:'median' with:#( self ) axis:axis };
+    countNonZero: -> { |axis| [NumPy]Expr.op:'countnonzero' with:#( self ) axis:axis };
     prod: -> { |axis| [NumPy]Expr.op:'prod' with:#( self ) axis:axis };
+
+    "* running (cumulative) forms are array-shaped, so they STAY lazy (no axis = NumPy's
+    "* flatten-first convention)
+    cumSum -> { [NumPy]Expr.op:'cumsum' with:#( self ) };
+    cumProd -> { [NumPy]Expr.op:'cumprod' with:#( self ) };
+    cumSum: -> { |axis| [NumPy]Expr.op:'cumsum' with:#( self ) axis:axis };
+    cumProd: -> { |axis| [NumPy]Expr.op:'cumprod' with:#( self ) axis:axis };
 
     "* the force point: serialize the DAG, one evalGraph: send, memoize the result
     eval -> {
@@ -200,6 +236,12 @@
     pow: -> { |rhs| [NumPy]Expr.op:'pow' with:#( self rhs ) };
     mod: -> { |rhs| [NumPy]Expr.op:'mod' with:#( self rhs ) };
     matMul: -> { |rhs| [NumPy]Expr.op:'matmul' with:#( self rhs ) };
+    maximum: -> { |rhs| [NumPy]Expr.op:'maximum' with:#( self rhs ) };
+    minimum: -> { |rhs| [NumPy]Expr.op:'minimum' with:#( self rhs ) };
+    arcTan2: -> { |rhs| [NumPy]Expr.op:'arctan2' with:#( self rhs ) };
+    floorDiv: -> { |rhs| [NumPy]Expr.op:'floordiv' with:#( self rhs ) };
+    hypot: -> { |rhs| [NumPy]Expr.op:'hypot' with:#( self rhs ) };
+    clip:to: -> { |lo hi| [NumPy]Expr.op:'clip' with:#( self lo hi ) };
     neg -> { [NumPy]Expr.op:'neg' with:#( self ) };
     sqrt -> { [NumPy]Expr.op:'sqrt' with:#( self ) };
     exp -> { [NumPy]Expr.op:'exp' with:#( self ) };
@@ -212,6 +254,17 @@
     ceil -> { [NumPy]Expr.op:'ceil' with:#( self ) };
     round -> { [NumPy]Expr.op:'round' with:#( self ) };
     sign -> { [NumPy]Expr.op:'sign' with:#( self ) };
+    cbrt -> { [NumPy]Expr.op:'cbrt' with:#( self ) };
+    expm1 -> { [NumPy]Expr.op:'expm1' with:#( self ) };
+    log2 -> { [NumPy]Expr.op:'log2' with:#( self ) };
+    log10 -> { [NumPy]Expr.op:'log10' with:#( self ) };
+    log1p -> { [NumPy]Expr.op:'log1p' with:#( self ) };
+    sinh -> { [NumPy]Expr.op:'sinh' with:#( self ) };
+    cosh -> { [NumPy]Expr.op:'cosh' with:#( self ) };
+    tanh -> { [NumPy]Expr.op:'tanh' with:#( self ) };
+    arcSin -> { [NumPy]Expr.op:'arcsin' with:#( self ) };
+    arcCos -> { [NumPy]Expr.op:'arccos' with:#( self ) };
+    arcTan -> { [NumPy]Expr.op:'arctan' with:#( self ) };
 
     "* comparisons are ELEMENTWISE (NumPy semantics): they build bool-mask nodes, not truths.
     "* (Identity comparison of two arrays is gone — that is the NumPy trade.)
@@ -224,6 +277,9 @@
     and: -> { |rhs| [NumPy]Expr.op:'and' with:#( self rhs ) };
     or: -> { |rhs| [NumPy]Expr.op:'or' with:#( self rhs ) };
     not -> { [NumPy]Expr.op:'not' with:#( self ) };
+    isNan -> { [NumPy]Expr.op:'isnan' with:#( self ) };
+    isInf -> { [NumPy]Expr.op:'isinf' with:#( self ) };
+    isFinite -> { [NumPy]Expr.op:'isfinite' with:#( self ) };
     select: -> { |mask| [NumPy]Expr.op:'select' with:#( self mask ) };
     where:else: -> { |ifTrue ifFalse| [NumPy]Expr.op:'where' with:#( self ifTrue ifFalse ) };
     any -> { ([NumPy]Expr.op:'any' with:#( self )).eval };
@@ -246,6 +302,11 @@
     argMin -> { ([NumPy]Expr.op:'argmin' with:#( self )).eval };
     argMax -> { ([NumPy]Expr.op:'argmax' with:#( self )).eval };
     std -> { ([NumPy]Expr.op:'std' with:#( self )).eval };
+    "* `variance` (not `var` — a keyword) is NumPy's `var`
+    variance -> { ([NumPy]Expr.op:'var' with:#( self )).eval };
+    ptp -> { ([NumPy]Expr.op:'ptp' with:#( self )).eval };
+    median -> { ([NumPy]Expr.op:'median' with:#( self )).eval };
+    countNonZero -> { ([NumPy]Expr.op:'countnonzero' with:#( self )).eval };
     prod -> { ([NumPy]Expr.op:'prod' with:#( self )).eval };
 
     sum: -> { |axis| [NumPy]Expr.op:'sum' with:#( self ) axis:axis };
@@ -255,7 +316,18 @@
     argMin: -> { |axis| [NumPy]Expr.op:'argmin' with:#( self ) axis:axis };
     argMax: -> { |axis| [NumPy]Expr.op:'argmax' with:#( self ) axis:axis };
     std: -> { |axis| [NumPy]Expr.op:'std' with:#( self ) axis:axis };
+    variance: -> { |axis| [NumPy]Expr.op:'var' with:#( self ) axis:axis };
+    ptp: -> { |axis| [NumPy]Expr.op:'ptp' with:#( self ) axis:axis };
+    median: -> { |axis| [NumPy]Expr.op:'median' with:#( self ) axis:axis };
+    countNonZero: -> { |axis| [NumPy]Expr.op:'countnonzero' with:#( self ) axis:axis };
     prod: -> { |axis| [NumPy]Expr.op:'prod' with:#( self ) axis:axis };
+
+    "* running (cumulative) forms are array-shaped, so they STAY lazy (no axis = NumPy's
+    "* flatten-first convention)
+    cumSum -> { [NumPy]Expr.op:'cumsum' with:#( self ) };
+    cumProd -> { [NumPy]Expr.op:'cumprod' with:#( self ) };
+    cumSum: -> { |axis| [NumPy]Expr.op:'cumsum' with:#( self ) axis:axis };
+    cumProd: -> { |axis| [NumPy]Expr.op:'cumprod' with:#( self ) axis:axis };
 
     "* an already-materialized array 'forces' to itself, so Array/Expr mix freely
     eval -> { self }
