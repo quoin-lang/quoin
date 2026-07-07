@@ -549,27 +549,44 @@ pub enum AotOutcome<'gc> {
     Err(QuoinError),
 }
 
+/// Entry bails since process start (`VM.stats` 'aot' section). Incremented
+/// only on the rare bail path, never on successful entries.
+static ENTRY_BAILS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Compiled-entry bails so far (stale-epoch, or a malformed fiber value).
+pub fn entry_bails() -> usize {
+    ENTRY_BAILS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The entry gates every compiled invocation shares — checked BEFORE any
 /// state changes, so a `false` (Bail to the interpreted body, identical
 /// semantics) is always safe.
 ///
-/// - NO COMPILED FRAMES INSIDE USER FIBERS: an abandoned fiber (a generator
-///   dropped mid-iteration by `take:`) is torn down by corosensei's FORCED
-///   UNWIND, which cannot cross Cranelift frames (no unwind info) — the
-///   process aborts. A compiled body may suspend at any outcall or fuel
-///   checkpoint, so the only sound rule is entry-level. The main task and
-///   spawned tasks are torn down gracefully (cancellation errors / process
-///   exit), so they keep compiled execution.
+/// - COMPILED FRAMES INSIDE USER FIBERS are allowed (the historical blanket
+///   bail is gone): the fiber context swap carries a per-fiber
+///   `AotTaskState`, and entry MARKS the fiber (`Fiber::ran_compiled`) so an
+///   abandoned-suspended drop leaks its stack instead of force-unwinding
+///   across Cranelift frames — see `Fiber::drop` for the invariant argument.
 /// - S2: direct self-recursion bakes in "dispatch(self, sel) reaches this
 ///   template"; any later method-table mutation could change that, so a
 ///   stale epoch runs the interpreted body (which re-dispatches per send).
 ///   Templates never carry `direct_self`, so the check is a no-op for them.
 #[inline(always)]
 fn entry_gates(vm: &VmState<'_>, entry: &AotEntry) -> bool {
-    if vm.sched.current_fiber.is_some() {
-        return false;
+    if let Some(f) = vm.sched.current_fiber {
+        let marked = f
+            .with_native_state::<crate::runtime::fiber::NativeFiberState, _, _>(|s| {
+                s.coro().ran_compiled.set(true);
+            })
+            .is_ok();
+        if !marked {
+            // Not a real fiber value (should not happen) — stay interpreted.
+            ENTRY_BAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
     }
     if entry.direct_self && entry.compile_epoch != redef_epoch() {
+        ENTRY_BAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return false;
     }
     true

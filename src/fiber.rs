@@ -5,7 +5,7 @@ use crate::vm::{TaskId, VmState, VmStatus};
 
 use corosensei::stack::DefaultStack;
 use gc_arena::{Collect, Gc, Mutation};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 pub type VMCoroutine<'gc> = corosensei::ScopedCoroutine<
     'gc,
@@ -204,6 +204,46 @@ impl<'gc> VMContext<'gc> {
 
 pub struct Fiber<'gc> {
     pub coroutine: RefCell<Option<VMCoroutine<'gc>>>,
+    /// Sticky: this fiber has entered AOT-compiled code at least once, so its
+    /// suspended stack may hold Cranelift frames — which corosensei's forced
+    /// unwind cannot cross (compiled code carries no unwind tables; the walk
+    /// aborts the process). Set by `codegen`'s entry gate, read by `Drop`.
+    pub ran_compiled: Cell<bool>,
+}
+
+/// Teardown for an abandoned fiber (a generator dropped mid-iteration by
+/// `take:`, or still suspended at program exit). Corosensei's own `Drop`
+/// force-unwinds a suspended coroutine with a panic that walks the fiber's
+/// stack — fine for pure-interpreted fibers (their Rust frames unwind
+/// normally, exactly as before), fatal across Cranelift frames. If this
+/// fiber ever entered compiled code, LEAK the suspended stack instead:
+/// `force_reset` marks the coroutine complete, so its `Drop` frees the
+/// stack mapping without the unwind walk.
+///
+/// Safety of the leak: by the pinned suspension invariants, nothing on a
+/// suspended coroutine stack owns a `Gc` value (tests/gc_across_yield.rs)
+/// or holds a `RefCell` borrow (tests/borrow_across_yield.rs) — the guest
+/// context lives in the swapped `stack`/`frames`/`aot` slices, which the
+/// fiber's native state owns and drops normally. What leaks is the
+/// Rust-frame residue of one suspended resume chain (interpreter locals'
+/// heap buffers), bounded per abandoned fiber — the price of admitting
+/// compiled frames into fibers at all.
+impl<'gc> Drop for Fiber<'gc> {
+    fn drop(&mut self) {
+        if !self.ran_compiled.get() {
+            return; // pre-existing behavior: corosensei's forced unwind
+        }
+        if let Ok(mut slot) = self.coroutine.try_borrow_mut() {
+            if let Some(coro) = slot.as_mut() {
+                if coro.started() && !coro.done() {
+                    // SAFETY: leaks the suspended stack instead of unwinding
+                    // it; the invariants above guarantee nothing on it
+                    // requires Drop for soundness.
+                    unsafe { coro.force_reset() };
+                }
+            }
+        }
+    }
 }
 
 unsafe impl<'gc> Collect<'gc> for Fiber<'gc> {
@@ -223,6 +263,7 @@ impl<'gc> Fiber<'gc> {
         let coroutine = VMCoroutine::with_stack(stack, move |yielder, ctx| f(yielder, ctx));
         Self {
             coroutine: RefCell::new(Some(coroutine)),
+            ran_compiled: Cell::new(false),
         }
     }
 }

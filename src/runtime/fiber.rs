@@ -2,7 +2,7 @@ use crate::error::QuoinError;
 use crate::fiber::{Fiber, run_vm_loop};
 use crate::gc;
 use crate::value::{AnyCollect, NativeCall, NativeClassBuilder, Value};
-use crate::vm::Frame;
+use crate::vm::{AotTaskState, Frame};
 use crate::vm_scheduler::TaskId;
 
 use gc_arena::Gc;
@@ -48,6 +48,11 @@ pub struct NativeFiberState {
     stack: Vec<Value<'static>>,
     frames: Vec<Frame<'static>>,
     native_args: Vec<NativeCall<'static>>,
+    /// The fiber's own AOT execution state (frame marks, enclosing env,
+    /// fuel/depth), swapped with `vm.aot` alongside `stack`/`frames` so a
+    /// compiled frame suspended across a `Fiber.yield` resumes with ITS
+    /// marks — not the resumer's.
+    aot: AotTaskState<'static>,
     /// Final return value once the fiber completes normally.
     result: Option<Value<'static>>,
     /// The error value once the fiber fails.
@@ -76,6 +81,7 @@ impl NativeFiberState {
             stack: Vec::new(),
             frames: Vec::new(),
             native_args: Vec::new(),
+            aot: AotTaskState::default(),
             result: None,
             error: None,
             yielder: None,
@@ -118,15 +124,24 @@ impl NativeFiberState {
     }
 
     /// Move the saved context out, leaving the slots empty.
+    #[allow(clippy::type_complexity)]
     pub fn take_context<'gc>(
         &mut self,
-    ) -> (Vec<Value<'gc>>, Vec<Frame<'gc>>, Vec<NativeCall<'gc>>) {
+    ) -> (
+        Vec<Value<'gc>>,
+        Vec<Frame<'gc>>,
+        Vec<NativeCall<'gc>>,
+        AotTaskState<'gc>,
+    ) {
         unsafe {
             (
                 transmute::<Vec<Value<'static>>, Vec<Value<'gc>>>(std::mem::take(&mut self.stack)),
                 transmute::<Vec<Frame<'static>>, Vec<Frame<'gc>>>(std::mem::take(&mut self.frames)),
                 transmute::<Vec<NativeCall<'static>>, Vec<NativeCall<'gc>>>(std::mem::take(
                     &mut self.native_args,
+                )),
+                transmute::<AotTaskState<'static>, AotTaskState<'gc>>(std::mem::take(
+                    &mut self.aot,
                 )),
             )
         }
@@ -138,12 +153,14 @@ impl NativeFiberState {
         stack: Vec<Value<'gc>>,
         frames: Vec<Frame<'gc>>,
         native_args: Vec<NativeCall<'gc>>,
+        aot: AotTaskState<'gc>,
     ) {
         unsafe {
             self.stack = transmute::<Vec<Value<'gc>>, Vec<Value<'static>>>(stack);
             self.frames = transmute::<Vec<Frame<'gc>>, Vec<Frame<'static>>>(frames);
             self.native_args =
                 transmute::<Vec<NativeCall<'gc>>, Vec<NativeCall<'static>>>(native_args);
+            self.aot = transmute::<AotTaskState<'gc>, AotTaskState<'static>>(aot);
         }
     }
 }
@@ -180,6 +197,10 @@ impl AnyCollect for NativeFiberState {
             let frame_gc: &Frame<'gc> = unsafe { transmute(frame) };
             frame_gc.dyn_trace(cc);
         }
+        // The saved AOT slice holds one Gc field (`enclosing_env`); the rest
+        // is require_static. Trace the whole struct like a Frame.
+        let aot_gc: &AotTaskState<'gc> = unsafe { transmute(&self.aot) };
+        aot_gc.dyn_trace(cc);
         for call in &self.native_args {
             let recv_gc: &Value<'gc> = unsafe { transmute(&call.receiver) };
             recv_gc.dyn_trace(cc);

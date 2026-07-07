@@ -676,6 +676,7 @@ impl<'gc> VmState<'gc> {
                 main_saved_stack: Vec::new(),
                 main_saved_frames: Vec::new(),
                 main_saved_native_args: Vec::new(),
+                main_saved_aot: AotTaskState::default(),
                 fiber_error: None,
                 wake: None,
                 cancel_current: false,
@@ -3890,7 +3891,29 @@ impl<'gc> VmState<'gc> {
                 Ok(self.pop()?)
             }
         } else {
-            Ok(self.new_nil(mc))
+            // No method: raise EXACTLY what the interpreted send raises
+            // (candidates included). This arm returned nil since the first
+            // outcall shell, which made a warm compiled outcall silently
+            // "succeed" where the same interpreted send raised
+            // MessageNotUnderstood — a parity hole that hid real errors the
+            // moment a block template or promoted method warmed up.
+            // (`call_method_inner` — the native `call_method` helper — still
+            // has the legacy nil arm: its callers are host-ops and hooks
+            // with their own absent-method conventions, out of scope here.)
+            let candidates = self
+                .collect_method_candidates(receiver, selector)
+                .iter()
+                .map(|&mv| self.format_candidate_signature(mv, selector))
+                .collect();
+            let receiver_name = receiver.class_name();
+            let arg_names = args.iter().map(|a| a.class_name()).collect();
+            self.exceptions.last_send_args = args;
+            Err(QuoinError::MessageNotUnderstood {
+                receiver: receiver_name,
+                selector: selector.as_str().to_string(),
+                args: arg_names,
+                candidates,
+            })
         }
     }
 
