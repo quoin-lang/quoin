@@ -1,9 +1,9 @@
 # Cross-language results: Quoin vs Python vs Ruby
 
-*Measured 2026-07-06 on `perf/cheap-materialization` @ `5af70cc` (the
-alloc-churn arc, PR #59, plus the materialization arc M1-M3 — both
-pre-merge), Apple Silicon (darwin25). The previous table (2026-07-06,
-main @ `fc89fc9`) is preserved below for the delta story.*
+*Measured 2026-07-06 on `perf/ic-direct-calls` @ `80a209b` (main
+post #59/#60 plus the outcall-seam arc F1-D2, pre-merge), Apple
+Silicon (darwin25). The previous table (same day, the materialization
+arc tip `5af70cc`) is preserved below for the delta story.*
 ## Methodology
 
 - **Whole-process wall time** (startup + load + compile + run), median of 5
@@ -31,59 +31,50 @@ main @ `fc89fc9`) is preserved below for the delta story.*
 
 | bench        | quoin | python | ruby  | rb-yjit | py/qn | rb/qn | yjit/qn |
 |--------------|------:|-------:|------:|--------:|------:|------:|--------:|
-| btrees       | 0.361 | 0.199  | 0.123 | 0.062   | 0.55  | 0.34  | 0.17    |
-| combinators  | 0.128 | 0.048  | 0.050 | 0.046   | 0.38  | 0.39  | 0.36    |
-| fib_typed    | 0.028 | 0.196  | 0.122 | 0.042   | **6.93** | **4.31** | **1.48** |
-| fib_untyped  | 0.018 | 0.085  | 0.062 | 0.031   | **4.74** | **3.48** | **1.71** |
-| json         | 0.239 | 0.224  | 0.121 | 0.120   | 0.94  | 0.51  | 0.50    |
-| maps         | 0.141 | 0.074  | 0.086 | 0.078   | 0.52  | 0.61  | 0.56    |
-| richards     | 0.371 | 0.098  | 0.082 | 0.046   | 0.27  | 0.22  | 0.13    |
-| sieve        | 0.105 | 0.310  | 0.194 | 0.100   | **2.96** | **1.85** | 0.96 |
-| strings      | 0.078 | 0.045  | 0.073 | 0.069   | 0.58  | **0.93** | 0.89 |
-| **geomean**  |       |        |       |         | **1.05** | 0.85  | 0.55 |
+| btrees       | 0.320 | 0.195  | 0.120 | 0.061   | 0.61  | 0.37  | 0.19    |
+| combinators  | 0.126 | 0.047  | 0.049 | 0.046   | 0.38  | 0.39  | 0.36    |
+| fib_typed    | 0.028 | 0.191  | 0.117 | 0.040   | **6.79** | **4.16** | **1.42** |
+| fib_untyped  | 0.016 | 0.082  | 0.059 | 0.030   | **5.08** | **3.67** | **1.87** |
+| json         | 0.231 | 0.217  | 0.116 | 0.116   | 0.94  | 0.50  | 0.50    |
+| maps         | 0.138 | 0.070  | 0.084 | 0.075   | 0.51  | 0.60  | 0.54    |
+| richards     | 0.314 | 0.094  | 0.079 | 0.045   | 0.30  | 0.25  | 0.14    |
+| sieve        | 0.101 | 0.301  | 0.187 | 0.097   | **2.97** | **1.85** | 0.96 |
+| strings      | 0.077 | 0.043  | 0.071 | 0.067   | 0.57  | **0.92** | 0.88 |
+| **geomean**  |       |        |       |         | **1.07** | 0.87  | 0.57 |
 
-Previous table (2026-07-06, main @ `fc89fc9`, pre both arcs): btrees
-0.895 (py/qn 0.22), strings 0.169 (0.27), combinators 0.155 (0.31),
-richards 0.431 (0.22), maps 0.154 (0.47); geomeans **0.83** / 0.67 /
-0.43.
+Previous table (2026-07-06, materialization-arc tip `5af70cc`): btrees
+0.361 (py/qn 0.55), richards 0.371 (0.27), combinators 0.128, maps
+0.141, json 0.239; geomeans **1.05** / 0.85 / 0.55.
 
 ## Honest reading
 
-**The suite geomean vs CPython crossed 1.0.** Two arcs did it — the
-allocation-churn arc (PR #59: strings 1.96×, InitPlan memoization,
-stack-window arg rooting) and the materialization arc (alpha-renamed
-control-flow fusion, fused instantiation, the cold-span gate lift):
+**The outcall-seam arc (F1-D2) moved the two seam-bound rows again**:
+btrees 0.361 → 0.320 and richards 0.371 → 0.314 (−11/−15%), from the
+per-site AOT IC dispatching warm compiled→compiled calls straight to
+the entry, plus entry-nil deferred locals compiling `sum`/`reduce:`
+(the suite's last coverage refusal). Suite geomean vs CPython edges
+1.05 → **1.07**; vs Ruby 0.87; vs YJIT 0.57. maps improved to 0.138 —
+its +3% on the local profiling build was static code layout, exactly
+as the same-binary shim test said, and PGO washes it.
 
-- **btrees 0.895 → 0.361 (2.48×)** — the headline. makeTree's arms now
-  fuse (M1) and its `TreeNode.new:{…}` configs compile to inline
-  field binds (M2): no per-node closure, no config frame, no
-  interpreted stores. Still 1.8× behind CPython — the residue is
-  compiled-to-compiled outcall dispatch, no longer allocation.
-- **strings 0.169 → 0.078** — at **parity with Ruby** (0.93) and 0.89
-  vs YJIT; 1.7× behind CPython whose C string ops set the bar.
-- combinators 0.155 → 0.128 (M3's cold-span lift compiled `any?:`),
-  richards 0.431 → 0.371, maps/json small gains; the fib/sieve wins
-  hold.
+Quoin holds four rows outright (both fibs, sieve, json-at-parity) and
+the geomean vs CPython. What remains behind, in measured order:
 
-Quoin now wins four rows outright (both fibs, sieve, json-at-parity)
-and the geomean: **1.05 vs CPython 3.13** (was 0.83), 0.85 vs Ruby 4
-(was 0.67), 0.55 vs YJIT (was 0.43).
+1. **The irreducible outcall shell** (btrees 1.6×, richards 3.3×
+   behind CPython): window push + preconditions + invoke +
+   `run_in_frame_ctx` per call even on an AOT-IC hit. The recorded
+   next step is D3 (docs/OUTCALL_ARCH.md): guarded direct inner calls
+   baked into the caller's native code — needs
+   re-translation-on-warm-IC machinery.
+2. **Combinator pipelines** (2.6×): per-element `valueWithSelfOrArg:`
+   block-call seams — the same shell in block clothing.
+3. **maps/json/strings** (≈2×/parity/1.7×): interpreter residue and
+   C-library string ops; diminishing returns.
 
-**What the table points at next** (the gap, in measured order):
-1. **Compiled-to-compiled outcall dispatch** — the NEW #1. Post-arc,
-   btrees and richards have the same profile shape: ~29% and ~35% in
-   `Callable::call` + IC machinery on outcall seams (recursive sends,
-   megamorphic `@task.run:`). Direct calls for IC-stable outcall sites
-   is the recorded follow-up.
-2. **Per-call frame/env cost in the interpreter residue** (maps, json)
-   — PERF_ROADMAP Tier 3a (escape-analysis stack environments) still
-   applies where methods stay interpreted.
-3. **Strings** — the remaining 1.7× vs CPython is C-library string ops
-   vs compiled-but-generic ones; diminishing returns from here.
-
-The allocation/GC frontier that headed this list in the previous
-measurement is substantially CLOSED: btrees' profile no longer shows
-`dispatch_one` at all, and alloc+GC sits under 10%.
+The dispatch and allocation frontiers that headed this list across the
+last three arcs are substantially closed: untyped dispatch (S-arcs),
+alloc/GC (alloc-churn), materialization (M-arcs), and now the warm
+outcall lookup itself (D2).
 
 ## Reproducing
 
