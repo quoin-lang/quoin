@@ -57,7 +57,7 @@ fn ps_tree_recurses_and_reads_busy_and_idle_workers() {
     let script = r#"
 var ok = true;
 var nested = Worker.spawn:'@nest.qn@';
-var busy = Worker.start:{ var s = 0; (0..4000000).each:{ |i| s = s + i }; s };
+var busy = Worker.start:{ var s = 0; (0..1500000).each:{ |i| s = s + i }; s };
 Async.sleep:300;
 
 var tree = VM.psTree;

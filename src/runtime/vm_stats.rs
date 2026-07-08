@@ -101,6 +101,7 @@ pub(crate) struct PsWorkerRow {
     pub unit: String,
     pub label: String,
     pub backing: &'static str,
+    pub pid: Option<u32>,
     pub running: bool,
     pub inbox: usize,
     pub outbox: usize,
@@ -163,6 +164,10 @@ pub(crate) fn ps_to_wire(data: &PsData) -> quoin_ext_proto::DataValue {
                 ("unit".to_string(), W::Str(w.unit.clone())),
                 ("label".to_string(), W::Str(w.label.clone())),
                 ("backing".to_string(), W::Str(w.backing.to_string())),
+                (
+                    "pid".to_string(),
+                    w.pid.map_or(W::Null, |p| W::Int(p as i64)),
+                ),
                 (
                     "state".to_string(),
                     W::Str(if w.running { "running" } else { "exited" }.to_string()),
@@ -283,6 +288,7 @@ pub(crate) fn ps_data_with_current<'gc>(
             unit: w.unit.clone(),
             label: w.label.clone(),
             backing: w.backing,
+            pid: w.pid,
             running: !w.outbox_rx.is_closed(),
             inbox: w.inbox_tx.len(),
             outbox: w.outbox_rx.len(),
@@ -354,6 +360,9 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                         "backing".to_string(),
                         vm.new_string(mc, w.backing.to_string()),
                     );
+                    if let Some(pid) = w.pid {
+                        m.insert("pid".to_string(), vm.new_int(mc, pid as i64));
+                    }
                     m.insert(
                         "state".to_string(),
                         vm.new_string(mc, if w.running { "running" } else { "exited" }.to_string()),

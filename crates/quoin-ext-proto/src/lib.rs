@@ -15,7 +15,7 @@
 //! extension may interleave re-entrant host-op requests (each answered by the host
 //! mid-call) before its terminal reply.
 
-mod codec;
+pub mod codec;
 
 pub use codec::{decode_frame, encode, pack_dv, unpack_dv};
 

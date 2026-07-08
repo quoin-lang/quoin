@@ -197,15 +197,24 @@ fn host<'gc>(
     receiver: Value<'gc>,
     path: String,
     class_name: String,
+    backing: &'static str,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(class) = receiver else {
         return Err(QuoinError::Other("WorkerService: bad receiver".into()));
     };
-    let ch = spawn_worker_service(path.clone(), class_name);
+    let (ch, pid) = match backing {
+        "process" => {
+            let (ch, pid) = crate::worker::spawn_worker_process(path.clone(), Some(class_name))
+                .map_err(QuoinError::Other)?;
+            (ch, Some(pid))
+        }
+        _ => (spawn_worker_service(path.clone(), class_name), None),
+    };
     vm.worker_registry.push(crate::worker::WorkerReg {
         unit: format!("svc:{path}"),
         label: format!("svc:{path}"),
-        backing: "thread",
+        backing,
+        pid,
         inbox_tx: ch.inbox_tx.clone(),
         outbox_rx: ch.outbox_rx.clone(),
         control_tx: ch.control_tx.clone(),
@@ -263,7 +272,7 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
         .class_method("host:class:", |vm, mc, receiver, args| {
             let path = string_arg(args[0], "the unit path")?;
             let class_name = string_arg(args[1], "the class name")?;
-            host(vm, mc, receiver, path, class_name)
+            host(vm, mc, receiver, path, class_name, "thread")
         })
         // Backing is a spawn-time choice by DESIGN (docs/CONCURRENCY_ARCH.md
         // §10): 'thread' is this v1; 'process' — the sanctioned escape from
@@ -275,12 +284,8 @@ pub fn build_worker_service_class() -> NativeClassBuilder {
             let class_name = string_arg(args[1], "the class name")?;
             let backing = string_arg(args[2], "the backing")?;
             match backing.as_str() {
-                "thread" => host(vm, mc, receiver, path, class_name),
-                "process" => Err(QuoinError::Other(
-                    "WorkerService: process backing is designed but not yet implemented \
-                     (docs/CONCURRENCY_ARCH.md §10) — use backing:'thread'"
-                        .into(),
-                )),
+                "thread" => host(vm, mc, receiver, path, class_name, "thread"),
+                "process" => host(vm, mc, receiver, path, class_name, "process"),
                 other => Err(QuoinError::Other(format!(
                     "WorkerService: unknown backing '{other}' (thread|process)"
                 ))),

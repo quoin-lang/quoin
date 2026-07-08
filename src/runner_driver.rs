@@ -526,7 +526,11 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
         let control_rx =
             arena.mutate_root(|_mc, vm| vm.worker_link.as_ref().map(|l| l.control_rx.clone()));
         let mut ps_collect: Option<PsCollect> = None;
-        let mut ps_queue: Vec<async_channel::Sender<crate::worker::WorkerMsg>> = Vec::new();
+        // FIFO: process-worker pumps correlate control replies by ORDER
+        // (one reply lane, ids queued at the reader) — LIFO would misroute.
+        let mut ps_queue: std::collections::VecDeque<
+            async_channel::Sender<crate::worker::WorkerMsg>,
+        > = std::collections::VecDeque::new();
         loop {
             // Service control requests opportunistically — once per loop
             // iteration, so a compute-bound task still answers at batch
@@ -534,11 +538,11 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
             if let Some(rx) = &control_rx {
                 while let Ok(req) = rx.try_recv() {
                     match req.kind {
-                        crate::worker::ControlKind::PsTree => ps_queue.push(req.reply),
+                        crate::worker::ControlKind::PsTree => ps_queue.push_back(req.reply),
                     }
                 }
                 if ps_collect.is_none()
-                    && let Some(reply) = ps_queue.pop()
+                    && let Some(reply) = ps_queue.pop_front()
                 {
                     // `current` reflects what is genuinely running RIGHT NOW
                     // (None between resumes) — truer than the VM's sticky
@@ -648,7 +652,7 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                                 if let Some(req) = req {
                                     match req.kind {
                                         crate::worker::ControlKind::PsTree => {
-                                            ps_queue.push(req.reply)
+                                            ps_queue.push_back(req.reply)
                                         }
                                     }
                                 }
