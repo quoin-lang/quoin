@@ -88,6 +88,9 @@ pub const IC_PLAINNEW_KIND: u8 = u8::MAX - 1;
 #[collect(no_drop)]
 pub struct AotSiteCell<'gc> {
     epoch: u64,
+    /// D3a: fast-path hit streak since fill (bump-free). Crossing
+    /// `QN_DIRECT_WARM` queues the CALLER for retranslation (§3.3).
+    pub hits: u32,
     recv_kind: u8,
     recv_ptr: usize,
     n_args: u8,
@@ -102,6 +105,7 @@ impl Default for AotSiteCell<'_> {
     fn default() -> Self {
         AotSiteCell {
             epoch: 0,
+            hits: 0,
             recv_kind: 0,
             recv_ptr: 0,
             n_args: 0,
@@ -570,6 +574,12 @@ pub struct VmState<'gc> {
     pub ic_registry: FxHashMap<u32, Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>>,
     /// D2 site-cache cells, indexed by translation-minted outcall-site id.
     pub aot_sites: Vec<AotSiteCell<'gc>>,
+    /// D3a retranslation queue: caller tids whose sites crossed
+    /// `QN_DIRECT_WARM`, drained at the driver boundary (never inside a VM
+    /// step). The queued set dedups for the process lifetime — one
+    /// retranslation per tid until an epoch-driven refill re-queues (D3b).
+    pub aot_retranslate_queue: Vec<u32>,
+    pub aot_retranslate_queued: rustc_hash::FxHashSet<u32>,
     /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts every
     /// per-`Block` [`ICSlot`] at once, giving O(1) inline-cache invalidation.
     #[collect(require_static)]
@@ -712,6 +722,8 @@ impl<'gc> VmState<'gc> {
             },
             ic_registry: FxHashMap::default(),
             aot_sites: Vec::new(),
+            aot_retranslate_queue: Vec::new(),
+            aot_retranslate_queued: rustc_hash::FxHashSet::default(),
             dispatch_cache: DispatchCache {
                 entries: FxHashMap::default(),
                 uncacheable: false,
@@ -3712,23 +3724,30 @@ impl<'gc> VmState<'gc> {
     /// One lane of [`aot_site_args_match`] — the D2.5b helper fast path
     /// guards verbatim scalar lanes by lane-kind compare and only routes
     /// GENERAL lanes (Obj / precondition-narrowed) through this shape guard.
-    pub(crate) fn aot_site_arg_match_one(
-        cell: &AotSiteCell<'gc>,
-        i: usize,
-        a: Value<'gc>,
-    ) -> bool {
+    pub(crate) fn aot_site_arg_match_one(cell: &AotSiteCell<'gc>, i: usize, a: Value<'gc>) -> bool {
         let (ak, ap) = value_type_guard(a);
         cell.arg_kinds[i] == ak && cell.arg_ptrs[i] == ap
     }
 
-    pub(crate) fn aot_site_args_match(cell: &AotSiteCell<'gc>, args: &[Value<'gc>]) -> bool {
-        for (i, a) in args.iter().enumerate() {
-            let (ak, ap) = value_type_guard(*a);
-            if cell.arg_kinds[i] != ak || cell.arg_ptrs[i] != ap {
-                return false;
-            }
+    /// D3a: count a fast-path hit; crossing the `QN_DIRECT_WARM` threshold
+    /// queues the CALLER tid for retranslation (deduped, process-lifetime).
+    #[inline]
+    pub(crate) fn aot_site_note_hit(&mut self, site: usize, caller_tid: u32) {
+        let Some(threshold) = crate::codegen::direct_warm_threshold() else {
+            return;
+        };
+        let Some(cell) = self.aot_sites.get_mut(site) else {
+            return;
+        };
+        cell.hits = cell.hits.saturating_add(1);
+        if cell.hits == threshold && self.aot_retranslate_queued.insert(caller_tid) {
+            self.aot_retranslate_queue.push(caller_tid);
         }
-        true
+    }
+
+    /// Drain the retranslation queue (driver-boundary caller).
+    pub(crate) fn take_retranslations(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.aot_retranslate_queue)
     }
 
     /// Fill a D2 site cell. The caller gates this on the interpreted IC
@@ -3759,6 +3778,7 @@ impl<'gc> VmState<'gc> {
         }
         self.aot_sites[site] = AotSiteCell {
             epoch: self.dispatch_epoch,
+            hits: 0,
             recv_kind,
             recv_ptr,
             n_args: args.len() as u8,

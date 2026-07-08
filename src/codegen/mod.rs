@@ -118,6 +118,7 @@ pub enum AotRole {
     BlockTemplate,
 }
 
+#[derive(Clone)]
 pub struct AotCandidate {
     pub group_id: u32,
     pub selector: String,
@@ -330,6 +331,111 @@ pub fn bump_redef_epoch() {
 /// Mint a D2 outcall-site id (docs/OUTCALL_ARCH.md): the index of this
 /// compiled call site's cell in `VmState::aot_sites`. Monotonic and never
 /// reused; retried translations waste a few — harmless.
+/// D3a (docs/DIRECT_CALLS_ARCH.md §3.3): retained retranslation inputs —
+/// the candidate (the re-translation source) and the outcall site ids its
+/// first translation minted per bytecode ip. The SAME ids must be reused on
+/// retranslation so the D2 cells and the generic fallback keep working.
+pub struct Retained {
+    pub cand: AotCandidate,
+    pub sites: FxHashMap<usize, u32>,
+}
+
+fn retained() -> &'static RwLock<FxHashMap<u32, Retained>> {
+    static RETAINED: OnceLock<RwLock<FxHashMap<u32, Retained>>> = OnceLock::new();
+    RETAINED.get_or_init(|| RwLock::new(FxHashMap::default()))
+}
+
+pub(super) fn prior_sites_for(tid: u32) -> Option<FxHashMap<usize, u32>> {
+    retained()
+        .read()
+        .unwrap()
+        .get(&tid)
+        .map(|r| r.sites.clone())
+}
+
+/// How many warm-site retranslations have run (D3a: null retranslations —
+/// identical code, registry overwrite). Surfaced by `VM.stats`.
+pub static TOTAL_RETRANSLATED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// `QN_DIRECT_WARM`: site-hit threshold that queues the CALLER for
+/// retranslation. Unset/0 = the tier is off (the D3a default; D3b flips the
+/// default once direct edges exist to justify the recompile).
+static DIRECT_WARM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
+pub fn direct_warm_threshold() -> Option<u32> {
+    let mut v = DIRECT_WARM.load(std::sync::atomic::Ordering::Relaxed);
+    if v == u32::MAX {
+        v = std::env::var("QN_DIRECT_WARM")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&n| n > 0 && n < u32::MAX)
+            .unwrap_or(0);
+        DIRECT_WARM.store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    (v != 0).then_some(v)
+}
+
+/// The outcall fast path's per-hit gate: one relaxed load + one branch when
+/// the tier is off (measured: routing every hit through the accounting CALL
+/// cost richards ~1.5%). `compile_candidates` resolves the env eagerly —
+/// a hit requires a compiled entry, so the sentinel is never read hot; if
+/// it somehow were, `true` merely routes into `aot_site_note_hit`, which
+/// resolves and self-disables.
+#[inline(always)]
+pub fn direct_warm_on() -> bool {
+    DIRECT_WARM.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// Recompile a retained candidate and OVERWRITE its registry entry (§3.1:
+/// in-flight invocations of the old leaked entry complete on their own
+/// code). D3a emits IDENTICAL generic code — the null retranslation that
+/// proves the queue, the site-id reuse, and the registry swap.
+pub fn retranslate(tid: u32) -> bool {
+    let (cand, group_cands) = {
+        let r = retained().read().unwrap();
+        let Some(ret) = r.get(&tid) else {
+            return false;
+        };
+        let group = ret.cand.group_id;
+        let group_cands: Vec<AotCandidate> = r
+            .values()
+            .filter(|x| x.cand.group_id == group)
+            .map(|x| x.cand.clone())
+            .collect();
+        (ret.cand.clone(), group_cands)
+    };
+    // The sibling signature map exactly as the original group compile built
+    // it — without it the retranslated body would lose its S2 direct
+    // sibling calls and stop being "identical code".
+    let mut siblings: HashMap<(u32, String), (Vec<AotParam>, AotRet, u32)> = HashMap::new();
+    for c in &group_cands {
+        if let Some(id) = c.block.template_id {
+            siblings.insert(
+                (c.group_id, c.selector.clone()),
+                (c.params.clone(), c.ret, id),
+            );
+        }
+    }
+    let cands = vec![cand];
+    let (compiled, _refusals) = translate::compile_all(&cands, &siblings);
+    let mut any = false;
+    for (template_id, entry, sites) in compiled {
+        registry()
+            .write()
+            .unwrap()
+            .insert(template_id, Box::leak(Box::new(entry)));
+        retained()
+            .write()
+            .unwrap()
+            .entry(template_id)
+            .and_modify(|r| r.sites = sites.iter().copied().collect());
+        TOTAL_RETRANSLATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        any = true;
+    }
+    any
+}
+
 pub fn next_outcall_site() -> u32 {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -533,6 +639,7 @@ pub fn compile_totals() -> (usize, usize) {
 /// bytecode walk. Refusal is silent and safe (the method stays interpreted);
 /// `QN_AOT_VERBOSE=1` prints per-method outcomes to stderr.
 pub fn compile_candidates(cands: Vec<AotCandidate>) -> CompileStats {
+    let _ = direct_warm_threshold(); // eager-resolve the fast path's gate
     let mut stats = CompileStats::default();
     if cands.is_empty() {
         return stats;
@@ -548,14 +655,29 @@ pub fn compile_candidates(cands: Vec<AotCandidate>) -> CompileStats {
         }
     }
     let verbose = std::env::var("QN_AOT_VERBOSE").is_ok_and(|v| v == "1");
+    let by_tid: HashMap<u32, &AotCandidate> = cands
+        .iter()
+        .filter_map(|c| c.block.template_id.map(|id| (id, c)))
+        .collect();
     let (compiled, refusals) = translate::compile_all(&cands, &siblings);
     {
         let mut reg = registry().write().unwrap();
-        for (template_id, entry) in compiled {
+        let mut ret = retained().write().unwrap();
+        for (template_id, entry, sites) in compiled {
             if verbose {
                 eprintln!("qn aot: compiled template {template_id}");
             }
             reg.insert(template_id, Box::leak(Box::new(entry)));
+            // D3a: retain the retranslation inputs (candidate + site ids).
+            if let Some(c) = by_tid.get(&template_id) {
+                ret.insert(
+                    template_id,
+                    Retained {
+                        cand: (*c).clone(),
+                        sites: sites.iter().copied().collect(),
+                    },
+                );
+            }
             stats.compiled += 1;
         }
     }

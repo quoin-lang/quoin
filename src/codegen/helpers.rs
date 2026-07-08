@@ -754,6 +754,12 @@ pub(super) unsafe extern "C" fn outcall(
             }
         }
         if hit {
+            // D3a: warmth accounting — gated on ONE inlined load so the
+            // off-tier fast path never pays the call (measured ~1.5% on
+            // richards without the gate).
+            if crate::codegen::direct_warm_on() {
+                vm.aot_site_note_hit(site as usize, tid as u32);
+            }
             let args = &argv[..n];
             let recv_start = base;
             vm.stack.push(receiver);

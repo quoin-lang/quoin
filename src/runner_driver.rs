@@ -533,12 +533,22 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
         let control_rx =
             arena.mutate_root(|_mc, vm| vm.worker_link.as_ref().map(|l| l.control_rx.clone()));
         let mut ps_collect: Option<PsCollect> = None;
+        // D3a: drain warm-site retranslations at the driver boundary (the
+        // B3a placement discipline — a recompile never runs inside a VM
+        // step). Empty-vec take is the whole cost when the tier is off.
+        let drain_retranslations = |arena: &mut ReplArena| {
+            let tids = arena.mutate_root(|_mc, vm| vm.take_retranslations());
+            for tid in tids {
+                crate::codegen::retranslate(tid);
+            }
+        };
         // FIFO: process-worker pumps correlate control replies by ORDER
         // (one reply lane, ids queued at the reader) — LIFO would misroute.
         let mut ps_queue: std::collections::VecDeque<
             async_channel::Sender<crate::worker::WorkerMsg>,
         > = std::collections::VecDeque::new();
         loop {
+            drain_retranslations(arena);
             // Service control requests opportunistically — once per loop
             // iteration, so a compute-bound task still answers at batch
             // boundaries; the cost when idle is one failed try_recv.

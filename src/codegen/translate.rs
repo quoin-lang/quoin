@@ -91,10 +91,14 @@ enum TranslateAbort {
 
 /// Compile every group; members are refused individually. Returns the
 /// registered entries and refusals `(selector, reason)`.
+#[allow(clippy::type_complexity)]
 pub(super) fn compile_all(
     cands: &[AotCandidate],
     siblings: &SiblingMap,
-) -> (Vec<(u32, AotEntry)>, Vec<(String, Refusal)>) {
+) -> (
+    Vec<(u32, AotEntry, Vec<(usize, u32)>)>,
+    Vec<(String, Refusal)>,
+) {
     let mut groups: HashMap<u32, Vec<&AotCandidate>> = HashMap::new();
     for c in cands {
         groups.entry(c.group_id).or_default().push(c);
@@ -432,7 +436,7 @@ fn compile_group(
     demoted: &HashSet<u32>,
     ret_demoted: &HashSet<u32>,
     dyn_merges: &HashMap<u32, HashSet<usize>>,
-) -> Result<Vec<(u32, AotEntry)>, (u32, TranslateAbort)> {
+) -> Result<Vec<(u32, AotEntry, Vec<(usize, u32)>)>, (u32, TranslateAbort)> {
     let fail = |tid: u32, e: Refusal| (tid, TranslateAbort::Refuse(e));
     let any_tid = members[0].block.template_id.unwrap_or(0);
 
@@ -472,8 +476,18 @@ fn compile_group(
     }
 
     let mut fb_ctx = FunctionBuilderContext::new();
-    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool, bool, bool, bool)> =
-        Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut tramp_ids: Vec<(
+        u32,
+        FuncId,
+        &AotCandidate,
+        u32,
+        bool,
+        bool,
+        bool,
+        bool,
+        Vec<(usize, u32)>,
+    )> = Vec::new();
 
     for m in members {
         let tid = m.block.template_id.unwrap();
@@ -497,6 +511,7 @@ fn compile_group(
         let direct_self;
         let materializes_nlr;
         let materializes;
+        let site_log;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
             static EMPTY_MERGES: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
@@ -522,6 +537,8 @@ fn compile_group(
                 materialized: HashSet::new(),
                 materialized_nlr: HashSet::new(),
                 pending_abort: None,
+                prior_sites: crate::codegen::prior_sites_for(tid),
+                site_log: Vec::new(),
             };
             if let Err(e) = tr.build_inner(&mut b) {
                 // A demote signal set alongside the aborting Err travels
@@ -535,6 +552,7 @@ fn compile_group(
             direct_self = tr.used_direct_self;
             materializes_nlr = !tr.materialized_nlr.is_empty();
             materializes = !tr.materialized.is_empty();
+            site_log = std::mem::take(&mut tr.site_log);
             b.seal_all_blocks();
             b.finalize();
         }
@@ -573,6 +591,7 @@ fn compile_group(
             direct_self,
             materializes_nlr,
             materializes,
+            site_log,
         ));
     }
 
@@ -580,8 +599,17 @@ fn compile_group(
         .finalize_definitions()
         .map_err(|e| fail(any_tid, e.to_string().into()))?;
     let mut out = Vec::new();
-    for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self, materializes_nlr, materializes) in
-        tramp_ids
+    for (
+        tid,
+        tramp_id,
+        m,
+        n_scratch,
+        needs_list_self,
+        direct_self,
+        materializes_nlr,
+        materializes,
+        site_log,
+    ) in tramp_ids
     {
         let addr = module.get_finalized_function(tramp_id);
         let raw: AotRawFn = unsafe { std::mem::transmute(addr) };
@@ -603,6 +631,7 @@ fn compile_group(
                 materializes,
                 lane_plan: super::build_lane_plan(&m.params, &m.spec_preconditions),
             },
+            site_log,
         ));
     }
     // The code must live for the process (fn pointers are registered
@@ -789,6 +818,12 @@ struct Translator<'a> {
     /// Out-of-band demote signal (see [`TranslateAbort`]): set at the same
     /// moment the aborting `Err` is returned, consumed by `compile_group`.
     pending_abort: Option<TranslateAbort>,
+    /// D3a: site ids from this tid's FIRST translation — a retranslation
+    /// must reuse them (the D2 cells key on them; the generic fallback and
+    /// interpreted IC stay warm through the swap).
+    prior_sites: Option<rustc_hash::FxHashMap<usize, u32>>,
+    /// Every (ip, site) this translation minted or reused, for retention.
+    site_log: Vec<(usize, u32)>,
     /// The materialized closures whose bodies contain a `^^` (S5). A
     /// `catch`-family send consuming one must refuse: interpreted, a
     /// catch-all can catch the `^^` crossing it — a compiled home cannot
@@ -2617,7 +2652,13 @@ impl<'a> Translator<'a> {
         // high bits (see helpers::outcall) so the helper keeps its pre-D2
         // 12-argument ABI; `u32::MAX` = no site (never peek).
         let site = if with_site {
-            crate::codegen::next_outcall_site()
+            let s = self
+                .prior_sites
+                .as_ref()
+                .and_then(|m| m.get(&ip).copied())
+                .unwrap_or_else(crate::codegen::next_outcall_site);
+            self.site_log.push((ip, s));
+            s
         } else {
             u32::MAX
         };
