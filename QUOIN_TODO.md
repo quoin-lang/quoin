@@ -3,6 +3,20 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the Quoin standard library (`qnlib`) files and test suites.
 
 ## Misc
+- [ ] **Lint: `^` inside an `if:`/`else:` arm that intends a method return.**
+  `^` returns from the BLOCK (by design — it's `break`); `^^` returns from the
+  method. The trap is `cond.if:{ ^expr }` written to mean "return from the
+  method here": the `^` yields `expr` as the if's value, which is then
+  DISCARDED, and execution falls through to the code below. This has bitten
+  ~6 times across two working days, always in framework code, including a
+  severe one: a stopping web-pool worker fell through its
+  `(Worker.worker?).if:{ ^.poolWorkerLoop }` guard into the main-VM path and
+  bound its own listener + spawned a recursive sub-pool (found as a poolStop
+  hang). Proposed lint (in `qn check` / the compiler warning pass): warn when
+  a block passed to `if:`/`else:`/`if:else:` ends in `^` AND the send's value
+  is unused (statement position) — that combination is almost always a
+  mistyped `^^`. The legitimate uses of `^` (early exit from `each:`-style
+  iteration blocks, value-producing `if:` arms) don't match it.
 - [ ] `.is:`/`.isTrue:` assertions inside an `each:` block wedge the `qn test`
   harness (the suite stops at that test with no failure reported). No suite uses the
   pattern today — found writing `47-url.qn`, worked around by unrolling. Either

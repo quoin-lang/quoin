@@ -166,4 +166,38 @@ use std:web/*;
         server.join;
         server.close;
     };
+};
+
+"* Handler-side fan-out composes with the concurrency library: a handler is
+"* just code in a Task, so Plan trees await inside it — the official idiom
+"* for aggregating backends (docs/WEB_ARCH.md).
+(TestSuite.new:{ var name = 'WebPlan' }).add:{
+    .test:
+    planFanOutInsideAHandler -> {
+        var app = [Web]App.new;
+        app.get:'/agg' do:{
+            var parts = (Plan.all:#(
+                (Plan.task:{ #{ 'a': 1 } })
+                (Plan.task:{ #{ 'b': 2 } })
+            )).await;
+            #{ 'a': ((parts.at:0).at:'a') 'b': ((parts.at:1).at:'b') }
+        };
+        var resp = app.handle:([Test]WebReq.get:'/agg');
+        .is:{ resp.status } equalTo:200;
+        .is:{ ((JSON.parse:(resp.body.asString)).at:'a') } equalTo:1;
+        .is:{ ((JSON.parse:(resp.body.asString)).at:'b') } equalTo:2
+    };
+
+    .test:
+    anyRaceInsideAHandler -> {
+        var app = [Web]App.new;
+        app.get:'/fast' do:{
+            (Plan.any:#(
+                (Plan.task:{ Async.sleep:5; 'slow-but-wins' })
+                (Plan.task:{ 'immediate'.throw })
+            )).await
+        };
+        var resp = app.handle:([Test]WebReq.get:'/fast');
+        .is:{ resp.body.asString } equalTo:'slow-but-wins'
+    }
 }

@@ -581,6 +581,12 @@ pub struct VmState<'gc> {
     /// channel ends back to the parent. `None` on the main VM.
     #[collect(require_static)]
     pub worker_link: Option<crate::worker::WorkerLink>,
+    /// The ENTRY unit this VM was booted to run (canonicalized), `None` for
+    /// REPL/eval. "What program is this?" — `Worker.spawn:(VM.unit)` runs
+    /// another copy of the current program (the same-unit provisioning
+    /// model, docs/WEB_ARCH.md workers). Deliberately NOT `__FILE__`: a
+    /// `use`d library sees the app's unit, not its own file.
+    pub unit_path: Option<String>,
     /// Workers this VM spawned (`VM.ps` observability; see `WorkerReg`).
     #[collect(require_static)]
     pub worker_registry: Vec<crate::worker::WorkerReg>,
@@ -713,6 +719,7 @@ impl<'gc> VmState<'gc> {
             // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
             dispatch_epoch: 1,
             worker_link: None,
+            unit_path: None,
             worker_registry: Vec::new(),
             io: Io {
                 backend: crate::io_backend::SmolBackend::new(),

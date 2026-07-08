@@ -768,6 +768,17 @@ var results = Join.all:#(
   no-self blocks keep the free slot-fill (combinators bench at exact
   parity, 0.13s warm).
 
+### 13.5b First consumer: the web framework
+
+`[Web]App.serve:workers:` (docs/WEB_ARCH.md workers) consumes the stack
+end to end: requests ship as DATA over worker lanes (the pure `handle:`
+pipeline runs in pool isolates — sockets never cross), provisioning is
+the same-unit model via the `VM.unit` native (a pool worker re-runs the
+app's own file; `serve:` detects the worker context via a pre-buffered
+pool sentinel), labels ride the registry (`web:0`...), and `app.debug:`
+exposes `GET /_qn/ps` — `VM.psTree` as JSON from the transport VM.
+`backing:'process'` passes straight through to the pump.
+
 ### 13.6 Build order for this arc
 
 1. Control lane + driver hook (thread backing first — it unifies
