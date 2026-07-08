@@ -159,6 +159,37 @@ pub fn snapshot_block<'gc>(
     })
 }
 
+/// Deep-copy a shipped template into WORKER-LOCAL allocations, recursing
+/// into nested block constants. Shipped `Arc<StaticBlock>`s are shared with
+/// the parent (and every sibling worker); each closure materialization
+/// bumps the Arc refcount, and that RMW invalidates the cache line the hot
+/// dispatch loop in every OTHER worker constantly reads through (template →
+/// bytecode derefs on each frame push). Measured: the shared-template pool
+/// path scaled 1.8x WORSE than share-nothing unit workers on identical
+/// work (profiling/worker-scaling/notes.md). Localizing is a one-time,
+/// bytes-sized copy per shipped job that removes every cross-worker line.
+fn localize_template(sb: &StaticBlock) -> Arc<StaticBlock> {
+    let mut copy: StaticBlock = (**&sb).clone();
+    let mut bytecode: Vec<Instruction> = copy.bytecode.iter().cloned().collect();
+    for inst in bytecode.iter_mut() {
+        match inst {
+            Instruction::Push(Constant::Block(inner)) => {
+                *inner = localize_template(inner);
+            }
+            Instruction::SendConst(Constant::Block(inner), _, _)
+            | Instruction::SendLocalConst(_, Constant::Block(inner), _, _) => {
+                *inner = localize_template(inner);
+            }
+            _ => {}
+        }
+    }
+    copy.bytecode = bytecode.into();
+    if let Some(decl) = &copy.decl_block {
+        copy.decl_block = Some(localize_template(decl));
+    }
+    Arc::new(copy)
+}
+
 /// Rebuild a shipped block as a live closure in THIS worker's arena:
 /// verify its global references, wire-copy the captures into a snapshot
 /// env frame (recursing for block captures), and close the template over
@@ -169,11 +200,12 @@ pub(crate) fn rebuild_portable_value<'gc>(
     pb: &PortableBlock,
 ) -> Result<Value<'gc>, String> {
     let env = rebuild_env(vm, mc, pb)?;
-    let inline_cache = vm.ic_cell_for(mc, &pb.template);
+    let template = localize_template(&pb.template);
+    let inline_cache = vm.ic_cell_for(mc, &template);
     Ok(vm.new_block(
         mc,
         Block {
-            template: pb.template.clone(),
+            template,
             parent_env: Some(env),
             enclosing_method_id: None,
             decl_block: None,
@@ -507,7 +539,7 @@ fn run_worker_block(job: PortableBlock, link: WorkerLink) -> Result<WireData, St
                 return;
             }
         };
-        let block = vm.block_from_template(mc, job.template.clone(), Some(env), None);
+        let block = vm.block_from_template(mc, localize_template(&job.template), Some(env), None);
         vm.start_block(mc, block, Vec::new(), None, None);
         install_main_task(mc, vm);
     });

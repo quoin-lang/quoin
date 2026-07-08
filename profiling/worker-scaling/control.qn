@@ -1,0 +1,9 @@
+"* Process-level scaling control: the SAME heavy per-item work as the L3
+"* bench, but sized by argv so N independent qn processes can each take
+"* 1/N of the items — no shared process state at all.
+var args = Runtime.arguments;
+var n = (args.count > 0).if:{ (args.at:0).to_integer } else:{ 20000 };
+var heavy = #();
+(0..n).each:{ |i| heavy.add:(i % 977) };
+var out = heavy.collect:{ |x| var s = 0; (0..200).each:{ |k| s = s + ((x + k) * 7 % 31) }; s };
+out.count.print;
