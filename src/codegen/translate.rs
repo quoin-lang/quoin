@@ -382,6 +382,7 @@ aot_helpers! {
     checkpoint: super::aot_checkpoint as fn(*mut c_void, *mut i64) -> u8,
     fmod: aot_fmod as fn(f64, f64) -> f64,
     slot_set: helpers::slot_set as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    guard_recv: helpers::guard_recv as fn(*mut c_void, *const c_void, i64, i64, i64, i64) -> u8,
     slot_peek: helpers::slot_peek as fn(*mut c_void, *const c_void, i64, *mut i64) -> i64,
     list_new: helpers::list_new as fn(*mut c_void, *const c_void, i64) -> u8,
     list_from: helpers::list_from as fn(*mut c_void, *const c_void, i64, i64, *const i64, *const i64) -> u8,
@@ -486,6 +487,7 @@ fn compile_group(
         bool,
         bool,
         bool,
+        bool,
         Vec<(usize, u32)>,
     )> = Vec::new();
 
@@ -511,6 +513,7 @@ fn compile_group(
         let direct_self;
         let materializes_nlr;
         let materializes;
+        let uses_slot_base;
         let site_log;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
@@ -537,6 +540,8 @@ fn compile_group(
                 materialized: HashSet::new(),
                 materialized_nlr: HashSet::new(),
                 pending_abort: None,
+                uses_slot_base: std::cell::Cell::new(false),
+                baked: crate::codegen::take_baked_for(tid),
                 prior_sites: crate::codegen::prior_sites_for(tid),
                 site_log: Vec::new(),
             };
@@ -552,6 +557,7 @@ fn compile_group(
             direct_self = tr.used_direct_self;
             materializes_nlr = !tr.materialized_nlr.is_empty();
             materializes = !tr.materialized.is_empty();
+            uses_slot_base = tr.uses_slot_base.get();
             site_log = std::mem::take(&mut tr.site_log);
             b.seal_all_blocks();
             b.finalize();
@@ -591,6 +597,7 @@ fn compile_group(
             direct_self,
             materializes_nlr,
             materializes,
+            uses_slot_base,
             site_log,
         ));
     }
@@ -608,6 +615,7 @@ fn compile_group(
         direct_self,
         materializes_nlr,
         materializes,
+        uses_slot_base,
         site_log,
     ) in tramp_ids
     {
@@ -629,6 +637,7 @@ fn compile_group(
                 compile_epoch: super::redef_epoch(),
                 materializes_nlr,
                 materializes,
+                uses_slot_base,
                 lane_plan: super::build_lane_plan(&m.params, &m.spec_preconditions),
             },
             site_log,
@@ -818,6 +827,12 @@ struct Translator<'a> {
     /// Out-of-band demote signal (see [`TranslateAbort`]): set at the same
     /// moment the aborting `Err` is returned, consumed by `compile_group`.
     pending_abort: Option<TranslateAbort>,
+    /// D3b: the body computed an absolute slot index (see
+    /// `AotEntry::uses_slot_base`). Cell: `abs_slot` takes `&self`.
+    uses_slot_base: std::cell::Cell<bool>,
+    /// D3b: baked direct-edge facts per ip, present only on a
+    /// retranslation whose drain staged them.
+    baked: rustc_hash::FxHashMap<usize, super::BakedW0>,
     /// D3a: site ids from this tid's FIRST translation — a retranslation
     /// must reuse them (the D2 cells key on them; the generic fallback and
     /// interpreted IC stay warm through the swap).
@@ -926,6 +941,8 @@ struct FnCtx {
     kinds_buf: cranelift_codegen::ir::StackSlot,
     bits_buf: cranelift_codegen::ir::StackSlot,
     peek_out: cranelift_codegen::ir::StackSlot,
+    /// D3b: the baked direct edge's raw-call ret out-parameter (8 bytes).
+    direct_ret: cranelift_codegen::ir::StackSlot,
 }
 
 impl<'a> Translator<'a> {
@@ -954,6 +971,9 @@ impl<'a> Translator<'a> {
     }
 
     fn abs_slot(&self, b: &mut FunctionBuilder, fx: &FnCtx, window_idx: u32) -> CVal {
+        // D3b: any absolute slot computation makes the body slot-dependent —
+        // it can never run under a W0 edge's poison base.
+        self.uses_slot_base.set(true);
         b.ins().iadd_imm(fx.slot_base, i64::from(window_idx))
     }
 
@@ -1059,6 +1079,8 @@ impl<'a> Translator<'a> {
         ));
         let peek_out =
             b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+        let direct_ret =
+            b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let fx = FnCtx {
             vm,
             mc,
@@ -1068,6 +1090,7 @@ impl<'a> Translator<'a> {
             slot_base,
             exit,
             ret: self.eff_ret,
+            direct_ret,
             kinds_buf,
             bits_buf,
             peek_out,
@@ -2665,6 +2688,125 @@ impl<'a> Translator<'a> {
         let ip_site = b
             .ins()
             .iconst(types::I64, (ip as i64) | ((i64::from(site)) << 32));
+
+        // D3b (docs/DIRECT_CALLS_ARCH.md §3.4): a baked W0 site emits a
+        // guarded DIRECT edge — live-epoch check (native), receiver+fiber
+        // guard (mini-helper), then one uniform call_indirect straight into
+        // the callee's raw entry, with the generic helper call as the guard-
+        // miss path. Static preconditions: every arg is an SSA scalar whose
+        // kind matches the baked callee's lane plan, so `bits_buf` already
+        // IS the raw lane layout and no runtime arg guard exists at all.
+        let baked = if with_site {
+            self.baked.get(&ip).copied().filter(|bk| {
+                args.len() == bk.entry.lane_plan.len()
+                    && args.iter().zip(bk.entry.lane_plan.iter()).all(|(a, &pl)| {
+                        matches!(
+                            (a, pl as i64),
+                            (AV::C(_, AotKind::Int), KIND_INT)
+                                | (AV::C(_, AotKind::Double), KIND_DOUBLE)
+                                | (AV::C(_, AotKind::Bool), KIND_BOOL)
+                        )
+                    })
+            })
+        } else {
+            None
+        };
+        if let Some(bk) = baked {
+            crate::codegen::TOTAL_DIRECT_SITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let generic_bl = b.create_block();
+            let recv_bl = b.create_block();
+            let direct_bl = b.create_block();
+            let merge_bl = b.create_block();
+
+            // 1. epoch guard: the live dispatch epoch (through the ABI's
+            //    pointer) must equal the bake-time constant.
+            let live = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), fx.epoch, 0);
+            let want = b.ins().iconst(types::I64, bk.epoch as i64);
+            let fresh = b.ins().icmp(IntCC::Equal, live, want);
+            b.ins().brif(fresh, recv_bl, &[], generic_bl, &[]);
+
+            // 2. receiver + fiber guard (the mini-helper reproduces
+            //    entry_gates' fiber marking exactly).
+            b.switch_to_block(recv_bl);
+            let gk = b.ins().iconst(types::I64, i64::from(bk.recv_kind));
+            let gp = b.ins().iconst(types::I64, bk.recv_ptr as i64);
+            let gf = self.func_ref(b, self.helpers.guard_recv);
+            let gcall = b.ins().call(gf, &[fx.vm, fx.mc, rk, rb, gk, gp]);
+            let gok = b.inst_results(gcall)[0];
+            b.ins().brif(gok, direct_bl, &[], generic_bl, &[]);
+
+            // 3. the direct edge: one uniform call_indirect into the baked
+            //    raw entry. slot_base = 0 poison (W0 never derefs it);
+            //    outcall_nesting untouched (a flat native call adds no
+            //    Rust-stack alternation).
+            b.switch_to_block(direct_bl);
+            let raw_sig = {
+                let ptr = self.module.target_config().pointer_type();
+                let mut sig = self.module.make_signature();
+                for _ in 0..5 {
+                    sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch
+                }
+                sig.params.push(AbiParam::new(types::I64)); // slot_base
+                sig.params.push(AbiParam::new(ptr)); // args
+                sig.params.push(AbiParam::new(ptr)); // ret
+                sig.returns.push(AbiParam::new(types::I8));
+                b.import_signature(sig)
+            };
+            let ptr_ty = self.module.target_config().pointer_type();
+            let fnaddr = b.ins().iconst(ptr_ty, bk.entry.raw as usize as i64);
+            let poison_base = b.ins().iconst(types::I64, 0);
+            let ret_addr = b.ins().stack_addr(ptr_ty, fx.direct_ret, 0);
+            let dcall = b.ins().call_indirect(
+                raw_sig,
+                fnaddr,
+                &[
+                    fx.vm,
+                    fx.mc,
+                    fx.fuel,
+                    fx.depth,
+                    fx.epoch,
+                    poison_base,
+                    ba,
+                    ret_addr,
+                ],
+            );
+            let dtag = b.inst_results(dcall)[0];
+            self.tag_check(b, fx, dtag);
+            // Deliver the scalar into the site's out slot so both paths
+            // yield the same AV::Dyn contract downstream.
+            let retv = b.ins().stack_load(types::I64, fx.direct_ret, 0);
+            let ret_kind = match bk.entry.ret {
+                AotRet::Scalar(AotKind::Int) => KIND_INT,
+                AotRet::Scalar(AotKind::Double) => KIND_DOUBLE,
+                AotRet::Scalar(AotKind::Bool) => KIND_BOOL,
+                AotRet::Obj => unreachable!("w0_eligible excludes Obj rets"),
+            };
+            let rkc = b.ins().iconst(types::I64, ret_kind);
+            let sf = self.func_ref(b, self.helpers.slot_set);
+            let scall = b.ins().call(sf, &[fx.vm, fx.mc, out_idx, rkc, retv]);
+            let stag = b.inst_results(scall)[0];
+            self.tag_check(b, fx, stag);
+            b.ins().jump(merge_bl, &[]);
+
+            // 4. guard miss: exactly today's generic helper call.
+            b.switch_to_block(generic_bl);
+            let f = self.func_ref(b, self.helpers.outcall);
+            let call = b.ins().call(
+                f,
+                &[
+                    fx.vm, fx.mc, tid_v, ip_site, len_v, rk, rb, sel, argc, ka, ba, out_idx,
+                ],
+            );
+            let tag = b.inst_results(call)[0];
+            self.tag_check(b, fx, tag);
+            b.ins().jump(merge_bl, &[]);
+
+            b.switch_to_block(merge_bl);
+            return Ok(AV::Dyn(out_idx));
+        }
+
         let f = self.func_ref(b, self.helpers.outcall);
         let call = b.ins().call(
             f,

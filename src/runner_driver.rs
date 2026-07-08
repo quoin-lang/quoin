@@ -537,8 +537,50 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
         // B3a placement discipline — a recompile never runs inside a VM
         // step). Empty-vec take is the whole cost when the tier is off.
         let drain_retranslations = |arena: &mut ReplArena| {
-            let tids = arena.mutate_root(|_mc, vm| vm.take_retranslations());
-            for tid in tids {
+            // D3b: bake guard facts from the live cells (VM access lives
+            // here, not in the translator), stage them, then retranslate —
+            // the recompiled caller carries guarded direct edges for its
+            // warm monomorphic W0 sites.
+            let work = arena.mutate_root(|_mc, vm| {
+                let tids = vm.take_retranslations();
+                if tids.is_empty() {
+                    return Vec::new();
+                }
+                let threshold = crate::codegen::direct_warm_threshold().unwrap_or(u32::MAX);
+                let mut work: Vec<_> = tids
+                    .into_iter()
+                    .map(|tid| {
+                        let baked = crate::codegen::retained_sites_for(tid)
+                            .map(|sites| vm.bake_w0_sites(&sites, threshold))
+                            .unwrap_or_default();
+                        (tid, baked)
+                    })
+                    .collect();
+                // ACTIVATION: caches (D2 cells, dispatch ICs) hold the OLD
+                // entries by 'static ref — a registry overwrite alone would
+                // never be reached. Bumping the dispatch epoch fails every
+                // cached resolution once; refills go through the registry
+                // and pick up the retranslated code. Facts above were read
+                // from PRE-bump cells; the baked guards must compare against
+                // the POST-bump epoch, so restamp them.
+                if work.iter().any(|(_, b)| !b.is_empty()) {
+                    vm.dispatch_epoch += 1;
+                    let epoch = vm.dispatch_epoch;
+                    for (_, baked) in &mut work {
+                        for bk in baked.values_mut() {
+                            bk.epoch = epoch;
+                        }
+                    }
+                }
+                work
+            });
+            for (tid, baked) in work {
+                if !baked.is_empty()
+                    && crate::codegen::direct_allows(tid)
+                    && crate::codegen::direct_budget_allows()
+                {
+                    crate::codegen::stage_baked(tid, baked);
+                }
                 crate::codegen::retranslate(tid);
             }
         };

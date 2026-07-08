@@ -69,6 +69,36 @@ fn decode<'gc>(vm: &VmState<'gc>, kind: i64, bits: i64) -> Value<'gc> {
     }
 }
 
+/// D3b: the baked direct edge's receiver-and-fiber guard. Decodes the
+/// receiver lane, compares its type guard against the baked (kind, ptr),
+/// and reproduces `entry_gates`' fiber arm EXACTLY (running compiled code
+/// inside a fiber must mark `ran_compiled` for the teardown discipline —
+/// an unmarkable fiber fails the guard and the generic path handles it).
+/// Returns 1 = take the direct edge, 0 = generic.
+pub(super) unsafe extern "C" fn guard_recv(
+    vm: *mut c_void,
+    mc: *const c_void,
+    recv_kind: i64,
+    recv_bits: i64,
+    baked_kind: i64,
+    baked_ptr: i64,
+) -> u8 {
+    let (vm, _mc) = unsafe { vm_mc(vm, mc) };
+    if let Some(f) = vm.sched.current_fiber {
+        let marked = f
+            .with_native_state::<crate::runtime::fiber::NativeFiberState, _, _>(|s| {
+                s.coro().ran_compiled.set(true);
+            })
+            .is_ok();
+        if !marked {
+            return 0;
+        }
+    }
+    let v = decode(vm, recv_kind, recv_bits);
+    let (k, p) = crate::vm::value_type_guard(v);
+    (i64::from(k) == baked_kind && p as i64 == baked_ptr) as u8
+}
+
 fn store_err(vm: &mut VmState<'_>, e: QuoinError) -> u8 {
     vm.aot_pending_error = Some(e);
     TAG_ERR

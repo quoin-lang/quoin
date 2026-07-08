@@ -174,7 +174,7 @@ impl<'gc> ICSlot<'gc> {
 /// the class pointer for objects/classes (`0` for immediates). Matches what
 /// `MethodCacheKey` keys on, so a guard match ⇒ the same dispatch result.
 #[inline]
-fn value_type_guard<'gc>(v: Value<'gc>) -> (u8, usize) {
+pub(crate) fn value_type_guard<'gc>(v: Value<'gc>) -> (u8, usize) {
     match v {
         Value::Int(_) => (0, 0),
         Value::Double(_) => (1, 0),
@@ -3750,6 +3750,39 @@ impl<'gc> VmState<'gc> {
         std::mem::take(&mut self.aot_retranslate_queue)
     }
 
+    /// D3b: capture baked W0 facts for a caller's retained sites — warm,
+    /// current-epoch, monomorphic cells whose entry meets the W0 tier
+    /// criteria. Runs in the driver's drain (the translator has no VM).
+    pub(crate) fn bake_w0_sites(
+        &self,
+        sites: &rustc_hash::FxHashMap<usize, u32>,
+        threshold: u32,
+    ) -> rustc_hash::FxHashMap<usize, crate::codegen::BakedW0> {
+        let mut out = rustc_hash::FxHashMap::default();
+        for (&ip, &site) in sites {
+            let Some(cell) = self.aot_sites.get(site as usize) else {
+                continue;
+            };
+            let Some(entry) = cell.entry else { continue };
+            if cell.epoch != self.dispatch_epoch
+                || cell.hits < threshold
+                || !crate::codegen::w0_eligible(entry)
+            {
+                continue;
+            }
+            out.insert(
+                ip,
+                crate::codegen::BakedW0 {
+                    entry,
+                    epoch: self.dispatch_epoch,
+                    recv_kind: cell.recv_kind,
+                    recv_ptr: cell.recv_ptr,
+                },
+            );
+        }
+        out
+    }
+
     /// Fill a D2 site cell. The caller gates this on the interpreted IC
     /// having filled for the same resolution (probe-after-fill), which
     /// carries over every cacheability rule (guard-free, non-eigenclass,
@@ -3834,7 +3867,24 @@ impl<'gc> VmState<'gc> {
     ) -> Result<Value<'gc>, QuoinError> {
         let ic = self.ic_cell_by_id(mc, tid);
         let method = match self.ic_probe(ic, ip, receiver, &args) {
-            Some(c) => Some(c),
+            Some(c) => {
+                // D2 gap (found by D3b): a caller that TIERS UP mid-run has
+                // warm interpreted ICs, so the cold-arm fill below never
+                // runs and its site cells stay cold forever — the D2 fast
+                // path was inert for every spec-promoted caller. Fill on a
+                // probe-hit too, under the same once-per-epoch gate (the
+                // polymorphic-flip tax the cold-arm comment guards against
+                // stays impossible: a warm cell short-circuits here).
+                if let (Some(site), crate::dispatch::Callable::AotCall { block, entry }) =
+                    (site, &c)
+                    && self.aot_sites.get(site as usize).is_none_or(|cell| {
+                        cell.entry.is_none() || cell.epoch != self.dispatch_epoch
+                    })
+                {
+                    self.aot_site_fill(site as usize, receiver, &args, entry.0, block.parent_env);
+                }
+                Some(c)
+            }
             None => {
                 let m = self.lookup_method(mc, receiver, selector, &args)?;
                 if let Some(c) = &m {

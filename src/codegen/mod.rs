@@ -29,7 +29,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::Arc;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
 
@@ -238,6 +238,11 @@ pub struct AotEntry {
     /// entry that never materializes never reads it — `invoke` skips the
     /// env swap/restore entirely (D2.5a, docs/DIRECT_CALLS_ARCH.md §2).
     pub materializes: bool,
+    /// The body computes ANY absolute slot index (`abs_slot` — self reads,
+    /// Dyn locals, field helpers, scratch). False = truly windowless: the
+    /// entry never dereferences `slot_base`, so a baked W0 edge may pass a
+    /// poison base (D3b, docs/DIRECT_CALLS_ARCH.md §3.2).
+    pub uses_slot_base: bool,
     /// D2.5b marshaling plan, one i8 per param: for a verbatim-eligible
     /// scalar param (declared Scalar(K), S1 precondition absent or == K)
     /// this is the caller lane-kind constant (`helpers::KIND_*`) whose
@@ -247,6 +252,60 @@ pub struct AotEntry {
     /// cell guard + precondition, exactly the classic checks.
     pub lane_plan: Box<[i8]>,
 }
+
+/// W0 tier criteria (docs/DIRECT_CALLS_ARCH.md §3.2): a callee a baked
+/// direct edge may call with NO window — all-scalar params, scalar ret, no
+/// scratch, never touches its slot window, materializes nothing, and no
+/// direct_self (its redef-epoch gate lives in `entry_gates`, which the
+/// direct edge skips).
+pub fn w0_eligible(entry: &AotEntry) -> bool {
+    entry.role == AotRole::Method
+        && matches!(entry.ret, AotRet::Scalar(_))
+        && entry.n_scratch == 0
+        && !entry.uses_slot_base
+        && !entry.materializes
+        && !entry.materializes_nlr
+        && !entry.needs_list_self
+        && !entry.direct_self
+        && !entry.lane_plan.is_empty()
+        && entry.lane_plan.iter().all(|&p| p >= 0)
+}
+
+/// One baked W0 site (D3b): the callee identity + the guard facts captured
+/// from the D2 cell at bake time. `Copy` plain data — the entry is 'static.
+#[derive(Clone, Copy)]
+pub struct BakedW0 {
+    pub entry: &'static AotEntry,
+    /// `vm.dispatch_epoch` at bake time; the emitted guard compares the
+    /// live value (through the ABI's epoch pointer) against this constant.
+    pub epoch: u64,
+    pub recv_kind: u8,
+    pub recv_ptr: usize,
+}
+
+/// Staging: the driver's drain captures baked sites (it has VM access; the
+/// translator does not), keyed by caller tid; the retranslation's
+/// Translator takes them. Cleared on take.
+fn baked_staging() -> &'static Mutex<FxHashMap<u32, FxHashMap<usize, BakedW0>>> {
+    static S: OnceLock<Mutex<FxHashMap<u32, FxHashMap<usize, BakedW0>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+pub fn stage_baked(tid: u32, sites: FxHashMap<usize, BakedW0>) {
+    baked_staging().lock().unwrap().insert(tid, sites);
+}
+
+pub(super) fn take_baked_for(tid: u32) -> FxHashMap<usize, BakedW0> {
+    baked_staging()
+        .lock()
+        .unwrap()
+        .remove(&tid)
+        .unwrap_or_default()
+}
+
+/// Baked direct-edge sites emitted across all retranslations (stats/tests).
+pub static TOTAL_DIRECT_SITES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Build the D2.5b plan (see `AotEntry::lane_plan`).
 pub fn build_lane_plan(params: &[AotParam], pres: &[Option<AotKind>]) -> Box<[i8]> {
@@ -351,6 +410,42 @@ pub(super) fn prior_sites_for(tid: u32) -> Option<FxHashMap<usize, u32>> {
         .unwrap()
         .get(&tid)
         .map(|r| r.sites.clone())
+}
+
+/// The driver's drain needs a caller's retained site map to bake guard
+/// facts from the live cells (D3b).
+pub fn retained_sites_for(tid: u32) -> Option<FxHashMap<usize, u32>> {
+    prior_sites_for(tid)
+}
+
+/// D3b bisect hooks (the S1 discipline — they land WITH the feature):
+/// `QN_DIRECT_ONLY=tid,tid` limits which callers bake direct edges;
+/// `QN_DIRECT_MAX=n` caps how many callers may bake (process-wide).
+pub fn direct_allows(tid: u32) -> bool {
+    static ONLY: OnceLock<Option<Vec<u32>>> = OnceLock::new();
+    let only = ONLY.get_or_init(|| {
+        std::env::var("QN_DIRECT_ONLY")
+            .ok()
+            .map(|v| v.split(',').filter_map(|t| t.trim().parse().ok()).collect())
+    });
+    match only {
+        Some(list) => list.contains(&tid),
+        None => true,
+    }
+}
+
+pub fn direct_budget_allows() -> bool {
+    static MAX: OnceLock<Option<usize>> = OnceLock::new();
+    static USED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let max = MAX.get_or_init(|| {
+        std::env::var("QN_DIRECT_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    });
+    match max {
+        Some(cap) => USED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < *cap,
+        None => true,
+    }
 }
 
 /// How many warm-site retranslations have run (D3a: null retranslations —
