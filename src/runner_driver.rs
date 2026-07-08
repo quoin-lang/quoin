@@ -361,6 +361,127 @@ fn maybe_print_spec_stats(arena: &mut ReplArena) {
     });
 }
 
+/// In-flight recursive ps collection (docs/CONCURRENCY_ARCH.md §13.3/§13.4):
+/// a `PsTree` control request fans out to this worker's own workers and
+/// assembles their subtrees WITHOUT blocking the driver — `progress` runs
+/// once per loop iteration, and a deadline turns silent children into
+/// `'unresponsive'`.
+struct PsCollect {
+    reply: async_channel::Sender<crate::worker::WorkerMsg>,
+    local: quoin_ext_proto::DataValue,
+    pending: Vec<(usize, async_channel::Receiver<crate::worker::WorkerMsg>)>,
+    done: Vec<(usize, Option<quoin_ext_proto::DataValue>)>,
+    deadline: std::time::Instant,
+}
+
+/// Per-hop child budget: generous for a thread hop, and small enough that a
+/// deep tree still answers interactively.
+const PS_CHILD_DEADLINE_MS: u64 = 120;
+
+fn start_ps_collect(
+    arena: &mut ReplArena,
+    reply: async_channel::Sender<crate::worker::WorkerMsg>,
+    current: Option<TaskId>,
+) -> PsCollect {
+    let (local, children) = arena.mutate_root(|_mc, vm| {
+        let data = crate::runtime::vm_stats::ps_data_with_current(vm, current);
+        let local = crate::runtime::vm_stats::ps_to_wire(&data);
+        let children: Vec<(
+            usize,
+            async_channel::Sender<crate::worker::ControlReq>,
+            bool,
+        )> = vm
+            .worker_registry
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (i, w.control_tx.clone(), !w.outbox_rx.is_closed()))
+            .collect();
+        (local, children)
+    });
+    let mut pending = Vec::new();
+    let mut done = Vec::new();
+    for (idx, tx, running) in children {
+        if !running {
+            done.push((idx, None));
+            continue;
+        }
+        let (rtx, rrx) = async_channel::bounded(1);
+        if tx
+            .try_send(crate::worker::ControlReq {
+                kind: crate::worker::ControlKind::PsTree,
+                reply: rtx,
+            })
+            .is_ok()
+        {
+            pending.push((idx, rrx));
+        } else {
+            done.push((idx, None));
+        }
+    }
+    PsCollect {
+        reply,
+        local,
+        pending,
+        done,
+        deadline: std::time::Instant::now()
+            + std::time::Duration::from_millis(PS_CHILD_DEADLINE_MS),
+    }
+}
+
+/// Poll children; on completion (or deadline) patch the local tree's worker
+/// rows with each child's 'ps' and send the reply. Returns `true` when done.
+fn progress_ps_collect(c: &mut PsCollect) -> bool {
+    let mut i = 0;
+    while i < c.pending.len() {
+        match c.pending[i].1.try_recv() {
+            Ok(crate::worker::WorkerMsg::Data(dv)) => {
+                let (idx, _) = c.pending.remove(i);
+                c.done.push((idx, Some(dv)));
+            }
+            Ok(_) => {
+                let (idx, _) = c.pending.remove(i);
+                c.done.push((idx, None));
+            }
+            Err(async_channel::TryRecvError::Empty) => i += 1,
+            Err(async_channel::TryRecvError::Closed) => {
+                let (idx, _) = c.pending.remove(i);
+                c.done.push((idx, None));
+            }
+        }
+    }
+    if !c.pending.is_empty() && std::time::Instant::now() < c.deadline {
+        return false;
+    }
+    for (idx, _) in c.pending.drain(..) {
+        c.done.push((idx, None));
+    }
+    // Patch worker rows in place: done is keyed by registry index, which is
+    // the rows' order (both come from the same registry walk).
+    if let quoin_ext_proto::DataValue::Map(sections) = &mut c.local {
+        for (k, v) in sections.iter_mut() {
+            if k == "workers"
+                && let quoin_ext_proto::DataValue::List(rows) = v
+            {
+                for (idx, sub) in c.done.drain(..) {
+                    if let Some(quoin_ext_proto::DataValue::Map(row)) = rows.get_mut(idx) {
+                        row.push((
+                            "ps".to_string(),
+                            match sub {
+                                Some(tree) => tree,
+                                None => quoin_ext_proto::DataValue::Str("unresponsive".to_string()),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let _ = c
+        .reply
+        .try_send(crate::worker::WorkerMsg::Data(c.local.clone()));
+    true
+}
+
 pub(crate) fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
     let result = drive_with_frontend(arena, &mut CliFrontend::default());
     maybe_print_spec_stats(arena);
@@ -400,7 +521,36 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
             return Ok(());
         }
         let mut step_count = 0;
+        // §13.3: the control lane. Fetched once — the link never changes for
+        // a VM's lifetime; None for the main VM, Some inside workers.
+        let control_rx =
+            arena.mutate_root(|_mc, vm| vm.worker_link.as_ref().map(|l| l.control_rx.clone()));
+        let mut ps_collect: Option<PsCollect> = None;
+        let mut ps_queue: Vec<async_channel::Sender<crate::worker::WorkerMsg>> = Vec::new();
         loop {
+            // Service control requests opportunistically — once per loop
+            // iteration, so a compute-bound task still answers at batch
+            // boundaries; the cost when idle is one failed try_recv.
+            if let Some(rx) = &control_rx {
+                while let Ok(req) = rx.try_recv() {
+                    match req.kind {
+                        crate::worker::ControlKind::PsTree => ps_queue.push(req.reply),
+                    }
+                }
+                if ps_collect.is_none()
+                    && let Some(reply) = ps_queue.pop()
+                {
+                    // `current` reflects what is genuinely running RIGHT NOW
+                    // (None between resumes) — truer than the VM's sticky
+                    // current_task for the snapshot.
+                    ps_collect = Some(start_ps_collect(arena, reply, current));
+                }
+                if let Some(c) = &mut ps_collect
+                    && progress_ps_collect(c)
+                {
+                    ps_collect = None;
+                }
+            }
             // Acquire a task to run after the previous one parked or finished: pick from
             // `ready` (random under stress); if none are ready but I/O is in flight, await a
             // completion, which feeds `ready`, and retry.
@@ -457,7 +607,56 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                         }
                         // The single reactor wait: park until some background future (I/O op
                         // or deadline timer) lands.
-                        let (tid, wakeup) = futures.next().await.expect("futures is non-empty");
+                        enum Woke {
+                            Task(Option<(TaskId, TaskWakeup)>),
+                            Ctl(Option<crate::worker::ControlReq>),
+                            Tick,
+                        }
+                        let woke = {
+                            let next_task = async { Woke::Task(futures.next().await) };
+                            match (&control_rx, ps_collect.is_some()) {
+                                (Some(rx), collecting) => {
+                                    // Wake for a control request too; while a
+                                    // collection is pending, also tick so its
+                                    // deadline/children make progress.
+                                    let ctl = async { Woke::Ctl(rx.recv().await.ok()) };
+                                    if collecting {
+                                        let tick = async {
+                                            async_io::Timer::after(
+                                                std::time::Duration::from_millis(5),
+                                            )
+                                            .await;
+                                            Woke::Tick
+                                        };
+                                        futures_lite::future::or(
+                                            next_task,
+                                            futures_lite::future::or(ctl, tick),
+                                        )
+                                        .await
+                                    } else {
+                                        futures_lite::future::or(next_task, ctl).await
+                                    }
+                                }
+                                (None, _) => next_task.await,
+                            }
+                        };
+                        let step = match woke {
+                            Woke::Task(step) => step,
+                            Woke::Ctl(req) => {
+                                // Queue the request this recv consumed; the
+                                // loop top services it (and any siblings).
+                                if let Some(req) = req {
+                                    match req.kind {
+                                        crate::worker::ControlKind::PsTree => {
+                                            ps_queue.push(req.reply)
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            Woke::Tick => continue,
+                        };
+                        let (tid, wakeup) = step.expect("futures is non-empty");
                         arena.mutate_root(|_mc, vm| match wakeup {
                             TaskWakeup::Io(result) => {
                                 {

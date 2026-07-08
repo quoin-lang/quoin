@@ -89,6 +89,12 @@ pub enum IoRequest {
     /// inbox or a parent's view of a worker's outbox). The endpoint is
     /// plain `Send` data; resolving to `None` means the far side closed.
     WorkerRecv(async_channel::Receiver<crate::worker::WorkerMsg>),
+    /// Like `WorkerRecv` with a deadline: `None` for BOTH closed and timed
+    /// out (callers that care distinguish via the registry's liveness).
+    WorkerRecvTimed {
+        rx: async_channel::Receiver<crate::worker::WorkerMsg>,
+        ms: u64,
+    },
     /// Park until the worker's done lane reports (its unit finished or
     /// failed); resolving the lane closed means the worker vanished.
     WorkerJoin(async_channel::Receiver<Result<quoin_ext_proto::DataValue, String>>),
@@ -169,6 +175,9 @@ impl IoRequest {
             IoRequest::Write { .. } => "io: write".to_string(),
             IoRequest::Compute(job) => format!("compute: {}", job.label),
             IoRequest::WorkerRecv(_) => "worker receive".to_string(),
+            IoRequest::WorkerRecvTimed { ms, .. } => {
+                format!("worker receive (timeout {ms}ms)")
+            }
             IoRequest::WorkerJoin(_) => "worker join".to_string(),
             IoRequest::Close { .. } => "io: close".to_string(),
             IoRequest::TlsWrap { .. } => "io: tls handshake".to_string(),
@@ -593,6 +602,14 @@ impl IoBackend for SmolBackend {
             IoRequest::WorkerRecv(rx) => {
                 Box::pin(async move { IoResult::WorkerMsg(rx.recv().await.ok()) })
             }
+            IoRequest::WorkerRecvTimed { rx, ms } => Box::pin(async move {
+                let recv = async { rx.recv().await.ok() };
+                let deadline = async {
+                    async_io::Timer::after(std::time::Duration::from_millis(ms)).await;
+                    None
+                };
+                IoResult::WorkerMsg(futures_lite::future::or(recv, deadline).await)
+            }),
             IoRequest::WorkerJoin(rx) => Box::pin(async move {
                 IoResult::WorkerDone(rx.recv().await.unwrap_or_else(|_| {
                     Err("worker vanished without reporting a result".to_string())
@@ -789,6 +806,7 @@ impl IoBackend for MockBackend {
             IoRequest::Sleep { .. } => IoResult::Slept,
             IoRequest::Compute(job) => IoResult::Computed(job.run()),
             IoRequest::WorkerRecv(rx) => IoResult::WorkerMsg(rx.try_recv().ok()),
+            IoRequest::WorkerRecvTimed { rx, .. } => IoResult::WorkerMsg(rx.try_recv().ok()),
             IoRequest::WorkerJoin(rx) => {
                 IoResult::WorkerDone(rx.try_recv().unwrap_or_else(|_| {
                     Err("worker vanished without reporting a result".to_string())

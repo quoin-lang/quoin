@@ -111,8 +111,11 @@ fn wrap_handle<'gc>(
     };
     vm.worker_registry.push(crate::worker::WorkerReg {
         unit: unit.to_string(),
+        label: unit.to_string(),
+        backing: "thread",
         inbox_tx: ch.inbox_tx.clone(),
         outbox_rx: ch.outbox_rx.clone(),
+        control_tx: ch.control_tx.clone(),
     });
     Ok(vm.new_native_state(
         mc,

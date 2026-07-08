@@ -1,5 +1,5 @@
 use crate::error::QuoinError;
-use crate::ext_sdk::{Host, HostExt};
+use crate::ext_sdk::HostExt;
 use crate::runtime::elem_tag::{ElemTag, check_insert};
 use crate::runtime::map::{keys_equal, map_hash_key};
 use crate::runtime::pretty::{PpShape, PrettyPrint};

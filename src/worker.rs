@@ -43,12 +43,28 @@ use crate::symbol::{Symbol, self_symbol};
 use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{VmOptions, VmState};
 
+/// A parent-initiated control request (docs/CONCURRENCY_ARCH.md §13.3).
+/// Each request CARRIES its reply lane, so any number may be in flight
+/// with no routing table; the worker's DRIVER answers opportunistically
+/// once per loop iteration — bounded staleness, no preemption.
+pub struct ControlReq {
+    pub kind: ControlKind,
+    pub reply: async_channel::Sender<WorkerMsg>,
+}
+
+pub enum ControlKind {
+    /// Answer with this worker's ps tree — its own `VM.ps` with each
+    /// sub-worker row's 'ps' filled by the same request, recursively.
+    PsTree,
+}
+
 /// The worker-side half of the lanes, injected into the worker's `VmState`
 /// at boot: `Worker.receive` parks on `inbox_rx`, `Worker.send:` pushes to
-/// `outbox_tx`.
+/// `outbox_tx`; the driver services `control_rx` (§13.3).
 pub struct WorkerLink {
     pub inbox_rx: async_channel::Receiver<WorkerMsg>,
     pub outbox_tx: async_channel::Sender<WorkerMsg>,
+    pub control_rx: async_channel::Receiver<ControlReq>,
 }
 
 /// Registry entry for `VM.ps`: plain lane clones — `async_channel`'s
@@ -57,8 +73,15 @@ pub struct WorkerLink {
 /// counts are small and the entries are a few pointers).
 pub struct WorkerReg {
     pub unit: String,
+    /// Human-readable label for `VM.ps`/`psTree` (defaults to `unit`; the
+    /// Join layer stamps its own — internal ids mean nothing to a Quoin
+    /// developer).
+    pub label: String,
+    /// 'thread' | 'process' (§13.2).
+    pub backing: &'static str,
     pub inbox_tx: async_channel::Sender<WorkerMsg>,
     pub outbox_rx: async_channel::Receiver<WorkerMsg>,
+    pub control_tx: async_channel::Sender<ControlReq>,
 }
 
 /// The parent-side half, held by the `Worker` handle instance.
@@ -66,6 +89,7 @@ pub struct WorkerChannels {
     pub inbox_tx: async_channel::Sender<WorkerMsg>,
     pub outbox_rx: async_channel::Receiver<WorkerMsg>,
     pub done_rx: async_channel::Receiver<Result<WireData, String>>,
+    pub control_tx: async_channel::Sender<ControlReq>,
 }
 
 // Counters for the `VM.stats` 'workers' section. Message counts are bumped
@@ -423,6 +447,7 @@ fn spawn_worker_with(
     let (inbox_tx, inbox_rx) = async_channel::unbounded();
     let (outbox_tx, outbox_rx) = async_channel::unbounded();
     let (done_tx, done_rx) = async_channel::bounded(1);
+    let (control_tx, control_rx) = async_channel::unbounded();
     let id = SPAWNED.fetch_add(1, Ordering::Relaxed);
     std::thread::Builder::new()
         .name(format!("qn-worker-{id}"))
@@ -435,6 +460,7 @@ fn spawn_worker_with(
                 body(WorkerLink {
                     inbox_rx,
                     outbox_tx,
+                    control_rx,
                 })
             }))
             .unwrap_or_else(|p| {
@@ -453,6 +479,7 @@ fn spawn_worker_with(
         inbox_tx,
         outbox_rx,
         done_rx,
+        control_tx,
     }
 }
 

@@ -204,8 +204,11 @@ fn host<'gc>(
     let ch = spawn_worker_service(path.clone(), class_name);
     vm.worker_registry.push(crate::worker::WorkerReg {
         unit: format!("svc:{path}"),
+        label: format!("svc:{path}"),
+        backing: "thread",
         inbox_tx: ch.inbox_tx.clone(),
         outbox_rx: ch.outbox_rx.clone(),
+        control_tx: ch.control_tx.clone(),
     });
     // Handshake: the loop's first act is a 'ready' message; a closed lane
     // instead means boot/compile/instantiation failed — the done lane says
