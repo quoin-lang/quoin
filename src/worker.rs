@@ -29,6 +29,7 @@ use gc_arena::{Arena, Gc, Rootable};
 use quoin_ext_proto::DataValue as WireData;
 
 use crate::compiler::Compiler;
+use crate::error::QuoinError;
 use crate::gcl;
 use crate::instruction::{Constant, Instruction, StaticBlock};
 use crate::parser::{NodeValue, try_parse_quoin_string_named};
@@ -39,21 +40,21 @@ use crate::runner::{
 use crate::runtime::extension::{value_to_wire, wire_to_value};
 use crate::runtime::runtime::build_block;
 use crate::symbol::{Symbol, self_symbol};
-use crate::value::{EnvFrame, NamespacedName, Value};
+use crate::value::{Block, EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{VmOptions, VmState};
 
 /// The worker-side half of the lanes, injected into the worker's `VmState`
 /// at boot: `Worker.receive` parks on `inbox_rx`, `Worker.send:` pushes to
 /// `outbox_tx`.
 pub struct WorkerLink {
-    pub inbox_rx: async_channel::Receiver<WireData>,
-    pub outbox_tx: async_channel::Sender<WireData>,
+    pub inbox_rx: async_channel::Receiver<WorkerMsg>,
+    pub outbox_tx: async_channel::Sender<WorkerMsg>,
 }
 
 /// The parent-side half, held by the `Worker` handle instance.
 pub struct WorkerChannels {
-    pub inbox_tx: async_channel::Sender<WireData>,
-    pub outbox_rx: async_channel::Receiver<WireData>,
+    pub inbox_tx: async_channel::Sender<WorkerMsg>,
+    pub outbox_rx: async_channel::Receiver<WorkerMsg>,
     pub done_rx: async_channel::Receiver<Result<WireData, String>>,
 }
 
@@ -77,15 +78,133 @@ pub fn note_message() {
     MESSAGES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// A block shipped to a worker (docs/CONCURRENCY_ARCH.md §10, PORTABLE
-/// BLOCKS): the `Send` template reference, the deep-copied snapshot of its
-/// free reads, and the global names it resolves — checked against the
-/// worker's own globals before the block runs, so a missing user definition
-/// is a clear error instead of a silent nil.
-pub struct PortableJob {
+/// One cross-worker message: plain data (the wire taxonomy), or — the L3
+/// enabler — a PORTABLE BLOCK, so pool workers can receive jobs and
+/// combinator wrappers can capture the user's per-item block. Blocks cross
+/// only at top level and as block-captures; a block nested INSIDE a data
+/// structure still refuses (the wire walkers own that taxonomy).
+#[derive(Clone, Debug)]
+pub enum WorkerMsg {
+    Data(WireData),
+    Block(PortableBlock),
+}
+
+/// A block shipped across a worker boundary (docs/CONCURRENCY_ARCH.md §10):
+/// the `Send` template reference, the deep-copied snapshot of its free
+/// reads (RECURSIVE — a captured block ships as its own `PortableBlock`),
+/// and the global names each level resolves — checked against the worker's
+/// own globals before running, so a missing user definition is a clear
+/// error instead of a silent nil.
+#[derive(Clone, Debug)]
+pub struct PortableBlock {
     pub template: Arc<StaticBlock>,
-    pub captures: Vec<(Symbol, WireData)>,
+    pub captures: Vec<(Symbol, PortableCapture)>,
     pub globals: Vec<NamespacedName>,
+}
+
+#[derive(Clone, Debug)]
+pub enum PortableCapture {
+    Data(WireData),
+    Block(Box<PortableBlock>),
+}
+
+/// Snapshot a block value into its portable form: scan for portability,
+/// then deep-copy each free read out of the capture chain — recursing when
+/// a capture is itself a block (its own scan applies). The depth cap
+/// converts capture cycles (`var f = ...; f = { f }`) into a clear error.
+pub fn snapshot_block<'gc>(
+    template: Arc<StaticBlock>,
+    parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+    depth: usize,
+) -> Result<PortableBlock, QuoinError> {
+    if depth > 8 {
+        return Err(QuoinError::Other(
+            "portable block captures nest too deeply (a block capturing itself?)".into(),
+        ));
+    }
+    let (frees, globals) = scan_portable(&template)
+        .map_err(|why| QuoinError::Other(format!("block is not portable: {why}")))?;
+    let mut captures = Vec::with_capacity(frees.len());
+    for sym in frees {
+        // Absent up the chain reads as nil in the interpreter; the snapshot
+        // mirrors that.
+        let val = parent_env
+            .and_then(|env| EnvFrame::get(env, sym))
+            .unwrap_or(Value::Nil);
+        let block_parts = if let Value::Object(obj) = val {
+            let borrowed = obj.borrow();
+            if let ObjectPayload::Block(b) = &borrowed.payload {
+                Some((b.template.clone(), b.parent_env))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let cap = match block_parts {
+            Some((t, env)) => PortableCapture::Block(Box::new(
+                snapshot_block(t, env, depth + 1)
+                    .map_err(|e| QuoinError::Other(format!("capture '{}': {e}", sym.as_str())))?,
+            )),
+            None => PortableCapture::Data(value_to_wire(val, None).map_err(|e| {
+                QuoinError::Other(format!("capture '{}' is not portable: {e}", sym.as_str()))
+            })?),
+        };
+        captures.push((sym, cap));
+    }
+    Ok(PortableBlock {
+        template,
+        captures,
+        globals,
+    })
+}
+
+/// Rebuild a shipped block as a live closure in THIS worker's arena:
+/// verify its global references, wire-copy the captures into a snapshot
+/// env frame (recursing for block captures), and close the template over
+/// it. Used for top-level jobs and for block-valued lane messages alike.
+pub(crate) fn rebuild_portable_value<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    pb: &PortableBlock,
+) -> Result<Value<'gc>, String> {
+    let env = rebuild_env(vm, mc, pb)?;
+    let inline_cache = vm.ic_cell_for(mc, &pb.template);
+    Ok(vm.new_block(
+        mc,
+        Block {
+            template: pb.template.clone(),
+            parent_env: Some(env),
+            enclosing_method_id: None,
+            decl_block: None,
+            inline_cache,
+        },
+    ))
+}
+
+fn rebuild_env<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    pb: &PortableBlock,
+) -> Result<Gc<'gc, RefLock<EnvFrame<'gc>>>, String> {
+    for g in &pb.globals {
+        if vm.globals.borrow().get(g).is_none() {
+            return Err(format!(
+                "global '{g}' is not defined in the worker (workers boot qnlib only \
+                 — put user definitions in a unit and Worker.spawn: it)"
+            ));
+        }
+    }
+    let mut env = EnvFrame::new(None);
+    for (sym, cap) in &pb.captures {
+        let v = match cap {
+            PortableCapture::Data(dv) => wire_to_value(vm, mc, dv, None)
+                .map_err(|e| format!("capture '{}': {e}", sym.as_str()))?,
+            PortableCapture::Block(inner) => rebuild_portable_value(vm, mc, inner)?,
+        };
+        env.bind(*sym, v);
+    }
+    Ok(gcl!(mc, env))
 }
 
 /// Scan a block template (recursively through nested literals) for
@@ -251,7 +370,7 @@ pub fn spawn_worker(path: String) -> WorkerChannels {
 /// Spawn a worker running a portable block (docs/CONCURRENCY_ARCH.md §10):
 /// same lanes, same lifecycle; `join` returns the BLOCK'S VALUE (copied),
 /// unlike unit workers' nil.
-pub fn spawn_worker_block(job: PortableJob) -> WorkerChannels {
+pub fn spawn_worker_block(job: PortableBlock) -> WorkerChannels {
     spawn_worker_with(move |link| run_worker_block(job, link))
 }
 
@@ -376,32 +495,19 @@ fn boot_worker_arena(link: WorkerLink) -> Result<ReplArena, String> {
 /// references against THIS VM's globals (clear error over silent nil),
 /// rebuild the closure over a snapshot env frame, drive it as the main
 /// task, and copy its value back for `join`.
-fn run_worker_block(job: PortableJob, link: WorkerLink) -> Result<WireData, String> {
+fn run_worker_block(job: PortableBlock, link: WorkerLink) -> Result<WireData, String> {
     let mut arena = boot_worker_arena(link)?;
 
     let mut start_err = None;
     arena.mutate_root(|mc, vm| {
-        for g in &job.globals {
-            if vm.globals.borrow().get(g).is_none() {
-                start_err = Some(format!(
-                    "global '{g}' is not defined in the worker (workers boot qnlib \
-                     only — put user definitions in a unit and Worker.spawn: it)"
-                ));
+        let env = match rebuild_env(vm, mc, &job) {
+            Ok(env) => env,
+            Err(e) => {
+                start_err = Some(e);
                 return;
             }
-        }
-        let mut env = EnvFrame::new(None);
-        for (sym, dv) in &job.captures {
-            match wire_to_value(vm, mc, dv, None) {
-                Ok(v) => env.bind(*sym, v),
-                Err(e) => {
-                    start_err = Some(format!("capture '{}': {e}", sym.as_str()));
-                    return;
-                }
-            }
-        }
-        let env_ref = gcl!(mc, env);
-        let block = vm.block_from_template(mc, job.template.clone(), Some(env_ref), None);
+        };
+        let block = vm.block_from_template(mc, job.template.clone(), Some(env), None);
         vm.start_block(mc, block, Vec::new(), None, None);
         install_main_task(mc, vm);
     });

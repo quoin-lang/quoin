@@ -1,0 +1,43 @@
+"* L3 parallel combinators (core/10-parallel.qn). Under the sharded test
+"* runner these execute INSIDE a worker, where the combinators deliberately
+"* fall back to serial (no recursive pools) — the equalities hold either
+"* way, and the portability refusal is UNIFORM (`portable!` runs on every
+"* path), so this suite passes identically in both contexts.
+
+(TestSuite.new:{ var name = 'Parallel' }).add:{
+    .test:collectMatchesSerialInOrder -> {
+        var items = #();
+        (0..3000).each:{ |i| items.add:i };
+        var f = { |x| x * 3 + 1 };
+        .is:{ items.parallelCollect:f } equalTo:(items.collect:f)
+    };
+
+    .test:reduceMatchesSerial -> {
+        var items = #();
+        (0..3000).each:{ |i| items.add:i };
+        .is:{ items.parallelReduce:{ |a b| a + b } } equalTo:(items.reduce:{ |a b| a + b })
+    };
+
+    .test:smallListsGateToSerial -> {
+        .is:{ #( 1 2 3 ).parallelCollect:{ |x| x + 1 } } equalTo:#( 2 3 4 )
+    };
+
+    .test:capturedDataShipsAsSnapshot -> {
+        var items = #();
+        (0..2500).each:{ |i| items.add:i };
+        var offset = 100;
+        var got = items.parallelCollect:{ |x| x + offset };
+        .is:{ got.at:0 } equalTo:100;
+        .is:{ got.at:2499 } equalTo:2599
+    };
+
+    .test:nonPortableBlockRaisesCatchably -> {
+        var items = #();
+        (0..2500).each:{ |i| items.add:i };
+        var acc = 0;
+        var refused = { items.parallelCollect:{ |x| acc = acc + x }; false }.catch:{ |e|
+            e.s.contains?:'acc'
+        };
+        .is:{ refused } equalTo:true
+    }
+}

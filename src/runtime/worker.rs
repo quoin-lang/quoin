@@ -26,16 +26,19 @@ use quoin_ext_proto::DataValue as WireData;
 use crate::error::QuoinError;
 use crate::io_backend::{IoRequest, IoResult};
 use crate::runtime::extension::{value_to_wire, wire_to_value};
+use crate::value::ObjectPayload;
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
-use crate::value::{EnvFrame, ObjectPayload};
-use crate::worker::{PortableJob, note_message, scan_portable, spawn_worker, spawn_worker_block};
+use crate::worker::{
+    WorkerMsg, note_message, rebuild_portable_value, snapshot_block, spawn_worker,
+    spawn_worker_block,
+};
 
 /// Parent-side handle state: the three channel ends. Plain `Send` data —
 /// nothing here touches the arena.
 #[derive(Debug)]
 pub struct NativeWorkerHandle {
-    inbox_tx: async_channel::Sender<WireData>,
-    outbox_rx: async_channel::Receiver<WireData>,
+    inbox_tx: async_channel::Sender<WorkerMsg>,
+    outbox_rx: async_channel::Receiver<WorkerMsg>,
     done_rx: async_channel::Receiver<Result<WireData, String>>,
     /// `join` consumes the done lane (its channel holds exactly one value);
     /// a second join is a clear error rather than a confusing hang.
@@ -56,12 +59,43 @@ unsafe impl<'gc> Collect<'gc> for NativeWorkerHandle {
     const NEEDS_TRACE: bool = false;
 }
 
-/// Copy a guest value onto the wire for a cross-worker message; the walker
-/// refuses blocks/symbols/instances/resources with its usual errors.
-fn to_message<'gc>(v: Value<'gc>) -> Result<WireData, QuoinError> {
+/// Copy a guest value into a cross-worker message. A BLOCK value ships as
+/// a portable block (template + capture snapshot — same rules as
+/// `Worker.start:`); everything else takes the wire walkers, whose
+/// taxonomy still refuses symbols/instances/resources — and blocks nested
+/// INSIDE data structures.
+fn to_message<'gc>(v: Value<'gc>) -> Result<WorkerMsg, QuoinError> {
+    if let Value::Object(obj) = v {
+        let block_parts = {
+            let borrowed = obj.borrow();
+            if let ObjectPayload::Block(b) = &borrowed.payload {
+                Some((b.template.clone(), b.parent_env))
+            } else {
+                None
+            }
+        };
+        if let Some((template, parent_env)) = block_parts {
+            let pb = snapshot_block(template, parent_env, 0)?;
+            note_message();
+            return Ok(WorkerMsg::Block(pb));
+        }
+    }
     let dv = value_to_wire(v, None)?;
     note_message();
-    Ok(dv)
+    Ok(WorkerMsg::Data(dv))
+}
+
+/// Decode a received cross-worker message into a live value: data through
+/// the wire walkers, blocks rebuilt over their capture snapshots.
+fn from_message<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    msg: &WorkerMsg,
+) -> Result<Value<'gc>, QuoinError> {
+    match msg {
+        WorkerMsg::Data(dv) => wire_to_value(vm, mc, dv, None),
+        WorkerMsg::Block(pb) => rebuild_portable_value(vm, mc, pb).map_err(QuoinError::Other),
+    }
 }
 
 /// Wrap freshly spawned lanes in a Worker-class handle instance.
@@ -120,34 +154,9 @@ pub fn build_worker_class() -> NativeClassBuilder {
                         .into(),
                 ));
             }
-            let (frees, globals) = scan_portable(&template)
-                .map_err(|why| QuoinError::Other(format!("Worker.start: {why}")))?;
-            let mut captures = Vec::with_capacity(frees.len());
-            for sym in frees {
-                // Absent up the chain reads as nil in the interpreter; the
-                // snapshot mirrors that.
-                let val = parent_env
-                    .and_then(|env| EnvFrame::get(env, sym))
-                    .unwrap_or(Value::Nil);
-                let dv = value_to_wire(val, None).map_err(|e| {
-                    QuoinError::Other(format!(
-                        "Worker.start: capture '{}' is not portable: {e}",
-                        sym.as_str()
-                    ))
-                })?;
-                note_message();
-                captures.push((sym, dv));
-            }
-            wrap_handle(
-                vm,
-                mc,
-                receiver,
-                spawn_worker_block(PortableJob {
-                    template,
-                    captures,
-                    globals,
-                }),
-            )
+            let pb = snapshot_block(template, parent_env, 0)
+                .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
+            wrap_handle(vm, mc, receiver, spawn_worker_block(pb))
         })
         .instance_method("send:", |vm, _mc, receiver, args| {
             let dv = to_message(args[0])?;
@@ -163,7 +172,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 .with_native_state::<NativeWorkerHandle, _, _>(|h| h.outbox_rx.clone())
                 .map_err(QuoinError::Other)?;
             match vm.await_io(IoRequest::WorkerRecv(rx))? {
-                IoResult::WorkerMsg(Some(dv)) => wire_to_value(vm, mc, &dv, None),
+                IoResult::WorkerMsg(Some(msg)) => from_message(vm, mc, &msg),
                 IoResult::WorkerMsg(None) => Ok(vm.new_nil(mc)),
                 other => Err(QuoinError::Other(format!(
                     "Worker.receive: unexpected result {other:?}"
@@ -201,7 +210,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
             };
             let rx = link.inbox_rx.clone();
             match vm.await_io(IoRequest::WorkerRecv(rx))? {
-                IoResult::WorkerMsg(Some(dv)) => wire_to_value(vm, mc, &dv, None),
+                IoResult::WorkerMsg(Some(msg)) => from_message(vm, mc, &msg),
                 IoResult::WorkerMsg(None) => Ok(vm.new_nil(mc)),
                 other => Err(QuoinError::Other(format!(
                     "Worker.receive: unexpected result {other:?}"

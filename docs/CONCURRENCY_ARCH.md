@@ -420,6 +420,20 @@ BEAM-code-loading style (units know their source).
   requirement (per-worker partials, then combine). `parallelEach:` is
   deliberately absent in v1: worker-side effects don't touch the caller's
   heap, so it only makes sense for IO and invites confusion.
+
+  **SHIPPED (v1)** as `qnlib/core/10-parallel.qn` over a lazily-started warm
+  pool of block-job workers (blocks now cross the lanes as portable-block
+  MESSAGES, recursively — the user's per-item block rides as a capture of
+  the chunk job). Measured honestly (profiling/parallel-combinators/):
+  cheap per-item blocks NEVER pay (copy-bound at every count — the real
+  eligibility knob is per-item work, which no gate can see; stated in the
+  combinator docs); heavy blocks reach 1.9× at the measured pool sweet spot
+  of 4 (8 workers ran slower — P/E-core mix + allocator bandwidth; the
+  scaling ceiling is a recorded open item, not understood yet). One flight
+  at a time (no per-job lane addressing); concurrent calls fall back
+  serial. Refusal semantics are UNIFORM: `Block.portable!` (the shape
+  scan) runs on every path incl. serial fallbacks, so a write-capturing
+  block refuses identically at any input size and inside workers.
 - **L4 — `WorkerService`**, the stateful story — and the extension system
   pays off again: Phase-3 extension-backed classes already install proxy
   classes whose method sends dispatch over a wire with the

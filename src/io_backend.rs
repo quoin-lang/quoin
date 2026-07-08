@@ -88,7 +88,7 @@ pub enum IoRequest {
     /// Park until the next cross-worker message on this lane (a worker's
     /// inbox or a parent's view of a worker's outbox). The endpoint is
     /// plain `Send` data; resolving to `None` means the far side closed.
-    WorkerRecv(async_channel::Receiver<quoin_ext_proto::DataValue>),
+    WorkerRecv(async_channel::Receiver<crate::worker::WorkerMsg>),
     /// Park until the worker's done lane reports (its unit finished or
     /// failed); resolving the lane closed means the worker vanished.
     WorkerJoin(async_channel::Receiver<Result<quoin_ext_proto::DataValue, String>>),
@@ -138,7 +138,7 @@ pub enum IoResult {
     Computed(Result<crate::compute::ComputeOut, String>),
     /// The next cross-worker message, or `None` if the lane is closed and
     /// drained (the far side exited).
-    WorkerMsg(Option<quoin_ext_proto::DataValue>),
+    WorkerMsg(Option<crate::worker::WorkerMsg>),
     /// A worker's terminal report: its unit's outcome, or an `Err` for the
     /// lane closing unreported (the worker vanished).
     WorkerDone(Result<quoin_ext_proto::DataValue, String>),

@@ -117,6 +117,20 @@ pub fn build_block_class() -> NativeClassBuilder {
         .instance_method("==:", |vm, mc, receiver, args| {
             Ok(vm.new_bool(mc, receiver == args[0]))
         })
+        // Shape-level portability check (docs/CONCURRENCY_ARCH.md §10): raises
+        // the scanner's refusal (write-captures, ^^, self/@fields, guarded,
+        // class/method definition) or answers the block. The parallel
+        // combinators call it on EVERY path — including serial fallbacks — so
+        // refusal semantics don't depend on input size or worker context.
+        // (Capture-VALUE portability is checked only when actually shipping:
+        // verifying it here would deep-copy the captures just to throw them
+        // away.)
+        .instance_method("portable!", |_vm, _mc, receiver, _args| {
+            let block = recv!(receiver, Block);
+            crate::worker::scan_portable(&block.template)
+                .map_err(|why| QuoinError::Other(format!("block is not portable: {why}")))?;
+            Ok(receiver)
+        })
         // `{…}.catch:{|e| …}` — run the protected block; on a throw, the handler runs if its
         // declared exception type matches (an untyped `|e|` catches everything), else the error
         // re-raises to an enclosing `catch:`.
