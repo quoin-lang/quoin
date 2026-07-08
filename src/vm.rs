@@ -1081,7 +1081,7 @@ impl<'gc> VmState<'gc> {
             });
             return Ok(());
         }
-        if let Ok(vec) = v.with_native_state::<NativeSetState, _, _>(|s| s.get_vec().to_vec()) {
+        if let Ok(vec) = v.with_native_state::<NativeSetState, _, _>(|s| s.values()) {
             for (i, e) in vec.iter().enumerate() {
                 elem_tag::check_insert(Some(tag), "Set", e, Some(i as i64), |val, n| {
                     self.value_matches_type(*val, n)
@@ -1178,7 +1178,15 @@ impl<'gc> VmState<'gc> {
 
     pub fn new_set(&self, mc: &Mutation<'gc>, set: Vec<Value<'gc>>) -> Value<'gc> {
         let class = self.get_or_create_builtin_class(mc, "Set");
-        let boxed_state: Box<dyn AnyCollect> = Box::new(NativeSetState::new(set));
+        // Sole caller passes an empty vec (the NewSet literal dedups via
+        // set_add); accept scalar-hashable elements defensively.
+        let mut state = NativeSetState::new_empty();
+        for v in set {
+            let h = crate::value::value_hash_scalar(&v)
+                .expect("new_set elements must be scalar-hashable; use set_add for instances");
+            state.append(h, v);
+        }
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
             mc,
             Object {
@@ -1196,18 +1204,8 @@ impl<'gc> VmState<'gc> {
         set_val: Value<'gc>,
         value: Value<'gc>,
     ) -> Result<bool, QuoinError> {
-        let len = set_val
-            .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-            .map_err(|e| QuoinError::Other(e))?;
-        for i in 0..len {
-            let elem = set_val
-                .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
-                .map_err(|e| QuoinError::Other(e))?;
-            if self.call_method(mc, elem, "==:", vec![value])?.is_true() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let (_, found) = crate::runtime::set::set_find(self, mc, set_val, value)?;
+        Ok(found.is_some())
     }
 
     /// Insert `value` into `set_val` unless an equal element is already present.
@@ -1218,12 +1216,13 @@ impl<'gc> VmState<'gc> {
         set_val: Value<'gc>,
         value: Value<'gc>,
     ) -> Result<bool, QuoinError> {
-        if self.set_contains(mc, set_val, value)? {
+        let (h, found) = crate::runtime::set::set_find(self, mc, set_val, value)?;
+        if found.is_some() {
             Ok(false)
         } else {
             set_val
-                .with_native_state_mut::<NativeSetState, _, _>(mc, |s| s.get_vec_mut().push(value))
-                .map_err(|e| QuoinError::Other(e))?;
+                .with_native_state_mut::<NativeSetState, _, _>(mc, |s| s.append(h, value))
+                .map_err(QuoinError::Other)?;
             Ok(true)
         }
     }
@@ -1236,23 +1235,16 @@ impl<'gc> VmState<'gc> {
         set_val: Value<'gc>,
         value: Value<'gc>,
     ) -> Result<bool, QuoinError> {
-        let len = set_val
-            .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-            .map_err(|e| QuoinError::Other(e))?;
-        for i in 0..len {
-            let elem = set_val
-                .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
-                .map_err(|e| QuoinError::Other(e))?;
-            if self.call_method(mc, elem, "==:", vec![value])?.is_true() {
+        let (_, found) = crate::runtime::set::set_find(self, mc, set_val, value)?;
+        match found {
+            Some(idx) => {
                 set_val
-                    .with_native_state_mut::<NativeSetState, _, _>(mc, |s| {
-                        s.get_vec_mut().remove(i);
-                    })
-                    .map_err(|e| QuoinError::Other(e))?;
-                return Ok(true);
+                    .with_native_state_mut::<NativeSetState, _, _>(mc, |s| s.remove_at(idx))
+                    .map_err(QuoinError::Other)?;
+                Ok(true)
             }
+            None => Ok(false),
         }
-        Ok(false)
     }
 
     pub fn new_regex(&self, mc: &Mutation<'gc>, regex: Regex) -> Value<'gc> {

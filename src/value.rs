@@ -635,7 +635,7 @@ impl<'gc> fmt::Display for Value<'gc> {
                     }
                     _ if o_borrow.class_name() == "Set" => {
                         if let Ok(res) = self.with_native_state::<NativeSetState, _, _>(|s| {
-                            let vec = s.get_vec();
+                            let vec = s.values();
                             let mut out = String::new();
                             out.push_str("#<");
                             for (i, val) in vec.iter().enumerate() {

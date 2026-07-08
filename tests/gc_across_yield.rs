@@ -14,9 +14,13 @@ use std::process::Command;
 #[test]
 fn set_literal_survives_parking_equality() {
     let script = r#"
+"* The hashed-Set contract: a class overriding ==: must override hash too
+"* (a constant hash here forces every pair into one bucket, so the parking
+"* ==: below actually runs — which is this test's whole point).
 Sleepy <- { | @n |
     init -> { };
     n -> { @n };
+    hash -> { 1 };
     #'==:' -> { |other| Async.sleep:2; ^@n == (other.n) }
 };
 
