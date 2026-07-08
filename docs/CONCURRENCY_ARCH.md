@@ -647,9 +647,11 @@ unchanged by construction, because none of them can see past the channels.
   "worker exited" path fires unchanged.
 - **What crosses**: DATA ONLY, exactly the extension taxonomy. Portable
   blocks do NOT cross a process boundary in v1 — templates are `Arc`
-  references, meaningless in another address space. (Shipping block
-  SOURCE is a recorded maybe-later; blocks don't carry their text today.)
-  `Worker.start:{...} backing:'process'` refuses loudly.
+  references, meaningless in another address space. The v1 model is
+  explicit provisioning: the child's UNIT imports/defines everything it
+  runs (decided — the alternative, shipping block SOURCE, is recorded for
+  later; blocks don't carry their text today). `Worker.start:{...}
+  backing:'process'` refuses loudly.
 - **What process backing BUYS** (the reasons to reach for it): real
   multicore for compute-heavy fleets (the cluster-ceiling escape —
   processes timeshare the fast cluster, one process's threads don't);
@@ -671,10 +673,11 @@ unchanged by construction, because none of them can see past the channels.
 - Constructs choose for their fleet: a future `WorkerPool.size:backing:`;
   the L3 default pool stays thread-backed (its fine-grained chunk traffic
   is exactly what the process boundary taxes).
-- OPEN: a process-default policy for services (the "heavyweight isolated
-  tier" reading — threads as the low-latency opt-in). Defer until process
-  backing has real mileage; flipping a default is cheap, un-flipping is
-  not.
+- DECIDED: thread stays the default, and the Quoin API exposes BOTH
+  backings on every spawn surface (`Worker.spawn:backing:`,
+  `Worker.start:backing:` — refusing 'process' until source-shipping —
+  and `WorkerService.host:class:backing:`). A process-default policy for
+  services stays open until process backing has real mileage.
 
 ### 13.3 The control lane (the enabler for ps + join bookkeeping)
 
@@ -738,10 +741,10 @@ var results = Join.all:#(
 - **Observability**: join edges are exactly what `psTree` shows —
   the graph is the ps topology plus in-flight leaf states. No separate
   bookkeeping channel needed beyond §13.3: the graph IS the spawn tree.
-- OPEN: whether `Join` nodes deserve VM-level identity (a graph id
-  stamped into registry rows so `psTree` labels which Join owns which
-  worker) or stay a pure library convention. Lean: stamp a label string
-  through spawn (cheap, purely observability).
+- DECIDED: `Join` nodes stamp human-readable LABELS through spawn into
+  the registry rows (`psTree` shows which Join owns which worker) —
+  internal ids mean nothing to a Quoin developer. Spawn surfaces grow an
+  optional label; the registry row carries it.
 
 ### 13.6 Build order for this arc
 
