@@ -460,7 +460,12 @@ BEAM-code-loading style (units know their source).
   already designed and stress-tested; C2 reuses rather than invents.
 
   **SHIPPED (v1)**: `WorkerService.host:class:` (+ `backing:` — 'thread'
-  now, 'process' reserved with a loud error). The proxy forwards through
+  now, 'process' reserved with a loud error). To be explicit about the
+  substrate: v1 services run on the SAME thread isolates `Worker.spawn:`
+  uses (a service shows in `VM.ps` as an ordinary `svc:` worker row) —
+  service-vs-worker is INTERFACE (proxy + sticky state + serialized
+  access), not substrate. The substrate choice is what `backing:` reserves,
+  designed in §13. The proxy forwards through
   the dispatch MNU seam (lookup-miss branch only — the hot path never pays)
   in both the interpreter and the compiled outcall arm; callers serialize
   on a one-token internal lane (fair parking on existing machinery, no
@@ -510,6 +515,11 @@ unification behind one combinator is an optimization to earn with data, not
 a founding requirement.
 
 ## 11. Build order
+
+**Status: steps 1–6 SHIPPED** (C1 4.4×; Arc slice flat; C2 v1; portable
+blocks; L3 at 2.7× after the scaling fix; L4 services). Next: **§13 —
+process backing + the join graph + distributed ps** (one arc). C3 remains
+data-gated; `[Num]`-on-C1 remains the independent parallel track.
 
 1. **C1 offload pool** — `IoRequest::Compute`, the Send bridge, 2-3 op
    families (Bytes hashing/codec, regex, msgpack encode), crossover
@@ -601,3 +611,148 @@ dependency with the C2/library line.
   boundary — likely the extension wire's UDS + msgpack verbatim, which
   would make a process-backed service nearly indistinguishable from an
   extension (worth unifying rather than paralleling).
+
+
+---
+
+## 13. Process backing, the join graph, and distributed ps (the next arc — DESIGN)
+
+Three deliverables that are really one system: workers that can run as
+child PROCESSES, a structured way to compose and join work across any mix
+of threads and processes, and observability that follows the topology.
+
+### 13.1 Process backing as a GENERAL worker mechanism
+
+Backing belongs to the `Worker` primitive, not to services: anything built
+on workers (services, pools, raw spawns) then chooses substrate at spawn.
+
+**The unification that makes it small: the lanes stay the interface.** A
+worker IS its three channels (inbox/outbox/done) plus a control lane
+(§13.3); nothing above the lanes knows what is on the other end. Thread
+backing connects them to a VM on a spawned thread (today, unchanged).
+Process backing connects them to a PUMP — a small bridge that frames
+channel messages over a unix socket to a child `qn` process, whose own
+pump feeds identical channels into the SAME `run_worker_unit` machinery.
+Handles, the registry, `VM.ps` rows, `WorkerService`, join semantics: all
+unchanged by construction, because none of them can see past the channels.
+
+- **Transport**: the extension wire verbatim — UDS + the msgpack codec the
+  proto crate already ships (`DataValue` encode/decode exists; frames get
+  a small envelope: `data` / `ready` / `done(ok|err)` / `ps` / `control`).
+  Unique socket paths ride the existing pid+counter scheme.
+- **Child side**: a new runner mode (`qn worker-serve <sock> <unit.qn>`)
+  that connects back, handshakes, then runs the standard worker body with
+  pump-backed lanes. Boot failures and panics travel the done frame; a
+  dead socket (EOF) closes the parent-side lanes, so every existing
+  "worker exited" path fires unchanged.
+- **What crosses**: DATA ONLY, exactly the extension taxonomy. Portable
+  blocks do NOT cross a process boundary in v1 — templates are `Arc`
+  references, meaningless in another address space. (Shipping block
+  SOURCE is a recorded maybe-later; blocks don't carry their text today.)
+  `Worker.start:{...} backing:'process'` refuses loudly.
+- **What process backing BUYS** (the reasons to reach for it): real
+  multicore for compute-heavy fleets (the cluster-ceiling escape —
+  processes timeshare the fast cluster, one process's threads don't);
+  kernel-grade failure isolation (a native fault kills one child, not the
+  world); and REAL CANCELLATION — a process can be killed. Thread workers
+  can only be orphaned; process workers get `terminate` (SIGTERM →
+  SIGKILL) as first-class lifecycle, which the join graph's cancel policy
+  exploits.
+- **Costs, stated**: per-message serialize + syscalls (the wire floor is
+  ~15µs/round-trip) versus in-memory tree copies; full `qn` spawn + boot
+  per worker versus in-process boot.
+
+### 13.2 Specifying backing in Quoin code
+
+- Per spawn, explicit: `Worker.spawn:'u.qn' backing:'process'`,
+  `WorkerService.host:class:backing:` (surface already reserved), and a
+  `Worker.spawn:backing:` variant. `'thread'` stays the default
+  everywhere: cheap lanes and portable blocks are the 99% case.
+- Constructs choose for their fleet: a future `WorkerPool.size:backing:`;
+  the L3 default pool stays thread-backed (its fine-grained chunk traffic
+  is exactly what the process boundary taxes).
+- OPEN: a process-default policy for services (the "heavyweight isolated
+  tier" reading — threads as the low-latency opt-in). Defer until process
+  backing has real mileage; flipping a default is cheap, un-flipping is
+  not.
+
+### 13.3 The control lane (the enabler for ps + join bookkeeping)
+
+Each worker link gains a fourth lane: `control` (request/response frames,
+parent-initiated). The key mechanism: **the worker's DRIVER answers
+control frames opportunistically once per loop iteration** — between task
+resumes, i.e. at least every `QN_BATCH` steps even while a task is
+compute-bound — so a busy worker answers ps requests with bounded
+staleness (µs–ms) without preemption, and a truly wedged worker (stuck in
+one native call) reports as `unresponsive` after a short deadline, with
+its lane depths still visible from the parent side. For process workers
+the pump forwards control frames over the socket; same protocol, same
+driver hook.
+
+### 13.4 Distributed ps
+
+`VM.ps` stays local and cheap. A new `VM.psTree` walks the topology: for
+each registry row it sends `ps` on the control lane (bounded deadline,
+concurrent fan-out), and each worker answers with ITS `VM.ps` — which
+recursively includes its own workers' subtrees. The result nests the
+whole thread/process tree in one data structure:
+
+```quoin
+VM.psTree → #{ 'tasks': #(…) 'workers': #(
+    #{ 'id': 0 'unit': 'svc:index.qn' 'backing': 'thread' 'state': 'running'
+       'ps': #{ 'tasks': #(…) 'workers': #(…) } }
+    #{ 'id': 1 'unit': 'shard.qn' 'backing': 'process' 'pid': 4711
+       'ps': 'unresponsive (120ms)' } ) … }
+```
+
+Workers/rows gain `backing` (+ `pid` for processes). Pull-based on demand
+— no heartbeats, no background traffic; the price of a snapshot is paid by
+whoever asks for it. `$ps` grows a `--tree` variant rendering the nesting
+as indentation.
+
+### 13.5 The join graph
+
+Composition already half-exists: worker waits are parked tasks, so
+`Async.gather:` nests joins today. What the graph adds is STRUCTURE with
+POLICY — a declarative tree of work whose result is a tree, with
+first-class failure semantics:
+
+```quoin
+var results = Join.all:#(
+    (Join.worker:'shard-a.qn' send:jobA backing:'process')
+    (Join.worker:'shard-b.qn' send:jobB backing:'process')
+    (Join.all:#( (Join.start:{ heavyLocal }) (Join.service:idx call:'flush') ))
+) onError:'cancelRest';
+```
+
+- **Shape**: a qnlib combinator layer (like L3) over the existing
+  primitives — `Join.worker:`/`start:`/`service:`/`all:`/`any:` build a
+  spec tree; `await` (or the implicit terminal) spawns leaves, gathers
+  structurally, and returns the isomorphic result tree. Leaves are
+  ordinary handles, so a Join node is inspectable mid-flight.
+- **Error policy per node**: `'cancelRest'` (first error cancels the
+  siblings — orphaning thread workers, TERMINATING process workers: the
+  first place real cancellation pays), `'collect'` (run all, return
+  results-and-errors), `'race'` (`any:` — first success wins, rest
+  cancelled).
+- **Observability**: join edges are exactly what `psTree` shows —
+  the graph is the ps topology plus in-flight leaf states. No separate
+  bookkeeping channel needed beyond §13.3: the graph IS the spawn tree.
+- OPEN: whether `Join` nodes deserve VM-level identity (a graph id
+  stamped into registry rows so `psTree` labels which Join owns which
+  worker) or stay a pure library convention. Lean: stamp a label string
+  through spawn (cheap, purely observability).
+
+### 13.6 Build order for this arc
+
+1. Control lane + driver hook (thread backing first — it unifies
+   everything after).
+2. `VM.psTree` + `$ps` tree rendering over thread workers.
+3. The pump + `qn worker-serve` + process backing for `Worker.spawn:` /
+   `WorkerService.host:` (data-only, terminate lifecycle).
+4. `psTree` across process workers (same frames through the pump —
+   should be free if 1–3 are right).
+5. `Join` combinator layer + cancel/error policies (+ terminate for
+   process leaves).
+6. Measure: wire floor per backing, boot costs, a mixed-tree demo;
+   revisit the services-default-backing open question with data.
