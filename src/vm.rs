@@ -3701,6 +3701,40 @@ impl<'gc> VmState<'gc> {
     /// `parent_env` Gc stays rooted in the traced `aot_sites` vec) for the
     /// argument-phase check.
     #[inline]
+    /// Block-call site peek (D2-for-blocks): the identity is the block's
+    /// TEMPLATE id (every closure shares the `Block` class, so the method
+    /// cells' receiver-class guard would alias all of them). Returns the
+    /// cached entry when live.
+    #[inline]
+    pub(crate) fn aot_block_site_peek(
+        &self,
+        site: usize,
+        template_id: u32,
+    ) -> Option<&'static crate::codegen::AotEntry> {
+        let cell = self.aot_sites.get(site)?;
+        let entry = cell.entry?;
+        if cell.epoch != self.dispatch_epoch || entry.template_id != template_id {
+            return None;
+        }
+        Some(entry)
+    }
+
+    /// Fill a block-call site cell (entry + epoch only — the template-id
+    /// guard lives on the entry itself).
+    pub(crate) fn aot_block_site_fill(
+        &mut self,
+        site: usize,
+        entry: &'static crate::codegen::AotEntry,
+    ) {
+        if site >= self.aot_sites.len() {
+            self.aot_sites.resize(site + 1, AotSiteCell::default());
+        }
+        let cell = &mut self.aot_sites[site];
+        *cell = AotSiteCell::default();
+        cell.epoch = self.dispatch_epoch;
+        cell.entry = Some(entry);
+    }
+
     pub(crate) fn aot_site_peek(
         &self,
         site: usize,

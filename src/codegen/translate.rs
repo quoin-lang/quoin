@@ -2002,12 +2002,30 @@ impl<'a> Translator<'a> {
         let (ak, abits) = self.encode(b, fx, arg);
         let out = self.alloc_scratch()?;
         let out_idx = self.abs_slot(b, fx, out);
-        let (tid_v, ip_v, len_v) = self.site_consts(b, ip);
+        let (tid_v, _ip_v, len_v) = self.site_consts(b, ip);
+        // Block-call sites get D2-style cells too (guarded by TEMPLATE id —
+        // all blocks share one class, so the receiver-class guard the
+        // method cells use would alias every closure). The cell caches the
+        // template's entry, killing the per-element registry RwLock the
+        // combinator loops paid. Site id rides the ip lane's high bits,
+        // same packing as the outcall helper.
+        let site = {
+            let s = self
+                .prior_sites
+                .as_ref()
+                .and_then(|m| m.get(&ip).copied())
+                .unwrap_or_else(crate::codegen::next_outcall_site);
+            self.site_log.push((ip, s));
+            s
+        };
+        let ip_site = b
+            .ins()
+            .iconst(types::I64, (ip as i64) | ((i64::from(site)) << 32));
         let f = self.func_ref(b, self.helpers.block_call);
         let call = b.ins().call(
             f,
             &[
-                fx.vm, fx.mc, tid_v, ip_v, len_v, rk, rbits, ak, abits, out_idx,
+                fx.vm, fx.mc, tid_v, ip_site, len_v, rk, rbits, ak, abits, out_idx,
             ],
         );
         let tag = b.inst_results(call)[0];

@@ -333,7 +333,7 @@ pub(super) unsafe extern "C" fn block_call(
     vm: *mut c_void,
     mc: *const c_void,
     tid: i64,
-    ip: i64,
+    ip_site: i64,
     bc_len: i64,
     recv_kind: i64,
     recv_bits: i64,
@@ -342,6 +342,10 @@ pub(super) unsafe extern "C" fn block_call(
     out_idx: i64,
 ) -> u8 {
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    // The block-site id rides the ip lane's high bits (same packing as
+    // `outcall`).
+    let ip = ip_site & 0xffff_ffff;
+    let site = (ip_site >> 32) as u32;
     let recv = decode(vm, recv_kind, recv_bits);
     let arg = decode(vm, arg_kind, arg_bits);
     let block = match recv {
@@ -370,15 +374,33 @@ pub(super) unsafe extern "C" fn block_call(
     };
     let self_val = super::self_or_arg_self(&block, arg);
     if vm.aot.outcall_nesting < super::spec::MAX_OUTCALL_NESTING
-        && let Some(tid) = block.template.template_id
-        && let Some(entry) = super::block_entry_for(vm, tid)
+        && let Some(btid) = block.template.template_id
     {
-        match super::invoke_block(vm, mc, entry, recv, arg, self_val) {
-            super::AotOutcome::Value(v) => {
-                return slot_write(vm, out_idx, v);
+        // The site cell caches the template's entry — a hit skips the
+        // registry RwLock the combinator loops paid PER ELEMENT.
+        let cached = if site != u32::MAX {
+            vm.aot_block_site_peek(site as usize, btid)
+        } else {
+            None
+        };
+        let entry = match cached {
+            Some(e) => Some(e),
+            None => {
+                let e = super::block_entry_for(vm, btid);
+                if let (Some(e), true) = (e, site != u32::MAX) {
+                    vm.aot_block_site_fill(site as usize, e);
+                }
+                e
             }
-            super::AotOutcome::Err(e) => return store_err(vm, e),
-            super::AotOutcome::Bail => {}
+        };
+        if let Some(entry) = entry {
+            match super::invoke_block(vm, mc, entry, recv, block, arg, self_val) {
+                super::AotOutcome::Value(v) => {
+                    return slot_write(vm, out_idx, v);
+                }
+                super::AotOutcome::Err(e) => return store_err(vm, e),
+                super::AotOutcome::Bail => {}
+            }
         }
     }
     // Interpreted fallback: same self-or-arg answer (a parameterless block

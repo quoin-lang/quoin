@@ -1253,6 +1253,7 @@ pub fn invoke_block<'gc>(
     mc: &gc_arena::Mutation<'gc>,
     entry: &'static AotEntry,
     block_val: Value<'gc>,
+    block: gc_arena::Gc<'gc, crate::value::Block<'gc>>,
     arg: Value<'gc>,
     self_val: Value<'gc>,
 ) -> AotOutcome<'gc> {
@@ -1265,13 +1266,8 @@ pub fn invoke_block<'gc>(
     // closure does (S5) — including `None` (a homeless block's `^^` errors,
     // exactly as interpreted). A template is never a `^^` TARGET itself
     // (`HomeCtx::Propagate`, not `Mint` — so `finish_frame` never consumes).
-    let (enclosing_env, home_id) = match block_val {
-        Value::Object(obj) => match &obj.borrow().payload {
-            crate::value::ObjectPayload::Block(b) => (b.parent_env, b.enclosing_method_id),
-            _ => (None, None),
-        },
-        _ => (None, None),
-    };
+    // The caller already holds the block payload — no second object borrow.
+    let (enclosing_env, home_id) = (block.parent_env, block.enclosing_method_id);
     let base = vm.stack.len();
     vm.stack.push(self_val); // slot 0: self (self-or-arg, resolved by the caller)
     vm.stack.push(arg); // slot 1: the parameter (its own cell)

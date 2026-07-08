@@ -107,7 +107,9 @@ pub fn build_block_class() -> NativeClassBuilder {
                 && let Some(entry) = crate::codegen::block_entry_for(vm, tid)
             {
                 let self_val = crate::codegen::self_or_arg_self(&block, arg_val);
-                match crate::codegen::invoke_block(vm, mc, entry, receiver, arg_val, self_val) {
+                match crate::codegen::invoke_block(
+                    vm, mc, entry, receiver, block, arg_val, self_val,
+                ) {
                     crate::codegen::AotOutcome::Value(v) => return Ok(v),
                     crate::codegen::AotOutcome::Err(e) => return Err(e),
                     crate::codegen::AotOutcome::Bail => {}
