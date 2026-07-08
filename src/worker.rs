@@ -51,6 +51,16 @@ pub struct WorkerLink {
     pub outbox_tx: async_channel::Sender<WorkerMsg>,
 }
 
+/// Registry entry for `VM.ps`: plain lane clones — `async_channel`'s
+/// `len()`/`is_closed()` give live queue depths and running/exited state
+/// with zero bookkeeping. Registered at spawn, never removed (worker
+/// counts are small and the entries are a few pointers).
+pub struct WorkerReg {
+    pub unit: String,
+    pub inbox_tx: async_channel::Sender<WorkerMsg>,
+    pub outbox_rx: async_channel::Receiver<WorkerMsg>,
+}
+
 /// The parent-side half, held by the `Worker` handle instance.
 pub struct WorkerChannels {
     pub inbox_tx: async_channel::Sender<WorkerMsg>,

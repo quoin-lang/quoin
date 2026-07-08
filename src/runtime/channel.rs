@@ -286,6 +286,7 @@ impl<'gc> VmState<'gc> {
         if let Some(t) = self.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
             t.parked_on_channel = true;
         }
+        self.set_park_info("channel send".to_string(), Some(receiver));
         match self.channel_park(mc, receiver)? {
             ParkOutcome::SendAccepted => Ok(()),
             ParkOutcome::Closed => Err(QuoinError::ValueError(
@@ -339,6 +340,7 @@ impl<'gc> VmState<'gc> {
         if let Some(t) = self.sched.tasks.get_mut(me.0).and_then(|t| t.as_mut()) {
             t.parked_on_channel = true;
         }
+        self.set_park_info("channel receive".to_string(), Some(receiver));
         match self.channel_park(mc, receiver)? {
             ParkOutcome::Received(v) => Ok(Some(v)),
             ParkOutcome::Closed => Ok(None),

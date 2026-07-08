@@ -129,6 +129,12 @@ pub fn stats() -> (usize, usize, usize) {
     )
 }
 
+/// Pool jobs submitted but not yet delivered (`VM.ps`).
+pub fn in_flight() -> usize {
+    let (s, c, _) = stats();
+    s.saturating_sub(c)
+}
+
 /// Record a gated op that ran inline (below threshold or pool disabled).
 pub fn note_inline() {
     INLINE.fetch_add(1, Ordering::Relaxed);

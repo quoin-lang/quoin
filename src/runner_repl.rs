@@ -90,11 +90,17 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
             println!("  $globals [pre]    list defined classes and values (optional prefix)");
             println!("  $class <Name>     show a class: parent, mixins, ivars, methods");
             println!("  $load <file.qn>   run a .qn file into the session");
+            println!("  $ps               show tasks, fibers, workers, and waits");
             println!("  $reset            clear session locals");
             println!("  $help             this help");
             println!("  $quit / $exit     leave the REPL (also Ctrl-D)");
             println!("Anything else is evaluated as Quoin; definitions and lowercase");
             println!("variables persist across lines.");
+        }
+        "ps" => {
+            let out =
+                arena.mutate_root(|_mc, vm| format_ps(&crate::runtime::vm_stats::ps_data(vm)));
+            print!("{out}");
         }
         "reset" => {
             arena.mutate_root(|mc, vm| {
@@ -583,4 +589,59 @@ pub(crate) fn run_repl_piped(arena: &mut ReplArena) {
             }
         }
     }
+}
+
+/// Render the `VM.ps` snapshot as the `$ps` table.
+fn format_ps(data: &crate::runtime::vm_stats::PsData) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "TASKS");
+    let _ = writeln!(
+        out,
+        "  {:>3}  {:<8} {:>6}  {:>6}  WAITING ON",
+        "ID", "STATE", "FIBERS", "PARENT"
+    );
+    for t in &data.tasks {
+        let parent = t.parent.map_or("-".to_string(), |p| p.to_string());
+        let mut on = t.on.clone().unwrap_or_else(|| "-".to_string());
+        if let Some((cap, buffered, recv, send)) = t.channel {
+            let _ = write!(on, " [buf {buffered}/{cap}, recv {recv}, send {send}]");
+        }
+        if !t.awaiting.is_empty() {
+            let ids: Vec<String> = t.awaiting.iter().map(|c| c.to_string()).collect();
+            let _ = write!(on, " (awaiting {})", ids.join(", "));
+        }
+        let _ = writeln!(
+            out,
+            "  {:>3}  {:<8} {:>6}  {:>6}  {on}",
+            t.id, t.state, t.fibers, parent
+        );
+    }
+    if !data.workers.is_empty() {
+        let _ = writeln!(out, "WORKERS");
+        let _ = writeln!(
+            out,
+            "  {:>3}  {:<8} {:>3}  {:>3}  UNIT",
+            "ID", "STATE", "IN", "OUT"
+        );
+        for w in &data.workers {
+            let state = if w.running { "running" } else { "exited" };
+            let _ = writeln!(
+                out,
+                "  {:>3}  {:<8} {:>3}  {:>3}  {}",
+                w.id, state, w.inbox, w.outbox, w.unit
+            );
+        }
+    }
+    let worker_note = if data.is_worker {
+        "  (inside a worker)"
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        out,
+        "io in flight: {}   compute in flight: {}{worker_note}",
+        data.io_in_flight, data.compute_in_flight
+    );
+    out
 }

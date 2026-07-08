@@ -121,6 +121,15 @@ pub struct Task<'gc> {
     /// it. See `src/runtime/channel.rs`.
     #[collect(require_static)]
     pub parked_on_channel: bool,
+    /// What this task is parked on, human-readable ("io: sleep 500ms",
+    /// "channel receive", "gather", ...). Set at the park sites, cleared on
+    /// becoming current. Purely observability (`VM.ps` / `$ps`).
+    #[collect(require_static)]
+    pub park_label: Option<String>,
+    /// The VALUE this task is parked on (today: the Channel object), rooted
+    /// only while parked so `VM.ps` can read its LIVE state (buffer depth,
+    /// waiter counts). Cleared with `park_label`.
+    pub park_subject: Option<Value<'gc>>,
     /// This task's native → Quoin re-entry depth (see `VmState::native_reentry_depth`),
     /// stashed while parked. Each task has its own coroutine stack, so the depth that
     /// bounds overflow is per-task, not global — a task parked mid-re-entry (a host-reach
@@ -420,6 +429,16 @@ impl<'gc> VmState<'gc> {
     /// `YieldReason::AwaitIo`, and on resume the driver has stashed the answer in
     /// `self.sched.wake`. Only plain data crosses the yield. Works from the main
     /// program too (it runs as a task whose root coroutine has its own `root_yielder`).
+    /// Record what the CURRENT task is about to park on (observability for
+    /// `VM.ps`/`$ps`; cleared when the task next becomes current).
+    pub(crate) fn set_park_info(&mut self, label: String, subject: Option<Value<'gc>>) {
+        let cur = self.sched.current_task;
+        if let Some(t) = self.sched.tasks.get_mut(cur.0).and_then(|t| t.as_mut()) {
+            t.park_label = Some(label);
+            t.park_subject = subject;
+        }
+    }
+
     pub fn await_io(&mut self, req: IoRequest) -> Result<IoResult, QuoinError> {
         if let Some(yielder) = unsafe { self.get_yielder() } {
             yielder.suspend(YieldReason::AwaitIo { req });
@@ -940,6 +959,8 @@ impl<'gc> VmState<'gc> {
             self.sched.cancel_current = t.cancel_requested;
             t.joining = None;
             t.parked_on_channel = false;
+            t.park_label = None;
+            t.park_subject = None;
             t.park_epoch = self.sched.park_seq;
             t.deadline_abort = None;
         }
@@ -1063,6 +1084,8 @@ impl<'gc> VmState<'gc> {
             saved_root_frames: Vec::new(),
             saved_root_native_args: Vec::new(),
             saved_root_aot: AotTaskState::default(),
+            park_label: None,
+            park_subject: None,
             wake: None,
             parent,
             gather: None,
@@ -1251,6 +1274,8 @@ impl<'gc> VmState<'gc> {
             // Its entry in the channel's waiter queue can't be reached from here (no `mc`),
             // so it lingers as a ghost and is skipped when a counterpart next pops it.
             t.parked_on_channel = false;
+            t.park_label = None;
+            t.park_subject = None;
             self.sched.ready.push_back(target);
         }
         // Otherwise it is already ready (or parked on its own gather — see the v1 scope

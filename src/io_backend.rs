@@ -156,6 +156,29 @@ pub type IoFuture = Pin<Box<dyn Future<Output = IoResult>>>;
 
 /// The seam. Object-safe so the VM can hold a `Box<dyn IoBackend>` and swap smol →
 /// tokio → a WASM host backend without touching anything above this trait.
+impl IoRequest {
+    /// Human-readable park description for `VM.ps` / `$ps` ("what is this
+    /// task waiting on"). Purely observability — keep it cheap and short.
+    pub fn label(&self) -> String {
+        match self {
+            IoRequest::Sleep { ms } => format!("io: sleep {ms}ms"),
+            IoRequest::Connect { host, port } => format!("io: connect {host}:{port}"),
+            IoRequest::ConnectUnix { .. } => "io: connect unix".to_string(),
+            IoRequest::Read { .. } => "io: read".to_string(),
+            IoRequest::ReadTimed { ms, .. } => format!("io: read (timeout {ms}ms)"),
+            IoRequest::Write { .. } => "io: write".to_string(),
+            IoRequest::Compute(job) => format!("compute: {}", job.label),
+            IoRequest::WorkerRecv(_) => "worker receive".to_string(),
+            IoRequest::WorkerJoin(_) => "worker join".to_string(),
+            IoRequest::Close { .. } => "io: close".to_string(),
+            IoRequest::TlsWrap { .. } => "io: tls handshake".to_string(),
+            IoRequest::OpenFile { .. } => "io: open file".to_string(),
+            IoRequest::Listen { host, port } => format!("io: listen {host}:{port}"),
+            IoRequest::Accept { .. } => "io: accept".to_string(),
+        }
+    }
+}
+
 pub trait IoBackend {
     fn perform(&self, req: IoRequest) -> IoFuture;
 

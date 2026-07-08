@@ -103,11 +103,17 @@ fn wrap_handle<'gc>(
     vm: &mut crate::vm::VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
+    unit: &str,
     ch: crate::worker::WorkerChannels,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(class) = receiver else {
         return Err(QuoinError::Other("Worker: bad receiver".into()));
     };
+    vm.worker_registry.push(crate::worker::WorkerReg {
+        unit: unit.to_string(),
+        inbox_tx: ch.inbox_tx.clone(),
+        outbox_rx: ch.outbox_rx.clone(),
+    });
     Ok(vm.new_native_state(
         mc,
         class,
@@ -127,7 +133,8 @@ pub fn build_worker_class() -> NativeClassBuilder {
             let path = args[0]
                 .as_string()
                 .ok_or_else(|| QuoinError::Other("Worker.spawn: expects a String path".into()))?;
-            wrap_handle(vm, mc, receiver, spawn_worker(path))
+            let reg = path.clone();
+            wrap_handle(vm, mc, receiver, &reg, spawn_worker(path))
         })
         // Portable blocks (docs/CONCURRENCY_ARCH.md §10): ship the block's
         // template by reference plus a deep-copied SNAPSHOT of its free
@@ -156,7 +163,7 @@ pub fn build_worker_class() -> NativeClassBuilder {
             }
             let pb = snapshot_block(template, parent_env, 0)
                 .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
-            wrap_handle(vm, mc, receiver, spawn_worker_block(pb))
+            wrap_handle(vm, mc, receiver, "<block>", spawn_worker_block(pb))
         })
         .instance_method("send:", |vm, _mc, receiver, args| {
             let dv = to_message(args[0])?;

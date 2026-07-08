@@ -127,23 +127,27 @@ fn resume_current_task<'gc>(
         CoroutineResult::Yield(YieldReason::AwaitIo { req }) => {
             // Park: stash this task's context so another can run while I/O is in flight.
             vm.save_task_context(vm.sched.current_task);
+            vm.set_park_info(req.label(), None);
             Ok(RunStep::ParkedIo(req))
         }
         CoroutineResult::Yield(YieldReason::Gather { blocks }) => {
             // Park the parent on its gather; children are enqueued inside spawn_gather.
             vm.spawn_gather(mc, blocks);
+            vm.set_park_info("gather".to_string(), None);
             Ok(RunStep::Parked)
         }
         CoroutineResult::Yield(YieldReason::Join { .. }) => {
             // The joiner already added itself to the target's waiter list in await_join;
             // park its context until the target completes and wakes it.
             vm.save_task_context(vm.sched.current_task);
+            vm.set_park_info("join".to_string(), None);
             Ok(RunStep::Parked)
         }
         CoroutineResult::Yield(YieldReason::JoinTimed { task, ms }) => {
             // Like Join (the joiner is already a waiter on `task`), but the driver also
             // arms a deadline timer — carry the target and `ms` up to it.
             vm.save_task_context(vm.sched.current_task);
+            vm.set_park_info(format!("join (timeout {ms}ms)"), None);
             Ok(RunStep::ParkedJoinTimed { target: task, ms })
         }
         CoroutineResult::Yield(YieldReason::ChannelPark) => {
@@ -243,6 +247,8 @@ pub(crate) fn install_main_task<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
         saved_root_frames: Vec::new(),
         saved_root_native_args: Vec::new(),
         saved_root_aot: Default::default(),
+        park_label: None,
+        park_subject: None,
         wake: None,
         parent: None,
         gather: None,
