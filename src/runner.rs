@@ -525,11 +525,14 @@ impl VmRunner {
                     .target_path
                     .clone()
                     .unwrap_or_else(|| "qnlib/testscript.qn".to_string());
+                let unit = std::fs::canonicalize(&script_path)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| script_path.clone());
                 let ast_iter = prelude_asts().chain(once_with(move || {
                     parse_quoin_file(&PathBuf::from(&script_path))
                 }));
 
-                self.compile_and_run_asts(ast_iter);
+                self.compile_and_run_asts_as_unit(ast_iter, Some(unit));
                 Ok(())
             }
             VmRunnerMode::Repl => {
@@ -965,9 +968,18 @@ impl VmRunner {
     /// last value is main.qn's `results.none?:{…}` boolean (true iff every suite
     /// passed), so the Test driver can gate the process exit code on it.
     fn compile_and_run_asts(&self, ast_iter: impl Iterator<Item = Node>) -> bool {
+        self.compile_and_run_asts_as_unit(ast_iter, None)
+    }
+
+    fn compile_and_run_asts_as_unit(
+        &self,
+        ast_iter: impl Iterator<Item = Node>,
+        unit_path: Option<String>,
+    ) -> bool {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
             register_builtins(mc, &mut vm);
+            vm.unit_path = unit_path.clone();
             // Attach the coverage collector before any user code runs, so every
             // line-start crossing from here on is recorded.
             if self.options.coverage.is_some() {

@@ -556,6 +556,12 @@ fn run_worker_unit(path: &str, link: WorkerLink) -> Result<WireData, String> {
     run_worker_source(path, &source, link)
 }
 
+fn canonical_unit(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 fn run_worker_source(path: &str, source: &str, link: WorkerLink) -> Result<WireData, String> {
     let ast = try_parse_quoin_string_named(source, path)
         .map_err(|e| format!("worker unit {path}: parse error: {e}"))?;
@@ -564,6 +570,8 @@ fn run_worker_source(path: &str, source: &str, link: WorkerLink) -> Result<WireD
     };
 
     let mut arena = boot_worker_arena(link)?;
+    let unit = canonical_unit(path);
+    arena.mutate_root(|_mc, vm| vm.unit_path = Some(unit));
 
     let mut compile_err = None;
     arena.mutate_root(|mc, vm| {

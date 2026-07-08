@@ -1,0 +1,194 @@
+"* ===========================================================================
+"* [Web]Pool — multi-core request execution over worker isolates
+"* (docs/WEB_ARCH.md workers; docs/CONCURRENCY_ARCH.md §13).
+"*
+"* Sockets never cross worker lanes — the transport VM keeps every
+"* connection, and REQUESTS TRAVEL AS DATA: a connection task ships
+"* #{id method target headers body} to a pool worker, the worker runs the
+"* whole pure pipeline (`app.handle:`), and replies #{id status headers
+"* body}. `[Web]App.handle:`'s no-sockets purity is exactly what makes it
+"* shippable.
+"*
+"* Provisioning is the same-unit model: each pool worker re-runs the app's
+"* OWN unit (`VM.unit`), whose `serve:workers:` call detects the worker
+"* context and enters the request loop instead of binding a listener. The
+"* pool pre-buffers a 'webpool-init' sentinel at spawn (the lanes exist
+"* before the worker boots), so the worker-side loop can VERIFY it was
+"* spawned by a pool rather than guessing from context.
+"*
+"* One reply-router task per worker demultiplexes correlation ids into
+"* per-request channels; dispatch is round-robin, skipping dead workers. A
+"* worker death fails ITS in-flight requests with 502 (per-worker pending
+"* maps — a crash never spuriously fails a sibling's requests).
+"* Streaming (Generator) response bodies MATERIALIZE in pool mode (chunked
+"* streaming over the lanes is a recorded follow-up).
+[Web]Pool <- { | @workers @alive @pendings @routers @next @counter |
+    .meta <-- {
+        spawn:unit:backing: -> { |n unit backing|
+            ^[Web]Pool.new.startWorkers:n unit:unit backing:backing
+        };
+
+        "* -- wire shapes -------------------------------------------------
+        "* Request -> data: headers stay the order/duplicate-preserving
+        "* #(name value) pair list; the body drains to bytes here in the
+        "* transport VM (it is stream-backed until someone reads it).
+        requestToData:id: -> { |req id|
+            ^#{
+                'id': id
+                'method': (req.method)
+                'target': (req.rawTarget)
+                'version': (req.version)
+                'headers': (req.headers)
+                'body': (req.body.bytes)
+            }
+        };
+
+        "* Data -> request, worker side. Content type/encoding ride the
+        "* header list; the body arrives bytes-backed, so `.json`/`.form`
+        "* work in the worker exactly as they would have in the main VM.
+        dataToRequest: -> { |m|
+            var headers = m.at:'headers';
+            var ct = [HTTP]Response.find:headers named:'Content-Type';
+            var enc = [HTTP]Response.find:headers named:'Content-Encoding';
+            ^[HTTP]ServerRequest.new:{
+                var method = m.at:'method';
+                target = m.at:'target';
+                var version = m.at:'version';
+                headers = headers;
+                var body = [HTTP]Body.of:(m.at:'body') contentType:ct encoding:enc
+            }
+        };
+
+        "* Response -> data, worker side. A Generator body materializes:
+        "* its yields (String | Bytes) concatenate into one Bytes value.
+        responseToData:id: -> { |resp id|
+            var body = resp.body;
+            (Generator ~ body).if:{
+                var acc = Bytes.empty;
+                body.each:{ |chunk| acc = acc + chunk.asBytes };
+                body = acc
+            };
+            ^#{ 'id': id 'status': (resp.status) 'headers': (resp.headers) 'body': body }
+        };
+
+        dataToResponse: -> { |m|
+            ^[HTTP]ServerResponse.new:{
+                var status = m.at:'status';
+                var headers = m.at:'headers';
+                var body = m.at:'body'
+            }
+        }
+    };
+
+    init -> {
+        @workers = #();
+        @alive = #();
+        @pendings = #();
+        @routers = #();
+        @next = 0;
+        @counter = 0
+    };
+
+    startWorkers:unit:backing: -> { |n unit backing|
+        var me = self;
+        (0..n).each:{ |i|
+            var w = (backing == 'process')
+                .if:{ Worker.spawn:unit backing:'process' }
+                 else:{ Worker.spawn:unit };
+            w.label:('web:' + i.s);
+            "* Pre-buffered before the worker even boots: the lanes exist at
+            "* spawn, so the worker-side loop's first receive is guaranteed
+            "* to see this sentinel (its proof it belongs to a pool).
+            w.send:'webpool-init';
+            @workers.add:w;
+            @alive.add:true;
+            var pending = #{};
+            @pendings.add:pending;
+            "* The reply router: demultiplex this worker's outbox into the
+            "* per-request channels. On worker exit (nil), fail ITS pending
+            "* requests with 502 and mark the slot dead.
+            @routers.add:(Task.spawn:{
+                var running = true;
+                { running }.whileDo:{
+                    var m = w.receive;
+                    (m == nil).if:{
+                        running = false;
+                        me.markDead:i
+                    }
+                    else:{
+                        var ch = pending.at:((m.at:'id').s);
+                        (ch != nil).if:{
+                            pending.remove:((m.at:'id').s);
+                            ch.send:m
+                        }
+                    }
+                }
+            })
+        };
+        self
+    };
+
+    markDead: -> { |i|
+        @alive.at:i put:false;
+        var pending = @pendings.at:i;
+        pending.keys.each:{ |k|
+            var ch = pending.at:k;
+            pending.remove:k;
+            ch.send:#{ 'status': 502 'headers': #() 'body': ('worker exited'.asBytes) }
+        }
+    };
+
+    aliveCount -> {
+        var n = 0;
+        @alive.each:{ |a| a.if:{ n = n + 1 } };
+        ^n
+    };
+
+    "* Ship one request, park the calling (connection) task on its reply
+    "* channel, rebuild the response. Round-robin over live workers; a send
+    "* to a just-died worker marks it and retries the next; all dead -> 503.
+    handle: -> { |req|
+        var n = @workers.count;
+        var tries = 0;
+        { tries < n }.whileDo:{
+            var i = @next % n;
+            @next = @next + 1;
+            tries = tries + 1;
+            (@alive.at:i).if:{
+                @counter = @counter + 1;
+                var id = @counter;
+                var ch = Channel.buffered:1;
+                (@pendings.at:i).at:(id.s) put:ch;
+                var sent = { (@workers.at:i).send:([Web]Pool.requestToData:req id:id); true }.catch:{ |e|
+                    false
+                };
+                sent.if:{
+                    var m = ch.receive;
+                    ^^([Web]Pool.dataToResponse:m)
+                }
+                else:{
+                    (@pendings.at:i).remove:(id.s);
+                    .markDead:i
+                }
+            }
+        };
+        ^[HTTP]ServerResponse.new:{
+            var status = 503;
+            var headers = #();
+            var body = 'no live pool workers'
+        }
+    };
+
+    "* Drain-not-graceful: stop every worker's loop and join it; in-flight
+    "* handler tasks in that worker end with it.
+    stop -> {
+        var n = @workers.count;
+        (0..n).each:{ |i|
+            (@alive.at:i).if:{
+                { (@workers.at:i).send:'webpool-stop' }.catch:{ |e| nil };
+                { (@workers.at:i).join }.catch:{ |e| nil }
+            }
+        };
+        self
+    }
+}

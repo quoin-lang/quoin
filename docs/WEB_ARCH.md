@@ -389,3 +389,70 @@ globals-borrowing fallbacks.
   `Accept-Encoding`, skip for small/streamed bodies.
 - **Cookies/sessions, multipart, static files, HTTP/2** — post-v1, in roughly that
   order.
+
+## Workers: multi-core serving (docs/CONCURRENCY_ARCH.md §13)
+
+```quoin
+app.serve:':8080' workers:4                     "* thread isolates
+app.serve:':8080' workers:8 backing:'process'   "* child qn processes
+```
+
+Sockets never cross worker lanes — the transport VM keeps every
+connection, and REQUESTS TRAVEL AS DATA: a connection task ships
+`#{id method target headers body}` to a pool worker ([Web]Pool), the
+worker runs the whole pure pipeline (`app.handle:` — middleware, router,
+handler, render conventions), and replies `#{id status headers body}`.
+The pure core's no-sockets contract is exactly what makes it shippable.
+
+**Provisioning is the same-unit model**: each pool worker re-runs the
+app's OWN unit (`VM.unit`), whose `serve:workers:` call detects the
+worker context (verified by a pool sentinel pre-buffered at spawn) and
+enters the request loop instead of binding a listener. One file
+describes the whole fleet:
+
+```quoin
+var app = [Web]App.new;
+app.get:'/users/:id' do:{ |req| db.lookup:(req.param:'id') };
+app.serve:':8080' workers:4    "* main VM: binds + dispatches; worker: serves
+```
+
+For anything beyond a trailing serve call, guard main-only code:
+`(Worker.worker?).if:{ app.serve:':8080' workers:4 } else:{ ... }`.
+
+**Semantics and constraints, by design:**
+
+- Handlers in pool mode cannot capture main-VM mutable state — isolates
+  share nothing. Per-worker state is per-worker (a counter increments
+  independently in each). Shared state belongs in a WorkerService or an
+  external store.
+- Generator (streaming) response bodies MATERIALIZE in pool mode
+  (chunked streaming over the lanes is a recorded follow-up).
+- Requests within one worker overlap: each runs as its own Task, so
+  I/O-bound handlers (backend calls, `Plan` fan-outs) interleave exactly
+  as connection tasks do in single-VM mode.
+- Dispatch is round-robin over live workers; a worker death fails only
+  ITS in-flight requests (502) and the pool routes around it; all dead
+  -> 503. `app.poolStop` is drain-not-graceful.
+- `workers:0` (or plain `serve:`) is the single-VM path, unchanged.
+- `backing:'process'` buys real multicore past the same-process
+  scheduling ceiling for CPU-heavy handlers (~7us extra per hop —
+  noise against network latency), kernel-grade isolation, and real
+  termination.
+
+**Observability**: with `app.debug:true`, `GET /_qn/ps` answers
+`VM.psTree` as JSON FROM THE TRANSPORT VM — the whole topology in one
+request: connection tasks, pool workers (labeled `web:0`...), their
+inbox depths and per-worker task states, recursively.
+
+**Handler-side fan-out**: a handler is ordinary code in a Task, so the
+concurrency library composes inside it — the official aggregation idiom:
+
+```quoin
+app.get:'/dashboard' do:{
+    var parts = (Plan.all:#(
+        (Plan.task:{ [HTTP]Client.get:ordersUrl })
+        (Plan.task:{ [HTTP]Client.get:usersUrl })
+    )).await;
+    #{ 'orders': ((parts.at:0).body.json) 'users': ((parts.at:1).body.json) }
+};
+```

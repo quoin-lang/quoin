@@ -457,6 +457,15 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             }
             crate::runtime::extension::wire_to_value(vm, mc, &local, None)
         })
+        // `VM.unit` — the ENTRY unit this VM runs (canonicalized path), nil
+        // for REPL/eval. The same-unit provisioning primitive:
+        // `Worker.spawn:(VM.unit)` runs another copy of this program.
+        .class_method("unit", |vm, mc, _receiver, _args| {
+            Ok(match &vm.unit_path {
+                Some(p) => vm.new_string(mc, p.clone()),
+                None => Value::Nil,
+            })
+        })
         .class_method("stats", |vm, mc, _receiver, _args| {
             let mut sections = IndexMap::new();
             sections.insert("aot".to_string(), aot_section(vm, mc));

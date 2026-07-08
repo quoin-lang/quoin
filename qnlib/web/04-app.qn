@@ -46,7 +46,7 @@
     mediaType -> { .body.mediaType }
 };
 
-[Web]App <- { | @router @middleware @debug |
+[Web]App <- { | @router @middleware @debug @pool |
     init -> {
         @router = [Web]Router.new;
         @middleware = #();
@@ -139,12 +139,83 @@
     "* start: binds and serves in the background, returning the [HTTP]Server
     "* handle (port / stop / join / close — tests, graceful shutdown); serve:
     "* blocks driving it.
+    "*
+    "* workers: variants run the pure pipeline on a pool of isolates
+    "* (docs/CONCURRENCY_ARCH.md §13): the transport VM keeps the sockets and
+    "* ships requests as data; each pool worker re-runs THIS app's unit
+    "* (`VM.unit` — the same-unit provisioning model), whose serve call lands
+    "* in poolWorkerLoop below instead of binding. backing:'process' escapes
+    "* the same-process scheduling ceiling for CPU-heavy handlers.
+    "* Constraints, by design: handlers in pool mode cannot capture main-VM
+    "* mutable state (isolates share nothing), and Generator bodies
+    "* materialize. workers:0 = the single-VM path, unchanged.
     start: -> { |address|
         var me = self;
         ^([HTTP]Server.new:{
             address = address;
-            var handler = { |req| me.handle:req }
+            var handler = { |req| me.dispatch:req pool:nil }
         }).start
     };
-    serve: -> { |address| (.start:address).join }
+    serve: -> { |address| (.start:address).join };
+
+    start:workers: -> { |address n| ^.start:address workers:n backing:'thread' };
+    start:workers:backing: -> { |address n backing|
+        (Worker.worker?).if:{ ^^(.poolWorkerLoop) };
+        (n < 1).if:{ ^.start:address };
+        (VM.unit == nil).if:{
+            ('[Web]App workers: needs a unit-run program (VM.unit is nil — '
+                + 'REPL/eval cannot re-execute themselves)').throw };
+        @pool = [Web]Pool.spawn:n unit:(VM.unit) backing:backing;
+        var me = self;
+        ^([HTTP]Server.new:{
+            address = address;
+            var handler = { |req| me.dispatch:req pool:(me.pool) }
+        }).start
+    };
+    serve:workers: -> { |address n| ^.serve:address workers:n backing:'thread' };
+    serve:workers:backing: -> { |address n backing|
+        (Worker.worker?).if:{ ^^(.poolWorkerLoop) };
+        (.start:address workers:n backing:backing).join
+    };
+    pool -> { @pool };
+    poolStop -> { @pool.defined?.if:{ @pool.stop }; self };
+
+    "* The transport-side hop: debug observability is answered HERE (the main
+    "* VM — its psTree sees the whole topology: connection tasks, pool
+    "* workers, per-worker states), everything else goes to the pool or the
+    "* in-VM pipeline.
+    dispatch:pool: -> { |req pool|
+        (@debug && ((req.path) == '/_qn/ps')).if:{
+            ^^([Web]Response.json:(VM.psTree))
+        };
+        (pool == nil).if:{ ^^(.handle:req) };
+        ^pool.handle:req
+    };
+
+    "* The worker side of the same-unit model: verify the pool sentinel
+    "* (pre-buffered at spawn — its absence means this worker was NOT
+    "* spawned by a web pool, e.g. someone ran serve:workers: inside their
+    "* own worker), then serve request data until stopped. Each request
+    "* runs as its own Task, so handlers doing I/O overlap within a worker
+    "* exactly as connection tasks do in the single-VM mode.
+    poolWorkerLoop -> {
+        var init = Worker.receive;
+        (init == 'webpool-init').else:{
+            ('[Web]App: serve:workers: ran inside a worker that was not '
+                + 'spawned by a web pool — pool serving must run in the '
+                + 'main VM').throw };
+        var me = self;
+        var running = true;
+        { running }.whileDo:{
+            var msg = Worker.receive;
+            ((msg == nil) || (msg == 'webpool-stop')).if:{ running = false }
+            else:{
+                Task.spawn:{
+                    var resp = me.handle:([Web]Pool.dataToRequest:msg);
+                    Worker.send:([Web]Pool.responseToData:resp id:(msg.at:'id'))
+                }
+            }
+        };
+        self
+    }
 }
