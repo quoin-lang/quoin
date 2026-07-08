@@ -149,9 +149,17 @@ pub fn build_string_class() -> NativeClassBuilder {
                     .downcast_ref::<NativeMapState>()
             {
                 map_state
-                    .get_map()
+                    .entries()
                     .iter()
-                    .map(|(k, &v)| (k.clone(), v))
+                    .filter_map(|(_, k, v)| {
+                        if let Value::Object(kobj) = k
+                            && let crate::value::ObjectPayload::String(s) = &kobj.borrow().payload
+                        {
+                            Some(((**s).clone(), *v))
+                        } else {
+                            None
+                        }
+                    })
                     .collect()
             } else {
                 Vec::new()

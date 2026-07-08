@@ -38,11 +38,13 @@ pub enum PpShape<'gc> {
         close: &'static str,
         items: Vec<Value<'gc>>,
     },
-    /// Keyed entries rendered `key: value` (Map `#{ }`); keys are quoted by the walker.
+    /// Keyed entries rendered `key: value` (Map `#{ }`). The bool marks a
+    /// STRING key the walker quotes; non-string keys arrive pre-rendered
+    /// (structural, unquoted).
     Entries {
         open: &'static str,
         close: &'static str,
-        entries: Vec<(String, Value<'gc>)>,
+        entries: Vec<(String, bool, Value<'gc>)>,
     },
     /// A named record `Name{ field: value … }` with *unquoted* struct-field labels (distinct
     /// from `Entries`, whose keys are quoted as map literals). This is the structural form for
@@ -479,7 +481,7 @@ pub fn value_children<'gc>(value: Value<'gc>) -> Vec<(String, PpChild<'gc>)> {
                 .collect(),
             Some(PpShape::Entries { entries, .. }) => entries
                 .into_iter()
-                .map(|(k, v)| (k, PpChild::Val(v)))
+                .map(|(k, _, v)| (k, PpChild::Val(v)))
                 .collect(),
             Some(PpShape::Record { fields, .. }) => fields,
             None => Vec::new(),
@@ -507,7 +509,10 @@ fn native_doc<'gc>(value: Value<'gc>, cname: &str, visited: &mut HashSet<usize>)
         }) => {
             let docs = entries
                 .into_iter()
-                .map(|(k, v)| Doc::Cat(vec![text(quote(&k)), text(": "), value_to_doc(v, visited)]))
+                .map(|(k, quoted, v)| {
+                    let label = if quoted { quote(&k) } else { k };
+                    Doc::Cat(vec![text(label), text(": "), value_to_doc(v, visited)])
+                })
                 .collect();
             bracket("", open, close, docs)
         }

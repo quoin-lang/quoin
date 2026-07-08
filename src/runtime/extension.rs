@@ -153,10 +153,16 @@ pub(crate) fn value_to_wire(
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(WireData::List(items));
             }
-            if let Ok(map) = v.with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone()) {
+            if let Ok(map) = v.with_native_state::<NativeMapState, _, _>(|m| m.entries().to_vec()) {
                 let mut entries = Vec::with_capacity(map.len());
-                for (k, val) in map {
-                    entries.push((k, value_to_wire(val, owner)?));
+                for (_, k, val) in map {
+                    let Value::Object(kobj) = k else {
+                        return Err(unrepresentable("Map with non-String keys"));
+                    };
+                    let ObjectPayload::String(ks) = &kobj.borrow().payload else {
+                        return Err(unrepresentable("Map with non-String keys"));
+                    };
+                    entries.push(((**ks).clone(), value_to_wire(val, owner)?));
                 }
                 return Ok(WireData::Map(entries));
             }

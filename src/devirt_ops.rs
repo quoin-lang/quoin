@@ -12,7 +12,6 @@
 use crate::error::QuoinError;
 use crate::instruction::IntBinKind;
 use crate::value::Value;
-use indexmap::IndexMap;
 
 /// Result of an Integer binary op: an `Int` for arithmetic, a `Bool` for a comparison.
 pub enum IntBinOut {
@@ -109,12 +108,6 @@ pub fn list_set<'gc>(vec: &mut [Value<'gc>], i: i64, value: Value<'gc>) -> Resul
             ),
         }),
     }
-}
-
-/// `Map#at:` — the value for `key`, or `None` (→ `nil`) if absent. Maps are String-keyed.
-#[inline]
-pub fn map_get<'gc>(map: &IndexMap<String, Value<'gc>>, key: &str) -> Option<Value<'gc>> {
-    map.get(key).copied()
 }
 
 // Note: Set has no verb here. Native `Set#contains?:`/`add:` dispatch `==:` per element (so

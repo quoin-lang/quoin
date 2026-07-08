@@ -4,6 +4,23 @@ use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
+        // The hash-code half of the key contract (docs in `value_hash_scalar`):
+        // scalars answer their structural hash; instances default to IDENTITY
+        // (gc-arena is non-moving, so the pointer is stable), matching
+        // Object's identity `==:`. A class that overrides `==:` with value
+        // semantics must override `hash` to match — equal values must hash
+        // equal, or map lookups miss (never corrupt).
+        .instance_method("hash", |vm, mc, receiver, _args| {
+            let h = match crate::value::value_hash_scalar(&receiver) {
+                Some(h) => h,
+                None => match receiver {
+                    Value::Object(obj) => crate::value::hash_i64(gc_arena::Gc::as_ptr(obj) as i64),
+                    _ => 0,
+                },
+            };
+            Ok(vm.new_int(mc, h as i64))
+        })
+        .returns("Integer")
         // Reflective send: `obj.perform:'add:' args:#( 3 )`. Raises the same
         // MessageNotUnderstood a direct send would (the legacy nil-for-absent
         // convention of the internal call_method helper does NOT apply here).

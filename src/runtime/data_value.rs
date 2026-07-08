@@ -74,10 +74,16 @@ pub fn value_to_data(v: Value) -> Result<DataValue, QuoinError> {
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(DataValue::Array(arr));
             }
-            if let Ok(map) = v.with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone()) {
+            if let Ok(map) = v.with_native_state::<NativeMapState, _, _>(|m| m.entries().to_vec()) {
                 let mut pairs = Vec::with_capacity(map.len());
-                for (k, val) in map {
-                    pairs.push((k, value_to_data(val)?));
+                for (_, k, val) in map {
+                    let Value::Object(kobj) = k else {
+                        return Err(unrepresentable("Map with non-String keys"));
+                    };
+                    let crate::value::ObjectPayload::String(ks) = &kobj.borrow().payload else {
+                        return Err(unrepresentable("Map with non-String keys"));
+                    };
+                    pairs.push(((**ks).clone(), value_to_data(val)?));
                 }
                 return Ok(DataValue::Object(pairs));
             }

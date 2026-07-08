@@ -84,7 +84,19 @@ pub fn build_csv_class() -> NativeClassBuilder {
             };
             let headers: Vec<String> = first
                 .with_native_state::<NativeMapState, _, _>(|m| {
-                    m.get_map().keys().cloned().collect()
+                    m.entries()
+                        .iter()
+                        .filter_map(|(_, k, _)| {
+                            if let Value::Object(kobj) = k
+                                && let crate::value::ObjectPayload::String(s) =
+                                    &kobj.borrow().payload
+                            {
+                                Some((**s).clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
                 })
                 .map_err(|_| row_not_map())?;
             wtr.write_record(&headers)
@@ -93,9 +105,7 @@ pub fn build_csv_class() -> NativeClassBuilder {
                 let mut record: Vec<String> = Vec::with_capacity(headers.len());
                 for header in &headers {
                     let field_val = row
-                        .with_native_state::<NativeMapState, _, _>(|m| {
-                            m.get_map().get(header).copied()
-                        })
+                        .with_native_state::<NativeMapState, _, _>(|m| m.get_str(header))
                         .map_err(|_| row_not_map())?;
                     record.push(match field_val {
                         Some(v) => field_to_string(host, v)?,
