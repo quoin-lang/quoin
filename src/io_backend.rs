@@ -85,6 +85,13 @@ pub enum IoRequest {
     /// (docs/CONCURRENCY_ARCH.md §4). The job's `Send + Sync` closure owns
     /// its detached inputs; the caller parks exactly as for IO.
     Compute(crate::compute::ComputeJob),
+    /// Park until the next cross-worker message on this lane (a worker's
+    /// inbox or a parent's view of a worker's outbox). The endpoint is
+    /// plain `Send` data; resolving to `None` means the far side closed.
+    WorkerRecv(async_channel::Receiver<quoin_ext_proto::DataValue>),
+    /// Park until the worker's done lane reports (its unit finished or
+    /// failed); resolving the lane closed means the worker vanished.
+    WorkerJoin(async_channel::Receiver<Result<quoin_ext_proto::DataValue, String>>),
     /// Close and deregister the stream.
     Close { id: StreamId },
     /// Upgrade the stream at `id` to TLS *in place*: take it out of the registry, run
@@ -129,6 +136,12 @@ pub enum IoResult {
     /// the job's domain error (e.g. malformed gzip), NOT an IO failure —
     /// callers wrap it in the same error type their inline path uses.
     Computed(Result<crate::compute::ComputeOut, String>),
+    /// The next cross-worker message, or `None` if the lane is closed and
+    /// drained (the far side exited).
+    WorkerMsg(Option<quoin_ext_proto::DataValue>),
+    /// A worker's terminal report: its unit's outcome, or an `Err` for the
+    /// lane closing unreported (the worker vanished).
+    WorkerDone(Result<quoin_ext_proto::DataValue, String>),
     Wrote(usize),
     Closed,
     Err(IoError),
@@ -554,6 +567,14 @@ impl IoBackend for SmolBackend {
             IoRequest::Compute(job) => {
                 Box::pin(async move { IoResult::Computed(crate::compute::offload(job).await) })
             }
+            IoRequest::WorkerRecv(rx) => {
+                Box::pin(async move { IoResult::WorkerMsg(rx.recv().await.ok()) })
+            }
+            IoRequest::WorkerJoin(rx) => Box::pin(async move {
+                IoResult::WorkerDone(rx.recv().await.unwrap_or_else(|_| {
+                    Err("worker vanished without reporting a result".to_string())
+                }))
+            }),
             IoRequest::Write { id, bytes } => Box::pin(async move {
                 // Leased like Read. An aborted write may leave the peer with a
                 // partial message — the canceller's problem — but the stream itself
@@ -744,6 +765,12 @@ impl IoBackend for MockBackend {
         let result = match req {
             IoRequest::Sleep { .. } => IoResult::Slept,
             IoRequest::Compute(job) => IoResult::Computed(job.run()),
+            IoRequest::WorkerRecv(rx) => IoResult::WorkerMsg(rx.try_recv().ok()),
+            IoRequest::WorkerJoin(rx) => {
+                IoResult::WorkerDone(rx.try_recv().unwrap_or_else(|_| {
+                    Err("worker vanished without reporting a result".to_string())
+                }))
+            }
             IoRequest::Connect { .. } | IoRequest::ConnectUnix { .. } => {
                 let id = StreamId(self.next_id.get());
                 self.next_id.set(self.next_id.get() + 1);

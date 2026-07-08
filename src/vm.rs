@@ -577,6 +577,10 @@ pub struct VmState<'gc> {
     /// The session's async-I/O backend + the deferred resource-reap queues ([`Io`]).
     #[collect(require_static)]
     pub io: Io,
+    /// Set at boot on a WORKER's VM (docs/CONCURRENCY_ARCH.md §5): the
+    /// channel ends back to the parent. `None` on the main VM.
+    #[collect(require_static)]
+    pub worker_link: Option<crate::worker::WorkerLink>,
     /// Per-instruction instrumentation hooks — debugger + coverage ([`Instrumentation`]).
     #[collect(require_static)]
     pub instrumentation: Instrumentation,
@@ -705,6 +709,7 @@ impl<'gc> VmState<'gc> {
             },
             // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
             dispatch_epoch: 1,
+            worker_link: None,
             io: Io {
                 backend: crate::io_backend::SmolBackend::new(),
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),

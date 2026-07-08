@@ -71,6 +71,17 @@ fn compute_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Valu
     vm.new_map(mc, m)
 }
 
+/// The `'workers'` section: isolate counters (spawned / completed threads,
+/// cross-worker messages copied).
+fn workers_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'gc> {
+    let (spawned, completed, messages) = crate::worker::stats();
+    let mut m = IndexMap::new();
+    m.insert("spawned".to_string(), vm.new_int(mc, spawned as i64));
+    m.insert("completed".to_string(), vm.new_int(mc, completed as i64));
+    m.insert("messages".to_string(), vm.new_int(mc, messages as i64));
+    vm.new_map(mc, m)
+}
+
 pub fn build_vm_stats_class() -> NativeClassBuilder {
     NativeClassBuilder::new("VM", Some("Object"))
         // `VM.stats` -> the section Map (see the module doc for the shape and
@@ -79,6 +90,7 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             let mut sections = IndexMap::new();
             sections.insert("aot".to_string(), aot_section(vm, mc));
             sections.insert("compute".to_string(), compute_section(vm, mc));
+            sections.insert("workers".to_string(), workers_section(vm, mc));
             Ok(vm.new_map(mc, sections))
         })
         // `VM.aotRefusals` -> one Map per distinct refusal/skip, for finding

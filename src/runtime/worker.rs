@@ -1,0 +1,178 @@
+//! The `Worker` class — C2 v1 isolates (docs/CONCURRENCY_ARCH.md §5).
+//!
+//! Parent side: `Worker.spawn:'unit.qn'` boots a fresh VM on its own OS
+//! thread and returns a handle; `handle.send:` deep-copies a data value in,
+//! `handle.receive` parks until the worker sends one back, `handle.join`
+//! parks until the unit finishes (raising the worker's error, catchable).
+//! Worker side (class-side, inside the spawned unit): `Worker.receive` /
+//! `Worker.send:` are the mirror lanes and `Worker.worker?` says which side
+//! you're on.
+//!
+//! Receives and joins park through `await_io` like any IO wait — a worker
+//! handle IS a parked task, so `Async.gather:`/`timeout:do:`/cancellation
+//! compose over worker waits unchanged (the §10 L2 property).
+//!
+//! What crosses: the extension wire's data taxonomy via the same walkers
+//! (numbers, strings, booleans, nil, Bytes, lists, maps, big numerics).
+//! Blocks, symbols, instances, and resources refuse with the wire's errors.
+//! A receive on an exited worker's drained outbox answers nil.
+
+use std::any::Any;
+
+use gc_arena::Collect;
+use gc_arena::collect::Trace;
+use quoin_ext_proto::DataValue as WireData;
+
+use crate::error::QuoinError;
+use crate::io_backend::{IoRequest, IoResult};
+use crate::runtime::extension::{value_to_wire, wire_to_value};
+use crate::value::{AnyCollect, NativeClassBuilder, Value};
+use crate::worker::{note_message, spawn_worker};
+
+/// Parent-side handle state: the three channel ends. Plain `Send` data —
+/// nothing here touches the arena.
+#[derive(Debug)]
+pub struct NativeWorkerHandle {
+    inbox_tx: async_channel::Sender<WireData>,
+    outbox_rx: async_channel::Receiver<WireData>,
+    done_rx: async_channel::Receiver<Result<WireData, String>>,
+    /// `join` consumes the done lane (its channel holds exactly one value);
+    /// a second join is a clear error rather than a confusing hang.
+    joined: std::cell::Cell<bool>,
+}
+
+impl AnyCollect for NativeWorkerHandle {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn trace_gc<'gc>(&self, _cc: &mut dyn Trace<'gc>) {}
+}
+
+unsafe impl<'gc> Collect<'gc> for NativeWorkerHandle {
+    const NEEDS_TRACE: bool = false;
+}
+
+/// Copy a guest value onto the wire for a cross-worker message; the walker
+/// refuses blocks/symbols/instances/resources with its usual errors.
+fn to_message<'gc>(v: Value<'gc>) -> Result<WireData, QuoinError> {
+    let dv = value_to_wire(v, None)?;
+    note_message();
+    Ok(dv)
+}
+
+pub fn build_worker_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("Worker", Some("Object"))
+        // ---- parent side (class-side spawn, instance-side lanes) ----
+        .class_method("spawn:", |vm, mc, receiver, args| {
+            let path = args[0]
+                .as_string()
+                .ok_or_else(|| QuoinError::Other("Worker.spawn: expects a String path".into()))?;
+            let ch = spawn_worker(path);
+            let Value::Class(class) = receiver else {
+                return Err(QuoinError::Other("Worker.spawn: bad receiver".into()));
+            };
+            Ok(vm.new_native_state(
+                mc,
+                class,
+                NativeWorkerHandle {
+                    inbox_tx: ch.inbox_tx,
+                    outbox_rx: ch.outbox_rx,
+                    done_rx: ch.done_rx,
+                    joined: std::cell::Cell::new(false),
+                },
+            ))
+        })
+        .instance_method("send:", |vm, _mc, receiver, args| {
+            let dv = to_message(args[0])?;
+            let tx = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| h.inbox_tx.clone())
+                .map_err(QuoinError::Other)?;
+            tx.try_send(dv)
+                .map_err(|_| QuoinError::Other("Worker.send: the worker has exited".into()))?;
+            Ok(vm.new_nil(_mc))
+        })
+        .instance_method("receive", |vm, mc, receiver, _args| {
+            let rx = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| h.outbox_rx.clone())
+                .map_err(QuoinError::Other)?;
+            match vm.await_io(IoRequest::WorkerRecv(rx))? {
+                IoResult::WorkerMsg(Some(dv)) => wire_to_value(vm, mc, &dv, None),
+                IoResult::WorkerMsg(None) => Ok(vm.new_nil(mc)),
+                other => Err(QuoinError::Other(format!(
+                    "Worker.receive: unexpected result {other:?}"
+                ))),
+            }
+        })
+        .instance_method("join", |vm, mc, receiver, _args| {
+            let rx = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| {
+                    if h.joined.get() {
+                        None
+                    } else {
+                        h.joined.set(true);
+                        Some(h.done_rx.clone())
+                    }
+                })
+                .map_err(QuoinError::Other)?;
+            let Some(rx) = rx else {
+                return Err(QuoinError::Other("Worker.join: already joined".into()));
+            };
+            match vm.await_io(IoRequest::WorkerJoin(rx))? {
+                IoResult::WorkerDone(Ok(dv)) => wire_to_value(vm, mc, &dv, None),
+                IoResult::WorkerDone(Err(msg)) => Err(QuoinError::Other(msg)),
+                other => Err(QuoinError::Other(format!(
+                    "Worker.join: unexpected result {other:?}"
+                ))),
+            }
+        })
+        // ---- worker side (class-side lanes, live only inside a worker) ----
+        .class_method("receive", |vm, mc, _receiver, _args| {
+            let Some(link) = vm.worker_link.as_ref() else {
+                return Err(QuoinError::Other(
+                    "Worker.receive: not inside a worker (spawn one with Worker.spawn:)".into(),
+                ));
+            };
+            let rx = link.inbox_rx.clone();
+            match vm.await_io(IoRequest::WorkerRecv(rx))? {
+                IoResult::WorkerMsg(Some(dv)) => wire_to_value(vm, mc, &dv, None),
+                IoResult::WorkerMsg(None) => Ok(vm.new_nil(mc)),
+                other => Err(QuoinError::Other(format!(
+                    "Worker.receive: unexpected result {other:?}"
+                ))),
+            }
+        })
+        .class_method("send:", |vm, mc, _receiver, args| {
+            let Some(link) = vm.worker_link.as_ref() else {
+                return Err(QuoinError::Other("Worker.send: not inside a worker".into()));
+            };
+            let tx = link.outbox_tx.clone();
+            let dv = to_message(args[0])?;
+            tx.try_send(dv)
+                .map_err(|_| QuoinError::Other("Worker.send: the parent has gone away".into()))?;
+            Ok(vm.new_nil(mc))
+        })
+        .class_method("worker?", |vm, mc, _receiver, _args| {
+            Ok(vm.new_bool(mc, vm.worker_link.is_some()))
+        })
+}
+
+/// Value → String helper used by `spawn:` (mirrors `arg!` string extraction
+/// without the macro's class plumbing).
+trait AsStringArg {
+    fn as_string(&self) -> Option<String>;
+}
+
+impl<'gc> AsStringArg for Value<'gc> {
+    fn as_string(&self) -> Option<String> {
+        match self {
+            Value::Object(obj) => match &obj.borrow().payload {
+                crate::value::ObjectPayload::String(s) => Some((**s).clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}

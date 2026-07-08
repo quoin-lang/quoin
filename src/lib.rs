@@ -30,6 +30,7 @@ pub mod types;
 pub mod value;
 pub mod vm;
 pub mod vm_scheduler;
+pub mod worker;
 
 #[macro_export]
 macro_rules! gc {

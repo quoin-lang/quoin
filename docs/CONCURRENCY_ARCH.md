@@ -84,9 +84,11 @@ spends:
   seam — parallelism for bulk native ops on detachable data, zero semantic
   surface. v1 = the `Bytes` codec family (`src/compute.rs`; gather of
   8 × 4 MB encodes measured 4.4×; gates in `ENV_FLAGS.md`).
-- **C2 (decided, second):** worker isolates — one arena + one `VmState` + one
+- **C2 (v1 SHIPPED):** worker isolates — one arena + one `VmState` + one
   cooperative scheduler per OS thread; message passing by deep copy through
-  the wire walkers; tasks pinned to their worker.
+  the wire walkers; tasks pinned to their worker. v1 = `Worker.spawn:` +
+  send/receive/join lanes with the L2 handle-as-task property
+  (`src/worker.rs`, `src/runtime/worker.rs`); pools/portable blocks next.
 - **C3 (sketched, deferred):** shared *immutable* values (`Arc`-backed frozen
   Bytes/strings/collections) crossing workers by reference — the
   copy-cost-killer, added only when C2 traffic shows the need.

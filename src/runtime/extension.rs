@@ -103,7 +103,7 @@ fn unrepresentable(type_name: &str) -> QuoinError {
 /// instance owned by that extension crosses as a live `Resource` reference; one owned by a
 /// *different* extension — or any instance when `owner` is `None` (host-op channels carry plain
 /// data) — is an error, so the tree-level caller can fall back (or refuse) explicitly.
-fn value_to_wire(
+pub(crate) fn value_to_wire(
     v: Value<'_>,
     owner: Option<&Rc<RefCell<Vec<u64>>>>,
 ) -> Result<WireData, QuoinError> {
@@ -176,7 +176,7 @@ fn value_to_wire(
 /// resource-reap queue (cloned into each wrapper, so drops release normally) and its package
 /// namespace (to resolve the declared class — cross-class returns inside data). Absent where
 /// resources are not accepted (host-op values — deferred).
-struct ResCtx<'a> {
+pub(crate) struct ResCtx<'a> {
     reap: &'a Rc<RefCell<Vec<u64>>>,
     namespace: Option<&'a str>,
 }
@@ -185,7 +185,7 @@ struct ResCtx<'a> {
 /// `List` → `List`, decimal-string `BigInt`/`Decimal` parsed back to arbitrary precision, a
 /// `Resource` leaf wrapped as a live extension-backed instance (when `res` allows it). The
 /// nesting depth of a received tree is already capped by the decoder.
-fn wire_to_value<'gc>(
+pub(crate) fn wire_to_value<'gc>(
     vm: &VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     dv: &WireData,
