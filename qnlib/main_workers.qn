@@ -1,0 +1,73 @@
+"* Parallel test entry — the C2 worker-isolates demo (`qn qnlib/main_workers.qn`;
+"* the stock `qn test` entry is main.qn). Spawns 8 worker isolates; each boots
+"* the full suite set (test_worker.qn) and runs the modulo slice assigned by
+"* its index. Workers report per-suite results as data messages; this side
+"* collects, merges, and displays them. Final value = the all-passed boolean
+"* (informational here — the plain Run driver doesn't gate its exit on it).
+var workerCount = 8;
+
+var shards = nil;
+var wall = Timer.time:{
+    var workers = #();
+    (0..workerCount).each:{ |i|
+        var w = Worker.spawn:'qnlib/test_worker.qn';
+        w.send:#{ 'index': i 'count': workerCount };
+        workers.add:w
+    };
+    shards = Async.gather:(workers.collect:{ |w| { w.receive } });
+    workers.each:{ |w| w.join }
+};
+
+"* Merge and display, one line per suite in a stable order (workers report
+"* their slices in registration order; interleave by original position).
+var nameWidth = 0;
+shards.each:{ |sh|
+    (sh.at:'suites').each:{ |r|
+        ((r.at:'suite').length > nameWidth).if:{ nameWidth = (r.at:'suite').length }
+    }
+};
+
+var out = [IO]Stdout;
+var passes = 0;
+var failures = 0;
+var skips = 0;
+var failedLines = #();
+(0..((shards.collect:{ |sh| (sh.at:'suites').count }).max)).each:{ |row|
+    shards.each:{ |sh|
+        var suites = sh.at:'suites';
+        (row < suites.count).if:{
+            var r = suites.at:row;
+            var name = (r.at:'suite').padRight:nameWidth;
+            (r.at:'skipped').if:{
+                skips = skips + 1;
+                out.writeln:#ANSI'[$#5fd7af;bw[%1$]] $#ffd75f[SKIPPED$] — %2' % #( name (r.at:'reason') )
+            }
+            else:{
+                passes = passes + (r.at:'passes');
+                failures = failures + (r.at:'failures');
+                var us = r.at:'us';
+                var took = (us < 1000).if:{ us.s + 'µs' } else:{ (us / 1000).s + 'ms' };
+                out.writeln:#ANSI'[$#5fd7af;bw[%1$]] $#69ff61[%2 passes$] / $#ff6961[%3 failures$] (worker %4, $#00bfff[%5$])' % #(
+                    name
+                    (r.at:'passes')
+                    (r.at:'failures')
+                    (sh.at:'index')
+                    took
+                )
+            };
+            (r.at:'failed').each:{ |line| failedLines.add:line }
+        }
+    }
+};
+
+failedLines.each:{ |line| out.writeln:#ANSI'  $#ff6961[FAILED$]: %1' % #( line ) };
+
+out.writeln:#ANSI'All %1 workers finished in $#00bfff[%2$] : $#69ff61[%3 passes$] / $#ff6961[%4 failures$] / $#ffd75f[%5 skipped$]' % #(
+    workerCount
+    ((wall / 1000).s + 'ms')
+    passes
+    failures
+    skips
+);
+
+failures == 0

@@ -2,6 +2,7 @@
 //! devirtualization (Slice 2e).
 
 use super::*;
+use std::sync::Arc;
 
 impl Compiler {
     /// The devirtualized `List` op for a keyword send whose receiver is statically a `List`
@@ -459,7 +460,7 @@ impl Compiler {
             self.compile_node(rvalue, &mut hot)?;
         }
         let names: Vec<Symbol> = pairs.iter().map(|(s, _)| *s).collect();
-        hot.push(Instruction::NewWithFields(Rc::new(names)));
+        hot.push(Instruction::NewWithFields(Arc::new(names)));
 
         let mut cold = CodeBlock::new();
         cold.current_source = bytecode.current_source.clone();

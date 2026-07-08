@@ -1,10 +1,12 @@
 use crate::arg;
+use crate::compute::{self, ComputeJob, ComputeOut};
 use crate::error::QuoinError;
-use crate::ext_sdk::Host;
+use crate::io_backend::{IoRequest, IoResult};
 use crate::recv;
 use crate::runtime::compress;
 use crate::runtime::list::NativeListState;
 use crate::value::{NativeClassBuilder, Value};
+use crate::vm::VmState;
 
 /// The `Bytes` class — immutable binary data (Stage 3a). The raw `Vec<u8>` lives in
 /// `ObjectPayload::Bytes`; this is the QN-facing surface. Text crosses at the edges
@@ -114,20 +116,24 @@ pub fn build_bytes_class() -> NativeClassBuilder {
         // Content-Encoding (de)compression — gzip + deflate (flate2/miniz_oxide) and zstd
         // decode (ruzstd), all pure Rust. Malformed input throws a catchable ParseError.
         // zstd encode is intentionally absent (no pure-Rust compressor; see compress.rs).
-        .sdk_instance_method("decodeGz", |host, receiver, _args| {
-            run_codec(host, receiver, "decodeGz", compress::gzip_decode)
+        // Legacy (`&mut VmState`) style rather than the SDK surface: big inputs OFFLOAD
+        // to the compute pool (docs/CONCURRENCY_ARCH.md §4), which parks the task via
+        // `await_io` — below `QN_COMPUTE_MIN` (or with the pool disabled) they run
+        // inline exactly as before.
+        .instance_method("decodeGz", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "decodeGz", compress::gzip_decode)
         })
-        .sdk_instance_method("encodeGz", |host, receiver, _args| {
-            run_codec(host, receiver, "encodeGz", compress::gzip_encode)
+        .instance_method("encodeGz", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "encodeGz", compress::gzip_encode)
         })
-        .sdk_instance_method("decodeDeflate", |host, receiver, _args| {
-            run_codec(host, receiver, "decodeDeflate", compress::deflate_decode)
+        .instance_method("decodeDeflate", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "decodeDeflate", compress::deflate_decode)
         })
-        .sdk_instance_method("encodeDeflate", |host, receiver, _args| {
-            run_codec(host, receiver, "encodeDeflate", compress::deflate_encode)
+        .instance_method("encodeDeflate", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "encodeDeflate", compress::deflate_encode)
         })
-        .sdk_instance_method("decodeZstd", |host, receiver, _args| {
-            run_codec(host, receiver, "decodeZstd", compress::zstd_decode)
+        .instance_method("decodeZstd", |vm, mc, receiver, _args| {
+            run_codec(vm, mc, receiver, "decodeZstd", compress::zstd_decode)
         })
         // s -> the inspect string: length + a short hex preview.
         .sdk_instance_method("s", |host, receiver, _args| {
@@ -138,14 +144,34 @@ pub fn build_bytes_class() -> NativeClassBuilder {
 /// Run a `&[u8] -> Result<Vec<u8>, String>` codec over the receiver Bytes, returning a new
 /// Bytes; a codec error becomes a catchable `ParseError` tagged with the method name.
 fn run_codec<'gc>(
-    host: &mut dyn Host<'gc>,
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
-    label: &str,
-    f: impl Fn(&[u8]) -> Result<Vec<u8>, String>,
+    label: &'static str,
+    f: impl Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static,
 ) -> Result<Value<'gc>, QuoinError> {
+    // Detach the buffer FIRST: nothing borrowed (and no Gc beyond the rooted
+    // receiver) is held across the park below.
     let bytes = recv!(receiver, Bytes).to_vec();
-    match f(&bytes) {
-        Ok(out) => Ok(host.new_bytes(out)),
+    let out = if compute::should_offload(bytes.len()) {
+        // The job owns the detached buffer; the `Send + Sync` bound is what
+        // enforces the eligibility rule at compile time.
+        let job = ComputeJob::new(label, move || f(&bytes).map(ComputeOut::Bytes));
+        match vm.await_io(IoRequest::Compute(job))? {
+            IoResult::Computed(Ok(ComputeOut::Bytes(out))) => Ok(out),
+            IoResult::Computed(Err(msg)) => Err(msg),
+            other => {
+                return Err(QuoinError::Other(format!(
+                    "Bytes.{label}: unexpected compute result {other:?}"
+                )));
+            }
+        }
+    } else {
+        compute::note_inline();
+        f(&bytes)
+    };
+    match out {
+        Ok(out) => Ok(vm.new_bytes(mc, out)),
         Err(msg) => Err(QuoinError::ParseError(format!("Bytes.{label}: {msg}"))),
     }
 }

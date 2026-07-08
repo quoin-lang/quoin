@@ -19,7 +19,7 @@ use crate::value::{
     NativeClass, NativeFunc, Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, devirt_ops, gc, gcl};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use gc_arena::metrics::Pacing;
 use gc_arena::{Collect, Gc, Mutation, lock::RefLock};
@@ -577,6 +577,10 @@ pub struct VmState<'gc> {
     /// The session's async-I/O backend + the deferred resource-reap queues ([`Io`]).
     #[collect(require_static)]
     pub io: Io,
+    /// Set at boot on a WORKER's VM (docs/CONCURRENCY_ARCH.md §5): the
+    /// channel ends back to the parent. `None` on the main VM.
+    #[collect(require_static)]
+    pub worker_link: Option<crate::worker::WorkerLink>,
     /// Per-instruction instrumentation hooks — debugger + coverage ([`Instrumentation`]).
     #[collect(require_static)]
     pub instrumentation: Instrumentation,
@@ -705,6 +709,7 @@ impl<'gc> VmState<'gc> {
             },
             // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
             dispatch_epoch: 1,
+            worker_link: None,
             io: Io {
                 backend: crate::io_backend::SmolBackend::new(),
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -3475,7 +3480,7 @@ impl<'gc> VmState<'gc> {
     /// Cell (the hot-path gate is inline at the push site). Returns the tid
     /// for `Frame.spec_tid`, or 0.
     #[cold]
-    fn spec_observe_entry(&mut self, template: &Rc<StaticBlock>, args: &[Value<'gc>]) -> u32 {
+    fn spec_observe_entry(&mut self, template: &Arc<StaticBlock>, args: &[Value<'gc>]) -> u32 {
         use crate::codegen::spec;
         let Some(tid) = template.template_id else {
             return 0;
@@ -3618,7 +3623,7 @@ impl<'gc> VmState<'gc> {
     pub fn block_from_template(
         &mut self,
         mc: &Mutation<'gc>,
-        template: Rc<StaticBlock>,
+        template: Arc<StaticBlock>,
         parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
         enclosing_method_id: Option<usize>,
     ) -> Gc<'gc, Block<'gc>> {
@@ -3655,7 +3660,7 @@ impl<'gc> VmState<'gc> {
     pub(crate) fn ic_cell_for(
         &mut self,
         mc: &Mutation<'gc>,
-        template: &Rc<StaticBlock>,
+        template: &Arc<StaticBlock>,
     ) -> Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>> {
         match template.template_id {
             Some(id) => {

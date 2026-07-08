@@ -18,7 +18,7 @@ use crate::runtime::{
 };
 use crate::value::{EnvFrame, NamespacedName, ObjectPayload, Value};
 use crate::vm::{Task, TaskId, VmOptions, VmState, VmStatus, Wake};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use corosensei::CoroutineResult;
 use futures_lite::StreamExt;
@@ -48,7 +48,7 @@ pub(crate) fn prelude_asts() -> impl Iterator<Item = Node> {
 /// modes (run/test/benchmark/repl) so the builtin set can't drift between them.
 /// The once-per-unit compiler: template ids for shared inline caches, plus AOT
 /// candidate collection when `QN_AOT=1` (docs/AOT_ARCH.md).
-fn unit_compiler() -> Compiler {
+pub(crate) fn unit_compiler() -> Compiler {
     let c = Compiler::new().with_template_ids();
     if crate::tuning::aot_enabled() {
         c.with_aot()
@@ -61,7 +61,7 @@ fn unit_compiler() -> Compiler {
 /// METHOD candidates compile eagerly (few, hot by construction); BLOCK
 /// templates stash as pending and compile lazily on first invocation
 /// (B3a — eager compilation of every literal cost ~+34ms startup).
-fn compile_unit_aot(vm: &mut VmState, compiler: &mut Compiler) {
+pub(crate) fn compile_unit_aot(vm: &mut VmState, compiler: &mut Compiler) {
     if !crate::tuning::aot_enabled() {
         return;
     }
@@ -94,6 +94,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, io::build_io_file_class());
     vm.register_native_class(mc, io::build_io_handle_class());
     vm.register_native_class(mc, vm_stats::build_vm_stats_class());
+    vm.register_native_class(mc, crate::runtime::worker::build_worker_class());
     vm.register_native_class(mc, list::build_list_class());
     vm.register_native_class(mc, set::build_set_class());
     vm.register_native_class(mc, array::build_array_class());
@@ -135,7 +136,8 @@ mod runner_driver;
 mod runner_repl;
 
 use runner_dap::{DapFrontend, PendingProgram};
-use runner_driver::{drive_main_task, drive_with_frontend, install_main_task};
+use runner_driver::drive_with_frontend;
+pub(crate) use runner_driver::{drive_main_task, install_main_task};
 use runner_repl::{eval_once, load_quoinrc, run_repl_interactive, run_repl_piped};
 
 /// Step status for the benchmark driver, which runs a single fiber to completion
@@ -976,7 +978,7 @@ impl VmRunner {
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
 
-                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
+                let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 // Run this program unit as scheduler task #0; driven to completion below.
                 install_main_task(mc, vm);
@@ -1064,7 +1066,7 @@ impl VmRunner {
                 };
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
-                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
+                let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 install_main_task(mc, vm);
             });
@@ -1271,7 +1273,7 @@ impl VmRunner {
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
 
-                let main_block = vm.block_from_template(mc, Rc::new(program), None, None);
+                let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
             });
 

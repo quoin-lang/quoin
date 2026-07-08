@@ -1,0 +1,122 @@
+"* L3 parallel combinators (docs/CONCURRENCY_ARCH.md §10): parallelCollect: /
+"* parallelReduce: run their per-item block across a lazily-started pool of
+"* warm worker isolates. The user's block ships as a portable block (capture
+"* snapshot; write-captures/self/^^ refuse), chunks deep-copy both ways, and
+"* order is preserved. Falls back to plain serial when the input is small
+"* (the pool round trip + copies beat small work), when already inside a
+"* worker (no recursive pools), or when another flight is in progress.
+[Parallel]Workers <- #();
+[Parallel]State <- #{ 'busy': false };
+
+Parallel <- {
+    .meta <-- {
+        "* Inputs below this run serially. Chosen from the measured crossover
+        "* (profiling/parallel-combinators/): per-item work is unknowable, so
+        "* this errs high — cheap blocks stay serial, and genuinely heavy
+        "* small batches can use Worker.start: directly.
+        minItems -> { 2048 };
+
+        "* The warm pool: one worker per compute thread, capped at 4 — the
+        "* measured sweet spot for interpreter-bound work on this class of
+        "* machine (8 workers ran SLOWER than 4: P/E-core mix + memory
+        "* bandwidth; profiling/parallel-combinators/notes.md). Started on
+        "* first use; process exit ends them; a nil job stops one explicitly.
+        pool -> {
+            ([Parallel]Workers.count == 0).if:{
+                var n = (VM.stats.at:'compute').at:'threads';
+                (n < 1).if:{ n = 1 };
+                (n > 4).if:{ n = 4 };
+                (0..n).each:{ |i|
+                    [Parallel]Workers.add:(Worker.start:{
+                        var running = true;
+                        { running }.whileDo:{
+                            var job = Worker.receive;
+                            (job == nil).if:{ running = false } else:{ Worker.send:(job.value) }
+                        };
+                        0
+                    })
+                }
+            };
+            [Parallel]Workers
+        };
+
+        "* One flight at a time: the pool lanes have no per-job addressing
+        "* yet, so a second concurrent flight falls back to serial (correct,
+        "* just not parallel). Cooperative scheduling makes check-then-set
+        "* atomic between awaits.
+        enter -> {
+            (([Parallel]State.at:'busy') == true).if:{ ^^false };
+            [Parallel]State.at:'busy' put:true;
+            true
+        };
+        exit -> { [Parallel]State.at:'busy' put:false }
+    };
+    .sealed!
+};
+
+List <-- {
+    "* Order-preserving parallel map. The block must be portable (read-only
+    "* data captures; no writes to outer bindings, no self/@fields, no ^^) —
+    "* violations raise the portability error, catchable at the call site.
+    parallelCollect: -> { |f|
+        f.portable!;
+        var n = .count;
+        ((n < Parallel.minItems) || Worker.worker?).if:{ ^^(.collect:f) };
+        (Parallel.enter).else:{ ^^(.collect:f) };
+        var me = self;
+        var outs = {
+            var ws = Parallel.pool;
+            var wn = ws.count;
+            (wn > n).if:{ wn = n };
+            "* contiguous balanced chunks, one per worker, in order
+            var chunks = #();
+            (0..wn).each:{ |k| chunks.add:#() };
+            var i = 0;
+            me.each:{ |x|
+                (chunks.at:((i * wn) / n)).add:x;
+                i = i + 1
+            };
+            var g = f;
+            (0..wn).each:{ |k|
+                var c = chunks.at:k;
+                (ws.at:k).send:{ c.collect:g }
+            };
+            Async.gather:((0..wn).collect:{ |k| { (ws.at:k).receive } })
+        }.catch:{ |e| Parallel.exit; e.throw };
+        Parallel.exit;
+        outs.flatten
+    };
+
+    "* Parallel semigroup fold, mirroring `reduce:` (no seed): the block
+    "* combines two values into one and MUST be associative — each worker
+    "* folds its chunk, then the partials fold on this side. Non-associative
+    "* blocks get chunk-boundary-dependent answers; that's on the caller,
+    "* exactly as documented.
+    parallelReduce: -> { |f|
+        f.portable!;
+        var n = .count;
+        ((n < Parallel.minItems) || Worker.worker?).if:{ ^^(.reduce:f) };
+        (Parallel.enter).else:{ ^^(.reduce:f) };
+        var me = self;
+        var partials = {
+            var ws = Parallel.pool;
+            var wn = ws.count;
+            (wn > n).if:{ wn = n };
+            var chunks = #();
+            (0..wn).each:{ |k| chunks.add:#() };
+            var i = 0;
+            me.each:{ |x|
+                (chunks.at:((i * wn) / n)).add:x;
+                i = i + 1
+            };
+            var g = f;
+            (0..wn).each:{ |k|
+                var c = chunks.at:k;
+                (ws.at:k).send:{ c.reduce:g }
+            };
+            Async.gather:((0..wn).collect:{ |k| { (ws.at:k).receive } })
+        }.catch:{ |e| Parallel.exit; e.throw };
+        Parallel.exit;
+        partials.reduce:f
+    }
+}

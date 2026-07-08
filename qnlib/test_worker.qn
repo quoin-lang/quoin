@@ -1,0 +1,58 @@
+"* Test-shard worker (the C2 isolates demo — see main.qn). Every worker boots
+"* the FULL suite set (`use` is static; loading only registers suites, which
+"* is milliseconds) and runs its modulo slice: suite k runs on worker
+"* (k % count). Results travel back to the parent as one data message — a
+"* list of per-suite maps — and the reporter is silent so eight workers
+"* don't interleave progress lines on the shared stdout.
+use test;
+use std:tests/*;
+
+"* No annotations on the hook params: this unit compiles before its `use`
+"* statements run, so `TestSuite`/`Test`/`TestResult` aren't class-table
+"* entries yet (the stock reporter lives inside test.qn, where they are).
+TestReporter <- QuietReporter <- {
+    startRun: --> { |suites| nil };
+    endRun:elapsed: --> { |suites elapsed| nil };
+    startSuite: --> { |suite| nil };
+    endSuite:elapsed: --> { |suite elapsed| nil };
+    startTest: --> { |test| nil };
+    endTest: --> { |result| nil };
+    startAssertion: --> { |assertion| nil };
+    endAssertion: --> { |result| nil }
+};
+
+var spec = Worker.receive;
+var index = spec.at:'index';
+var count = spec.at:'count';
+
+var runner = TestRunner.new;
+var pos = 0;
+[Test]Suites.each:{ |s|
+    ((pos % count) == index).if:{ runner.add:s };
+    pos = pos + 1
+};
+
+var elapsed = Timer.time:{ runner.run:QuietReporter.new };
+
+"* One map per suite in this shard; `.sum:` over an empty list yields nil,
+"* so guard with any? exactly like the stock reporter does.
+var report = #();
+runner.suites.each:{ |s|
+    var ran = s.tests;
+    var passes = ran.any?.if:{ ran.sum:{ .passes.count } } else:{ 0 };
+    var failures = ran.any?.if:{ ran.sum:{ .failures.count } } else:{ 0 };
+    var us = ran.any?.if:{ ran.sum:{ .elapsed } } else:{ 0 };
+    var failed = #();
+    ran.each:{ |t| t.failures.each:{ |a| failed.add:(a.s) } };
+    report.add:#{
+        'suite': s.name
+        'skipped': s.skipped?
+        'reason': (s.skipped?.if:{ s.reason } else:{ '' })
+        'passes': passes
+        'failures': failures
+        'us': us
+        'failed': failed
+    }
+};
+
+Worker.send:#{ 'index': index 'us': elapsed 'suites': report }

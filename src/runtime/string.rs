@@ -8,7 +8,7 @@ use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::runtime::regex::NativeRegexState;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use std::collections::{HashMap, HashSet};
 
@@ -322,7 +322,7 @@ pub fn build_string_class() -> NativeClassBuilder {
 
                         let block = vm.block_from_template(
                             mc,
-                            Rc::new(compiled),
+                            Arc::new(compiled),
                             Some(caller_env),
                             enclosing_method_id,
                         );

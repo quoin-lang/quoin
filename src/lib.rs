@@ -4,6 +4,7 @@ pub mod ansi_colorizer;
 pub mod class_table;
 pub mod codegen;
 pub mod compiler;
+pub mod compute;
 pub mod coverage;
 pub mod dap;
 pub mod debug;
@@ -29,6 +30,7 @@ pub mod types;
 pub mod value;
 pub mod vm;
 pub mod vm_scheduler;
+pub mod worker;
 
 #[macro_export]
 macro_rules! gc {

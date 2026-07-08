@@ -987,7 +987,7 @@ fn compile(exprs: Vec<Node>) -> Result<StaticBlock, String> {
     };
     let mut block = compiler.compile_program(&program)?;
     if block.bytecode.last() == Some(&Instruction::Return) {
-        Rc::make_mut(&mut block.bytecode.0).pop();
+        Arc::make_mut(&mut block.bytecode.0).pop();
     }
     Ok(block)
 }
@@ -1378,10 +1378,10 @@ fn test_compile_blocks() {
         param_syms: crate::value::intern_param_syms(&vec!["x".to_string()]),
         param_types: vec!["Object".to_string()],
         param_elem_tags: Vec::new(),
-        bytecode: SharedBytecode(Rc::new(inner_bc)),
+        bytecode: SharedBytecode(Arc::new(inner_bc)),
         source_info: None,
         decl_block: None,
-        source_map: SharedSourceMap(Rc::new(inner_sm)),
+        source_map: SharedSourceMap(Arc::new(inner_sm)),
         template_id: None,
     };
     let mut expected = prefix_ops();
@@ -1519,13 +1519,13 @@ fn test_compile_class_and_method_definitions() {
         param_syms: crate::value::intern_param_syms(&vec!["a".to_string(), "b".to_string()]),
         param_types: vec!["Object".to_string(), "Object".to_string()],
         param_elem_tags: Vec::new(),
-        bytecode: SharedBytecode(Rc::new(vec![
+        bytecode: SharedBytecode(Arc::new(vec![
             Instruction::Push(Constant::Nil),
             Instruction::Return,
         ])),
         source_info: None,
         decl_block: None,
-        source_map: SharedSourceMap(Rc::new(vec![None; 2])),
+        source_map: SharedSourceMap(Arc::new(vec![None; 2])),
         template_id: None,
     };
     let mut expected = prefix_ops();
@@ -2003,7 +2003,7 @@ fn generic_params_carry_tag_requirements() {
     };
     let mut c = Compiler::new();
     let code = c.compile_program(p).unwrap();
-    fn walk(insts: &[Instruction], out: &mut Vec<Rc<StaticBlock>>) {
+    fn walk(insts: &[Instruction], out: &mut Vec<Arc<StaticBlock>>) {
         for i in insts {
             if let Instruction::Push(Constant::Block(b)) = i {
                 if !b.param_types.is_empty() {

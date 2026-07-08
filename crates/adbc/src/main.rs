@@ -488,6 +488,11 @@ fn param_to_array(p: &DataValue) -> HandlerResult<(DataType, ArrayRef)> {
         DataValue::List(_) | DataValue::Map(_) => {
             return Err("cannot bind a List/Map as a SQL parameter".into());
         }
+        // A live extension-instance reference (wire v2) is not data; nothing
+        // sane to bind it as.
+        DataValue::Resource { .. } => {
+            return Err("cannot bind an extension resource as a SQL parameter".into());
+        }
     };
     Ok(arr)
 }

@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -400,7 +400,7 @@ aot_helpers! {
         *mut c_void, *const c_void, i64, i64, i64, i64, i64, i64, i64, i64,
     ) -> u8,
     make_closure: helpers::make_closure as fn(
-        *mut c_void, *const c_void, *const Rc<StaticBlock>, i64, i64,
+        *mut c_void, *const c_void, *const Arc<StaticBlock>, i64, i64,
     ) -> u8,
     plain_new_check: helpers::plain_new_check as fn(
         *mut c_void, *const c_void, i64, i64, i64, i64, i64,
@@ -2028,7 +2028,7 @@ impl<'a> Translator<'a> {
         fx: &FnCtx,
         vars: &mut HashMap<Symbol, VarSlot>,
         obj_params: &HashMap<Symbol, CVal>,
-        rc: &Rc<StaticBlock>,
+        rc: &Arc<StaticBlock>,
         ip: usize,
     ) -> Result<AV, Refusal> {
         // Force still-deferred `var x = nil` locals into REAL slots before
@@ -2144,10 +2144,10 @@ impl<'a> Translator<'a> {
         }
         // Build the closure in a scratch slot (rooted throughout), then bind
         // the whole frame environment into its snapshot env.
-        let tmpl: &'static Rc<StaticBlock> = Box::leak(Box::new(rc.clone()));
+        let tmpl: &'static Arc<StaticBlock> = Box::leak(Box::new(rc.clone()));
         let tmpl_ptr = b
             .ins()
-            .iconst(types::I64, tmpl as *const Rc<StaticBlock> as i64);
+            .iconst(types::I64, tmpl as *const Arc<StaticBlock> as i64);
         let out = self.alloc_scratch()?;
         let out_idx = self.abs_slot(b, fx, out);
         let want_home = b.ins().iconst(types::I64, i64::from(has_nlr));

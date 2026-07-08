@@ -16,7 +16,7 @@ use crate::runtime::string::build_string_class;
 use crate::value::{NativeClassBuilder, OpaqueState};
 use gc_arena::{Arena, Rootable};
 use rustc_hash::FxHashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 fn native_add<'gc>(
     vm: &mut VmState<'gc>,
@@ -170,7 +170,7 @@ where
         let block = gc!(
             mc,
             Block {
-                template: Rc::new(static_block.clone()),
+                template: Arc::new(static_block.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
@@ -311,7 +311,7 @@ fn test_deferred_call_values_survive_collection() {
         let block = gc!(
             mc,
             Block {
-                template: Rc::new(static_block.clone()),
+                template: Arc::new(static_block.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
@@ -977,7 +977,7 @@ fn test_non_local_return_callback() {
     let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
         let mut vm = VmState::new(mc, VmOptions::default());
         let bar_block = Block {
-            template: Rc::new(block_bar.clone()),
+            template: Arc::new(block_bar.clone()),
             parent_env: None,
             enclosing_method_id: None,
             decl_block: None,
@@ -992,7 +992,7 @@ fn test_non_local_return_callback() {
         let foo_block = gc!(
             mc,
             Block {
-                template: Rc::new(block_foo.clone()),
+                template: Arc::new(block_foo.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
@@ -1522,7 +1522,7 @@ fn test_execute_block_helper() {
         let block = gc!(
             mc,
             Block {
-                template: Rc::new(StaticBlock {
+                template: Arc::new(StaticBlock {
                     spec_state: Default::default(),
                     source_info: None,
                     name: Some("test_block".to_string()),
@@ -1580,7 +1580,7 @@ fn test_execute_block_helper() {
         let block2 = gc!(
             mc,
             Block {
-                template: Rc::new(StaticBlock {
+                template: Arc::new(StaticBlock {
                     spec_state: Default::default(),
                     source_info: None,
                     name: Some("test_block_no_self".to_string()),
@@ -1788,7 +1788,7 @@ fn test_error_annotation_and_display() {
         let block = gc!(
             mc,
             Block {
-                template: Rc::new(compiled.clone()),
+                template: Arc::new(compiled.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block,
@@ -1855,7 +1855,7 @@ fn test_error_annotation_with_color() {
         let block = gc!(
             mc,
             Block {
-                template: Rc::new(compiled.clone()),
+                template: Arc::new(compiled.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block,
@@ -1913,7 +1913,7 @@ fn test_error_annotation_with_console_width() {
         let block = gc!(
             mc,
             Block {
-                template: Rc::new(compiled.clone()),
+                template: Arc::new(compiled.clone()),
                 parent_env: None,
                 enclosing_method_id: None,
                 decl_block: None,
