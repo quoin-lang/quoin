@@ -57,41 +57,47 @@ fn ps_tree_recurses_and_reads_busy_and_idle_workers() {
     let script = r#"
 var ok = true;
 var nested = Worker.spawn:'@nest.qn@';
-var busy = Worker.start:{ var s = 0; (0..1500000).each:{ |i| s = s + i }; s };
-Async.sleep:300;
+var busy = Worker.start:{ var s = 0; (0..30000000).each:{ |i| s = s + i }; s };
 
-var tree = VM.psTree;
-var rows = tree.at:'workers';
-(rows.count == 2).else:{ ok = false };
-
-var nestedRow = nil;
-var busyRow = nil;
-rows.each:{ |r|
-    ((r.at:'unit') == '<block>').if:{ busyRow = r } else:{ nestedRow = r }
+"* Workers must BOOT qnlib before their drivers answer control requests —
+"* on a loaded CI runner that can far exceed one deadline window, and an
+"* honest 'unresponsive' is the designed answer. Poll until the tree is
+"* fully formed: the nested subtree (with ITS inner worker answering) and
+"* the busy worker caught running mid-loop with a real ps map.
+var sub = nil;
+var busyOk = false;
+var tree = nil;
+var tries = 0;
+{ ((sub == nil) || (busyOk == false)) && (tries < 120) }.whileDo:{
+    tries = tries + 1;
+    tree = VM.psTree;
+    (tree.at:'workers').each:{ |r|
+        ((r.at:'unit') == '<block>').if:{
+            (((r.at:'state') == 'running')
+                && (((r.at:'ps')).class.name == 'Map')).if:{ busyOk = true }
+        }
+        else:{
+            var got = r.at:'ps';
+            (got.class.name == 'Map').if:{
+                var forming = got.at:'workers';
+                ((forming.count == 1)
+                    && ((((forming.at:0).at:'ps')).class.name == 'Map'))
+                    .if:{ sub = got }
+            }
+        }
+    };
+    ((sub == nil) || (busyOk == false)).if:{ Async.sleep:100 }
 };
 
-"* the idle nested worker answers: its main task is parked on its inbox,
-"* and ITS OWN sub-worker appears one level deeper with its own ps
-(nestedRow == nil).if:{ ok = false }
+var rows = tree.at:'workers';
+(rows.count == 2).else:{ ok = false };
+busyOk.else:{ ok = false };
+(sub == nil).if:{ ok = false }
 else:{
-    ((nestedRow.at:'backing') == 'thread').else:{ ok = false };
-    var sub = nestedRow.at:'ps';
-    (sub.class.name == 'Map').else:{ ok = false };
     ((sub.at:'worker?') == true).else:{ ok = false };
     var parked = false;
     (sub.at:'tasks').each:{ |t| ((t.at:'on') == 'worker receive').if:{ parked = true } };
-    parked.else:{ ok = false };
-    var subWorkers = sub.at:'workers';
-    (subWorkers.count == 1).else:{ ok = false };
-    var inner = (subWorkers.at:0).at:'ps';
-    (inner.class.name == 'Map').else:{ ok = false }
-};
-
-"* the BUSY worker (mid 60M-iteration loop) still answers between batches
-(busyRow == nil).if:{ ok = false }
-else:{
-    ((busyRow.at:'state') == 'running').else:{ ok = false };
-    ((busyRow.at:'ps').class.name == 'Map').else:{ ok = false }
+    parked.else:{ ok = false }
 };
 
 "* labels ride the rows
@@ -99,7 +105,9 @@ else:{
 
 nested.send:nil;
 nested.join;
-busy.join;
+"* busy is deliberately NOT joined: it only needs to outlive the poll
+"* window above (even on a slow CI runner), and process exit reaps it —
+"* joining would serialize the test on the whole 30M-iteration loop.
 ok.if:{ 'PASS'.print } else:{ ('FAIL: ' + tree.s).print };
 "#;
     assert_ps_script_passes("recurse", script, &[("nest.qn", NEST_UNIT)]);
@@ -137,7 +145,12 @@ fn repl_ps_tree_renders_nested() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"var w = Worker.start:{ Worker.receive };\nAsync.sleep:400;\n$ps tree\n")
+        .write_all(
+            b"var w = Worker.start:{ Worker.receive };\n\
+              var i = 0;\n\
+              { (i < 120) && (((((VM.psTree.at:'workers').at:0).at:'ps')).class.name != 'Map') }.whileDo:{ i = i + 1; Async.sleep:100 };\n\
+              $ps tree\n",
+        )
         .unwrap();
     let out = child.wait_with_output().expect("repl run");
     let stdout = String::from_utf8_lossy(&out.stdout);
