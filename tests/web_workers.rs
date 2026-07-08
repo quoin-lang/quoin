@@ -22,6 +22,17 @@ app.get:'/users/:id' do:{ |req| #{ 'id': (req.param:'id') } };
 app.post:'/echo' do:{ |req| req.json };
 app.get:'/count' do:{ hits.at:'n' put:((hits.at:'n') + 1); #{ 'n': (hits.at:'n') } };
 app.get:'/boom' do:{ 'kaboom'.throw };
+app.get:'/stream'
+do:{ [Web]Response.stream:(Generator.from:{ ^>'a'; ^>'bb'; ^>'ccc' }) contentType:'text/plain' };
+app.get:'/big' do:{
+    [Web]Response.stream:(Generator.from:{
+        var i = 0;
+        { i < 200 }.whileDo:{ ^> 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i = i + 1 }
+    })
+};
+app.get:'/slow' do:{
+    [Web]Response.stream:(Generator.from:{ ^>'s1'; Async.sleep:300; ^>'s2'; Async.sleep:300; ^>'s3' })
+};
 
 (Worker.worker?).if:{ app.serve:'127.0.0.1:0' workers:2 backing:backing }
 else:{
@@ -148,14 +159,61 @@ fn exercise(app: &App, backing: &str) {
     );
 }
 
+fn dechunk(body: &str) -> String {
+    // Minimal HTTP/1.1 chunked decoder for test assertions.
+    let mut out = String::new();
+    let mut rest = body;
+    loop {
+        let Some(nl) = rest.find("\r\n") else { break };
+        let size = usize::from_str_radix(rest[..nl].trim(), 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        out.push_str(&rest[nl + 2..nl + 2 + size]);
+        rest = &rest[nl + 2 + size + 2..];
+    }
+    out
+}
+
+fn exercise_streaming(app: &App) {
+    // Streams stay CHUNKED through the lanes: head frame + a chunk frame
+    // per yield + end frame, rebuilt as a Generator body in the transport.
+    let stream = get(app.port, "/stream");
+    assert!(
+        stream.to_lowercase().contains("transfer-encoding: chunked"),
+        "not chunked through the pool:\n{stream}"
+    );
+    assert_eq!(dechunk(body_of(&stream)), "abbccc");
+
+    // Many frames, one body.
+    let big = get(app.port, "/big");
+    assert_eq!(dechunk(body_of(&big)).len(), 200 * 32, "big stream");
+
+    // A slow stream must not block the pool: while /slow trickles (~600ms),
+    // other requests keep completing through the same workers.
+    let port = app.port;
+    let slow = std::thread::spawn(move || get(port, "/slow"));
+    let t0 = Instant::now();
+    let hello = get(app.port, "/hello");
+    assert!(hello.starts_with("HTTP/1.1 200"));
+    assert!(
+        t0.elapsed() < Duration::from_millis(2000),
+        "request starved behind a slow stream"
+    );
+    let slow = slow.join().expect("slow stream thread");
+    assert_eq!(dechunk(body_of(&slow)), "s1s2s3");
+}
+
 #[test]
 fn thread_pool_serves_and_shards() {
     let app = start_app("thread", "thread");
     exercise(&app, "thread");
+    exercise_streaming(&app);
 }
 
 #[test]
 fn process_pool_serves_and_shards() {
     let app = start_app("process", "process");
     exercise(&app, "process");
+    exercise_streaming(&app);
 }

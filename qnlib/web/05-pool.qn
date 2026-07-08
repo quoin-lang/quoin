@@ -59,16 +59,34 @@
             }
         };
 
-        "* Response -> data, worker side. A Generator body materializes:
-        "* its yields (String | Bytes) concatenate into one Bytes value.
-        responseToData:id: -> { |resp id|
+        "* Response -> frames, worker side (called from the request's own
+        "* Task, so a stream's frames leave in order). A plain body is ONE
+        "* terminal frame; a Generator body STREAMS: a head frame (stream:
+        "* true), one chunk frame per yield, a terminal end frame. A
+        "* mid-stream generator error truncates (the chunked wire has no
+        "* mid-body error signal) — the end frame closes the correlation
+        "* either way.
+        reply:id: -> { |resp id|
             var body = resp.body;
-            (Generator ~ body).if:{
-                var acc = Bytes.empty;
-                body.each:{ |chunk| acc = acc + chunk.asBytes };
-                body = acc
+            (Generator ~ body).else:{
+                Worker.send:#{
+                    'id': id
+                    'status': (resp.status)
+                    'headers': (resp.headers)
+                    'body': body
+                };
+                ^^nil
             };
-            ^#{ 'id': id 'status': (resp.status) 'headers': (resp.headers) 'body': body }
+            Worker.send:#{
+                'id': id
+                'status': (resp.status)
+                'headers': (resp.headers)
+                'stream': true
+            };
+            { body.each:{ |chunk|
+                Worker.send:#{ 'id': id 'chunk': (chunk.asBytes) } } }
+                .catch:{ |e| nil };
+            Worker.send:#{ 'id': id 'end': true }
         };
 
         dataToResponse: -> { |m|
@@ -118,7 +136,13 @@
                     else:{
                         var ch = pending.at:((m.at:'id').s);
                         (ch != nil).if:{
-                            pending.remove:((m.at:'id').s);
+                            "* A correlation stays open across a stream: a
+                            "* head with stream:true and every chunk frame
+                            "* keep it; a plain head or the end frame is
+                            "* terminal.
+                            var terminal = ((m.at:'stream') != true)
+                                && ((m.at:'chunk') == nil);
+                            terminal.if:{ pending.remove:((m.at:'id').s) };
                             ch.send:m
                         }
                     }
@@ -157,13 +181,39 @@
             (@alive.at:i).if:{
                 @counter = @counter + 1;
                 var id = @counter;
-                var ch = Channel.buffered:1;
+                "* Sized for streaming: chunk frames buffer here between
+                "* the router and a slow client. A full channel parks the
+                "* ROUTER (head-of-line for this worker's other replies) —
+                "* credit-based backpressure is the recorded follow-up.
+                var ch = Channel.buffered:64;
                 (@pendings.at:i).at:(id.s) put:ch;
                 var sent = { (@workers.at:i).send:([Web]Pool.requestToData:req id:id); true }.catch:{ |e|
                     false
                 };
                 sent.if:{
                     var m = ch.receive;
+                    ((m.at:'stream') == true).if:{
+                        "* Streamed: the response body is a Generator pulling
+                        "* chunk frames from this request's channel — the
+                        "* server's chunked writer drives it lazily from the
+                        "* connection task. A frame with no chunk ends it
+                        "* (the end frame, or a worker-death 502 flush =
+                        "* truncation).
+                        var going = true;
+                        var gen = Generator.from:{
+                            { going }.whileDo:{
+                                var f = ch.receive;
+                                ((f == nil) || ((f.at:'chunk') == nil))
+                                    .if:{ going = false }
+                                    else:{ ^> (f.at:'chunk') }
+                            }
+                        };
+                        ^^([HTTP]ServerResponse.new:{
+                            var status = m.at:'status';
+                            var headers = m.at:'headers';
+                            var body = gen
+                        })
+                    };
                     ^^([Web]Pool.dataToResponse:m)
                 }
                 else:{

@@ -425,8 +425,14 @@ For anything beyond a trailing serve call, guard main-only code:
   share nothing. Per-worker state is per-worker (a counter increments
   independently in each). Shared state belongs in a WorkerService or an
   external store.
-- Generator (streaming) response bodies MATERIALIZE in pool mode
-  (chunked streaming over the lanes is a recorded follow-up).
+- Generator (streaming) response bodies STREAM through the lanes: a head
+  frame, one chunk frame per yield, an end frame — rebuilt as a Generator
+  in the transport VM, so the client sees ordinary chunked
+  transfer-encoding and a slow stream never blocks the pool (frames of
+  concurrent requests interleave by correlation id). Producer-side
+  backpressure is credit-less v1: chunk frames buffer in the per-request
+  channel (64) and then in the lane; a credit scheme is the recorded
+  follow-up.
 - Requests within one worker overlap: each runs as its own Task, so
   I/O-bound handlers (backend calls, `Plan` fan-outs) interleave exactly
   as connection tasks do in single-VM mode.

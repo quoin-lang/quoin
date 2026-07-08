@@ -164,7 +164,10 @@ var wRound = 1;
                 var r = [HTTP]Client.post:(wBase + '/echo') body:#{ 'msg': wRound };
                 #( r.status (r.body.json.at:'msg') )
             }
-            { ([HTTP]Client.get:(wBase + '/stream')).body.text }
+            {
+                var r = [HTTP]Client.get:(wBase + '/stream');
+                #( (r.header:'transfer-encoding') (r.body.text) )
+            }
             { ([HTTP]Client.get:(wBase + '/teapot')).status }
             { ([HTTP]Client.get:(wBase + '/hello')).body.text }
         )
@@ -173,7 +176,9 @@ var wRound = 1;
     check.is:((wr.at:0).at:1) equalTo:(wRound.s) label:'pool param id';
     check.is:((wr.at:1).at:0) equalTo:201 label:'pool echo status';
     check.is:((wr.at:1).at:1) equalTo:wRound label:'pool echo body';
-    check.is:(wr.at:2) equalTo:'abbccc' label:'pool stream (materialized)';
+    "* Streams STAY chunked through the lanes (chunk frames per yield).
+    check.is:((wr.at:2).at:0) equalTo:'chunked' label:'pool stream framing';
+    check.is:((wr.at:2).at:1) equalTo:'abbccc' label:'pool stream body';
     check.is:(wr.at:3) equalTo:418 label:'pool HttpError status';
     check.is:(wr.at:4) equalTo:'hi' label:'pool hello';
     wRound = wRound + 1
