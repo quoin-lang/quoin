@@ -233,6 +233,37 @@ pub struct AotEntry {
     /// entry that never materializes never reads it — `invoke` skips the
     /// env swap/restore entirely (D2.5a, docs/DIRECT_CALLS_ARCH.md §2).
     pub materializes: bool,
+    /// D2.5b marshaling plan, one i8 per param: for a verbatim-eligible
+    /// scalar param (declared Scalar(K), S1 precondition absent or == K)
+    /// this is the caller lane-kind constant (`helpers::KIND_*`) whose
+    /// `bits` copy STRAIGHT into the raw lane — no `Value` decode, no
+    /// re-encode, and the arg guard is one integer compare. `-1` = general
+    /// lane (Obj params, precondition-narrowed params): full decode +
+    /// cell guard + precondition, exactly the classic checks.
+    pub lane_plan: Box<[i8]>,
+}
+
+/// Build the D2.5b plan (see `AotEntry::lane_plan`).
+pub fn build_lane_plan(params: &[AotParam], pres: &[Option<AotKind>]) -> Box<[i8]> {
+    params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match p {
+            AotParam::Scalar(k) => {
+                let pre = pres.get(i).copied().flatten();
+                if pre.is_none() || pre == Some(*k) {
+                    match k {
+                        AotKind::Int => helpers::KIND_INT as i8,
+                        AotKind::Double => helpers::KIND_DOUBLE as i8,
+                        AotKind::Bool => helpers::KIND_BOOL as i8,
+                    }
+                } else {
+                    -1
+                }
+            }
+            AotParam::Obj => -1,
+        })
+        .collect()
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -809,6 +840,53 @@ pub fn invoke<'gc>(
         };
         raw[i] = bits;
     }
+    invoke_tail(vm, mc, entry, receiver, args, raw, enclosing_env, window)
+}
+
+/// D2.5b: the helper fast path enters here with lanes ALREADY marshaled
+/// straight from the caller's `(kind,bits)` per the entry's `lane_plan` —
+/// no `Value` decode/re-encode round trip. Gates and the list-self
+/// precondition still apply; the arity was matched against the plan.
+#[allow(clippy::too_many_arguments)]
+pub fn invoke_prebuilt<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    entry: &'static AotEntry,
+    receiver: Value<'gc>,
+    args: &[Value<'gc>],
+    raw: &[i64],
+    enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
+    window: Option<usize>,
+) -> AotOutcome<'gc> {
+    if !entry_gates(vm, entry) {
+        return AotOutcome::Bail;
+    }
+    if entry.needs_list_self
+        && receiver
+            .with_native_state::<crate::runtime::list::NativeListState, _, _>(|_| ())
+            .is_err()
+    {
+        return AotOutcome::Bail;
+    }
+    invoke_tail(vm, mc, entry, receiver, args, raw, enclosing_env, window)
+}
+
+/// The post-ladder body of [`invoke`]: window/scratch pushes, frame ctx, the
+/// raw call, outcome. `raw` must already hold the lane bits per the entry's
+/// param shapes (the D2.5b helper fast path builds them straight from the
+/// caller's lanes and enters here — `invoke_prebuilt`).
+#[allow(clippy::too_many_arguments)]
+fn invoke_tail<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    entry: &'static AotEntry,
+    receiver: Value<'gc>,
+    args: &[Value<'gc>],
+    raw: &[i64],
+    enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
+    window: Option<usize>,
+) -> AotOutcome<'gc> {
+    let base = window.unwrap_or(vm.stack.len());
     if window.is_none() {
         vm.stack.push(receiver); // slot 0
         for &a in args {

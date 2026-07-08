@@ -3709,6 +3709,18 @@ impl<'gc> VmState<'gc> {
 
     /// Argument-phase check for a peeked D2 cell (see [`Self::aot_site_peek`]).
     #[inline]
+    /// One lane of [`aot_site_args_match`] — the D2.5b helper fast path
+    /// guards verbatim scalar lanes by lane-kind compare and only routes
+    /// GENERAL lanes (Obj / precondition-narrowed) through this shape guard.
+    pub(crate) fn aot_site_arg_match_one(
+        cell: &AotSiteCell<'gc>,
+        i: usize,
+        a: Value<'gc>,
+    ) -> bool {
+        let (ak, ap) = value_type_guard(a);
+        cell.arg_kinds[i] == ak && cell.arg_ptrs[i] == ap
+    }
+
     pub(crate) fn aot_site_args_match(cell: &AotSiteCell<'gc>, args: &[Value<'gc>]) -> bool {
         for (i, a) in args.iter().enumerate() {
             let (ak, ap) = value_type_guard(*a);

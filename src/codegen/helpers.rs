@@ -687,32 +687,87 @@ pub(super) unsafe extern "C" fn outcall(
         && vm.aot.outcall_nesting < crate::codegen::spec::MAX_OUTCALL_NESTING
         && let Some(cell) = vm.aot_site_peek(site as usize, receiver, n)
     {
-        let mut argv = [Value::Nil; 8];
-        for (i, slot) in argv.iter_mut().enumerate().take(n) {
-            let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
-            *slot = decode(vm, k, b);
-        }
-        let args = &argv[..n];
+        // D2.5b: marshal lanes per the entry's plan in ONE pass — a
+        // verbatim scalar lane is a lane-kind compare + a bits copy (the
+        // guard, the S1 precondition, and invoke's re-encode ladder all
+        // fold into it); only general lanes (Obj, precondition-narrowed)
+        // decode and take the classic shape guard.
         let entry = cell.entry.expect("peeked cell has an entry");
-        if VmState::aot_site_args_match(&cell, args)
-            && entry
-                .param_preconditions
-                .iter()
-                .zip(args.iter())
-                .all(|(pre, a)| pre.is_none_or(|k| crate::codegen::scalar_matches(k, *a)))
-        {
-            let recv_start = vm.stack.len();
+        let plan = &entry.lane_plan;
+        let mut argv = [Value::Nil; 8];
+        let mut raw = [0i64; 8];
+        let base = vm.stack.len();
+        let mut hit = plan.len() == n;
+        if hit {
+            for i in 0..n {
+                let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
+                let p = plan[i] as i64;
+                if p >= 0 {
+                    if k == p {
+                        raw[i] = b;
+                        argv[i] = match p {
+                            KIND_INT => Value::Int(b),
+                            KIND_DOUBLE => Value::Double(f64::from_bits(b as u64)),
+                            _ => Value::Bool(b != 0),
+                        };
+                    } else if k == KIND_SLOT {
+                        // The caller holds the value in a window slot (a Dyn
+                        // local): one load, then the same kind fold.
+                        let v = vm.stack[b as usize];
+                        match (p, v) {
+                            (KIND_INT, Value::Int(x)) => {
+                                raw[i] = x;
+                                argv[i] = v;
+                            }
+                            (KIND_DOUBLE, Value::Double(d)) => {
+                                raw[i] = d.to_bits() as i64;
+                                argv[i] = v;
+                            }
+                            (KIND_BOOL, Value::Bool(x)) => {
+                                raw[i] = x as i64;
+                                argv[i] = v;
+                            }
+                            _ => {
+                                hit = false;
+                            }
+                        }
+                    } else {
+                        hit = false;
+                    }
+                } else {
+                    let v = decode(vm, k, b);
+                    // preconditions may be an EMPTY slice (no S1 specs)
+                    let pre = entry.param_preconditions.get(i).copied().flatten();
+                    if !VmState::aot_site_arg_match_one(&cell, i, v)
+                        || !pre.is_none_or(|kk| crate::codegen::scalar_matches(kk, v))
+                        || !matches!(v, Value::Object(_))
+                    {
+                        hit = false;
+                    } else {
+                        raw[i] = (base + 1 + i) as i64;
+                        argv[i] = v;
+                    }
+                }
+                if !hit {
+                    break;
+                }
+            }
+        }
+        if hit {
+            let args = &argv[..n];
+            let recv_start = base;
             vm.stack.push(receiver);
             for &a in args {
                 vm.stack.push(a);
             }
             vm.aot.outcall_nesting += 1;
-            let outcome = crate::codegen::invoke(
+            let outcome = crate::codegen::invoke_prebuilt(
                 vm,
                 mc,
                 entry,
                 receiver,
                 args,
+                &raw[..n],
                 cell.parent_env,
                 Some(recv_start),
             );
@@ -736,18 +791,15 @@ pub(super) unsafe extern "C" fn outcall(
                 }
             }
         }
-        // Arg-shape / precondition miss (or Bail): classic path, args ready.
+        // Arg-shape / precondition miss (or Bail): classic path — decode
+        // the lanes fresh (the marshaling pass may have stopped early).
+        let mut cargs = Vec::with_capacity(n);
+        for i in 0..n {
+            let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
+            cargs.push(decode(vm, k, b));
+        }
         return outcall_classic(
-            vm,
-            mc,
-            tid,
-            ip,
-            bc_len,
-            receiver,
-            selector,
-            args.to_vec(),
-            out_idx,
-            site,
+            vm, mc, tid, ip, bc_len, receiver, selector, cargs, out_idx, site,
         );
     }
     let mut args = Vec::with_capacity(n);

@@ -601,6 +601,7 @@ fn compile_group(
                 compile_epoch: super::redef_epoch(),
                 materializes_nlr,
                 materializes,
+                lane_plan: super::build_lane_plan(&m.params, &m.spec_preconditions),
             },
         ));
     }
