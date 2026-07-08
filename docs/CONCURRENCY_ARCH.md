@@ -781,3 +781,9 @@ var results = Join.all:#(
    process leaves). [SHIPPED — see §13.5: the `Plan` class]
 6. Measure: wire floor per backing, boot costs, a mixed-tree demo;
    revisit the services-default-backing open question with data.
+   [DONE — profiling/plan-arc/: thread vs process boot+join 6 ms vs 9 ms,
+   lane RTT 22 µs vs 29 µs (wire tax ~7 µs, half the §13.1 estimate);
+   `Plan.all:` of 4 process compute leaves = 3.45× over serial (real
+   multicore through the join graph); psTree over a mixed tree sub-ms.
+   The data softens the case for thread-default services — revisit after
+   real mileage, as decided.]
