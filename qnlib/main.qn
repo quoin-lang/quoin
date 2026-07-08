@@ -1,12 +1,63 @@
-"* Test entry point. Pulls in the framework and every test file via `use`; each suite
-"* self-registers into [Test]Suites (see test.qn), which we then run. `use std:tests/*`
-"* loads qnlib/tests/*.qn in UTF-8 sorted order (== numeric, since prefixes are padded).
-use test;
-use std:tests/*;
+"* Test entry point — parallel edition (the C2 worker-isolates demo). Instead
+"* of running every suite in this VM, spawn 8 worker isolates; each boots the
+"* full suite set (test_worker.qn) and runs the modulo slice assigned by its
+"* index. Workers report per-suite results as data messages; this side
+"* collects, merges, and displays them — and keeps the contract the Test
+"* driver relies on: the final value is the all-passed boolean.
+var workerCount = 8;
 
-var runner = TestRunner.new;
-[Test]Suites.each:{ |s| runner.add:s };
+var shards = nil;
+var wall = Timer.time:{
+    var workers = #();
+    (0..workerCount).each:{ |i|
+        var w = Worker.spawn:'qnlib/test_worker.qn';
+        w.send:#{ 'index': i 'count': workerCount };
+        workers.add:w
+    };
+    shards = Async.gather:(workers.collect:{ |w| { w.receive } });
+    workers.each:{ |w| w.join }
+};
 
-var results = runner.run:AnsiTestReporter.new:{ var out = [IO]Stdout };
+"* Merge and display, one line per suite in a stable order (workers report
+"* their slices in registration order; interleave by original position).
+var nameWidth = 0;
+shards.each:{ |sh|
+    (sh.at:'suites').each:{ |r|
+        ((r.at:'suite').length > nameWidth).if:{ nameWidth = (r.at:'suite').length }
+    }
+};
 
-results.none?:{ |tr| tr.failures.any? }
+var passes = 0;
+var failures = 0;
+var skips = 0;
+var failedLines = #();
+(0..((shards.collect:{ |sh| (sh.at:'suites').count }).max)).each:{ |row|
+    shards.each:{ |sh|
+        var suites = sh.at:'suites';
+        (row < suites.count).if:{
+            var r = suites.at:row;
+            var name = (r.at:'suite').padRight:nameWidth;
+            (r.at:'skipped').if:{
+                skips = skips + 1;
+                ('[' + name + '] SKIPPED — ' + (r.at:'reason')).print
+            }
+            else:{
+                passes = passes + (r.at:'passes');
+                failures = failures + (r.at:'failures');
+                var us = r.at:'us';
+                var took = (us < 1000).if:{ us.s + 'µs' } else:{ (us / 1000).s + 'ms' };
+                ('[' + name + '] ' + (r.at:'passes').s + ' passes / '
+                    + (r.at:'failures').s + ' failures (worker ' + (sh.at:'index').s
+                    + ', ' + took + ')').print
+            };
+            (r.at:'failed').each:{ |line| failedLines.add:line }
+        }
+    }
+};
+
+failedLines.each:{ |line| ('  FAILED: ' + line).print };
+
+('All ' + workerCount.s + ' workers finished in ' + (wall / 1000).s + 'ms : '
+    + passes.s + ' passes / ' + failures.s + ' failures / ' + skips.s + ' skipped').print;
+
+failures == 0
