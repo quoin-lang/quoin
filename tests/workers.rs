@@ -155,13 +155,22 @@ ok.if:{ 'PASS'.print } else:{ ('FAIL: ' + outs.s + ' ' + timedOut).print };
 }
 
 #[test]
-fn worker_message_taxonomy_refuses_blocks() {
+fn worker_message_taxonomy() {
+    // Since L3, BLOCKS cross the lanes as portable-block messages (the
+    // combinator enabler) — the echo worker bounces one back and the parent
+    // runs the rebuilt closure. Native-state instances (here: the worker
+    // handle itself) still refuse at the send seam, catchable, worker
+    // unharmed.
     let script = r#"
 var ok = true;
 var w = Worker.spawn:'@echo.qn@';
-"* blocks refuse at the send seam, catchable, worker unharmed
-var refused = { w.send:{ |x| x }; 'sent' }.catch:{ |e| 'refused' };
+"* a native-state instance refuses at the send seam
+var refused = { w.send:w; 'sent' }.catch:{ |e| 'refused' };
 (refused == 'refused').else:{ ok = false };
+"* a block crosses, echoes back, and runs on this side
+w.send:{ |x| x * 7 };
+var back = w.receive;
+((back.valueWithSelfOrArg:6) == 42).else:{ ok = false };
 w.send:5;
 ((w.receive) == 10).else:{ ok = false };
 w.send:'stop';

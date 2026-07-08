@@ -96,10 +96,15 @@ var c = 0;
 var wc = { Worker.start:{ c = c + 1 }; 'started' }.catch:{ |e| e.s };
 ((wc.contains?:'c') && (wc.contains?:'writes captured')).else:{ ok = false };
 
-"* a non-portable capture value (a block) refuses, naming the variable
-var b = { 1 };
-var bc = { Worker.start:{ b }; 'started' }.catch:{ |e| e.s };
-(bc.contains?:'b').else:{ ok = false };
+"* a captured BLOCK ships recursively since L3 (the combinator enabler)
+var g = { |x| x * 2 };
+(((Worker.start:{ g.valueWithSelfOrArg:21 }).join) == 42).else:{ ok = false };
+
+"* a genuinely non-portable capture (a user-class instance) refuses, named
+Box <- { |@v| init -> { @v = 1 } };
+var inst = Box.new;
+var bc = { Worker.start:{ inst }; 'started' }.catch:{ |e| e.s };
+(bc.contains?:'inst').else:{ ok = false };
 
 "* ^^ refuses (its home method can't exist over there)
 Nlr <- {
