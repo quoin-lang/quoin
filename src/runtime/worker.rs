@@ -27,7 +27,8 @@ use crate::error::QuoinError;
 use crate::io_backend::{IoRequest, IoResult};
 use crate::runtime::extension::{value_to_wire, wire_to_value};
 use crate::value::{AnyCollect, NativeClassBuilder, Value};
-use crate::worker::{note_message, spawn_worker};
+use crate::value::{EnvFrame, ObjectPayload};
+use crate::worker::{PortableJob, note_message, scan_portable, spawn_worker, spawn_worker_block};
 
 /// Parent-side handle state: the three channel ends. Plain `Send` data —
 /// nothing here touches the arena.
@@ -63,6 +64,28 @@ fn to_message<'gc>(v: Value<'gc>) -> Result<WireData, QuoinError> {
     Ok(dv)
 }
 
+/// Wrap freshly spawned lanes in a Worker-class handle instance.
+fn wrap_handle<'gc>(
+    vm: &mut crate::vm::VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    receiver: Value<'gc>,
+    ch: crate::worker::WorkerChannels,
+) -> Result<Value<'gc>, QuoinError> {
+    let Value::Class(class) = receiver else {
+        return Err(QuoinError::Other("Worker: bad receiver".into()));
+    };
+    Ok(vm.new_native_state(
+        mc,
+        class,
+        NativeWorkerHandle {
+            inbox_tx: ch.inbox_tx,
+            outbox_rx: ch.outbox_rx,
+            done_rx: ch.done_rx,
+            joined: std::cell::Cell::new(false),
+        },
+    ))
+}
+
 pub fn build_worker_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Worker", Some("Object"))
         // ---- parent side (class-side spawn, instance-side lanes) ----
@@ -70,20 +93,61 @@ pub fn build_worker_class() -> NativeClassBuilder {
             let path = args[0]
                 .as_string()
                 .ok_or_else(|| QuoinError::Other("Worker.spawn: expects a String path".into()))?;
-            let ch = spawn_worker(path);
-            let Value::Class(class) = receiver else {
-                return Err(QuoinError::Other("Worker.spawn: bad receiver".into()));
+            wrap_handle(vm, mc, receiver, spawn_worker(path))
+        })
+        // Portable blocks (docs/CONCURRENCY_ARCH.md §10): ship the block's
+        // template by reference plus a deep-copied SNAPSHOT of its free
+        // reads; join returns the block's value. The portability scan
+        // refuses write-captures, ^^, self/@fields, guarded blocks, and
+        // class/method definition — loudly, at submit time.
+        .class_method("start:", |vm, mc, receiver, args| {
+            let Value::Object(obj) = args[0] else {
+                return Err(QuoinError::Other("Worker.start: expects a Block".into()));
             };
-            Ok(vm.new_native_state(
+            let (template, parent_env) = {
+                let borrowed = obj.borrow();
+                match &borrowed.payload {
+                    ObjectPayload::Block(b) => (b.template.clone(), b.parent_env),
+                    _ => {
+                        return Err(QuoinError::Other("Worker.start: expects a Block".into()));
+                    }
+                }
+            };
+            if !template.param_syms.is_empty() {
+                return Err(QuoinError::Other(
+                    "Worker.start: the block takes no parameters (send it data through \
+                     the lanes instead)"
+                        .into(),
+                ));
+            }
+            let (frees, globals) = scan_portable(&template)
+                .map_err(|why| QuoinError::Other(format!("Worker.start: {why}")))?;
+            let mut captures = Vec::with_capacity(frees.len());
+            for sym in frees {
+                // Absent up the chain reads as nil in the interpreter; the
+                // snapshot mirrors that.
+                let val = parent_env
+                    .and_then(|env| EnvFrame::get(env, sym))
+                    .unwrap_or(Value::Nil);
+                let dv = value_to_wire(val, None).map_err(|e| {
+                    QuoinError::Other(format!(
+                        "Worker.start: capture '{}' is not portable: {e}",
+                        sym.as_str()
+                    ))
+                })?;
+                note_message();
+                captures.push((sym, dv));
+            }
+            wrap_handle(
+                vm,
                 mc,
-                class,
-                NativeWorkerHandle {
-                    inbox_tx: ch.inbox_tx,
-                    outbox_rx: ch.outbox_rx,
-                    done_rx: ch.done_rx,
-                    joined: std::cell::Cell::new(false),
-                },
-            ))
+                receiver,
+                spawn_worker_block(PortableJob {
+                    template,
+                    captures,
+                    globals,
+                }),
+            )
         })
         .instance_method("send:", |vm, _mc, receiver, args| {
             let dv = to_message(args[0])?;

@@ -358,6 +358,15 @@ Write-captures, `^^`, and a data-bearing `self` refuse, loudly, at submit
 time. A portable block crosses as `(template reference, deep-copied capture
 snapshot)` — captures ride the same walkers as any message.
 
+**SHIPPED (v1)** as `Worker.start:{...}`: the scanner (`scan_portable`,
+`src/worker.rs`) recurses nested literals incl. fused constants, collects
+free reads + global references, and refuses write-captures / `^^` /
+self-and-@fields / guarded blocks / class-method definition; the worker
+verifies the global list against its own globals before running (clear
+error over silent nil), rebuilds the closure over a snapshot `EnvFrame`,
+and `join` returns the block's VALUE. Pools/combinators (L1/L3) still
+ahead.
+
 Every piece already exists somewhere in this VM: the compiler's capture
 analysis (the AOT candidacy prescans classify free names, write-captures,
 `^^` — `compiler/mod.rs`), the B3b cold-path materialization already builds
