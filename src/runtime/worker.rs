@@ -37,6 +37,11 @@ use crate::worker::{
 /// nothing here touches the arena.
 #[derive(Debug)]
 pub struct NativeWorkerHandle {
+    backing: &'static str,
+    /// Registry slot, for `label:` restamps (`VM.ps` rows are the audience).
+    reg_idx: usize,
+    /// Process backing only: the grip `terminate` kills through.
+    grip: Option<crate::worker::ChildGrip>,
     inbox_tx: async_channel::Sender<WorkerMsg>,
     outbox_rx: async_channel::Receiver<WorkerMsg>,
     done_rx: async_channel::Receiver<Result<WireData, String>>,
@@ -64,7 +69,7 @@ unsafe impl<'gc> Collect<'gc> for NativeWorkerHandle {
 /// `Worker.start:`); everything else takes the wire walkers, whose
 /// taxonomy still refuses symbols/instances/resources — and blocks nested
 /// INSIDE data structures.
-fn to_message<'gc>(v: Value<'gc>) -> Result<WorkerMsg, QuoinError> {
+fn to_message<'gc>(v: Value<'gc>, allow_blocks: bool) -> Result<WorkerMsg, QuoinError> {
     if let Value::Object(obj) = v {
         let block_parts = {
             let borrowed = obj.borrow();
@@ -75,6 +80,13 @@ fn to_message<'gc>(v: Value<'gc>) -> Result<WorkerMsg, QuoinError> {
             }
         };
         if let Some((template, parent_env)) = block_parts {
+            if !allow_blocks {
+                return Err(QuoinError::Other(
+                    "blocks cannot cross a process boundary (templates are \
+                     in-process references) — send data, or use thread backing"
+                        .into(),
+                ));
+            }
             let pb = snapshot_block(template, parent_env, 0)?;
             note_message();
             return Ok(WorkerMsg::Block(pb));
@@ -104,20 +116,31 @@ fn wrap_handle<'gc>(
     mc: &gc_arena::Mutation<'gc>,
     receiver: Value<'gc>,
     unit: &str,
+    backing: &'static str,
+    pid: Option<u32>,
+    grip: Option<crate::worker::ChildGrip>,
     ch: crate::worker::WorkerChannels,
 ) -> Result<Value<'gc>, QuoinError> {
     let Value::Class(class) = receiver else {
         return Err(QuoinError::Other("Worker: bad receiver".into()));
     };
+    let reg_idx = vm.worker_registry.len();
     vm.worker_registry.push(crate::worker::WorkerReg {
         unit: unit.to_string(),
+        label: unit.to_string(),
+        backing,
+        pid,
         inbox_tx: ch.inbox_tx.clone(),
         outbox_rx: ch.outbox_rx.clone(),
+        control_tx: ch.control_tx.clone(),
     });
     Ok(vm.new_native_state(
         mc,
         class,
         NativeWorkerHandle {
+            backing,
+            reg_idx,
+            grip,
             inbox_tx: ch.inbox_tx,
             outbox_rx: ch.outbox_rx,
             done_rx: ch.done_rx,
@@ -134,7 +157,71 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 .as_string()
                 .ok_or_else(|| QuoinError::Other("Worker.spawn: expects a String path".into()))?;
             let reg = path.clone();
-            wrap_handle(vm, mc, receiver, &reg, spawn_worker(path))
+            wrap_handle(
+                vm,
+                mc,
+                receiver,
+                &reg,
+                "thread",
+                None,
+                None,
+                spawn_worker(path),
+            )
+        })
+        // §13.2: backing is a spawn-time choice — thread (default) or a
+        // child qn process bridged by the pump.
+        .class_method("spawn:backing:", |vm, mc, receiver, args| {
+            let path = args[0]
+                .as_string()
+                .ok_or_else(|| QuoinError::Other("Worker.spawn: expects a String path".into()))?;
+            let backing = args[1]
+                .as_string()
+                .ok_or_else(|| QuoinError::Other("backing: expects a String".into()))?;
+            match backing.as_str() {
+                "thread" => {
+                    let reg = path.clone();
+                    wrap_handle(
+                        vm,
+                        mc,
+                        receiver,
+                        &reg,
+                        "thread",
+                        None,
+                        None,
+                        spawn_worker(path),
+                    )
+                }
+                "process" => {
+                    let reg = path.clone();
+                    let (ch, pid, grip) = crate::worker::spawn_worker_process(path, None)
+                        .map_err(QuoinError::Other)?;
+                    wrap_handle(vm, mc, receiver, &reg, "process", Some(pid), Some(grip), ch)
+                }
+                other => Err(QuoinError::Other(format!(
+                    "Worker.spawn: unknown backing '{other}' (thread|process)"
+                ))),
+            }
+        })
+        // Portable blocks are in-process by nature; the explicit form
+        // documents WHY rather than silently doing the wrong thing.
+        .class_method("start:backing:", |vm, mc, receiver, args| {
+            let backing = args[1]
+                .as_string()
+                .ok_or_else(|| QuoinError::Other("backing: expects a String".into()))?;
+            match backing.as_str() {
+                "thread" => {
+                    // Same as Worker.start: — reuse its body via the send.
+                    vm.call_method(mc, receiver, "start:", vec![args[0]])
+                }
+                "process" => Err(QuoinError::Other(
+                    "Worker.start: blocks cannot cross a process boundary — put the \
+                     code in a unit and Worker.spawn:backing:'process' it"
+                        .into(),
+                )),
+                other => Err(QuoinError::Other(format!(
+                    "Worker.start: unknown backing '{other}' (thread|process)"
+                ))),
+            }
         })
         // Portable blocks (docs/CONCURRENCY_ARCH.md §10): ship the block's
         // template by reference plus a deep-copied SNAPSHOT of its free
@@ -163,13 +250,22 @@ pub fn build_worker_class() -> NativeClassBuilder {
             }
             let pb = snapshot_block(template, parent_env, 0)
                 .map_err(|e| QuoinError::Other(format!("Worker.start: {e}")))?;
-            wrap_handle(vm, mc, receiver, "<block>", spawn_worker_block(pb))
+            wrap_handle(
+                vm,
+                mc,
+                receiver,
+                "<block>",
+                "thread",
+                None,
+                None,
+                spawn_worker_block(pb),
+            )
         })
         .instance_method("send:", |vm, _mc, receiver, args| {
-            let dv = to_message(args[0])?;
-            let tx = receiver
-                .with_native_state::<NativeWorkerHandle, _, _>(|h| h.inbox_tx.clone())
+            let (tx, backing) = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| (h.inbox_tx.clone(), h.backing))
                 .map_err(QuoinError::Other)?;
+            let dv = to_message(args[0], backing == "thread")?;
             tx.try_send(dv)
                 .map_err(|_| QuoinError::Other("Worker.send: the worker has exited".into()))?;
             Ok(vm.new_nil(_mc))
@@ -185,6 +281,38 @@ pub fn build_worker_class() -> NativeClassBuilder {
                     "Worker.receive: unexpected result {other:?}"
                 ))),
             }
+        })
+        // handle.label:'name' — restamp the registry row (VM.ps/psTree show
+        // it; the Plan layer marks ownership and orphans this way).
+        .instance_method("label:", |vm, _mc, receiver, args| {
+            let label = args[0]
+                .as_string()
+                .ok_or_else(|| QuoinError::Other("label: expects a String".into()))?;
+            let idx = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| h.reg_idx)
+                .map_err(QuoinError::Other)?;
+            if let Some(reg) = vm.worker_registry.get_mut(idx) {
+                reg.label = label;
+            }
+            Ok(receiver)
+        })
+        // handle.terminate — REAL cancellation, process backing only (a
+        // thread worker cannot be killed; orphan it instead). Idempotent;
+        // join afterwards reports the exit as an error.
+        .instance_method("terminate", |_vm, _mc, receiver, _args| {
+            let (grip, backing) = receiver
+                .with_native_state::<NativeWorkerHandle, _, _>(|h| (h.grip.clone(), h.backing))
+                .map_err(QuoinError::Other)?;
+            let Some(grip) = grip else {
+                return Err(QuoinError::Other(format!(
+                    "terminate: only process-backed workers can be killed \
+                     (this one is {backing}-backed) — orphan or join it instead"
+                )));
+            };
+            if let Some(c) = grip.lock().expect("child grip").as_mut() {
+                let _ = c.kill();
+            }
+            Ok(Value::Nil)
         })
         .instance_method("join", |vm, mc, receiver, _args| {
             let rx = receiver
@@ -229,7 +357,8 @@ pub fn build_worker_class() -> NativeClassBuilder {
                 return Err(QuoinError::Other("Worker.send: not inside a worker".into()));
             };
             let tx = link.outbox_tx.clone();
-            let dv = to_message(args[0])?;
+            let allow_blocks = !link.process;
+            let dv = to_message(args[0], allow_blocks)?;
             tx.try_send(dv)
                 .map_err(|_| QuoinError::Other("Worker.send: the parent has gone away".into()))?;
             Ok(vm.new_nil(mc))

@@ -226,6 +226,9 @@ fn collect_qn_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmRunnerMode {
+    /// `qn worker-serve <sock> <unit> [<serviceClass>]` — the child side of
+    /// a PROCESS-backed worker (docs/CONCURRENCY_ARCH.md §13.1).
+    WorkerServe,
     Highlight,
     Test,
     Benchmark,
@@ -285,6 +288,12 @@ impl VmRunnerOptions {
                 mode = VmRunnerMode::Repl;
                 if args.len() > 2 {
                     vm_args = args[2..].to_vec();
+                }
+            } else if arg == "worker-serve" {
+                mode = VmRunnerMode::WorkerServe;
+                target_path = args.get(2).cloned();
+                if args.len() > 3 {
+                    vm_args = args[3..].to_vec();
                 }
             } else if arg == "-e" {
                 // `qn -e '<expr>'`: the next arg is the expression source; anything after it
@@ -477,6 +486,19 @@ impl VmRunner {
                 };
                 print!("{}", highlight_to_ansi(&source));
                 Ok(())
+            }
+            VmRunnerMode::WorkerServe => {
+                let Some(sock) = self.options.target_path.clone() else {
+                    eprintln!("usage: qn worker-serve <sock> <unit> [<serviceClass>]");
+                    exit(2);
+                };
+                let args = &self.options.vm_options.arguments;
+                let Some(unit) = args.first() else {
+                    eprintln!("usage: qn worker-serve <sock> <unit> [<serviceClass>]");
+                    exit(2);
+                };
+                let service = args.get(1).map(|s| s.as_str());
+                exit(crate::worker::worker_serve_main(&sock, unit, service));
             }
             VmRunnerMode::Test => {
                 // prelude, then the test entry — main.qn `use`s the framework + suites.

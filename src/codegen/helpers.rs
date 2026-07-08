@@ -338,11 +338,12 @@ pub(super) unsafe extern "C" fn block_call(
             Err(e) => store_err(vm, e),
         };
     };
+    let self_val = super::self_or_arg_self(&block, arg);
     if vm.aot.outcall_nesting < super::spec::MAX_OUTCALL_NESTING
         && let Some(tid) = block.template.template_id
         && let Some(entry) = super::block_entry_for(vm, tid)
     {
-        match super::invoke_block(vm, mc, entry, recv, arg) {
+        match super::invoke_block(vm, mc, entry, recv, arg, self_val) {
             super::AotOutcome::Value(v) => {
                 return slot_write(vm, out_idx, v);
             }
@@ -350,7 +351,10 @@ pub(super) unsafe extern "C" fn block_call(
             super::AotOutcome::Bail => {}
         }
     }
-    match vm.execute_block(mc, block, vec![arg], Some(arg)) {
+    // Interpreted fallback: same self-or-arg answer (a parameterless block
+    // gets the item as self; a parameterized one keeps lexical self).
+    let self_opt = block.template.param_syms.is_empty().then_some(arg);
+    match vm.execute_block(mc, block, vec![arg], self_opt) {
         Ok(v) => slot_write(vm, out_idx, v),
         Err(e) => store_err(vm, e),
     }

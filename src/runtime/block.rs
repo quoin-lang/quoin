@@ -106,13 +106,22 @@ pub fn build_block_class() -> NativeClassBuilder {
                 && let Some(tid) = block.template.template_id
                 && let Some(entry) = crate::codegen::block_entry_for(vm, tid)
             {
-                match crate::codegen::invoke_block(vm, mc, entry, receiver, arg_val) {
+                let self_val = crate::codegen::self_or_arg_self(&block, arg_val);
+                match crate::codegen::invoke_block(vm, mc, entry, receiver, arg_val, self_val) {
                     crate::codegen::AotOutcome::Value(v) => return Ok(v),
                     crate::codegen::AotOutcome::Err(e) => return Err(e),
                     crate::codegen::AotOutcome::Bail => {}
                 }
             }
-            vm.execute_block(mc, block, vec![arg_val], Some(arg_val))
+            // self OR arg: a parameterless block gets the item as `self`
+            // (the `{ .name }` shorthand); a parameterized block gets it as
+            // the argument with `self` staying LEXICAL (resolved through the
+            // parent env chain). Binding both — the old behavior — made
+            // `@field` inside `{ |x| ... }` read the ITEM's fields whenever
+            // this interpreted path ran (the AOT block path and devirt
+            // inlining resolve `self` lexically, which is how it hid).
+            let implicit_self = block.template.param_syms.is_empty();
+            vm.execute_block(mc, block, vec![arg_val], implicit_self.then_some(arg_val))
         })
         .instance_method("==:", |vm, mc, receiver, args| {
             Ok(vm.new_bool(mc, receiver == args[0]))

@@ -91,11 +91,22 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
             println!("  $class <Name>     show a class: parent, mixins, ivars, methods");
             println!("  $load <file.qn>   run a .qn file into the session");
             println!("  $ps               show tasks, fibers, workers, and waits");
+            println!("  $ps tree          the same, recursively across workers");
             println!("  $reset            clear session locals");
             println!("  $help             this help");
             println!("  $quit / $exit     leave the REPL (also Ctrl-D)");
             println!("Anything else is evaluated as Quoin; definitions and lowercase");
             println!("variables persist across lines.");
+        }
+        "ps" if rest == "tree" => {
+            // The recursive variant awaits worker replies, so it must run as
+            // a driven line — evaluate through the ordinary eval path and
+            // pretty-print the resulting tree.
+            match eval_once(arena, "VM.psTree.pp") {
+                Ok(Some(out)) => println!("{out}"),
+                Ok(None) => {}
+                Err(msg) => eprintln!("$ps tree: {msg}"),
+            }
         }
         "ps" => {
             let out =

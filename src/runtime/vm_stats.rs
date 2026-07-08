@@ -99,6 +99,9 @@ pub(crate) struct PsTaskRow {
 pub(crate) struct PsWorkerRow {
     pub id: usize,
     pub unit: String,
+    pub label: String,
+    pub backing: &'static str,
+    pub pid: Option<u32>,
     pub running: bool,
     pub inbox: usize,
     pub outbox: usize,
@@ -112,14 +115,106 @@ pub(crate) struct PsData {
     pub compute_in_flight: usize,
 }
 
+/// Render `PsData` as plain wire data (the §13.3 control-lane reply and the
+/// building block `VM.psTree` assembles). Worker rows carry an empty 'ps'
+/// slot the collector patches with each child's subtree.
+pub(crate) fn ps_to_wire(data: &PsData) -> quoin_ext_proto::DataValue {
+    use quoin_ext_proto::DataValue as W;
+    let tasks: Vec<W> = data
+        .tasks
+        .iter()
+        .map(|t| {
+            let mut m = vec![
+                ("id".to_string(), W::Int(t.id as i64)),
+                ("state".to_string(), W::Str(t.state.to_string())),
+                ("fibers".to_string(), W::Int(t.fibers as i64)),
+            ];
+            if let Some(on) = &t.on {
+                m.push(("on".to_string(), W::Str(on.clone())));
+            }
+            if let Some((cap, buffered, recv, send)) = t.channel {
+                m.push((
+                    "channel".to_string(),
+                    W::Map(vec![
+                        ("cap".to_string(), W::Int(cap as i64)),
+                        ("buffered".to_string(), W::Int(buffered as i64)),
+                        ("recvWaiters".to_string(), W::Int(recv as i64)),
+                        ("sendWaiters".to_string(), W::Int(send as i64)),
+                    ]),
+                ));
+            }
+            if let Some(p) = t.parent {
+                m.push(("parent".to_string(), W::Int(p as i64)));
+            }
+            if !t.awaiting.is_empty() {
+                m.push((
+                    "awaiting".to_string(),
+                    W::List(t.awaiting.iter().map(|c| W::Int(*c as i64)).collect()),
+                ));
+            }
+            W::Map(m)
+        })
+        .collect();
+    let workers: Vec<W> = data
+        .workers
+        .iter()
+        .map(|w| {
+            W::Map(vec![
+                ("id".to_string(), W::Int(w.id as i64)),
+                ("unit".to_string(), W::Str(w.unit.clone())),
+                ("label".to_string(), W::Str(w.label.clone())),
+                ("backing".to_string(), W::Str(w.backing.to_string())),
+                (
+                    "pid".to_string(),
+                    w.pid.map_or(W::Null, |p| W::Int(p as i64)),
+                ),
+                (
+                    "state".to_string(),
+                    W::Str(if w.running { "running" } else { "exited" }.to_string()),
+                ),
+                ("inbox".to_string(), W::Int(w.inbox as i64)),
+                ("outbox".to_string(), W::Int(w.outbox as i64)),
+            ])
+        })
+        .collect();
+    W::Map(vec![
+        ("worker?".to_string(), W::Bool(data.is_worker)),
+        ("tasks".to_string(), W::List(tasks)),
+        ("workers".to_string(), W::List(workers)),
+        (
+            "io".to_string(),
+            W::Map(vec![(
+                "inFlight".to_string(),
+                W::Int(data.io_in_flight as i64),
+            )]),
+        ),
+        (
+            "compute".to_string(),
+            W::Map(vec![(
+                "inFlight".to_string(),
+                W::Int(data.compute_in_flight as i64),
+            )]),
+        ),
+    ])
+}
+
 /// Snapshot the scheduler/worker state as plain rows. Read-only.
+/// `vm.sched.current_task` is trusted as the running task — callers that
+/// know better (the DRIVER answering a control request between resumes,
+/// when nothing is running) use [`ps_data_with_current`].
 pub(crate) fn ps_data<'gc>(vm: &VmState<'gc>) -> PsData {
-    let current = vm.sched.current_task;
+    ps_data_with_current(vm, Some(vm.sched.current_task))
+}
+
+pub(crate) fn ps_data_with_current<'gc>(
+    vm: &VmState<'gc>,
+    current: Option<crate::vm_scheduler::TaskId>,
+) -> PsData {
     let mut tasks = Vec::new();
     let mut io_in_flight = 0;
     for (id, slot) in vm.sched.tasks.iter().enumerate() {
         let Some(t) = slot else { continue };
-        let running = id == current.0;
+        let running = current.is_some_and(|c| id == c.0);
         let state = if running {
             "running"
         } else if vm.sched.ready.iter().any(|r| r.0 == id) {
@@ -191,6 +286,9 @@ pub(crate) fn ps_data<'gc>(vm: &VmState<'gc>) -> PsData {
         .map(|(id, w)| PsWorkerRow {
             id,
             unit: w.unit.clone(),
+            label: w.label.clone(),
+            backing: w.backing,
+            pid: w.pid,
             running: !w.outbox_rx.is_closed(),
             inbox: w.inbox_tx.len(),
             outbox: w.outbox_rx.len(),
@@ -257,6 +355,14 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                     let mut m = IndexMap::new();
                     m.insert("id".to_string(), vm.new_int(mc, w.id as i64));
                     m.insert("unit".to_string(), vm.new_string(mc, w.unit.clone()));
+                    m.insert("label".to_string(), vm.new_string(mc, w.label.clone()));
+                    m.insert(
+                        "backing".to_string(),
+                        vm.new_string(mc, w.backing.to_string()),
+                    );
+                    if let Some(pid) = w.pid {
+                        m.insert("pid".to_string(), vm.new_int(mc, pid as i64));
+                    }
                     m.insert(
                         "state".to_string(),
                         vm.new_string(mc, if w.running { "running" } else { "exited" }.to_string()),
@@ -280,6 +386,76 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
             );
             root.insert("compute".to_string(), vm.new_map(mc, comp));
             Ok(vm.new_map(mc, root))
+        })
+        // `VM.psTree` — `VM.ps` plus each worker row's 'ps' filled with the
+        // worker's OWN tree, recursively (docs/CONCURRENCY_ARCH.md §13.4):
+        // one control request per worker (its driver answers between task
+        // resumes), bounded deadline, 'unresponsive' for the silent.
+        // Pull-based: the whole topology costs exactly one call.
+        .class_method("psTree", |vm, mc, _receiver, _args| {
+            let children: Vec<(
+                usize,
+                async_channel::Sender<crate::worker::ControlReq>,
+                bool,
+            )> = vm
+                .worker_registry
+                .iter()
+                .enumerate()
+                .map(|(i, w)| (i, w.control_tx.clone(), !w.outbox_rx.is_closed()))
+                .collect();
+            let mut subs: Vec<(usize, Option<quoin_ext_proto::DataValue>)> = Vec::new();
+            for (idx, tx, running) in children {
+                if !running {
+                    subs.push((idx, None));
+                    continue;
+                }
+                let (rtx, rrx) = async_channel::bounded(1);
+                if tx
+                    .try_send(crate::worker::ControlReq {
+                        kind: crate::worker::ControlKind::PsTree,
+                        reply: rtx,
+                    })
+                    .is_err()
+                {
+                    subs.push((idx, None));
+                    continue;
+                }
+                let sub = match vm
+                    .await_io(crate::io_backend::IoRequest::WorkerRecvTimed { rx: rrx, ms: 700 })?
+                {
+                    crate::io_backend::IoResult::WorkerMsg(Some(
+                        crate::worker::WorkerMsg::Data(dv),
+                    )) => Some(dv),
+                    _ => None,
+                };
+                subs.push((idx, sub));
+            }
+            // Assemble as wire data (reusing the same patch shape the driver
+            // uses), then convert ONCE into guest values.
+            let data = ps_data(vm);
+            let mut local = ps_to_wire(&data);
+            if let quoin_ext_proto::DataValue::Map(sections) = &mut local {
+                for (k, v) in sections.iter_mut() {
+                    if k == "workers"
+                        && let quoin_ext_proto::DataValue::List(rows) = v
+                    {
+                        for (idx, sub) in subs.drain(..) {
+                            if let Some(quoin_ext_proto::DataValue::Map(row)) = rows.get_mut(idx) {
+                                row.push((
+                                    "ps".to_string(),
+                                    match sub {
+                                        Some(tree) => tree,
+                                        None => quoin_ext_proto::DataValue::Str(
+                                            "unresponsive".to_string(),
+                                        ),
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            crate::runtime::extension::wire_to_value(vm, mc, &local, None)
         })
         .class_method("stats", |vm, mc, _receiver, _args| {
             let mut sections = IndexMap::new();

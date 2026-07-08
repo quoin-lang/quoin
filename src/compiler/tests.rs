@@ -1372,6 +1372,7 @@ fn test_compile_blocks() {
     );
     let inner_static = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         name: None,
         is_nested_block: true,
         is_init_literal: false,
@@ -1513,6 +1514,7 @@ fn test_compile_class_and_method_definitions() {
     let res = compile(vec![class_def]).unwrap();
     let expected_block = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         name: None,
         is_nested_block: true,
         is_init_literal: false,

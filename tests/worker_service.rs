@@ -129,10 +129,10 @@ var noClass = { WorkerService.host:'@counter.qn@' class:'NoSuchClass'; 'hosted' 
 var inject = { WorkerService.host:'@counter.qn@' class:'X; 1.print'; 'hosted' }
     .catch:{ |e| 'refused' };
 (inject == 'refused').else:{ ok = false };
-"* process backing is reserved surface, refused loudly
-var pb = { WorkerService.host:'@counter.qn@' class:'Counter' backing:'process'; 'hosted' }
-    .catch:{ |e| (e.s.contains?:'not yet implemented').if:{ 'reserved' } else:{ e.s } };
-(pb == 'reserved').else:{ ok = false };
+"* process backing is REAL now (§13): host, call, stop over the wire
+var pc = WorkerService.host:'@counter.qn@' class:'Counter' backing:'process';
+((pc.add:3) == 3).else:{ ok = false };
+pc.serviceStop;
 ok.if:{ 'PASS'.print } else:{ 'FAIL'.print };
 "#;
     assert_service_script_passes("boot", script, &[("counter.qn", COUNTER_UNIT)]);

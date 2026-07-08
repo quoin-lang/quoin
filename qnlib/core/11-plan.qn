@@ -1,0 +1,216 @@
+"* Plan — the join graph (docs/CONCURRENCY_ARCH.md §13.5).
+"*
+"* A Plan is a LAZY spec tree: constructors build it, nothing runs until
+"* `await`. Leaf methods name WHERE the code runs; composites name shape:
+"*
+"*   Plan.task:{ b }          in-VM task (same heap, ordinary closure)
+"*   Plan.thread:{ b }        thread isolate, portable block
+"*   Plan.thread:'unit.qn'    thread isolate, unit form
+"*   Plan.process:'unit.qn'   child qn process (data-only lanes)
+"*   Plan.all:#( plans )      structural gather -> isomorphic result List
+"*   Plan.any:#( plans )      race -> first success, rest cancelled
+"*
+"* Worker leaves take `send:` (the input message) and `label:` (stamped
+"* into the registry: `VM.psTree` shows plan ownership). Failure policy is
+"* a composite attribute: onError:'cancelRest' (default — first error
+"* cancels the rest and re-raises) or 'collect' (every slot resolves to
+"* #{'ok': v} or #{'err': message}).
+"*
+"* Cancellation is per-backing: process leaves are TERMINATED (killed),
+"* thread leaves are orphaned (marked `orphaned:` in the registry — they
+"* run to completion detached), task leaves get cooperative cancel.
+"* Timeouts compose: Async.timeout:ms do:{ plan.await }.
+Plan <- { | @kind @code @msg @label @children @policy |
+    .meta <-- {
+        "* --- constructors --------------------------------------------
+        task: -> { |b| ^^Plan.new.setKind:'task' code:b };
+        thread: -> { |c| ^^Plan.new.setKind:'thread' code:c };
+        thread:send: -> { |c m| ^^(Plan.new.setKind:'thread' code:c).setMsg:m };
+        thread:label: -> { |c l| ^^(Plan.new.setKind:'thread' code:c).setLabel:l };
+        thread:send:label: -> { |c m l|
+            ^^((Plan.new.setKind:'thread' code:c).setMsg:m).setLabel:l
+        };
+        process: -> { |u| ^^Plan.new.setKind:'process' code:(Plan.unitPath:u) };
+        process:send: -> { |u m|
+            ^^(Plan.new.setKind:'process' code:(Plan.unitPath:u)).setMsg:m
+        };
+        process:label: -> { |u l|
+            ^^(Plan.new.setKind:'process' code:(Plan.unitPath:u)).setLabel:l
+        };
+        process:send:label: -> { |u m l|
+            ^^((Plan.new.setKind:'process' code:(Plan.unitPath:u)).setMsg:m).setLabel:l
+        };
+        all: -> { |plans| ^^Plan.new.setKind:'all' children:plans };
+        all:onError: -> { |plans policy|
+            ((policy == 'cancelRest') || (policy == 'collect'))
+                .else:{ ('Plan onError: unknown policy ' + policy.s
+                    + ' (cancelRest|collect)').throw };
+            ^^(Plan.new.setKind:'all' children:plans).setPolicy:policy
+        };
+        any: -> { |plans| ^^Plan.new.setKind:'any' children:plans };
+
+        "* process leaves are unit-form only (§13.2: blocks cannot cross)
+        unitPath: -> { |u|
+            (u.class.name == 'String')
+                .else:{ ('Plan.process: needs a unit path — blocks cannot cross a '
+                    + 'process boundary; use Plan.thread: or a unit file').throw };
+            ^u
+        };
+
+        "* settle a LIVE node from a fresh task (no captured instance)
+        settleNode: -> { |live| ^(live.at:'plan').settle:live };
+
+        "* Cancel whatever part of a live subtree has not completed:
+        "* process -> terminate, thread -> orphan + label, task -> cancel.
+        cancelNode: -> { |live|
+            (live.at:'done?').if:{ ^^nil };
+            live.at:'done?' put:true;
+            var plan = live.at:'plan';
+            var kids = live.at:'children';
+            (kids != nil).if:{ kids.each:{ |kid| Plan.cancelNode:kid }; ^^nil };
+            var h = live.at:'handle';
+            (plan.kind == 'process').if:{ h.terminate; ^^nil };
+            (plan.kind == 'thread').if:{
+                var l = plan.label;
+                h.label:('orphaned: ' + ((l == nil).if:{ '<worker>' } else:{ l }));
+                ^^nil
+            };
+            h.cancel
+        }
+    };
+
+    init -> {
+        @kind = 'task';
+        @code = nil;
+        @msg = nil;
+        @label = nil;
+        @children = nil;
+        @policy = 'cancelRest'
+    };
+
+    "* --- internal setters (constructors only) ------------------------
+    setKind:code: -> { |k c| @kind = k; @code = c; ^self };
+    setKind:children: -> { |k cs| @kind = k; @children = cs; ^self };
+    setMsg: -> { |m| @msg = m; ^self };
+    setLabel: -> { |l| @label = l; ^self };
+    setPolicy: -> { |p| @policy = p; ^self };
+    kind -> { @kind };
+    policy -> { @policy };
+    label -> { @label };
+
+    "* --- run ----------------------------------------------------------
+    await -> {
+        var live = self.launch;
+        ^self.settle:live
+    };
+
+    "* Phase 1: spawn the whole tree without waiting on anything. A live
+    "* node is #{'plan' 'handle' 'children' 'done?'} — 'handle' is a Worker
+    "* or Task handle, nil for composites.
+    launch -> {
+        (@kind == 'thread').if:{
+            var h = (@code.class.name == 'String')
+                .if:{ Worker.spawn:@code }
+                else:{ Worker.start:@code };
+            (@label != nil).if:{ h.label:@label };
+            (@msg != nil).if:{ h.send:@msg };
+            ^^#{ 'plan': self 'handle': h 'children': nil 'done?': false }
+        };
+        (@kind == 'process').if:{
+            var h = Worker.spawn:@code backing:'process';
+            (@label != nil).if:{ h.label:@label };
+            (@msg != nil).if:{ h.send:@msg };
+            ^^#{ 'plan': self 'handle': h 'children': nil 'done?': false }
+        };
+        (@kind == 'task').if:{
+            var t = Task.spawn:@code;
+            ^^#{ 'plan': self 'handle': t 'children': nil 'done?': false }
+        };
+        "* composite: launch every child NOW (that is what makes siblings
+        "* of a composite run in parallel with it)
+        var kids = @children.collect:{ |c| c.launch };
+        ^#{ 'plan': self 'handle': nil 'children': kids 'done?': false }
+    };
+
+    "* Phase 2: join in structure. Composites join their children through
+    "* an outcome channel so policy reacts in COMPLETION order, not index
+    "* order — a fast failure cancels a slow sibling immediately.
+    settle: -> { |live|
+        var plan = live.at:'plan';
+        (plan.kind == 'all').if:{ ^^(plan.settleAll:live) };
+        (plan.kind == 'any').if:{ ^^(plan.settleAny:live) };
+        "* leaf: join, then mark completed — marking BEFORE the join would
+        "* make cancelNode skip exactly the in-flight sibling cancelRest
+        "* exists to kill. Errors re-raise after the mark.
+        var out = { #( 'ok' ((live.at:'handle').join) ) }.catch:{ |e| #( 'err' e ) };
+        live.at:'done?' put:true;
+        ((out.at:0) == 'ok').if:{ ^^(out.at:1) };
+        (out.at:1).throw
+    };
+
+    settleAll: -> { |live|
+        var kids = live.at:'children';
+        var n = kids.count;
+        var results = List.new;
+        (0..n).each:{ |i| results.add:nil };
+        var ch = Channel.buffered:n;
+        var next = 0;
+        kids.each:{ |kid|
+            var i = next;
+            next = next + 1;
+            Task.spawn:{
+                var out = { #( 'ok' (Plan.settleNode:kid) ) }
+                    .catch:{ |e| #( 'err' e ) };
+                ch.send:#( i out )
+            }
+        };
+        var failure = nil;
+        (0..n).each:{ |j|
+            var slot = ch.receive;
+            var i = slot.at:0;
+            var out = slot.at:1;
+            (@policy == 'collect').if:{
+                ((out.at:0) == 'ok')
+                    .if:{ results.at:i put:#{ 'ok': (out.at:1) } }
+                    else:{ results.at:i put:#{ 'err': ((out.at:1).s) } }
+            }
+            else:{
+                (((out.at:0) == 'err') && (failure == nil)).if:{
+                    failure = out.at:1;
+                    "* first error: cancel every leaf still in flight
+                    kids.each:{ |kid| Plan.cancelNode:kid }
+                };
+                ((out.at:0) == 'ok').if:{ results.at:i put:(out.at:1) }
+            }
+        };
+        (failure != nil).if:{ failure.throw };
+        ^results
+    };
+
+    settleAny: -> { |live|
+        var kids = live.at:'children';
+        var n = kids.count;
+        var ch = Channel.buffered:n;
+        var next = 0;
+        kids.each:{ |kid|
+            var i = next;
+            next = next + 1;
+            Task.spawn:{
+                var out = { #( 'ok' (Plan.settleNode:kid) ) }
+                    .catch:{ |e| #( 'err' e ) };
+                ch.send:#( i out )
+            }
+        };
+        var lastErr = nil;
+        (0..n).each:{ |j|
+            var slot = ch.receive;
+            var out = slot.at:1;
+            ((out.at:0) == 'ok').if:{
+                kids.each:{ |kid| Plan.cancelNode:kid };
+                ^^(out.at:1)
+            };
+            lastErr = out.at:1
+        };
+        ('Plan.any: every branch failed — last: ' + lastErr.s).throw
+    }
+}
