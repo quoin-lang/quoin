@@ -581,6 +581,9 @@ pub struct VmState<'gc> {
     /// channel ends back to the parent. `None` on the main VM.
     #[collect(require_static)]
     pub worker_link: Option<crate::worker::WorkerLink>,
+    /// Workers this VM spawned (`VM.ps` observability; see `WorkerReg`).
+    #[collect(require_static)]
+    pub worker_registry: Vec<crate::worker::WorkerReg>,
     /// Per-instruction instrumentation hooks — debugger + coverage ([`Instrumentation`]).
     #[collect(require_static)]
     pub instrumentation: Instrumentation,
@@ -710,6 +713,7 @@ impl<'gc> VmState<'gc> {
             // Epoch starts at 1 so the epoch-0 empty slots never spuriously match.
             dispatch_epoch: 1,
             worker_link: None,
+            worker_registry: Vec::new(),
             io: Io {
                 backend: crate::io_backend::SmolBackend::new(),
                 socket_reap: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -3896,6 +3900,16 @@ impl<'gc> VmState<'gc> {
                 Ok(self.pop()?)
             }
         } else {
+            // Same service-proxy forwarding as exec_send's miss branch —
+            // compiled callers reach proxies through this outcall arm.
+            if let Some(res) = crate::runtime::worker_service::try_service_call(
+                self, mc, receiver, selector, &args,
+            ) {
+                if res.is_err() {
+                    self.exceptions.last_send_args = args;
+                }
+                return res;
+            }
             // No method: raise EXACTLY what the interpreted send raises
             // (candidates included). This arm returned nil since the first
             // outcall shell, which made a warm compiled outcall silently
@@ -4409,6 +4423,24 @@ impl<'gc> VmState<'gc> {
             );
             self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start)
         } else {
+            // A WorkerService proxy forwards any selector its class doesn't
+            // define (docs/CONCURRENCY_ARCH.md §10 L4) — the hook sits on
+            // this lookup-miss branch, so the hot path never pays for it.
+            if let Some(res) = crate::runtime::worker_service::try_service_call(
+                self, mc, receiver, selector, &args,
+            ) {
+                self.stack.truncate(recv_start);
+                return match res {
+                    Ok(v) => {
+                        self.push(v);
+                        Ok(VmStatus::Running)
+                    }
+                    Err(e) => {
+                        self.exceptions.last_send_args = args;
+                        Err(e)
+                    }
+                };
+            }
             // The selector may still exist with non-matching signatures; surface those
             // filtered-out variants as a hint.
             let candidates = self

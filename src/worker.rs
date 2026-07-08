@@ -51,6 +51,16 @@ pub struct WorkerLink {
     pub outbox_tx: async_channel::Sender<WorkerMsg>,
 }
 
+/// Registry entry for `VM.ps`: plain lane clones — `async_channel`'s
+/// `len()`/`is_closed()` give live queue depths and running/exited state
+/// with zero bookkeeping. Registered at spawn, never removed (worker
+/// counts are small and the entries are a few pointers).
+pub struct WorkerReg {
+    pub unit: String,
+    pub inbox_tx: async_channel::Sender<WorkerMsg>,
+    pub outbox_rx: async_channel::Receiver<WorkerMsg>,
+}
+
 /// The parent-side half, held by the `Worker` handle instance.
 pub struct WorkerChannels {
     pub inbox_tx: async_channel::Sender<WorkerMsg>,
@@ -446,6 +456,59 @@ fn spawn_worker_with(
     }
 }
 
+/// The generic service loop appended to a hosted unit's source
+/// (docs/CONCURRENCY_ARCH.md §10 L4): instantiate the hosted class, report
+/// ready, then serve calls forever — one at a time, actor-style. Calls are
+/// reflective sends (`perform:args:`), so a missing method raises the same
+/// MessageNotUnderstood a direct send would, and it travels back as the
+/// reply's 'err'. A nil message (serviceStop) ends the loop; the unit then
+/// completes and the done lane reports.
+const SERVICE_LOOP_QN: &str = r#"
+var svcHostInstance = @CLASS@.new;
+Worker.send:#{ 'ready': true };
+var svcHostRunning = true;
+{ svcHostRunning }.whileDo:{
+    var svcHostCall = Worker.receive;
+    (svcHostCall == nil).if:{ svcHostRunning = false }
+    else:{
+        var svcHostReply = {
+            #{ 'ret': (svcHostInstance.perform:(svcHostCall.at:'sel') args:(svcHostCall.at:'args')) }
+        }.catch:{ |e| #{ 'err': e.s } };
+        Worker.send:svcHostReply
+    }
+};
+"#;
+
+/// Spawn a SERVICE worker: the unit at `path` (which defines `class_name`)
+/// plus the generic serve loop, compiled as one program.
+pub fn spawn_worker_service(path: String, class_name: String) -> WorkerChannels {
+    spawn_worker_with(move |link| run_worker_service(&path, &class_name, link))
+}
+
+fn run_worker_service(path: &str, class_name: &str, link: WorkerLink) -> Result<WireData, String> {
+    // The class name is interpolated into synthesized source — insist on a
+    // plain class identifier so a hostile string can't smuggle code.
+    if class_name.is_empty()
+        || !class_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+        || !class_name.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(format!(
+            "WorkerService: '{class_name}' is not a plain class name"
+        ));
+    }
+    let unit_source = std::fs::read_to_string(PathBuf::from(path))
+        .map_err(|e| format!("service unit {path}: {e}"))?;
+    let source = format!(
+        "{unit_source}
+{}",
+        SERVICE_LOOP_QN.replace("@CLASS@", class_name)
+    );
+    run_worker_source(path, &source, link)
+}
+
 /// The worker thread body: boot a fresh VM (builtins + full qnlib prelude,
 /// exactly the `qn <file>` recipe), inject the link, compile and drive the
 /// unit to completion. v1 join carries no payload (`Null` on success) —
@@ -453,7 +516,11 @@ fn spawn_worker_with(
 fn run_worker_unit(path: &str, link: WorkerLink) -> Result<WireData, String> {
     let source = std::fs::read_to_string(PathBuf::from(path))
         .map_err(|e| format!("worker unit {path}: {e}"))?;
-    let ast = try_parse_quoin_string_named(&source, path)
+    run_worker_source(path, &source, link)
+}
+
+fn run_worker_source(path: &str, source: &str, link: WorkerLink) -> Result<WireData, String> {
+    let ast = try_parse_quoin_string_named(source, path)
         .map_err(|e| format!("worker unit {path}: parse error: {e}"))?;
     let NodeValue::Program(program_node) = &ast.value else {
         return Err(format!("worker unit {path}: root AST is not a program"));

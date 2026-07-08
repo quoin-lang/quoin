@@ -459,6 +459,43 @@ BEAM-code-loading style (units know their source).
   classification, error transparency, and ownership/reap discipline are
   already designed and stress-tested; C2 reuses rather than invents.
 
+  **SHIPPED (v1)**: `WorkerService.host:class:` (+ `backing:` — 'thread'
+  now, 'process' reserved with a loud error). The proxy forwards through
+  the dispatch MNU seam (lookup-miss branch only — the hot path never pays)
+  in both the interpreter and the compiled outcall arm; callers serialize
+  on a one-token internal lane (fair parking on existing machinery, no
+  crossed replies); the hosted loop is synthesized guest code driving
+  `perform:args:` (new Object reflection, MNU-correct), so hosted methods
+  do real IO. Errors — throws, MNU, non-portable args — are transparent
+  and catchable; boot failures surface from `host:` with the worker's own
+  message; `serviceStop` waits for quiet, then joins.
+
+  Services scale on a DIFFERENT AXIS than the pool, and the cluster
+  ceiling (§ the scaling investigation) matters far less there. The pool's
+  shape — N threads all CPU-saturated at once — is exactly what macOS
+  punishes past the fast cluster. A service fleet under realistic load is
+  MIXED: at any instant some workers are parked on lanes, some mid-request,
+  few simultaneously compute-bound — parked threads are free, and the
+  runnable set stays at or under cluster size most of the time. And where
+  the pool scales one operation's throughput over stateless snapshots,
+  services scale sustained concurrent load over SHARDED STATE (an index, a
+  session store, a connection owner per shard) — the thing snapshots
+  structurally cannot do. For the server shape that motivated C2, services
+  are the real scaling surface; the pool is the special-purpose tool for
+  data-parallel bursts.
+
+  **Backing is a spawn-time choice, specified from day one.** The recorded
+  escape hatch for the cluster ceiling is process-backed workers, and a
+  service is the one worker shape where that's nearly free: long-lived,
+  state-owning, message-only interface — precisely the extension model
+  already in production. The proxy must not care what's behind the
+  mailbox: a compute-heavy service escapes the DVFS policy with process
+  backing; a chatty low-latency one stays in-process for the cheap lanes.
+  Choosing per service beats anything the pool could do here — coarse RPC
+  tolerates a process boundary; the pool's fine-grained chunk traffic
+  would not. Retrofitting this later would mean two proxy kinds forever
+  (the same argument that put handle-as-task into C2 v1 on day one).
+
 ### What stays visible, on purpose
 
 Copy semantics leak deliberately: arguments and results are deep copies —
@@ -531,6 +568,10 @@ dependency with the C2/library line.
   preserve order; `parallelReduce:` requires associativity; no
   `parallelEach:` in v1.
 - `WorkerService` reuses the extension-backed-class proxy machinery.
+- Service BACKING (in-process thread vs child process) is a spawn-time
+  option in the L4 design from day one; the proxy is backing-agnostic.
+  Process backing is the sanctioned answer to the macOS cluster ceiling
+  for compute-heavy services.
 - `Rc→Arc` for code objects is on the C2 critical path (not optional).
 
 **Open**
@@ -556,3 +597,7 @@ dependency with the C2/library line.
   linked workers) — a library concern, deliberately not runtime.
 - Fire-and-forget service sends: ordering/delivery guarantees, backpressure
   on the service mailbox.
+- Process-backed service transport: in-memory lanes don't cross a process
+  boundary — likely the extension wire's UDS + msgpack verbatim, which
+  would make a process-backed service nearly indistinguishable from an
+  extension (worth unifying rather than paralleling).
