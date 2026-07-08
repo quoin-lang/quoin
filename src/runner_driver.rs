@@ -367,20 +367,27 @@ fn maybe_print_spec_stats(arena: &mut ReplArena) {
 /// once per loop iteration, and a deadline turns silent children into
 /// `'unresponsive'`.
 struct PsCollect {
-    reply: async_channel::Sender<crate::worker::WorkerMsg>,
+    /// Every requester waiting on this collection: one snapshot answers them
+    /// ALL, each through its own sender (a per-request reply keeps the
+    /// process pump's FIFO id correlation intact). Collapsing the queue this
+    /// way is what makes the driver unstarveable by ps traffic — served one
+    /// at a time, a 100ms poll cadence outruns a slow hop and every request
+    /// is answered stale, after its requester stopped listening.
+    replies: Vec<async_channel::Sender<crate::worker::WorkerMsg>>,
     local: quoin_ext_proto::DataValue,
     pending: Vec<(usize, async_channel::Receiver<crate::worker::WorkerMsg>)>,
     done: Vec<(usize, Option<quoin_ext_proto::DataValue>)>,
     deadline: std::time::Instant,
 }
 
-/// Per-hop child budget: generous for a thread hop, and small enough that a
-/// deep tree still answers interactively.
-const PS_CHILD_DEADLINE_MS: u64 = 120;
+/// Per-hop child budget: generous for a thread hop (loaded CI runners wake
+/// parked threads late), and small enough that a deep tree still answers
+/// interactively.
+const PS_CHILD_DEADLINE_MS: u64 = 300;
 
 fn start_ps_collect(
     arena: &mut ReplArena,
-    reply: async_channel::Sender<crate::worker::WorkerMsg>,
+    replies: Vec<async_channel::Sender<crate::worker::WorkerMsg>>,
     current: Option<TaskId>,
 ) -> PsCollect {
     let (local, children) = arena.mutate_root(|_mc, vm| {
@@ -419,7 +426,7 @@ fn start_ps_collect(
         }
     }
     PsCollect {
-        reply,
+        replies,
         local,
         pending,
         done,
@@ -476,9 +483,9 @@ fn progress_ps_collect(c: &mut PsCollect) -> bool {
             }
         }
     }
-    let _ = c
-        .reply
-        .try_send(crate::worker::WorkerMsg::Data(c.local.clone()));
+    for reply in c.replies.drain(..) {
+        let _ = reply.try_send(crate::worker::WorkerMsg::Data(c.local.clone()));
+    }
     true
 }
 
@@ -541,13 +548,18 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                         crate::worker::ControlKind::PsTree => ps_queue.push_back(req.reply),
                     }
                 }
-                if ps_collect.is_none()
-                    && let Some(reply) = ps_queue.pop_front()
-                {
+                if let Some(c) = &mut ps_collect {
+                    // Requests arriving mid-collection join it: a snapshot a
+                    // few ms old is exactly as good (bounded staleness is the
+                    // §13.3 contract), and absorbing them here is what keeps
+                    // the queue from outgrowing a slow hop.
+                    c.replies.extend(ps_queue.drain(..));
+                } else if !ps_queue.is_empty() {
                     // `current` reflects what is genuinely running RIGHT NOW
                     // (None between resumes) — truer than the VM's sticky
                     // current_task for the snapshot.
-                    ps_collect = Some(start_ps_collect(arena, reply, current));
+                    let replies: Vec<_> = ps_queue.drain(..).collect();
+                    ps_collect = Some(start_ps_collect(arena, replies, current));
                 }
                 if let Some(c) = &mut ps_collect
                     && progress_ps_collect(c)

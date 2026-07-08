@@ -421,7 +421,7 @@ pub fn build_vm_stats_class() -> NativeClassBuilder {
                     continue;
                 }
                 let sub = match vm
-                    .await_io(crate::io_backend::IoRequest::WorkerRecvTimed { rx: rrx, ms: 250 })?
+                    .await_io(crate::io_backend::IoRequest::WorkerRecvTimed { rx: rrx, ms: 700 })?
                 {
                     crate::io_backend::IoResult::WorkerMsg(Some(
                         crate::worker::WorkerMsg::Data(dv),
