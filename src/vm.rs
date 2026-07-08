@@ -3900,6 +3900,16 @@ impl<'gc> VmState<'gc> {
                 Ok(self.pop()?)
             }
         } else {
+            // Same service-proxy forwarding as exec_send's miss branch —
+            // compiled callers reach proxies through this outcall arm.
+            if let Some(res) = crate::runtime::worker_service::try_service_call(
+                self, mc, receiver, selector, &args,
+            ) {
+                if res.is_err() {
+                    self.exceptions.last_send_args = args;
+                }
+                return res;
+            }
             // No method: raise EXACTLY what the interpreted send raises
             // (candidates included). This arm returned nil since the first
             // outcall shell, which made a warm compiled outcall silently
@@ -4413,6 +4423,24 @@ impl<'gc> VmState<'gc> {
             );
             self.dispatch_send_rooted(mc, callable, receiver, args, selector, recv_start)
         } else {
+            // A WorkerService proxy forwards any selector its class doesn't
+            // define (docs/CONCURRENCY_ARCH.md §10 L4) — the hook sits on
+            // this lookup-miss branch, so the hot path never pays for it.
+            if let Some(res) = crate::runtime::worker_service::try_service_call(
+                self, mc, receiver, selector, &args,
+            ) {
+                self.stack.truncate(recv_start);
+                return match res {
+                    Ok(v) => {
+                        self.push(v);
+                        Ok(VmStatus::Running)
+                    }
+                    Err(e) => {
+                        self.exceptions.last_send_args = args;
+                        Err(e)
+                    }
+                };
+            }
             // The selector may still exist with non-matching signatures; surface those
             // filtered-out variants as a hint.
             let candidates = self

@@ -459,6 +459,17 @@ BEAM-code-loading style (units know their source).
   classification, error transparency, and ownership/reap discipline are
   already designed and stress-tested; C2 reuses rather than invents.
 
+  **SHIPPED (v1)**: `WorkerService.host:class:` (+ `backing:` — 'thread'
+  now, 'process' reserved with a loud error). The proxy forwards through
+  the dispatch MNU seam (lookup-miss branch only — the hot path never pays)
+  in both the interpreter and the compiled outcall arm; callers serialize
+  on a one-token internal lane (fair parking on existing machinery, no
+  crossed replies); the hosted loop is synthesized guest code driving
+  `perform:args:` (new Object reflection, MNU-correct), so hosted methods
+  do real IO. Errors — throws, MNU, non-portable args — are transparent
+  and catchable; boot failures surface from `host:` with the worker's own
+  message; `serviceStop` waits for quiet, then joins.
+
   Services scale on a DIFFERENT AXIS than the pool, and the cluster
   ceiling (§ the scaling investigation) matters far less there. The pool's
   shape — N threads all CPU-saturated at once — is exactly what macOS

@@ -4,6 +4,56 @@ use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
+        // Reflective send: `obj.perform:'add:' args:#( 3 )`. Raises the same
+        // MessageNotUnderstood a direct send would (the legacy nil-for-absent
+        // convention of the internal call_method helper does NOT apply here).
+        // Added for the WorkerService host loop; generally useful reflection.
+        .instance_method("perform:args:", |vm, mc, receiver, args| {
+            let sel = match args[0] {
+                Value::Object(obj) => match &obj.borrow().payload {
+                    crate::value::ObjectPayload::String(s) => (**s).clone(),
+                    _ => {
+                        return Err(QuoinError::Other(
+                            "perform:args: expects a String selector".into(),
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(QuoinError::Other(
+                        "perform:args: expects a String selector".into(),
+                    ));
+                }
+            };
+            let call_args: Vec<Value> = if let Value::Nil = args[1] {
+                Vec::new()
+            } else {
+                args[1]
+                    .with_native_state::<crate::runtime::list::NativeListState, _, _>(|l| {
+                        l.get_vec().to_vec()
+                    })
+                    .map_err(|_| {
+                        QuoinError::Other("perform:args: expects a List of arguments".into())
+                    })?
+            };
+            let symbol = crate::symbol::Symbol::intern(&sel);
+            if vm
+                .lookup_method(mc, receiver, symbol, &call_args)?
+                .is_none()
+            {
+                let candidates = vm
+                    .collect_method_candidates(receiver, symbol)
+                    .iter()
+                    .map(|&mv| vm.format_candidate_signature(mv, symbol))
+                    .collect();
+                return Err(QuoinError::MessageNotUnderstood {
+                    receiver: receiver.class_name(),
+                    selector: sel,
+                    args: call_args.iter().map(|a| a.class_name()).collect(),
+                    candidates,
+                });
+            }
+            vm.call_method(mc, receiver, &sel, call_args)
+        })
         // The default `.s` for a value with no intrinsic human form: fall back to the
         // structural `.pp`. The Rust Display impl is for Rust-level debugging only — no Quoin
         // `.s` routes through it. (Types with an intrinsic form — Integer, String, Error, … —
