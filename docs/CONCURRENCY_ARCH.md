@@ -427,9 +427,16 @@ BEAM-code-loading style (units know their source).
   the chunk job). Measured honestly (profiling/parallel-combinators/):
   cheap per-item blocks NEVER pay (copy-bound at every count — the real
   eligibility knob is per-item work, which no gate can see; stated in the
-  combinator docs); heavy blocks reach 1.9× at the measured pool sweet spot
-  of 4 (8 workers ran slower — P/E-core mix + allocator bandwidth; the
-  scaling ceiling is a recorded open item, not understood yet). One flight
+  combinator docs); heavy blocks reach 2.7× at the measured pool sweet spot
+  of 4 (after the shared-template false-sharing fix — shipped templates
+  LOCALIZE per worker, profiling/worker-scaling/notes.md; the residual >4
+  in-process ceiling is powermetrics-confirmed platform policy: extra
+  same-process threads land on a sibling cluster clocked at ~1/3 frequency
+  (1.5 vs 4.6 GHz) that macOS won't clock up, and aggregate throughput
+  drops even under dynamic feed-on-completion chunking — which shipped
+  anyway, as the robust design for variable per-item cost. Cap 4 stands,
+  triple-confirmed; the escape hatch if it ever matters is process-backed
+  pool workers). One flight
   at a time (no per-job lane addressing); concurrent calls fall back
   serial. Refusal semantics are UNIFORM: `Block.portable!` (the shape
   scan) runs on every path incl. serial fallbacks, so a write-capturing
