@@ -166,6 +166,10 @@ pub type AotRawFn = unsafe extern "C" fn(
     mc: *const c_void,
     fuel: *mut i64,
     depth: *mut i64,
+    // D3a: pointer to the VM's `dispatch_epoch`, rides beside fuel/depth so
+    // D3b's baked-guard sites can compare epochs without raw VmState field
+    // offsets. 8 params = exactly the ARM64 integer-register budget.
+    epoch: *const u64,
     slot_base: i64,
     args: *const i64,
     ret: *mut i64,
@@ -909,6 +913,7 @@ fn invoke_tail<'gc>(
     let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, env_blind, |vm| {
         let fuel_ptr = &raw mut vm.aot.fuel;
         let depth_ptr = &raw mut vm.aot.depth;
+        let epoch_ptr = &raw const vm.dispatch_epoch;
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
         let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
         unsafe {
@@ -917,6 +922,7 @@ fn invoke_tail<'gc>(
                 mc_ptr,
                 fuel_ptr,
                 depth_ptr,
+                epoch_ptr,
                 base as i64,
                 raw.as_ptr(),
                 &mut ret,
@@ -1034,6 +1040,7 @@ pub fn invoke_block<'gc>(
     let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, env_blind, |vm| {
         let fuel_ptr = &raw mut vm.aot.fuel;
         let depth_ptr = &raw mut vm.aot.depth;
+        let epoch_ptr = &raw const vm.dispatch_epoch;
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
         let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
         let raw_args: [i64; 1] = [base as i64 + 1];
@@ -1043,6 +1050,7 @@ pub fn invoke_block<'gc>(
                 mc_ptr,
                 fuel_ptr,
                 depth_ptr,
+                epoch_ptr,
                 base as i64,
                 raw_args.as_ptr(),
                 &mut ret,

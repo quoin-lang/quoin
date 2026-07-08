@@ -34,6 +34,8 @@ fn compile_and_register(src: &str) -> Vec<(String, u32)> {
     ids
 }
 
+static EPOCH_FOR_TESTS: u64 = 1;
+
 fn entry_for(ids: &[(String, u32)], selector: &str) -> &'static AotEntry {
     let (_, tid) = ids
         .iter()
@@ -57,6 +59,7 @@ fn run_raw(entry: &AotEntry, args: &[i64]) -> Result<i64, u8> {
             std::ptr::dangling(),
             &mut fuel,
             &mut depth,
+            &EPOCH_FOR_TESTS,
             0,
             args.as_ptr(),
             &mut ret,

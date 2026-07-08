@@ -613,8 +613,8 @@ fn compile_group(
 
 fn inner_sig(module: &mut JITModule, ptr: Type, m: &AotCandidate, eff: AotRet) -> Signature {
     let mut sig = module.make_signature();
-    for _ in 0..4 {
-        sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth
+    for _ in 0..5 {
+        sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch
     }
     sig.params.push(AbiParam::new(types::I64)); // slot_base
     for &p in &m.params {
@@ -628,8 +628,8 @@ fn inner_sig(module: &mut JITModule, ptr: Type, m: &AotCandidate, eff: AotRet) -
 
 fn tramp_sig(module: &mut JITModule, ptr: Type) -> Signature {
     let mut sig = module.make_signature();
-    for _ in 0..4 {
-        sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth
+    for _ in 0..5 {
+        sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch
     }
     sig.params.push(AbiParam::new(types::I64)); // slot_base
     sig.params.push(AbiParam::new(ptr)); // args
@@ -649,8 +649,9 @@ fn build_trampoline(
     b.append_block_params_for_function_params(entry);
     b.switch_to_block(entry);
     let p = b.block_params(entry).to_vec();
-    let (vm, mc, fuel, depth, slot_base, args, ret) = (p[0], p[1], p[2], p[3], p[4], p[5], p[6]);
-    let mut call_args = vec![vm, mc, fuel, depth, slot_base];
+    let (vm, mc, fuel, depth, epoch, slot_base, args, ret) =
+        (p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+    let mut call_args = vec![vm, mc, fuel, depth, epoch, slot_base];
     for (i, &k) in m.params.iter().enumerate() {
         let off = (i * 8) as i32;
         let v = match k {
@@ -878,6 +879,10 @@ struct FnCtx {
     mc: CVal,
     fuel: CVal,
     depth: CVal,
+    /// D3a plumbing: pointer to the VM's `dispatch_epoch` (read by D3b's
+    /// baked-guard sites; forwarded on sibling direct calls meanwhile).
+    #[allow(dead_code)]
+    epoch: CVal,
     slot_base: CVal,
     exit: CBlock,
     ret: AotRet,
@@ -961,7 +966,7 @@ impl<'a> Translator<'a> {
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let p = b.block_params(entry).to_vec();
-        let (vm, mc, fuel, depth, slot_base) = (p[0], p[1], p[2], p[3], p[4]);
+        let (vm, mc, fuel, depth, epoch, slot_base) = (p[0], p[1], p[2], p[3], p[4], p[5]);
 
         // Named locals: params first. Object params occupy window slots 1..;
         // their SSA param value already carries the absolute index.
@@ -978,11 +983,11 @@ impl<'a> Translator<'a> {
             match pk {
                 AotParam::Scalar(k) => {
                     let var = b.declare_var(kind_type(k));
-                    b.def_var(var, p[5 + i]);
+                    b.def_var(var, p[6 + i]);
                     vars.insert(sym, VarSlot::Scalar(var, k));
                 }
                 AotParam::Obj => {
-                    obj_param_avs.insert(sym, p[5 + i]);
+                    obj_param_avs.insert(sym, p[6 + i]);
                     // B1: a `List`-hinted param is a dispatch-GUARANTEED native
                     // List (List is sealed; the hint only matches the native
                     // class) — and a tag-required param is guaranteed tagged,
@@ -998,7 +1003,7 @@ impl<'a> Translator<'a> {
                             Some(tag) => DynProof::CollectionOf(tag),
                             None => DynProof::NativeList,
                         };
-                        self.proofs.insert(p[5 + i], proof);
+                        self.proofs.insert(p[6 + i], proof);
                     }
                 }
             }
@@ -1024,6 +1029,7 @@ impl<'a> Translator<'a> {
             mc,
             fuel,
             depth,
+            epoch,
             slot_base,
             exit,
             ret: self.eff_ret,
@@ -2685,7 +2691,7 @@ impl<'a> Translator<'a> {
         {
             // Direct call. Scalar-pure callee: args must be exact scalars.
             let mut ok = true;
-            let mut call_args = vec![fx.vm, fx.mc, fx.fuel, fx.depth, fx.slot_base];
+            let mut call_args = vec![fx.vm, fx.mc, fx.fuel, fx.depth, fx.epoch, fx.slot_base];
             for (a, pk) in args.iter().zip(psig.iter()) {
                 match (a, pk) {
                     (AV::C(v, k), AotParam::Scalar(want)) if k == want => call_args.push(*v),
