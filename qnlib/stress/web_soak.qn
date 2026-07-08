@@ -193,4 +193,18 @@ wServer.close;
      else:{ ('FAILED: ' + check.failures + ' checks failed').print }
 };
 
-(Worker.worker?).if:{ app.serve:'127.0.0.1:0' workers:2 } else:{ mainFlow.value }
+"* Worker context is MODE-ADDRESSED by the first inbox message: 'soak'
+"* runs the whole battery inside this worker (spawn it from the REPL and
+"* watch `$ps tree` — its phase-2 pool workers appear as grandchildren);
+"* anything else is the pool path (the sentinel, verified downstream).
+(Worker.worker?).if:{
+    var mode = Worker.receive;
+    (mode == 'soak').if:{
+        "* this worker HOSTS the battery (incl. its phase-2 pool): its
+        "* serve calls must act as the pool main, not a pool worker
+        app.poolMain:true;
+        mainFlow.value
+    }
+    else:{ app.poolWorkerLoopWith:mode }
+}
+else:{ mainFlow.value }

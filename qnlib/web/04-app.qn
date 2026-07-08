@@ -46,7 +46,7 @@
     mediaType -> { .body.mediaType }
 };
 
-[Web]App <- { | @router @middleware @debug @pool |
+[Web]App <- { | @router @middleware @debug @pool @poolMain |
     init -> {
         @router = [Web]Router.new;
         @middleware = #();
@@ -159,8 +159,15 @@
     serve: -> { |address| (.start:address).join };
 
     start:workers: -> { |address n| ^.start:address workers:n backing:'thread' };
+    "* `Worker.worker?` alone conflates "pool worker" with "any worker": a
+    "* worker that legitimately HOSTS a pool (the soak spawned from the
+    "* REPL, any nested-fleet unit) must declare itself with poolMain:true
+    "* before its serve call, or that call would park waiting for a pool
+    "* sentinel that is never coming.
+    poolMain: -> { |flag| @poolMain = flag; self };
+
     start:workers:backing: -> { |address n backing|
-        (Worker.worker?).if:{ ^^(.poolWorkerLoop) };
+        ((@poolMain != true) && Worker.worker?).if:{ ^^(.poolWorkerLoop) };
         (n < 1).if:{ ^.start:address };
         (VM.unit == nil).if:{
             ('[Web]App workers: needs a unit-run program (VM.unit is nil — '
@@ -174,7 +181,7 @@
     };
     serve:workers: -> { |address n| ^.serve:address workers:n backing:'thread' };
     serve:workers:backing: -> { |address n backing|
-        (Worker.worker?).if:{ ^^(.poolWorkerLoop) };
+        ((@poolMain != true) && Worker.worker?).if:{ ^^(.poolWorkerLoop) };
         (.start:address workers:n backing:backing).join
     };
     pool -> { @pool };
@@ -198,8 +205,12 @@
     "* own worker), then serve request data until stopped. Each request
     "* runs as its own Task, so handlers doing I/O overlap within a worker
     "* exactly as connection tasks do in the single-VM mode.
-    poolWorkerLoop -> {
-        var init = Worker.receive;
+    poolWorkerLoop -> { ^.poolWorkerLoopWith:(Worker.receive) };
+
+    "* The sentinel-verified entry, for callers that already received the
+    "* worker's first message (e.g. a mode-dispatching unit like the web
+    "* soak, which answers 'soak' itself and forwards anything else here).
+    poolWorkerLoopWith: -> { |init|
         (init == 'webpool-init').else:{
             ('[Web]App: serve:workers: ran inside a worker that was not '
                 + 'spawned by a web pool — pool serving must run in the '
