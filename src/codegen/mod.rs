@@ -877,12 +877,35 @@ pub fn block_entry_for<'gc>(vm: &mut VmState<'gc>, template_id: u32) -> Option<&
 /// block object itself, through which the `env_get`/`env_set` helpers reach
 /// the closure's captured `EnvFrame` chain. Same fuel/depth regime as
 /// `invoke` (nested compiled calls share one budget).
+/// `self` for a self-or-arg invocation: the item for a parameterless block
+/// (the `{ .name }` shorthand), the LEXICAL self (resolved through the
+/// closure's parent env chain) for a parameterized one. Compiled and
+/// interpreted tiers must agree — the interpreted fix lives in
+/// `valueWithSelfOrArg:` (block.rs); this is the shared answer for the
+/// compiled frames, whose templates read `self` from slot 0.
+pub fn self_or_arg_self<'gc>(block: &crate::value::Block<'gc>, arg: Value<'gc>) -> Value<'gc> {
+    if block.template.param_syms.is_empty() {
+        return arg; // implicit-self shorthand: the item IS self
+    }
+    // Parameterized: lexical self — but the env walk only pays off for
+    // blocks that actually reference self/@fields; for the common no-self
+    // block the slot is dead and the item is as good a filler as any.
+    if !crate::instruction::template_uses_self(&block.template) {
+        return arg;
+    }
+    block
+        .parent_env
+        .and_then(|env| crate::value::EnvFrame::get(env, crate::symbol::self_symbol()))
+        .unwrap_or(Value::Nil)
+}
+
 pub fn invoke_block<'gc>(
     vm: &mut VmState<'gc>,
     mc: &gc_arena::Mutation<'gc>,
     entry: &'static AotEntry,
     block_val: Value<'gc>,
     arg: Value<'gc>,
+    self_val: Value<'gc>,
 ) -> AotOutcome<'gc> {
     debug_assert!(entry.role == AotRole::BlockTemplate);
     if !entry_gates(vm, entry) {
@@ -901,7 +924,7 @@ pub fn invoke_block<'gc>(
         _ => (None, None),
     };
     let base = vm.stack.len();
-    vm.stack.push(arg); // slot 0: self (vWSOA binds the arg)
+    vm.stack.push(self_val); // slot 0: self (self-or-arg, resolved by the caller)
     vm.stack.push(arg); // slot 1: the parameter (its own cell)
     vm.stack.push(block_val); // slot 2: the block object (env access)
     for _ in 0..entry.n_scratch {

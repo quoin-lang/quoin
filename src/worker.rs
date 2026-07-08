@@ -697,10 +697,14 @@ fn fget<'a>(pairs: &'a [(String, WireData)], key: &str) -> Option<&'a WireData> 
 /// Spawn a PROCESS-backed worker running `unit` (with `service` naming a
 /// hosted class for the WorkerService form). Returns the standard channel
 /// ends plus the child's pid; the pump threads own the socket.
+/// Shared grip on the child for `terminate` (guest-side cancellation) and
+/// the pump reader's reap; `None` once reaped.
+pub type ChildGrip = std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>;
+
 pub fn spawn_worker_process(
     unit: String,
     service: Option<String>,
-) -> Result<(WorkerChannels, u32), String> {
+) -> Result<(WorkerChannels, u32, ChildGrip), String> {
     let sock_path = format!(
         "/tmp/quoin-worker-{}-{}.sock",
         std::process::id(),
@@ -715,10 +719,11 @@ pub fn spawn_worker_process(
     if let Some(class) = &service {
         cmd.arg(class);
     }
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| format!("spawn worker process: {e}"))?;
     let pid = child.id();
+    let grip: ChildGrip = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
 
     // Accept with a bounded wait: poll the listener in nonblocking mode so a
     // child that dies pre-connect becomes an error, not a hang.
@@ -730,17 +735,23 @@ pub fn spawn_worker_process(
         match listener.accept() {
             Ok((s, _)) => break s,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if let Ok(Some(status)) = child.try_wait() {
+                let mut slot = grip.lock().expect("child grip");
+                if let Some(c) = slot.as_mut()
+                    && let Ok(Some(status)) = c.try_wait()
+                {
                     let _ = std::fs::remove_file(&sock_path);
                     return Err(format!(
                         "worker process exited before connecting ({status})"
                     ));
                 }
                 if std::time::Instant::now() > deadline {
-                    let _ = child.kill();
+                    if let Some(c) = slot.as_mut() {
+                        let _ = c.kill();
+                    }
                     let _ = std::fs::remove_file(&sock_path);
                     return Err("worker process did not connect within 10s".to_string());
                 }
+                drop(slot);
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             Err(e) => {
@@ -830,6 +841,7 @@ pub fn spawn_worker_process(
     {
         let mut rsock = sock;
         let map = ctl_map;
+        let reader_grip = grip.clone();
         std::thread::spawn(move || {
             let mut done_sent = false;
             loop {
@@ -871,17 +883,21 @@ pub fn spawn_worker_process(
                 }
             }
             if !done_sent {
-                let status = child
-                    .try_wait()
-                    .ok()
-                    .flatten()
+                let status = reader_grip
+                    .lock()
+                    .expect("child grip")
+                    .as_mut()
+                    .and_then(|c| c.try_wait().ok().flatten())
                     .map(|s| format!(" ({s})"))
                     .unwrap_or_default();
                 let _ = done_tx.send_blocking(Err(format!("worker process exited{status}")));
             }
             map.lock().expect("ctl map").clear();
             COMPLETED.fetch_add(1, Ordering::Relaxed);
-            let _ = child.wait(); // reap
+            // Reap; leave None so a late `terminate` is a clean no-op.
+            if let Some(mut c) = reader_grip.lock().expect("child grip").take() {
+                let _ = c.wait();
+            }
         });
     }
 
@@ -893,6 +909,7 @@ pub fn spawn_worker_process(
             control_tx,
         },
         pid,
+        grip,
     ))
 }
 

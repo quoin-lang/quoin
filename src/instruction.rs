@@ -109,6 +109,78 @@ pub struct StaticBlock {
     /// touches anyway — a side table would cost a dependent pointer chase on
     /// every method call. Shared by all closures of the literal (one `Arc`).
     pub spec_state: SpecState,
+    /// Memoized "does this block (or a nested literal) reference `self` or
+    /// touch `@fields`?" — the self-or-arg seams (`valueWithSelfOrArg:`,
+    /// compiled outcalls) resolve LEXICAL self through the env chain only
+    /// for blocks that need it; the common no-self block keeps the free
+    /// path. 0 = unscanned, 1 = no, 2 = yes.
+    pub uses_self: UsesSelfFlag,
+}
+
+/// One atomic byte, same shape as `SpecState`: shared by every closure of
+/// the literal through the template `Arc` (must be `Send`+`Sync` for C2's
+/// portable blocks); Relaxed everywhere — a racing observer merely rescans.
+/// `Clone` gives the copy an independent (unscanned) flag.
+#[derive(Debug, Default)]
+pub struct UsesSelfFlag(std::sync::atomic::AtomicU8);
+
+impl Clone for UsesSelfFlag {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// Whether the template references `self` — directly (a bare `self` read or
+/// an implicit-self send lowers to a self-symbol local op), through
+/// `@field` access, or inside any NESTED block literal (a closure it
+/// materializes resolves `self` through the env this frame provides).
+/// Conservative on the field ops; memoized per template.
+pub fn template_uses_self(sb: &StaticBlock) -> bool {
+    use std::sync::atomic::Ordering;
+    match sb.uses_self.0.load(Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
+    let self_sym = crate::symbol::self_symbol();
+    let mut uses = false;
+    for inst in sb.bytecode.iter() {
+        let hit = match inst {
+            Instruction::LoadField(_)
+            | Instruction::StoreField(_)
+            | Instruction::StoreFieldKeep(_)
+            | Instruction::SendField(_, _, _) => true,
+            Instruction::LoadLocal(s) | Instruction::StoreLocal(s) => *s == self_sym,
+            Instruction::SendLocal(v, _, _) => *v == self_sym,
+            Instruction::SendLocalLocal(a, b, _, _) => *a == self_sym || *b == self_sym,
+            Instruction::SendLocalConst(a, _, _, _) => *a == self_sym,
+            Instruction::IntBinLL(a, b, _) | Instruction::DoubleBinLL(a, b, _) => {
+                *a == self_sym || *b == self_sym
+            }
+            Instruction::IntBinLC(a, _, _) | Instruction::DoubleBinLC(a, _, _) => *a == self_sym,
+            _ => false,
+        };
+        if hit {
+            uses = true;
+            break;
+        }
+        if let Instruction::Push(Constant::Block(inner)) = inst
+            && template_uses_self(inner)
+        {
+            uses = true;
+            break;
+        }
+        if let Some((_, _, Some(Constant::Block(inner)))) = inst.send_parts()
+            && template_uses_self(inner)
+        {
+            uses = true;
+            break;
+        }
+    }
+    sb.uses_self
+        .0
+        .store(if uses { 2 } else { 1 }, Ordering::Relaxed);
+    uses
 }
 
 /// One atomic byte (was `Cell<u8>`): the flag is shared by every closure of

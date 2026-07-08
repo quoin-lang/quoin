@@ -204,8 +204,9 @@ fn host<'gc>(
     };
     let (ch, pid) = match backing {
         "process" => {
-            let (ch, pid) = crate::worker::spawn_worker_process(path.clone(), Some(class_name))
-                .map_err(QuoinError::Other)?;
+            let (ch, pid, _grip) =
+                crate::worker::spawn_worker_process(path.clone(), Some(class_name))
+                    .map_err(QuoinError::Other)?;
             (ch, Some(pid))
         }
         _ => (spawn_worker_service(path.clone(), class_name), None),

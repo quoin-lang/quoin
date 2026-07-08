@@ -713,7 +713,7 @@ Workers/rows gain `backing` (+ `pid` for processes). Pull-based on demand
 whoever asks for it. `$ps` grows a `--tree` variant rendering the nesting
 as indentation.
 
-### 13.5 The join graph
+### 13.5 The join graph — SHIPPED as `Plan`
 
 Composition already half-exists: worker waits are parked tasks, so
 `Async.gather:` nests joins today. What the graph adds is STRUCTURE with
@@ -745,6 +745,28 @@ var results = Join.all:#(
   the registry rows (`psTree` shows which Join owns which worker) —
   internal ids mean nothing to a Quoin developer. Spawn surfaces grow an
   optional label; the registry row carries it.
+- SHIPPED (qnlib/core/11-plan.qn) with two naming decisions on top: the
+  class is `Plan` (a lazy spec you build then `await` — noun class, verb
+  methods), and LEAF METHODS NAME WHERE THE CODE RUNS: `Plan.task:{b}`
+  (in-VM), `Plan.thread:` (isolate; String = unit, Block = portable),
+  `Plan.process:'unit.qn'` (child qn; blocks refuse). `backing:`
+  disappears from this layer entirely. Composites: `all:` /
+  `all:onError:'cancelRest'|'collect'` / `any:`. Settling goes through an
+  outcome channel so policy reacts in COMPLETION order; cancellation is
+  per-backing (process TERMINATE via the child grip, thread orphan +
+  `orphaned:` label, task cooperative cancel), and a leaf marks itself
+  done only AFTER its join settles (marking before would make cancel skip
+  exactly the in-flight sibling it exists to kill). New handle natives:
+  `label:` (registry restamp) and `terminate` (process only).
+  Shipping it surfaced a LATENT VM BUG: `valueWithSelfOrArg:` bound
+  `self` to the ITEM even for parameterized blocks, in all three tiers
+  (interpreted native, AOT block seam, compiled outcall) — `@field`
+  inside `each:`/`collect:` blocks read the item's fields whenever those
+  paths ran. Fixed tier-symmetrically: parameterless blocks keep
+  item-as-self (the `{ .name }` shorthand); parameterized blocks resolve
+  self LEXICALLY, gated by a memoized per-template `uses_self` scan so
+  no-self blocks keep the free slot-fill (combinators bench at exact
+  parity, 0.13s warm).
 
 ### 13.6 Build order for this arc
 
@@ -756,6 +778,6 @@ var results = Join.all:#(
 4. `psTree` across process workers (same frames through the pump —
    should be free if 1–3 are right).
 5. `Join` combinator layer + cancel/error policies (+ terminate for
-   process leaves).
+   process leaves). [SHIPPED — see §13.5: the `Plan` class]
 6. Measure: wire floor per backing, boot costs, a mixed-tree demo;
    revisit the services-default-backing open question with data.

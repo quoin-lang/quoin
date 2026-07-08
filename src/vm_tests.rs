@@ -155,6 +155,7 @@ where
 
         let static_block = StaticBlock {
             spec_state: Default::default(),
+            uses_self: Default::default(),
             source_info: None,
             name: Some("test_main".to_string()),
             is_nested_block: false,
@@ -296,6 +297,7 @@ fn test_deferred_call_values_survive_collection() {
         // Start a frame the defer can attach to (mirrors run_test_steps).
         let static_block = StaticBlock {
             spec_state: Default::default(),
+            uses_self: Default::default(),
             source_info: None,
             name: Some("defer_gc_test".to_string()),
             is_nested_block: false,
@@ -761,6 +763,7 @@ fn test_block_execution_and_returns() {
     // The block bytecode will load its parameter, add 1 to it, and return.
     let block_static = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("test_block".to_string()),
         is_nested_block: false,
@@ -845,6 +848,7 @@ fn test_method_return() {
     // Bytecode: Push(999), MethodReturn
     let block_nested = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("nested".to_string()),
         is_nested_block: true,
@@ -865,6 +869,7 @@ fn test_method_return() {
     // Bytecode: Push(Block(nested)), Send("value", 0), Push(100), Return
     let block_method = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("method".to_string()),
         is_nested_block: false, // enclosing_method_id will be this frame's ID
@@ -915,6 +920,7 @@ fn test_non_local_return_callback() {
     // block_nested: Push(777), MethodReturn
     let block_nested = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("nested".to_string()),
         is_nested_block: true,
@@ -934,6 +940,7 @@ fn test_non_local_return_callback() {
     // block_bar: blk.value, Push(111), Return
     let block_bar = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("bar".to_string()),
         is_nested_block: false,
@@ -955,6 +962,7 @@ fn test_non_local_return_callback() {
     // block_foo: bar.value: block_nested, Push(222), Return
     let block_foo = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("foo".to_string()),
         is_nested_block: false,
@@ -1035,6 +1043,7 @@ fn test_non_local_return_callback() {
 fn test_class_and_method_definition_vm() {
     let class_block = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("class_block".to_string()),
         is_nested_block: false,
@@ -1046,6 +1055,7 @@ fn test_class_and_method_definition_vm() {
             // 1. Define inst method x
             Instruction::Push(Constant::block(StaticBlock {
                 spec_state: Default::default(),
+                uses_self: Default::default(),
                 source_info: None,
                 name: Some("x".to_string()),
                 is_nested_block: false,
@@ -1066,6 +1076,7 @@ fn test_class_and_method_definition_vm() {
             // 2. Override inst method x
             Instruction::Push(Constant::block(StaticBlock {
                 spec_state: Default::default(),
+                uses_self: Default::default(),
                 source_info: None,
                 name: Some("x".to_string()),
                 is_nested_block: false,
@@ -1209,6 +1220,7 @@ fn test_class_method_lookup_fallback() {
 fn test_primitive_methods_and_overrides() {
     let custom_true_method = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("custom_true_method".to_string()),
         is_nested_block: false,
@@ -1227,6 +1239,7 @@ fn test_primitive_methods_and_overrides() {
 
     let class_extension_block = StaticBlock {
         spec_state: Default::default(),
+        uses_self: Default::default(),
         source_info: None,
         name: Some("class_extension_block".to_string()),
         is_nested_block: false,
@@ -1524,6 +1537,7 @@ fn test_execute_block_helper() {
             Block {
                 template: Arc::new(StaticBlock {
                     spec_state: Default::default(),
+                    uses_self: Default::default(),
                     source_info: None,
                     name: Some("test_block".to_string()),
                     is_nested_block: false,
@@ -1582,6 +1596,7 @@ fn test_execute_block_helper() {
             Block {
                 template: Arc::new(StaticBlock {
                     spec_state: Default::default(),
+                    uses_self: Default::default(),
                     source_info: None,
                     name: Some("test_block_no_self".to_string()),
                     is_nested_block: false,
@@ -1641,6 +1656,7 @@ fn test_cannot_extend_non_existent_class() {
             Instruction::Push(Constant::Nil),
             Instruction::Push(Constant::block(StaticBlock {
                 spec_state: Default::default(),
+                uses_self: Default::default(),
                 source_info: None,
                 name: Some("ext_block".to_string()),
                 is_nested_block: false,

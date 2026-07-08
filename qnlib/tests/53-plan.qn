@@ -1,0 +1,87 @@
+"* Plan (qnlib/core/11-plan.qn) — the join graph: lazy spec trees over
+"* task/thread/process leaves, isomorphic results, error policies, and
+"* per-backing cancellation. Process leaves are exercised sparingly (one
+"* boot each); the heavy cross-boundary coverage lives in the Rust tests.
+(TestSuite.new:{ var name = 'Plan' }).add:{
+    .test:
+    leavesAndStructure -> {
+        .is:{ (Plan.task:{ 21 * 2 }).await } equalTo:42;
+        .is:{ (Plan.thread:{ 'iso' }).await } equalTo:'iso';
+        .is:{
+            (Plan.all:#(
+                (Plan.task:{ 1 })
+                (Plan.all:#( (Plan.task:{ 2 }) (Plan.thread:{ 3 }) ))
+            )).await
+        } equalTo:#( 1 #( 2 3 ) );
+        "* specs are lazy values: build twice, await independently
+        var spec = Plan.task:{ 7 };
+        .is:{ spec.await + spec.await } equalTo:14
+    };
+
+    .test:
+    collectPolicy -> {
+        var r = (Plan.all:#(
+            (Plan.task:{ 'fine' })
+            (Plan.task:{ 'bad'.throw })
+        ) onError:'collect').await;
+        .is:{ (r.at:0).at:'ok' } equalTo:'fine';
+        .is:{ ((r.at:1).at:'err').contains?:'bad' } equalTo:true
+    };
+
+    .test:
+    cancelRestRaisesFirstError -> {
+        var raised = { (Plan.all:#(
+            (Plan.task:{ Async.sleep:5000; 'slow' })
+            (Plan.task:{ Async.sleep:10; 'fast-fail'.throw })
+        )).await; 'no-error' }.catch:{ |e| e.s };
+        .is:{ raised.contains?:'fast-fail' } equalTo:true
+    };
+
+    .test:
+    anyRaces -> {
+        .is:{
+            (Plan.any:#(
+                (Plan.task:{ Async.sleep:30; 'winner' })
+                (Plan.task:{ 'early'.throw })
+            )).await
+        } equalTo:'winner';
+        var all = { (Plan.any:#(
+            (Plan.task:{ 'a'.throw })
+            (Plan.task:{ 'b'.throw })
+        )).await; 'no-error' }.catch:{ |e| 'all-failed' };
+        .is:{ all } equalTo:'all-failed'
+    };
+
+    .test:
+    orphanedThreadLeafIsLabeled -> {
+        var r = { (Plan.all:#(
+            (Plan.thread:{ Async.sleep:1500; 1 } label:'straggler')
+            (Plan.task:{ 'die'.throw })
+        )).await; 'no-error' }.catch:{ |e| 'raised' };
+        .is:{ r } equalTo:'raised';
+        var marked = false;
+        (VM.ps.at:'workers').each:{ |w|
+            ((w.at:'label') == 'orphaned: straggler').if:{ marked = true }
+        };
+        .is:{ marked } equalTo:true
+    };
+
+    .test:
+    badInputsRefuse -> {
+        var bp = { Plan.process:{ 1 }; 'built' }.catch:{ |e| 'refused' };
+        .is:{ bp } equalTo:'refused';
+        var pol = { Plan.all:#( (Plan.task:{ 1 }) ) onError:'explode'; 'built' }
+            .catch:{ |e| 'refused' };
+        .is:{ pol } equalTo:'refused'
+    };
+
+    .test:
+    sendAndLabelRideWorkerLeaves -> {
+        var got = nil;
+        var r = (Plan.all:#(
+            (Plan.thread:{ (Worker.receive) * 3 } send:5 label:'tripler')
+        )).await;
+        "* thread block leaves see their send: via the inbox
+        .is:{ r } equalTo:#( 15 )
+    }
+}
