@@ -168,7 +168,7 @@
 
     start:workers:backing: -> { |address n backing|
         ((@poolMain != true) && Worker.worker?).if:{ ^^(.poolWorkerLoop) };
-        (n < 1).if:{ ^.start:address };
+        (n < 1).if:{ ^^(.start:address) };
         (VM.unit == nil).if:{
             ('[Web]App workers: needs a unit-run program (VM.unit is nil — '
                 + 'REPL/eval cannot re-execute themselves)').throw };

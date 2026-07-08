@@ -3,7 +3,7 @@
 This document outlines the language features, compiler updates, and VM modifications required to execute the Quoin standard library (`qnlib`) files and test suites.
 
 ## Misc
-- [ ] **Lint: `^` inside an `if:`/`else:` arm that intends a method return.**
+- [x] **Lint: `^` inside an `if:`/`else:` arm that intends a method return.** DONE —
   `^` returns from the BLOCK (by design — it's `break`); `^^` returns from the
   method. The trap is `cond.if:{ ^expr }` written to mean "return from the
   method here": the `^` yields `expr` as the if's value, which is then
