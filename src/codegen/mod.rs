@@ -228,6 +228,11 @@ pub struct AotEntry {
     /// and home-id bookkeeping entirely when this is false (the hot
     /// majority, including every `count:`-style write-back arm).
     pub materializes_nlr: bool,
+    /// The body materializes ANY closure (superset of `materializes_nlr`).
+    /// `vm.aot.enclosing_env` is consulted only by `make_closure`, so an
+    /// entry that never materializes never reads it — `invoke` skips the
+    /// env swap/restore entirely (D2.5a, docs/DIRECT_CALLS_ARCH.md §2).
+    pub materializes: bool,
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -621,13 +626,21 @@ fn run_in_frame_ctx<'gc>(
     enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
     home: HomeCtx,
     base: usize,
+    // D2.5a: the callee never materializes a closure, so `enclosing_env` is
+    // never read during this body — skip the swap/restore pair. Nested
+    // calls that DO materialize install their own env first.
+    env_blind: bool,
     body: impl FnOnce(&mut VmState<'gc>) -> u8,
 ) -> (u8, Option<usize>) {
     if vm.aot.depth == 0 {
         vm.aot.fuel = i64::from(crate::tuning::step_batch());
     }
     vm.aot_pending_error = None;
-    let saved_env = std::mem::replace(&mut vm.aot.enclosing_env, enclosing_env);
+    let saved_env = if env_blind {
+        None
+    } else {
+        Some(std::mem::replace(&mut vm.aot.enclosing_env, enclosing_env))
+    };
     let (minted, saved_home) = match home {
         HomeCtx::Mint => {
             let id = vm.next_frame_id;
@@ -646,7 +659,9 @@ fn run_in_frame_ctx<'gc>(
         HomeCtx::Untracked => (None, None),
     };
     let tag = body(vm);
-    vm.aot.enclosing_env = saved_env;
+    if let Some(env) = saved_env {
+        vm.aot.enclosing_env = env;
+    }
     if let Some(h) = saved_home {
         vm.aot.home_frame_id = h;
     }
@@ -812,7 +827,8 @@ pub fn invoke<'gc>(
         HomeCtx::Untracked
     };
     let mut ret: i64 = 0;
-    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, |vm| {
+    let env_blind = !entry.materializes && matches!(home, HomeCtx::Untracked);
+    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, env_blind, |vm| {
         let fuel_ptr = &raw mut vm.aot.fuel;
         let depth_ptr = &raw mut vm.aot.depth;
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
@@ -936,7 +952,8 @@ pub fn invoke_block<'gc>(
         HomeCtx::Untracked
     };
     let mut ret: i64 = 0;
-    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, |vm| {
+    let env_blind = !entry.materializes && matches!(home, HomeCtx::Untracked);
+    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, env_blind, |vm| {
         let fuel_ptr = &raw mut vm.aot.fuel;
         let depth_ptr = &raw mut vm.aot.depth;
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;

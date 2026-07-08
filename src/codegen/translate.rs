@@ -472,7 +472,8 @@ fn compile_group(
     }
 
     let mut fb_ctx = FunctionBuilderContext::new();
-    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool, bool, bool)> = Vec::new();
+    let mut tramp_ids: Vec<(u32, FuncId, &AotCandidate, u32, bool, bool, bool, bool)> =
+        Vec::new();
 
     for m in members {
         let tid = m.block.template_id.unwrap();
@@ -495,6 +496,7 @@ fn compile_group(
         let needs_list_self;
         let direct_self;
         let materializes_nlr;
+        let materializes;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
             static EMPTY_MERGES: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
@@ -532,6 +534,7 @@ fn compile_group(
             needs_list_self = tr.needs_list_self;
             direct_self = tr.used_direct_self;
             materializes_nlr = !tr.materialized_nlr.is_empty();
+            materializes = !tr.materialized.is_empty();
             b.seal_all_blocks();
             b.finalize();
         }
@@ -569,6 +572,7 @@ fn compile_group(
             needs_list_self,
             direct_self,
             materializes_nlr,
+            materializes,
         ));
     }
 
@@ -576,7 +580,9 @@ fn compile_group(
         .finalize_definitions()
         .map_err(|e| fail(any_tid, e.to_string().into()))?;
     let mut out = Vec::new();
-    for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self, materializes_nlr) in tramp_ids {
+    for (tid, tramp_id, m, n_scratch, needs_list_self, direct_self, materializes_nlr, materializes) in
+        tramp_ids
+    {
         let addr = module.get_finalized_function(tramp_id);
         let raw: AotRawFn = unsafe { std::mem::transmute(addr) };
         out.push((
@@ -594,6 +600,7 @@ fn compile_group(
                 direct_self,
                 compile_epoch: super::redef_epoch(),
                 materializes_nlr,
+                materializes,
             },
         ));
     }
