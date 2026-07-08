@@ -3731,7 +3731,7 @@ impl<'gc> VmState<'gc> {
 
     /// D3a: count a fast-path hit; crossing the `QN_DIRECT_WARM` threshold
     /// queues the CALLER tid for retranslation (deduped, process-lifetime).
-    #[inline]
+    #[inline(always)]
     pub(crate) fn aot_site_note_hit(&mut self, site: usize, caller_tid: u32) {
         let Some(threshold) = crate::codegen::direct_warm_threshold() else {
             return;
@@ -3739,7 +3739,14 @@ impl<'gc> VmState<'gc> {
         let Some(cell) = self.aot_sites.get_mut(site) else {
             return;
         };
-        cell.hits = cell.hits.saturating_add(1);
+        // Saturate at the threshold: a warm site's hits become a read-only
+        // compare — the unconditional per-hit WRITE dirtied the cell's cache
+        // line millions of times on call-heavy programs (measured ~2% on
+        // richards even with the counter inlined).
+        if cell.hits >= threshold {
+            return;
+        }
+        cell.hits += 1;
         if cell.hits == threshold && self.aot_retranslate_queued.insert(caller_tid) {
             self.aot_retranslate_queue.push(caller_tid);
         }
@@ -3748,6 +3755,37 @@ impl<'gc> VmState<'gc> {
     /// Drain the retranslation queue (driver-boundary caller).
     pub(crate) fn take_retranslations(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.aot_retranslate_queue)
+    }
+
+    /// D3b activation, the TARGETED form: clear exactly the caches holding
+    /// `tid`'s (now replaced) entry — its D2 site cells and interpreted IC
+    /// slots — so the next resolution refills from the registry and picks
+    /// up the retranslated code. Everything else stays warm, and earlier
+    /// batches' baked guards stay LIVE (the wholesale dispatch-epoch bump
+    /// this replaces stranded every prior batch's edges and re-warmed the
+    /// world per batch — measured btrees +3.2%/richards +3.7%). Runs at the
+    /// driver boundary; O(total cached slots), rare.
+    pub(crate) fn invalidate_caches_for_template(&mut self, mc: &Mutation<'gc>, tid: u32) {
+        for cell in &mut self.aot_sites {
+            if cell.entry.is_some_and(|e| e.template_id == tid) {
+                *cell = AotSiteCell::default();
+            }
+        }
+        for ic in self.ic_registry.values() {
+            let mut slots = ic.borrow_mut(mc);
+            if let Some(slots) = slots.as_mut() {
+                for slot in slots.iter_mut() {
+                    let stale = matches!(
+                        &slot.callable,
+                        Some(crate::dispatch::Callable::AotCall { entry, .. })
+                            if entry.0.template_id == tid
+                    );
+                    if stale {
+                        *slot = ICSlot::empty();
+                    }
+                }
+            }
+        }
     }
 
     /// D3b: capture baked W0 facts for a caller's retained sites — warm,

@@ -547,7 +547,7 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                     return Vec::new();
                 }
                 let threshold = crate::codegen::direct_warm_threshold().unwrap_or(u32::MAX);
-                let mut work: Vec<_> = tids
+                let work: Vec<_> = tids
                     .into_iter()
                     .map(|tid| {
                         let baked = crate::codegen::retained_sites_for(tid)
@@ -556,32 +556,36 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                         (tid, baked)
                     })
                     .collect();
-                // ACTIVATION: caches (D2 cells, dispatch ICs) hold the OLD
-                // entries by 'static ref — a registry overwrite alone would
-                // never be reached. Bumping the dispatch epoch fails every
-                // cached resolution once; refills go through the registry
-                // and pick up the retranslated code. Facts above were read
-                // from PRE-bump cells; the baked guards must compare against
-                // the POST-bump epoch, so restamp them.
-                if work.iter().any(|(_, b)| !b.is_empty()) {
-                    vm.dispatch_epoch += 1;
-                    let epoch = vm.dispatch_epoch;
-                    for (_, baked) in &mut work {
-                        for bk in baked.values_mut() {
-                            bk.epoch = epoch;
-                        }
-                    }
-                }
                 work
             });
+            let mut swapped = Vec::new();
             for (tid, baked) in work {
-                if !baked.is_empty()
+                let stage = !baked.is_empty()
                     && crate::codegen::direct_allows(tid)
-                    && crate::codegen::direct_budget_allows()
-                {
+                    && crate::codegen::direct_budget_allows();
+                if stage {
                     crate::codegen::stage_baked(tid, baked);
                 }
-                crate::codegen::retranslate(tid);
+                // A retranslation with nothing to bake is PURE COST (the
+                // fresh code placement alone measured +2-3% on hot benches)
+                // — skip it unless the null-machinery test hook forces it.
+                if (stage || crate::codegen::direct_null_forced())
+                    && crate::codegen::retranslate(tid)
+                {
+                    swapped.push(tid);
+                }
+            }
+            // ACTIVATION (targeted): caches hold the OLD entries by 'static
+            // ref — clear exactly the slots caching each swapped tid so the
+            // next resolution refills through the registry. No epoch bump:
+            // the rest of the warm world (and every earlier batch's baked
+            // guards, which compare dispatch_epoch) is untouched.
+            if !swapped.is_empty() {
+                arena.mutate_root(|mc, vm| {
+                    for tid in swapped {
+                        vm.invalidate_caches_for_template(mc, tid);
+                    }
+                });
             }
         };
         // FIFO: process-worker pumps correlate control replies by ORDER

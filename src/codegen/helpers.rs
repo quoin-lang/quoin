@@ -784,10 +784,15 @@ pub(super) unsafe extern "C" fn outcall(
             }
         }
         if hit {
-            // D3a: warmth accounting — gated on ONE inlined load so the
-            // off-tier fast path never pays the call (measured ~1.5% on
-            // richards without the gate).
-            if crate::codegen::direct_warm_on() {
+            // D3a: warmth accounting. The gate must cost REGISTERS ONLY on
+            // the post-threshold hot path: `cell` is already a stack copy
+            // (the peek), so comparing ITS hits adds one compare to the one
+            // atomic load — the accounting call (bounds check + cell write)
+            // runs only for the ~threshold hits before saturation. The
+            // always-call version measured ~2% on call-heavy benches even
+            // inlined (the per-hit cell-line traffic).
+            let warm_t = crate::codegen::direct_warm_raw();
+            if warm_t != 0 && cell.hits < warm_t {
                 vm.aot_site_note_hit(site as usize, tid as u32);
             }
             let args = &argv[..n];

@@ -434,6 +434,15 @@ pub fn direct_allows(tid: u32) -> bool {
     }
 }
 
+/// Test hook: `QN_DIRECT_NULL=1` retranslates queued callers even with no
+/// baked sites (the D3a null-retranslation contract). Production skips
+/// empty bakes: recompiling without edges buys nothing and costs fresh
+/// code placement — measured +2-3% on hot benches (notes.md).
+pub fn direct_null_forced() -> bool {
+    static F: OnceLock<bool> = OnceLock::new();
+    *F.get_or_init(|| std::env::var("QN_DIRECT_NULL").is_ok_and(|v| v == "1"))
+}
+
 pub fn direct_budget_allows() -> bool {
     static MAX: OnceLock<Option<usize>> = OnceLock::new();
     static USED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -482,11 +491,34 @@ pub fn direct_warm_on() -> bool {
     DIRECT_WARM.load(std::sync::atomic::Ordering::Relaxed) != 0
 }
 
+/// Raw threshold for the seam's register-only warmth gate: 0 = off.
+/// (`compile_candidates` eager-resolves the sentinel; see
+/// [`direct_warm_threshold`].)
+#[inline(always)]
+pub fn direct_warm_raw() -> u32 {
+    let v = DIRECT_WARM.load(std::sync::atomic::Ordering::Relaxed);
+    if v == u32::MAX { 0 } else { v }
+}
+
 /// Recompile a retained candidate and OVERWRITE its registry entry (§3.1:
 /// in-flight invocations of the old leaked entry complete on their own
 /// code). D3a emits IDENTICAL generic code — the null retranslation that
 /// proves the queue, the site-id reuse, and the registry swap.
+/// Wall-nanoseconds spent inside `retranslate` (attribution: on short
+/// benches the Cranelift recompiles themselves are a visible slice).
+pub static RETRANSLATE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn retranslate(tid: u32) -> bool {
+    let t0 = std::time::Instant::now();
+    let out = retranslate_inner(tid);
+    RETRANSLATE_NS.fetch_add(
+        t0.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    out
+}
+
+fn retranslate_inner(tid: u32) -> bool {
     let (cand, group_cands) = {
         let r = retained().read().unwrap();
         let Some(ret) = r.get(&tid) else {

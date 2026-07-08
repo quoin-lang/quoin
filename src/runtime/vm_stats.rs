@@ -63,6 +63,13 @@ fn aot_section<'gc>(vm: &VmState<'gc>, mc: &gc_arena::Mutation<'gc>) -> Value<'g
             codegen::TOTAL_DIRECT_SITES.load(std::sync::atomic::Ordering::Relaxed) as i64,
         ),
     );
+    aot.insert(
+        "retranslateMs".to_string(),
+        vm.new_int(
+            mc,
+            (codegen::RETRANSLATE_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000) as i64,
+        ),
+    );
     aot.insert("refused".to_string(), vm.new_int(mc, refused));
     aot.insert("skipped".to_string(), vm.new_int(mc, skipped));
     aot.insert("reasons".to_string(), vm.new_map(mc, reasons_map));

@@ -6,6 +6,25 @@
 
 use std::process::Command;
 
+const W0: &str = r#"
+Adder <- {
+    add:to: -> { |a: Integer b: Integer ^Integer| ^^ a + b }
+};
+Driver <- {
+    step:with: -> { |x: Integer adder ^Integer|
+        var a = adder.add:x to:1;
+        ^^ a
+    }
+};
+var d = Driver.new;
+var a = Adder.new;
+var total = 0;
+(0..200000).each:{ |r| total = total + (d.step:r with:a) };
+('total=' + total.s).print;
+var st = VM.stats.at:'aot';
+('retranslated=' + (st.at:'retranslated').s + ' directSites=' + (st.at:'directSites').s).print;
+"#;
+
 const HOT: &str = r#"
 D3aProbe <- {
     add:to: -> { |a: Integer b: Integer ^Integer| ^^ a + b };
@@ -21,22 +40,32 @@ var m = D3aProbe.new;
 ('retranslated=' + ((VM.stats.at:'aot').at:'retranslated').s).print;
 "#;
 
-fn run(warm: Option<&str>) -> (String, String) {
-    let dir = std::env::temp_dir().join("qn_direct_calls_a");
+fn run_src(name: &str, src: &str, envs: &[(&str, &str)]) -> (String, String) {
+    let dir = std::env::temp_dir().join(format!("qn_direct_calls_{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("hot.qn");
-    std::fs::write(&path, HOT).unwrap();
+    std::fs::write(&path, src).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_qn"));
     cmd.arg(&path);
-    match warm {
-        Some(v) => cmd.env("QN_DIRECT_WARM", v),
-        None => cmd.env_remove("QN_DIRECT_WARM"),
-    };
+    cmd.env_remove("QN_DIRECT_WARM");
+    cmd.env_remove("QN_DIRECT_NULL");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     let out = cmd.output().expect("run qn");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
     )
+}
+
+fn run(warm: Option<&str>) -> (String, String) {
+    match warm {
+        // The D3a null contract needs the test hook now: production skips
+        // retranslations with no baked sites.
+        Some(v) => run_src("a", HOT, &[("QN_DIRECT_WARM", v), ("QN_DIRECT_NULL", "1")]),
+        None => run_src("a", HOT, &[]),
+    }
 }
 
 #[test]
@@ -66,4 +95,26 @@ fn null_retranslation_preserves_behavior_and_counts() {
         count >= 1,
         "no retranslations under QN_DIRECT_WARM=1:\n{on}"
     );
+}
+
+#[test]
+fn w0_direct_edge_bakes_and_preserves_behavior() {
+    let (out, err) = run_src("w0", W0, &[("QN_DIRECT_WARM", "64")]);
+    assert!(
+        out.contains("total=20000100000"),
+        "wrong sum:\n{out}\n{err}"
+    );
+    let direct: i64 = out
+        .split("directSites=")
+        .nth(1)
+        .expect("stats line")
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(direct >= 1, "no direct edge baked:\n{out}");
+
+    // Tier off: same result, no machinery.
+    let (off, _) = run_src("w0off", W0, &[]);
+    assert!(off.contains("total=20000100000"), "off-path sum:\n{off}");
+    assert!(off.contains("directSites=0"));
 }
