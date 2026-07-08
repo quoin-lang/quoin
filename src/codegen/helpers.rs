@@ -99,6 +99,38 @@ pub(super) unsafe extern "C" fn guard_recv(
     (i64::from(k) == baked_kind && p as i64 == baked_ptr) as u8
 }
 
+/// The baked BLOCK edge's guard: fiber arm (identical to `guard_recv` —
+/// running compiled code inside a fiber must mark `ran_compiled`) plus the
+/// block's dispatch identity: the receiver must be a Block whose template
+/// id equals the baked one (closures are runtime values; the local feeding
+/// this site can be reassigned). 1 = direct edge, 0 = generic.
+pub(super) unsafe extern "C" fn guard_block(
+    vm: *mut c_void,
+    mc: *const c_void,
+    recv_kind: i64,
+    recv_bits: i64,
+    baked_tid: i64,
+) -> u8 {
+    let (vm, _mc) = unsafe { vm_mc(vm, mc) };
+    if let Some(f) = vm.sched.current_fiber {
+        let marked = f
+            .with_native_state::<crate::runtime::fiber::NativeFiberState, _, _>(|s| {
+                s.coro().ran_compiled.set(true);
+            })
+            .is_ok();
+        if !marked {
+            return 0;
+        }
+    }
+    let v = decode(vm, recv_kind, recv_bits);
+    let Value::Object(obj) = v else { return 0 };
+    let tid = match &obj.borrow().payload {
+        ObjectPayload::Block(b) => b.template.template_id,
+        _ => None,
+    };
+    (tid == Some(baked_tid as u32)) as u8
+}
+
 fn store_err(vm: &mut VmState<'_>, e: QuoinError) -> u8 {
     vm.aot_pending_error = Some(e);
     TAG_ERR
@@ -377,14 +409,23 @@ pub(super) unsafe extern "C" fn block_call(
         && let Some(btid) = block.template.template_id
     {
         // The site cell caches the template's entry — a hit skips the
-        // registry RwLock the combinator loops paid PER ELEMENT.
+        // registry RwLock the combinator loops paid PER ELEMENT. Warmth
+        // rides the same cells (register-only gate, saturating counter):
+        // warm block sites queue their CALLER for retranslation, exactly
+        // like method sites.
         let cached = if site != u32::MAX {
             vm.aot_block_site_peek(site as usize, btid)
         } else {
             None
         };
         let entry = match cached {
-            Some(e) => Some(e),
+            Some((e, hits)) => {
+                let warm_t = crate::codegen::direct_warm_raw();
+                if warm_t != 0 && hits < warm_t {
+                    vm.aot_site_note_hit(site as usize, tid as u32);
+                }
+                Some(e)
+            }
             None => {
                 let e = super::block_entry_for(vm, btid);
                 if let (Some(e), true) = (e, site != u32::MAX) {

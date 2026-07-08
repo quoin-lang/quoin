@@ -238,6 +238,10 @@ pub struct AotEntry {
     /// entry that never materializes never reads it — `invoke` skips the
     /// env swap/restore entirely (D2.5a, docs/DIRECT_CALLS_ARCH.md §2).
     pub materializes: bool,
+    /// Window-hoist: the body reads SLOT 0 (`self`) specifically. A baked
+    /// block edge provides a real hoisted window whose self slot is never
+    /// written per element — slot-0 readers are ineligible.
+    pub uses_self_slot: bool,
     /// The body computes ANY absolute slot index (`abs_slot` — self reads,
     /// Dyn locals, field helpers, scratch). False = truly windowless: the
     /// entry never dereferences `slot_base`, so a baked W0 edge may pass a
@@ -269,6 +273,19 @@ pub fn w0_eligible(entry: &AotEntry) -> bool {
         && !entry.direct_self
         && !entry.lane_plan.is_empty()
         && entry.lane_plan.iter().all(|&p| p >= 0)
+}
+
+/// W0-for-blocks (the window-hoist slice): a template a baked BLOCK edge
+/// may call with a FRAME-HOISTED window — no scratch (nothing to re-nil
+/// per element, the F2 invariant is vacuous), never touches its slot
+/// window beyond what the caller provides (slots 0/2 provably unread via
+/// `uses_slot_base`), materializes nothing. Blocks return via slot (`Obj`
+/// eff-ret), so no ret-shape criterion.
+pub fn block_w0_eligible(entry: &AotEntry) -> bool {
+    entry.role == AotRole::BlockTemplate
+        && !entry.materializes
+        && !entry.materializes_nlr
+        && !entry.uses_self_slot
 }
 
 /// One baked W0 site (D3b): the callee identity + the guard facts captured

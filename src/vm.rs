@@ -3710,13 +3710,13 @@ impl<'gc> VmState<'gc> {
         &self,
         site: usize,
         template_id: u32,
-    ) -> Option<&'static crate::codegen::AotEntry> {
+    ) -> Option<(&'static crate::codegen::AotEntry, u32)> {
         let cell = self.aot_sites.get(site)?;
         let entry = cell.entry?;
         if cell.epoch != self.dispatch_epoch || entry.template_id != template_id {
             return None;
         }
-        Some(entry)
+        Some((entry, cell.hits))
     }
 
     /// Fill a block-call site cell (entry + epoch only — the template-id
@@ -3836,10 +3836,9 @@ impl<'gc> VmState<'gc> {
                 continue;
             };
             let Some(entry) = cell.entry else { continue };
-            if cell.epoch != self.dispatch_epoch
-                || cell.hits < threshold
-                || !crate::codegen::w0_eligible(entry)
-            {
+            let eligible =
+                crate::codegen::w0_eligible(entry) || crate::codegen::block_w0_eligible(entry);
+            if cell.epoch != self.dispatch_epoch || cell.hits < threshold || !eligible {
                 continue;
             }
             out.insert(

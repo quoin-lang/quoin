@@ -383,6 +383,7 @@ aot_helpers! {
     fmod: aot_fmod as fn(f64, f64) -> f64,
     slot_set: helpers::slot_set as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
     guard_recv: helpers::guard_recv as fn(*mut c_void, *const c_void, i64, i64, i64, i64) -> u8,
+    guard_block: helpers::guard_block as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
     slot_peek: helpers::slot_peek as fn(*mut c_void, *const c_void, i64, *mut i64) -> i64,
     list_new: helpers::list_new as fn(*mut c_void, *const c_void, i64) -> u8,
     list_from: helpers::list_from as fn(*mut c_void, *const c_void, i64, i64, *const i64, *const i64) -> u8,
@@ -488,6 +489,7 @@ fn compile_group(
         bool,
         bool,
         bool,
+        bool,
         Vec<(usize, u32)>,
     )> = Vec::new();
 
@@ -514,6 +516,7 @@ fn compile_group(
         let materializes_nlr;
         let materializes;
         let uses_slot_base;
+        let uses_self_slot;
         let site_log;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
@@ -541,6 +544,7 @@ fn compile_group(
                 materialized_nlr: HashSet::new(),
                 pending_abort: None,
                 uses_slot_base: std::cell::Cell::new(false),
+                uses_self_slot: std::cell::Cell::new(false),
                 baked: crate::codegen::take_baked_for(tid),
                 prior_sites: crate::codegen::prior_sites_for(tid),
                 site_log: Vec::new(),
@@ -558,6 +562,7 @@ fn compile_group(
             materializes_nlr = !tr.materialized_nlr.is_empty();
             materializes = !tr.materialized.is_empty();
             uses_slot_base = tr.uses_slot_base.get();
+            uses_self_slot = tr.uses_self_slot.get();
             site_log = std::mem::take(&mut tr.site_log);
             b.seal_all_blocks();
             b.finalize();
@@ -598,6 +603,7 @@ fn compile_group(
             materializes_nlr,
             materializes,
             uses_slot_base,
+            uses_self_slot,
             site_log,
         ));
     }
@@ -616,6 +622,7 @@ fn compile_group(
         materializes_nlr,
         materializes,
         uses_slot_base,
+        uses_self_slot,
         site_log,
     ) in tramp_ids
     {
@@ -638,6 +645,7 @@ fn compile_group(
                 materializes_nlr,
                 materializes,
                 uses_slot_base,
+                uses_self_slot,
                 lane_plan: super::build_lane_plan(&m.params, &m.spec_preconditions),
             },
             site_log,
@@ -830,6 +838,10 @@ struct Translator<'a> {
     /// D3b: the body computed an absolute slot index (see
     /// `AotEntry::uses_slot_base`). Cell: `abs_slot` takes `&self`.
     uses_slot_base: std::cell::Cell<bool>,
+    /// Window-hoist: the body read SLOT 0 (`self`) specifically — a baked
+    /// block edge provides a real hoisted window but never writes its
+    /// self slot, so slot-0 readers are ineligible.
+    uses_self_slot: std::cell::Cell<bool>,
     /// D3b: baked direct-edge facts per ip, present only on a
     /// retranslation whose drain staged them.
     baked: rustc_hash::FxHashMap<usize, super::BakedW0>,
@@ -992,6 +1004,7 @@ impl<'a> Translator<'a> {
             }
             AV::Dyn(idx) => (b.ins().iconst(types::I64, KIND_SLOT), idx),
             AV::SelfRef => {
+                self.uses_self_slot.set(true);
                 let idx = self.abs_slot(b, fx, 0);
                 (b.ins().iconst(types::I64, KIND_SLOT), idx)
             }
@@ -1921,7 +1934,10 @@ impl<'a> Translator<'a> {
     ) -> Result<CVal, Refusal> {
         match v {
             AV::Dyn(idx) => Ok(idx),
-            AV::SelfRef => Ok(self.abs_slot(b, fx, 0)),
+            AV::SelfRef => {
+                self.uses_self_slot.set(true);
+                Ok(self.abs_slot(b, fx, 0))
+            }
             _ => Err(refuse(
                 RefusalKind::SlotResidency,
                 format!("{what} is not slot-resident"),
@@ -2021,6 +2037,136 @@ impl<'a> Translator<'a> {
         let ip_site = b
             .ins()
             .iconst(types::I64, (ip as i64) | ((i64::from(site)) << 32));
+
+        // Window-hoist (the block-edge slice): a baked BLOCK site calls the
+        // template directly through a FRAME-HOISTED window — the callee's
+        // 3+scratch slots are this caller's own scratch, pushed once at
+        // frame entry and torn down at frame exit, so the per-element cost
+        // is: guard_block + param slot_set (+ scratch re-nil per F2) + one
+        // call_indirect + the result copy. The generic helper call is the
+        // guard-miss path, exactly as before.
+        let baked = self
+            .baked
+            .get(&ip)
+            .copied()
+            .filter(|bk| bk.entry.role == super::AotRole::BlockTemplate);
+        if let Some(bk) = baked {
+            crate::codegen::TOTAL_DIRECT_SITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // The hoisted window: [self, param, block] + the callee's
+            // scratch, allocated as OUR scratch (contiguous — alloc_scratch
+            // is sequential within a translation).
+            let w_self = self.alloc_scratch()?;
+            let w_param = self.alloc_scratch()?;
+            let w_block = self.alloc_scratch()?;
+            let mut w_scratch = Vec::new();
+            for _ in 0..bk.entry.n_scratch {
+                w_scratch.push(self.alloc_scratch()?);
+            }
+            debug_assert_eq!(w_param, w_self + 1);
+            debug_assert_eq!(w_block, w_self + 2);
+
+            let generic_bl = b.create_block();
+            let guard_bl = b.create_block();
+            let direct_bl = b.create_block();
+            let merge_bl = b.create_block();
+
+            // 1. live epoch == baked epoch (native).
+            let live = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), fx.epoch, 0);
+            let want = b.ins().iconst(types::I64, bk.epoch as i64);
+            let fresh = b.ins().icmp(IntCC::Equal, live, want);
+            b.ins().brif(fresh, guard_bl, &[], generic_bl, &[]);
+
+            // 2. fiber gate + block identity (template id) via mini-helper.
+            b.switch_to_block(guard_bl);
+            let btid = b.ins().iconst(types::I64, i64::from(bk.entry.template_id));
+            let gf = self.func_ref(b, self.helpers.guard_block);
+            let gcall = b.ins().call(gf, &[fx.vm, fx.mc, rk, rbits, btid]);
+            let gok = b.inst_results(gcall)[0];
+            b.ins().brif(gok, direct_bl, &[], generic_bl, &[]);
+
+            // 3. the direct edge.
+            b.switch_to_block(direct_bl);
+            let sf = self.func_ref(b, self.helpers.slot_set);
+            // param into the hoisted window (slot_set decodes our lanes).
+            let w_param_abs = self.abs_slot(b, fx, w_param);
+            let pcall = b.ins().call(sf, &[fx.vm, fx.mc, w_param_abs, ak, abits]);
+            let ptag = b.inst_results(pcall)[0];
+            self.tag_check(b, fx, ptag);
+            // The block object into slot 2: capture reads (`env_get`) go
+            // through it. Same value the guard just verified — its lanes
+            // are already encoded.
+            let w_block_abs = self.abs_slot(b, fx, w_block);
+            let bcall = b.ins().call(sf, &[fx.vm, fx.mc, w_block_abs, rk, rbits]);
+            let btag = b.inst_results(bcall)[0];
+            self.tag_check(b, fx, btag);
+            // F2: scratch slots are NIL at invocation entry.
+            if !w_scratch.is_empty() {
+                let nil_kind = b.ins().iconst(types::I64, KIND_NIL);
+                let zero = b.ins().iconst(types::I64, 0);
+                for &wsl in &w_scratch {
+                    let abs = self.abs_slot(b, fx, wsl);
+                    let scall = b.ins().call(sf, &[fx.vm, fx.mc, abs, nil_kind, zero]);
+                    let stag = b.inst_results(scall)[0];
+                    self.tag_check(b, fx, stag);
+                }
+            }
+            // the raw call: lanes = [param slot idx] in bits_buf lane 0.
+            let ba2 = b.ins().stack_addr(types::I64, fx.bits_buf, 0);
+            b.ins().store(MemFlagsData::trusted(), w_param_abs, ba2, 0);
+            let w_base_abs = self.abs_slot(b, fx, w_self);
+            let raw_sig = {
+                let ptr = self.module.target_config().pointer_type();
+                let mut sig = self.module.make_signature();
+                for _ in 0..5 {
+                    sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch
+                }
+                sig.params.push(AbiParam::new(types::I64)); // slot_base
+                sig.params.push(AbiParam::new(ptr)); // args
+                sig.params.push(AbiParam::new(ptr)); // ret
+                sig.returns.push(AbiParam::new(types::I8));
+                b.import_signature(sig)
+            };
+            let ptr_ty = self.module.target_config().pointer_type();
+            let fnaddr = b.ins().iconst(ptr_ty, bk.entry.raw as usize as i64);
+            let ret_addr = b.ins().stack_addr(ptr_ty, fx.direct_ret, 0);
+            let dcall = b.ins().call_indirect(
+                raw_sig,
+                fnaddr,
+                &[
+                    fx.vm, fx.mc, fx.fuel, fx.depth, fx.epoch, w_base_abs, ba2, ret_addr,
+                ],
+            );
+            let dtag = b.inst_results(dcall)[0];
+            self.tag_check(b, fx, dtag);
+            // result: blocks return via slot (Obj eff-ret) — the raw ret
+            // lane is the result's absolute slot index; copy slot-to-slot
+            // into this site's out slot.
+            let retv = b.ins().stack_load(types::I64, fx.direct_ret, 0);
+            let slotk = b.ins().iconst(types::I64, KIND_SLOT);
+            let rcall = b.ins().call(sf, &[fx.vm, fx.mc, out_idx, slotk, retv]);
+            let rtag = b.inst_results(rcall)[0];
+            self.tag_check(b, fx, rtag);
+            b.ins().jump(merge_bl, &[]);
+
+            // 4. guard miss: exactly today's generic seam.
+            b.switch_to_block(generic_bl);
+            let f = self.func_ref(b, self.helpers.block_call);
+            let call = b.ins().call(
+                f,
+                &[
+                    fx.vm, fx.mc, tid_v, ip_site, len_v, rk, rbits, ak, abits, out_idx,
+                ],
+            );
+            let tag = b.inst_results(call)[0];
+            self.tag_check(b, fx, tag);
+            b.ins().jump(merge_bl, &[]);
+
+            b.switch_to_block(merge_bl);
+            return Ok(AV::Dyn(out_idx));
+        }
+
         let f = self.func_ref(b, self.helpers.block_call);
         let call = b.ins().call(
             f,
@@ -3000,7 +3146,10 @@ impl<'a> Translator<'a> {
             (AotRet::Obj, v) => {
                 let idx = match v {
                     AV::Dyn(idx) => idx,
-                    AV::SelfRef => self.abs_slot(b, fx, 0),
+                    AV::SelfRef => {
+                        self.uses_self_slot.set(true);
+                        self.abs_slot(b, fx, 0)
+                    }
                     other => {
                         // Box a scalar/nil into a scratch slot (a lying `^List`
                         // etc. returns the honest value, as the interpreter's
