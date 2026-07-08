@@ -27,6 +27,7 @@ shards.each:{ |sh|
     }
 };
 
+var out = [IO]Stdout;
 var passes = 0;
 var failures = 0;
 var skips = 0;
@@ -39,25 +40,34 @@ var failedLines = #();
             var name = (r.at:'suite').padRight:nameWidth;
             (r.at:'skipped').if:{
                 skips = skips + 1;
-                ('[' + name + '] SKIPPED — ' + (r.at:'reason')).print
+                out.writeln:#ANSI'[$#5fd7af;bw[%1$]] $#ffd75f[SKIPPED$] — %2' % #( name (r.at:'reason') )
             }
             else:{
                 passes = passes + (r.at:'passes');
                 failures = failures + (r.at:'failures');
                 var us = r.at:'us';
                 var took = (us < 1000).if:{ us.s + 'µs' } else:{ (us / 1000).s + 'ms' };
-                ('[' + name + '] ' + (r.at:'passes').s + ' passes / '
-                    + (r.at:'failures').s + ' failures (worker ' + (sh.at:'index').s
-                    + ', ' + took + ')').print
+                out.writeln:#ANSI'[$#5fd7af;bw[%1$]] $#69ff61[%2 passes$] / $#ff6961[%3 failures$] (worker %4, $#00bfff[%5$])' % #(
+                    name
+                    (r.at:'passes')
+                    (r.at:'failures')
+                    (sh.at:'index')
+                    took
+                )
             };
             (r.at:'failed').each:{ |line| failedLines.add:line }
         }
     }
 };
 
-failedLines.each:{ |line| ('  FAILED: ' + line).print };
+failedLines.each:{ |line| out.writeln:#ANSI'  $#ff6961[FAILED$]: %1' % #( line ) };
 
-('All ' + workerCount.s + ' workers finished in ' + (wall / 1000).s + 'ms : '
-    + passes.s + ' passes / ' + failures.s + ' failures / ' + skips.s + ' skipped').print;
+out.writeln:#ANSI'All %1 workers finished in $#00bfff[%2$] : $#69ff61[%3 passes$] / $#ff6961[%4 failures$] / $#ffd75f[%5 skipped$]' % #(
+    workerCount
+    ((wall / 1000).s + 'ms')
+    passes
+    failures
+    skips
+);
 
 failures == 0
