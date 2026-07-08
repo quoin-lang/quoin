@@ -34,9 +34,9 @@ app.get:'/slow' do:{
     [Web]Response.stream:(Generator.from:{ ^>'s1'; Async.sleep:300; ^>'s2'; Async.sleep:300; ^>'s3' })
 };
 
-(Worker.worker?).if:{ app.serve:'127.0.0.1:0' workers:2 backing:backing }
+(Worker.worker?).if:{ app.serve:'127.0.0.1:0' workers:@N@ backing:backing }
 else:{
-    var server = app.start:'127.0.0.1:0' workers:2 backing:backing;
+    var server = app.start:'127.0.0.1:0' workers:@N@ backing:backing;
     ('PORT=' + server.port.s).print;
     server.join
 }
@@ -60,7 +60,11 @@ fn start_app(name: &str, backing: &str) -> App {
     let dir = std::env::temp_dir().join(format!("qn_webworkers_{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("app.qn");
-    std::fs::write(&path, APP.replace("@BACKING@", backing)).unwrap();
+    let (backing, n) = match backing.split_once(':') {
+        Some((b, n)) => (b, n),
+        None => (backing, "2"),
+    };
+    std::fs::write(&path, APP.replace("@BACKING@", backing).replace("@N@", n)).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_qn"))
         .arg(&path)
         .stdout(Stdio::piped())
@@ -202,6 +206,31 @@ fn exercise_streaming(app: &App) {
     );
     let slow = slow.join().expect("slow stream thread");
     assert_eq!(dechunk(body_of(&slow)), "s1s2s3");
+}
+
+#[test]
+fn workers_zero_is_the_single_vm_path() {
+    // The caret lint's first catch: `(n < 1).if:{ ^.start:address }` FELL
+    // THROUGH (block-return, value discarded) and built a zero-worker pool
+    // that 503'd everything. workers:0 must serve single-VM: requests
+    // succeed, one shared state (counts increment monotonically), no pool
+    // rows in ps.
+    let app = start_app("zero", "thread:0");
+    let hello = get(app.port, "/hello");
+    assert!(hello.starts_with("HTTP/1.1 200"), "hello:\n{hello}");
+    let counts: Vec<String> = (0..3)
+        .map(|_| body_of(&get(app.port, "/count")).to_string())
+        .collect();
+    assert_eq!(
+        counts,
+        vec![r#"{"n":1}"#, r#"{"n":2}"#, r#"{"n":3}"#],
+        "single-VM state not shared"
+    );
+    let ps = get(app.port, "/_qn/ps");
+    assert!(
+        !body_of(&ps).contains("\"web:0\""),
+        "workers:0 spawned a pool:\n{ps}"
+    );
 }
 
 #[test]

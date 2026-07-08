@@ -2715,3 +2715,53 @@ fn unfusable_configs_keep_the_classic_form() {
         "non-assignment statement must refuse",
     );
 }
+
+#[test]
+fn caret_in_discarded_if_arm_lints() {
+    fn diags(src: &str) -> Vec<String> {
+        let node = crate::parser::parse_quoin_string(src);
+        let NodeValue::Program(p) = &node.value else {
+            panic!("expected a program");
+        };
+        let mut c = Compiler::new();
+        c.compile_program(p).unwrap();
+        c.diagnostics().iter().map(|d| d.message.clone()).collect()
+    }
+    let hit = |ds: &[String]| {
+        ds.iter()
+            .filter(|m| m.contains("control falls through"))
+            .count()
+    };
+
+    // The trap: statement-position if:/else: arms ending in `^`.
+    assert_eq!(hit(&diags("T <- { a: -> { |c| c.if:{ ^1 }; 2 } }")), 1);
+    assert_eq!(
+        hit(&diags("T <- { a: -> { |c| c.if:{ ^1 } else:{ ^2 }; 3 } }")),
+        2
+    );
+    assert_eq!(hit(&diags("T <- { a: -> { |c| c.else:{ ^1 }; 2 } }")), 1);
+    // Top-level statement position too.
+    assert_eq!(hit(&diags("var c = true;\nc.if:{ ^1 };\n2")), 1);
+
+    // Legitimate `^` shapes stay silent: value position (tail expression,
+    // assignment, explicit return), `^^`, and non-if iteration blocks.
+    assert_eq!(
+        hit(&diags("T <- { a: -> { |c| c.if:{ ^1 } else:{ ^2 } } }")),
+        0
+    );
+    assert_eq!(
+        hit(&diags(
+            "T <- { a: -> { |c| var v = c.if:{ ^1 } else:{ ^2 }; v } }"
+        )),
+        0
+    );
+    assert_eq!(
+        hit(&diags("T <- { a: -> { |c| ^c.if:{ ^1 } else:{ ^2 } } }")),
+        0
+    );
+    assert_eq!(hit(&diags("T <- { a: -> { |c| c.if:{ ^^1 }; 2 } }")), 0);
+    assert_eq!(
+        hit(&diags("T <- { a: -> { |l| l.each:{ |x| ^x }; 2 } }")),
+        0
+    );
+}

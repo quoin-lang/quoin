@@ -151,7 +151,21 @@ GenericFlow <- {
     "* narrowed element read; select: flows List(Integer); nil is always insertable.
     goodRead: -> { |l: List(Integer)| var v = l.at:0; v.defined?.if:{ v + 1 } else:{ 0 } };
     goodFlow: -> { |l: List(Integer)| var evens: List(Integer) = l.select:{ |x| x > 1 }; evens };
-    goodNil: -> { |l: List(Integer)| l.add:nil }
+    goodNil: -> { |l: List(Integer)| l.add:nil };
+
+    "* --- the `^`-in-discarded-if-arm lint ---
+
+    "* `^` ending an `if:` arm whose value is discarded returns from the
+    "* BLOCK (control falls through) — a method return is `^^`.
+    caretFallsThrough: -> { |cond|
+        cond.if:{ ^'early' };
+        'late'
+    };
+
+    "* --- these are CORRECT and must emit NO warning ---
+    "* value-position if-arms and iteration-block early exits use `^` legitimately.
+    goodCaretValue: -> { |cond| ^cond.if:{ 'a' } else:{ 'b' } };
+    goodCaretBreak: -> { |l: List(Integer)| l.each:{ |x| ^x }; nil }
 };
 
 'Defined Warnings — see the diagnostics printed above.'.print

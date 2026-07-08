@@ -1205,6 +1205,40 @@ impl Compiler {
         });
     }
 
+    /// Lint (QUOIN_TODO): a `^` ending an `if:`/`else:` arm whose send value
+    /// is DISCARDED (statement position) is almost always a mistyped `^^` —
+    /// the `^` yields the arm's value to a send nobody reads, and control
+    /// FALLS THROUGH to the next statement. The legitimate `^` uses (early
+    /// exit from iteration blocks, value-producing arms) don't have this
+    /// shape. Statement loops call this on every non-final statement.
+    fn check_discarded_caret_arm(&mut self, stmt: &Node) {
+        let NodeValue::MethodCall(call) = &stmt.value else {
+            return;
+        };
+        let idents = &call.arguments.signature.identifiers;
+        let kws: Vec<&str> = idents.iter().map(|i| i.name.as_str()).collect();
+        if !matches!(kws.as_slice(), ["if"] | ["else"] | ["if", "else"]) {
+            return;
+        }
+        for arg in &call.arguments.expressions {
+            let NodeValue::Block(b) = &arg.value else {
+                continue;
+            };
+            let Some(last) = b.statements.last() else {
+                continue;
+            };
+            if matches!(&last.value, NodeValue::BlockReturn(_)) {
+                self.warn(
+                    "`^` returns from this block, but the surrounding `if:`/`else:` \
+                     value is discarded — control falls through to the next \
+                     statement; a method return here is `^^`"
+                        .to_string(),
+                    last.source_info.as_ref(),
+                );
+            }
+        }
+    }
+
     fn resolve_annotation(&mut self, tr: &TypeRefNode) -> Type {
         // A bare name that matches a declared class/mixin-header type parameter
         // is a type variable (`T?` rides the nullable suffix inside the ident,
@@ -2307,6 +2341,7 @@ impl Compiler {
             cb.current_source = expr.source_info.clone();
             self.compile_node(expr, &mut cb)?;
             if idx < len - 1 {
+                self.check_discarded_caret_arm(expr);
                 cb.push(Instruction::Pop);
             }
         }
@@ -3144,6 +3179,7 @@ impl Compiler {
                 }
             }
             if idx < len - 1 {
+                self.check_discarded_caret_arm(stmt);
                 block_bytecode.push(Instruction::Pop);
             }
         }
