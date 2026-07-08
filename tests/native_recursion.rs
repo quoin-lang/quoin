@@ -17,7 +17,10 @@ var ok = true;
 Evil <- { | @bag |
     init: -> { |b| @bag = b };
     "* a custom equality that mutates the set it is being compared within: every
-    "* membership check re-enters set_add, which re-enters == :, without bound
+    "* membership check re-enters set_add, which re-enters == :, without bound.
+    "* The constant hash forces one bucket, so ==: actually dispatches (the
+    "* hashed Set otherwise never consults ==: across distinct buckets).
+    hash -> { 1 };
     #'==:' -> { |o| @bag.add:(Evil.new:{ var b = nil }); false }
 };
 

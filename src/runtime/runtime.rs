@@ -115,12 +115,22 @@ pub(crate) fn build_block_with_env<'gc>(
 fn map_to_bindings<'gc>(map_val: Value<'gc>) -> Result<Vec<Binding<'gc>>, QuoinError> {
     map_val
         .with_native_state::<NativeMapState, _, _>(|m| {
-            m.get_map()
+            m.entries()
                 .iter()
-                .map(|(k, v)| (Symbol::intern(k), *v))
-                .collect()
+                .map(|(_, k, v)| {
+                    if let Value::Object(kobj) = k
+                        && let crate::value::ObjectPayload::String(s) = &kobj.borrow().payload
+                    {
+                        Ok((Symbol::intern(s), *v))
+                    } else {
+                        Err(QuoinError::Other(
+                            "eval:bindings: binding keys must be Strings".to_string(),
+                        ))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
         })
-        .map_err(QuoinError::Other)
+        .map_err(|_| QuoinError::Other("eval bindings: expected a Map".to_string()))?
 }
 
 /// Compile `source` (named `display` for source-info / errors) into a top-level block and run

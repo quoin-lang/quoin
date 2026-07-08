@@ -73,9 +73,9 @@ fn to_spec(val: Value<'_>) -> ValueSpec {
                 _ if borrowed.class_name() == "Map" => {
                     let res = val.with_native_state::<NativeMapState, _, _>(|m| {
                         let map_specs = m
-                            .get_map()
+                            .entries()
                             .iter()
-                            .map(|(k, &v)| (k.clone(), to_spec(v)))
+                            .map(|(_, k, v)| (format!("{k}"), to_spec(*v)))
                             .collect();
                         ValueSpec::Map(map_specs)
                     });

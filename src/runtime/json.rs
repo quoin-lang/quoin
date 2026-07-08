@@ -62,10 +62,20 @@ fn value_to_json(v: Value) -> Result<Json, QuoinError> {
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Json::Array(arr));
             }
-            if let Ok(map) = v.with_native_state::<NativeMapState, _, _>(|m| m.get_map().clone()) {
+            if let Ok(map) = v.with_native_state::<NativeMapState, _, _>(|m| m.entries().to_vec()) {
                 let mut obj_map = serde_json::Map::with_capacity(map.len());
-                for (k, val) in map {
-                    obj_map.insert(k, value_to_json(val)?);
+                for (_, k, val) in map {
+                    let Value::Object(kobj) = k else {
+                        return Err(QuoinError::Other(
+                            "JSON: Map keys must be Strings".to_string(),
+                        ));
+                    };
+                    let crate::value::ObjectPayload::String(ks) = &kobj.borrow().payload else {
+                        return Err(QuoinError::Other(
+                            "JSON: Map keys must be Strings".to_string(),
+                        ));
+                    };
+                    obj_map.insert((**ks).clone(), value_to_json(val)?);
                 }
                 return Ok(Json::Object(obj_map));
             }

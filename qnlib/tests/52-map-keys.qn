@@ -1,0 +1,108 @@
+"* Any-object Map keys (feat/map-any-keys). The contract: scalars key by
+"* VALUE (with the same Int<->Double coercion equality has), user instances
+"* by IDENTITY unless their class overrides BOTH `hash` and `==:`, mutable
+"* built-in collections by identity. Serialization boundaries (JSON etc.)
+"* stay String-keyed and refuse loudly.
+
+Point <- { |@x @y|
+    init: -> { |x y| @x = x; @y = y };
+    x -> { @x }
+};
+
+VPoint <- { |@x @y|
+    init: -> { |x y| @x = x; @y = y };
+    hash -> { @x * 31 + @y };
+    #'==:' -> { |o| (o.class.name == 'VPoint') && ((o.hx == @x) && (o.hy == @y)) };
+    hx -> { @x };
+    hy -> { @y }
+};
+
+(TestSuite.new:{ var name = 'MapKeys' }).add:{
+    .test:scalarKeysOfEveryKind -> {
+        var m = #{ 1: 'one' 'two': 2 3.0: 'three' true: 'yes' nil: 'nothing' };
+        .is:{ m.at:1 } equalTo:'one';
+        .is:{ m.at:'two' } equalTo:2;
+        "* Int<->Double key coercion mirrors equality: 3 finds the 3.0 entry
+        .is:{ m.at:3 } equalTo:'three';
+        .is:{ m.at:true } equalTo:'yes';
+        .is:{ m.at:nil } equalTo:'nothing';
+        .is:{ m.count } equalTo:5;
+        .is:{ m.containsKey?:1 } equalTo:true;
+        .is:{ m.containsKey?:99 } equalTo:false;
+    };
+
+    .test:instanceKeysDefaultToIdentity -> {
+        var p1 = Point.new:{ var x = 1; var y = 2 };
+        var p2 = Point.new:{ var x = 1; var y = 2 };
+        var m = #{};
+        m.at:p1 put:'first';
+        .is:{ m.at:p1 } equalTo:'first';
+        .is:{ m.at:p2 } equalTo:nil;
+    };
+
+    .test:customHashAndEqGiveValueSemantics -> {
+        var v1 = VPoint.new:{ var x = 1; var y = 2 };
+        var v2 = VPoint.new:{ var x = 1; var y = 2 };
+        var m = #{};
+        m.at:v1 put:'val';
+        .is:{ m.at:v2 } equalTo:'val';
+        m.at:v2 put:'replaced';
+        .is:{ m.count } equalTo:1;
+        .is:{ m.at:v1 } equalTo:'replaced';
+    };
+
+    .test:collectionsKeyByIdentity -> {
+        var l1 = #( 1 2 );
+        var l2 = #( 1 2 );
+        var m = #{};
+        m.at:l1 put:'mine';
+        .is:{ m.at:l1 } equalTo:'mine';
+        .is:{ m.at:l2 } equalTo:nil;
+    };
+
+    .test:keysRoundTripRealValues -> {
+        var m = #{ 'z': 1 5: 2 'a': 3 };
+        .is:{ m.keys.count } equalTo:3;
+        "* insertion order preserved across mixed keys
+        .is:{ m.keys.at:1 } equalTo:5;
+        var seen = 0;
+        m.each:{ |kvp| seen = seen + ((m.at:(kvp.key)) == kvp.value).if:{ 1 } else:{ 0 } };
+        .is:{ seen } equalTo:3;
+    };
+
+    .test:removeAnswersValueAndShrinks -> {
+        var m = #{ 'a': 1 7: 2 };
+        .is:{ m.remove:'a' } equalTo:1;
+        .is:{ m.count } equalTo:1;
+        .is:{ m.at:'a' } equalTo:nil;
+        .is:{ m.at:7 } equalTo:2;
+        .is:{ m.remove:'ghost' } equalTo:nil;
+    };
+
+    .test:mapEqualityOverAnyKeys -> {
+        .is:{ #{ 1: 'x' 'two': 2 } == #{ 1: 'x' 'two': 2 } } equalTo:true;
+        .is:{ #{ 1: 'x' } == #{ 2: 'x' } } equalTo:false;
+        .is:{ #{ 1: 'x' } == #{ 1: 'y' } } equalTo:false;
+    };
+
+    .test:duplicateLiteralKeysLastWins -> {
+        var m = #{ 1: 'first' 1: 'second' };
+        .is:{ m.count } equalTo:1;
+        .is:{ m.at:1 } equalTo:'second';
+    };
+
+    .test:serializationRefusesNonStringKeys -> {
+        var refused = { JSON.generate:#{ 1: 'x' }; 'encoded' }.catch:{ |e| 'refused' };
+        .is:{ refused } equalTo:'refused';
+        var ok = { JSON.generate:#{ 'k': 'x' }; 'encoded' }.catch:{ |e| 'refused' };
+        .is:{ ok } equalTo:'encoded';
+    };
+
+    .test:hashIsIntegerEverywhere -> {
+        .is:{ 5.hash.class.name } equalTo:'Integer';
+        .is:{ 'str'.hash.class.name } equalTo:'Integer';
+        .is:{ (Point.new:{ var x = 1; var y = 1 }).hash.class.name } equalTo:'Integer';
+        "* equal scalars hash equal, incl the coercion pair
+        .is:{ 3.hash == 3.0.hash } equalTo:true;
+    };
+}

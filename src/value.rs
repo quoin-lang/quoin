@@ -368,6 +368,113 @@ impl<'gc> Value<'gc> {
     }
 }
 
+/// Hash a value WITHOUT dispatching guest code, or `None` if the value is a
+/// user instance (whose hash is its `hash` method — dispatched by
+/// `map_hash_key`, never from inside a Rust `Hash` impl).
+///
+/// The contract mirrors equality: equal values must hash equal. So Doubles
+/// with integral values hash as their Int (native `==` coerces Int↔Double);
+/// Strings/Bytes hash by content; Symbols/Blocks/Classes by their stable
+/// pointer (gc-arena is non-moving); BigInteger/BigDecimal structurally
+/// (their guest `==:` is structural even though native `==` is identity);
+/// other native-state values by identity, matching their native `==`.
+pub fn value_hash_scalar(v: &Value<'_>) -> Option<u64> {
+    Some(match v {
+        Value::Int(i) => hash_i64(*i),
+        Value::Double(d) => {
+            if d.fract() == 0.0 && *d >= i64::MIN as f64 && *d <= i64::MAX as f64 {
+                hash_i64(*d as i64)
+            } else {
+                hash_i64(d.to_bits() as i64) ^ 0x9e37
+            }
+        }
+        Value::Bool(b) => {
+            if *b {
+                0x9e3779b97f4a7c15
+            } else {
+                0x517cc1b727220a95
+            }
+        }
+        Value::Nil => 0x2545f4914f6cdd1d,
+        Value::Class(c) => hash_i64(Gc::as_ptr(*c) as i64),
+        Value::ClassMeta(c) => hash_i64(Gc::as_ptr(*c) as i64) ^ 0x5bd1,
+        Value::Object(obj) => {
+            let borrowed = obj.borrow();
+            match &borrowed.payload {
+                ObjectPayload::String(s) => hash_bytes(s.as_bytes()),
+                ObjectPayload::Bytes(b) => hash_bytes(b.as_slice()) ^ 0x1f83,
+                ObjectPayload::Symbol(sym) => hash_i64(sym.as_str().as_ptr() as i64),
+                ObjectPayload::Block(b) => hash_i64(Gc::as_ptr(*b) as i64),
+                ObjectPayload::Instance => return None,
+                ObjectPayload::NativeState(cell) => {
+                    let state = cell.borrow();
+                    let any = (**state).as_any();
+                    if let Some(bi) =
+                        any.downcast_ref::<crate::runtime::big_integer::NativeBigInteger>()
+                    {
+                        match num_traits::ToPrimitive::to_i64(&bi.0) {
+                            Some(i) => hash_i64(i),
+                            None => hash_bytes(bi.0.to_string().as_bytes()),
+                        }
+                    } else if let Some(bd) =
+                        any.downcast_ref::<crate::runtime::big_decimal::NativeBigDecimal>()
+                    {
+                        if bd.0.fract().is_zero() {
+                            match num_traits::ToPrimitive::to_i64(&bd.0) {
+                                Some(i) => hash_i64(i),
+                                None => hash_bytes(bd.0.normalize().to_string().as_bytes()),
+                            }
+                        } else {
+                            hash_bytes(bd.0.normalize().to_string().as_bytes())
+                        }
+                    } else {
+                        // Other native-state values (channels, workers, arrays,
+                        // …) key by IDENTITY, matching their native `==`.
+                        hash_i64(Gc::as_ptr(*obj) as i64)
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// True when native `==` is AUTHORITATIVE for this value (scalars and
+/// content-compared payloads): two such values that are not natively equal
+/// are definitively unequal — no guest `==:` dispatch needed.
+pub fn key_native_exact(v: &Value<'_>) -> bool {
+    match v {
+        Value::Int(_)
+        | Value::Double(_)
+        | Value::Bool(_)
+        | Value::Nil
+        | Value::Class(_)
+        | Value::ClassMeta(_) => true,
+        Value::Object(obj) => matches!(
+            &obj.borrow().payload,
+            ObjectPayload::String(_)
+                | ObjectPayload::Bytes(_)
+                | ObjectPayload::Symbol(_)
+                | ObjectPayload::Block(_)
+        ),
+    }
+}
+
+/// FxHash over bytes — the single content-hash used by both String VALUES
+/// and native `&str` lookups, so they can never disagree.
+pub fn hash_bytes(b: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    b.hash(&mut h);
+    h.finish()
+}
+
+pub fn hash_i64(i: i64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    i.hash(&mut h);
+    h.finish()
+}
+
 impl<'gc> PartialEq for Value<'gc> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -514,9 +621,8 @@ impl<'gc> fmt::Display for Value<'gc> {
                     }
                     _ if o_borrow.class_name() == "Map" => {
                         if let Ok(res) = self.with_native_state::<NativeMapState, _, _>(|m| {
-                            let borrowed = m.get_map();
                             let mut parts = Vec::new();
-                            for (k, v) in borrowed.iter() {
+                            for (_, k, v) in m.entries().iter() {
                                 parts.push(format!("{}: {}", k, v));
                             }
                             parts.sort();
@@ -529,7 +635,7 @@ impl<'gc> fmt::Display for Value<'gc> {
                     }
                     _ if o_borrow.class_name() == "Set" => {
                         if let Ok(res) = self.with_native_state::<NativeSetState, _, _>(|s| {
-                            let vec = s.get_vec();
+                            let vec = s.values();
                             let mut out = String::new();
                             out.push_str("#<");
                             for (i, val) in vec.iter().enumerate() {

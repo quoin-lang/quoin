@@ -1069,7 +1069,7 @@ impl<'gc> VmState<'gc> {
             return Ok(());
         }
         if let Ok(vals) = v.with_native_state::<NativeMapState, _, _>(|m| {
-            m.get_map().values().copied().collect::<Vec<_>>()
+            m.entries().iter().map(|(_, _, v)| *v).collect::<Vec<_>>()
         }) {
             for e in &vals {
                 elem_tag::check_insert(Some(tag), "Map String", e, None, |val, n| {
@@ -1081,7 +1081,7 @@ impl<'gc> VmState<'gc> {
             });
             return Ok(());
         }
-        if let Ok(vec) = v.with_native_state::<NativeSetState, _, _>(|s| s.get_vec().to_vec()) {
+        if let Ok(vec) = v.with_native_state::<NativeSetState, _, _>(|s| s.values()) {
             for (i, e) in vec.iter().enumerate() {
                 elem_tag::check_insert(Some(tag), "Set", e, Some(i as i64), |val, n| {
                     self.value_matches_type(*val, n)
@@ -1140,28 +1140,6 @@ impl<'gc> VmState<'gc> {
             .map_err(QuoinError::Other)?
     }
 
-    /// Checked write into a TAGGED map (the cold side of the MapSet arm).
-    #[inline(never)]
-    pub(crate) fn tagged_map_set(
-        &self,
-        mc: &Mutation<'gc>,
-        receiver: Value<'gc>,
-        key: String,
-        value: Value<'gc>,
-    ) -> Result<(), QuoinError> {
-        use crate::runtime::map::NativeMapState;
-        let tag = receiver
-            .with_native_state::<NativeMapState, _, _>(|m| m.elem)
-            .map_err(QuoinError::Other)?;
-        elem_tag::check_insert(tag, "Map String", &value, None, |v, n| {
-            self.value_matches_type(*v, n)
-        })?;
-        let _ = receiver.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
-            m.get_map_mut().insert(key, value);
-        });
-        Ok(())
-    }
-
     pub fn new_list(&self, mc: &Mutation<'gc>, list: Vec<Value<'gc>>) -> Value<'gc> {
         let class = self.builtin_cache.borrow().list_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "List"));
@@ -1180,7 +1158,14 @@ impl<'gc> VmState<'gc> {
     pub fn new_map(&self, mc: &Mutation<'gc>, map: IndexMap<String, Value<'gc>>) -> Value<'gc> {
         let class = self.builtin_cache.borrow().map_class;
         let class = class.unwrap_or_else(|| self.get_or_create_builtin_class(mc, "Map"));
-        let boxed_state: Box<dyn AnyCollect> = Box::new(NativeMapState::new(map));
+        // Convenience constructor for the string-shaped native callers
+        // (JSON/wire/CSV/stats): builds a full any-key map internally.
+        let mut state = NativeMapState::new_empty();
+        for (k, v) in map {
+            let h = crate::value::hash_bytes(k.as_bytes());
+            state.append(h, self.new_string(mc, k), v);
+        }
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
             mc,
             Object {
@@ -1193,7 +1178,15 @@ impl<'gc> VmState<'gc> {
 
     pub fn new_set(&self, mc: &Mutation<'gc>, set: Vec<Value<'gc>>) -> Value<'gc> {
         let class = self.get_or_create_builtin_class(mc, "Set");
-        let boxed_state: Box<dyn AnyCollect> = Box::new(NativeSetState::new(set));
+        // Sole caller passes an empty vec (the NewSet literal dedups via
+        // set_add); accept scalar-hashable elements defensively.
+        let mut state = NativeSetState::new_empty();
+        for v in set {
+            let h = crate::value::value_hash_scalar(&v)
+                .expect("new_set elements must be scalar-hashable; use set_add for instances");
+            state.append(h, v);
+        }
+        let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
             mc,
             Object {
@@ -1211,18 +1204,8 @@ impl<'gc> VmState<'gc> {
         set_val: Value<'gc>,
         value: Value<'gc>,
     ) -> Result<bool, QuoinError> {
-        let len = set_val
-            .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-            .map_err(|e| QuoinError::Other(e))?;
-        for i in 0..len {
-            let elem = set_val
-                .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
-                .map_err(|e| QuoinError::Other(e))?;
-            if self.call_method(mc, elem, "==:", vec![value])?.is_true() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let (_, found) = crate::runtime::set::set_find(self, mc, set_val, value)?;
+        Ok(found.is_some())
     }
 
     /// Insert `value` into `set_val` unless an equal element is already present.
@@ -1233,12 +1216,13 @@ impl<'gc> VmState<'gc> {
         set_val: Value<'gc>,
         value: Value<'gc>,
     ) -> Result<bool, QuoinError> {
-        if self.set_contains(mc, set_val, value)? {
+        let (h, found) = crate::runtime::set::set_find(self, mc, set_val, value)?;
+        if found.is_some() {
             Ok(false)
         } else {
             set_val
-                .with_native_state_mut::<NativeSetState, _, _>(mc, |s| s.get_vec_mut().push(value))
-                .map_err(|e| QuoinError::Other(e))?;
+                .with_native_state_mut::<NativeSetState, _, _>(mc, |s| s.append(h, value))
+                .map_err(QuoinError::Other)?;
             Ok(true)
         }
     }
@@ -1251,23 +1235,16 @@ impl<'gc> VmState<'gc> {
         set_val: Value<'gc>,
         value: Value<'gc>,
     ) -> Result<bool, QuoinError> {
-        let len = set_val
-            .with_native_state::<NativeSetState, _, _>(|s| s.get_vec().len())
-            .map_err(|e| QuoinError::Other(e))?;
-        for i in 0..len {
-            let elem = set_val
-                .with_native_state::<NativeSetState, _, _>(|s| s.get_vec()[i])
-                .map_err(|e| QuoinError::Other(e))?;
-            if self.call_method(mc, elem, "==:", vec![value])?.is_true() {
+        let (_, found) = crate::runtime::set::set_find(self, mc, set_val, value)?;
+        match found {
+            Some(idx) => {
                 set_val
-                    .with_native_state_mut::<NativeSetState, _, _>(mc, |s| {
-                        s.get_vec_mut().remove(i);
-                    })
-                    .map_err(|e| QuoinError::Other(e))?;
-                return Ok(true);
+                    .with_native_state_mut::<NativeSetState, _, _>(mc, |s| s.remove_at(idx))
+                    .map_err(QuoinError::Other)?;
+                Ok(true)
             }
+            None => Ok(false),
         }
-        Ok(false)
     }
 
     pub fn new_regex(&self, mc: &Mutation<'gc>, regex: Regex) -> Value<'gc> {
@@ -5342,18 +5319,17 @@ impl<'gc> VmState<'gc> {
                 let n = self.stack.len();
                 let key = self.stack[n - 1];
                 let receiver = self.stack[n - 2];
-                if let Value::Object(o) = key
-                    && let ObjectPayload::String(s) = o.borrow().payload
+                // Inline fast path for ANY scalar-exact key (String, Int,
+                // Double, Symbol, …): hash in Rust, no guest dispatch
+                // possible. Instance keys (guest hash/==:) fall back to the
+                // real `at:` send, which handles dispatch and parking.
+                if let Ok(Some(hit)) =
+                    receiver.with_native_state::<NativeMapState, _, _>(|m| m.get_scalar(&key))
                 {
-                    let got = receiver.with_native_state::<NativeMapState, _, _>(|m| {
-                        devirt_ops::map_get(m.get_map(), s.as_str())
-                    });
-                    if let Ok(v) = got {
-                        self.stack.truncate(n - 2);
-                        self.push(v.unwrap_or(Value::Nil)); // missing key → nil (native `at:`)
-                        self.frames[frame_idx].ip = ip + 1;
-                        return Ok(VmStatus::Running);
-                    }
+                    self.stack.truncate(n - 2);
+                    self.push(hit.unwrap_or(Value::Nil)); // missing key → nil (native `at:`)
+                    self.frames[frame_idx].ip = ip + 1;
+                    return Ok(VmStatus::Running);
                 }
                 return self.exec_send(mc, frame_idx, Symbol::intern("at:"), 1);
             }
@@ -5362,20 +5338,22 @@ impl<'gc> VmState<'gc> {
                 let value = self.stack[n - 1];
                 let key = self.stack[n - 2];
                 let receiver = self.stack[n - 3];
-                if let Value::Object(o) = key
-                    && let ObjectPayload::String(s) = o.borrow().payload
+                // Same widening as MapGet: any scalar-exact key inlines;
+                // instance keys — and tag checks that need the full
+                // type-matcher — fall back to the real `at:put:` send.
+                if crate::value::key_native_exact(&key)
+                    && crate::value::value_hash_scalar(&key).is_some()
                 {
-                    let key_str = s.to_string(); // the map owns String keys
                     let res =
                         receiver.with_native_state_mut::<NativeMapState, _, _>(mc, |m| {
                             match m.elem {
                                 None => {
-                                    m.get_map_mut().insert(key_str.clone(), value);
+                                    m.insert_scalar(key, value);
                                     Some(Ok(()))
                                 }
                                 Some(t) => match t.matches_value(&value) {
                                     Some(true) => {
-                                        m.get_map_mut().insert(key_str.clone(), value);
+                                        m.insert_scalar(key, value);
                                         Some(Ok(()))
                                     }
                                     Some(false) => Some(Err(elem_tag::elem_type_error(
@@ -5388,18 +5366,9 @@ impl<'gc> VmState<'gc> {
                                 },
                             }
                         });
-                    if let Ok(fast) = res {
-                        match fast {
-                            Some(inner) => {
-                                self.stack.truncate(n - 3);
-                                inner?;
-                            }
-                            None => {
-                                let r = self.tagged_map_set(mc, receiver, key_str, value);
-                                self.stack.truncate(n - 3);
-                                r?;
-                            }
-                        }
+                    if let Ok(Some(inner)) = res {
+                        self.stack.truncate(n - 3);
+                        inner?;
                         self.push(receiver); // `at:put:` evaluates to the receiver
                         self.frames[frame_idx].ip = ip + 1;
                         return Ok(VmStatus::Running);
@@ -5644,29 +5613,24 @@ impl<'gc> VmState<'gc> {
             }
             Instruction::NewMap(n) => {
                 let n = *n;
-                // Entries pop in reverse source order; collect, then insert reversed so the literal
-                // keeps its written key order (the Map is insertion-ordered).
-                let mut pairs: Vec<(String, Value)> = Vec::with_capacity(n);
-                for _ in 0..n {
-                    let val = self.pop()?;
-                    let key_val = self.pop()?;
-                    if let Value::Object(obj) = key_val
-                        && let ObjectPayload::String(s) = &obj.borrow().payload
-                    {
-                        pairs.push(((**s).clone(), val));
-                    } else {
-                        return Err(QuoinError::TypeError {
-                            expected: "String".to_string(),
-                            got: key_val.type_name().to_string(),
-                            msg: format!("Map keys must be Strings, got: {:?}", key_val),
-                        });
-                    }
+                // ANY value keys. Same rooting discipline as NewSet below: an
+                // instance key's hash/==: can PARK, so the pairs stay rooted
+                // in place on the VM stack, the fresh map rides on top, and
+                // each insert re-reads through the stack.
+                {
+                    let map_val = self.new_map(mc, IndexMap::new());
+                    self.push(map_val);
                 }
-                let mut map = IndexMap::with_capacity(n);
-                for (k, v) in pairs.into_iter().rev() {
-                    map.insert(k, v);
+                let base = self.stack.len() - 1 - 2 * n;
+                for i in 0..n {
+                    let map_val = *self.stack.last().expect("map on top");
+                    let key = self.stack[base + 2 * i];
+                    let val = self.stack[base + 2 * i + 1];
+                    // Duplicate keys: the later entry wins, as before.
+                    crate::runtime::map::map_put_any(self, mc, map_val, key, val)?;
                 }
-                let map_val = self.new_map(mc, map);
+                let map_val = self.pop()?;
+                self.stack.truncate(base);
                 self.push(map_val);
                 ip += 1;
             }
