@@ -1,0 +1,21 @@
+"* Conveniences over the native [OS] namespace (src/runtime/os.rs). Kept in Quoin because they
+"* only compose the native primitives — no reason to spend a native method (or a block call from
+"* Rust) on either.
+
+[OS]Env <-- {
+    .meta <-- {
+        "* The value of `name`, or the block's value when unset. `nil` is only ever "unset": a
+        "* variable with an empty value reads as '', so the fallback does not fire for `FOO=`.
+        at:ifAbsent: -> { |name: String fallback: Block ^String|
+            var value = .at:name;
+            ^value.defined?.if:{ value } else:{ fallback.value }
+        };
+
+        "* Iterate the environment as KeyValuePairs, sorted by name. `.asMap` is the general
+        "* door — it carries the whole Iterate mixin (`select:`, `collect:`, `detect:`, …), which
+        "* a namespace class cannot mix in for itself.
+        each: -> { |block: Block| .asMap.each:block };
+
+        count -> { .keys.count }
+    }
+}

@@ -4,6 +4,13 @@
 //! filesystem: nothing here stats, resolves symlinks, or requires a path to exist, which is
 //! what makes it safe to call on a path you are about to create. Filesystem access lives on
 //! `[IO]File` / `[IO]Folder`.
+//!
+//! `[OS]Env` — **read-only** access to the process environment. Mutation is deliberately absent:
+//! since edition 2024 `std::env::set_var` is `unsafe`, because the C environment is global state
+//! that another thread may be reading concurrently — and this VM runs worker threads and a
+//! blocking I/O pool. The usual reason to set a variable is to configure a child process, and
+//! subprocess spawning is itself deferred (`QUOIN_TODO.md`), so the mutation half would buy a
+//! soundness hazard for nothing.
 
 use crate::arg;
 use crate::error::QuoinError;
@@ -12,6 +19,7 @@ use crate::value::{NativeClassBuilder, Value};
 use crate::vm::VmState;
 
 use gc_arena::Mutation;
+use indexmap::IndexMap;
 use std::path::{Component, Path, PathBuf};
 
 /// Elements of a Quoin `List` argument, or a `TypeError` naming the caller.
@@ -162,6 +170,64 @@ pub fn build_os_path_class() -> NativeClassBuilder {
             Ok(vm.new_bool(mc, Path::new(&*p).is_absolute()))
         })
         .returns("Boolean")
+}
+
+/// The environment as `(name, value)` pairs, sorted by name, skipping any entry whose name or
+/// value is not valid UTF-8.
+///
+/// Sorted because `std::env::vars_os` yields an unspecified order, and a stdlib that returns a
+/// different `keys` list run-to-run is a trap for tests and for anything that hashes its output.
+/// Non-UTF-8 entries are skipped rather than lossily mangled: a Quoin String is UTF-8, and a
+/// silently-corrupted name would be worse than an absent one.
+fn env_pairs() -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs
+}
+
+pub fn build_os_env_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("[OS]Env", Some("Object"))
+        .abstract_class()
+        // The value of `name`, or `nil` when unset. An empty value is `''`, not `nil` — `FOO=`
+        // is set. A name or value that is not valid UTF-8 reads as `nil`.
+        .typed_class_method("at:", &["String"], |vm, mc, _r, args| {
+            let name = arg!(args, String, 0);
+            Ok(
+                match std::env::var_os(&*name).and_then(|v| v.into_string().ok()) {
+                    Some(value) => vm.new_string(mc, value),
+                    None => vm.new_nil(mc),
+                },
+            )
+        })
+        .returns("String?")
+        // Whether `name` is set at all, empty value included.
+        .typed_class_method("contains?:", &["String"], |vm, mc, _r, args| {
+            let name = arg!(args, String, 0);
+            Ok(vm.new_bool(mc, std::env::var_os(&*name).is_some()))
+        })
+        .returns("Boolean")
+        // Every variable name, sorted.
+        .class_method("keys", |vm, mc, _r, _args| {
+            let names = env_pairs()
+                .into_iter()
+                .map(|(k, _)| vm.new_string(mc, k))
+                .collect::<Vec<_>>();
+            Ok(vm.new_list(mc, names))
+        })
+        .returns("List")
+        // The whole environment as a Map, sorted by name. This is also how you get the `Iterate`
+        // combinators (`select:`, `collect:`, …) — a namespace class has no instances to mix into.
+        .class_method("asMap", |vm, mc, _r, _args| {
+            let mut map = IndexMap::new();
+            for (k, v) in env_pairs() {
+                let value = vm.new_string(mc, v);
+                map.insert(k, value);
+            }
+            Ok(vm.new_map(mc, map))
+        })
+        .returns("Map")
 }
 
 #[cfg(test)]
