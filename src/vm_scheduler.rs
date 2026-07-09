@@ -714,14 +714,14 @@ impl<'gc> VmState<'gc> {
         let aot = std::mem::take(&mut self.aot);
         match who {
             None => {
-                self.sched.main_saved_stack = stack;
+                self.sched.main_saved_stack = stack.into_vec();
                 self.sched.main_saved_frames = frames;
                 self.sched.main_saved_native_args = native_args;
                 self.sched.main_saved_aot = aot;
             }
             Some(f) => {
                 f.with_native_state_mut::<NativeFiberState, _, _>(mc, |s| {
-                    s.set_context(stack, frames, native_args, aot)
+                    s.set_context(stack.into_vec(), frames, native_args, aot)
                 })
                 .map_err(QuoinError::Other)?;
             }
@@ -746,7 +746,7 @@ impl<'gc> VmState<'gc> {
                 .with_native_state_mut::<NativeFiberState, _, _>(mc, |s| s.take_context())
                 .map_err(QuoinError::Other)?,
         };
-        self.stack = stack;
+        self.stack = crate::value::SlotStack::from_vec(stack);
         self.frames = frames;
         self.active_native_args = native_args;
         self.aot = aot;
@@ -929,7 +929,7 @@ impl<'gc> VmState<'gc> {
         let t = self.sched.tasks[tid.0]
             .as_mut()
             .expect("save_task_context: task slot is empty");
-        t.stack = stack;
+        t.stack = stack.into_vec();
         t.frames = frames;
         t.native_args = native_args;
         t.current_fiber = current_fiber;
@@ -967,7 +967,7 @@ impl<'gc> VmState<'gc> {
         let started = self.sched.tasks[tid.0].as_ref().unwrap().started;
         if started {
             let t = self.sched.tasks[tid.0].as_mut().unwrap();
-            self.stack = std::mem::take(&mut t.stack);
+            self.stack = crate::value::SlotStack::from_vec(std::mem::take(&mut t.stack));
             self.frames = std::mem::take(&mut t.frames);
             self.active_native_args = std::mem::take(&mut t.native_args);
             self.sched.current_fiber = t.current_fiber.take();
@@ -981,7 +981,7 @@ impl<'gc> VmState<'gc> {
             self.aot = std::mem::take(&mut t.aot);
         } else {
             // First activation: a fresh, empty live context, then start the block.
-            self.stack = Vec::new();
+            self.stack = crate::value::SlotStack::new();
             self.frames = Vec::new();
             self.active_native_args = Vec::new();
             self.sched.current_fiber = None;

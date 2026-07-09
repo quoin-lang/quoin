@@ -1183,6 +1183,9 @@ fn invoke_tail<'gc>(
         HomeCtx::Untracked
     };
     let mut ret: i64 = 0;
+    // Window-arena: refresh the slot head the compiled code will read
+    // (lazy discipline — see SlotStack::sync_head).
+    vm.stack.sync_head();
     let env_blind = !entry.materializes && matches!(home, HomeCtx::Untracked);
     let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, env_blind, |vm| {
         let fuel_ptr = &raw mut vm.aot.fuel;
@@ -1306,6 +1309,9 @@ pub fn invoke_block<'gc>(
         HomeCtx::Untracked
     };
     let mut ret: i64 = 0;
+    // Window-arena: refresh the slot head the compiled code will read
+    // (lazy discipline — see SlotStack::sync_head).
+    vm.stack.sync_head();
     let env_blind = !entry.materializes && matches!(home, HomeCtx::Untracked);
     let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, env_blind, |vm| {
         let fuel_ptr = &raw mut vm.aot.fuel;

@@ -1225,3 +1225,123 @@ mod tests {
         );
     }
 }
+/// The VM's slot stack (docs/WINDOW_ARENA_ARCH.md §2.2): a Vec with a
+/// `#[repr(C)]` HEAD at a stable address — compiled code reads `(ptr, len)`
+/// through the head (passed via the raw ABI beside fuel/depth/epoch) and
+/// does native bounds-checked slot loads/stores against `Value`'s fixed
+/// layout. Growth stays in Rust: every mutation routes through methods
+/// that re-sync the head, so Vec reallocation remains legal — native code
+/// re-reads the head per access and never pushes.
+#[repr(C)]
+pub struct SlotHead {
+    /// Read by compiled code at offset 0.
+    pub ptr: *mut u8,
+    /// Read by compiled code at offset 8 (in Values, not bytes).
+    pub len: usize,
+}
+
+pub struct SlotStack<'gc> {
+    head: SlotHead,
+    vec: Vec<Value<'gc>>,
+}
+
+impl<'gc> SlotStack<'gc> {
+    pub fn new() -> Self {
+        let mut s = SlotStack {
+            head: SlotHead {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            },
+            vec: Vec::new(),
+        };
+        s.sync_head();
+        s
+    }
+
+    /// LAZY head discipline (the A2 lesson: syncing on every push/truncate
+    /// sat on the interpreter's two hottest operations and gave back the
+    /// whole A1 win — +6-8% measured). Only compiled code reads the head,
+    /// so it is refreshed explicitly at the compiled-call boundary
+    /// (`invoke`/`invoke_block` before the raw call) and at the exit of any
+    /// helper that can GROW the stack while native code holds slot
+    /// addresses derived from it. Interpreter mutations are plain Vec ops.
+    #[inline(always)]
+    pub fn sync_head(&mut self) {
+        self.head.ptr = self.vec.as_mut_ptr() as *mut u8;
+        self.head.len = self.vec.len();
+    }
+
+    /// The stable head address for the raw ABI.
+    pub fn head_addr(&mut self) -> *mut SlotHead {
+        &raw mut self.head
+    }
+
+    /// Task-switch boundary (the scheduler parks a task's stack as a plain
+    /// Vec): O(1) moves either way, head re-synced on entry.
+    pub fn from_vec(vec: Vec<Value<'gc>>) -> Self {
+        let mut s = SlotStack {
+            head: SlotHead {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            },
+            vec,
+        };
+        s.sync_head();
+        s
+    }
+
+    pub fn into_vec(self) -> Vec<Value<'gc>> {
+        self.vec
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, v: Value<'gc>) {
+        self.vec.push(v);
+    }
+
+    #[inline(always)]
+    pub fn pop(&mut self) -> Option<Value<'gc>> {
+        self.vec.pop()
+    }
+
+    #[inline(always)]
+    pub fn truncate(&mut self, n: usize) {
+        self.vec.truncate(n);
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.vec.clear();
+    }
+}
+
+impl Default for SlotStack<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'gc> std::ops::Deref for SlotStack<'gc> {
+    type Target = [Value<'gc>];
+    #[inline(always)]
+    fn deref(&self) -> &[Value<'gc>] {
+        &self.vec
+    }
+}
+
+impl<'gc> std::ops::DerefMut for SlotStack<'gc> {
+    // In-place writes through the slice never move or resize the storage,
+    // so the head stays valid.
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [Value<'gc>] {
+        &mut self.vec
+    }
+}
+
+// The head is plain data (no GC content); the slots trace like the Vec did.
+unsafe impl<'gc> gc_arena::Collect<'gc> for SlotStack<'gc> {
+    const NEEDS_TRACE: bool = true;
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        self.vec.trace(cc);
+    }
+}

@@ -466,7 +466,7 @@ pub struct Instrumentation {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct VmState<'gc> {
-    pub stack: Vec<Value<'gc>>,
+    pub stack: crate::value::SlotStack<'gc>,
     pub frames: Vec<Frame<'gc>>,
     /// FxHash, not SipHash: `LoadGlobal` probes this once per instantiation
     /// (`TreeNode` etc. resolve here before every `.new:`), the last
@@ -667,7 +667,7 @@ impl<'gc> VmState<'gc> {
 
     pub fn new(mc: &Mutation<'gc>, options: VmOptions) -> Self {
         Self {
-            stack: Vec::new(),
+            stack: crate::value::SlotStack::new(),
             frames: Vec::new(),
             globals: gcl!(mc, FxHashMap::default()),
             symbol_table: gcl!(mc, HashMap::new()),
