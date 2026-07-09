@@ -38,7 +38,13 @@ This document outlines the language features, compiler updates, and VM modificat
   separately). The normal `% 10` debt-paced collection masks it. Worth tracking down: likely a
   temporary that's reachable only via the Rust stack across a step boundary in the `add:` /
   collection-builder path. See `profiling/send-receiver-split/notes.md`.
-- [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
+- [x] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
+  DONE (release-prep, 2026-07): `clap` derive (`Cli`/`Cmd` in `src/runner.rs`); `parse` keeps its
+  `&[String] -> Self` signature, so `--help`/`--version`/usage errors are answered by clap and every
+  mode still maps onto `VmRunnerMode`. **Behavior change:** a hyphen-leading argument for the
+  *program* now needs `--` (`qn app.qn -- --verbose`); an unknown flag is an error (exit 2) instead
+  of being read as a filename. `--coverage` sets `require_equals` so a bare `--coverage` cannot
+  swallow the following positional as its format.
 - [x] Add a Quoin builtin for exiting the process with a status code (like C's `exit(status)`).
   DONE (release-prep, 2026-07): `Runtime.exit:code` / `Runtime.exit` raise the uncatchable
   `QuoinError::ExitRequested` (modeled on `Cancelled`: `finally` runs, `catch:` can't swallow
@@ -61,9 +67,14 @@ This document outlines the language features, compiler updates, and VM modificat
   `self:` = the project (`$CWD`), other names are a reserved stub ("cannot resolve"). `dir/*` globs a
   directory in UTF-8-sorted order. The load *path* is decoupled from the `[Ns]` *namespace* a file
   registers under. Reference: `docs/language/` §21.
-  - [ ] When the installer work is done, search for files in standard locations + wherever the binary
-    is installed. (Today both roots are `$CWD`-relative; `self_root` can later anchor to the entry-point
-    directory, and the stdlib can be embedded via `include_dir!`.)
+  - [x] DONE (release-prep, 2026-07), by embedding rather than searching: `build.rs` compiles the
+    shipping stdlib subset (`core/`, `net/`, `web/`, `prelude`, `test`) into the binary
+    (`src/stdlib.rs`), so an installed `qn` needs no support files at all; `QUOIN_STDLIB=DIR` reads
+    it from disk instead (set for cargo builds in `.cargo/config.toml`, which keeps the
+    edit-a-`.qn`-without-rebuilding loop). `self_root` now anchors to the entry script's directory.
+    The rest of `qnlib/` (`tests/`, `benchmark.qn`, the `use` fixtures) is deliberately NOT embedded
+    — a source-tree feature. Standard-location search is only needed if a future installer ships
+    stdlib *source* alongside the binary. See `docs/RELEASE_PREP.md`.
 - [x] Change the file extension to `.qn` everywhere.
   - [x] Don't forget to update the plugin.
 - [x] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.

@@ -38,8 +38,12 @@ LSP/VSCode tooling, Windows.
 - [x] **CLI hygiene.** `-h/--help` and `-V/--version` exist; bare `qn` prints
   usage instead of running the dev scratch `qnlib/testscript.qn`; an unknown
   flag is an error (exit 2) rather than a filename.
-- [ ] Replace the hand-rolled `VmRunnerOptions::parse` with `clap` (existing
-  QUOIN_TODO item; the verb table and usage text now exist to port).
+- [x] Replace the hand-rolled `VmRunnerOptions::parse` with `clap` (QUOIN_TODO
+  item). `--help`/`--version`/usage errors are answered by the parser.
+  **One behavior change:** a hyphen-leading argument meant for the *program* now
+  needs `--` (`qn app.qn -- --verbose`); previously any unrecognized flag was
+  passed through. `--coverage` uses `require_equals` so a bare `--coverage` can
+  never swallow the next positional as its format.
 - [x] **`qn <file>` always exits 0.** FIXED: the mode drivers gate on a
   `UnitOutcome` (`src/runner.rs`) — an uncaught error exits 1 (a falsy final
   value does not), and `Runtime.exit:` / `Runtime.exit` request a specific
@@ -164,14 +168,29 @@ Checked and clear for concurrent execution: all test ports are ephemeral (`:0`),
 extension sockets are pid-tagged (`extension.rs`), temp files are uniquified, and
 no test writes into the repo tree.
 
-**Separately** — a `cargo test` that seems to hang for minutes is blocked on the
-cargo **build-directory lock**, not slow tests: a second `cargo` invocation waits
-for the first to release `target/debug/.cargo-lock`. A foreground `cargo test`
-started behind a backgrounded one measured 277s, essentially all of it waiting.
-Never run two cargo commands against `target/` at once. (Measured, not assumed:
-rust-analyzer is *not* a meaningful contender — it takes the lock only transiently
-at workspace load for `cargo metadata` / proc-macro builds, and holds nothing while
-idle or serving queries.)
+**macOS gotcha — the first nextest run after a rebuild pays a Gatekeeper tax.**
+nextest enumerates tests by exec'ing all 46 test binaries with `--list`, and the
+first exec of each freshly linked binary is assessed by `syspolicyd`. Measured
+here: **357s wall for 5.2s of tests**, with 30+ `deps/*-<hash> --list` processes
+alive for minutes, zero rustc, no build lock held, and `syspolicyd` at ~34% CPU.
+The immediately following run: **6s**, `syspolicyd` at 0% — the assessment is
+cached per binary until it is relinked. `cargo test` hides the cost by exec'ing
+binaries one at a time as it runs them. Fix: add the terminal to System Settings →
+Privacy & Security → **Developer Tools** (attribution happens at process launch, so
+the terminal must be restarted). Do **not** kill a slow run: the assessments only
+cache once they complete, so killing restarts the whole scan.
+
+**Also** — a `cargo test` that seems to hang for minutes may instead be blocked on
+the cargo **build-directory lock**: a second `cargo` invocation waits for the first
+to release `target/debug/.cargo-lock`. A foreground `cargo test` started behind a
+backgrounded one measured 277s, essentially all of it waiting. Never run two cargo
+commands against `target/` at once. (Measured, not assumed: rust-analyzer is *not*
+a meaningful contender — it takes the lock only transiently at workspace load for
+`cargo metadata` / proc-macro builds, and holds nothing while idle or serving
+queries.)
+
+Distinguishing the three: `pgrep -fl cargo|rustc|nextest`, `lsof
+target/debug/.cargo-lock`, and `ps -eo pcpu,comm | grep syspolicyd`.
 
 ## `.new` on native classes: survey (2026-07-08)
 

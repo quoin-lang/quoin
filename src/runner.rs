@@ -200,35 +200,6 @@ pub struct VmRunnerOptions {
     pub fmt_diff: bool,
 }
 
-/// Pull `--coverage[=fmt]` and `--coverage-out=PATH` out of an argument slice, pushing
-/// every other argument onto `vm_args`. Shared by the `test` and `run` arms.
-fn take_coverage_flags(
-    args: &[String],
-    vm_args: &mut Vec<String>,
-    enabled: &mut bool,
-    out: &mut Option<String>,
-    format: &mut crate::coverage::CoverageFormat,
-) {
-    use crate::coverage::CoverageFormat;
-    for a in args {
-        if a == "--coverage" {
-            *enabled = true;
-        } else if let Some(fmt) = a.strip_prefix("--coverage=") {
-            *enabled = true;
-            match fmt {
-                "lcov" => *format = CoverageFormat::Lcov,
-                "cobertura" => *format = CoverageFormat::Cobertura,
-                other => eprintln!("qn: unsupported coverage format '{other}', using lcov"),
-            }
-        } else if let Some(path) = a.strip_prefix("--coverage-out=") {
-            *enabled = true;
-            *out = Some(path.to_string());
-        } else {
-            vm_args.push(a.clone());
-        }
-    }
-}
-
 /// Recursively collect `.qn` files under `dir`, in sorted order, skipping `target`/`.git`.
 /// Used by `qn fmt <dir>`.
 fn collect_qn_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -272,40 +243,166 @@ pub enum VmRunnerMode {
     /// `qn check <file>…`: type-check each file (report diagnostics) without running it. The paths
     /// are carried in `VmRunnerOptions::vm_options.arguments`; exits non-zero if any diagnostic.
     Check,
-    /// `qn` with no arguments, `qn -h`, `qn --help`: print usage.
+    /// `qn` with no arguments: print usage. (`--help` / `--version` are answered by
+    /// the argument parser itself, which prints and exits before a mode is chosen.)
     Help,
-    /// `qn -V`, `qn --version`.
-    Version,
-    /// An unusable command line (an unknown flag). The message is carried in
-    /// `VmRunnerOptions::target_path`; usage goes to stderr and the process exits 2.
-    Usage,
 }
 
-/// `qn --help`. Lists every verb, since an unrecognized one is no longer silently
-/// reinterpreted as a file path.
-const USAGE: &str = "\
-Quoin — a small object-oriented language on a bytecode VM.
-
-Usage:
-  qn <file.qn> [args…]              Run a program
-  qn -e '<expr>'                    Evaluate one expression and print its result
-  qn repl                           Interactive read-eval-print loop
-  qn test [DIR]                     Run the test suites in DIR (default: tests)
-  qn check <path>…                  Type-check without running
-  qn fmt [--check|--diff] <path>…   Format Quoin source in place
-  qn debug [--dap] <file.qn>        Run under the debugger
-  qn highlight <file.qn>            Print syntax-highlighted source
-  qn benchmark                      Run the built-in benchmarks (needs a source tree)
-
-Options:
-  -h, --help                        Print this help
-  -V, --version                     Print the version
-  --coverage[=lcov|cobertura]       Collect coverage (with a program or `test`)
-  --coverage-out=PATH               Write the coverage report to PATH
+/// Shown under the generated help. The parser knows the flags; these are the things it
+/// can't infer.
+const AFTER_HELP: &str = "\
+Arguments after a program are passed to it (`Runtime.arguments`); separate flags
+meant for the program with `--`, e.g. `qn app.qn -- --verbose`.
 
 Environment:
-  QUOIN_STDLIB=DIR                  Load the stdlib from DIR, not the embedded copy
-  QUOIN_PATH=DIRS                   Extra roots searched for extension packages";
+  QUOIN_STDLIB=DIR  Load the stdlib from DIR, not the copy embedded in the binary
+  QUOIN_PATH=DIRS   Extra roots searched for extension packages";
+
+/// Coverage collection, shared by a program run and `qn test`.
+#[derive(clap::Args, Clone, Debug, Default)]
+struct CoverageArgs {
+    /// Collect coverage; FORMAT is `lcov` (default) or `cobertura`
+    ///
+    /// `require_equals` matters: without it a bare `--coverage` would swallow the next
+    /// positional as its format, so `qn app.qn --coverage extra` would lose `extra`.
+    #[arg(long, value_name = "FORMAT", num_args = 0..=1, require_equals = true, default_missing_value = "lcov")]
+    coverage: Option<String>,
+    /// Write the coverage report to PATH instead of stdout (implies --coverage)
+    #[arg(long, value_name = "PATH")]
+    coverage_out: Option<String>,
+}
+
+impl CoverageArgs {
+    /// `None` when coverage was not requested. An unsupported format warns and falls back
+    /// to lcov rather than failing the run — coverage is a reporting side-channel.
+    fn config(self) -> Option<crate::coverage::CoverageConfig> {
+        use crate::coverage::CoverageFormat;
+        if self.coverage.is_none() && self.coverage_out.is_none() {
+            return None;
+        }
+        let format = match self.coverage.as_deref() {
+            Some("cobertura") => CoverageFormat::Cobertura,
+            Some("lcov") | None => CoverageFormat::Lcov,
+            Some(other) => {
+                eprintln!("qn: unsupported coverage format '{other}', using lcov");
+                CoverageFormat::Lcov
+            }
+        };
+        Some(crate::coverage::CoverageConfig {
+            format,
+            out: self.coverage_out,
+        })
+    }
+}
+
+/// The `qn` command line. A bare `qn` prints help; `qn <file.qn>` runs a program; every
+/// other verb is a subcommand.
+#[derive(clap::Parser, Debug)]
+#[command(
+    name = "qn",
+    version,
+    about = "Quoin — a small object-oriented language on a bytecode VM.",
+    after_help = AFTER_HELP,
+    disable_help_subcommand = true,
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Cmd>,
+    /// Evaluate one expression and print its result
+    #[arg(short = 'e', value_name = "EXPR", conflicts_with = "file")]
+    eval: Option<String>,
+    /// Quoin program to run
+    #[arg(value_name = "FILE")]
+    file: Option<String>,
+    /// Arguments passed to the program
+    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    args: Vec<String>,
+    #[command(flatten)]
+    coverage: CoverageArgs,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Cmd {
+    /// Run the test suites in DIR (each file registers its suites as it loads)
+    Test {
+        /// Directory of `.qn` test files
+        #[arg(value_name = "DIR")]
+        dir: Option<String>,
+        #[command(flatten)]
+        coverage: CoverageArgs,
+    },
+    /// Interactive read-eval-print loop
+    Repl,
+    /// Type-check each path, reporting diagnostics, without running it
+    Check {
+        #[arg(value_name = "PATH", required = true)]
+        paths: Vec<String>,
+    },
+    /// Format Quoin source in place
+    Fmt {
+        /// Exit non-zero if any file is not already formatted
+        #[arg(long)]
+        check: bool,
+        /// Report what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Print a unified diff of the changes
+        #[arg(long)]
+        diff: bool,
+        /// Files or directories (`-` reads stdin)
+        #[arg(value_name = "PATH", required = true)]
+        paths: Vec<String>,
+    },
+    /// Run a program under the debugger
+    Debug {
+        /// Pause when one of these exception types is thrown
+        #[arg(long, value_name = "TYPES")]
+        break_on_throw: Option<String>,
+        /// Pause only when a matching exception will go uncaught
+        #[arg(long, value_name = "TYPES")]
+        break_on_uncaught: Option<String>,
+        /// Speak the Debug Adapter Protocol on stdio instead of the `$`-command loop
+        #[arg(long)]
+        dap: bool,
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+        #[arg(value_name = "ARGS", trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Print syntax-highlighted source
+    Highlight {
+        #[arg(value_name = "FILE")]
+        file: String,
+        #[arg(value_name = "ARGS", trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Run the built-in benchmarks (needs a Quoin source tree)
+    Benchmark {
+        #[arg(value_name = "ARGS", trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// The child side of a process-backed worker (internal)
+    #[command(name = "worker-serve", hide = true)]
+    WorkerServe {
+        sock: String,
+        unit: String,
+        service: Option<String>,
+    },
+}
+
+/// `--break-on-throw=TypeError, Error` — comma-separated, whitespace-trimmed.
+fn split_types(types: Option<String>) -> Vec<String> {
+    types
+        .into_iter()
+        .flat_map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
 
 /// The synthesized `qn test` entry unit: pull in the test framework, glob the caller's
 /// test directory (each suite self-registers as it loads), then run the registry.
@@ -365,136 +462,99 @@ enum UnitOutcome {
 }
 
 impl VmRunnerOptions {
+    /// Parse `argv`. `--help` / `--version` and any usage error are answered by the
+    /// parser itself (printing, then exiting 0 or 2); everything that returns here is a
+    /// runnable command.
     pub fn parse(args: &[String]) -> Self {
-        // Bare `qn` prints usage rather than running a scratch script.
-        let mut mode = VmRunnerMode::Help;
-        let mut target_path = None;
-        let mut vm_args = Vec::new();
+        use clap::Parser;
+        let cli = match Cli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(e) => e.exit(),
+        };
+
         let mut break_on_throw = Vec::new();
         let mut break_on_uncaught = Vec::new();
         let mut dap = false;
-        let mut coverage_enabled = false;
-        let mut coverage_out = None;
-        let mut coverage_format = crate::coverage::CoverageFormat::Lcov;
         let mut fmt_check = false;
         let mut fmt_dry_run = false;
         let mut fmt_diff = false;
+        let mut target_path = None;
+        let mut vm_args = Vec::new();
+        let mut coverage = None;
 
-        if let Some(arg) = args.get(1) {
-            if arg == "highlight" {
-                mode = VmRunnerMode::Highlight;
-                target_path = args.get(2).cloned();
-                if args.len() > 3 {
-                    vm_args = args[3..].to_vec();
-                }
-            } else if arg == "test" {
-                // `qn test [DIR] [--coverage…]`: DIR is the caller's test directory (the
-                // first non-flag argument), defaulting to `tests`.
-                mode = VmRunnerMode::Test;
-                take_coverage_flags(
-                    &args[2..],
-                    &mut vm_args,
-                    &mut coverage_enabled,
-                    &mut coverage_out,
-                    &mut coverage_format,
-                );
-                if !vm_args.is_empty() {
-                    target_path = Some(vm_args.remove(0));
-                }
-            } else if arg == "benchmark" {
-                mode = VmRunnerMode::Benchmark;
-                if args.len() > 2 {
-                    vm_args = args[2..].to_vec();
-                }
-            } else if arg == "repl" {
-                mode = VmRunnerMode::Repl;
-                if args.len() > 2 {
-                    vm_args = args[2..].to_vec();
-                }
-            } else if arg == "worker-serve" {
-                mode = VmRunnerMode::WorkerServe;
-                target_path = args.get(2).cloned();
-                if args.len() > 3 {
-                    vm_args = args[3..].to_vec();
-                }
-            } else if arg == "-e" {
-                // `qn -e '<expr>'`: the next arg is the expression source; anything after it
-                // is passed through as VM arguments.
-                mode = VmRunnerMode::Eval;
-                target_path = args.get(2).cloned();
-                if args.len() > 3 {
-                    vm_args = args[3..].to_vec();
-                }
-            } else if arg == "debug" {
-                // `qn debug [--break-on-throw=Type,…] <file> [vm-args…]`: run under the
-                // interactive debugger. The first non-flag arg is the file; the rest pass through.
-                mode = VmRunnerMode::Debug;
-                for a in &args[2..] {
-                    if let Some(types) = a.strip_prefix("--break-on-throw=") {
-                        break_on_throw = types
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                    } else if let Some(types) = a.strip_prefix("--break-on-uncaught=") {
-                        break_on_uncaught = types
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                    } else if a == "--dap" {
-                        dap = true;
-                    } else if target_path.is_none() {
-                        target_path = Some(a.clone());
-                    } else {
-                        vm_args.push(a.clone());
-                    }
-                }
-            } else if arg == "fmt" {
-                // `qn fmt [--check|--dry-run] <file-or-dir>…`: format Quoin source in place.
-                // Flags are pulled out; every other argument is a path (collected in `vm_args`).
-                mode = VmRunnerMode::Fmt;
-                for a in &args[2..] {
-                    match a.as_str() {
-                        "--check" => fmt_check = true,
-                        "--dry-run" => fmt_dry_run = true,
-                        "--diff" => fmt_diff = true,
-                        _ => vm_args.push(a.clone()),
-                    }
-                }
-            } else if arg == "check" {
-                // `qn check <file>…`: type-check each file without running it. Every argument is a
-                // path (collected in `vm_args`, like `fmt`).
-                mode = VmRunnerMode::Check;
-                for a in &args[2..] {
-                    vm_args.push(a.clone());
-                }
-            } else if arg == "-h" || arg == "--help" {
-                mode = VmRunnerMode::Help;
-            } else if arg == "-V" || arg == "--version" {
-                mode = VmRunnerMode::Version;
-            } else if arg.starts_with('-') {
-                // Previously an unknown flag was taken as a file path, so `qn --help`
-                // reported "cannot open --help".
-                mode = VmRunnerMode::Usage;
-                target_path = Some(format!("unknown option '{arg}'"));
-            } else {
-                mode = VmRunnerMode::Run;
-                target_path = Some(arg.clone());
-                take_coverage_flags(
-                    &args[2..],
-                    &mut vm_args,
-                    &mut coverage_enabled,
-                    &mut coverage_out,
-                    &mut coverage_format,
-                );
+        let mode = match cli.command {
+            Some(Cmd::Test { dir, coverage: cov }) => {
+                target_path = dir;
+                coverage = cov.config();
+                VmRunnerMode::Test
             }
-        }
-
-        let coverage = coverage_enabled.then(|| crate::coverage::CoverageConfig {
-            format: coverage_format,
-            out: coverage_out,
-        });
+            Some(Cmd::Repl) => VmRunnerMode::Repl,
+            Some(Cmd::Check { paths }) => {
+                vm_args = paths;
+                VmRunnerMode::Check
+            }
+            Some(Cmd::Fmt {
+                check,
+                dry_run,
+                diff,
+                paths,
+            }) => {
+                fmt_check = check;
+                fmt_dry_run = dry_run;
+                fmt_diff = diff;
+                vm_args = paths;
+                VmRunnerMode::Fmt
+            }
+            Some(Cmd::Debug {
+                break_on_throw: bot,
+                break_on_uncaught: bou,
+                dap: is_dap,
+                file,
+                args,
+            }) => {
+                break_on_throw = split_types(bot);
+                break_on_uncaught = split_types(bou);
+                dap = is_dap;
+                target_path = file;
+                vm_args = args;
+                VmRunnerMode::Debug
+            }
+            Some(Cmd::Highlight { file, args }) => {
+                target_path = Some(file);
+                vm_args = args;
+                VmRunnerMode::Highlight
+            }
+            Some(Cmd::Benchmark { args }) => {
+                vm_args = args;
+                VmRunnerMode::Benchmark
+            }
+            // `target_path` is the socket; the unit (and optional service class) ride in
+            // `arguments`, matching how the parent spawns the child.
+            Some(Cmd::WorkerServe {
+                sock,
+                unit,
+                service,
+            }) => {
+                target_path = Some(sock);
+                vm_args = std::iter::once(unit).chain(service).collect();
+                VmRunnerMode::WorkerServe
+            }
+            None => match (cli.eval, cli.file) {
+                (Some(expr), _) => {
+                    target_path = Some(expr);
+                    vm_args = cli.args;
+                    VmRunnerMode::Eval
+                }
+                (None, Some(file)) => {
+                    target_path = Some(file);
+                    vm_args = cli.args;
+                    coverage = cli.coverage.config();
+                    VmRunnerMode::Run
+                }
+                // Bare `qn`: print usage rather than running a scratch script.
+                (None, None) => VmRunnerMode::Help,
+            },
+        };
 
         // Interactive modes (REPL, debugger) colorize errors/output when stdout is a terminal.
         // DAP owns stdout (program output is sent as plain-text `output` events), so never there.
@@ -682,25 +742,17 @@ impl VmRunner {
                 Ok(())
             }
             VmRunnerMode::Help => {
-                println!("{USAGE}");
+                use clap::CommandFactory;
+                Cli::command().print_help().ok();
+                println!();
                 Ok(())
-            }
-            VmRunnerMode::Version => {
-                println!("qn {}", env!("CARGO_PKG_VERSION"));
-                Ok(())
-            }
-            VmRunnerMode::Usage => {
-                if let Some(ref msg) = self.options.target_path {
-                    eprintln!("qn: {msg}");
-                }
-                eprintln!("{USAGE}");
-                exit(2);
             }
             VmRunnerMode::Run => {
-                let Some(script_path) = self.options.target_path.clone() else {
-                    eprintln!("{USAGE}");
-                    exit(2);
-                };
+                let script_path = self
+                    .options
+                    .target_path
+                    .clone()
+                    .expect("Run mode always carries a script path");
                 let unit = std::fs::canonicalize(&script_path)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| script_path.clone());
