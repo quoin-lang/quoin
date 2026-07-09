@@ -21,6 +21,20 @@ type Binding<'gc> = (Symbol, Value<'gc>);
 
 pub fn build_runtime_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Runtime", Some("Object"))
+        .abstract_class()
+        // `Runtime.exit:` / `Runtime.exit` — request process exit with a status code.
+        // Uncatchable (like cancellation): the raising task unwinds through `finally`
+        // blocks, and the `requested_exit` flag stops every other task at the driver,
+        // which exits after normal teardown (so extension/socket `Drop`s run).
+        .typed_class_method("exit:", &["Integer"], |vm, _mc, _receiver, args| {
+            let code = arg!(args, Int, 0) as i32;
+            vm.requested_exit = Some(code);
+            Err(QuoinError::ExitRequested(code))
+        })
+        .class_method("exit", |vm, _mc, _receiver, _args| {
+            vm.requested_exit = Some(0);
+            Err(QuoinError::ExitRequested(0))
+        })
         .class_method("eval:", |vm, mc, _receiver, args| {
             let code = arg!(args, String, 0);
             eval_string(vm, mc, &code, "<string>", None, &[])

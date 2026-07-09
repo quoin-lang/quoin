@@ -102,6 +102,10 @@ fn resume_current_task<'gc>(
     // Point `vm.sched.yielder` at the coroutine we're about to run, sourced from its
     // own GC-rooted slot, so it never dangles.
     vm.sched.yielder = vm.current_fiber_yielder();
+    // Likewise `stack_limit`: `execute_block` measures headroom against the stack of the
+    // coroutine it is actually running on, and a task or guest fiber has its own. One store
+    // per resume, not per block.
+    vm.stack_limit = coro_holder.stack_limit;
 
     let ctx = VMContext {
         vm: vm as *mut _,
@@ -596,6 +600,15 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
             async_channel::Sender<crate::worker::WorkerMsg>,
         > = std::collections::VecDeque::new();
         loop {
+            // A guest requested process exit (`Runtime.exit:`). The raising task's own
+            // unwind only reaches this loop's `Err` arm when it was the CURRENT task's
+            // main unwind path — an exit from a spawned task lands in its join result
+            // instead — so the flag is the authoritative, process-wide stop signal.
+            if let Some(code) = arena.mutate_root(|_mc, vm| vm.requested_exit) {
+                let e = QuoinError::ExitRequested(code);
+                frontend.on_finished(arena, Some(&e))?;
+                return Err(e);
+            }
             drain_retranslations(arena);
             // Service control requests opportunistically — once per loop
             // iteration, so a compute-bound task still answers at batch

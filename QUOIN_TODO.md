@@ -38,13 +38,22 @@ This document outlines the language features, compiler updates, and VM modificat
   separately). The normal `% 10` debt-paced collection masks it. Worth tracking down: likely a
   temporary that's reachable only via the Rust stack across a step boundary in the `add:` /
   collection-builder path. See `profiling/send-receiver-split/notes.md`.
-- [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
-- [ ] Add a Quoin builtin for exiting the process with a status code (like C's `exit(status)`) —
-  e.g. `Runtime.exit:0` / `Runtime.exit:1` — threading a requested exit code out of the VM to
-  `std::process::exit`. Once it exists, the `qn test` harness (`qnlib/main.qn`) can call it
-  directly instead of the Rust driver inferring pass/fail from the program's final value (today
-  `compile_and_run_asts` in `src/runner.rs` exits non-zero when a `qn test` run aborts on a VM
-  error or its final result is falsy).
+- [x] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
+  DONE (release-prep, 2026-07): `clap` derive (`Cli`/`Cmd` in `src/runner.rs`); `parse` keeps its
+  `&[String] -> Self` signature, so `--help`/`--version`/usage errors are answered by clap and every
+  mode still maps onto `VmRunnerMode`. **Behavior change:** a hyphen-leading argument for the
+  *program* now needs `--` (`qn app.qn -- --verbose`); an unknown flag is an error (exit 2) instead
+  of being read as a filename. `--coverage` sets `require_equals` so a bare `--coverage` cannot
+  swallow the following positional as its format.
+- [x] Add a Quoin builtin for exiting the process with a status code (like C's `exit(status)`).
+  DONE (release-prep, 2026-07): `Runtime.exit:code` / `Runtime.exit` raise the uncatchable
+  `QuoinError::ExitRequested` (modeled on `Cancelled`: `finally` runs, `catch:` can't swallow
+  it) plus a `VmState.requested_exit` flag the driver checks each iteration, so the exit is
+  process-wide even from a spawned task; the runner exits with the code only after the arena
+  drops (extension/socket `Drop`s run). Landed with the same change: **`qn <file>` now exits 1
+  on an uncaught error** (`UnitOutcome` in `src/runner.rs`; a falsy final value stays exit 0 —
+  only `qn test` gates on the final boolean). Tests: `tests/exit_code.rs`. Remaining option:
+  have `qnlib/main.qn` call `Runtime.exit:` directly instead of the final-value inference.
 - [ ] Design an installer.
   - [x] Named the language **Quoin** (extension `.qn`); rationale in `~/code/quoin/DECISIONS.md`.
   - [x] Binary name is `qn` (set via `[[bin]]` in `Cargo.toml`).
@@ -58,9 +67,14 @@ This document outlines the language features, compiler updates, and VM modificat
   `self:` = the project (`$CWD`), other names are a reserved stub ("cannot resolve"). `dir/*` globs a
   directory in UTF-8-sorted order. The load *path* is decoupled from the `[Ns]` *namespace* a file
   registers under. Reference: `docs/language/` §21.
-  - [ ] When the installer work is done, search for files in standard locations + wherever the binary
-    is installed. (Today both roots are `$CWD`-relative; `self_root` can later anchor to the entry-point
-    directory, and the stdlib can be embedded via `include_dir!`.)
+  - [x] DONE (release-prep, 2026-07), by embedding rather than searching: `build.rs` compiles the
+    shipping stdlib subset (`core/`, `net/`, `web/`, `prelude`, `test`) into the binary
+    (`src/stdlib.rs`), so an installed `qn` needs no support files at all; `QUOIN_STDLIB=DIR` reads
+    it from disk instead (set for cargo builds in `.cargo/config.toml`, which keeps the
+    edit-a-`.qn`-without-rebuilding loop). `self_root` now anchors to the entry script's directory.
+    The rest of `qnlib/` (`tests/`, `benchmark.qn`, the `use` fixtures) is deliberately NOT embedded
+    — a source-tree feature. Standard-location search is only needed if a future installer ships
+    stdlib *source* alongside the binary. See `docs/RELEASE_PREP.md`.
 - [x] Change the file extension to `.qn` everywhere.
   - [x] Don't forget to update the plugin.
 - [x] Get rid of `Value::Native`, it's only used by the global funcs and those are only used for testing.
@@ -540,10 +554,14 @@ deferred `Mirror` in `## REPL`.
   collections (+ `Bytes.new`): native class methods now win the hierarchy lookup before the
   generic fallback — `new` constructs the real empty native value; `new:` raises a clear
   catchable error ("List has no instance fields — construct with `#()` …"). Tests:
-  `classNewConstructs` in 41-list/40-maps/15-sets/22-bytes. **Residual (general trap):** any
-  OTHER native-payload builtin reachable via the `NewNoBlock`/`New` fallbacks still mints a
-  shell (e.g. namespace-ish classes); a general fix needs a per-class "has native constructor"
-  marker consulted by the fallbacks — deferred. Original report: The generic `Callable::New`
+  `classNewConstructs` in 41-list/40-maps/15-sets/22-bytes. **Residual RESOLVED (release-prep,
+  2026-07):** every builder-registered native class now declares a `NativeNewPolicy`
+  (`src/value.rs`, default `Refuse`) — namespace façades + `Object` are `abstract!`, everything
+  else refuses `new`/`new:` with a typed `ClassError` naming its real constructors
+  ("Cannot construct UUID with new — use UUID.generateV4 / …"), enforced in
+  `ensure_instantiable` (covers interp + the M2 fused-instantiation verdict). Tests:
+  `qnlib/tests/54-native-new.qn`. Still open: user *subclasses* of native classes keep the
+  shell behavior (pre-existing, separate gap). Original report: The generic `Callable::New`
   instantiation path builds a plain `Object` of the class *without* the `NativeState` payload, so
   the very first native method call on it fails with the internal `"Not a native state of the
   requested type"` error (`value.rs` `with_native_state`): `List.new.add:1` errors; so do
@@ -578,8 +596,24 @@ deferred `Mirror` in `## REPL`.
   `user_string_expr` (`#ident'…'`). Fixed by byte-slicing between the single-byte `'`/`#` delimiters
   (`&raw[1..raw.len() - 1]`), which is char-boundary-safe. The `us`→`µs` workaround in `qnlib/test.qn` was
   reverted. Regression test: `multibyteLiterals` (`qnlib/tests/08-strings.qn`).
-- [ ] **Native re-entry through `execute_block` can still overflow the machine stack
-  (uncatchable SIGBUS).** *(audit follow-up, PR #48; DUG 2026-07-07 — confirmed live, repros
+- [x] **Native re-entry through `execute_block` can still overflow the machine stack
+  (uncatchable SIGBUS).** **FIXED (release-prep, 2026-07-09)** with the settled stack-watermark
+  design, simpler than planned: no SP capture at coroutine entry is needed, because corosensei's
+  `Stack::limit()` gives each coroutine's low address at construction (`Fiber::stack_limit`), and
+  there are only **two** `coro.resume()` sites (`runner_driver.rs`, and `runner.rs` for the
+  benchmark harness) — both copy it into `VmState::stack_limit` before resuming. `execute_block`
+  then calls `ensure_stack_headroom`: refuse once fewer than `STACK_MARGIN` (2 MiB) of the 16 MiB
+  remain. `stack_limit == 0` disables the check (the benchmark harness steps the VM on the OS
+  thread stack). Deep-but-finite pipelines keep working — a 400-stage lazy generator chain still
+  runs; the test pins 200. **Both this and the `MAX_NATIVE_REENTRY` error now raise the new typed
+  `StackError`** (`QuoinError::StackExhausted` → `Error <- StackError` in `00-bootstrap.qn`); the
+  native-reentry error was previously a bare `String`, so `catch:{|e:Error|}` could not see it —
+  the F12 trap. **Measured** (`profiling/execute-block-watermark/notes.md`): free. Interleaved
+  release A/B, 15 pairs on combinators (the `execute_block`-heaviest bench): Δ mean +0.12%, Δ
+  median −0.03%, slower in 7/15 paired runs against a 2.4 ms stdev. (A first, *sequential* sweep
+  showed all six benches 2-3% *faster* — drift, not a result; interleaving fixed it.) Tests:
+  `qnlib/tests/56-stack-reentry.qn`; repros `each_reenter.qn` / `catch_reenter.qn` now exit 0.
+  Original report follows. *(audit follow-up, PR #48; DUG 2026-07-07 — confirmed live, repros
   `qnlib/stress/audit/each_reenter.qn` + `catch_reenter.qn`, both exit 138. The dig NARROWED
   the surface: plain `b = { b.value }` self-recursion is SAFE (flat interpreted frames), and
   the sort-comparator shape is already caught by the >12 cap — the live hole is the
@@ -600,7 +634,23 @@ deferred `Mirror` in `## REPL`.
   stack-remaining check (stacker-style `maybe_grow`) or a larger/growable coroutine stack,
   rather than a fixed depth counter that conflates pathological recursion with deep-but-finite
   legitimate nesting.
-- [ ] **Unbounded serialization recursion — WIDER than the original encode-side finding.**
+- [x] **Unbounded serialization recursion — WIDER than the original encode-side finding.**
+  **FIXED (release-prep, 2026-07-09.)** `MAX_SERIALIZE_DEPTH = 128` + `too_deep()` in
+  `src/runtime/data_value.rs`, threaded as a depth parameter through `value_to_data` (backing
+  `MessagePack.pack:` / `TOML.generate:` / `YAML.generate:` / extension `call:…data:` / the
+  process-worker frames) and `value_to_json` (`JSON.generate:`). Past the cap: a catchable
+  `ValueError`, "value nesting exceeds 128 levels — is the value self-referential?" — one
+  mechanism for cycles (infinite depth), mutual cycles, and merely enormous values.
+  **128 is symmetric with decode, not arbitrary:** it is `serde_json`'s own recursion limit, so
+  anything we emit as JSON we can read back; MessagePack decodes past 1000, and the overflow
+  only began ~50k, so no working depth regressed (verified). The proto-side `write_dv` stays
+  **infallible** — `encode`/`pack_dv` sit on paths that cannot report an error, and the host
+  only ever packs `DataValue`s produced by `value_to_data`, so nothing deeper than the cap can
+  reach it; an extension building a deep `DataValue` by hand crashes only its own (isolated)
+  process. Note `MAX_SERIALIZE_DEPTH` (a value-shape bound) is deliberately distinct from
+  `quoin_ext_proto::MAX_DV_DEPTH` = 64 (a hostile-peer bound on bytes arriving from a peer).
+  Tests: `qnlib/tests/55-serialize-depth.qn`; repro `qnlib/stress/audit/serialize_cycle.qn`
+  now exits 0. Original report follows.
   *(audit follow-up, PR #48; DUG 2026-07-07 — repro `qnlib/stress/audit/serialize_cycle.qn`.
   A CYCLIC value (`var l = #(); l.add:l`) or a ~500k-deep one SIGBUSes uncatchably through
   EVERY serializer, no extension involved: `JSON.generate:` (its own `value_to_json` walk,

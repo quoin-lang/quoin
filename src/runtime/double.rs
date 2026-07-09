@@ -49,6 +49,7 @@ pub fn build_double_class() -> NativeClassBuilder {
     // Binary operators are the `:` keyword selectors (`a + b` -> `Send(a, "+:", [b])`).
     // Only `<:` is provided natively; `>:`/`<=:`/`>=:` derive from it as shared Quoin.
     let b = NativeClassBuilder::new("Double", Some("Object"))
+        .construct_with("use number literals (3.14)")
         .sdk_instance_method("sqrt", |host, receiver, _args| {
             let val = recv!(receiver, Double);
             if val < 0.0 {

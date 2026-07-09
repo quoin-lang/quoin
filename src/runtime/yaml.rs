@@ -8,6 +8,7 @@ use crate::value::{NativeClassBuilder, Value};
 /// (unlike TOML). Big numbers beyond 64 bits and any BigDecimal serialize as strings (see DataValue).
 pub fn build_yaml_class() -> NativeClassBuilder {
     NativeClassBuilder::new("YAML", Some("Object"))
+        .abstract_class()
         // YAML.parse:'…' -> a Quoin value.
         .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);

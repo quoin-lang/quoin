@@ -129,6 +129,7 @@ fn shift<'gc>(
 
 pub fn build_date_time_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("DateTime", Some("Object"))
+        .construct_with("use DateTime.now / DateTime.parse:")
         // DateTime.now -> the current date+time in the host's local zone.
         .sdk_class_method("now", |host, _r, _a| Ok(make_date_time(host, Zoned::now())))
         // DateTime.nowUtc -> the current date+time in UTC.

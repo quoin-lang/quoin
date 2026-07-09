@@ -71,6 +71,7 @@ impl Drop for NativeSocket {
 
 pub fn build_tcp_socket_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("TcpSocket", Some("Object"))
+        .construct_with("use TcpSocket.connect:")
         // TcpSocket.connect:'host:port' -> a connected socket. The caller owns it
         // (close it, or rely on the GC reap backstop). DNS is resolved internally.
         .class_method("connect:", |vm, mc, _receiver, args| {
@@ -102,6 +103,7 @@ pub fn build_tcp_socket_class() -> NativeClassBuilder {
 
 pub fn build_tls_socket_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("TlsSocket", Some("Object"))
+        .construct_with("use TlsSocket.connect: / TlsSocket.wrap:host:")
         // TLS from byte zero: open a plaintext connection and immediately hand it to the
         // handshake. The bare selectors forward `insecure = false` to the canonical
         // `insecure:`-bearing form; `insecure: true` skips certificate validation (local
@@ -495,6 +497,7 @@ impl Drop for NativeListener {
 
 pub fn build_tcp_listener_class() -> NativeClassBuilder {
     NativeClassBuilder::new("TcpListener", Some("Object"))
+        .construct_with("use TcpListener.listen:")
         // TcpListener.listen:'host:port' -> a bound listening socket. Port 0 binds an
         // ephemeral port; read the chosen port back with `port`.
         .class_method("listen:", |vm, mc, _r, args| {

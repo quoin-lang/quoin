@@ -74,6 +74,7 @@ fn narrow(total: i128, unit: &str) -> Result<i64, QuoinError> {
 
 pub fn build_duration_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("Duration", Some("Object"))
+        .construct_with("use Duration.seconds: / Duration.milliseconds: / …")
         // Unit constructors (Integer counts). `Duration.zero` is the identity.
         .sdk_class_method("zero", |host, _r, _a| {
             Ok(make_duration(host, SignedDuration::ZERO))

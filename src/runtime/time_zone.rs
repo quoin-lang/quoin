@@ -59,6 +59,7 @@ impl PrettyPrint for NativeTimeZone {
 
 pub fn build_time_zone_class() -> NativeClassBuilder {
     NativeClassBuilder::new("TimeZone", Some("Object"))
+        .construct_with("use TimeZone.of: / TimeZone.utc / TimeZone.system")
         // TimeZone.of:'America/New_York' — look up an IANA time zone (errors if unknown).
         .sdk_typed_class_method("of:", &["String"], |host, _r, args| {
             let name = arg!(args, String, 0);

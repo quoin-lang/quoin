@@ -68,6 +68,7 @@ pub fn make_bigint<'gc>(host: &dyn Host<'gc>, n: BigInt) -> Value<'gc> {
 
 pub fn build_big_integer_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("BigInteger", Some("Object"))
+        .construct_with("use BigInteger.of:")
         // BigInteger.of:'123456789012345678901234567890' — parse from a decimal string.
         .sdk_typed_class_method("of:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);

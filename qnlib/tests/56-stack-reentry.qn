@@ -1,0 +1,92 @@
+"* Stack-exhaustion guards (StackError). Two mechanisms, one error class:
+"*
+"*  - `execute_block` measures the *remaining coroutine stack* (VmState::ensure_stack_headroom,
+"*    STACK_MARGIN = 2 MiB of 16 MiB). A block that re-enters itself — an `each:` body that
+"*    re-iterates its own receiver, a `catch:` whose protected block re-enters it — stacks real
+"*    Rust frames per level and used to walk off the stack with an UNCATCHABLE SIGBUS.
+"*  - `call_method` caps native -> Quoin re-entry depth (MAX_NATIVE_REENTRY = 12), for a custom
+"*    `==:`/`hash`/comparator hook that re-enters the native op it was called from.
+"*
+"* A *depth* cap would be wrong for the first: lazy generator pipelines legitimately nest blocks
+"* deeper than any machine-stack-safe count, so the guard measures the stack, not the levels.
+"*
+"* If any of these regress, the suite does not fail — the process dies.
+
+(TestSuite.new:{ var name = 'StackReentry' }).add:{
+    "* An `each:` body that re-iterates its own receiver, forever.
+    .test:
+    eachBodyReenteringItsReceiverIsCatchable -> {
+        var l = #(1 2 3);
+        var body = nil;
+        body = { |x| l.each:body };
+
+        .does:{ l.each:body } throw:StackError;
+        .does:{ l.each:body } throw:#/re-entering itself/
+    };
+
+    "* A `catch:` whose protected block re-enters the same `catch:`.
+    .test:
+    selfNestingCatchIsCatchable -> {
+        var f = nil;
+        f = {
+            { f.value }.catch:{ |e| e.throw }
+        };
+
+        .does:{ f.value } throw:StackError
+    };
+
+    "* Native -> Quoin re-entry: a `hash` that re-enters the Set it is being added to.
+    "* This already raised, but as a bare String — `catch:{|e:Error|}` could not see it.
+    .test:
+    nativeReentryRaisesATypedStackError -> {
+        Evil <- { |@id|
+            hash --> {
+                var s = #<>;
+                s.add:self;
+                1
+            }
+        };
+        var e = Evil.new:{ var id = 1 };
+        var s = #<>;
+
+        .does:{ s.add:e } throw:StackError;
+        "* and the base-class handler sees it too
+        var caught = false;
+        { s.add:e }.catch:{ |ex:Error| caught = true };
+        .isTrue:{ caught }
+    };
+
+    "* The whole point of a watermark rather than a depth cap: deep-but-finite pipelines,
+    "* which nest an `execute_block` per stage, must keep working.
+    .test:
+    deepLazyPipelinesStillRun -> {
+        var g = Generator.from:{
+            var n = 0;
+            { true }.whileDo:{
+                ^>n;
+                n = n + 1
+            }
+        };
+        var i = 0;
+        { i < 200 }.whileDo:{
+            g = g.lazyCollect:{ |x| x + 0 };
+            i = i + 1
+        };
+
+        .is:{ g.take:3 } equalTo:#(0 1 2)
+    };
+
+    "* Catching leaves the VM usable.
+    .test:
+    theProcessSurvivesAndContinues -> {
+        var l = #(1 2);
+        var body = nil;
+        body = { |x| l.each:body };
+
+        var caught = false;
+        { l.each:body }.catch:{ |e:StackError| caught = true };
+        .isTrue:{ caught };
+
+        .is:{ #(1 2 3).collect:{ |x| x * 2 } } equalTo:#(2 4 6)
+    }
+}

@@ -3,6 +3,7 @@ use crate::value::{NativeClassBuilder, Value};
 
 pub fn build_boolean_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Boolean", Some("Object"))
+        .construct_with("use the literals true / false")
         //
         .sdk_instance_method("s", |host, receiver, _args| {
             let b = recv!(receiver, Bool);

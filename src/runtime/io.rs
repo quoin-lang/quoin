@@ -24,6 +24,7 @@ fn fs_err(e: std::io::Error) -> QuoinError {
 
 pub fn build_io_folder_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Folder", Some("Object"))
+        .construct_with("use [IO]Folder.open:")
         .class_method("open:", |vm, mc, _receiver, args| {
             let path = arg!(args, String, 0);
             new_native_io_folder(vm, mc, path)
@@ -114,6 +115,7 @@ fn new_native_io_file<'a>(
 
 pub fn build_io_file_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]File", Some("Object"))
+        .construct_with("use [IO]File.open:")
         .class_method("open:", |vm, mc, _receiver, args| {
             let path = arg!(args, String, 0);
             let os_string = OsString::from(path.as_str());
@@ -329,6 +331,7 @@ fn handle_write<'gc>(
 
 pub fn build_io_handle_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Handle", Some("Object"))
+        .construct_with("use [IO]Handle.stdin / stdout / stderr")
         .class_method("stdout", |vm, mc, _receiver, _args| {
             Ok(new_native_io_handle_with_wrapper(
                 vm,

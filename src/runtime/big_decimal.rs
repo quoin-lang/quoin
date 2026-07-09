@@ -64,6 +64,7 @@ pub fn make_decimal<'gc>(host: &dyn Host<'gc>, d: Decimal) -> Value<'gc> {
 
 pub fn build_big_decimal_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("BigDecimal", Some("Object"))
+        .construct_with("use BigDecimal.of:")
         // BigDecimal.of:'1.50' — parse exactly from a string. (A Double is intentionally not
         // accepted: convert via a string so the value isn't already corrupted by binary float
         // rounding.)

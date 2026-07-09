@@ -13,6 +13,7 @@ use crate::vm::VmState;
 /// via `String.asBytes` / `Bytes.asString`. See `docs/ASYNC_ARCH.md`.
 pub fn build_bytes_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Bytes", Some("Object"))
+        .construct_with("use Bytes.of: / Bytes.empty (or 'abc'.bytes)")
         // Bytes of:#(72 101 ...) -> bytes from a list of integers (each 0-255).
         .sdk_class_method("of:", |host, _receiver, args| {
             let list_val = *args

@@ -2,3 +2,24 @@
 cov = ["llvm-cov", "--ignore-filename-regex", "src/parser/generated"]
 cov-test = ["llvm-cov", "--ignore-filename-regex", "src/parser/generated", "run", "--", "test"]
 lint = "dylint --all"
+# `cargo test` runs the 46 test binaries ONE AT A TIME (it only parallelizes tests
+# *within* a binary), and most of ours hold 1-5 mostly-idle socket/worker tests — so
+# the suite serializes on process launches. nextest runs every test as its own
+# process across all binaries at once: ~22s -> ~5s. There are no doctests to lose.
+# Requires `cargo-nextest` (brew install cargo-nextest).
+#
+# `--workspace` because the root Cargo.toml is both a `[package]` and a `[workspace]`:
+# a bare `cargo test` / `cargo nextest run` tests only the root package, silently
+# skipping 132 tests in quoin-syntax / quoin-fmt / quoin-ext / quoin-ext-proto.
+# The two dylint crates are excluded: they link `rustc-private` and only build on the
+# nightly toolchain (`cargo lint` builds them).
+nt = "nextest run --workspace --exclude no_gc_across_yield --exclude no_borrow_across_yield"
+
+# The shipping stdlib subset (core/ net/ web/ prelude test) is compiled into the binary
+# so an installed `qn` runs outside a checkout. Point cargo-run builds back at the source
+# tree: it restores the "edit a .qn, no rebuild" loop, and it is the only way to reach the
+# units we deliberately DON'T embed — the language's own `qnlib/tests/`, `benchmark.qn`,
+# and the `usetest/`/`cyc/` fixtures. `relative = true` resolves against the workspace
+# root, so it works from any subdirectory. See docs/RELEASE_PREP.md.
+[env]
+QUOIN_STDLIB = { value = "qnlib", relative = true }

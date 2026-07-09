@@ -16,7 +16,7 @@ use crate::runtime::set::NativeSetState;
 use crate::symbol::{Symbol, init_colon_symbol, init_symbol, new_colon_symbol, self_symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, Fields, InitEntry, InitPlan, NamespacedName, NativeCall,
-    NativeClass, NativeFunc, Object, ObjectPayload, Value,
+    NativeClass, NativeFunc, NativeNewPolicy, Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, devirt_ops, gc, gcl};
 use std::sync::Arc;
@@ -73,6 +73,11 @@ pub const IC_FIELD_KIND: u8 = u8::MAX;
 /// Same sharing rules as field entries: the branch instruction never shares an
 /// `ip` with a send, and a verdict entry can never satisfy `ic_probe`.
 pub const IC_PLAINNEW_KIND: u8 = u8::MAX - 1;
+
+/// Refusal hint for a native class that didn't name its constructors
+/// ([`NativeNewPolicy::Refuse`]`(None)`, the builder default).
+const NATIVE_NEW_GENERIC_HINT: &str =
+    "it has no default constructor (see its class-side constructor methods)";
 
 /// One compiled outcall site's direct-dispatch cache (D2, the "AOT IC" —
 /// docs/OUTCALL_ARCH.md): the same epoch + receiver/arg type-shape guards as
@@ -355,6 +360,10 @@ pub struct VmOptions {
     /// the same way. Carries parent/mixins/method-set/sealed for cross-class checks (subtyping,
     /// MNU).
     pub class_table: crate::class_table::ClassTable,
+    /// Directory that `use self:…` resolves against: the entry script's directory, so a
+    /// script means the same thing wherever it is invoked from. Empty (the default) is
+    /// CWD-relative, which is what the script-less modes want (`repl`, `-e`, `test`).
+    pub self_root: std::path::PathBuf,
 }
 
 // The scheduler / task / guest-fiber subsystem lives in `vm_scheduler.rs` (still
@@ -504,6 +513,19 @@ pub struct VmState<'gc> {
     /// exit (via `NativeReentryGuard`), and capped at `MAX_NATIVE_REENTRY`.
     #[collect(require_static)]
     pub native_reentry_depth: usize,
+    /// Lowest usable address of the coroutine stack currently running (`Fiber::stack_limit`),
+    /// refreshed by the driver before every `resume`. `0` means "not on a known coroutine"
+    /// (the benchmark harness steps the VM straight on the OS thread stack), which disables
+    /// the check. Read by `ensure_stack_headroom`.
+    #[collect(require_static)]
+    pub stack_limit: usize,
+    /// Set by `Runtime.exit:` — the guest requested process exit with this status.
+    /// The raising task also unwinds with `QuoinError::ExitRequested`; this flag is
+    /// what makes the exit PROCESS-wide: the driver checks it each loop iteration,
+    /// so an exit requested inside a spawned task (whose unwind lands in the task's
+    /// join result, not the driver) still stops the world promptly.
+    #[collect(require_static)]
+    pub requested_exit: Option<i32>,
 
     /// The per-task compiled-execution slice (see [`AotTaskState`]) —
     /// swapped as ONE unit with the task context, since another task may run
@@ -691,6 +713,8 @@ impl<'gc> VmState<'gc> {
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
+            stack_limit: 0,
+            requested_exit: None,
             aot: AotTaskState::default(),
             aot_pending_error: None,
             aot_pending_blocks: rustc_hash::FxHashMap::default(),
@@ -728,7 +752,7 @@ impl<'gc> VmState<'gc> {
                 reraised: false,
             },
             modules: Modules {
-                resolver: Box::new(FsResolver::new()),
+                resolver: Box::new(FsResolver::new(options.self_root.clone())),
                 loaded: Vec::new(),
                 packages: gcl!(mc, HashMap::new()),
             },
@@ -1413,6 +1437,7 @@ impl<'gc> VmState<'gc> {
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,
+                native_new_refusal: None,
             }
         );
         self.globals
@@ -1616,6 +1641,7 @@ impl<'gc> VmState<'gc> {
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
+                    native_new_refusal: None,
                 }
             );
             self.globals
@@ -1693,6 +1719,11 @@ impl<'gc> VmState<'gc> {
             }
         }
 
+        let (is_abstract, native_new_refusal) = match native_class.new_policy() {
+            NativeNewPolicy::Abstract => (true, None),
+            NativeNewPolicy::Refuse(hint) => (false, Some(hint.unwrap_or(NATIVE_NEW_GENERIC_HINT))),
+        };
+
         let name = native_class.name();
         let ns_name = NamespacedName::parse(name);
         let existing = self.globals.borrow().get(&ns_name).copied();
@@ -1702,6 +1733,8 @@ impl<'gc> VmState<'gc> {
             borrowed.instance_methods = inst_methods;
             borrowed.class_methods = cls_methods;
             borrowed.instance_vars = Vec::new();
+            borrowed.is_abstract = is_abstract;
+            borrowed.native_new_refusal = native_new_refusal;
         } else {
             let class_obj = gcl!(
                 mc,
@@ -1716,7 +1749,8 @@ impl<'gc> VmState<'gc> {
                     init_plan: None,
                     is_eigenclass: false,
                     is_sealed: false,
-                    is_abstract: false,
+                    is_abstract,
+                    native_new_refusal,
                 }
             );
 
@@ -1781,13 +1815,26 @@ impl<'gc> VmState<'gc> {
 
     /// The catchable ceiling on native → Quoin re-entry depth (see `native_reentry_depth`).
     /// Well above any legitimate nesting of custom hooks, low enough to fault before the
-    /// 1 MiB VM coroutine stack overflows (each re-entry frame drives a nested `step` loop).
+    /// coroutine stack overflows (each re-entry frame drives a nested `step` loop).
     const MAX_NATIVE_REENTRY: usize = 12;
+
+    /// Headroom `execute_block` insists on before re-entering the VM: refuse once fewer than
+    /// this many bytes of the 16 MiB coroutine stack remain.
+    ///
+    /// A *depth* cap is the wrong instrument here (and is why `execute_block` was left
+    /// unguarded): lazy generator pipelines legitimately compose blocks deeper than any
+    /// machine-stack-safe fixed count, so a counter cannot tell them from a block that
+    /// re-enters itself. Measuring the stack itself separates the two — deep-but-finite
+    /// pipelines keep their real ceiling, minus this margin.
+    ///
+    /// 2 MiB is sized to cover the deepest single frame we can add after the check passes:
+    /// `dispatch_one` + a compiled outcall + a native method, several times over.
+    const STACK_MARGIN: usize = 2 * 1024 * 1024;
 
     /// Claim one level of native re-entry, or return a catchable error at the ceiling.
     fn enter_native_reentry(&mut self) -> Result<(), QuoinError> {
         if self.native_reentry_depth >= Self::MAX_NATIVE_REENTRY {
-            return Err(QuoinError::Other(format!(
+            return Err(QuoinError::StackExhausted(format!(
                 "native call recursion too deep (> {}): a custom ==:/hash/comparator/render \
                  hook is re-entering a native operation without bound",
                 Self::MAX_NATIVE_REENTRY
@@ -1795,6 +1842,34 @@ impl<'gc> VmState<'gc> {
         }
         self.native_reentry_depth += 1;
         Ok(())
+    }
+
+    /// Refuse to re-enter the VM when this coroutine's stack is nearly spent.
+    ///
+    /// Each `execute_block` level stacks *real Rust frames* (the `valueWithSelfOrArg:`
+    /// combinator seam, the `catch:` family), so an `each:` body that re-iterates its own
+    /// receiver — or a `catch:` whose protected block re-enters itself — walks off the end of
+    /// the 16 MiB coroutine stack and aborts the process with SIGBUS, uncatchably. The check
+    /// is a load, a subtract and a compare against the address of a stack local.
+    ///
+    /// `stack_limit == 0` disables it: the benchmark harness steps the VM on the OS thread
+    /// stack, where we have no extent to measure and no re-entry to bound.
+    #[inline]
+    fn ensure_stack_headroom(&self) -> Result<(), QuoinError> {
+        if self.stack_limit == 0 {
+            return Ok(());
+        }
+        let probe = 0u8;
+        let sp = &probe as *const u8 as usize;
+        if sp.saturating_sub(self.stack_limit) >= Self::STACK_MARGIN {
+            return Ok(());
+        }
+        Err(QuoinError::StackExhausted(
+            "block re-entry exhausted the task stack: a block is re-entering itself without \
+             bound (an each:/collect: body that re-iterates its own receiver, or a catch: \
+             whose protected block re-enters it)"
+                .to_string(),
+        ))
     }
 
     fn call_method_inner(
@@ -2031,7 +2106,9 @@ impl<'gc> VmState<'gc> {
         // cap here would break real programs. The native-recursion guard lives on the
         // method-dispatch paths (`call_method`/`call_method_value`), where the
         // pathological self-referential hooks (a `==:` that re-adds to its own set)
-        // actually recurse.
+        // actually recurse. What bounds *this* path is the remaining stack itself, which
+        // costs those pipelines nothing while still refusing unbounded self-re-entry.
+        self.ensure_stack_headroom()?;
         let initial_frame_count = self.frames.len();
         if let Some(receiver) = self_val {
             self.start_block_as_method(mc, block, receiver, args, None, false);
@@ -2582,8 +2659,10 @@ impl<'gc> VmState<'gc> {
         Ok(())
     }
 
-    /// Error if `class` is `abstract!` — refuses `new` / `new:` on the class itself
-    /// (concrete subclasses are unaffected, since the flag isn't inherited).
+    /// Error if `class` refuses `new` / `new:` on the class itself — either
+    /// `abstract!`, or a native class whose generic instantiation fallback would
+    /// mint a payload-less shell (`Class::native_new_refusal`). Concrete
+    /// subclasses are unaffected, since neither flag is inherited.
     pub(crate) fn ensure_instantiable(
         &self,
         class: Gc<'gc, RefLock<Class<'gc>>>,
@@ -2593,6 +2672,13 @@ impl<'gc> VmState<'gc> {
             return Err(QuoinError::ClassError(format!(
                 "Cannot instantiate abstract class {}",
                 c.name.to_explicit_string()
+            )));
+        }
+        if let Some(hint) = c.native_new_refusal {
+            return Err(QuoinError::ClassError(format!(
+                "Cannot construct {} with new — {}",
+                c.name.to_explicit_string(),
+                hint
             )));
         }
         Ok(())
@@ -2639,6 +2725,7 @@ impl<'gc> VmState<'gc> {
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
+                        native_new_refusal: None,
                     }
                 );
                 self.globals.borrow_mut(mc).insert(ns, Value::Class(s));
@@ -2675,6 +2762,7 @@ impl<'gc> VmState<'gc> {
                             is_eigenclass: true,
                             is_sealed: false,
                             is_abstract: false,
+                            native_new_refusal: None,
                         }
                     );
                     obj.borrow_mut(mc).class = s;
@@ -3059,6 +3147,7 @@ impl<'gc> VmState<'gc> {
             QuoinError::ValueError(msg) => self.make_error(mc, "ValueError", msg, None),
             QuoinError::ParseError(msg) => self.make_error(mc, "ParseError", msg, None),
             QuoinError::ClassError(msg) => self.make_error(mc, "ClassError", msg, None),
+            QuoinError::StackExhausted(msg) => self.make_error(mc, "StackError", msg, None),
             QuoinError::ExtensionError(msg) => self.make_error(mc, "Error", msg, None),
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)
@@ -3066,7 +3155,8 @@ impl<'gc> VmState<'gc> {
             | QuoinError::Other(_)
             | QuoinError::Thrown
             | QuoinError::NonLocalReturn
-            | QuoinError::Cancelled => {
+            | QuoinError::Cancelled
+            | QuoinError::ExitRequested(_) => {
                 let s = format!("{}", error);
                 self.new_string(mc, s)
             }
@@ -4840,6 +4930,10 @@ impl<'gc> VmState<'gc> {
         if let Err(QuoinError::Cancelled) = res {
             return Err(QuoinError::Cancelled);
         }
+        // A requested process exit likewise stays bare so the driver can match it.
+        if let Err(QuoinError::ExitRequested(code)) = res {
+            return Err(QuoinError::ExitRequested(code));
+        }
         if let Err(e) = res {
             return Err(self.annotate_error(e));
         }
@@ -4923,6 +5017,9 @@ impl<'gc> VmState<'gc> {
                 }
                 Ok(other) => return Ok(other),
                 Err(QuoinError::Cancelled) => return Err(QuoinError::Cancelled),
+                Err(QuoinError::ExitRequested(code)) => {
+                    return Err(QuoinError::ExitRequested(code));
+                }
                 Err(e) => return Err(self.annotate_error(e)),
             }
         }
@@ -5973,6 +6070,7 @@ impl<'gc> VmState<'gc> {
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
+                        native_new_refusal: None,
                     }
                 );
                 self.globals

@@ -138,13 +138,22 @@ this first.
     globals — there's no local import scope, and aliasing is just `X = [Ns]Name`. `use`
     is a *soft keyword* (still usable as an identifier). Packages: bare/`std:` = stdlib,
     `self:` = your project; `dir/*` globs a directory (sorted). See §21.
-18. **Consecutive negatives in a list literal are merged by subtraction.** List
-    elements are greedy expressions (so `#(a + b  c)` is two elements), which means a
-    `-N` immediately after another element is read as infix subtraction, not a new
-    element: `#(-1 -2)` is the single element `#(-3)`, and `#(5 -10)` is `#(-5)`. A
-    *leading* negative is fine (`#(-1 2)` = two elements). Parenthesize to be safe:
-    `#((-1) (-2))`. (BUGS.md Finding 11 — silent, so worth knowing when generating
-    lists of negative numbers.)
+18. **Inside a collection literal, spacing decides whether `+ - %` is a prefix or an infix
+    operator.** Elements are juxtaposed expressions (so `#(a + b  c)` is two elements),
+    which makes `#(-1 -2)` ambiguous. The rule, in `#( … )`, `#Name( … )` and `#< … >`: an
+    operator **detached from its left operand and glued to its right one** is a prefix and
+    starts a new element. Every other spacing is infix.
+
+    | | |
+    |---|---|
+    | `#(1 -2)`, `#(1 +2)`, `#('a' %'b')` | two elements |
+    | `#(1 - 2)`, `#(1-2)`, `#(1- 2)` | one element — subtraction |
+
+    So `#(-1 -2)` is two negatives, `#(5-3)` is `#(2)`, and `#('a' %'b%{x}')` is a string
+    plus an interpolation. Identifiers follow the same rule (`#(a -b)` is two elements),
+    and the prefix binds tighter than the infix after it, so `#(1 -2 + 3)` is `#(1 1)`.
+    `!` needs no rule: its infix form is the two-character `!=`. Parenthesize when in
+    doubt: `#((7-3))`.
 
 ---
 

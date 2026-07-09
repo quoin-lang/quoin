@@ -8,6 +8,7 @@ use crate::value::{NativeClassBuilder, Value};
 /// `BigInteger`) and any `BigDecimal` serialize as their exact digits in a string (see DataValue).
 pub fn build_message_pack_class() -> NativeClassBuilder {
     NativeClassBuilder::new("MessagePack", Some("Object"))
+        .abstract_class()
         // MessagePack.pack:value -> Bytes.
         .sdk_class_method("pack:", |host, _r, args| {
             let data = value_to_data(args[0])?;

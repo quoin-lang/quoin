@@ -161,10 +161,15 @@ fn handle_repl_command(arena: &mut ReplArena, line: &str) -> Option<ReplAction> 
         "time" => eprintln!("usage: $time <expr>"),
         "load" if !rest.is_empty() => match read_to_string(rest) {
             Ok(src) => {
-                if let Some(out) = eval_repl_input(arena, &src) {
-                    println!("{out}");
+                let out = eval_repl_input(arena, &src);
+                // A `Runtime.exit:` in the loaded file is a deliberate request, not a
+                // result: say nothing — the loop top sees the flag and exits.
+                if arena.mutate_root(|_mc, vm| vm.requested_exit.is_none()) {
+                    if let Some(out) = out {
+                        println!("{out}");
+                    }
+                    println!("loaded {rest}");
                 }
-                println!("loaded {rest}");
             }
             Err(e) => eprintln!("$load: cannot read {rest}: {e}"),
         },
@@ -355,7 +360,13 @@ pub(crate) fn load_quoinrc(arena: &mut ReplArena) {
     if src.trim().is_empty() {
         return;
     }
-    if let Err(msg) = eval_once(arena, &src) {
+    let res = eval_once(arena, &src);
+    // A `Runtime.exit:` in the rc file is a deliberate request, not a load failure:
+    // the REPL loop sees the flag at its top and exits without reporting anything.
+    let exiting = arena.mutate_root(|_mc, vm| vm.requested_exit.is_some());
+    if let Err(msg) = res
+        && !exiting
+    {
         eprintln!("~/.quoinrc: {msg}");
     }
 }
@@ -493,8 +504,9 @@ fn render_value<'gc>(vm: &mut VmState<'gc>, mc: &Mutation<'gc>, val: Value<'gc>)
 }
 
 /// Interactive loop: rustyline editing, history, multiline via the `Validator`, and Ctrl-C
-/// to abandon an in-progress input (Ctrl-D to exit).
-pub(crate) fn run_repl_interactive(arena: &mut ReplArena) {
+/// to abandon an in-progress input (Ctrl-D to exit). Returns `Some(code)` if the guest
+/// requested process exit (`Runtime.exit:`) — the caller exits once the arena has dropped.
+pub(crate) fn run_repl_interactive(arena: &mut ReplArena) -> Option<i32> {
     // `List` completion shows all candidates beneath the prompt (vs the default circular
     // cycle-on-Tab), which suits selector/global menus.
     let config = rustyline::Config::builder()
@@ -507,7 +519,7 @@ pub(crate) fn run_repl_interactive(arena: &mut ReplArena) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("repl: failed to start line editor: {e}");
-                return;
+                return None;
             }
         };
     editor.set_helper(Some(ReplHelper {
@@ -528,7 +540,14 @@ pub(crate) fn run_repl_interactive(arena: &mut ReplArena) {
     // `QN_PROMPT` overrides the prompt string (default `qn> `).
     let prompt = std::env::var("QN_PROMPT").unwrap_or_else(|_| "qn> ".to_string());
 
+    let mut exit_code = None;
     loop {
+        // An exit requested outside an eval — by `~/.quoinrc` before the loop, or by a
+        // `$load`ed file, both of which reach the loop top without passing the check below.
+        if let Some(code) = arena.mutate_root(|_mc, vm| vm.requested_exit) {
+            exit_code = Some(code);
+            break;
+        }
         // Refresh the completion snapshot from the VM as it stands before this line (it can't
         // change until we eval below). `helper_mut` and `arena` are disjoint borrows.
         let index = arena.mutate_root(|_mc, vm| build_completion_index(vm));
@@ -547,7 +566,13 @@ pub(crate) fn run_repl_interactive(arena: &mut ReplArena) {
                         ReplAction::Continue => continue,
                     }
                 }
-                if let Some(out) = eval_repl_input(arena, &input) {
+                let out = eval_repl_input(arena, &input);
+                // A `Runtime.exit:` ends the session (skip echoing its unwind error).
+                if let Some(code) = arena.mutate_root(|_mc, vm| vm.requested_exit) {
+                    exit_code = Some(code);
+                    break;
+                }
+                if let Some(out) = out {
                     println!("{out}");
                 }
             }
@@ -564,15 +589,21 @@ pub(crate) fn run_repl_interactive(arena: &mut ReplArena) {
     if let Some(ref p) = history {
         let _ = editor.save_history(p);
     }
+    exit_code
 }
 
 /// Non-interactive loop (piped / redirected stdin): no editor, no prompts. Accumulates
 /// lines until the buffer parses (or errors mid-input), then evaluates. Enables
-/// `echo '…' | qn repl` and `qn repl < script.qn`.
-pub(crate) fn run_repl_piped(arena: &mut ReplArena) {
+/// `echo '…' | qn repl` and `qn repl < script.qn`. Returns `Some(code)` if the guest
+/// requested process exit (`Runtime.exit:`).
+pub(crate) fn run_repl_piped(arena: &mut ReplArena) -> Option<i32> {
     let stdin = stdin();
     let mut buffer = String::new();
     loop {
+        // An exit requested outside an eval (a `$load`ed file); see `run_repl_interactive`.
+        if let Some(code) = arena.mutate_root(|_mc, vm| vm.requested_exit) {
+            return Some(code);
+        }
         let mut line = String::new();
         if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
             break;
@@ -593,13 +624,19 @@ pub(crate) fn run_repl_piped(arena: &mut ReplArena) {
             // Incomplete — keep accumulating.
             Err(pe) if pe.start >= buffer.trim_end().len() => continue,
             _ => {
-                if let Some(out) = eval_repl_input(arena, &buffer) {
+                let out = eval_repl_input(arena, &buffer);
+                // A `Runtime.exit:` ends the session (skip echoing its unwind error).
+                if let Some(code) = arena.mutate_root(|_mc, vm| vm.requested_exit) {
+                    return Some(code);
+                }
+                if let Some(out) = out {
                     println!("{out}");
                 }
                 buffer.clear();
             }
         }
     }
+    None
 }
 
 /// Render the `VM.ps` snapshot as the `$ps` table.

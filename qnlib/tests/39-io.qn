@@ -19,7 +19,7 @@
     fileEquality -> {
         var f = [IO]File.open:'qnlib/tests/39-io.qn';
         .isTrue:{ f == ([IO]File.open:'qnlib/tests/39-io.qn') };
-        .isFalse:{ f == ([IO]File.open:'qnlib/main.qn') };
+        .isFalse:{ f == ([IO]File.open:'qnlib/prelude.qn') };
         "* rhs is not an [IO]File -> the native ==: falls through to false
         .isFalse:{ f == [IO]Stdout };
     };

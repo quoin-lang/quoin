@@ -92,6 +92,7 @@ pub fn parse_request_head(buf: &[u8]) -> Result<Option<ParsedRequestHead>, Strin
 /// demand via `use std:net/...`), driving `TcpSocket`/`TlsSocket` directly.
 pub fn build_http_parser_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[HTTP]Parser", Some("Object"))
+        .abstract_class()
         // parseHead: bytes -> nil if the response head is not complete yet, else
         // #( statusInt reasonStr headLenInt headers ), where `headers` is a list of
         // #( nameStr valueStr ) pairs. The body begins at `headLenInt` in `bytes`.

@@ -894,6 +894,13 @@ pub struct Class<'gc> {
     /// Set by `abstract!`: the class itself can't be instantiated (`new` / `new:`),
     /// though concrete subclasses still can.
     pub is_abstract: bool,
+    /// For builder-registered native classes: refuse the generic `new` / `new:{}`
+    /// instantiation fallback with this constructor hint. The fallback mints a plain
+    /// object with no `NativeState` payload — a poison shell whose first native
+    /// method fails with an internal error — so a native class is constructible only
+    /// through its own class-side constructors. `None` for user-defined classes (and
+    /// the natives whose explicit class-side `new` wins lookup before the fallback).
+    pub native_new_refusal: Option<&'static str>,
 }
 
 /// How many instance fields an `Object` stores inline before spilling to the heap.
@@ -1057,6 +1064,27 @@ pub trait NativeClass {
     fn name(&self) -> &'static str;
     fn class_methods(&self) -> Vec<NativeMethodDef>;
     fn instance_methods(&self) -> Vec<NativeMethodDef>;
+    fn new_policy(&self) -> NativeNewPolicy {
+        NativeNewPolicy::Refuse(None)
+    }
+}
+
+/// How the generic `new`/`new:{}` instantiation fallback treats a native class.
+/// The default is `Refuse(None)`: the fallback would mint a payload-less shell, so
+/// a native class must declare how it is constructed — a namespace-style class
+/// marks itself [`Abstract`](NativeNewPolicy::Abstract); anything with real
+/// instances names its constructors in a [`Refuse`](NativeNewPolicy::Refuse) hint.
+/// (A class whose explicit class-side `new` wins lookup — `List`, `Map`, `Set`,
+/// `Bytes`, `Channel` — never reaches the fallback for bare `new`; its policy
+/// still governs `new:{}`.)
+#[derive(Clone, Copy)]
+pub enum NativeNewPolicy {
+    /// Mark the class `abstract!`: a namespace-style class (`Math`, `JSON`, …)
+    /// whose instances are meaningless.
+    Abstract,
+    /// Refuse `new`/`new:` with a constructor hint, e.g.
+    /// `"use UUID.generateV4 / UUID.parse:"`; `None` uses a generic message.
+    Refuse(Option<&'static str>),
 }
 
 pub struct NativeClassBuilder {
@@ -1065,6 +1093,7 @@ pub struct NativeClassBuilder {
     class_methods: Vec<NativeMethodDef>,
     instance_methods: Vec<NativeMethodDef>,
     last_side: Option<LastSide>,
+    new_policy: NativeNewPolicy,
 }
 
 type NativeFn = for<'a> fn(
@@ -1086,7 +1115,22 @@ impl NativeClassBuilder {
             class_methods: Vec::new(),
             instance_methods: Vec::new(),
             last_side: None,
+            new_policy: NativeNewPolicy::Refuse(None),
         }
+    }
+
+    /// Mark this class `abstract!`: a namespace-style class (`Math`, `JSON`, …)
+    /// whose instances are meaningless — `new`/`new:` raise the abstract-class error.
+    pub fn abstract_class(mut self) -> Self {
+        self.new_policy = NativeNewPolicy::Abstract;
+        self
+    }
+
+    /// Name the class's real constructors in the `new`/`new:` refusal message,
+    /// e.g. `"use UUID.generateV4 / UUID.parse:"`.
+    pub fn construct_with(mut self, hint: &'static str) -> Self {
+        self.new_policy = NativeNewPolicy::Refuse(Some(hint));
+        self
     }
 
     /// Append a class-side method def and remember the side for a following `.returns(..)`.
@@ -1207,6 +1251,10 @@ impl NativeClass for NativeClassBuilder {
 
     fn instance_methods(&self) -> Vec<NativeMethodDef> {
         self.instance_methods.clone()
+    }
+
+    fn new_policy(&self) -> NativeNewPolicy {
+        self.new_policy
     }
 }
 

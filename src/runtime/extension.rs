@@ -1492,6 +1492,7 @@ fn load_package<'gc>(
 
 pub fn build_extension_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Extension", Some("Object"))
+        .construct_with("use Extension.loadPackage:")
         // `Extension spawn: '<path-to-binary>'` -> spawn the extension subprocess and connect to
         // it, returning an Extension handle. The unmanaged escape hatch (`EXT_PACKAGING.md` §4):
         // it installs the manifest's `ClassDecl` names *verbatim* (possibly bare globals), unlike

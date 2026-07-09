@@ -340,6 +340,7 @@ impl AnyCollect for NativeMapState {
 
 pub fn build_map_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Map", Some("Object"))
+        .construct_with("use #{ … } literals")
         //
         .instance_method("containsKey?:", |vm, mc, receiver, args| {
             let (_, found) = map_find(vm, mc, receiver, args[0])?;
@@ -537,6 +538,7 @@ impl PrettyPrint for NativeKeyValuePairState {
 
 pub fn build_key_value_pair_class() -> NativeClassBuilder {
     NativeClassBuilder::new("KeyValuePair", Some("Object"))
+        .construct_with("use KeyValuePair.new: (or Map iteration)")
         .class_method("new:", |vm, mc, receiver, args| {
             if !matches!(receiver, Value::Class(_)) {
                 return Err(QuoinError::TypeError {

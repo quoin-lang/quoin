@@ -9,6 +9,7 @@ use gc_arena::{Gc, Mutation};
 
 pub fn build_block_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Block", Some("Object"))
+        .construct_with("use block literals ({ … })")
         .instance_method("arity", |vm, mc, receiver, _args| {
             let block = recv!(receiver, Block);
             Ok(vm.new_int(mc, block.template.param_syms.len() as i64))
@@ -297,6 +298,12 @@ fn do_catch<'gc>(
             unwind(vm, initial);
             Err(QuoinError::Cancelled)
         }
+        // A requested process exit (`Runtime.exit:`) unwinds like cancellation:
+        // never offered to the handlers.
+        Err(QuoinError::ExitRequested(code)) => {
+            unwind(vm, initial);
+            Err(QuoinError::ExitRequested(code))
+        }
         // A `^^` in flight to a live COMPILED frame (S5): the delivered value
         // already sits at that frame's window base and only its
         // `codegen::invoke` may stop the unwind — uncatchable in flight, like
@@ -374,6 +381,14 @@ fn do_catch_finally<'gc>(
             let _ = vm.execute_block(mc, finally, Vec::new(), None);
             unwind(vm, initial);
             Err(QuoinError::Cancelled)
+        }
+        // A requested process exit likewise runs `finally` (cleanup still happens)
+        // but cannot be caught, and wins over a finally error.
+        Err(QuoinError::ExitRequested(code)) => {
+            unwind(vm, initial);
+            let _ = vm.execute_block(mc, finally, Vec::new(), None);
+            unwind(vm, initial);
+            Err(QuoinError::ExitRequested(code))
         }
         // A `^^` in flight to a live COMPILED frame (S5): uncatchable, but
         // `finally` still runs — see the matching arm in `do_catch`.

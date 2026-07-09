@@ -28,6 +28,7 @@ fn require_positive(x: f64, who: &str) -> Result<(), QuoinError> {
 /// here (`sqrt:`, `pow:to:`) for a free-function style. Angles are in radians.
 pub fn build_math_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Math", Some("Object"))
+        .abstract_class()
         // Constants.
         .sdk_class_method("pi", |host, _r, _a| {
             Ok(host.new_double(std::f64::consts::PI))

@@ -1,7 +1,14 @@
 [package]
 name = "quoin"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Quoin — a small, object-oriented language in the Smalltalk tradition, on a Rust bytecode VM with a tracing GC and stackful fibers."
+readme = "README.md"
+keywords = ["language", "smalltalk", "vm", "interpreter", "quoin"]
+categories = ["development-tools"]
 # `src/bin/ext_echo.rs` (a Tier-1 test-fixture extension) adds a second bin, so name
 # the default for a bare `cargo run`.
 default-run = "qn"
@@ -20,6 +27,18 @@ members = [
     "lint/no_gc_across_yield",
     "lint/no_borrow_across_yield",
 ]
+
+# Shared across every member so version/licence/links live in one place. The name
+# `quoin` is already reserved on crates.io by the placeholder crate at
+# github.com/quoin-lang/quoin, which this VM is destined to become — hence the
+# repository/homepage point there rather than at the current working remote.
+# `crates/adbc` is its own workspace and repeats these explicitly.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quoin-lang/quoin"
+homepage = "https://quoinlang.dev"
 
 [workspace.metadata.dylint]
 libraries = [
@@ -125,6 +144,7 @@ cranelift-frontend = "0.133.1"
 cranelift-jit = "0.133.1"
 cranelift-module = "0.133.1"
 cranelift-native = "0.133.1"
+clap = { version = "4.6.1", features = ["derive"] }
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

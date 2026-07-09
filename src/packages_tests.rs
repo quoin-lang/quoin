@@ -7,7 +7,7 @@ use super::{FsResolver, PackageResolver};
 
 #[test]
 fn root_glob_of_a_file_package_lists_bare_stems() {
-    let r = FsResolver::new();
+    let r = FsResolver::default();
     // `use std:*` globs the stdlib ROOT (empty dir): unit names are bare stems, never `/stem`
     // (the leading-slash bug that empty-dir listing used to produce).
     let units = r.list(Some("std"), "").expect("qnlib root lists");
@@ -23,7 +23,7 @@ fn root_glob_of_a_file_package_lists_bare_stems() {
 
 #[test]
 fn extension_package_glob_synthesizes_loadpackage_glue() {
-    let r = FsResolver::new();
+    let r = FsResolver::default();
     // The bundled `quoin_packages/adbc/` is on the default search root, so `use adbc:*` maps to the
     // one synthetic unit `*`, which `resolve` turns into a single line of `loadPackage:` glue.
     assert_eq!(r.list(Some("adbc"), ""), Some(vec!["*".to_string()]));
@@ -38,7 +38,7 @@ fn extension_package_glob_synthesizes_loadpackage_glue() {
 
 #[test]
 fn an_unknown_named_package_is_unresolved() {
-    let r = FsResolver::new();
+    let r = FsResolver::default();
     assert!(r.list(Some("definitely_not_a_package"), "").is_none());
     assert!(r.resolve(Some("definitely_not_a_package"), "*").is_none());
 }

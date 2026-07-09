@@ -1,4 +1,4 @@
-"* Test-shard worker (the C2 isolates demo — see main.qn). Every worker boots
+"* Test-shard worker (the C2 isolates demo — see main_workers.qn). Every worker boots
 "* the FULL suite set (`use` is static; loading only registers suites, which
 "* is milliseconds) and runs its modulo slice: suite k runs on worker
 "* (k % count). Results travel back to the parent as one data message — a

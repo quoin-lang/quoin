@@ -1209,6 +1209,7 @@ fn test_class_method_lookup_fallback() {
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
+                    native_new_refusal: None,
                 }
             );
             vm.globals.borrow_mut(mc).insert(
@@ -1492,6 +1493,7 @@ fn test_mixin_method_lookup_and_instance_vars() {
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,
+                native_new_refusal: None,
             }
         );
 
@@ -1510,6 +1512,7 @@ fn test_mixin_method_lookup_and_instance_vars() {
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,
+                native_new_refusal: None,
             }
         );
 

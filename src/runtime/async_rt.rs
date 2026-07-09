@@ -14,6 +14,7 @@ use gc_arena::Gc;
 /// the surfaced API will be revisited as it grows. See `docs/ASYNC_ARCH.md`.
 pub fn build_async_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Async", Some("Object"))
+        .abstract_class()
         // `Async.gather:[ {…}, {…} ] -> list` — spawn one task per block, overlap
         // their I/O, and return the results in order. Propagates the first error.
         .class_method("gather:", |vm, _mc, _receiver, args| {

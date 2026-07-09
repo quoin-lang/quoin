@@ -127,6 +127,7 @@ pub fn array_parts(value: Value<'_>) -> Option<(ArrayDType, Vec<u8>)> {
 
 pub fn build_array_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Array", Some("Object"))
+        .construct_with("use Array.ofInts: / Array.ofFloats:")
         // `Array ofFloats: #( 1.0 2.0 … )` — pack a list of numbers into a Float64 column.
         .class_method("ofFloats:", |vm, mc, _receiver, args| {
             let elems = list_elems(

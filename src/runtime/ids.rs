@@ -59,6 +59,7 @@ fn make_uuid<'gc>(host: &dyn Host<'gc>, u: Uuid) -> Value<'gc> {
 
 pub fn build_uuid_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("UUID", Some("Object"))
+        .construct_with("use UUID.generateV4 / UUID.generateV7 / UUID.parse:")
         // UUID.generateV4 -> a random (v4) UUID.
         .sdk_class_method("generateV4", |host, _r, _a| {
             Ok(make_uuid(host, Uuid::new_v4()))
@@ -153,6 +154,7 @@ fn make_ulid<'gc>(host: &dyn Host<'gc>, u: Ulid) -> Value<'gc> {
 
 pub fn build_ulid_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("ULID", Some("Object"))
+        .construct_with("use ULID.generate / ULID.parse:")
         // ULID.generate -> a new ULID (current time + randomness).
         .sdk_class_method("generate", |host, _r, _a| Ok(make_ulid(host, Ulid::new())))
         // ULID.parse:'…' -> parse a 26-char Crockford base32 ULID string.

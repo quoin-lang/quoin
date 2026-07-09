@@ -151,6 +151,7 @@ fn wrap_handle<'gc>(
 
 pub fn build_worker_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Worker", Some("Object"))
+        .construct_with("use Worker.spawn: / Worker.start:")
         // ---- parent side (class-side spawn, instance-side lanes) ----
         .class_method("spawn:", |vm, mc, receiver, args| {
             let path = args[0]

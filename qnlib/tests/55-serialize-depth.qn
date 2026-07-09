@@ -1,0 +1,87 @@
+"* Serialization depth cap (src/runtime/data_value.rs MAX_SERIALIZE_DEPTH = 128).
+"*
+"* Every serializer used to walk a value with no bound, so a cyclic value — `l.add:l`, two
+"* lines — overflowed the coroutine stack and aborted the process with an UNCATCHABLE SIGBUS,
+"* right past `catch:`. One depth bound stops both a cycle (infinite depth) and a merely
+"* enormous value. 128 is symmetric with the decode side: it is serde_json's own recursion
+"* limit, so anything we emit as JSON we can read back.
+"*
+"* If any of these regress, the suite does not fail — the process dies.
+
+(TestSuite.new:{ var name = 'SerializeDepth' }).add:{
+    "* Build a list nested `n` deep: #(#(#(…))).
+    .test:
+    selfReferentialValueIsACatchableError -> {
+        var l = #();
+        l.add:l;
+
+        .does:{ JSON.generate:l } throw:ValueError;
+        .does:{ MessagePack.pack:l } throw:ValueError;
+        .does:{ YAML.generate:l } throw:ValueError;
+        .does:{ JSON.generate:l } throw:#/self-referential/
+    };
+
+    .test:
+    selfReferentialMapIsACatchableError -> {
+        var m = #{};
+        m.at:'k' put:m;
+
+        .does:{ JSON.generate:m } throw:ValueError;
+        .does:{ TOML.generate:m } throw:ValueError;
+        .does:{ MessagePack.pack:m } throw:ValueError
+    };
+
+    "* A -> B -> A: no single value contains itself, but the walk still never terminates.
+    .test:
+    mutualCycleIsACatchableError -> {
+        var a = #();
+        var b = #();
+        a.add:b;
+        b.add:a;
+
+        .does:{ JSON.generate:a } throw:ValueError
+    };
+
+    "* The cap must not cost a working program: values that round-tripped before still do.
+    .test:
+    legitimateNestingStillSerializes -> {
+        var d = #();
+        var i = 0;
+        { i < 100 }.whileDo:{
+            d = #(d);
+            i = i + 1
+        };
+
+        var json = JSON.generate:d;
+        .is:{ (JSON.parse:json).count } equalTo:1;
+        .is:{ (MessagePack.unpack:(MessagePack.pack:d)).count } equalTo:1
+    };
+
+    "* Past the cap, a merely deep (acyclic) value fails the same clean way.
+    .test:
+    nestingPastTheCapIsRejected -> {
+        var deep = #();
+        var i = 0;
+        { i < 200 }.whileDo:{
+            deep = #(deep);
+            i = i + 1
+        };
+
+        .does:{ JSON.generate:deep } throw:ValueError;
+        .does:{ MessagePack.pack:deep } throw:ValueError
+    };
+
+    "* Catching leaves the VM usable — the point of the whole exercise.
+    .test:
+    theProcessSurvivesAndContinues -> {
+        var l = #();
+        l.add:l;
+
+        var caught = false;
+        { JSON.generate:l }.catch:{ |e:ValueError| caught = true };
+        .isTrue:{ caught };
+
+        "* and normal serialization still works afterwards
+        .is:{ JSON.generate:#(1 2) } equalTo:'[1,2]'
+    }
+}
