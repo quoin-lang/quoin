@@ -262,6 +262,23 @@ it. None is fixed.
 - [ ] **Compile errors carry no line/column.** `compile_program` returns a bare
   `String`, unlike parse errors and checker diagnostics, which have spans.
 
+- [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
+  and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so
+  cleanup-on-every-path with no interest in the error must name a handler that
+  only rethrows:
+
+  ```
+  { s.write:text }.catch:{ |e: Error| e.throw } finally:{ s.close }
+  ```
+
+  That is the idiom `[IO]File.write:to:` / `append:to:` / `read:` use in
+  `qnlib/core/06-io.qn`, and it reads as though it were swallowing the error when
+  it is doing the opposite. `{ … }.finally:{ … }` should run the cleanup on the
+  normal, throwing, and non-local-return paths and propagate whatever happened —
+  i.e. `catch:finally:` with an implicit rethrowing handler. Check it against `^`
+  / `^^` leaving the protected block, and against `cancel` (`QuoinError::Cancelled`),
+  which `catch:` deliberately cannot swallow.
+
 ---
 
 ## Relocatable stdlib loading (2026-07-09)
