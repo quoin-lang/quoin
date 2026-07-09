@@ -73,6 +73,7 @@ pub fn duration_between(a: Timestamp, b: Timestamp) -> SignedDuration {
 
 pub fn build_timestamp_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("Timestamp", Some("Object"))
+        .construct_with("use Timestamp.now / Timestamp.parse:")
         // Timestamp.now -> the current absolute instant (UTC).
         .sdk_class_method("now", |host, _r, _a| {
             Ok(make_timestamp(host, Timestamp::now()))

@@ -16,7 +16,7 @@ use crate::runtime::set::NativeSetState;
 use crate::symbol::{Symbol, init_colon_symbol, init_symbol, new_colon_symbol, self_symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, Fields, InitEntry, InitPlan, NamespacedName, NativeCall,
-    NativeClass, NativeFunc, Object, ObjectPayload, Value,
+    NativeClass, NativeFunc, NativeNewPolicy, Object, ObjectPayload, Value,
 };
 use crate::{ansi_colorizer, devirt_ops, gc, gcl};
 use std::sync::Arc;
@@ -73,6 +73,11 @@ pub const IC_FIELD_KIND: u8 = u8::MAX;
 /// Same sharing rules as field entries: the branch instruction never shares an
 /// `ip` with a send, and a verdict entry can never satisfy `ic_probe`.
 pub const IC_PLAINNEW_KIND: u8 = u8::MAX - 1;
+
+/// Refusal hint for a native class that didn't name its constructors
+/// ([`NativeNewPolicy::Refuse`]`(None)`, the builder default).
+const NATIVE_NEW_GENERIC_HINT: &str =
+    "it has no default constructor (see its class-side constructor methods)";
 
 /// One compiled outcall site's direct-dispatch cache (D2, the "AOT IC" —
 /// docs/OUTCALL_ARCH.md): the same epoch + receiver/arg type-shape guards as
@@ -1413,6 +1418,7 @@ impl<'gc> VmState<'gc> {
                 is_eigenclass: false,
                 is_sealed: false,
                 is_abstract: false,
+                native_new_refusal: None,
             }
         );
         self.globals
@@ -1616,6 +1622,7 @@ impl<'gc> VmState<'gc> {
                     is_eigenclass: false,
                     is_sealed: false,
                     is_abstract: false,
+                    native_new_refusal: None,
                 }
             );
             self.globals
@@ -1693,6 +1700,11 @@ impl<'gc> VmState<'gc> {
             }
         }
 
+        let (is_abstract, native_new_refusal) = match native_class.new_policy() {
+            NativeNewPolicy::Abstract => (true, None),
+            NativeNewPolicy::Refuse(hint) => (false, Some(hint.unwrap_or(NATIVE_NEW_GENERIC_HINT))),
+        };
+
         let name = native_class.name();
         let ns_name = NamespacedName::parse(name);
         let existing = self.globals.borrow().get(&ns_name).copied();
@@ -1702,6 +1714,8 @@ impl<'gc> VmState<'gc> {
             borrowed.instance_methods = inst_methods;
             borrowed.class_methods = cls_methods;
             borrowed.instance_vars = Vec::new();
+            borrowed.is_abstract = is_abstract;
+            borrowed.native_new_refusal = native_new_refusal;
         } else {
             let class_obj = gcl!(
                 mc,
@@ -1716,7 +1730,8 @@ impl<'gc> VmState<'gc> {
                     init_plan: None,
                     is_eigenclass: false,
                     is_sealed: false,
-                    is_abstract: false,
+                    is_abstract,
+                    native_new_refusal,
                 }
             );
 
@@ -2582,8 +2597,10 @@ impl<'gc> VmState<'gc> {
         Ok(())
     }
 
-    /// Error if `class` is `abstract!` — refuses `new` / `new:` on the class itself
-    /// (concrete subclasses are unaffected, since the flag isn't inherited).
+    /// Error if `class` refuses `new` / `new:` on the class itself — either
+    /// `abstract!`, or a native class whose generic instantiation fallback would
+    /// mint a payload-less shell (`Class::native_new_refusal`). Concrete
+    /// subclasses are unaffected, since neither flag is inherited.
     pub(crate) fn ensure_instantiable(
         &self,
         class: Gc<'gc, RefLock<Class<'gc>>>,
@@ -2593,6 +2610,13 @@ impl<'gc> VmState<'gc> {
             return Err(QuoinError::ClassError(format!(
                 "Cannot instantiate abstract class {}",
                 c.name.to_explicit_string()
+            )));
+        }
+        if let Some(hint) = c.native_new_refusal {
+            return Err(QuoinError::ClassError(format!(
+                "Cannot construct {} with new — {}",
+                c.name.to_explicit_string(),
+                hint
             )));
         }
         Ok(())
@@ -2639,6 +2663,7 @@ impl<'gc> VmState<'gc> {
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
+                        native_new_refusal: None,
                     }
                 );
                 self.globals.borrow_mut(mc).insert(ns, Value::Class(s));
@@ -2675,6 +2700,7 @@ impl<'gc> VmState<'gc> {
                             is_eigenclass: true,
                             is_sealed: false,
                             is_abstract: false,
+                            native_new_refusal: None,
                         }
                     );
                     obj.borrow_mut(mc).class = s;
@@ -5973,6 +5999,7 @@ impl<'gc> VmState<'gc> {
                         is_eigenclass: false,
                         is_sealed: false,
                         is_abstract: false,
+                        native_new_refusal: None,
                     }
                 );
                 self.globals

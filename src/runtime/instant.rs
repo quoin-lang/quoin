@@ -46,6 +46,7 @@ fn signed(d: std::time::Duration) -> SignedDuration {
 
 pub fn build_instant_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Instant", Some("Object"))
+        .construct_with("use Instant.now")
         // Instant.now -> the current monotonic instant.
         .sdk_class_method("now", |host, _r, _a| {
             Ok(make_instant(host, StdInstant::now()))

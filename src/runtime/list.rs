@@ -118,6 +118,7 @@ fn sort_swap<'gc>(mc: &Mutation<'gc>, list: Value<'gc>, j: usize) -> Result<(), 
 
 pub fn build_list_class() -> NativeClassBuilder {
     NativeClassBuilder::new("List", Some("Object"))
+        .construct_with("use #( … ) literals")
         .instance_method("count", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())

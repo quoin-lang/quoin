@@ -4,6 +4,7 @@ use std::time::Instant;
 
 pub fn build_timer_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Timer", Some("Object"))
+        .abstract_class()
         //
         .sdk_class_method("time:", |host, _receiver, args| {
             let start = Instant::now();

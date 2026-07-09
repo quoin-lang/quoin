@@ -232,6 +232,7 @@ fn status_of(fiber: Value<'_>) -> Result<FiberStatus, QuoinError> {
 
 pub fn build_fiber_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Fiber", Some("Object"))
+        .construct_with("use Fiber.new:{ … }")
         // Fiber.new:aBlock -> a fresh, unstarted fiber wrapping the block.
         .class_method("new:", |vm, mc, _receiver, args| {
             let block_val = args[0];

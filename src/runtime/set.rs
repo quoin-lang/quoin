@@ -170,6 +170,7 @@ pub(crate) fn set_find<'gc>(
 
 pub fn build_set_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Set", Some("Object"))
+        .construct_with("use #< … > literals")
         .sdk_instance_method("count", |host, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.len())

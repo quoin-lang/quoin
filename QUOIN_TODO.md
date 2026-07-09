@@ -540,10 +540,14 @@ deferred `Mirror` in `## REPL`.
   collections (+ `Bytes.new`): native class methods now win the hierarchy lookup before the
   generic fallback — `new` constructs the real empty native value; `new:` raises a clear
   catchable error ("List has no instance fields — construct with `#()` …"). Tests:
-  `classNewConstructs` in 41-list/40-maps/15-sets/22-bytes. **Residual (general trap):** any
-  OTHER native-payload builtin reachable via the `NewNoBlock`/`New` fallbacks still mints a
-  shell (e.g. namespace-ish classes); a general fix needs a per-class "has native constructor"
-  marker consulted by the fallbacks — deferred. Original report: The generic `Callable::New`
+  `classNewConstructs` in 41-list/40-maps/15-sets/22-bytes. **Residual RESOLVED (release-prep,
+  2026-07):** every builder-registered native class now declares a `NativeNewPolicy`
+  (`src/value.rs`, default `Refuse`) — namespace façades + `Object` are `abstract!`, everything
+  else refuses `new`/`new:` with a typed `ClassError` naming its real constructors
+  ("Cannot construct UUID with new — use UUID.generateV4 / …"), enforced in
+  `ensure_instantiable` (covers interp + the M2 fused-instantiation verdict). Tests:
+  `qnlib/tests/54-native-new.qn`. Still open: user *subclasses* of native classes keep the
+  shell behavior (pre-existing, separate gap). Original report: The generic `Callable::New`
   instantiation path builds a plain `Object` of the class *without* the `NativeState` payload, so
   the very first native method call on it fails with the internal `"Not a native state of the
   requested type"` error (`value.rs` `with_native_state`): `List.new.add:1` errors; so do

@@ -163,6 +163,7 @@ impl AnyCollect for NativeMethodState {
 
 pub fn build_method_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Method", Some("Object"))
+        .construct_with("method objects are created by the VM")
         .sdk_instance_method("selector", |host, receiver, _args| {
             let selector =
                 receiver.with_native_state::<NativeMethodState, _, _>(|m| m.selector.clone())?;

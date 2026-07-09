@@ -37,6 +37,7 @@ pub fn build_integer_class() -> NativeClassBuilder {
     // Binary operators are the `:` keyword selectors (`a + b` -> `Send(a, "+:", [b])`);
     // the bare forms are reserved for unary operators.
     let b = NativeClassBuilder::new("Integer", Some("Object"))
+        .construct_with("use integer literals (42)")
         .sdk_instance_method("sqrt", |host, receiver, _args| {
             let val = recv!(receiver, Int);
             if val < 0 {

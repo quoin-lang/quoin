@@ -77,6 +77,7 @@ impl Drop for NativeStream {
 
 pub fn build_byte_stream_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("ByteStream", Some("Object"))
+        .construct_with("use ByteStream.over: (or streams from sockets/files)")
         // ByteStream.over: aSocket -> a buffered byte stream that *consumes* the socket:
         // the fd transfers to the stream and the socket is left closed (further ops on it
         // throw). Works over any conduit that is a `StreamId` — TcpSocket/TlsSocket today.
@@ -259,6 +260,7 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
 
 pub fn build_string_stream_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("StringStream", Some("Object"))
+        .construct_with("use StringStream.over:")
         // StringStream.over: aByteStream -> a text stream that *consumes* the byte stream
         // (its fd and buffered read-ahead transfer; the byte stream is left closed).
         .class_method("over:", |vm, mc, _r, args| {

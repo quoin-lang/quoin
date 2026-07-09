@@ -7,6 +7,7 @@ use crate::value::{NativeClassBuilder, Value};
 /// be a table, so `generate:` requires a `Map`; TOML has no null, so a `nil` anywhere errors.
 pub fn build_toml_class() -> NativeClassBuilder {
     NativeClassBuilder::new("TOML", Some("Object"))
+        .abstract_class()
         // TOML.parse:'…' -> a Quoin value (a Map at the top level).
         .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);

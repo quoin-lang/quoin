@@ -270,6 +270,7 @@ fn string_arg<'gc>(v: Value<'gc>, what: &str) -> Result<String, QuoinError> {
 
 pub fn build_worker_service_class() -> NativeClassBuilder {
     NativeClassBuilder::new("WorkerService", Some("Object"))
+        .construct_with("use WorkerService.host:class:")
         .class_method("host:class:", |vm, mc, receiver, args| {
             let path = string_arg(args[0], "the unit path")?;
             let class_name = string_arg(args[1], "the class name")?;

@@ -161,6 +161,7 @@ fn number_to_value<'gc>(raw: &str, host: &dyn Host<'gc>) -> Result<Value<'gc>, Q
 
 pub fn build_json_class() -> NativeClassBuilder {
     NativeClassBuilder::new("JSON", Some("Object"))
+        .abstract_class()
         // JSON.parse:'…' → a Quoin value (Map/List/String/Integer/Double/Bool/Nil, with
         // BigInteger/BigDecimal for out-of-range numbers). Malformed input → ParseError.
         .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {

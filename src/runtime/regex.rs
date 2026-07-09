@@ -30,6 +30,7 @@ impl AnyCollect for NativeRegexState {
 }
 pub fn build_regex_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Regex", Some("Object"))
+        .construct_with("use regex literals (#/…/)")
         .sdk_instance_method("==:", |host, receiver, args| {
             let lhs_pat =
                 receiver.with_native_state(|r: &NativeRegexState| r.regex.as_str().to_string())?;

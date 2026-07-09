@@ -1,0 +1,64 @@
+"* Native classes and the generic `new`/`new:{}` fallback. The fallback mints a plain
+"* object with no native payload (a poison shell), so a builder-registered native class
+"* either constructs for real (List/Map/Set/Bytes/Channel own a class-side `new`), is a
+"* namespace-style abstract class (Math, JSON, Runtime, …), or refuses `new` with a
+"* typed ClassError naming its real constructors ("use UUID.generateV4 / …").
+
+(TestSuite.new:{ var name = 'NativeNew' }).add:{
+    .test:nativeNewRefusalNamesConstructors -> {
+        .does:{ UUID.new } throw:#/use UUID.generateV4/;
+        .does:{ BigDecimal.new } throw:#/use BigDecimal.of:/;
+        .does:{ Fiber.new } throw:#/use Fiber.new:/;
+        .does:{ Task.new } throw:#/use Task.spawn:/
+    };
+
+    .test:valueClassesPointAtLiterals -> {
+        .does:{ Integer.new } throw:#/use integer literals/;
+        .does:{ Boolean.new } throw:#/use the literals true/;
+        .does:{ Regex.new } throw:#/use regex literals/
+    };
+
+    .test:refusalIsATypedClassError -> {
+        var kind = nil;
+        { UUID.new }.catch:{ |e:ClassError| kind = e.class.name };
+        .is:{ kind } equalTo:'ClassError';
+
+        "* and a plain typed Error handler catches it too
+        var caught = false;
+        { DateTime.new }.catch:{ |e:Error| caught = true };
+        .isTrue:{ caught }
+    };
+
+    .test:namespaceClassesAreAbstract -> {
+        .does:{ JSON.new } throw:#/Cannot instantiate abstract class/;
+        .does:{ Math.new } throw:#/Cannot instantiate abstract class/;
+        .does:{ Runtime.new } throw:#/Cannot instantiate abstract class/;
+        .does:{ Object.new } throw:#/Cannot instantiate abstract class/
+    };
+
+    .test:newWithBlockAlsoRefused -> {
+        .does:{ UUID.new:{ } } throw:#/use UUID.generateV4/;
+        "* Bytes owns a real class-side `new`, but `new:{}` still hits the fallback
+        .does:{ Bytes.new:{ } } throw:#/Cannot construct/
+    };
+
+    .test:realConstructorsStillWork -> {
+        var l = List.new;
+        l.add:7;
+        .is:{ l } equalTo:#(7);
+        .is:{ Map.new.count } equalTo:0;
+        .is:{ Set.new.count } equalTo:0;
+        .is:{ Bytes.new.size } equalTo:0;
+        .is:{ Channel.new.s } equalTo:'<Channel>';
+        .is:{ (Fiber.new:{ 41 + 1 }).resume:nil } equalTo:42;
+        .is:{ UUID.generateV4.s.length } equalTo:36
+    };
+
+    .test:userClassesUnaffected -> {
+        NNPlain <- { |@x|
+            x -> { @x }
+        };
+        .is:{ (NNPlain.new:{ x = 5 }).x } equalTo:5;
+        .is:{ NNPlain.new.x } equalTo:nil
+    };
+}

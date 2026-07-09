@@ -14,6 +14,7 @@ pub fn symbol_name(val: Value<'_>) -> Option<String> {
 
 pub fn build_symbol_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Symbol", Some("Object"))
+        .construct_with("use symbol literals (#name)")
         // The plain name, without the leading `#` (e.g. `#foo.s` -> 'foo').
         .sdk_instance_method("s", |host, receiver, _args| {
             let name = symbol_name(receiver)

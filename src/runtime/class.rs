@@ -5,6 +5,7 @@ use crate::vm::DeferredCall;
 
 pub fn build_class_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Class", Some("Object"))
+        .construct_with("define classes with Name <- { … }")
         .instance_method("name", |vm, mc, receiver, _args| {
             let clz = recv!(receiver, Class);
             Ok(vm.new_string(mc, clz.borrow().name.to_string()))

@@ -21,6 +21,7 @@ type Binding<'gc> = (Symbol, Value<'gc>);
 
 pub fn build_runtime_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Runtime", Some("Object"))
+        .abstract_class()
         .class_method("eval:", |vm, mc, _receiver, args| {
             let code = arg!(args, String, 0);
             eval_string(vm, mc, &code, "<string>", None, &[])

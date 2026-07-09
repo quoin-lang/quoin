@@ -4,6 +4,7 @@ use crate::value::{NativeClassBuilder, ObjectPayload, Value};
 
 pub fn build_object_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Object", None)
+        .abstract_class()
         // The hash-code half of the key contract (docs in `value_hash_scalar`):
         // scalars answer their structural hash; instances default to IDENTITY
         // (gc-arena is non-moving, so the pointer is stable), matching

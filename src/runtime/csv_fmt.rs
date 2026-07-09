@@ -12,6 +12,7 @@ use indexmap::IndexMap;
 /// header-keyed rows (List of Maps) are supported.
 pub fn build_csv_class() -> NativeClassBuilder {
     NativeClassBuilder::new("CSV", Some("Object"))
+        .abstract_class()
         // CSV.parse:'a,b\n1,2' -> #( #('a' 'b') #('1' '2') ) — every field a String.
         .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);

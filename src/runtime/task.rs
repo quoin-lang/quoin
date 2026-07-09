@@ -118,6 +118,7 @@ fn handle_state(receiver: Value<'_>) -> Result<(TaskStatus, TaskId), QuoinError>
 
 pub fn build_task_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Task", Some("Object"))
+        .construct_with("use Task.spawn:")
         // Task.spawn:aBlock -> spawn a detached task running the block; returns a
         // handle. The spawner keeps running (fire-and-forget). See docs/ASYNC_ARCH.md.
         .class_method("spawn:", |vm, _mc, _receiver, args| {

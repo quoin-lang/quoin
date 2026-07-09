@@ -8,6 +8,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 /// `Base64` — encode/decode between `Bytes` and a base64 `String` (standard alphabet, padded).
 pub fn build_base64_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Base64", Some("Object"))
+        .abstract_class()
         .sdk_typed_class_method("encode:", &["Bytes"], |host, _r, args| {
             Ok(host.new_string(BASE64.encode(arg!(args, Bytes, 0).to_vec())))
         })
@@ -27,6 +28,7 @@ pub fn build_base64_class() -> NativeClassBuilder {
 /// case-insensitive on decode).
 pub fn build_hex_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Hex", Some("Object"))
+        .abstract_class()
         .sdk_typed_class_method("encode:", &["Bytes"], |host, _r, args| {
             Ok(host.new_string(hex::encode(arg!(args, Bytes, 0).to_vec())))
         })

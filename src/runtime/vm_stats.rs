@@ -326,6 +326,7 @@ pub(crate) fn ps_data_with_current<'gc>(
 
 pub fn build_vm_stats_class() -> NativeClassBuilder {
     NativeClassBuilder::new("VM", Some("Object"))
+        .abstract_class()
         // `VM.stats` -> the section Map (see the module doc for the shape and
         // the events-vs-distinct-members counting semantics).
         // `VM.ps` — a live tree of the scheduler and workers as plain data

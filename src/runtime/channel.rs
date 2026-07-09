@@ -404,6 +404,7 @@ impl<'gc> VmState<'gc> {
 
 pub fn build_channel_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("Channel", Some("Object"))
+        .construct_with("use Channel.new or Channel.buffered:")
         // Channel.new -> an unbuffered (rendezvous) channel.
         .class_method("new", |vm, mc, _r, _a| Ok(make_channel(vm, mc, 0)))
         // Channel.buffered:n -> a channel that buffers up to n values (0 == unbuffered).
