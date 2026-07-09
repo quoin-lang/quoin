@@ -139,6 +139,11 @@ pub enum QuoinError {
     /// `StringStream`), a malformed HTTP response head, or a compile error from `eval:`.
     /// Mapped to a typed Quoin `ParseError` at the `catch:` boundary. Message-only.
     ParseError(String),
+    /// A class-structural violation reachable from guest code (extending a
+    /// sealed class, instantiating an abstract one, …) — mapped to a typed
+    /// Quoin `ClassError` so `catch:{|e:Error|}` catches it (BUGS.md
+    /// Finding 12). Message-only.
+    ClassError(String),
     /// A recoverable error an out-of-process extension raised from a call (e.g. a SQL error from
     /// the `adbc` driver) — the extension stays alive. Mapped to a catchable Quoin `Error` object
     /// at the `catch:` boundary. Distinct from the extension *crashing*, which is an `Io` of kind
@@ -253,6 +258,7 @@ impl fmt::Display for QuoinError {
             QuoinError::Timeout { ms } => write!(f, "operation timed out after {}ms", ms),
             QuoinError::ValueError(msg) => write!(f, "{}", msg),
             QuoinError::ParseError(msg) => write!(f, "{}", msg),
+            QuoinError::ClassError(msg) => write!(f, "{}", msg),
             QuoinError::ExtensionError(msg) => write!(f, "{}", msg),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),

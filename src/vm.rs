@@ -2573,7 +2573,7 @@ impl<'gc> VmState<'gc> {
     ) -> Result<(), QuoinError> {
         let c = class.borrow();
         if c.is_sealed {
-            return Err(QuoinError::Other(if c.is_eigenclass {
+            return Err(QuoinError::ClassError(if c.is_eigenclass {
                 "Cannot extend a sealed instance".to_string()
             } else {
                 format!("Cannot extend sealed class {}", c.name.to_explicit_string())
@@ -2590,7 +2590,7 @@ impl<'gc> VmState<'gc> {
     ) -> Result<(), QuoinError> {
         let c = class.borrow();
         if c.is_abstract {
-            return Err(QuoinError::Other(format!(
+            return Err(QuoinError::ClassError(format!(
                 "Cannot instantiate abstract class {}",
                 c.name.to_explicit_string()
             )));
@@ -3058,6 +3058,7 @@ impl<'gc> VmState<'gc> {
             }
             QuoinError::ValueError(msg) => self.make_error(mc, "ValueError", msg, None),
             QuoinError::ParseError(msg) => self.make_error(mc, "ParseError", msg, None),
+            QuoinError::ClassError(msg) => self.make_error(mc, "ClassError", msg, None),
             QuoinError::ExtensionError(msg) => self.make_error(mc, "Error", msg, None),
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)
