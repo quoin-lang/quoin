@@ -125,3 +125,87 @@ fn exit_from_spawned_task_is_process_wide() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("after"), "main task continued: {stdout}");
 }
+
+/// A *compile* error is a user error, not a VM bug. Every entry point must report it the same
+/// way and exit 1. The run path used to `panic!` inside `arena.mutate_root`, printing a Rust
+/// backtrace note and exiting 101 — and it fired on exactly the two mistakes the strict
+/// `var`/`let` rule invites, so it was the first thing a migrating user saw.
+mod compile_errors {
+    use super::{run_eval, run_script};
+    use std::process::Command;
+
+    /// Every source that fails to compile, and the phrase its message must contain.
+    const CASES: &[(&str, &str, &str)] = &[
+        ("undeclared", "typo = 5;\n", "undeclared local `typo`"),
+        (
+            "let_reassign",
+            "let x = 1;\nx = 2;\n",
+            "cannot reassign `let`",
+        ),
+    ];
+
+    fn assert_clean_failure(what: &str, code: Option<i32>, stderr: &str, needle: &str) {
+        assert_eq!(
+            code,
+            Some(1),
+            "{what}: expected exit 1, got {code:?}\n{stderr}"
+        );
+        assert!(
+            stderr.contains("Compile error:"),
+            "{what}: message should be prefixed `Compile error:`\n{stderr}"
+        );
+        assert!(
+            stderr.contains(needle),
+            "{what}: message should name the problem ({needle})\n{stderr}"
+        );
+        // The two tells of a panic: never acceptable for a user's typo.
+        assert!(
+            !stderr.contains("panicked") && !stderr.contains("RUST_BACKTRACE"),
+            "{what}: a compile error must not panic\n{stderr}"
+        );
+    }
+
+    #[test]
+    fn a_script_reports_and_exits_one() {
+        for (name, src, needle) in CASES {
+            let out = run_script(name, src);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_clean_failure(&format!("qn {name}.qn"), out.status.code(), &stderr, needle);
+        }
+    }
+
+    #[test]
+    fn eval_and_check_agree_with_the_run_path() {
+        for (name, src, needle) in CASES {
+            let out = run_eval(src);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_clean_failure(
+                &format!("qn -e ({name})"),
+                out.status.code(),
+                &stderr,
+                needle,
+            );
+
+            let path = std::env::temp_dir().join(format!(
+                "quoin_check_{}_{}.qn",
+                name,
+                std::process::id()
+            ));
+            std::fs::write(&path, src).unwrap();
+            let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+                .arg("check")
+                .arg(&path)
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .expect("run qn check");
+            let _ = std::fs::remove_file(&path);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_clean_failure(
+                &format!("qn check ({name})"),
+                out.status.code(),
+                &stderr,
+                needle,
+            );
+        }
+    }
+}

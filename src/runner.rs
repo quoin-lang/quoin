@@ -1249,7 +1249,11 @@ impl VmRunner {
                 break;
             }
 
-            arena.mutate_root(|mc, vm| {
+            // A compile error here is a *user* error — a typo, an undeclared local, a
+            // reassigned `let` — so it is reported and aborts the run like any other. It must
+            // not `panic!`: that printed a Rust backtrace note and exited 101, on exactly the
+            // two mistakes strict `var`/`let` invites.
+            let compiled = arena.mutate_root(|mc, vm| {
                 let program_node = match &ast.value {
                     NodeValue::Program(p) => p,
                     _ => {
@@ -1261,12 +1265,7 @@ impl VmRunner {
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
-                let program = match compiler.compile_program(program_node) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        panic!("Compilation error: {}", e);
-                    }
-                };
+                let program = compiler.compile_program(program_node)?;
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
 
@@ -1274,7 +1273,13 @@ impl VmRunner {
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 // Run this program unit as scheduler task #0; driven to completion below.
                 install_main_task(mc, vm);
+                Ok::<(), String>(())
             });
+            if let Err(e) = compiled {
+                eprintln!("Compile error: {e}");
+                ended = Some(UnitOutcome::Aborted);
+                break;
+            }
 
             // Drive the unit to completion through the shared scheduler (async I/O, sleep,
             // tasks, fibers). An error aborts the remaining ASTs (and fails a test run);
@@ -1350,7 +1355,9 @@ impl VmRunner {
 
         // Execute the prelude so every stdlib class is registered for the checker to see.
         for ast in prelude {
-            arena.mutate_root(|mc, vm| {
+            // The prelude is the stdlib we shipped, so a compile error here is our bug, not the
+            // user's — but report it the same way rather than panicking at them about it.
+            let compiled = arena.mutate_root(|mc, vm| {
                 let program_node = match &ast.value {
                     NodeValue::Program(p) => p,
                     _ => panic!("Error: Root AST node is not a ProgramNode"),
@@ -1359,16 +1366,18 @@ impl VmRunner {
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
-                let program = match compiler.compile_program(program_node) {
-                    Ok(p) => p,
-                    Err(e) => panic!("Compilation error: {}", e),
-                };
+                let program = compiler.compile_program(program_node)?;
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
                 let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 install_main_task(mc, vm);
+                Ok::<(), String>(())
             });
+            if let Err(e) = compiled {
+                eprintln!("qn check: the prelude failed to compile: {e}");
+                break;
+            }
             if let Err(e) = drive_main_task(&mut arena) {
                 eprintln!("qn check: error loading the prelude: {}", e);
                 break;
@@ -1395,7 +1404,7 @@ impl VmRunner {
                         had
                     }
                     Err(e) => {
-                        eprintln!("Compilation error: {}", e);
+                        eprintln!("Compile error: {e}");
                         true
                     }
                 }
@@ -1555,7 +1564,7 @@ impl VmRunner {
                 break;
             }
 
-            arena.mutate_root(|mc, vm| {
+            let compiled = arena.mutate_root(|mc, vm| {
                 let program_node = match &ast.value {
                     NodeValue::Program(p) => p,
                     _ => {
@@ -1567,18 +1576,19 @@ impl VmRunner {
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
-                let program = match compiler.compile_program(program_node) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        panic!("Compilation error: {}", e);
-                    }
-                };
+                let program = compiler.compile_program(program_node)?;
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
 
                 let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
+                Ok::<(), String>(())
             });
+            if let Err(e) = compiled {
+                eprintln!("Compile error: {e}");
+                aborted = true;
+                break;
+            }
 
             let mut step_count = 0;
             loop {
