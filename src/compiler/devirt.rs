@@ -610,6 +610,15 @@ impl Compiler {
     /// (`^^s.whileDo:block`). Returns `true` if inlined. Evaluates to `nil`, matching the
     /// bootstrap (the terminating `if:` has no else). `^` in `cond`/`body` ends that block
     /// (redirected by `inline_block_body`); `^^` still returns from the enclosing method.
+    /// Static type of a block's tail expression (its result), for the
+    /// strict-Boolean loop-condition check (BUGS.md Finding 14).
+    fn block_tail_type(&self, blk: &BlockNode) -> Type {
+        match blk.statements.last() {
+            Some(stmt) => self.static_type(stmt),
+            None => Type::Any,
+        }
+    }
+
     pub(super) fn try_compile_inlined_while(
         &mut self,
         call: &MethodCallNode,
@@ -653,11 +662,20 @@ impl Compiler {
             .and_then(|()| self.splice_block_body(body_blk, &mut body_bc));
         self.fused_loop_depth -= 1;
         compiled?;
+        // BUGS.md Finding 14: a non-Boolean loop condition must raise (as
+        // `if:` and the dispatched `whileDo:` do), not loop forever on a
+        // truthy `ElseJump`. Emit a strict check ONLY when the condition
+        // isn't statically Boolean — `{ i < n }` (Int compare) pays nothing.
+        let cond_is_bool = self.block_tail_type(cond_blk) == Type::Bool;
+        if !cond_is_bool {
+            cond_bc.push(Instruction::RequireBool);
+        }
         let c = cond_bc.len() as isize;
         let b = body_bc.len() as isize;
 
         // Layout (each jump offset is relative to its own position):
         //   [start] <cond>          (c instrs; leaves the condition on the stack)
+        //           [RequireBool]    raise unless the condition is a Boolean
         //           ElseJump(b+3)    cond false → exit to the trailing nil
         //           <body>          (b instrs; leaves the body value)
         //           Pop              discard the body value

@@ -5760,6 +5760,21 @@ impl<'gc> VmState<'gc> {
                     ip = (ip as isize + offset) as usize;
                 }
             }
+            Instruction::RequireBool => {
+                match self.stack.last() {
+                    Some(Value::Bool(_)) => ip += 1,
+                    other => {
+                        let got = other.map(|v| v.class_name()).unwrap_or_else(|| "Nil".to_string());
+                        return Err(QuoinError::MessageNotUnderstood {
+                            receiver: got,
+                            selector: "whileDo: (a loop condition must be a Boolean)"
+                                .to_string(),
+                            args: Vec::new(),
+                            candidates: Vec::new(),
+                        });
+                    }
+                }
+            }
             Instruction::BranchIfNotList(offset) => {
                 let offset = *offset;
                 // Peek the `each:` receiver (do not pop): a native List falls through to

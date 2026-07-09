@@ -384,6 +384,7 @@ aot_helpers! {
     slot_set: helpers::slot_set as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
     guard_recv: helpers::guard_recv as fn(*mut c_void, *const c_void, i64, i64, i64, i64) -> u8,
     guard_block: helpers::guard_block as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    require_bool: helpers::require_bool as fn(*mut c_void, *const c_void, i64) -> u8,
     slot_peek: helpers::slot_peek as fn(*mut c_void, *const c_void, i64, *mut i64) -> i64,
     list_new: helpers::list_new as fn(*mut c_void, *const c_void, i64) -> u8,
     list_from: helpers::list_from as fn(*mut c_void, *const c_void, i64, i64, *const i64, *const i64) -> u8,
@@ -1722,6 +1723,27 @@ impl<'a> Translator<'a> {
                             b.ins().brif(cond, fbl, &args, tbl, &args);
                         }
                         break 'block;
+                    }
+                    Instruction::RequireBool => {
+                        // Statically Bool → no-op. Otherwise materialize the
+                        // top to a slot and let the helper raise on a
+                        // non-Bool (BUGS.md Finding 14). The value stays on
+                        // the stack for the following ElseJump.
+                        match *stack.last().ok_or("stack underflow")? {
+                            AV::C(_, AotKind::Bool) => {}
+                            _ => {
+                                let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                                let idx = match nstack.last() {
+                                    Some(AV::Dyn(i)) => *i,
+                                    _ => return Err("RequireBool: top not slot-resident".into()),
+                                };
+                                let f = self.func_ref(b, self.helpers.require_bool);
+                                let call = b.ins().call(f, &[fx.vm, fx.mc, idx]);
+                                let tag = b.inst_results(call)[0];
+                                self.tag_check(b, &fx, tag);
+                                stack = nstack;
+                            }
+                        }
                     }
                     Instruction::BranchIfNotBool(off) => {
                         let target = (ip as isize + off) as usize;

@@ -2254,7 +2254,19 @@ impl Compiler {
     fn binop_result_type(&self, op: &BinaryOperatorNode) -> Type {
         use BinaryOperatorType::*;
         match op.operator {
-            Lt | LtEq | Gt | GtEq | Eq | NotEq => Type::Bool,
+            // A comparison is statically `Bool` ONLY when both operands are
+            // native scalars (Int/Double): those devirtualize to direct i64/
+            // f64 compares that bypass dispatch, so no user override can
+            // intervene. For any other operand types the comparison goes
+            // through `==:`/`<:`/… dispatch, which a user class may override
+            // to return a non-Boolean — so the result type is Unknown and
+            // the inlined `if:` uses its GUARDED form (BUGS.md Finding 1).
+            Lt | LtEq | Gt | GtEq | Eq | NotEq
+                if matches!(self.static_type(&op.left), Type::Int | Type::Double)
+                    && matches!(self.static_type(&op.right), Type::Int | Type::Double) =>
+            {
+                Type::Bool
+            }
             Add | Sub | Mul | Div | Mod
                 if self.static_type(&op.left) == Type::Int
                     && self.static_type(&op.right) == Type::Int =>
