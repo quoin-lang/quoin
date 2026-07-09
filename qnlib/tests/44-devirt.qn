@@ -7,9 +7,10 @@
     .test:
     arithmeticMatchesDispatch -> {
         "* `check` runs all nine operator comparisons for one (a, b). Operands are passed as
-        "* variables so `#(a b)` is an unambiguous two-element list (a bare `#(7 -3)` would
-        "* read the `-3` as binary subtraction). `t` is the captured test (leading-dot `self`
-        "* inside the block would be the block, not the test).
+        "* variables so `#(a b)` is an unambiguous two-element list — `#(a - b)` would read
+        "* as a single subtraction (see the `prefixOperatorsStartNewElements` tests). `t` is
+        "* the captured test (leading-dot `self` inside the block would be the block, not the
+        "* test).
         var t = self;
         var check = { |a b|
             var ab = #(a b);

@@ -445,6 +445,91 @@ fn parse_lvalue(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
     }
 }
 
+/// Infix operators whose lexeme is also a [`Rule::prefix_op`] (`"+" | "-" | "!" | "%"`).
+/// `!` is absent on purpose: the infix form is the two-character `!=`, so it can never be
+/// confused with a prefix `!`.
+fn is_prefix_capable_infix(rule: Rule) -> bool {
+    matches!(rule, Rule::op_add | Rule::op_sub | Rule::op_mod)
+}
+
+/// Does this infix operator actually begin a NEW collection-literal element?
+///
+/// Literal elements are juxtaposed expressions, so `#(1 -2)` and `#('a' %'b')` are
+/// ambiguous: the operator could be infix, or a prefix on the next element. Greedy parsing
+/// always chose infix, silently turning `#(-1 -2)` into `#(-3)`. Spacing is the only signal
+/// that separates the two readings — as in Ruby — so an operator **detached from its left
+/// operand and glued to its right one** is a prefix that starts a new element. `#(5-3)` and
+/// `#(5 - 3)` both stay subtraction.
+fn starts_new_element(op: &Pair<Rule>, source_text: &str) -> bool {
+    if !is_prefix_capable_infix(op.as_rule()) {
+        return false;
+    }
+    let span = op.as_span();
+    let before = source_text[..span.start()].chars().next_back();
+    let after = source_text[span.end()..].chars().next();
+    before.is_some_and(char::is_whitespace) && after.is_some_and(|c| !c.is_whitespace())
+}
+
+/// Parse one collection-literal element (`expr` / `set_elem`), splitting it into several
+/// elements at each prefix-operator boundary — see [`starts_new_element`].
+///
+/// The split is on the *token* sequence, not the parsed tree: `#(1 -2 % 3)` parses greedily
+/// as `1 - (2 % 3)` because `%` binds tighter than `-`, so re-associating the tree would
+/// yield `-(2 % 3)` where the element is really `(-2) % 3`. Re-parsing each chunk lets pest
+/// derive the precedence instead of us reconstructing it.
+fn parse_literal_elements(pair: Pair<Rule>, filename: &str, source_text: &str) -> Vec<Node> {
+    let pairs: Vec<Pair<Rule>> = pair.clone().into_inner().collect();
+    // An operator never appears first (that position is `prefix_op` or `primary`), so
+    // `skip(1)` only guards against a malformed sequence.
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            pairs
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter(|(_, p)| starts_new_element(p, source_text))
+                .map(|(i, _)| i),
+        )
+        .collect();
+    if starts.len() == 1 {
+        return vec![parse_expr(pair, filename, source_text)];
+    }
+
+    let mut elements = Vec::with_capacity(starts.len());
+    for (n, &begin) in starts.iter().enumerate() {
+        let end_pair = starts.get(n + 1).copied().unwrap_or(pairs.len()) - 1;
+        let (start, end) = (
+            pairs[begin].as_span().start(),
+            pairs[end_pair].as_span().end(),
+        );
+        match reparse_element(start, end, filename, source_text) {
+            Some(node) => elements.push(node),
+            // Unreachable for any chunk pest just parsed. Degrade to the old greedy
+            // reading rather than fail the whole program on a parser invariant.
+            None => return vec![parse_expr(pair, filename, source_text)],
+        }
+    }
+    elements
+}
+
+/// Re-parse `source_text[start..end]` as one expression.
+///
+/// The chunk is parsed inside a buffer left-padded with spaces to `start`, so every span
+/// keeps its original byte offset and `extract_source_info` (which reads the *original*
+/// source) still reports the right line, column and snippet. Padding also bounds the parse
+/// at `end`, so a chunk can't run past its element. Returns `None` if the chunk does not
+/// re-parse in full.
+fn reparse_element(start: usize, end: usize, filename: &str, source_text: &str) -> Option<Node> {
+    let mut padded = " ".repeat(start);
+    padded.push_str(&source_text[start..end]);
+    let expr = QuoinParser::parse(Rule::elem_chunk, &padded)
+        .ok()?
+        .next()?
+        .into_inner()
+        .next()?;
+    (expr.as_span().end() == end).then(|| parse_expr(expr, filename, source_text))
+}
+
 fn parse_expr(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
     let pairs = pair.into_inner();
     PRATT_PARSER
@@ -595,7 +680,11 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
 
             let mut values = Vec::new();
             for expr in pairs {
-                values.push(Arc::new(parse_expr(expr, filename, source_text)));
+                values.extend(
+                    parse_literal_elements(expr, filename, source_text)
+                        .into_iter()
+                        .map(Arc::new),
+                );
             }
             Node {
                 source_info,
@@ -613,7 +702,8 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         Rule::list_expr => {
             let values: Vec<_> = inner
                 .into_inner()
-                .map(|expr| Arc::new(parse_expr(expr, filename, source_text)))
+                .flat_map(|expr| parse_literal_elements(expr, filename, source_text))
+                .map(Arc::new)
                 .collect();
             Node {
                 source_info,
@@ -623,7 +713,8 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         Rule::set_expr => {
             let values: Vec<_> = inner
                 .into_inner()
-                .map(|expr| Arc::new(parse_expr(expr, filename, source_text)))
+                .flat_map(|expr| parse_literal_elements(expr, filename, source_text))
+                .map(Arc::new)
                 .collect();
             Node {
                 source_info,
@@ -2748,3 +2839,7 @@ mod tests {
         assert_eq!(table.find_line_col(27, text), (5, 1)); // 'l'
     }
 }
+
+#[cfg(test)]
+#[path = "parser_tests.rs"]
+mod parser_tests;

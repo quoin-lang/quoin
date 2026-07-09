@@ -236,6 +236,21 @@ var b = #()
 
 ## Finding 11 — Consecutive negative numbers in a list/collection literal are silently merged by subtraction
 
+> **FIXED (release-prep, 2026-07-09).** The bug was never about minus: it affects every
+> operator whose lexeme is also a prefix operator — `+`, `-`, `%` — so `#(1 +2)` was `#(3)`
+> and `#( 'a' %'b' )` was one element. (`!` is exempt: its infix form is `!=`.) In
+> `#( … )`, `#Name( … )` and `#< … >` such an operator is a **prefix that starts a new
+> element** exactly when it is detached from its left operand and glued to its right one,
+> as in Ruby; every other spacing stays infix. `#(-1 -2)` is two elements, `#(5-3)` is
+> still `#(2)`.
+>
+> Implemented in `parse_literal_elements` (`crates/quoin-syntax/src/pest/parser.rs`), which
+> splits the *token* sequence and re-parses each chunk — the grammar cannot express it
+> (pest has no lookbehind, and an atomic rule would cascade into `primary`), and
+> re-associating the parsed tree would get precedence wrong: `#(1 -2 % 3)` parses greedily
+> as `1 - (2 % 3)`, but the element is `(-2) % 3`. Tests: `parser_tests.rs` (12 cases) and
+> `prefixOperatorsStartNewElements` in `qnlib/tests/41-list.qn` / `15-sets.qn`.
+
 **Severity: Medium (silent data loss; a natural way to write a list of negatives).**
 
 **Repro:**

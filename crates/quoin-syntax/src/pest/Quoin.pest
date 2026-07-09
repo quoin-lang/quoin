@@ -103,6 +103,13 @@ sub_lvalue           = { "(" ~ lvalue+ ~ ")" }
 
 expr = { prefix_op* ~ primary ~ postfix_op* ~ (infix_op ~ prefix_op* ~ primary ~ postfix_op*)* }
 
+// Entry point for re-parsing ONE collection-literal element in isolation, used by
+// `parse_literal_elements` to split `#(1 -2)` into two elements. The chunk is handed to
+// us inside a buffer left-padded with spaces so byte offsets (and therefore line/column
+// and error snippets) match the original source, hence the explicit leading `WHITESPACE*`:
+// pest does not skip leading trivia before the entry rule.
+elem_chunk = { WHITESPACE* ~ expr }
+
 infix_op = _{
     op_or
   | op_and

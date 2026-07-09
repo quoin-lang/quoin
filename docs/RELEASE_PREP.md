@@ -59,9 +59,13 @@ LSP/VSCode tooling, Windows.
 - [ ] **Uncatchable SIGBUS: `execute_block` native re-entry** (an `each:` body
   re-iterating its receiver; self-sorting comparator). Repro:
   `qnlib/stress/audit/each_reenter.qn`. See QUOIN_TODO for the settled design.
-- [ ] **Decide F11** (`#(-1 -2)` parses as `#(-3)`). Currently a documented
-  gotcha; leaning toward grammar fix (whitespace-then-`-digit` starts a new
-  element). See BUGS.md Finding 11.
+- [x] **F11** (`#(-1 -2)` parsed as `#(-3)`). FIXED — and it was never only about
+  minus: `+`, `-` and `%` are all both prefix and infix, so `#(1 +2)` was `#(3)`
+  and `#( 'a' %'b' )` was one element. Inside a collection literal such an
+  operator is a prefix starting a new element exactly when it is detached from
+  its left operand and glued to its right one; every other spacing is infix, so
+  `#(5-3)` is still `#(2)`. Done in `parse_literal_elements`, not the grammar
+  (pest has no lookbehind). See BUGS.md Finding 11.
 
 ## Tier 2 — language reference (`docs/language/`)
 
@@ -105,9 +109,16 @@ strict `var`/`let` and no longer compile.
 
 ## Tier 4 — packaging, CI, docs triage
 
+- [ ] **CI tests only the root package.** The root `Cargo.toml` is both a
+  `[package]` and a `[workspace]`, so CI's `cargo test` (and a bare
+  `cargo nextest run`) silently skips **132 tests** in `quoin-syntax`,
+  `quoin-fmt`, `quoin-ext` and `quoin-ext-proto` — 429 run of 561. The `cargo nt`
+  alias now passes `--workspace` (excluding the two dylint crates, which need
+  nightly `rustc-private`); CI must do the same. Also: `cargo run -- test` in CI
+  needs the `qnlib/tests` argument since `qn test [DIR]` landed.
 - [ ] CI: macOS runner, `cargo fmt --check` + clippy, doc-example harness,
   dependency caching, build `crates/adbc`. Swap `cargo test` for
-  `cargo nextest run` (see below) — same 425 tests, ~4× less wall time.
+  `cargo nextest run` (see below) — ~4× less wall time.
 - [ ] Release workflow producing binaries (macOS arm64 + Linux x86_64).
 - [ ] `CHANGELOG.md`.
 - [ ] Status-stamp the `docs/*_ARCH.md` files (some say "not built" for shipped

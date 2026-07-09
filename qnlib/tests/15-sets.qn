@@ -85,6 +85,22 @@
         var caught = 'no';
         { Set.new:{ a = 1 } }.catch:{ |e| caught = 'yes' };
         .is:{ caught } equalTo:'yes';
+    };
+
+    "* Set elements follow the same rule as list elements: a prefix-capable operator that is
+    "* detached from its left operand and glued to its right one starts a new element
+    "* (see 41-list.qn `prefixOperatorsStartNewElements`).
+    .test:
+    prefixOperatorsStartNewElements -> {
+        .is:{ #<-1 -2>.count } equalTo:2;
+        .isTrue:{ #<-1 -2>.contains?:(0 - 2) };
+        .is:{ #<1 +2>.count } equalTo:2;
+
+        "* every other spacing is infix
+        .is:{ #<7 - 3>.count } equalTo:1;
+        .isTrue:{ #<7 - 3>.contains?:4 };
+        .is:{ #<7-3>.count } equalTo:1;
+        .isTrue:{ #<7-3>.contains?:4 }
     }
 
 }
