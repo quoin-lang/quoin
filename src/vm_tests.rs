@@ -2182,11 +2182,23 @@ fn test_vm_options_at_runtime() {
 
 #[test]
 fn value_layout_facts() {
-    // The window-arena arc (docs/WINDOW_ARENA_ARCH.md) depends on these:
-    // Value is 16 bytes / align 8 today, and Option<Value> is niche-packed.
-    // The planned fixed repr keeps the 16-byte size and deliberately gives
-    // up the niche (audited: only small per-task/per-handle collections
-    // store Option<Value>).
-    assert_eq!(std::mem::size_of::<crate::value::Value>(), 16);
-    assert_eq!(std::mem::align_of::<crate::value::Value>(), 8);
+    // The window-arena CONTRACT (docs/WINDOW_ARENA_ARCH.md §2.1): compiled
+    // code reads/writes slots natively against exactly this layout. A
+    // failure here means the JIT's emission model is wrong for this build.
+    use crate::value::Value;
+    assert_eq!(std::mem::size_of::<Value>(), 16);
+    assert_eq!(std::mem::align_of::<Value>(), 8);
+    let probe = |v: Value<'static>| -> [u64; 2] { unsafe { std::mem::transmute(v) } };
+    // Scalar tags coincide with helpers::KIND_* — payload qword is the bits.
+    assert_eq!(probe(Value::Int(0x1234)), [0, 0x1234]);
+    assert_eq!(
+        probe(Value::Double(2.5)),
+        [1, f64::to_bits(2.5)],
+        "Double: tag 1, payload = to_bits"
+    );
+    assert_eq!(probe(Value::Bool(true))[0], 2);
+    assert_eq!(probe(Value::Bool(true))[1] & 0xff, 1);
+    assert_eq!(probe(Value::Nil)[0], 3);
+    assert_eq!(crate::codegen::helpers_kind_int(), 0);
+    assert_eq!(crate::codegen::helpers_kind_nil(), 3);
 }

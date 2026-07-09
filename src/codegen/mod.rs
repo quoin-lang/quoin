@@ -504,6 +504,14 @@ pub fn direct_warm_threshold() -> Option<u32> {
 /// it somehow were, `true` merely routes into `aot_site_note_hit`, which
 /// resolves and self-disables.
 #[inline(always)]
+/// Layout-pin accessors for value_layout_facts (helpers is pub(super)).
+pub fn helpers_kind_int() -> i64 {
+    helpers::KIND_INT
+}
+pub fn helpers_kind_nil() -> i64 {
+    helpers::KIND_NIL
+}
+
 pub fn direct_warm_on() -> bool {
     DIRECT_WARM.load(std::sync::atomic::Ordering::Relaxed) != 0
 }

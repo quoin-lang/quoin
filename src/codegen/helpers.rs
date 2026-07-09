@@ -39,8 +39,12 @@ use super::{TAG_ERR, TAG_OK};
 pub const KIND_INT: i64 = 0;
 pub const KIND_DOUBLE: i64 = 1;
 pub const KIND_BOOL: i64 = 2;
-pub const KIND_SLOT: i64 = 3;
-pub const KIND_NIL: i64 = 4;
+/// Aligned with `Value`'s fixed discriminants (window-arena contract):
+/// KIND_INT/DOUBLE/BOOL/NIL == the Value tags 0..3, so a scalar lane is a
+/// Value's (tag, payload) verbatim. KIND_SLOT is helper-lane-internal
+/// (never a Value tag).
+pub const KIND_NIL: i64 = 3;
+pub const KIND_SLOT: i64 = 4;
 
 /// Reconstitute the erased `(vm, mc)` pair for one helper call.
 ///

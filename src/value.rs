@@ -212,18 +212,30 @@ unsafe impl<'gc> Collect<'gc> for NativeFunc {
 
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
+/// FIXED LAYOUT (the window-arena contract, docs/WINDOW_ARENA_ARCH.md §2.1):
+/// `#[repr(C, u64)]` — tag qword at offset 0, payload qword at offset 8,
+/// 16 bytes total (pinned by `value_layout_facts`). Compiled code reads and
+/// writes slots natively against this layout; the scalar discriminants
+/// deliberately COINCIDE with the helper lane kinds (`helpers::KIND_*`), so
+/// a scalar lane→slot store is tag=kind, payload=bits verbatim. Object/
+/// Class payloads are Gc pointers: native code only ever copies those
+/// whole (16-byte slot-to-slot), never fabricates them — and the store
+/// order invariant (payload before tag) is what keeps every intermediate
+/// state traceable. Discriminant values are API for the JIT: do not
+/// reorder or renumber without updating codegen's emission.
+#[repr(C, u64)]
 pub enum Value<'gc> {
     /// Immediate value types — no GC allocation. Their class is *derived* from
     /// the variant (see `get_class_for_lookup`), so "numbers are objects" still
     /// holds: they dispatch via `Integer` / `Double` / `Boolean` / `Nil` and
     /// have methods, but no per-instance fields or true eigenclass.
-    Int(i64),
-    Double(f64),
-    Bool(bool),
-    Nil,
-    Object(Gc<'gc, RefLock<Object<'gc>>>),
-    Class(Gc<'gc, RefLock<Class<'gc>>>),
-    ClassMeta(Gc<'gc, RefLock<Class<'gc>>>),
+    Int(i64) = 0,
+    Double(f64) = 1,
+    Bool(bool) = 2,
+    Nil = 3,
+    Object(Gc<'gc, RefLock<Object<'gc>>>) = 4,
+    Class(Gc<'gc, RefLock<Class<'gc>>>) = 5,
+    ClassMeta(Gc<'gc, RefLock<Class<'gc>>>) = 6,
 }
 
 #[derive(Clone, Copy, Collect, Debug)]
