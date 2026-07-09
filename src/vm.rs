@@ -99,6 +99,10 @@ pub struct AotSiteCell<'gc> {
     #[collect(require_static)]
     pub entry: Option<&'static crate::codegen::AotEntry>,
     pub parent_env: Option<Gc<'gc, RefLock<EnvFrame<'gc>>>>,
+    /// Block-call sites: the receiver closure observed at fill (identity
+    /// bake source; rooted here while the cell lives, then pinned into
+    /// `aot_baked_roots` when an edge bakes it).
+    pub recv_val: Option<Value<'gc>>,
 }
 
 impl Default for AotSiteCell<'_> {
@@ -113,6 +117,7 @@ impl Default for AotSiteCell<'_> {
             arg_ptrs: [0; IC_MAX_ARGS],
             entry: None,
             parent_env: None,
+            recv_val: None,
         }
     }
 }
@@ -579,6 +584,17 @@ pub struct VmState<'gc> {
     /// step). The queued set dedups for the process lifetime — one
     /// retranslation per tid until an epoch-driven refill re-queues (D3b).
     pub aot_retranslate_queue: Vec<u32>,
+    /// A3: values PINNED by baked direct edges (a native identity guard
+    /// compares a slot's 16 bytes against a baked Gc pointer — the pointee
+    /// must stay alive for the code's lifetime or a recycled address could
+    /// false-positive the guard). Append-only, bounded by baked edges.
+    pub aot_baked_roots: Vec<Value<'gc>>,
+    /// Constant-closure promotion: CLOSED templates (no captures, no self,
+    /// no `^^`) materialize ONE closure per VM, shared by the interpreter
+    /// and compiled make_closure alike. Gives hot loops allocation-free
+    /// block arguments and makes the baked identity guards durable across
+    /// calls. Observable: two evaluations of a closed literal are `==`.
+    pub aot_closure_cache: rustc_hash::FxHashMap<u32, Value<'gc>>,
     pub aot_retranslate_queued: rustc_hash::FxHashSet<u32>,
     /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts every
     /// per-`Block` [`ICSlot`] at once, giving O(1) inline-cache invalidation.
@@ -723,6 +739,8 @@ impl<'gc> VmState<'gc> {
             ic_registry: FxHashMap::default(),
             aot_sites: Vec::new(),
             aot_retranslate_queue: Vec::new(),
+            aot_baked_roots: Vec::new(),
+            aot_closure_cache: rustc_hash::FxHashMap::default(),
             aot_retranslate_queued: rustc_hash::FxHashSet::default(),
             dispatch_cache: DispatchCache {
                 entries: FxHashMap::default(),
@@ -3187,6 +3205,16 @@ impl<'gc> VmState<'gc> {
             }
             Constant::Symbol(s) => self.new_symbol(mc, s.clone()),
             Constant::Block(sb) => {
+                // Constant-closure promotion: a CLOSED template (no captures,
+                // no self, no ^^) has one behavioral identity — reuse the
+                // per-VM cached closure (shared with compiled make_closure,
+                // so baked identity guards stay durable across calls).
+                if let Some(tid) = sb.template_id
+                    && crate::instruction::template_is_closed(sb)
+                    && let Some(&v) = self.aot_closure_cache.get(&tid)
+                {
+                    return v;
+                }
                 // A closure is its shared template (Rc bump) plus the captured
                 // runtime state — no deep clone of the param vectors.
                 let parent_env = self.frames.last().map(|f| f.env);
@@ -3212,7 +3240,13 @@ impl<'gc> VmState<'gc> {
                     decl_block,
                     inline_cache,
                 };
-                self.new_block(mc, block)
+                let v = self.new_block(mc, block);
+                if let Some(tid) = sb.template_id
+                    && crate::instruction::template_is_closed(sb)
+                {
+                    self.aot_closure_cache.insert(tid, v);
+                }
+                v
             }
         }
     }
@@ -3725,6 +3759,7 @@ impl<'gc> VmState<'gc> {
         &mut self,
         site: usize,
         entry: &'static crate::codegen::AotEntry,
+        recv: Value<'gc>,
     ) {
         if site >= self.aot_sites.len() {
             self.aot_sites.resize(site + 1, AotSiteCell::default());
@@ -3733,6 +3768,7 @@ impl<'gc> VmState<'gc> {
         *cell = AotSiteCell::default();
         cell.epoch = self.dispatch_epoch;
         cell.entry = Some(entry);
+        cell.recv_val = Some(recv);
     }
 
     pub(crate) fn aot_site_peek(
@@ -3829,16 +3865,39 @@ impl<'gc> VmState<'gc> {
         &self,
         sites: &rustc_hash::FxHashMap<usize, u32>,
         threshold: u32,
-    ) -> rustc_hash::FxHashMap<usize, crate::codegen::BakedW0> {
+    ) -> (
+        rustc_hash::FxHashMap<usize, crate::codegen::BakedW0>,
+        Vec<Value<'gc>>,
+    ) {
         let mut out = rustc_hash::FxHashMap::default();
+        let mut roots = Vec::new();
         for (&ip, &site) in sites {
             let Some(cell) = self.aot_sites.get(site as usize) else {
                 continue;
             };
             let Some(entry) = cell.entry else { continue };
-            let eligible =
-                crate::codegen::w0_eligible(entry) || crate::codegen::block_w0_eligible(entry);
+            let is_block = crate::codegen::block_w0_eligible(entry);
+            let eligible = crate::codegen::w0_eligible(entry) || is_block;
             if cell.epoch != self.dispatch_epoch || cell.hits < threshold || !eligible {
+                continue;
+            }
+            if is_block {
+                // Identity bake: the guard compares the receiver slot's 16
+                // bytes against this exact closure NATIVELY (fixed Value
+                // layout). Pin the closure for the code's lifetime — a
+                // recycled address must never false-positive the guard.
+                let Some(rv) = cell.recv_val else { continue };
+                let Value::Object(obj) = rv else { continue };
+                roots.push(rv);
+                out.insert(
+                    ip,
+                    crate::codegen::BakedW0 {
+                        entry,
+                        epoch: self.dispatch_epoch,
+                        recv_kind: 4, // Value tag: Object
+                        recv_ptr: Gc::as_ptr(obj) as usize,
+                    },
+                );
                 continue;
             }
             out.insert(
@@ -3851,7 +3910,7 @@ impl<'gc> VmState<'gc> {
                 },
             );
         }
-        out
+        (out, roots)
     }
 
     /// Fill a D2 site cell. The caller gates this on the interpreted IC
@@ -3890,6 +3949,7 @@ impl<'gc> VmState<'gc> {
             arg_ptrs,
             entry: Some(entry),
             parent_env,
+            recv_val: None,
         };
     }
 

@@ -2357,6 +2357,7 @@ impl Compiler {
         Ok(StaticBlock {
             spec_state: Default::default(),
             uses_self: Default::default(),
+            is_closed: Default::default(),
             name: None,
             is_nested_block: false,
             is_init_literal: false,
@@ -3248,6 +3249,7 @@ impl Compiler {
         let static_block = StaticBlock {
             spec_state: Default::default(),
             uses_self: Default::default(),
+            is_closed: Default::default(),
             name: block_name,
             is_nested_block: true,
             is_init_literal: is_init,

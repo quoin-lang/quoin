@@ -169,8 +169,15 @@ pub type AotRawFn = unsafe extern "C" fn(
     depth: *mut i64,
     // D3a: pointer to the VM's `dispatch_epoch`, rides beside fuel/depth so
     // D3b's baked-guard sites can compare epochs without raw VmState field
-    // offsets. 8 params = exactly the ARM64 integer-register budget.
+    // offsets.
     epoch: *const u64,
+    // A3 (window arena): the VM's SlotStack head — compiled code re-loads
+    // (ptr, len) through it per slot access and does native bounds-checked
+    // loads/stores against Value's fixed layout. Passed per call (NOT baked:
+    // portable-block localization preserves template ids, so an entry can
+    // run on a VM other than its compiler). The 9th param spills one slot
+    // past the ARM64 register budget — measured under the A3 gate.
+    slots: *mut crate::value::SlotHead,
     slot_base: i64,
     args: *const i64,
     ret: *mut i64,
@@ -238,6 +245,12 @@ pub struct AotEntry {
     /// entry that never materializes never reads it — `invoke` skips the
     /// env swap/restore entirely (D2.5a, docs/DIRECT_CALLS_ARCH.md §2).
     pub materializes: bool,
+    /// The template is CLOSED (no captures/self/`^^`): its closures are
+    /// cached per VM (constant-closure promotion), which makes baked
+    /// identity guards DURABLE — a capture-bearing template materializes a
+    /// fresh closure per call, so identity edges on it miss every element
+    /// and their guard becomes pure tax (measured combinators +2.3%).
+    pub is_closed: bool,
     /// Window-hoist: the body reads SLOT 0 (`self`) specifically. A baked
     /// block edge provides a real hoisted window whose self slot is never
     /// written per element — slot-0 readers are ineligible.
@@ -283,6 +296,7 @@ pub fn w0_eligible(entry: &AotEntry) -> bool {
 /// eff-ret), so no ret-shape criterion.
 pub fn block_w0_eligible(entry: &AotEntry) -> bool {
     entry.role == AotRole::BlockTemplate
+        && entry.is_closed
         && !entry.materializes
         && !entry.materializes_nlr
         && !entry.uses_self_slot
@@ -1191,6 +1205,7 @@ fn invoke_tail<'gc>(
         let fuel_ptr = &raw mut vm.aot.fuel;
         let depth_ptr = &raw mut vm.aot.depth;
         let epoch_ptr = &raw const vm.dispatch_epoch;
+        let slots_ptr = vm.stack.head_addr();
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
         let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
         unsafe {
@@ -1200,6 +1215,7 @@ fn invoke_tail<'gc>(
                 fuel_ptr,
                 depth_ptr,
                 epoch_ptr,
+                slots_ptr,
                 base as i64,
                 raw.as_ptr(),
                 &mut ret,
@@ -1317,6 +1333,7 @@ pub fn invoke_block<'gc>(
         let fuel_ptr = &raw mut vm.aot.fuel;
         let depth_ptr = &raw mut vm.aot.depth;
         let epoch_ptr = &raw const vm.dispatch_epoch;
+        let slots_ptr = vm.stack.head_addr();
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
         let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
         let raw_args: [i64; 1] = [base as i64 + 1];
@@ -1327,6 +1344,7 @@ pub fn invoke_block<'gc>(
                 fuel_ptr,
                 depth_ptr,
                 epoch_ptr,
+                slots_ptr,
                 base as i64,
                 raw_args.as_ptr(),
                 &mut ret,

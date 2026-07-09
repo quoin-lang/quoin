@@ -646,6 +646,7 @@ fn compile_group(
                 materializes,
                 uses_slot_base,
                 uses_self_slot,
+                is_closed: crate::instruction::template_is_closed(&m.block),
                 lane_plan: super::build_lane_plan(&m.params, &m.spec_preconditions),
             },
             site_log,
@@ -659,8 +660,8 @@ fn compile_group(
 
 fn inner_sig(module: &mut JITModule, ptr: Type, m: &AotCandidate, eff: AotRet) -> Signature {
     let mut sig = module.make_signature();
-    for _ in 0..5 {
-        sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch
+    for _ in 0..6 {
+        sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch, slots
     }
     sig.params.push(AbiParam::new(types::I64)); // slot_base
     for &p in &m.params {
@@ -674,8 +675,8 @@ fn inner_sig(module: &mut JITModule, ptr: Type, m: &AotCandidate, eff: AotRet) -
 
 fn tramp_sig(module: &mut JITModule, ptr: Type) -> Signature {
     let mut sig = module.make_signature();
-    for _ in 0..5 {
-        sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch
+    for _ in 0..6 {
+        sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch, slots
     }
     sig.params.push(AbiParam::new(types::I64)); // slot_base
     sig.params.push(AbiParam::new(ptr)); // args
@@ -695,9 +696,9 @@ fn build_trampoline(
     b.append_block_params_for_function_params(entry);
     b.switch_to_block(entry);
     let p = b.block_params(entry).to_vec();
-    let (vm, mc, fuel, depth, epoch, slot_base, args, ret) =
-        (p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
-    let mut call_args = vec![vm, mc, fuel, depth, epoch, slot_base];
+    let (vm, mc, fuel, depth, epoch, slots, slot_base, args, ret) =
+        (p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]);
+    let mut call_args = vec![vm, mc, fuel, depth, epoch, slots, slot_base];
     for (i, &k) in m.params.iter().enumerate() {
         let off = (i * 8) as i32;
         let v = match k {
@@ -943,8 +944,10 @@ struct FnCtx {
     depth: CVal,
     /// D3a plumbing: pointer to the VM's `dispatch_epoch` (read by D3b's
     /// baked-guard sites; forwarded on sibling direct calls meanwhile).
-    #[allow(dead_code)]
     epoch: CVal,
+    /// A3: the SlotStack head pointer — native slot access re-loads
+    /// (ptr, len) through it per access.
+    slots: CVal,
     slot_base: CVal,
     exit: CBlock,
     ret: AotRet,
@@ -980,6 +983,92 @@ impl<'a> Translator<'a> {
         let k = fixed + self.next_scratch;
         self.next_scratch += 1;
         Ok(k)
+    }
+
+    /// A3 native slot access (docs/WINDOW_ARENA_ARCH.md §3): load the slot
+    /// head's (ptr, len). Loaded fresh per access sequence — every growth
+    /// helper re-syncs the head at exit, so any head read after a helper
+    /// call sees truth (the vm_mc canary enforces the discipline in debug).
+    fn emit_head(&mut self, b: &mut FunctionBuilder, fx: &FnCtx) -> (CVal, CVal) {
+        let ptr_ty = self.module.target_config().pointer_type();
+        let ptr = b.ins().load(ptr_ty, MemFlagsData::trusted(), fx.slots, 0);
+        let len = b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), fx.slots, 8);
+        (ptr, len)
+    }
+
+    /// Bounds-checked native scalar store: `slots[idx] = Value{tag, bits}`.
+    /// `tag` is a Value discriminant (== the KIND constant for scalars/nil).
+    /// Out-of-bounds falls back to the slot_set helper, whose invariant
+    /// error path reports exactly as before. Store order within the pair is
+    /// free: gc_arena collects only at safepoints, and none can intervene
+    /// in straight-line native code.
+    fn emit_slot_store_scalar(
+        &mut self,
+        b: &mut FunctionBuilder,
+        fx: &FnCtx,
+        idx: CVal,
+        tag: i64,
+        bits: CVal,
+    ) {
+        let (ptr, len) = self.emit_head(b, fx);
+        let ok_bl = b.create_block();
+        let slow_bl = b.create_block();
+        let done_bl = b.create_block();
+        let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, idx, len);
+        b.ins().brif(in_bounds, ok_bl, &[], slow_bl, &[]);
+
+        b.switch_to_block(ok_bl);
+        let off = b.ins().imul_imm(idx, 16);
+        let addr = b.ins().iadd(ptr, off);
+        b.ins().store(MemFlagsData::trusted(), bits, addr, 8);
+        let tag_v = b.ins().iconst(types::I64, tag);
+        b.ins().store(MemFlagsData::trusted(), tag_v, addr, 0);
+        b.ins().jump(done_bl, &[]);
+
+        b.switch_to_block(slow_bl);
+        let kind_v = b.ins().iconst(types::I64, tag);
+        let sf = self.func_ref(b, self.helpers.slot_set);
+        let call = b.ins().call(sf, &[fx.vm, fx.mc, idx, kind_v, bits]);
+        let t = b.inst_results(call)[0];
+        self.tag_check(b, fx, t);
+        b.ins().jump(done_bl, &[]);
+
+        b.switch_to_block(done_bl);
+    }
+
+    /// Bounds-checked native 16-byte slot copy: `slots[dst] = slots[src]`.
+    fn emit_slot_copy(&mut self, b: &mut FunctionBuilder, fx: &FnCtx, dst: CVal, src: CVal) {
+        let (ptr, len) = self.emit_head(b, fx);
+        let ok_bl = b.create_block();
+        let slow_bl = b.create_block();
+        let done_bl = b.create_block();
+        let d_ok = b.ins().icmp(IntCC::UnsignedLessThan, dst, len);
+        let s_ok = b.ins().icmp(IntCC::UnsignedLessThan, src, len);
+        let both = b.ins().band(d_ok, s_ok);
+        b.ins().brif(both, ok_bl, &[], slow_bl, &[]);
+
+        b.switch_to_block(ok_bl);
+        let soff = b.ins().imul_imm(src, 16);
+        let saddr = b.ins().iadd(ptr, soff);
+        let stag = b.ins().load(types::I64, MemFlagsData::trusted(), saddr, 0);
+        let sbits = b.ins().load(types::I64, MemFlagsData::trusted(), saddr, 8);
+        let doff = b.ins().imul_imm(dst, 16);
+        let daddr = b.ins().iadd(ptr, doff);
+        b.ins().store(MemFlagsData::trusted(), sbits, daddr, 8);
+        b.ins().store(MemFlagsData::trusted(), stag, daddr, 0);
+        b.ins().jump(done_bl, &[]);
+
+        b.switch_to_block(slow_bl);
+        let kind_v = b.ins().iconst(types::I64, KIND_SLOT);
+        let sf = self.func_ref(b, self.helpers.slot_set);
+        let call = b.ins().call(sf, &[fx.vm, fx.mc, dst, kind_v, src]);
+        let t = b.inst_results(call)[0];
+        self.tag_check(b, fx, t);
+        b.ins().jump(done_bl, &[]);
+
+        b.switch_to_block(done_bl);
     }
 
     fn abs_slot(&self, b: &mut FunctionBuilder, fx: &FnCtx, window_idx: u32) -> CVal {
@@ -1034,7 +1123,8 @@ impl<'a> Translator<'a> {
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let p = b.block_params(entry).to_vec();
-        let (vm, mc, fuel, depth, epoch, slot_base) = (p[0], p[1], p[2], p[3], p[4], p[5]);
+        let (vm, mc, fuel, depth, epoch, slots, slot_base) =
+            (p[0], p[1], p[2], p[3], p[4], p[5], p[6]);
 
         // Named locals: params first. Object params occupy window slots 1..;
         // their SSA param value already carries the absolute index.
@@ -1051,11 +1141,11 @@ impl<'a> Translator<'a> {
             match pk {
                 AotParam::Scalar(k) => {
                     let var = b.declare_var(kind_type(k));
-                    b.def_var(var, p[6 + i]);
+                    b.def_var(var, p[7 + i]);
                     vars.insert(sym, VarSlot::Scalar(var, k));
                 }
                 AotParam::Obj => {
-                    obj_param_avs.insert(sym, p[6 + i]);
+                    obj_param_avs.insert(sym, p[7 + i]);
                     // B1: a `List`-hinted param is a dispatch-GUARANTEED native
                     // List (List is sealed; the hint only matches the native
                     // class) — and a tag-required param is guaranteed tagged,
@@ -1071,7 +1161,7 @@ impl<'a> Translator<'a> {
                             Some(tag) => DynProof::CollectionOf(tag),
                             None => DynProof::NativeList,
                         };
-                        self.proofs.insert(p[6 + i], proof);
+                        self.proofs.insert(p[7 + i], proof);
                     }
                 }
             }
@@ -1100,6 +1190,7 @@ impl<'a> Translator<'a> {
             fuel,
             depth,
             epoch,
+            slots,
             slot_base,
             exit,
             ret: self.eff_ret,
@@ -2049,7 +2140,11 @@ impl<'a> Translator<'a> {
             .baked
             .get(&ip)
             .copied()
-            .filter(|bk| bk.entry.role == super::AotRole::BlockTemplate);
+            .filter(|bk| bk.entry.role == super::AotRole::BlockTemplate)
+            // The identity guard reads the receiver's SLOT natively, so the
+            // lane must be a slot index by construction (Dyn/SelfRef). A
+            // scalar-lane receiver can never be the baked closure anyway.
+            .filter(|_| matches!(recv, AV::Dyn(_) | AV::SelfRef));
         if let Some(bk) = baked {
             crate::codegen::TOTAL_DIRECT_SITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // The hoisted window: [self, param, block] + the callee's
@@ -2078,38 +2173,68 @@ impl<'a> Translator<'a> {
             let fresh = b.ins().icmp(IntCC::Equal, live, want);
             b.ins().brif(fresh, guard_bl, &[], generic_bl, &[]);
 
-            // 2. fiber gate + block identity (template id) via mini-helper.
+            // 2. block identity, FULLY NATIVE (the guard_block helper was
+            //    the edge's last redundant crossing): load the receiver
+            //    slot's 16 bytes and compare against the baked closure —
+            //    identity implies template. The pointee is pinned in
+            //    aot_baked_roots, so a recycled address cannot alias.
+            //    NO fiber work: compiled frames never survive a park, so
+            //    any resume re-enters through interpreted code and the
+            //    next compiled ENTRY (invoke_tail -> entry_gates) marks the
+            //    fiber before this edge can possibly run — the mark is
+            //    already set, inductively, whenever we are here.
             b.switch_to_block(guard_bl);
-            let btid = b.ins().iconst(types::I64, i64::from(bk.entry.template_id));
-            let gf = self.func_ref(b, self.helpers.guard_block);
-            let gcall = b.ins().call(gf, &[fx.vm, fx.mc, rk, rbits, btid]);
-            let gok = b.inst_results(gcall)[0];
+            let (sptr, slen) = self.emit_head(b, fx);
+            let id_bl = b.create_block();
+            let in_b = b.ins().icmp(IntCC::UnsignedLessThan, rbits, slen);
+            b.ins().brif(in_b, id_bl, &[], generic_bl, &[]);
+            b.switch_to_block(id_bl);
+            let roff = b.ins().imul_imm(rbits, 16);
+            let raddr = b.ins().iadd(sptr, roff);
+            let rtag = b.ins().load(types::I64, MemFlagsData::trusted(), raddr, 0);
+            let rpay = b.ins().load(types::I64, MemFlagsData::trusted(), raddr, 8);
+            let tag_ok = b
+                .ins()
+                .icmp_imm(IntCC::Equal, rtag, i64::from(bk.recv_kind));
+            let want = b.ins().iconst(types::I64, bk.recv_ptr as i64);
+            let pay_ok = b.ins().icmp(IntCC::Equal, rpay, want);
+            let gok = b.ins().band(tag_ok, pay_ok);
             b.ins().brif(gok, direct_bl, &[], generic_bl, &[]);
 
             // 3. the direct edge.
             b.switch_to_block(direct_bl);
-            let sf = self.func_ref(b, self.helpers.slot_set);
-            // param into the hoisted window (slot_set decodes our lanes).
+            // A3: the window writes are NATIVE stores (the whole point —
+            // the slot_set version of this edge measured net-zero; see
+            // notes). Param store shape is known statically from the AV.
             let w_param_abs = self.abs_slot(b, fx, w_param);
-            let pcall = b.ins().call(sf, &[fx.vm, fx.mc, w_param_abs, ak, abits]);
-            let ptag = b.inst_results(pcall)[0];
-            self.tag_check(b, fx, ptag);
+            match arg {
+                AV::C(_, AotKind::Int) => {
+                    self.emit_slot_store_scalar(b, fx, w_param_abs, KIND_INT, abits)
+                }
+                AV::C(_, AotKind::Double) => {
+                    self.emit_slot_store_scalar(b, fx, w_param_abs, KIND_DOUBLE, abits)
+                }
+                AV::C(_, AotKind::Bool) => {
+                    self.emit_slot_store_scalar(b, fx, w_param_abs, KIND_BOOL, abits)
+                }
+                AV::Nil => {
+                    let zero = b.ins().iconst(types::I64, 0);
+                    self.emit_slot_store_scalar(b, fx, w_param_abs, KIND_NIL, zero)
+                }
+                // Dyn/SelfRef lanes carry a source slot index in `abits`.
+                AV::Dyn(_) | AV::SelfRef => self.emit_slot_copy(b, fx, w_param_abs, abits),
+            }
             // The block object into slot 2: capture reads (`env_get`) go
-            // through it. Same value the guard just verified — its lanes
-            // are already encoded.
+            // through it. The guard verified this receiver; its lane is a
+            // slot index (blocks are heap values).
             let w_block_abs = self.abs_slot(b, fx, w_block);
-            let bcall = b.ins().call(sf, &[fx.vm, fx.mc, w_block_abs, rk, rbits]);
-            let btag = b.inst_results(bcall)[0];
-            self.tag_check(b, fx, btag);
+            self.emit_slot_copy(b, fx, w_block_abs, rbits);
             // F2: scratch slots are NIL at invocation entry.
             if !w_scratch.is_empty() {
-                let nil_kind = b.ins().iconst(types::I64, KIND_NIL);
                 let zero = b.ins().iconst(types::I64, 0);
                 for &wsl in &w_scratch {
                     let abs = self.abs_slot(b, fx, wsl);
-                    let scall = b.ins().call(sf, &[fx.vm, fx.mc, abs, nil_kind, zero]);
-                    let stag = b.inst_results(scall)[0];
-                    self.tag_check(b, fx, stag);
+                    self.emit_slot_store_scalar(b, fx, abs, KIND_NIL, zero);
                 }
             }
             // the raw call: lanes = [param slot idx] in bits_buf lane 0.
@@ -2119,8 +2244,8 @@ impl<'a> Translator<'a> {
             let raw_sig = {
                 let ptr = self.module.target_config().pointer_type();
                 let mut sig = self.module.make_signature();
-                for _ in 0..5 {
-                    sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch
+                for _ in 0..6 {
+                    sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch, slots
                 }
                 sig.params.push(AbiParam::new(types::I64)); // slot_base
                 sig.params.push(AbiParam::new(ptr)); // args
@@ -2135,19 +2260,17 @@ impl<'a> Translator<'a> {
                 raw_sig,
                 fnaddr,
                 &[
-                    fx.vm, fx.mc, fx.fuel, fx.depth, fx.epoch, w_base_abs, ba2, ret_addr,
+                    fx.vm, fx.mc, fx.fuel, fx.depth, fx.epoch, fx.slots, w_base_abs, ba2, ret_addr,
                 ],
             );
             let dtag = b.inst_results(dcall)[0];
             self.tag_check(b, fx, dtag);
             // result: blocks return via slot (Obj eff-ret) — the raw ret
-            // lane is the result's absolute slot index; copy slot-to-slot
-            // into this site's out slot.
+            // lane is the result's absolute slot index; a NATIVE 16-byte
+            // slot copy closes the site's Dyn contract. The head is fresh:
+            // the callee's growth helpers synced at their exits.
             let retv = b.ins().stack_load(types::I64, fx.direct_ret, 0);
-            let slotk = b.ins().iconst(types::I64, KIND_SLOT);
-            let rcall = b.ins().call(sf, &[fx.vm, fx.mc, out_idx, slotk, retv]);
-            let rtag = b.inst_results(rcall)[0];
-            self.tag_check(b, fx, rtag);
+            self.emit_slot_copy(b, fx, out_idx, retv);
             b.ins().jump(merge_bl, &[]);
 
             // 4. guard miss: exactly today's generic seam.
@@ -2909,8 +3032,8 @@ impl<'a> Translator<'a> {
             let raw_sig = {
                 let ptr = self.module.target_config().pointer_type();
                 let mut sig = self.module.make_signature();
-                for _ in 0..5 {
-                    sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch
+                for _ in 0..6 {
+                    sig.params.push(AbiParam::new(ptr)); // vm, mc, fuel, depth, epoch, slots
                 }
                 sig.params.push(AbiParam::new(types::I64)); // slot_base
                 sig.params.push(AbiParam::new(ptr)); // args
@@ -2931,6 +3054,7 @@ impl<'a> Translator<'a> {
                     fx.fuel,
                     fx.depth,
                     fx.epoch,
+                    fx.slots,
                     poison_base,
                     ba,
                     ret_addr,
@@ -3038,7 +3162,15 @@ impl<'a> Translator<'a> {
         {
             // Direct call. Scalar-pure callee: args must be exact scalars.
             let mut ok = true;
-            let mut call_args = vec![fx.vm, fx.mc, fx.fuel, fx.depth, fx.epoch, fx.slot_base];
+            let mut call_args = vec![
+                fx.vm,
+                fx.mc,
+                fx.fuel,
+                fx.depth,
+                fx.epoch,
+                fx.slots,
+                fx.slot_base,
+            ];
             for (a, pk) in args.iter().zip(psig.iter()) {
                 match (a, pk) {
                     (AV::C(v, k), AotParam::Scalar(want)) if k == want => call_args.push(*v),

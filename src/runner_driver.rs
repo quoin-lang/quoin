@@ -550,9 +550,11 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
                 let work: Vec<_> = tids
                     .into_iter()
                     .map(|tid| {
-                        let baked = crate::codegen::retained_sites_for(tid)
+                        let (baked, roots) = crate::codegen::retained_sites_for(tid)
                             .map(|sites| vm.bake_w0_sites(&sites, threshold))
                             .unwrap_or_default();
+                        // Pin identity-baked closures for the code's life.
+                        vm.aot_baked_roots.extend(roots);
                         (tid, baked)
                     })
                     .collect();

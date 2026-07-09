@@ -55,12 +55,23 @@ unsafe fn vm_mc<'a>(
     vm: *mut c_void,
     mc: *const c_void,
 ) -> (&'a mut VmState<'static>, &'a Mutation<'static>) {
-    unsafe {
+    let pair = unsafe {
         (
             &mut *(vm as *mut VmState<'static>),
             &*(mc as *const Mutation<'static>),
         )
-    }
+    };
+    // A3 canary (debug): a helper entry means NATIVE CODE was just
+    // executing — the lazy slot head must match truth at every such
+    // moment, or some growth helper is missing its exit-sync (the head is
+    // allowed to go stale only INSIDE a helper's own Rust mutations, which
+    // read the vec directly). This chokepoint sweeps the whole corpus.
+    #[cfg(debug_assertions)]
+    debug_assert!(
+        pair.0.stack.head_is_fresh(),
+        "slot head stale at helper entry — a growth helper is missing its exit-sync"
+    );
+    pair
 }
 
 fn decode<'gc>(vm: &VmState<'gc>, kind: i64, bits: i64) -> Value<'gc> {
@@ -365,7 +376,7 @@ pub(super) unsafe extern "C" fn env_set(
 // convention, AOT_ARCH §9) — safe across the compiled/interpreted block
 // invocations below, which the lint's span heuristic can't see.
 #[allow(no_gc_across_yield)]
-pub(super) unsafe extern "C" fn block_call(
+unsafe extern "C" fn block_call_impl(
     vm: *mut c_void,
     mc: *const c_void,
     tid: i64,
@@ -433,7 +444,7 @@ pub(super) unsafe extern "C" fn block_call(
             None => {
                 let e = super::block_entry_for(vm, btid);
                 if let (Some(e), true) = (e, site != u32::MAX) {
-                    vm.aot_block_site_fill(site as usize, e);
+                    vm.aot_block_site_fill(site as usize, e, recv);
                 }
                 e
             }
@@ -481,7 +492,7 @@ pub(super) unsafe extern "C" fn plain_new_check(
 /// the receiver class and the n field values, push `[class, v1..vn]` as a
 /// rooted stack window (the A2d pattern — the init chain can park), and run
 /// the interpreter's own core; the finished object lands in `out_idx`.
-pub(super) unsafe extern "C" fn new_with_fields(
+unsafe extern "C" fn new_with_fields_impl(
     vm: *mut c_void,
     mc: *const c_void,
     names: *const Symbol,
@@ -530,7 +541,7 @@ pub(super) unsafe extern "C" fn new_with_fields(
 /// `vm.aot.home_frame_id` and addressable through `vm.aot.frame_marks`
 /// (a `^^`-free nest never consults `enclosing_method_id`, and its invoking
 /// frame skips the S5 bookkeeping entirely, so the field would be stale).
-pub(super) unsafe extern "C" fn make_closure(
+unsafe extern "C" fn make_closure_impl(
     vm: *mut c_void,
     mc: *const c_void,
     tmpl: *const std::sync::Arc<crate::instruction::StaticBlock>,
@@ -539,6 +550,14 @@ pub(super) unsafe extern "C" fn make_closure(
 ) -> u8 {
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
     let tmpl = unsafe { &*tmpl };
+    // Constant-closure promotion (shared with the interpreter's
+    // materialize_constant): a CLOSED template reuses one per-VM closure.
+    if let Some(tid) = tmpl.template_id
+        && crate::instruction::template_is_closed(tmpl)
+        && let Some(&v) = vm.aot_closure_cache.get(&tid)
+    {
+        return slot_write(vm, out_idx, v);
+    }
     // Chain the snapshot to the invoking frame's enclosing environment, so a
     // nested materialized closure's free names resolve through the FULL
     // lexical chain, exactly as interpreted (the webapp `path` lesson).
@@ -558,6 +577,11 @@ pub(super) unsafe extern "C" fn make_closure(
             inline_cache,
         },
     );
+    if let Some(tid) = tmpl.template_id
+        && crate::instruction::template_is_closed(tmpl)
+    {
+        vm.aot_closure_cache.insert(tid, v);
+    }
     slot_write(vm, out_idx, v)
 }
 
@@ -751,7 +775,7 @@ pub(super) unsafe extern "C" fn string_const(
 /// re-entry every native uses, with its depth guard, suspension safety, and
 /// thrown-value transparency. The result lands in `out_idx`.
 #[allow(clippy::too_many_arguments)]
-pub(super) unsafe extern "C" fn outcall(
+unsafe extern "C" fn outcall_impl(
     vm: *mut c_void,
     mc: *const c_void,
     tid: i64,
@@ -998,4 +1022,95 @@ pub(super) unsafe extern "C" fn load_global(
     let v = vm.globals.borrow().get(name).copied().unwrap_or(Value::Nil);
     let _ = mc;
     slot_write(vm, out_idx, v)
+}
+// ============================================================
+// A3 exit-sync wrappers (docs/WINDOW_ARENA_ARCH.md §5): these helpers can
+// GROW vm.stack (their own window pushes, or transitively via interpreted
+// dispatch), so the lazy slot head must be refreshed before control
+// returns to native code holding future slot reads. `slot_write`'s debug
+// canary catches any helper missing from this set across the corpus.
+// ============================================================
+
+macro_rules! sync_exit {
+    ($vm:expr, $mc:expr, $r:expr) => {{
+        let r = $r;
+        // Raw deref, NOT vm_mc: the canary in vm_mc asserts freshness at
+        // helper entry, and this is precisely the moment we are about to
+        // RESTORE freshness.
+        let vm = unsafe { &mut *($vm as *mut VmState<'static>) };
+        vm.stack.sync_head();
+        r
+    }};
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe extern "C" fn outcall(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tid: i64,
+    ip_site: i64,
+    bc_len: i64,
+    recv_kind: i64,
+    recv_bits: i64,
+    selector: *const Symbol,
+    argc: i64,
+    kinds: *const i64,
+    bits: *const i64,
+    out_idx: i64,
+) -> u8 {
+    sync_exit!(vm, mc, unsafe {
+        outcall_impl(
+            vm, mc, tid, ip_site, bc_len, recv_kind, recv_bits, selector, argc, kinds, bits,
+            out_idx,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe extern "C" fn block_call(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tid: i64,
+    ip_site: i64,
+    bc_len: i64,
+    recv_kind: i64,
+    recv_bits: i64,
+    arg_kind: i64,
+    arg_bits: i64,
+    out_idx: i64,
+) -> u8 {
+    sync_exit!(vm, mc, unsafe {
+        block_call_impl(
+            vm, mc, tid, ip_site, bc_len, recv_kind, recv_bits, arg_kind, arg_bits, out_idx,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe extern "C" fn new_with_fields(
+    vm: *mut c_void,
+    mc: *const c_void,
+    names: *const Symbol,
+    n: i64,
+    recv_kind: i64,
+    recv_bits: i64,
+    kinds: *const i64,
+    bits: *const i64,
+    out_idx: i64,
+) -> u8 {
+    sync_exit!(vm, mc, unsafe {
+        new_with_fields_impl(vm, mc, names, n, recv_kind, recv_bits, kinds, bits, out_idx)
+    })
+}
+
+pub(super) unsafe extern "C" fn make_closure(
+    vm: *mut c_void,
+    mc: *const c_void,
+    tmpl: *const std::sync::Arc<crate::instruction::StaticBlock>,
+    out_idx: i64,
+    want_home: i64,
+) -> u8 {
+    sync_exit!(vm, mc, unsafe {
+        make_closure_impl(vm, mc, tmpl, out_idx, want_home)
+    })
 }

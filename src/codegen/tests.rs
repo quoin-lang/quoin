@@ -35,6 +35,13 @@ fn compile_and_register(src: &str) -> Vec<(String, u32)> {
 }
 
 static EPOCH_FOR_TESTS: u64 = 1;
+thread_local! {
+    static SLOTS_FOR_TESTS: std::cell::Cell<*mut crate::value::SlotHead> =
+        std::cell::Cell::new(Box::leak(Box::new(crate::value::SlotHead {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        })));
+}
 
 fn entry_for(ids: &[(String, u32)], selector: &str) -> &'static AotEntry {
     let (_, tid) = ids
@@ -60,6 +67,7 @@ fn run_raw(entry: &AotEntry, args: &[i64]) -> Result<i64, u8> {
             &mut fuel,
             &mut depth,
             &EPOCH_FOR_TESTS,
+            SLOTS_FOR_TESTS.with(|s| s.get()),
             0,
             args.as_ptr(),
             &mut ret,

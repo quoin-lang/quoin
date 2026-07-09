@@ -1276,6 +1276,16 @@ impl<'gc> SlotStack<'gc> {
         &raw mut self.head
     }
 
+    /// The A5 canary: every extern helper that can grow the stack must
+    /// sync before returning into native code (docs/WINDOW_ARENA_ARCH.md
+    /// §5). `slot_write` asserts this in debug builds on every compiled
+    /// slot write, so a missed exit-sync fails the corpus loudly instead
+    /// of reading a reallocated-away buffer.
+    #[cfg(debug_assertions)]
+    pub fn head_is_fresh(&self) -> bool {
+        self.head.ptr as *const Value<'gc> == self.vec.as_ptr() && self.head.len == self.vec.len()
+    }
+
     /// Task-switch boundary (the scheduler parks a task's stack as a plain
     /// Vec): O(1) moves either way, head re-synced on entry.
     pub fn from_vec(vec: Vec<Value<'gc>>) -> Self {
