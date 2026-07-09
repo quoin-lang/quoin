@@ -128,7 +128,9 @@ statement.
   `Block#name` and `Method#selector` (alias `Method#name`) return symbols.
 - **Lists** are space-separated (no commas): `#(1 2 3)`. **Maps** pair `key: value`
   and are string-keyed: `#{ 'foo': 100 'bar': 200 }`. **Sets** are space-separated
-  and hold unique elements (deduplicated by `==:`): `#<1 2 3>`, empty `#<>`.
+  and hold unique elements (deduplicated by `hash` + `==:` — a user class that
+  overrides `==:` must also override `hash`, or its instances dedup by identity;
+  mirrors the any-key Map contract): `#<1 2 3>`, empty `#<>`.
 - **Ranges** are covered in §6 and Part VI; note they are **half-open** (the end is
   excluded).
 

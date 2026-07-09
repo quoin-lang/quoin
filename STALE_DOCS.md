@@ -1,5 +1,10 @@
 # Stale docs (implementation ≠ documentation)
 
+> **RESOLUTION (branch `fix/bug-hunt`):** #1 (truthiness scope), #2 (`%{}` self/field
+> scope), #4 (set dedup by hash+==:) FIXED in docs/language; #3 (`\xXXXX`) resolved by
+> IMPLEMENTING the escape (BUGS.md F8), so the doc is now accurate as written.
+
+
 Mismatches between `docs/language/` and the current implementation found during a bug-hunt
 session (worktree @ main `1535e7d`). These are *documentation* lag, not necessarily bugs —
 though a couple are borderline and cross-referenced to the bug report. Fix the doc (or decide

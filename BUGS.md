@@ -1,5 +1,14 @@
 # Quoin bug-hunt findings
 
+> **RESOLUTION (branch `fix/bug-hunt`):** 13 of the 14 numbered findings are FIXED
+> with code (F1–F10, F12, F13, F14); F11 (negative-number list literals) is a
+> language-grammar decision left OPEN and documented as a gotcha meanwhile. The
+> parser panic family (F2/F4/F6/F7/F8) + file-mode CLI hygiene landed as one commit;
+> the rest are individually committed. Secondary notes: file-mode panic fixed;
+> dangling-`^^` typed error and guarded-variant redefinition left as recorded design
+> questions. See STALE_DOCS.md for the doc-lag resolutions.
+
+
 Worktree: `bughunt-wt` @ main `1535e7d`. Binary: `target/release/qn`.
 Differential axis: `QN_AOT=0` (interp) vs default / `QN_AOT_WARM=1` (AOT). Suite baseline: 1684 passes / 0 fail.
 Method: 6 parallel black-box hunters (differential interp-vs-AOT) + white-box review of the compiler/devirt/codegen. All findings below are reproduced and root-caused; nothing was fixed.

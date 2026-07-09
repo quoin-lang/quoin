@@ -34,7 +34,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 `Method#selector`/`name` return symbols.
 
 **Set** (`src/runtime/set.rs`, algebra in `qnlib/core/02-iterate.qn`) — literal
-`#< … >`, unique by `==:`, insertion-ordered; `count`, `add:`, `remove:`,
+`#< … >`, unique by `hash`+`==:` (override both for value-equality), insertion-ordered; `count`, `add:`, `remove:`,
 `contains?:`, `each:`, `s`, `==:` (order-independent), plus `union:`,
 `intersection:`, `difference:`, `subset?:`, `superset?:` and all `Iterate`
 combinators. Membership is O(n) — a simple reference set, not hashed.
@@ -66,7 +66,7 @@ exclusive end). Plus `Iterate` combinators.
 >   - a bare `%` consumes the next argument value;
 >   - `%1`, `%2`, … index (1-based) into a **list** argument;
 >   - `%a`, `%b`, … (single letters) key into a **map** argument.
-> - **`mod` (prefix `%`)** — `%'…%{expr}…'` is inline interpolation: each `%{expr}` is evaluated **in the surrounding lexical scope** and stringified with `.s`.
+> - **`mod` (prefix `%`)** — `%'…%{expr}…'` is inline interpolation: each `%{expr}` is evaluated over the surrounding **locals and parameters** and stringified with `.s`. Note: `self`, a leading-dot send (`%{.name}`), and instance fields (`%{@name}`) are **not** in scope inside `%{…}` — they resolve as `nil`/`MessageNotUnderstood`. Bind what you need to a local first.
 > - Values are converted with `.s` before insertion.
 > - ANSI strings are the `#ANSI'…'` literal (a user string mixing in `ActAsUserString`); `%`-formatting works on them too.
 
