@@ -18,6 +18,21 @@ Rust, with a tracing garbage collector and stackful coroutines.
 `qn` is a single self-contained binary. The shipping standard library is compiled into it, so it
 runs from any directory with nothing else installed.
 
+### Changed
+
+- **Reading a name bound to nothing now raises `NameError`.** It used to evaluate to `nil`, so a
+  misspelling propagated silently — even though *assigning* to an undeclared local was already a
+  compile error. The two halves of the strict `var`/`let` rule now agree.
+
+  The check is at run time, not compile time, and has to be: `use` executes at run time, so a
+  unit cannot see the globals its own `use` will define, and a method may name a class defined
+  further down the file. By the time the read runs, everything is bound.
+
+  **Migration.** To ask whether a class exists without reading it, use `Class.exists?:#Name`
+  (`Class.exists?:#'[ADBC]Database'` for a namespaced one; a String works too). The old idiom —
+  reading the name and asking the `nil` whether it was `defined?` — no longer works. `defined?`
+  itself is unchanged for testing whether a *value* is `nil`.
+
 ### Language
 
 - Objects, classes, and single inheritance, with instance variables (`@name`), class-side methods
@@ -32,6 +47,7 @@ runs from any directory with nothing else installed.
   expressions. String interpolation is `%'total: %{a + b}'`. Comments start with `"`.
 - Keyword-message selectors, including variadic ones.
 - Errors are objects: typed `Error` subclasses, raised and caught by type, with multi-catch.
+- `Class.exists?:#Name` asks whether a class is defined, without reading the name.
 - `use` loads files explicitly — script-relative (`self:`), by glob, or by package.
 - Fibers, generators, and lazy iteration; `^>` yields a value from a fiber.
 

@@ -81,6 +81,10 @@ Error <- TypeError <- {};
 Error <- ArgumentError <- {};
 Error <- MessageNotUnderstood <- {};
 Error <- AmbiguousMethodError <- {};
+"* Reading a name bound to nothing (`typo`). Assigning to an undeclared local is a
+"* compile error; this is the other half of that rule. To ask whether a class exists
+"* without reading it, use `Class.exists?:#Name`.
+Error <- NameError <- {};
 Error <- ArithmeticError <- {};
 "* Raised by an out-of-bounds index (e.g. `List.at:put:`, `Bytes.at:`). The VM
 "* populates `index` (the offending index) and `length` (the collection's size) so a

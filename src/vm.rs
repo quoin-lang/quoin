@@ -3155,6 +3155,7 @@ impl<'gc> VmState<'gc> {
             QuoinError::ValueError(msg) => self.make_error(mc, "ValueError", msg, None),
             QuoinError::ParseError(msg) => self.make_error(mc, "ParseError", msg, None),
             QuoinError::ClassError(msg) => self.make_error(mc, "ClassError", msg, None),
+            QuoinError::NameError(msg) => self.make_error(mc, "NameError", msg, None),
             QuoinError::StackExhausted(msg) => self.make_error(mc, "StackError", msg, None),
             QuoinError::ExtensionError(msg) => self.make_error(mc, "Error", msg, None),
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
@@ -5207,12 +5208,18 @@ impl<'gc> VmState<'gc> {
                 ip += 1;
             }
             Instruction::LoadGlobal(name) => {
-                let val = self
-                    .globals
-                    .borrow()
-                    .get(name)
-                    .copied()
-                    .unwrap_or_else(|| self.new_nil(mc));
+                // A name bound to nothing is an error, not `nil`. Reading it used to yield
+                // `nil`, so a typo propagated silently even though *assigning* to an
+                // undeclared local is a compile error. A compile-time check is impossible
+                // here — `use` executes at run time, so a unit cannot see the globals its
+                // own `use` will define — but by the time this instruction runs, every
+                // `use` has run and every class is defined. Ask whether a class exists with
+                // `Class.exists?:#Name`.
+                let Some(val) = self.globals.borrow().get(name).copied() else {
+                    return Err(QuoinError::NameError(format!(
+                        "undefined name `{name}` — nothing with that name is in scope"
+                    )));
+                };
                 self.push(val);
                 ip += 1;
             }

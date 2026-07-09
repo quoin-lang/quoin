@@ -144,6 +144,12 @@ pub enum QuoinError {
     /// Quoin `ClassError` so `catch:{|e:Error|}` catches it (BUGS.md
     /// Finding 12). Message-only.
     ClassError(String),
+    /// A read of a name that is bound to nothing — `typo` where nothing named `typo`
+    /// was ever declared. The read used to evaluate to `nil`, so a misspelling
+    /// propagated silently while *assigning* to an undeclared local was rejected at
+    /// compile time; the two halves of the strict `var`/`let` rule now agree.
+    /// Ask whether a class exists with `Class.exists?:#Name`, not by reading it.
+    NameError(String),
     /// A recoverable error an out-of-process extension raised from a call (e.g. a SQL error from
     /// the `adbc` driver) — the extension stays alive. Mapped to a catchable Quoin `Error` object
     /// at the `catch:` boundary. Distinct from the extension *crashing*, which is an `Io` of kind
@@ -270,6 +276,7 @@ impl fmt::Display for QuoinError {
             QuoinError::ValueError(msg) => write!(f, "{}", msg),
             QuoinError::ParseError(msg) => write!(f, "{}", msg),
             QuoinError::ClassError(msg) => write!(f, "{}", msg),
+            QuoinError::NameError(msg) => write!(f, "{}", msg),
             QuoinError::ExtensionError(msg) => write!(f, "{}", msg),
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),

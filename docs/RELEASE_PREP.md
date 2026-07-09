@@ -201,24 +201,30 @@ strict `var`/`let` and no longer compile.
 Each of these was found by checking a claim against the binary instead of trusting
 it. None is fixed.
 
-- [ ] **A compile error in a script file panics.** `qn app.qn` on a semantic error
-  aborts with `thread 'main' panicked at src/runner.rs:1267` and **exit 101**,
-  plus a `RUST_BACKTRACE` note. `qn -e` and `qn check` report the same error
-  cleanly and exit 1; the run path is the outlier, and it is the common one. The
-  message itself is good — the delivery is a `panic!` inside `arena.mutate_root`
-  (three sites in `src/runner.rs`).
+- [x] **A compile error in a script file panics.** FIXED (`0e467c7`). The three
+  `panic!("Compilation error: …")` sites sat inside `arena.mutate_root`, whose
+  closure returned `()`; they now return `Result<(), String>`. All four entry
+  points (`qn FILE`, `-e`, `check`, `benchmark`) print `Compile error: …` and
+  exit 1. Tests in `tests/exit_code.rs` assert the message, the exit code, and
+  the *absence* of `panicked` / `RUST_BACKTRACE`.
 
-  This fires on exactly the two mistakes the strict-declaration rule invites:
-  `typo = 5` (never declared) and reassigning a `let`. Anyone hitting the breaking
-  change from PR #31 meets a Rust panic. Fix: return the error out of
-  `mutate_root` and route it through the same reporter `-e` uses.
+  Residue: compile errors carry no line/column — `compile_program` returns a bare
+  `String`, unlike parse errors and checker diagnostics, which have spans.
 
-- [ ] **Reading an undeclared identifier silently yields `nil`.** `typo == nil` is
-  `true` in a script that never mentions `typo`; there is no runtime error and
-  `qn check` emits no diagnostic. Assignment to an undeclared local *is* rejected,
-  so the two halves of the strict-declaration rule disagree. A typo in a read
-  position becomes `nil` and propagates. Decide: compile error, `qn check`
-  warning, or documented Smalltalk-ish behavior.
+- [x] **Reading an undeclared identifier silently yields `nil`.** FIXED — it now
+  raises a catchable `NameError`, in both the interpreter (`src/vm.rs`) and
+  compiled code (`load_global` in `src/codegen/helpers.rs`), verified to agree.
+
+  A compile-time check is impossible: `use` executes at run time, so a unit cannot
+  see the globals its own `use` will define, and a method may name a class defined
+  later in the file. Both would be false positives. At run time everything is bound.
+
+  Measured before changing anything: instrumenting every missing-global read showed
+  **exactly one** across the whole 1862-assertion suite, and zero in the prelude and
+  the benchmarks. That one was `TSCNC_ReqBad.defined?` — the "is this class defined?"
+  idiom, which only worked *because* a missing name read as nil. It is replaced by
+  `Class.exists?:#Name` (`src/runtime/class.rs`), which asks the question directly;
+  `Object#defined?` is unchanged for nil-testing a value. Tests: `qnlib/tests/60-names.qn`.
 
 - [ ] **No file-write API.** `[IO]File` opens a file for reading and metadata
   (`open:`, `fullpath`, `name`, `ext`, `is_file?`) and yields read streams; the
