@@ -132,7 +132,13 @@ strict `var`/`let` and no longer compile.
 
 ## Tier 4 — packaging, CI, docs triage
 
-- [ ] **Extension socket files must always be cleaned up on process exit.**
+- [x] **Extension socket files must always be cleaned up on process exit.** FIXED
+  (`f4f9c91`) by the preferred fix below: both SDKs now `unlink` the path
+  immediately after `accept()`. Tests in `tests/extension_socket.rs` assert the
+  path is gone while the extension is live and connected, and that SIGKILL on
+  the host strands nothing; they were verified to fail with the two unlinks
+  reverted. The host also gained the two missing `remove_file` calls on its
+  connect-failure arms. Original analysis retained:
   `/tmp/quoin-ext-<pid>-<n>.sock` litters `/tmp` — **63 stale files** on the dev
   box, dating back four days.
 
@@ -163,20 +169,63 @@ strict `var`/`let` and no longer compile.
   ("Extension socket files leak on abnormal *host* exit"), which assumed a sweep
   or a process-scoped temp dir was the only option.
 
-- [ ] **CI tests only the root package.** The root `Cargo.toml` is both a
-  `[package]` and a `[workspace]`, so CI's `cargo test` (and a bare
-  `cargo nextest run`) silently skips **132 tests** in `quoin-syntax`,
-  `quoin-fmt`, `quoin-ext` and `quoin-ext-proto` — 429 run of 561. The `cargo nt`
-  alias now passes `--workspace` (excluding the two dylint crates, which need
-  nightly `rustc-private`); CI must do the same. Also: `cargo run -- test` in CI
-  needs the `qnlib/tests` argument since `qn test [DIR]` landed.
-- [ ] CI: macOS runner, `cargo fmt --check` + clippy, doc-example harness,
-  dependency caching, build `crates/adbc`. Swap `cargo test` for
-  `cargo nextest run` (see below) — ~4× less wall time.
-- [ ] Release workflow producing binaries (macOS arm64 + Linux x86_64).
-- [ ] `CHANGELOG.md`.
-- [ ] Status-stamp the `docs/*_ARCH.md` files (some say "not built" for shipped
-  work — e.g. DEBUGGER_ARCH — and vice versa); keep them out of user-facing nav.
+- [x] **CI tests only the root package.** FIXED (`0c02adb`): the workflow now
+  passes `--workspace --exclude no_gc_across_yield --exclude no_borrow_across_yield`
+  to both `build` and `test`. Measured at the fix: `cargo test` ran **453 of 585**
+  tests and reported green; `--workspace` runs all 585. The 132 it skipped were
+  all of `quoin-syntax`, `quoin-fmt`, `quoin-ext` and `quoin-ext-proto` —
+  including every parser test written for the `#(-1 -2)` fix.
+- [ ] **DEFERRED until the repo moves org.** CI: macOS runner, `cargo fmt --check`
+  + clippy, doc-example harness, dependency caching, build `crates/adbc`. Swap
+  `cargo test` for `cargo nextest run` (see below) — ~4× less wall time.
+- [ ] **DEFERRED until the repo moves org.** Release workflow producing binaries
+  (macOS arm64 + Linux x86_64). Whenever it is written: it must smoke-test the
+  built binary **from outside the source tree** (`cd $(mktemp -d) && qn -e …`),
+  because that is the only place `QUOIN_STDLIB` is unset and the embedded stdlib
+  is actually exercised. Prefer the runner's `gh` CLI over a third-party action so
+  the org move costs nothing. `ubuntu-22.04` for a glibc old enough to be useful.
+- [x] `CHANGELOG.md` (`55bade1`). Heading is dated at tag time.
+- [x] Status-stamp the docs (`bfd59ca`). Every file under `docs/` now opens with a
+  Status line from a fixed vocabulary, verified against the tree rather than from
+  memory, and `docs/README.md` splits the user-facing reference from the internal
+  design notes. Five docs made **false** claims — `DEBUGGER_ARCH` ("No debugger
+  code exists yet"), `EXT_PACKAGING` ("not built"), `DIRECT_CALLS_ARCH` and
+  `WINDOW_ARENA_ARCH` ("no slices implemented"), `TYPED_DEVIRT_ARCH` ("before any
+  VM code is written"). Three more had a lead sentence lagging their own body.
+  Nothing claimed shipped for work that was not built. `ENV_FLAGS.md` claimed to
+  list "every environment variable the VM reads" and omitted six, including the
+  user-facing `QUOIN_STDLIB` and `QUOIN_PATH`.
+
+## Tier 4a — found while writing the release notes (2026-07-09)
+
+Each of these was found by checking a claim against the binary instead of trusting
+it. None is fixed.
+
+- [ ] **A compile error in a script file panics.** `qn app.qn` on a semantic error
+  aborts with `thread 'main' panicked at src/runner.rs:1267` and **exit 101**,
+  plus a `RUST_BACKTRACE` note. `qn -e` and `qn check` report the same error
+  cleanly and exit 1; the run path is the outlier, and it is the common one. The
+  message itself is good — the delivery is a `panic!` inside `arena.mutate_root`
+  (three sites in `src/runner.rs`).
+
+  This fires on exactly the two mistakes the strict-declaration rule invites:
+  `typo = 5` (never declared) and reassigning a `let`. Anyone hitting the breaking
+  change from PR #31 meets a Rust panic. Fix: return the error out of
+  `mutate_root` and route it through the same reporter `-e` uses.
+
+- [ ] **Reading an undeclared identifier silently yields `nil`.** `typo == nil` is
+  `true` in a script that never mentions `typo`; there is no runtime error and
+  `qn check` emits no diagnostic. Assignment to an undeclared local *is* rejected,
+  so the two halves of the strict-declaration rule disagree. A typo in a read
+  position becomes `nil` and propagates. Decide: compile error, `qn check`
+  warning, or documented Smalltalk-ish behavior.
+
+- [ ] **No file-write API.** `[IO]File` opens a file for reading and metadata
+  (`open:`, `fullpath`, `name`, `ext`, `is_file?`) and yields read streams; the
+  only writable handles are stdout and stderr. A Quoin program cannot create or
+  write a file. Verified by probe and by the absence of any writer in `qnlib/`.
+  This is a bigger "first real script" gap than anything in Tier 3 — a filter can
+  read stdin and print, but it cannot save its output.
 
 ---
 
