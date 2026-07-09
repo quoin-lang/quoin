@@ -19,6 +19,7 @@ issues re-entrant host-ops (:meth:`Host.make_string`, :meth:`Host.call_method`,
 """
 
 import decimal
+import os
 import socket
 import struct
 
@@ -435,6 +436,13 @@ def serve(path, handler):
     server.listen(1)
     try:
         conn, _ = server.accept()
+        # Unlink once the host is connected: the established connection is unaffected, the
+        # protocol never reconnects, and this is the only cleanup that survives a signal death
+        # of either process. Mirrors `serve` in the Rust SDK (crates/quoin-ext/src/lib.rs).
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
         try:
             while True:
                 frame = read_frame(conn)

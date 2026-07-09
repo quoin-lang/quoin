@@ -1247,6 +1247,11 @@ fn spawn_and_connect<'gc>(
 
     // The child binds the socket asynchronously after exec, so retry the connect briefly until it's
     // listening (each attempt parks the fiber).
+    //
+    // Both SDKs unlink the path as soon as they accept, so a healthy extension leaves nothing
+    // behind. The failure arms below still remove it: a child that binds and then dies before it
+    // can accept -- or a third-party SDK that never unlinks -- would otherwise strand the file,
+    // and we are the last party that knows the path.
     let mut attempts = 0u32;
     let id = loop {
         match vm.await_io(IoRequest::ConnectUnix {
@@ -1259,10 +1264,12 @@ fn spawn_and_connect<'gc>(
             }
             IoResult::Err(e) => {
                 let _ = child.kill();
+                let _ = std::fs::remove_file(&sock_path);
                 return Err(QuoinError::from_io_error(&e));
             }
             other => {
                 let _ = child.kill();
+                let _ = std::fs::remove_file(&sock_path);
                 return Err(QuoinError::Other(format!(
                     "Extension: unexpected connect result {other:?}"
                 )));
