@@ -115,14 +115,50 @@ strict `var`/`let` and no longer compile.
 
 ## Tier 3 — "first real script" stdlib gaps
 
-- [ ] `[IO]Stdin` (line/byte reads — can't write a filter today)
-- [ ] `[OS]Env`
-- [ ] `Path` (join/dirname/basename/…)
-- [ ] `Runtime.exit:`
+- [ ] `[IO]Stdin` (line/byte reads — can't write a filter today). Planned as a
+  `blocking::Unblock` over `std::io::stdin()` inserted as a `StreamId`, so it
+  parks on the scheduler and reuses `StringStream`'s `readLine`/`eachLine:`.
+- [ ] `[OS]Env` — read-only (`at:`, `at:ifAbsent:`, `contains?:`, `keys`, `each:`,
+  `asMap`). No `at:put:`: edition 2024 makes `std::env::set_var` `unsafe`, and the
+  mutation half mainly serves subprocess spawning, which is deferred past v0.1.
+- [x] `[OS]Path` (join/dirname/basename/extension/stem/normalize/absolute?) —
+  `src/runtime/os.rs`, `qnlib/tests/57-os-path.qn`.
+- [x] `Runtime.exit:`
 - [ ] Digests (sha256/blake3/HMAC) — optional; verified absent.
   (UUID/ULID already ship: `src/runtime/ids.rs`, `qnlib/tests/37-ids.qn`.)
 
 ## Tier 4 — packaging, CI, docs triage
+
+- [ ] **Extension socket files must always be cleaned up on process exit.**
+  `/tmp/quoin-ext-<pid>-<n>.sock` litters `/tmp` — **63 stale files** on the dev
+  box, dating back four days.
+
+  *Measured, not assumed* (2026-07-09): the graceful paths are already clean —
+  normal completion, `Runtime.exit:`, and an uncaught error (exit 1) each leak
+  **zero**, because `NativeExtension::drop` (`src/runtime/extension.rs:371`)
+  removes the file and the arena drops before the runner exits. What leaks is
+  every *signal* death: `SIGTERM`, `SIGINT` and `SIGKILL` each strand exactly one
+  socket. **`SIGINT` is the common case** — a user pressing Ctrl-C on a script
+  that loaded an extension. (Historically SIGBUS did it too; those two crash
+  families are now fixed.) The orphaned *child* exits on its own when the peer
+  closes, so only the filesystem entry is stranded.
+
+  **Preferred fix — unlink after accept.** The *child* binds the socket and the
+  host connects (`extension.rs:1238-1262`), so the standard Unix idiom applies:
+  once `accept()` returns, the path has served its purpose and the child can
+  `unlink` it immediately; the established connection is unaffected, and the
+  protocol is a single long-lived stream with no reconnect
+  (`extension.rs:286`). Then **no exit path of either process can leak**, without
+  an atexit hook, a signal handler, or a sweep. Two lines, in both SDKs:
+  `crates/quoin-ext/src/lib.rs:316-317` and
+  `sdk/python/quoin_ext/__init__.py:434-437` — neither unlinks today.
+
+  Still needed as a belt: the child can die *between* bind and accept, so keep the
+  host's existing `remove_file` on its handshake-failure paths. A startup sweep of
+  `/tmp/quoin-ext-<pid>-*.sock` for pids that are no longer alive would also mop
+  up files stranded by older builds. Supersedes the narrower QUOIN_TODO item
+  ("Extension socket files leak on abnormal *host* exit"), which assumed a sweep
+  or a process-scoped temp dir was the only option.
 
 - [ ] **CI tests only the root package.** The root `Cargo.toml` is both a
   `[package]` and a `[workspace]`, so CI's `cargo test` (and a bare
