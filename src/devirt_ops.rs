@@ -39,19 +39,26 @@ pub fn int_bin(kind: IntBinKind, a: i64, b: i64) -> Result<IntBinOut, QuoinError
         Add => Int(a + b),
         Sub => Int(a - b),
         Mul => Int(a * b),
-        // Only a zero *divisor* is an error; `i64::MIN / -1` overflows and wraps like the plain
-        // `/` (matching the original), so guard on `b == 0` rather than using `checked_div`.
+        // Only a zero *divisor* is an error. `i64::MIN / -1` PANICS in plain
+        // Rust `/` (every build — it's LLVM UB otherwise; the old comment
+        // claiming it wraps was wrong, BUGS.md Finding 2), so the -1 divisor
+        // wraps explicitly — matching the AOT codegen's ineg/0 lowering
+        // exactly (translate.rs), which is what the interpreter must mirror.
         Div => {
             if b == 0 {
                 return Err(division_by_zero());
             }
-            Int(a / b)
+            if b == -1 {
+                Int(a.wrapping_neg())
+            } else {
+                Int(a / b)
+            }
         }
         Mod => {
             if b == 0 {
                 return Err(division_by_zero());
             }
-            Int(a % b)
+            if b == -1 { Int(0) } else { Int(a % b) }
         }
         Lt => Bool(a < b),
         Le => Bool(a <= b),
