@@ -30,6 +30,7 @@ pub mod method;
 pub mod msgpack;
 pub mod nil;
 pub mod object;
+pub mod os;
 pub mod pretty;
 pub mod regex;
 pub mod runtime;
