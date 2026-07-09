@@ -7,7 +7,13 @@ lint = "dylint --all"
 # the suite serializes on process launches. nextest runs every test as its own
 # process across all binaries at once: ~22s -> ~5s. There are no doctests to lose.
 # Requires `cargo-nextest` (brew install cargo-nextest).
-nt = "nextest run"
+#
+# `--workspace` because the root Cargo.toml is both a `[package]` and a `[workspace]`:
+# a bare `cargo test` / `cargo nextest run` tests only the root package, silently
+# skipping 132 tests in quoin-syntax / quoin-fmt / quoin-ext / quoin-ext-proto.
+# The two dylint crates are excluded: they link `rustc-private` and only build on the
+# nightly toolchain (`cargo lint` builds them).
+nt = "nextest run --workspace --exclude no_gc_across_yield --exclude no_borrow_across_yield"
 
 # The shipping stdlib subset (core/ net/ web/ prelude test) is compiled into the binary
 # so an installed `qn` runs outside a checkout. Point cargo-run builds back at the source
