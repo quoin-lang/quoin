@@ -2681,6 +2681,21 @@ impl<'a> Translator<'a> {
             Constant::Bool(x) => AV::C(b.ins().iconst(types::I8, *x as i64), AotKind::Bool),
             Constant::Nil => AV::Nil,
             Constant::String(s) => {
+                // BUGS.md Finding 5: `%{…}` interpolation reads the CALLER's
+                // locals by walking the frame env, which a compiled frame
+                // does not materialize — every local silently read as nil.
+                // A method whose string constants can be interpolation
+                // sources therefore stays interpreted (refusal = semantics
+                // preserved; interpolation is dynamic scope reflection).
+                if s.contains("%{") {
+                    return Err(refuse(
+                        RefusalKind::Structural,
+                        "string constant contains a %{…} interpolation source \
+                         (reads caller locals via the frame env, which compiled \
+                         frames do not materialize)"
+                            .to_string(),
+                    ));
+                }
                 // Leak once per site; the code referencing it is process-lived.
                 let leaked: &'static str = Box::leak(s.clone().into_boxed_str());
                 let out = self.alloc_scratch()?;
