@@ -8,3 +8,12 @@ lint = "dylint --all"
 # process across all binaries at once: ~22s -> ~5s. There are no doctests to lose.
 # Requires `cargo-nextest` (brew install cargo-nextest).
 nt = "nextest run"
+
+# The shipping stdlib subset (core/ net/ web/ prelude test) is compiled into the binary
+# so an installed `qn` runs outside a checkout. Point cargo-run builds back at the source
+# tree: it restores the "edit a .qn, no rebuild" loop, and it is the only way to reach the
+# units we deliberately DON'T embed — the language's own `qnlib/tests/`, `benchmark.qn`,
+# and the `usetest/`/`cyc/` fixtures. `relative = true` resolves against the workspace
+# root, so it works from any subdirectory. See docs/RELEASE_PREP.md.
+[env]
+QUOIN_STDLIB = { value = "qnlib", relative = true }

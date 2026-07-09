@@ -1,6 +1,6 @@
 "* Global registry of test suites. Each TestSuite registers itself on construction
-"* (TestSuite#init:); the harness (main.qn) runs everything collected here, so test
-"* files just build their suite — no return-value plumbing or explicit registration.
+"* (TestSuite#init:); the harness ([Test]Main, below) runs everything collected here, so
+"* test files just build their suite — no return-value plumbing or explicit registration.
 [Test]Suites <- #();
 
 Mixin <- BuiltinAssertions <- {
@@ -417,5 +417,20 @@ TestRunner <- { |@suites|
 
         reporter.endRun:@suites elapsed:runElapsed;
         ^results.flatten
+    }
+};
+
+"* Entry point for `qn test`. The runner synthesizes `use test`, a glob of the caller's
+"* test directory (each suite self-registers into [Test]Suites as it loads), and finally
+"* a call to `[Test]Main.run` — whose value is the program's value, so a false result
+"* makes `qn test` exit non-zero.
+[Test]Main <- {
+    .meta <-- {
+        run -> {
+            var runner = TestRunner.new;
+            [Test]Suites.each:{ |s| runner.add:s };
+            var results = runner.run:AnsiTestReporter.new:{ var out = [IO]Stdout };
+            ^results.none?:{ |tr| tr.failures.any? }
+        }
     }
 }

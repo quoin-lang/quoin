@@ -29,17 +29,17 @@ LSP/VSCode tooling, Windows.
   real, is `abstract!` (namespace classes + `Object`), or refuses `new`/`new:`
   with a typed `ClassError` naming its real constructors. Tests:
   `qnlib/tests/54-native-new.qn`.
-- [ ] **CWD-coupled stdlib loading.** `src/runner.rs:43-45` loads
-  `qnlib/prelude.qn` CWD-relative; `FsResolver` (`src/packages.rs:41-52`)
-  hardcodes both roots to `$CWD`. An installed binary fails anywhere else.
-  Direction: embed `qnlib/` via `include_dir!` with a disk-path override for
-  development.
+- [x] **CWD-coupled stdlib loading.** FIXED — see the as-built record below. The
+  shipping stdlib subset is compiled into the binary, `use self:…` resolves
+  against the entry script's directory, and `qn test [DIR]` runs the *caller's*
+  suites.
 - [ ] **No LICENSE / no `license` field in any Cargo.toml.** Also missing root
   `description`/`repository`; lint crates say `authors = ["authors go here"]`.
-- [ ] **CLI hygiene.** No `--help`/`--version` (treated as filenames); bare `qn`
-  runs the dev scratch `qnlib/testscript.qn` and exits 0 even on VM error;
-  unknown flags masquerade as missing files. Replace hand-rolled
-  `VmRunnerOptions::parse` with a real arg parser (existing QUOIN_TODO item).
+- [x] **CLI hygiene.** `-h/--help` and `-V/--version` exist; bare `qn` prints
+  usage instead of running the dev scratch `qnlib/testscript.qn`; an unknown
+  flag is an error (exit 2) rather than a filename.
+- [ ] Replace the hand-rolled `VmRunnerOptions::parse` with `clap` (existing
+  QUOIN_TODO item; the verb table and usage text now exist to port).
 - [x] **`qn <file>` always exits 0.** FIXED: the mode drivers gate on a
   `UnitOutcome` (`src/runner.rs`) — an uncaught error exits 1 (a falsy final
   value does not), and `Runtime.exit:` / `Runtime.exit` request a specific
@@ -110,6 +110,42 @@ strict `var`/`let` and no longer compile.
   work — e.g. DEBUGGER_ARCH — and vice versa); keep them out of user-facing nav.
 
 ---
+
+## Relocatable stdlib loading (2026-07-09)
+
+**The binary is self-contained.** `build.rs` compiles the *shipping* stdlib subset
+into `qn` (`src/stdlib.rs`): `qnlib/{core,net,web}/` plus `prelude.qn` and
+`test.qn` — ~142 KB. `qn -e`, scripts, and `qn test` now work from any directory.
+
+**The rest of `qnlib/` is a source-tree feature** and is only reachable from a disk
+stdlib: the language's own `tests/`, `benchmark.qn`, and the `usetest/`/`cyc/`/
+`useself/` `use`-fixtures. That is enforced by construction — they are not in the
+embed list, so nothing can accidentally ship them.
+
+- `QUOIN_STDLIB=DIR` reads the stdlib from disk instead of the embedded copy.
+  `.cargo/config.toml` sets it (`relative = true` → workspace root) for every
+  cargo-run build, which preserves the "edit a `.qn`, no rebuild" loop and lets
+  `cargo run -- test qnlib/tests` reach the fixtures. A bare `./target/debug/qn`
+  uses the embedded copy — pass `QUOIN_STDLIB=qnlib` to run the language's suite.
+- `build.rs` emits `rerun-if-changed` per embedded file *and* per directory, so an
+  edited or added `.qn` rebuilds. Verified: two consecutive `cargo build`s, the
+  second a 0.08s no-op.
+
+**`self:` is script-relative.** `VmOptions.self_root` is the entry script's
+directory (`run`, `debug`, and a worker child's unit), so `qn /srv/app/main.qn`
+resolves `use self:lib/…` under `/srv/app` regardless of the invoking CWD. The
+script-less modes (`repl`, `-e`, `test`, `benchmark`) stay CWD-relative.
+Extension package roots stay **CWD**-anchored on purpose (`FsResolver::package_roots`):
+extensions are deferred past v0.1, and following the script would silently move
+where a script finds `quoin_packages/`.
+
+**`qn test [DIR]` runs the caller's suites** (default `tests`). The entry unit is
+synthesized (`use test` + a glob of DIR + `[Test]Main.run`), never shipped;
+`qnlib/main.qn` was folded into `test.qn` as `[Test]Main`. A missing directory, an
+empty one, or a failing suite each exit 1 — a zero-test run must never green a CI
+pipeline. This repo's own suite is now `qn test qnlib/tests` (CI updated).
+
+**`qn benchmark`** needs a source tree (`benchmark.qn` is not embedded) and says so.
 
 ## Test-suite wall time (2026-07-08)
 

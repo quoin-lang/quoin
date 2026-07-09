@@ -37,11 +37,37 @@ use std::process::{Command, exit};
 use std::sync::Once;
 use std::time::Instant;
 
-/// The prelude AST: a single `qnlib/prelude.qn` whose `use core/*` loads the core
-/// stdlib (00-bootstrap … 06-io) in sorted order. Every runner mode loads this first,
-/// so the prelude composition lives in Quoin rather than a hardcoded glob here.
+/// The prelude AST: the stdlib's `prelude` unit, whose `use core/*` loads the core
+/// stdlib (00-bootstrap … 11-plan) in sorted order. Every runner mode loads this first,
+/// so the prelude composition lives in Quoin rather than a hardcoded glob here. Read
+/// from the embedded stdlib (or `QUOIN_STDLIB`), never from the CWD — an installed `qn`
+/// has no `qnlib/` to find.
 pub(crate) fn prelude_asts() -> impl Iterator<Item = Node> {
-    once_with(|| parse_quoin_file(&PathBuf::from("qnlib/prelude.qn")))
+    once_with(|| {
+        let source = crate::packages::read_stdlib_unit("prelude").unwrap_or_else(|| {
+            eprintln!("qn: cannot load the stdlib prelude");
+            exit(1);
+        });
+        parse_source_or_exit(&source, "prelude.qn")
+    })
+}
+
+/// Parse Quoin source that did not come from a user-named file (the prelude, the
+/// synthesized `qn test` entry). A failure here is a bug in the shipped stdlib rather
+/// than user error, so it reports cleanly and exits rather than panicking.
+fn parse_source_or_exit(source: &str, display: &str) -> Node {
+    match try_parse_quoin_string_named(source, display) {
+        Ok(node) => node,
+        Err(e) => {
+            eprintln!(
+                "qn: parse error in {display} at line {}, col {}: {}",
+                e.line,
+                e.column + 1,
+                e.message
+            );
+            exit(1);
+        }
+    }
 }
 
 /// Register every native (Rust-backed) class on a fresh `VmState`. Shared by all runner
@@ -246,6 +272,83 @@ pub enum VmRunnerMode {
     /// `qn check <file>…`: type-check each file (report diagnostics) without running it. The paths
     /// are carried in `VmRunnerOptions::vm_options.arguments`; exits non-zero if any diagnostic.
     Check,
+    /// `qn` with no arguments, `qn -h`, `qn --help`: print usage.
+    Help,
+    /// `qn -V`, `qn --version`.
+    Version,
+    /// An unusable command line (an unknown flag). The message is carried in
+    /// `VmRunnerOptions::target_path`; usage goes to stderr and the process exits 2.
+    Usage,
+}
+
+/// `qn --help`. Lists every verb, since an unrecognized one is no longer silently
+/// reinterpreted as a file path.
+const USAGE: &str = "\
+Quoin — a small object-oriented language on a bytecode VM.
+
+Usage:
+  qn <file.qn> [args…]              Run a program
+  qn -e '<expr>'                    Evaluate one expression and print its result
+  qn repl                           Interactive read-eval-print loop
+  qn test [DIR]                     Run the test suites in DIR (default: tests)
+  qn check <path>…                  Type-check without running
+  qn fmt [--check|--diff] <path>…   Format Quoin source in place
+  qn debug [--dap] <file.qn>        Run under the debugger
+  qn highlight <file.qn>            Print syntax-highlighted source
+  qn benchmark                      Run the built-in benchmarks (needs a source tree)
+
+Options:
+  -h, --help                        Print this help
+  -V, --version                     Print the version
+  --coverage[=lcov|cobertura]       Collect coverage (with a program or `test`)
+  --coverage-out=PATH               Write the coverage report to PATH
+
+Environment:
+  QUOIN_STDLIB=DIR                  Load the stdlib from DIR, not the embedded copy
+  QUOIN_PATH=DIRS                   Extra roots searched for extension packages";
+
+/// The synthesized `qn test` entry unit: pull in the test framework, glob the caller's
+/// test directory (each suite self-registers as it loads), then run the registry.
+///
+/// `dir` is interpolated into a `use` path, so it is validated first: a missing or empty
+/// directory would otherwise glob to zero suites and *pass*, silently greening a CI run.
+fn test_entry_source(dir: &str) -> String {
+    let dir = dir.trim_end_matches('/');
+    if !Path::new(dir).is_dir() {
+        eprintln!("qn test: no test directory '{dir}'");
+        eprintln!("       pass one explicitly: qn test <dir>");
+        exit(1);
+    }
+    // The path lands in Quoin source as a bare `use` token, so keep it to characters the
+    // grammar accepts — anything else would surface as a confusing parse error.
+    if !dir
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+    {
+        eprintln!("qn test: test directory '{dir}' must be a plain relative path");
+        exit(1);
+    }
+    let has_tests = std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("qn"))
+    });
+    if !has_tests {
+        eprintln!("qn test: no .qn test files in '{dir}'");
+        exit(1);
+    }
+    format!("use test;\nuse self:{dir}/*;\n[Test]Main.run\n")
+}
+
+/// The directory `use self:…` resolves against for a script: the script's own directory,
+/// so `qn /srv/app/main.qn` finds `/srv/app/lib/…` regardless of the invoking CWD.
+/// Falls back to CWD-relative (an empty path) when the script path has no parent or
+/// cannot be canonicalized — the run will fail on the missing script anyway.
+fn script_self_root(script: &str) -> PathBuf {
+    std::fs::canonicalize(script)
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_default()
 }
 
 /// How a `compile_and_run_asts*` run ended, for the mode drivers' exit-code decisions.
@@ -263,7 +366,8 @@ enum UnitOutcome {
 
 impl VmRunnerOptions {
     pub fn parse(args: &[String]) -> Self {
-        let mut mode = VmRunnerMode::Run;
+        // Bare `qn` prints usage rather than running a scratch script.
+        let mut mode = VmRunnerMode::Help;
         let mut target_path = None;
         let mut vm_args = Vec::new();
         let mut break_on_throw = Vec::new();
@@ -284,6 +388,8 @@ impl VmRunnerOptions {
                     vm_args = args[3..].to_vec();
                 }
             } else if arg == "test" {
+                // `qn test [DIR] [--coverage…]`: DIR is the caller's test directory (the
+                // first non-flag argument), defaulting to `tests`.
                 mode = VmRunnerMode::Test;
                 take_coverage_flags(
                     &args[2..],
@@ -292,6 +398,9 @@ impl VmRunnerOptions {
                     &mut coverage_out,
                     &mut coverage_format,
                 );
+                if !vm_args.is_empty() {
+                    target_path = Some(vm_args.remove(0));
+                }
             } else if arg == "benchmark" {
                 mode = VmRunnerMode::Benchmark;
                 if args.len() > 2 {
@@ -360,6 +469,15 @@ impl VmRunnerOptions {
                 for a in &args[2..] {
                     vm_args.push(a.clone());
                 }
+            } else if arg == "-h" || arg == "--help" {
+                mode = VmRunnerMode::Help;
+            } else if arg == "-V" || arg == "--version" {
+                mode = VmRunnerMode::Version;
+            } else if arg.starts_with('-') {
+                // Previously an unknown flag was taken as a file path, so `qn --help`
+                // reported "cannot open --help".
+                mode = VmRunnerMode::Usage;
+                target_path = Some(format!("unknown option '{arg}'"));
             } else {
                 mode = VmRunnerMode::Run;
                 target_path = Some(arg.clone());
@@ -384,6 +502,22 @@ impl VmRunnerOptions {
             && matches!(mode, VmRunnerMode::Repl | VmRunnerMode::Debug)
             && std::io::stdout().is_terminal();
 
+        // `use self:…` resolves against the entry script's directory. The script-less modes
+        // (repl, -e, test, benchmark) have nothing to anchor to and stay CWD-relative.
+        // A worker child's script is its *unit* (the first vm arg), not `target_path`
+        // (which holds the socket path), so it anchors the same way its parent did.
+        let self_root = match mode {
+            VmRunnerMode::Run | VmRunnerMode::Debug => target_path
+                .as_deref()
+                .map(script_self_root)
+                .unwrap_or_default(),
+            VmRunnerMode::WorkerServe => vm_args
+                .first()
+                .map(|u| script_self_root(u))
+                .unwrap_or_default(),
+            _ => PathBuf::new(),
+        };
+
         Self {
             mode,
             target_path,
@@ -395,6 +529,7 @@ impl VmRunnerOptions {
                 // every VM and top-level compile, so units see each other's classes.
                 seen_types: crate::types::SeenTypes::with_builtins(),
                 class_table: crate::class_table::ClassTable::new(),
+                self_root,
             },
             break_on_throw,
             break_on_uncaught,
@@ -514,10 +649,15 @@ impl VmRunner {
                 exit(crate::worker::worker_serve_main(&sock, unit, service));
             }
             VmRunnerMode::Test => {
-                // prelude, then the test entry — main.qn `use`s the framework + suites.
-                let ast_iter = prelude_asts().chain(once_with(|| {
-                    parse_quoin_file(&PathBuf::from("qnlib/main.qn"))
-                }));
+                // `qn test [DIR]` runs the CALLER's suites: the entry unit is synthesized
+                // around their test directory, not shipped with the stdlib. Each test file
+                // self-registers into `[Test]Suites` as the glob loads it, then
+                // `[Test]Main.run` (qnlib/test.qn) runs the registry; its boolean value is
+                // the program's value, which `UnitOutcome::Finished` gates the exit code on.
+                let dir = self.options.target_path.as_deref().unwrap_or("tests");
+                let entry = test_entry_source(dir);
+                let ast_iter =
+                    prelude_asts().chain(once_with(move || parse_source_or_exit(&entry, "<test>")));
 
                 match self.compile_and_run_asts(ast_iter) {
                     UnitOutcome::ExitRequested(code) => exit(code),
@@ -526,19 +666,41 @@ impl VmRunner {
                 }
             }
             VmRunnerMode::Benchmark => {
-                let ast_iter = prelude_asts().chain(once_with(|| {
-                    parse_quoin_file(&PathBuf::from("qnlib/benchmark.qn"))
-                }));
+                // `benchmark.qn` is deliberately not embedded — the benchmarks are a
+                // source-tree feature, like the test suite. Say so plainly.
+                let Some(root) = crate::packages::source_tree_root() else {
+                    eprintln!(
+                        "qn benchmark: needs a Quoin source tree (qnlib/benchmark.qn).\n\
+                         \x20      Run from a checkout, or set QUOIN_STDLIB=/path/to/qnlib"
+                    );
+                    exit(1);
+                };
+                let bench = root.join("benchmark.qn");
+                let ast_iter = prelude_asts().chain(once_with(move || parse_quoin_file(&bench)));
 
                 self.compile_and_benchmark(ast_iter);
                 Ok(())
             }
+            VmRunnerMode::Help => {
+                println!("{USAGE}");
+                Ok(())
+            }
+            VmRunnerMode::Version => {
+                println!("qn {}", env!("CARGO_PKG_VERSION"));
+                Ok(())
+            }
+            VmRunnerMode::Usage => {
+                if let Some(ref msg) = self.options.target_path {
+                    eprintln!("qn: {msg}");
+                }
+                eprintln!("{USAGE}");
+                exit(2);
+            }
             VmRunnerMode::Run => {
-                let script_path = self
-                    .options
-                    .target_path
-                    .clone()
-                    .unwrap_or_else(|| "qnlib/testscript.qn".to_string());
+                let Some(script_path) = self.options.target_path.clone() else {
+                    eprintln!("{USAGE}");
+                    exit(2);
+                };
                 let unit = std::fs::canonicalize(&script_path)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| script_path.clone());

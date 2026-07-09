@@ -21,7 +21,7 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
     - name: Run Quoin tests
-      run: cargo run --verbose -- test
+      run: cargo run --verbose -- test qnlib/tests
 
   # Dylint lints: no_borrow_across_yield is deny-level (a violation fails this
   # job); no_gc_across_yield stays advisory (warnings only). The lint libraries

@@ -360,6 +360,10 @@ pub struct VmOptions {
     /// the same way. Carries parent/mixins/method-set/sealed for cross-class checks (subtyping,
     /// MNU).
     pub class_table: crate::class_table::ClassTable,
+    /// Directory that `use self:…` resolves against: the entry script's directory, so a
+    /// script means the same thing wherever it is invoked from. Empty (the default) is
+    /// CWD-relative, which is what the script-less modes want (`repl`, `-e`, `test`).
+    pub self_root: std::path::PathBuf,
 }
 
 // The scheduler / task / guest-fiber subsystem lives in `vm_scheduler.rs` (still
@@ -741,7 +745,7 @@ impl<'gc> VmState<'gc> {
                 reraised: false,
             },
             modules: Modules {
-                resolver: Box::new(FsResolver::new()),
+                resolver: Box::new(FsResolver::new(options.self_root.clone())),
                 loaded: Vec::new(),
                 packages: gcl!(mc, HashMap::new()),
             },

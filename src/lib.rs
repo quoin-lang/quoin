@@ -24,6 +24,7 @@ pub mod parser;
 pub mod repl_complete;
 pub mod runner;
 pub mod runtime;
+pub mod stdlib;
 pub mod symbol;
 pub mod tuning;
 pub mod types;
