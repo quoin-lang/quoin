@@ -1315,10 +1315,8 @@ fn parse_namespace(pair: Pair<Rule>, filename: &str, source_text: &str) -> Names
 
 fn unescape(s: String) -> String {
     static ESCAPED_CHAR: Lazy<regex::Regex> = Lazy::new(|| {
-        regex::Regex::new(
-            "\\\\([ux][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]|[\\\\tnr\"'])",
-        )
-        .unwrap()
+        regex::Regex::new("\\\\([ux][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]|[\\\\tnr\"'])")
+            .unwrap()
     });
 
     ESCAPED_CHAR

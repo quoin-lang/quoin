@@ -2,3 +2,9 @@
 cov = ["llvm-cov", "--ignore-filename-regex", "src/parser/generated"]
 cov-test = ["llvm-cov", "--ignore-filename-regex", "src/parser/generated", "run", "--", "test"]
 lint = "dylint --all"
+# `cargo test` runs the 46 test binaries ONE AT A TIME (it only parallelizes tests
+# *within* a binary), and most of ours hold 1-5 mostly-idle socket/worker tests — so
+# the suite serializes on process launches. nextest runs every test as its own
+# process across all binaries at once: ~22s -> ~5s. There are no doctests to lose.
+# Requires `cargo-nextest` (brew install cargo-nextest).
+nt = "nextest run"
