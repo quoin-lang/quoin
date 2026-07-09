@@ -509,6 +509,13 @@ pub struct VmState<'gc> {
     /// exit (via `NativeReentryGuard`), and capped at `MAX_NATIVE_REENTRY`.
     #[collect(require_static)]
     pub native_reentry_depth: usize,
+    /// Set by `Runtime.exit:` — the guest requested process exit with this status.
+    /// The raising task also unwinds with `QuoinError::ExitRequested`; this flag is
+    /// what makes the exit PROCESS-wide: the driver checks it each loop iteration,
+    /// so an exit requested inside a spawned task (whose unwind lands in the task's
+    /// join result, not the driver) still stops the world promptly.
+    #[collect(require_static)]
+    pub requested_exit: Option<i32>,
 
     /// The per-task compiled-execution slice (see [`AotTaskState`]) —
     /// swapped as ONE unit with the task context, since another task may run
@@ -696,6 +703,7 @@ impl<'gc> VmState<'gc> {
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
+            requested_exit: None,
             aot: AotTaskState::default(),
             aot_pending_error: None,
             aot_pending_blocks: rustc_hash::FxHashMap::default(),
@@ -3092,7 +3100,8 @@ impl<'gc> VmState<'gc> {
             | QuoinError::Other(_)
             | QuoinError::Thrown
             | QuoinError::NonLocalReturn
-            | QuoinError::Cancelled => {
+            | QuoinError::Cancelled
+            | QuoinError::ExitRequested(_) => {
                 let s = format!("{}", error);
                 self.new_string(mc, s)
             }
@@ -4866,6 +4875,10 @@ impl<'gc> VmState<'gc> {
         if let Err(QuoinError::Cancelled) = res {
             return Err(QuoinError::Cancelled);
         }
+        // A requested process exit likewise stays bare so the driver can match it.
+        if let Err(QuoinError::ExitRequested(code)) = res {
+            return Err(QuoinError::ExitRequested(code));
+        }
         if let Err(e) = res {
             return Err(self.annotate_error(e));
         }
@@ -4949,6 +4962,9 @@ impl<'gc> VmState<'gc> {
                 }
                 Ok(other) => return Ok(other),
                 Err(QuoinError::Cancelled) => return Err(QuoinError::Cancelled),
+                Err(QuoinError::ExitRequested(code)) => {
+                    return Err(QuoinError::ExitRequested(code));
+                }
                 Err(e) => return Err(self.annotate_error(e)),
             }
         }

@@ -39,12 +39,15 @@ This document outlines the language features, compiler updates, and VM modificat
   temporary that's reachable only via the Rust stack across a step boundary in the `add:` /
   collection-builder path. See `profiling/send-receiver-split/notes.md`.
 - [ ] Use a proper arg parsing library instead of the `VmRunnerMode` stuff in `runner.rs`.
-- [ ] Add a Quoin builtin for exiting the process with a status code (like C's `exit(status)`) —
-  e.g. `Runtime.exit:0` / `Runtime.exit:1` — threading a requested exit code out of the VM to
-  `std::process::exit`. Once it exists, the `qn test` harness (`qnlib/main.qn`) can call it
-  directly instead of the Rust driver inferring pass/fail from the program's final value (today
-  `compile_and_run_asts` in `src/runner.rs` exits non-zero when a `qn test` run aborts on a VM
-  error or its final result is falsy).
+- [x] Add a Quoin builtin for exiting the process with a status code (like C's `exit(status)`).
+  DONE (release-prep, 2026-07): `Runtime.exit:code` / `Runtime.exit` raise the uncatchable
+  `QuoinError::ExitRequested` (modeled on `Cancelled`: `finally` runs, `catch:` can't swallow
+  it) plus a `VmState.requested_exit` flag the driver checks each iteration, so the exit is
+  process-wide even from a spawned task; the runner exits with the code only after the arena
+  drops (extension/socket `Drop`s run). Landed with the same change: **`qn <file>` now exits 1
+  on an uncaught error** (`UnitOutcome` in `src/runner.rs`; a falsy final value stays exit 0 —
+  only `qn test` gates on the final boolean). Tests: `tests/exit_code.rs`. Remaining option:
+  have `qnlib/main.qn` call `Runtime.exit:` directly instead of the final-value inference.
 - [ ] Design an installer.
   - [x] Named the language **Quoin** (extension `.qn`); rationale in `~/code/quoin/DECISIONS.md`.
   - [x] Binary name is `qn` (set via `[[bin]]` in `Cargo.toml`).

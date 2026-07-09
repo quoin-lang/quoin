@@ -248,6 +248,19 @@ pub enum VmRunnerMode {
     Check,
 }
 
+/// How a `compile_and_run_asts*` run ended, for the mode drivers' exit-code decisions.
+/// Returned (not `exit()`ed in place) so the arena has dropped — extension children and
+/// sockets torn down — before the caller exits the process.
+enum UnitOutcome {
+    /// Every unit ran to completion; `last_truthy` is the final program's result value
+    /// (`qn test` gates on it — main.qn ends in "every suite passed").
+    Finished { last_truthy: bool },
+    /// A unit aborted on an uncaught error (already reported to stderr).
+    Aborted,
+    /// The guest requested process exit (`Runtime.exit:`) with this status.
+    ExitRequested(i32),
+}
+
 impl VmRunnerOptions {
     pub fn parse(args: &[String]) -> Self {
         let mut mode = VmRunnerMode::Run;
@@ -506,10 +519,11 @@ impl VmRunner {
                     parse_quoin_file(&PathBuf::from("qnlib/main.qn"))
                 }));
 
-                if !self.compile_and_run_asts(ast_iter) {
-                    exit(1);
+                match self.compile_and_run_asts(ast_iter) {
+                    UnitOutcome::ExitRequested(code) => exit(code),
+                    UnitOutcome::Finished { last_truthy: true } => Ok(()),
+                    UnitOutcome::Finished { last_truthy: false } | UnitOutcome::Aborted => exit(1),
                 }
-                Ok(())
             }
             VmRunnerMode::Benchmark => {
                 let ast_iter = prelude_asts().chain(once_with(|| {
@@ -532,8 +546,13 @@ impl VmRunner {
                     parse_quoin_file(&PathBuf::from(&script_path))
                 }));
 
-                self.compile_and_run_asts_as_unit(ast_iter, Some(unit));
-                Ok(())
+                match self.compile_and_run_asts_as_unit(ast_iter, Some(unit)) {
+                    UnitOutcome::ExitRequested(code) => exit(code),
+                    // A script that runs to completion exits 0 whatever its final
+                    // value; only an uncaught error (already printed) fails the run.
+                    UnitOutcome::Finished { .. } => Ok(()),
+                    UnitOutcome::Aborted => exit(1),
+                }
             }
             VmRunnerMode::Repl => {
                 self.run_repl();
@@ -829,6 +848,10 @@ impl VmRunner {
         }
         println!("Quoin debugger — $help for commands, $continue to run, $quit to exit.");
         if let Err(e) = drive_main_task(&mut arena) {
+            if let QuoinError::ExitRequested(code) = e {
+                drop(arena);
+                exit(code);
+            }
             eprintln!("VM execution error: {e}");
         }
     }
@@ -891,13 +914,18 @@ impl VmRunner {
 
         // Interactive terminals get the line editor; piped/redirected stdin uses the
         // promptless accumulation loop (rustyline's editor/validator only apply to a tty).
-        if stdin().is_terminal() {
+        let requested = if stdin().is_terminal() {
             // `~/.quoinrc` is interactive-only, like a shell rc file (a piped script or a
             // one-shot `-e` doesn't run it).
             load_quoinrc(&mut arena);
-            run_repl_interactive(&mut arena);
+            run_repl_interactive(&mut arena)
         } else {
-            run_repl_piped(&mut arena);
+            run_repl_piped(&mut arena)
+        };
+        // A guest `Runtime.exit:` — drop the arena first so teardown `Drop`s run.
+        if let Some(code) = requested {
+            drop(arena);
+            exit(code);
         }
     }
 
@@ -953,7 +981,14 @@ impl VmRunner {
         let Some(mut arena) = self.build_repl_arena() else {
             exit(1);
         };
-        match eval_once(&mut arena, expr) {
+        let res = eval_once(&mut arena, expr);
+        // A guest `Runtime.exit:` wins over result/error printing; drop the arena
+        // first so teardown `Drop`s (extension children, sockets) run before exiting.
+        if let Some(code) = arena.mutate_root(|_mc, vm| vm.requested_exit) {
+            drop(arena);
+            exit(code);
+        }
+        match res {
             Ok(Some(out)) => println!("{out}"),
             Ok(None) => {}
             Err(msg) => {
@@ -963,11 +998,10 @@ impl VmRunner {
         }
     }
 
-    /// Runs each program AST in turn. Returns `true` if the run completed without a
-    /// VM error and the last program's result value was truthy. For `qn test` that
-    /// last value is main.qn's `results.none?:{…}` boolean (true iff every suite
+    /// Runs each program AST in turn. For `qn test` the `Finished` outcome's
+    /// `last_truthy` is main.qn's `results.none?:{…}` boolean (true iff every suite
     /// passed), so the Test driver can gate the process exit code on it.
-    fn compile_and_run_asts(&self, ast_iter: impl Iterator<Item = Node>) -> bool {
+    fn compile_and_run_asts(&self, ast_iter: impl Iterator<Item = Node>) -> UnitOutcome {
         self.compile_and_run_asts_as_unit(ast_iter, None)
     }
 
@@ -975,7 +1009,7 @@ impl VmRunner {
         &self,
         ast_iter: impl Iterator<Item = Node>,
         unit_path: Option<String>,
-    ) -> bool {
+    ) -> UnitOutcome {
         let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
             let mut vm = VmState::new(mc, self.options.vm_options.clone());
             register_builtins(mc, &mut vm);
@@ -989,9 +1023,10 @@ impl VmRunner {
         });
         arena.metrics().set_pacing(crate::vm::gc_pacing());
 
-        let mut aborted = false;
+        // `Some` once a unit aborted or requested exit; the remaining ASTs are skipped.
+        let mut ended: Option<UnitOutcome> = None;
         for ast in ast_iter {
-            if aborted {
+            if ended.is_some() {
                 break;
             }
 
@@ -1023,10 +1058,15 @@ impl VmRunner {
             });
 
             // Drive the unit to completion through the shared scheduler (async I/O, sleep,
-            // tasks, fibers). An error aborts the remaining ASTs (and fails a test run).
+            // tasks, fibers). An error aborts the remaining ASTs (and fails a test run);
+            // a guest `Runtime.exit:` ends the run silently with its status.
             if let Err(e) = drive_main_task(&mut arena) {
-                eprintln!("VM execution error: {}", e);
-                aborted = true;
+                if let QuoinError::ExitRequested(code) = e {
+                    ended = Some(UnitOutcome::ExitRequested(code));
+                } else {
+                    eprintln!("VM execution error: {}", e);
+                    ended = Some(UnitOutcome::Aborted);
+                }
             }
         }
 
@@ -1063,13 +1103,15 @@ impl VmRunner {
             }
         }
 
-        // The last program run leaves its result on top of the stack. Treat a VM
-        // error (abort) as failure too, so callers can gate purely on the return.
-        let passed = !aborted
-            && arena.mutate_root(|_mc, vm| vm.stack.last().map(|v| v.is_truthy()).unwrap_or(false));
+        // The last program run leaves its result on top of the stack; callers that
+        // gate on it (`qn test`) read it off the `Finished` outcome.
+        let outcome = ended.unwrap_or_else(|| UnitOutcome::Finished {
+            last_truthy: arena
+                .mutate_root(|_mc, vm| vm.stack.last().map(|v| v.is_truthy()).unwrap_or(false)),
+        });
 
         arena.finish_cycle();
-        passed
+        outcome
     }
 
     /// `qn check FILE…`: run the prelude (so the checker sees the full stdlib class environment),

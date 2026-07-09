@@ -596,6 +596,15 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
             async_channel::Sender<crate::worker::WorkerMsg>,
         > = std::collections::VecDeque::new();
         loop {
+            // A guest requested process exit (`Runtime.exit:`). The raising task's own
+            // unwind only reaches this loop's `Err` arm when it was the CURRENT task's
+            // main unwind path — an exit from a spawned task lands in its join result
+            // instead — so the flag is the authoritative, process-wide stop signal.
+            if let Some(code) = arena.mutate_root(|_mc, vm| vm.requested_exit) {
+                let e = QuoinError::ExitRequested(code);
+                frontend.on_finished(arena, Some(&e))?;
+                return Err(e);
+            }
             drain_retranslations(arena);
             // Service control requests opportunistically — once per loop
             // iteration, so a compute-bound task still answers at batch

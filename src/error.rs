@@ -159,6 +159,11 @@ pub enum QuoinError {
     /// blocks run during the unwind, but is deliberately *not* catchable by `catch:`
     /// (a task cannot swallow its own cancellation). Carries no payload.
     Cancelled,
+    /// `Runtime.exit:` — the guest requested process exit with this status. Unwinds
+    /// like `Cancelled` (`finally` blocks run, `catch:` cannot swallow it); the
+    /// driver surfaces it to the runner, which exits after normal teardown so
+    /// `Drop`s (extension children, sockets) still run.
+    ExitRequested(i32),
     /// Wrapper containing source location for execution errors
     WithSourceInfo {
         error: Box<QuoinError>,
@@ -263,6 +268,7 @@ impl fmt::Display for QuoinError {
             QuoinError::Thrown => write!(f, "thrown exception"),
             QuoinError::NonLocalReturn => write!(f, "Non-local return"),
             QuoinError::Cancelled => write!(f, "task cancelled"),
+            QuoinError::ExitRequested(code) => write!(f, "exit requested (status {})", code),
             QuoinError::WithSourceInfo {
                 error,
                 source_info,
@@ -539,6 +545,7 @@ mod tests {
             (QuoinError::Thrown, "thrown exception"),
             (QuoinError::NonLocalReturn, "Non-local return"),
             (QuoinError::Cancelled, "task cancelled"),
+            (QuoinError::ExitRequested(3), "exit requested (status 3)"),
         ];
         for (err, expected) in cases {
             assert_eq!(format!("{}", err), expected, "variant {:?}", err);
