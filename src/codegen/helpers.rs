@@ -727,16 +727,14 @@ pub(super) unsafe extern "C" fn tag_collection(
 /// impossible tag-corruption failure names what arrived.
 /// BUGS.md Finding 14: strict-Boolean loop condition. Peeks slot `idx`; a
 /// `Bool` returns TAG_OK, anything else raises the exact `whileDo:` MNU.
-pub(super) unsafe extern "C" fn require_bool(
-    vm: *mut c_void,
-    mc: *const c_void,
-    idx: i64,
-) -> u8 {
+pub(super) unsafe extern "C" fn require_bool(vm: *mut c_void, mc: *const c_void, idx: i64) -> u8 {
     let (vm, _mc) = unsafe { vm_mc(vm, mc) };
     match vm.stack.get(idx as usize) {
         Some(Value::Bool(_)) => TAG_OK,
         other => {
-            let got = other.map(|v| v.class_name()).unwrap_or_else(|| "Nil".to_string());
+            let got = other
+                .map(|v| v.class_name())
+                .unwrap_or_else(|| "Nil".to_string());
             store_err(
                 vm,
                 QuoinError::MessageNotUnderstood {
