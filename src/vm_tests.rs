@@ -2179,3 +2179,14 @@ fn test_vm_options_at_runtime() {
         assert_eq!(to_spec(mapped_color), ValueSpec::Bool(true));
     });
 }
+
+#[test]
+fn value_layout_facts() {
+    // The window-arena arc (docs/WINDOW_ARENA_ARCH.md) depends on these:
+    // Value is 16 bytes / align 8 today, and Option<Value> is niche-packed.
+    // The planned fixed repr keeps the 16-byte size and deliberately gives
+    // up the niche (audited: only small per-task/per-handle collections
+    // store Option<Value>).
+    assert_eq!(std::mem::size_of::<crate::value::Value>(), 16);
+    assert_eq!(std::mem::align_of::<crate::value::Value>(), 8);
+}
