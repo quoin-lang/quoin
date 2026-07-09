@@ -102,6 +102,10 @@ fn resume_current_task<'gc>(
     // Point `vm.sched.yielder` at the coroutine we're about to run, sourced from its
     // own GC-rooted slot, so it never dangles.
     vm.sched.yielder = vm.current_fiber_yielder();
+    // Likewise `stack_limit`: `execute_block` measures headroom against the stack of the
+    // coroutine it is actually running on, and a task or guest fiber has its own. One store
+    // per resume, not per block.
+    vm.stack_limit = coro_holder.stack_limit;
 
     let ctx = VMContext {
         vm: vm as *mut _,

@@ -1,9 +1,14 @@
-"* OPEN (2026-07-07): the `catch:` family runs its protected block via
-"* execute_block; a self-nesting protected block compounds Rust frames per level
-"* and SIGBUSes uncatchably (exit 138). Same fix as each_reenter.qn: the
-"* execute_block stack-watermark check.
+"* FIXED (2026-07-09): a self-nesting `catch:` protected block compounds real Rust frames per
+"* level through `do_catch` -> `execute_block` -> `run_nested`, exhausting the 16 MiB coroutine
+"* stack and dying with an UNCATCHABLE SIGBUS (exit 138).
+"*
+"* Same fix as each_reenter.qn: the `execute_block` stack-watermark check, which refuses
+"* re-entry with a catchable `StackError` once fewer than 2 MiB of stack remain.
+"*
+"* This script now prints the caught error and exits 0. Regression tests:
+"* qnlib/tests/56-stack-reentry.qn.
 
 var f = nil;
 f = { { f.value }.catch:{ |e| e.throw } };
-f.value;
-'unreachable'.print
+{ f.value }.catch:{ |e:StackError| ('caught: ' + e.message).print };
+'reached — the process survived'.print

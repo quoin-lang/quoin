@@ -1465,6 +1465,10 @@ impl VmRunner {
                     return Ok(true);
                 };
 
+                // As in the scheduler driver: `execute_block` measures its headroom against
+                // the coroutine it is about to run on.
+                vm.stack_limit = fiber.stack_limit;
+
                 let mut opt = fiber.coroutine.borrow_mut();
                 let coro = opt.as_mut().expect("Coroutine already finished");
 

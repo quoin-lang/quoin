@@ -596,8 +596,24 @@ deferred `Mirror` in `## REPL`.
   `user_string_expr` (`#ident'…'`). Fixed by byte-slicing between the single-byte `'`/`#` delimiters
   (`&raw[1..raw.len() - 1]`), which is char-boundary-safe. The `us`→`µs` workaround in `qnlib/test.qn` was
   reverted. Regression test: `multibyteLiterals` (`qnlib/tests/08-strings.qn`).
-- [ ] **Native re-entry through `execute_block` can still overflow the machine stack
-  (uncatchable SIGBUS).** *(audit follow-up, PR #48; DUG 2026-07-07 — confirmed live, repros
+- [x] **Native re-entry through `execute_block` can still overflow the machine stack
+  (uncatchable SIGBUS).** **FIXED (release-prep, 2026-07-09)** with the settled stack-watermark
+  design, simpler than planned: no SP capture at coroutine entry is needed, because corosensei's
+  `Stack::limit()` gives each coroutine's low address at construction (`Fiber::stack_limit`), and
+  there are only **two** `coro.resume()` sites (`runner_driver.rs`, and `runner.rs` for the
+  benchmark harness) — both copy it into `VmState::stack_limit` before resuming. `execute_block`
+  then calls `ensure_stack_headroom`: refuse once fewer than `STACK_MARGIN` (2 MiB) of the 16 MiB
+  remain. `stack_limit == 0` disables the check (the benchmark harness steps the VM on the OS
+  thread stack). Deep-but-finite pipelines keep working — a 400-stage lazy generator chain still
+  runs; the test pins 200. **Both this and the `MAX_NATIVE_REENTRY` error now raise the new typed
+  `StackError`** (`QuoinError::StackExhausted` → `Error <- StackError` in `00-bootstrap.qn`); the
+  native-reentry error was previously a bare `String`, so `catch:{|e:Error|}` could not see it —
+  the F12 trap. **Measured** (`profiling/execute-block-watermark/notes.md`): free. Interleaved
+  release A/B, 15 pairs on combinators (the `execute_block`-heaviest bench): Δ mean +0.12%, Δ
+  median −0.03%, slower in 7/15 paired runs against a 2.4 ms stdev. (A first, *sequential* sweep
+  showed all six benches 2-3% *faster* — drift, not a result; interleaving fixed it.) Tests:
+  `qnlib/tests/56-stack-reentry.qn`; repros `each_reenter.qn` / `catch_reenter.qn` now exit 0.
+  Original report follows. *(audit follow-up, PR #48; DUG 2026-07-07 — confirmed live, repros
   `qnlib/stress/audit/each_reenter.qn` + `catch_reenter.qn`, both exit 138. The dig NARROWED
   the surface: plain `b = { b.value }` self-recursion is SAFE (flat interpreted frames), and
   the sort-comparator shape is already caught by the >12 cap — the live hole is the

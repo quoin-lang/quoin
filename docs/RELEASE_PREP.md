@@ -66,9 +66,14 @@ LSP/VSCode tooling, Windows.
   `serde_json`'s own parse limit, so nothing that round-tripped before regressed.
   `write_dv` stays infallible — the producer cap guards it. Tests:
   `qnlib/tests/55-serialize-depth.qn`.
-- [ ] **Uncatchable SIGBUS: `execute_block` native re-entry** (an `each:` body
-  re-iterating its receiver; self-sorting comparator). Repro:
-  `qnlib/stress/audit/each_reenter.qn`. See QUOIN_TODO for the settled design.
+- [x] **Uncatchable SIGBUS: `execute_block` native re-entry** (an `each:` body
+  re-iterating its receiver; a self-nesting `catch:`). FIXED: `execute_block`
+  measures the *remaining coroutine stack* (`ensure_stack_headroom`, 2 MiB margin
+  of 16 MiB) rather than capping depth, so deep-but-finite generator pipelines keep
+  working. Raises the new typed `StackError`, which the `MAX_NATIVE_REENTRY` error
+  now uses too (it was a bare String — uncatchable by `catch:{|e:Error|}`).
+  Measured free: `profiling/execute-block-watermark/notes.md`. Tests:
+  `qnlib/tests/56-stack-reentry.qn`.
 - [x] **F11** (`#(-1 -2)` parsed as `#(-3)`). FIXED — and it was never only about
   minus: `+`, `-` and `%` are all both prefix and infix, so `#(1 +2)` was `#(3)`
   and `#( 'a' %'b' )` was one element. Inside a collection literal such an

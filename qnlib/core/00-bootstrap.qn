@@ -93,6 +93,12 @@ Error <- FiberError <- {};
 "* A class-structural violation: extending a `sealed!` class, instantiating an
 "* `abstract!` one, and similar hierarchy errors (BUGS.md Finding 12).
 Error <- ClassError <- {};
+
+"* A recursion the VM refused before it could overflow the machine stack: a block that
+"* re-enters itself (an `each:` body re-iterating its own receiver, a self-nesting
+"* `catch:`), or a custom `==:`/`hash`/comparator hook re-entering a native operation.
+"* Raised instead of the process dying with an uncatchable SIGBUS.
+Error <- StackError <- {};
 "* A value of the right type but invalid content (e.g. a non-hex string to
 "* `Integer.fromHex:`, a byte outside 0..255, a malformed `host:port`).
 Error <- ValueError <- {};

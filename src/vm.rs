@@ -513,6 +513,12 @@ pub struct VmState<'gc> {
     /// exit (via `NativeReentryGuard`), and capped at `MAX_NATIVE_REENTRY`.
     #[collect(require_static)]
     pub native_reentry_depth: usize,
+    /// Lowest usable address of the coroutine stack currently running (`Fiber::stack_limit`),
+    /// refreshed by the driver before every `resume`. `0` means "not on a known coroutine"
+    /// (the benchmark harness steps the VM straight on the OS thread stack), which disables
+    /// the check. Read by `ensure_stack_headroom`.
+    #[collect(require_static)]
+    pub stack_limit: usize,
     /// Set by `Runtime.exit:` — the guest requested process exit with this status.
     /// The raising task also unwinds with `QuoinError::ExitRequested`; this flag is
     /// what makes the exit PROCESS-wide: the driver checks it each loop iteration,
@@ -707,6 +713,7 @@ impl<'gc> VmState<'gc> {
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
+            stack_limit: 0,
             requested_exit: None,
             aot: AotTaskState::default(),
             aot_pending_error: None,
@@ -1808,13 +1815,26 @@ impl<'gc> VmState<'gc> {
 
     /// The catchable ceiling on native → Quoin re-entry depth (see `native_reentry_depth`).
     /// Well above any legitimate nesting of custom hooks, low enough to fault before the
-    /// 1 MiB VM coroutine stack overflows (each re-entry frame drives a nested `step` loop).
+    /// coroutine stack overflows (each re-entry frame drives a nested `step` loop).
     const MAX_NATIVE_REENTRY: usize = 12;
+
+    /// Headroom `execute_block` insists on before re-entering the VM: refuse once fewer than
+    /// this many bytes of the 16 MiB coroutine stack remain.
+    ///
+    /// A *depth* cap is the wrong instrument here (and is why `execute_block` was left
+    /// unguarded): lazy generator pipelines legitimately compose blocks deeper than any
+    /// machine-stack-safe fixed count, so a counter cannot tell them from a block that
+    /// re-enters itself. Measuring the stack itself separates the two — deep-but-finite
+    /// pipelines keep their real ceiling, minus this margin.
+    ///
+    /// 2 MiB is sized to cover the deepest single frame we can add after the check passes:
+    /// `dispatch_one` + a compiled outcall + a native method, several times over.
+    const STACK_MARGIN: usize = 2 * 1024 * 1024;
 
     /// Claim one level of native re-entry, or return a catchable error at the ceiling.
     fn enter_native_reentry(&mut self) -> Result<(), QuoinError> {
         if self.native_reentry_depth >= Self::MAX_NATIVE_REENTRY {
-            return Err(QuoinError::Other(format!(
+            return Err(QuoinError::StackExhausted(format!(
                 "native call recursion too deep (> {}): a custom ==:/hash/comparator/render \
                  hook is re-entering a native operation without bound",
                 Self::MAX_NATIVE_REENTRY
@@ -1822,6 +1842,34 @@ impl<'gc> VmState<'gc> {
         }
         self.native_reentry_depth += 1;
         Ok(())
+    }
+
+    /// Refuse to re-enter the VM when this coroutine's stack is nearly spent.
+    ///
+    /// Each `execute_block` level stacks *real Rust frames* (the `valueWithSelfOrArg:`
+    /// combinator seam, the `catch:` family), so an `each:` body that re-iterates its own
+    /// receiver — or a `catch:` whose protected block re-enters itself — walks off the end of
+    /// the 16 MiB coroutine stack and aborts the process with SIGBUS, uncatchably. The check
+    /// is a load, a subtract and a compare against the address of a stack local.
+    ///
+    /// `stack_limit == 0` disables it: the benchmark harness steps the VM on the OS thread
+    /// stack, where we have no extent to measure and no re-entry to bound.
+    #[inline]
+    fn ensure_stack_headroom(&self) -> Result<(), QuoinError> {
+        if self.stack_limit == 0 {
+            return Ok(());
+        }
+        let probe = 0u8;
+        let sp = &probe as *const u8 as usize;
+        if sp.saturating_sub(self.stack_limit) >= Self::STACK_MARGIN {
+            return Ok(());
+        }
+        Err(QuoinError::StackExhausted(
+            "block re-entry exhausted the task stack: a block is re-entering itself without \
+             bound (an each:/collect: body that re-iterates its own receiver, or a catch: \
+             whose protected block re-enters it)"
+                .to_string(),
+        ))
     }
 
     fn call_method_inner(
@@ -2058,7 +2106,9 @@ impl<'gc> VmState<'gc> {
         // cap here would break real programs. The native-recursion guard lives on the
         // method-dispatch paths (`call_method`/`call_method_value`), where the
         // pathological self-referential hooks (a `==:` that re-adds to its own set)
-        // actually recurse.
+        // actually recurse. What bounds *this* path is the remaining stack itself, which
+        // costs those pipelines nothing while still refusing unbounded self-re-entry.
+        self.ensure_stack_headroom()?;
         let initial_frame_count = self.frames.len();
         if let Some(receiver) = self_val {
             self.start_block_as_method(mc, block, receiver, args, None, false);
@@ -3097,6 +3147,7 @@ impl<'gc> VmState<'gc> {
             QuoinError::ValueError(msg) => self.make_error(mc, "ValueError", msg, None),
             QuoinError::ParseError(msg) => self.make_error(mc, "ParseError", msg, None),
             QuoinError::ClassError(msg) => self.make_error(mc, "ClassError", msg, None),
+            QuoinError::StackExhausted(msg) => self.make_error(mc, "StackError", msg, None),
             QuoinError::ExtensionError(msg) => self.make_error(mc, "Error", msg, None),
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
             QuoinError::NotCallable(_)

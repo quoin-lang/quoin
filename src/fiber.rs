@@ -3,7 +3,7 @@ use crate::io_backend::IoRequest;
 use crate::value::{Block, Value};
 use crate::vm::{TaskId, VmState, VmStatus};
 
-use corosensei::stack::DefaultStack;
+use corosensei::stack::{DefaultStack, Stack};
 use gc_arena::{Collect, Gc, Mutation};
 use std::cell::{Cell, RefCell};
 
@@ -209,6 +209,11 @@ pub struct Fiber<'gc> {
     /// unwind cannot cross (compiled code carries no unwind tables; the walk
     /// aborts the process). Set by `codegen`'s entry gate, read by `Drop`.
     pub ran_compiled: Cell<bool>,
+    /// Lowest usable address of this coroutine's stack (stacks grow *down*), captured at
+    /// construction. The driver copies it into `VmState::stack_limit` before resuming this
+    /// coroutine, which is how `execute_block` knows how much room is left — see
+    /// `VmState::ensure_stack_headroom`.
+    pub stack_limit: usize,
 }
 
 /// Teardown for an abandoned fiber (a generator dropped mid-iteration by
@@ -260,10 +265,14 @@ impl<'gc> Fiber<'gc> {
         // spec::MAX_OUTCALL_NESTING), and `dispatch_one`'s frame is large —
         // the corosensei default (1 MiB) overflowed under S1 promotion.
         let stack = DefaultStack::new(16 * 1024 * 1024).expect("coroutine stack");
+        // Read the limit before `with_stack` consumes the stack: it is the only handle we
+        // get on this coroutine's extent, and `execute_block` needs it to bound re-entry.
+        let stack_limit = stack.limit().get();
         let coroutine = VMCoroutine::with_stack(stack, move |yielder, ctx| f(yielder, ctx));
         Self {
             coroutine: RefCell::new(Some(coroutine)),
             ran_compiled: Cell::new(false),
+            stack_limit,
         }
     }
 }
