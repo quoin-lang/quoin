@@ -115,12 +115,15 @@ strict `var`/`let` and no longer compile.
 
 ## Tier 3 — "first real script" stdlib gaps
 
-- [ ] `[IO]Stdin` (line/byte reads — can't write a filter today). Planned as a
-  `blocking::Unblock` over `std::io::stdin()` inserted as a `StreamId`, so it
-  parks on the scheduler and reuses `StringStream`'s `readLine`/`eachLine:`.
-- [ ] `[OS]Env` — read-only (`at:`, `at:ifAbsent:`, `contains?:`, `keys`, `each:`,
-  `asMap`). No `at:put:`: edition 2024 makes `std::env::set_var` `unsafe`, and the
-  mutation half mainly serves subprocess spawning, which is deferred past v0.1.
+- [x] `[IO]Stdin` — `readLine`, `eachLine:`, `readAll`, `stream`, `byteStream`.
+  A `blocking::Unblock` over `std::io::stdin()` registered as a `StreamId`, so
+  reads **park** on the scheduler and reuse the `StringStream` protocol. A class
+  rather than a prelude constant (opening stdin is an `await_io`, and the prelude
+  also runs under `qn benchmark`, which has no scheduler), and the stream is
+  memoized because it buffers. `tests/io_stdin.rs`, `qnlib/tests/59-io-stdin.qn`.
+- [x] `[OS]Env` — read-only (`at:`, `at:ifAbsent:`, `contains?:`, `keys`, `each:`,
+  `count`, `asMap`). No `at:put:`: edition 2024 makes `std::env::set_var` `unsafe`,
+  and the mutation half mainly serves subprocess spawning, deferred past v0.1.
 - [x] `[OS]Path` (join/dirname/basename/extension/stem/normalize/absolute?) —
   `src/runtime/os.rs`, `qnlib/tests/57-os-path.qn`.
 - [x] `Runtime.exit:`

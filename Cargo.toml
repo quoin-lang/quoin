@@ -145,6 +145,7 @@ cranelift-jit = "0.133.1"
 cranelift-module = "0.133.1"
 cranelift-native = "0.133.1"
 clap = { version = "4.6.1", features = ["derive"] }
+blocking = "1.6.2"
 
 [dev-dependencies]
 # Self-signed certs for the local rustls server in the TLS tests. `ring` backend to

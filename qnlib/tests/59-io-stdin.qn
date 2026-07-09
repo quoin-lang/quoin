@@ -1,0 +1,45 @@
+"* [IO]Stdin (src/runtime/io.rs + qnlib/core/06-io.qn) — the readable standard stream.
+"*
+"* Only the cases that need NO input live here: a test running under `qn test` inherits the
+"* harness's stdin, so actually reading would consume it (or block on a terminal). Everything
+"* that needs a controlled pipe or a file redirect is in `tests/io_stdin.rs`.
+"*
+"* Design notes worth keeping in view:
+"*  - `[IO]Stdin` is a CLASS, not a constant like [IO]Stdout / [IO]Stderr. Opening stdin parks
+"*    on the scheduler, and the prelude also runs under `qn benchmark`, which has none — so the
+"*    stream is created on the first read, not at startup.
+"*  - Reads park the task; a program can serve sockets while it waits on a line.
+"*  - The stream is memoized, because a stream buffers: two streams over fd 0 would each hold
+"*    bytes the other never sees.
+
+(TestSuite.new:{ var name = 'IOStdin' }).add:{
+    "* A namespace class (see 54-native-new.qn) — the stream lives behind `.stream`.
+    .test:isANamespaceClass -> {
+        .does:{ [IO]Stdin.new } throw:#/Cannot instantiate abstract class/
+    };
+
+    "* These are class-side methods, so `can?:` must be asked of the metaclass — on a Class
+    "* receiver it reports *instance* methods (see 17-can.qn).
+    .test:respondsToTheReadingProtocol -> {
+        .isTrue:{ [IO]Stdin.meta.can?:#readLine };
+        .isTrue:{ [IO]Stdin.meta.can?:#eachLine: };
+        .isTrue:{ [IO]Stdin.meta.can?:#readAll };
+        .isTrue:{ [IO]Stdin.meta.can?:#stream };
+        .isTrue:{ [IO]Stdin.meta.can?:#byteStream }
+    };
+
+    "* stdout/stderr are write-only: refused where the mistake is made, not at the first read.
+    .test:theWriteHandlesRefuseToBeRead -> {
+        .does:{ ([IO]Handle.stdout).stringStream } throw:IoError;
+        .does:{ ([IO]Handle.stderr).stringStream } throw:IoError;
+        .does:{ ([IO]Handle.stdout).stringStream } throw:#/only stdin is readable/;
+        .does:{ ([IO]Handle.stderr).byteStream } throw:#/write-only/
+    };
+
+    "* Conversely, stdin is not a sink. A typed IoError, not a bare String — `catch:{|e:Error|}`
+    "* must be able to see it.
+    .test:stdinRefusesToBeWritten -> {
+        .does:{ ([IO]Handle.stdin).write:'x' } throw:IoError;
+        .does:{ ([IO]Handle.stdin).writeln:'x' } throw:#/read-only/
+    }
+}

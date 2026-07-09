@@ -122,6 +122,7 @@ pub(crate) fn register_builtins<'gc>(mc: &Mutation<'gc>, vm: &mut VmState<'gc>) 
     vm.register_native_class(mc, io::build_io_folder_class());
     vm.register_native_class(mc, io::build_io_file_class());
     vm.register_native_class(mc, io::build_io_handle_class());
+    vm.register_native_class(mc, io::build_io_stdin_class());
     vm.register_native_class(mc, vm_stats::build_vm_stats_class());
     vm.register_native_class(mc, crate::runtime::worker::build_worker_class());
     vm.register_native_class(

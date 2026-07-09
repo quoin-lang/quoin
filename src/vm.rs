@@ -513,6 +513,13 @@ pub struct VmState<'gc> {
     /// exit (via `NativeReentryGuard`), and capped at `MAX_NATIVE_REENTRY`.
     #[collect(require_static)]
     pub native_reentry_depth: usize,
+    /// The process's standard input, as a stream, created on first use and reused forever after.
+    ///
+    /// Memoized because a stream *buffers*: two streams over fd 0 would each hold bytes the other
+    /// never sees, so `readLine` twice through two handles would silently drop input. Lazy because
+    /// opening it is an `await_io`, and the benchmark harness (which still runs the prelude) has
+    /// no scheduler to park on.
+    pub stdin_stream: Option<Value<'gc>>,
     /// Lowest usable address of the coroutine stack currently running (`Fiber::stack_limit`),
     /// refreshed by the driver before every `resume`. `0` means "not on a known coroutine"
     /// (the benchmark harness steps the VM straight on the OS thread stack), which disables
@@ -713,6 +720,7 @@ impl<'gc> VmState<'gc> {
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
+            stdin_stream: None,
             stack_limit: 0,
             requested_exit: None,
             aot: AotTaskState::default(),

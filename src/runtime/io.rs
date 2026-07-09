@@ -317,7 +317,12 @@ fn handle_write<'gc>(
         Kind::Err => vm
             .write_std(StdStream::Err, bytes)
             .map_err(|e| QuoinError::Other(e.to_string())),
-        Kind::Stdin => Err(QuoinError::Other("can't write to stdin!".to_string())),
+        // A typed `IoError`, not a bare String: `catch:{|e:Error|}` must be able to see it.
+        // (Mirrors `[IO]Handle.stringStream` refusing the write handles.)
+        Kind::Stdin => Err(QuoinError::io(
+            crate::error::IoErrorKind::InvalidInput,
+            "[IO]Handle.stdin is read-only (stdin cannot be written)",
+        )),
         Kind::File => handle.with_native_state_mut(mc, |h: &mut NativeIoHandle| {
             if let NativeIoHandleWrapper::File(f) = &mut h.wrapper {
                 f.write_all(bytes)
@@ -327,6 +332,96 @@ fn handle_write<'gc>(
             }
         })?,
     }
+}
+
+/// The one stdin stream, created on first use (`vm.stdin_stream`).
+///
+/// Memoized rather than freshly opened per call because a stream *buffers*: two streams over
+/// fd 0 would each hold bytes the other never sees, so reading a line through one and then the
+/// other would silently drop input. `kind` therefore also fixes the flavour — asking for the
+/// byte view after the text view (or vice versa) is a mistake, not a conversion.
+fn stdin_stream<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    kind: &str,
+    who: &str,
+) -> Result<Value<'gc>, QuoinError> {
+    let want = if kind == "byteStream" {
+        "ByteStream"
+    } else {
+        "StringStream"
+    };
+    if let Some(existing) = vm.stdin_stream {
+        // `type_name()` says `Object` for a native-state value; the class is what identifies it.
+        let have = match existing {
+            Value::Object(obj) => obj.borrow().class_name(),
+            other => other.type_name().to_string(),
+        };
+        if have != want {
+            return Err(QuoinError::io(
+                crate::error::IoErrorKind::InvalidInput,
+                format!(
+                    "{who}: stdin is already open as a {have}; it buffers, so it cannot also be read as a {want}"
+                ),
+            ));
+        }
+        return Ok(existing);
+    }
+    let stream = match vm.await_io(IoRequest::OpenStdin)? {
+        IoResult::Connected(id) => {
+            if kind == "byteStream" {
+                crate::runtime::streams::make_byte_stream(vm, mc, id)
+            } else {
+                crate::runtime::streams::make_string_stream(vm, mc, id, Vec::new())
+            }
+        }
+        IoResult::Err(e) => return Err(QuoinError::from_io_error(&e)),
+        other => {
+            return Err(QuoinError::Other(format!(
+                "{who}: unexpected I/O result {other:?}"
+            )));
+        }
+    };
+    vm.stdin_stream = Some(stream);
+    Ok(stream)
+}
+
+/// Back `[IO]Handle#stringStream` / `#byteStream`. The write handles are refused here rather
+/// than at first read, so the mistake surfaces where it was made.
+fn open_stdin_stream<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+    kind: &str,
+) -> Result<Value<'gc>, QuoinError> {
+    let readable = receiver.with_native_state(|h: &NativeIoHandle| {
+        matches!(h.wrapper, NativeIoHandleWrapper::Stdin(_))
+    })?;
+    if !readable {
+        return Err(QuoinError::io(
+            crate::error::IoErrorKind::InvalidInput,
+            format!("[IO]Handle.{kind}: only stdin is readable (stdout/stderr are write-only)"),
+        ));
+    }
+    stdin_stream(vm, mc, kind, &format!("[IO]Handle.{kind}"))
+}
+
+/// `[IO]Stdin` — the readable half of the standard streams, mirroring the `[IO]Stdout` /
+/// `[IO]Stderr` constants. A *class*, not a prelude constant, because opening stdin is an
+/// `await_io` and the prelude also runs under `qn benchmark`, which has no scheduler to park on;
+/// the stream is therefore created on first read. `readLine` / `eachLine:` / `readAll` are Quoin
+/// delegators over `.stream` (`qnlib/core/06-io.qn`).
+pub fn build_io_stdin_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("[IO]Stdin", Some("Object"))
+        .abstract_class()
+        .class_method("stream", |vm, mc, _r, _args| {
+            stdin_stream(vm, mc, "stringStream", "[IO]Stdin.stream")
+        })
+        .returns("StringStream")
+        .class_method("byteStream", |vm, mc, _r, _args| {
+            stdin_stream(vm, mc, "byteStream", "[IO]Stdin.byteStream")
+        })
+        .returns("ByteStream")
 }
 
 pub fn build_io_handle_class() -> NativeClassBuilder {
@@ -361,6 +456,16 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
                 NativeIoHandleWrapper::File(_) => "[IO]Handle.file",
             })?;
             Ok(vm.new_string(mc, s.to_string()))
+        })
+        // stringStream / byteStream: read the handle through the same stream stack as a socket
+        // or a file, so `readLine` / `eachLine:` / `readAll` come for free and every read PARKS
+        // the task rather than freezing the single-threaded scheduler. Only stdin is readable;
+        // the write handles say so rather than handing back a stream that fails on first read.
+        .instance_method("stringStream", |vm, mc, receiver, _args| {
+            open_stdin_stream(vm, mc, receiver, "stringStream")
+        })
+        .instance_method("byteStream", |vm, mc, receiver, _args| {
+            open_stdin_stream(vm, mc, receiver, "byteStream")
         })
         .instance_method("write:", |vm, mc, _receiver, args| {
             let mut s = get_io_string(vm, mc, args[0])?;

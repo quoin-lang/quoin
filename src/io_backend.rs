@@ -39,6 +39,47 @@ pub struct StreamId(pub u64);
 pub trait AsyncStream: futures_lite::AsyncRead + futures_lite::AsyncWrite + Unpin {}
 impl<T: futures_lite::AsyncRead + futures_lite::AsyncWrite + Unpin> AsyncStream for T {}
 
+/// Adapts a read-only source into the `AsyncStream` registry, whose entries must also be
+/// `AsyncWrite` (every other conduit — socket, file — is bidirectional). Writes fail with
+/// `Unsupported` rather than panicking or silently succeeding: `[IO]Stdin.write:'x'` is a
+/// programmer error, and it should say so.
+pub struct ReadOnlyStream<R>(pub R);
+
+impl<R: futures_lite::AsyncRead + Unpin> futures_lite::AsyncRead for ReadOnlyStream<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl<R: Unpin> futures_lite::AsyncWrite for ReadOnlyStream<R> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this stream is read-only",
+        )))
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
 /// A plain-data I/O error (no `std::io::Error` borrow of OS state, Clone-friendly).
 #[derive(Clone, Debug)]
 pub struct IoError {
@@ -117,6 +158,15 @@ pub enum IoRequest {
     /// `OsString` end to end (the QN String → path conversion happens at the `[IO]File`
     /// boundary, not here). Result reuses `Connected(id)`.
     OpenFile { path: OsString },
+    /// Register the process's standard input as a stream, returning its id — so stdin reads
+    /// through the same `ByteStream`/`StringStream` as a socket or a file, and *parks the task*
+    /// instead of freezing the single-threaded scheduler.
+    ///
+    /// Backed by `blocking::Unblock`, not `async_io::Async`: `Async` needs a pollable fd, and
+    /// redirected stdin (`qn app.qn < file`) is a regular file, which is not. `Unblock` reads on
+    /// the blocking pool and works uniformly for a tty, a pipe, and a file. Result reuses
+    /// `Connected(id)`.
+    OpenStdin,
     /// Bind a listening TCP socket on `host:port` (`port` 0 = ephemeral). Registers the
     /// listener and returns `Listening { id, port }` with the actual bound port.
     Listen { host: String, port: u16 },
@@ -182,6 +232,7 @@ impl IoRequest {
             IoRequest::Close { .. } => "io: close".to_string(),
             IoRequest::TlsWrap { .. } => "io: tls handshake".to_string(),
             IoRequest::OpenFile { .. } => "io: open file".to_string(),
+            IoRequest::OpenStdin => "io: open stdin".to_string(),
             IoRequest::Listen { host, port } => format!("io: listen {host}:{port}"),
             IoRequest::Accept { .. } => "io: accept".to_string(),
         }
@@ -713,6 +764,15 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
+            IoRequest::OpenStdin => Box::pin(async move {
+                // `Unblock` reads on the blocking pool, spawning nothing until the first read.
+                // Dropping the inner `Stdin` does NOT close fd 0 — it is a handle onto a process
+                // -wide static — so reaping this stream leaves the descriptor intact for anyone
+                // else (the REPL's line editor, a later stream).
+                let stdin = blocking::Unblock::new(std::io::stdin());
+                IoResult::Connected(inner.insert(Box::new(ReadOnlyStream(stdin))))
+            }),
+
             IoRequest::TlsWrap {
                 id,
                 domain,
@@ -831,7 +891,7 @@ impl IoBackend for MockBackend {
             // No real handshake in the mock — the conduit keeps its id, as in the
             // native backend's in-place swap.
             IoRequest::TlsWrap { id, .. } => IoResult::Connected(id),
-            IoRequest::OpenFile { .. } => {
+            IoRequest::OpenFile { .. } | IoRequest::OpenStdin => {
                 let id = StreamId(self.next_id.get());
                 self.next_id.set(self.next_id.get() + 1);
                 IoResult::Connected(id)
