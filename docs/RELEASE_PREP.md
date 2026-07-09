@@ -208,8 +208,6 @@ it. None is fixed.
   exit 1. Tests in `tests/exit_code.rs` assert the message, the exit code, and
   the *absence* of `panicked` / `RUST_BACKTRACE`.
 
-  Residue: compile errors carry no line/column — `compile_program` returns a bare
-  `String`, unlike parse errors and checker diagnostics, which have spans.
 
 - [x] **Reading an undeclared identifier silently yields `nil`.** FIXED — it now
   raises a catchable `NameError`, in both the interpreter (`src/vm.rs`) and
@@ -226,12 +224,43 @@ it. None is fixed.
   `Class.exists?:#Name` (`src/runtime/class.rs`), which asks the question directly;
   `Object#defined?` is unchanged for nil-testing a value. Tests: `qnlib/tests/60-names.qn`.
 
-- [ ] **No file-write API.** `[IO]File` opens a file for reading and metadata
-  (`open:`, `fullpath`, `name`, `ext`, `is_file?`) and yields read streams; the
-  only writable handles are stdout and stderr. A Quoin program cannot create or
-  write a file. Verified by probe and by the absence of any writer in `qnlib/`.
-  This is a bigger "first real script" gap than anything in Tier 3 — a filter can
-  read stdin and print, but it cannot save its output.
+- [x] **No file-write API.** FIXED. `[IO]File.create:` / `append:` return a
+  writable `ByteStream` over the same async backend a socket uses (a new
+  `IoRequest::OpenFileWrite`, `async_fs::OpenOptions`); `StringStream` gained
+  `write:` / `writeln:` / `flush!`; and `qnlib/core/06-io.qn` adds the one-shot
+  `[IO]File.write:to:` / `append:to:` / `read:`. Also `delete:`, `rename:to:`,
+  `exists?:`, `[IO]Folder.create:` / `delete:` (synchronous, like `open:`'s
+  metadata read). Tests: `qnlib/tests/61-file-write.qn`, `tests/file_write.rs`.
+
+  **Buffering.** File write streams buffer 16 KiB; sockets stay write-through,
+  because `[HTTP]Server` writes a response and then waits for the client, and a
+  buffered socket write would stall it (the socket test hangs if you buffer them —
+  verified). `flush!` is a no-op on a write-through stream, so the same code runs
+  over both. `close` flushes.
+
+  **Exit flush.** A stream the program never closed is flushed by the driver when
+  the program ends — after normal completion, after `Runtime.exit:`, and after an
+  uncaught error — because a `Drop` may not perform async I/O. It also fires per
+  REPL line, so `take_pending_writes` drains buffers *without* untracking streams
+  that are still open. Signal death still loses the buffer, as in C.
+
+  Also removed: `NativeIoHandleWrapper::File`, a blocking `write_all` on the
+  scheduler thread that no Quoin code could reach (only a Rust test constructed it).
+
+## Tier 4b — found while building the file-write path
+
+- [ ] **The backend allocates and zeroes a fresh buffer on every `Read`.**
+  `io_backend.rs`: `let mut buf = vec![0u8; max];` per fill, then truncate, copy
+  into the stream's `rbuf`, and free. Measured cost: reading a 64 MiB file, the
+  overhead above the 4.5 GB/s floor is +9% at a 16 KiB fill and +4% at 32 KiB, but
+  it *rises again* to +26% at 64 KiB, where the per-read allocation crosses the
+  allocator's large-object threshold. Reuse one scratch buffer per stream and the
+  curve should keep improving; then revisit `IO_BUFFER_BYTES` (32-64 KiB) for file
+  streams specifically. The measurement and the reasoning are recorded on
+  `IO_BUFFER_BYTES` in `src/runtime/streams.rs`.
+
+- [ ] **Compile errors carry no line/column.** `compile_program` returns a bare
+  `String`, unlike parse errors and checker diagnostics, which have spans.
 
 ---
 

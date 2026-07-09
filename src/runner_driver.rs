@@ -499,11 +499,45 @@ pub(crate) fn drive_main_task(arena: &mut ReplArena) -> Result<(), QuoinError> {
     result
 }
 
+/// Drive to completion, then run the exit flush. Every entry point goes through here — a
+/// script, `-e`, a REPL line, the debugger, the DAP adapter — so a buffered `[IO]File` write
+/// stream reaches disk wherever the program ends. (The REPL flushes per line, which is what an
+/// interactive session wants anyway.)
+pub(crate) fn drive_with_frontend<F: DriverFrontend>(
+    arena: &mut ReplArena,
+    frontend: &mut F,
+) -> Result<(), QuoinError> {
+    let result = drive_to_completion(arena, frontend);
+    flush_open_write_streams(arena);
+    result
+}
+
+/// C's atexit flush. A buffered `[IO]File` write stream the program never closed still holds
+/// bytes; a GC finaliser cannot write them (a `Drop` may not perform async I/O), so the driver
+/// does it here — after the program has ended, whether it finished, raised, or called
+/// `Runtime.exit:`. Blocking is fine at this point: nothing is left to schedule.
+///
+/// Signal death still loses the buffer, exactly as in C.
+fn flush_open_write_streams(arena: &mut ReplArena) {
+    let pending = arena.mutate_root(|mc, vm| vm.take_pending_writes(mc));
+    if pending.is_empty() {
+        return;
+    }
+    let backend = arena.mutate_root(|_mc, vm| vm.io.backend.clone());
+    for (id, bytes) in pending {
+        // Best-effort: a stream whose fd already went away cannot be helped, and the program
+        // has finished, so there is no one left to raise to.
+        if let IoResult::Err(e) = block_on(backend.perform(IoRequest::Write { id, bytes })) {
+            eprintln!("qn: could not flush a buffered file on exit: {e:?}");
+        }
+    }
+}
+
 /// The cooperative scheduler loop, parameterized by a [`DriverFrontend`] for the debug
 /// touchpoints (configuration, program output, pause, completion). Resumes the current task,
 /// services background I/O / deadlines via the reactor, and hands a `DebugPaused` to the
 /// frontend. Shared by the CLI debugger, normal/REPL runs, and the DAP adapter.
-pub(crate) fn drive_with_frontend<F: DriverFrontend>(
+fn drive_to_completion<F: DriverFrontend>(
     arena: &mut ReplArena,
     frontend: &mut F,
 ) -> Result<(), QuoinError> {

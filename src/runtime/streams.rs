@@ -11,8 +11,21 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// How many bytes a single fill pulls from the backend per `Read`.
-const FILL_CHUNK: usize = 8192;
+/// Quoin's one I/O buffer size: how many bytes a single fill pulls from the backend per `Read`,
+/// and how much a buffered write stream accumulates before it drains.
+///
+/// 16 KiB, measured rather than inherited. One `await_io` round trip costs ~270ns (a fiber park,
+/// a scheduler pass, a backend poll) — an order more than the syscall it wraps — so the buffer
+/// buys down that fixed cost. Reading a 64 MiB file, overhead above the 4.5 GB/s
+/// memory-bandwidth floor is +28% at 4 KiB, +16% at 8 KiB, +9% at 16 KiB, +4% at 32 KiB, and
+/// then *worsens* to +26% at 64 KiB — because the backend allocates and zeroes a fresh
+/// `max`-byte Vec on every `Read` (`io_backend.rs`), which crosses the allocator's large-object
+/// threshold there. That cliff is an artifact of the per-read allocation, not of the size, so
+/// 16 KiB sits below it and stays right once the allocation is fixed.
+///
+/// The top end is set by memory, not throughput: this is also every *socket's* read-ahead, so a
+/// server holding 10k connections holds 10k of these. 32 KiB would buy 4% and cost it 160 MB.
+pub const IO_BUFFER_BYTES: usize = 16 * 1024;
 
 /// Native backing for a buffered stream (`ByteStream`; `StringStream` joins it in 6b).
 /// Like `NativeSocket` it owns a `StreamId` into the backend registry — the conduit
@@ -25,11 +38,41 @@ pub struct NativeStream {
     reap: Rc<RefCell<Vec<StreamId>>>,
     closed: bool,
     rbuf: Vec<u8>,
+    /// Bytes written by QN but not yet handed to the backend. Empty unless `wcap > 0`.
+    wbuf: Vec<u8>,
+    /// Write-buffer capacity; **0 means write-through**, which is what every socket gets.
+    /// Buffering a socket would stall `[HTTP]Server`, which writes a response and then waits
+    /// for the client. Only file write streams (`[IO]File.create:` / `append:`) buffer — the
+    /// same split C stdio makes.
+    wcap: usize,
 }
 
 impl NativeStream {
     fn id(&self) -> StreamId {
         self.id
+    }
+
+    fn is_buffered(&self) -> bool {
+        self.wcap > 0
+    }
+
+    /// Whether this stream has been closed — the exit-flush registry drops closed streams.
+    pub fn is_stream_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// The backend stream id, for the exit-flush registry.
+    pub fn stream_id(&self) -> StreamId {
+        self.id
+    }
+
+    /// Take the undrained bytes for the exit flush. `None` when there is nothing to write —
+    /// including when the stream was closed (and therefore already flushed).
+    pub fn take_pending(&mut self) -> Option<(StreamId, Vec<u8>)> {
+        if self.closed || self.wbuf.is_empty() {
+            return None;
+        }
+        Some((self.id, std::mem::take(&mut self.wbuf)))
     }
 
     fn is_closed(&self) -> bool {
@@ -100,6 +143,25 @@ pub fn build_byte_stream_class() -> NativeClassBuilder {
 /// `pub` so the socket classes' `byteStream` method (and, later, `[IO]File`) can construct
 /// one after obtaining a `StreamId`.
 pub fn make_byte_stream<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, id: StreamId) -> Value<'gc> {
+    make_byte_stream_with(vm, mc, id, 0)
+}
+
+/// A `ByteStream` that *buffers* writes: `[IO]File.create:` / `append:`. The caller must also
+/// register it with `VmState::track_write_stream` so an unclosed stream is flushed at exit.
+pub fn make_write_byte_stream<'gc>(
+    vm: &VmState<'gc>,
+    mc: &Mutation<'gc>,
+    id: StreamId,
+) -> Value<'gc> {
+    make_byte_stream_with(vm, mc, id, IO_BUFFER_BYTES)
+}
+
+fn make_byte_stream_with<'gc>(
+    vm: &VmState<'gc>,
+    mc: &Mutation<'gc>,
+    id: StreamId,
+    wcap: usize,
+) -> Value<'gc> {
     let class = vm.get_or_create_builtin_class(mc, "ByteStream");
     vm.new_native_state(
         mc,
@@ -109,6 +171,8 @@ pub fn make_byte_stream<'gc>(vm: &VmState<'gc>, mc: &Mutation<'gc>, id: StreamId
             reap: vm.io.socket_reap.clone(),
             closed: false,
             rbuf: Vec::new(),
+            wbuf: Vec::new(),
+            wcap,
         },
     )
 }
@@ -226,20 +290,25 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             let bytes = drain_up_to(mc, receiver, n)?;
             Ok(vm.new_bytes(mc, bytes))
         })
-        // writeAll:bytes -> write all of `bytes` straight through to the conduit
-        // (complete-or-throw); the buffer is read-side only. Returns nil.
+        // writeAll:bytes -> write all of `bytes` (complete-or-throw). On a socket this goes
+        // straight through; on a buffered file stream it lands in the write buffer and drains
+        // once the buffer fills. Returns nil.
         .typed_instance_method("writeAll:", &["Bytes"], |vm, mc, receiver, args| {
-            let id = open_stream_id(receiver)?;
-            let bytes = arg!(args, Bytes, 0).to_vec(); // owned, before the await
-            match vm.await_io(IoRequest::Write { id, bytes })? {
-                IoResult::Wrote(_) => Ok(vm.new_nil(mc)),
-                IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
-                other => Err(unexpected("writeAll:", other)),
-            }
+            let bytes = arg!(args, Bytes, 0).to_vec(); // owned, before any await
+            stream_write(vm, mc, receiver, bytes)?;
+            Ok(vm.new_nil(mc))
+        })
+        // flush! -> hand any buffered bytes to the OS now. A no-op on a write-through stream
+        // (every socket), so the same code works over a file and a socket. Returns nil.
+        .instance_method("flush!", |vm, mc, receiver, _args| {
+            stream_flush(vm, mc, receiver)?;
+            Ok(vm.new_nil(mc))
         })
         // close -> close the stream (idempotent); its fd is reaped next scheduler turn and
         // any buffered-but-unread bytes are discarded. Further ops throw.
         .instance_method("close", |vm, mc, receiver, _args| {
+            stream_flush(vm, mc, receiver)?;
+            vm.untrack_write_stream(mc, receiver);
             reap_stream_handle(vm, mc, receiver);
             Ok(vm.new_nil(mc))
         })
@@ -253,8 +322,10 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         // stringStream -> a text `StringStream` that *consumes* this byte stream: the fd
         // and any buffered read-ahead transfer up; this handle is left closed.
         .instance_method("stringStream", |vm, mc, receiver, _args| {
-            let (id, rbuf) = consume_stream_or_raise(mc, receiver, "stringStream")?;
-            Ok(make_string_stream(vm, mc, id, rbuf))
+            let parts = consume_stream_or_raise(mc, receiver, "stringStream")?;
+            let handle = make_string_stream_from(vm, mc, parts);
+            retrack_write_stream(vm, mc, receiver, handle)?;
+            Ok(handle)
         })
 }
 
@@ -264,12 +335,15 @@ pub fn build_string_stream_class() -> NativeClassBuilder {
         // StringStream.over: aByteStream -> a text stream that *consumes* the byte stream
         // (its fd and buffered read-ahead transfer; the byte stream is left closed).
         .class_method("over:", |vm, mc, _r, args| {
-            let (id, rbuf) = consume_stream_or_raise(mc, args[0], "StringStream.over:")?;
-            Ok(make_string_stream(vm, mc, id, rbuf))
+            let parts = consume_stream_or_raise(mc, args[0], "StringStream.over:")?;
+            let handle = make_string_stream_from(vm, mc, parts);
+            retrack_write_stream(vm, mc, args[0], handle)?;
+            Ok(handle)
         })
         .class_method("over:do:", |vm, mc, _r, args| {
-            let (id, rbuf) = consume_stream_or_raise(mc, args[0], "StringStream.over:do:")?;
-            let handle = make_string_stream(vm, mc, id, rbuf);
+            let parts = consume_stream_or_raise(mc, args[0], "StringStream.over:do:")?;
+            let handle = make_string_stream_from(vm, mc, parts);
+            retrack_write_stream(vm, mc, args[0], handle)?;
             let block = arg!(args, Block, 1);
             scope_stream(vm, mc, handle, block)
         });
@@ -294,6 +368,8 @@ pub fn make_string_stream<'gc>(
             reap: vm.io.socket_reap.clone(),
             closed: false,
             rbuf,
+            wbuf: Vec::new(),
+            wcap: 0,
         },
     )
 }
@@ -353,7 +429,29 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
             let s = decode_utf8(all, "readAll")?;
             Ok(vm.new_string(mc, s))
         })
+        // write:text -> the String's UTF-8 bytes. Buffered on a file stream, straight through
+        // on a socket. Returns nil.
+        .typed_instance_method("write:", &["String"], |vm, mc, receiver, args| {
+            let text = arg!(args, String, 0).to_string();
+            stream_write(vm, mc, receiver, text.into_bytes())?;
+            Ok(vm.new_nil(mc))
+        })
+        // writeln:text -> `write:` plus a trailing newline. The line-oriented half of the
+        // filter idiom: `[IO]Stdin.eachLine:{ |l| out.writeln:l }`.
+        .typed_instance_method("writeln:", &["String"], |vm, mc, receiver, args| {
+            let mut text = arg!(args, String, 0).to_string();
+            text.push('\n');
+            stream_write(vm, mc, receiver, text.into_bytes())?;
+            Ok(vm.new_nil(mc))
+        })
+        // flush! -> hand any buffered bytes to the OS now; a no-op on a write-through stream.
+        .instance_method("flush!", |vm, mc, receiver, _args| {
+            stream_flush(vm, mc, receiver)?;
+            Ok(vm.new_nil(mc))
+        })
         .instance_method("close", |vm, mc, receiver, _args| {
+            stream_flush(vm, mc, receiver)?;
+            vm.untrack_write_stream(mc, receiver);
             reap_stream_handle(vm, mc, receiver);
             Ok(vm.new_nil(mc))
         })
@@ -416,22 +514,37 @@ fn utf8_split<'gc>(receiver: Value<'gc>) -> Result<(usize, bool), QuoinError> {
         .map_err(QuoinError::Other)
 }
 
-/// Consume a `ByteStream`, returning its `(id, rbuf)` and leaving it closed (the fd and
-/// buffered read-ahead transfer up to a `StringStream`). The `ByteStream` analogue of
-/// `consume_socket`. `Ok(None)` if already closed; errors only if `value` isn't a stream.
+/// Everything a stream carries when handed from one layer to the next: the fd, the read-ahead,
+/// and — for a buffered write stream — the bytes not yet drained plus the capacity that says it
+/// buffers at all. All four transfer, so `([IO]File.create:p).stringStream` keeps its buffer
+/// instead of silently dropping it.
+pub struct StreamParts {
+    id: StreamId,
+    rbuf: Vec<u8>,
+    wbuf: Vec<u8>,
+    wcap: usize,
+}
+
+/// Consume a `ByteStream`, returning its parts and leaving it closed (the fd and the buffers
+/// transfer up to a `StringStream`). The `ByteStream` analogue of `consume_socket`.
+/// `Ok(None)` if already closed; errors only if `value` isn't a stream.
 fn consume_stream<'gc>(
     mc: &Mutation<'gc>,
     value: Value<'gc>,
-) -> Result<Option<(StreamId, Vec<u8>)>, QuoinError> {
+) -> Result<Option<StreamParts>, QuoinError> {
     value
         .with_native_state_mut::<NativeStream, _, _>(mc, |s| {
             if s.is_closed() {
                 None
             } else {
-                let id = s.id();
-                let rbuf = std::mem::take(&mut s.rbuf); // hand the read-ahead upward
+                let parts = StreamParts {
+                    id: s.id(),
+                    rbuf: std::mem::take(&mut s.rbuf), // hand the read-ahead upward
+                    wbuf: std::mem::take(&mut s.wbuf), // ...and any undrained writes
+                    wcap: s.wcap,
+                };
                 s.mark_closed(); // no reap: the fd moves into the string stream
-                Some((id, rbuf))
+                Some(parts)
             }
         })
         .map_err(QuoinError::Other)
@@ -441,12 +554,128 @@ fn consume_stream_or_raise<'gc>(
     mc: &Mutation<'gc>,
     source: Value<'gc>,
     op: &str,
-) -> Result<(StreamId, Vec<u8>), QuoinError> {
+) -> Result<StreamParts, QuoinError> {
     match consume_stream(mc, source)? {
-        Some(pair) => Ok(pair),
+        Some(parts) => Ok(parts),
         None => Err(QuoinError::io_closed(format!(
             "{op}: the source is already closed"
         ))),
+    }
+}
+
+/// Rebuild a `StringStream` from a consumed byte stream's parts, preserving its write buffer.
+fn make_string_stream_from<'gc>(
+    vm: &VmState<'gc>,
+    mc: &Mutation<'gc>,
+    parts: StreamParts,
+) -> Value<'gc> {
+    let class = vm.get_or_create_builtin_class(mc, "StringStream");
+    vm.new_native_state(
+        mc,
+        class,
+        NativeStream {
+            id: parts.id,
+            reap: vm.io.socket_reap.clone(),
+            closed: false,
+            rbuf: parts.rbuf,
+            wbuf: parts.wbuf,
+            wcap: parts.wcap,
+        },
+    )
+}
+
+/// The exit-flush registry tracks *handles*, and `stringStream` retires one for another. Swap
+/// the tracked handle so the survivor is the one flushed at exit. A no-op for write-through
+/// streams, which are never tracked.
+fn retrack_write_stream<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    old: Value<'gc>,
+    new: Value<'gc>,
+) -> Result<(), QuoinError> {
+    let buffered = new
+        .with_native_state::<NativeStream, _, _>(|s| s.is_buffered())
+        .map_err(QuoinError::Other)?;
+    if buffered {
+        vm.untrack_write_stream(mc, old);
+        vm.track_write_stream(new);
+    }
+    Ok(())
+}
+
+/// Write `bytes` to the stream. Write-through (`wcap == 0`) issues the `Write` immediately; a
+/// buffered stream appends and drains only once the buffer reaches `wcap`, so a `writeln:` per
+/// line does not cost a scheduler round trip each.
+///
+/// The native-state borrow is dropped before every await, and no `Gc` value is read after one
+/// (`no_gc_across_yield` / `no_borrow_across_yield`).
+fn stream_write<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+    bytes: Vec<u8>,
+) -> Result<(), QuoinError> {
+    let id = open_stream_id(receiver)?;
+    let cap = receiver
+        .with_native_state::<NativeStream, _, _>(|s| s.wcap)
+        .map_err(QuoinError::Other)?;
+
+    if cap == 0 {
+        return write_through(vm, id, bytes);
+    }
+
+    // Append, then drain in one `Write` once we reach the buffer size. A single write larger
+    // than the buffer drains in one go rather than in `wcap`-sized pieces.
+    let pending = receiver
+        .with_native_state_mut::<NativeStream, _, _>(mc, |s| {
+            s.wbuf.extend_from_slice(&bytes);
+            if s.wbuf.len() >= s.wcap {
+                std::mem::take(&mut s.wbuf)
+            } else {
+                Vec::new()
+            }
+        })
+        .map_err(QuoinError::Other)?;
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+    write_through(vm, id, pending)
+}
+
+/// Drain a buffered stream's pending bytes. A no-op when nothing is pending, and on a
+/// write-through stream (which never accumulates any).
+fn stream_flush<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+) -> Result<(), QuoinError> {
+    let closed = receiver
+        .with_native_state::<NativeStream, _, _>(|s| s.is_closed())
+        .map_err(QuoinError::Other)?;
+    if closed {
+        return Ok(()); // already flushed on the way out; `close` is idempotent
+    }
+    let id = open_stream_id(receiver)?;
+    let pending = receiver
+        .with_native_state_mut::<NativeStream, _, _>(mc, |s| std::mem::take(&mut s.wbuf))
+        .map_err(QuoinError::Other)?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    write_through(vm, id, pending)
+}
+
+/// One `Write` round trip, complete-or-throw.
+fn write_through<'gc>(
+    vm: &mut VmState<'gc>,
+    id: StreamId,
+    bytes: Vec<u8>,
+) -> Result<(), QuoinError> {
+    match vm.await_io(IoRequest::Write { id, bytes })? {
+        IoResult::Wrote(_) => Ok(()),
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+        other => Err(unexpected("writeAll:", other)),
     }
 }
 
@@ -461,7 +690,7 @@ fn fill_once<'gc>(
 ) -> Result<bool, QuoinError> {
     match vm.await_io(IoRequest::Read {
         id,
-        max: FILL_CHUNK,
+        max: IO_BUFFER_BYTES,
     })? {
         IoResult::Read(chunk) if chunk.is_empty() => Ok(true), // EOF
         IoResult::Read(chunk) => {

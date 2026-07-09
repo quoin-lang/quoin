@@ -158,6 +158,11 @@ pub enum IoRequest {
     /// `OsString` end to end (the QN String → path conversion happens at the `[IO]File`
     /// boundary, not here). Result reuses `Connected(id)`.
     OpenFile { path: OsString },
+    /// Open a file for *writing* and register it as a stream. `append: false` truncates (or
+    /// creates); `append: true` positions at the end. The stream that comes back is buffered
+    /// on the VM side (`streams.rs`), so a `write:` per line does not cost a scheduler round
+    /// trip each. Result reuses `Connected(id)`.
+    OpenFileWrite { path: OsString, append: bool },
     /// Register the process's standard input as a stream, returning its id — so stdin reads
     /// through the same `ByteStream`/`StringStream` as a socket or a file, and *parks the task*
     /// instead of freezing the single-threaded scheduler.
@@ -232,6 +237,13 @@ impl IoRequest {
             IoRequest::Close { .. } => "io: close".to_string(),
             IoRequest::TlsWrap { .. } => "io: tls handshake".to_string(),
             IoRequest::OpenFile { .. } => "io: open file".to_string(),
+            IoRequest::OpenFileWrite { append, .. } => {
+                if *append {
+                    "io: open file (append)".to_string()
+                } else {
+                    "io: open file (write)".to_string()
+                }
+            }
             IoRequest::OpenStdin => "io: open stdin".to_string(),
             IoRequest::Listen { host, port } => format!("io: listen {host}:{port}"),
             IoRequest::Accept { .. } => "io: accept".to_string(),
@@ -764,6 +776,23 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
+            IoRequest::OpenFileWrite { path, append } => Box::pin(async move {
+                // Same registry, same `Write` op as a socket. `async_fs::File` buffers
+                // internally and is flushed by the `Write` arm above, so `Close` dropping the
+                // handle cannot strand bytes that reached the backend.
+                let mut opts = async_fs::OpenOptions::new();
+                opts.write(true).create(true);
+                if append {
+                    opts.append(true);
+                } else {
+                    opts.truncate(true);
+                }
+                match opts.open(&path).await {
+                    Ok(file) => IoResult::Connected(inner.insert(Box::new(file))),
+                    Err(e) => IoResult::Err(e.into()),
+                }
+            }),
+
             IoRequest::OpenStdin => Box::pin(async move {
                 // `Unblock` reads on the blocking pool, spawning nothing until the first read.
                 // Dropping the inner `Stdin` does NOT close fd 0 — it is a handle onto a process
@@ -891,7 +920,7 @@ impl IoBackend for MockBackend {
             // No real handshake in the mock — the conduit keeps its id, as in the
             // native backend's in-place swap.
             IoRequest::TlsWrap { id, .. } => IoResult::Connected(id),
-            IoRequest::OpenFile { .. } | IoRequest::OpenStdin => {
+            IoRequest::OpenFile { .. } | IoRequest::OpenFileWrite { .. } | IoRequest::OpenStdin => {
                 let id = StreamId(self.next_id.get());
                 self.next_id.set(self.next_id.get() + 1);
                 IoResult::Connected(id)

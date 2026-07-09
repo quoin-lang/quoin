@@ -1,0 +1,135 @@
+"* Writing files: [IO]File.create: / append: and the filesystem ops (src/runtime/io.rs,
+"* src/runtime/streams.rs, qnlib/core/06-io.qn).
+"*
+"* Until this landed, Quoin could read a file but not write one. The write path is the same
+"* async stream a socket uses -- writes park the task, they do not freeze the scheduler.
+"*
+"* The one property worth stating: a file write stream is BUFFERED (16 KiB), so bytes are not
+"* on disk until `flush!`, `close`, or the end of the program. A socket stream is write-through,
+"* because [HTTP]Server writes a response and then waits for the client. `flush!` is a no-op
+"* there, so the same code works over both.
+
+(TestSuite.new:{ var name = 'FileWrite' }).add:{
+    .test:oneShotWriteAndRead -> {
+        var p = '/tmp/qn_t_fw_oneshot.txt';
+        [IO]File.write:'hello\n' to:p;
+        .is:{ [IO]File.read:p } equalTo:'hello\n';
+        "* create: truncates an existing file rather than appending to it.
+        [IO]File.write:'again' to:p;
+        .is:{ [IO]File.read:p } equalTo:'again';
+        [IO]File.delete:p
+    };
+
+    .test:appendAddsToTheEnd -> {
+        var p = '/tmp/qn_t_fw_append.txt';
+        [IO]File.write:'a' to:p;
+        [IO]File.append:'b' to:p;
+        [IO]File.append:'c' to:p;
+        .is:{ [IO]File.read:p } equalTo:'abc';
+        [IO]File.delete:p
+    };
+
+    "* append: on a path that does not exist creates it.
+    .test:appendCreatesAMissingFile -> {
+        var p = '/tmp/qn_t_fw_appendnew.txt';
+        ([IO]File.exists?:p).if:{ [IO]File.delete:p };
+        [IO]File.append:'fresh' to:p;
+        .is:{ [IO]File.read:p } equalTo:'fresh';
+        [IO]File.delete:p
+    };
+
+    .test:streamWriteln -> {
+        var p = '/tmp/qn_t_fw_stream.txt';
+        var s = ([IO]File.create:p).stringStream;
+        s.writeln:'alpha';
+        s.writeln:'beta';
+        s.close;
+        .is:{ [IO]File.read:p } equalTo:'alpha\nbeta\n';
+        .isTrue:{ s.closed? };
+        [IO]File.delete:p
+    };
+
+    "* The buffer is real: a small write is nowhere on disk until it is flushed.
+    .test:writesAreBufferedUntilFlushed -> {
+        var p = '/tmp/qn_t_fw_buffer.txt';
+        var s = ([IO]File.create:p).stringStream;
+        s.write:'small';
+        .is:{ ([IO]File.read:p).length } equalTo:0;
+        s.flush!;
+        .is:{ ([IO]File.read:p).length } equalTo:5;
+        s.close;
+        [IO]File.delete:p
+    };
+
+    "* close flushes, so an explicit flush! before it is never needed.
+    .test:closeFlushes -> {
+        var p = '/tmp/qn_t_fw_close.txt';
+        var s = ([IO]File.create:p).stringStream;
+        s.write:'unflushed';
+        s.close;
+        .is:{ [IO]File.read:p } equalTo:'unflushed';
+        [IO]File.delete:p
+    };
+
+    "* flush! on a stream with nothing pending is a no-op, not an error -- which is what lets
+    "* the same code write to a file and to a (write-through) socket.
+    .test:flushIsAlwaysSafe -> {
+        var p = '/tmp/qn_t_fw_flush.txt';
+        var s = ([IO]File.create:p).stringStream;
+        .is:{ s.flush! } equalTo:nil;
+        .is:{ s.flush! } equalTo:nil;
+        s.close;
+        "* ...and after close, since close is idempotent.
+        .is:{ s.close } equalTo:nil;
+        [IO]File.delete:p
+    };
+
+    "* A write buffer transfers when a byte stream is converted to a text stream, so the
+    "* conversion cannot silently drop bytes.
+    .test:stringStreamInheritsTheWriteBuffer -> {
+        var p = '/tmp/qn_t_fw_convert.txt';
+        var b = [IO]File.create:p;
+        b.writeAll:('one ' .asBytes);
+        var t = b.stringStream;
+        t.write:'two';
+        t.close;
+        .is:{ [IO]File.read:p } equalTo:'one two';
+        [IO]File.delete:p
+    };
+
+    "* ---- filesystem ops -------------------------------------------------------
+    .test:existsDeleteRename -> {
+        var p = '/tmp/qn_t_fw_fs.txt';
+        var q = '/tmp/qn_t_fw_fs2.txt';
+        [IO]File.write:'x' to:p;
+        .isTrue:{ [IO]File.exists?:p };
+        [IO]File.rename:p to:q;
+        .isFalse:{ [IO]File.exists?:p };
+        .isTrue:{ [IO]File.exists?:q };
+        [IO]File.delete:q;
+        .isFalse:{ [IO]File.exists?:q }
+    };
+
+    "* exists?: answers rather than raising, unlike open: on a missing path.
+    .test:missingPathsAreCatchable -> {
+        .isFalse:{ [IO]File.exists?:'/tmp/qn_t_fw_definitely_absent' };
+        .does:{ [IO]File.delete:'/tmp/qn_t_fw_definitely_absent' } throw:IoError;
+        .does:{ [IO]File.open:'/tmp/qn_t_fw_definitely_absent' } throw:IoError
+    };
+
+    .test:folderCreateAndDelete -> {
+        var d = '/tmp/qn_t_fw_dir';
+        var nested = '/tmp/qn_t_fw_dir/a/b';
+        "* create: makes missing parents, and is idempotent.
+        [IO]Folder.create:nested;
+        .isTrue:{ [IO]File.exists?:nested };
+        [IO]Folder.create:nested;
+        .isTrue:{ [IO]File.exists?:nested };
+        "* delete: refuses a non-empty directory rather than recursing.
+        .does:{ [IO]Folder.delete:d } throw:IoError;
+        [IO]Folder.delete:nested;
+        [IO]Folder.delete:'/tmp/qn_t_fw_dir/a';
+        [IO]Folder.delete:d;
+        .isFalse:{ [IO]File.exists?:d }
+    }
+}

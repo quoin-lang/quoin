@@ -74,13 +74,21 @@ runs from any directory with nothing else installed.
 - Text: `String`, `Symbol`, `Regex`.
 - Identifiers: `UUID`, `ULID`.
 - I/O: `[IO]File`, `[IO]Folder`, `[IO]Stdin`, and byte/string streams over files and sockets.
+  Files are read *and* written: `[IO]File.create:` / `append:` return a buffered stream, with
+  `[IO]File.write:to:` / `append:to:` / `read:` for the one-shot cases, plus `delete:`,
+  `rename:to:`, `exists?:` and `[IO]Folder.create:` / `delete:`.
 - OS: `[OS]Path` (lexical path manipulation), `[OS]Env` (read-only process environment).
 - Networking: `TcpSocket`, `TlsSocket`, `TcpListener`, an `[HTTP]` client, and `[HTTP]Server`.
 - The `[Web]` framework: routing, requests and responses, and a worker pool.
 - Concurrency: `Task`, `Async` (`sleep:`, `timeout:do:`, `gather:`), CSP `Channel`s, worker
   isolates, and a compute-offload pool for CPU-bound native work.
 
-I/O is asynchronous and cooperative: a read parks the task, it does not block the scheduler.
+I/O is asynchronous and cooperative: a read or a write parks the task, it does not block the
+scheduler.
+
+File writes are **buffered** (16 KiB) and reach the disk on `flush!`, on `close`, or when the
+program ends. Socket writes are **not** buffered, because a server writes a response and then
+waits for the client; `flush!` is a no-op there, so the same code works over both.
 
 ### Extensions
 
@@ -105,8 +113,8 @@ I/O is asynchronous and cooperative: a read parks the task, it does not block th
 
 ### Known limitations
 
-- **Files are read-only.** `[IO]File` opens a file for reading and metadata; there is no API to
-  create or write one. The only writable handles are stdout and stderr.
+- A buffered file write stream is flushed on `close`, on `flush!`, and when the program ends —
+  but **not on signal death**, exactly as in C. `[IO]File.write:to:` avoids the question.
 - The extension SDK crates (`quoin-ext`, `quoin-ext-proto`) are not published to crates.io, so a
   third-party extension must vendor them. File-descriptor passing and a WASM tier are designed
   but not built.
