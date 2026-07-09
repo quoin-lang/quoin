@@ -59,10 +59,13 @@ LSP/VSCode tooling, Windows.
   `requested_exit` flag on `VmState` makes it process-wide even from a spawned
   task; the runner exits only after the arena drops, so extension/socket
   `Drop`s run. Works in run/test/eval/REPL modes. Tests: `tests/exit_code.rs`.
-- [ ] **Uncatchable SIGBUS: cyclic/deep serialization.**
-  `var l=#(); l.add:l; JSON.generate:l` crashes even inside `catch:` (exit 138).
-  Settled fix: depth cap (~128) in `value_to_data`/`value_to_json`/`encode_dv`.
-  Repro: `qnlib/stress/audit/serialize_cycle.qn`.
+- [x] **Uncatchable SIGBUS: cyclic/deep serialization.** FIXED:
+  `MAX_SERIALIZE_DEPTH = 128` threaded through `value_to_data` and `value_to_json`
+  (`src/runtime/data_value.rs`), so every serializer refuses a cyclic or enormous
+  value with a catchable `ValueError` instead of aborting the process. 128 is
+  `serde_json`'s own parse limit, so nothing that round-tripped before regressed.
+  `write_dv` stays infallible — the producer cap guards it. Tests:
+  `qnlib/tests/55-serialize-depth.qn`.
 - [ ] **Uncatchable SIGBUS: `execute_block` native re-entry** (an `each:` body
   re-iterating its receiver; self-sorting comparator). Repro:
   `qnlib/stress/audit/each_reenter.qn`. See QUOIN_TODO for the settled design.

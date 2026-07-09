@@ -3,6 +3,7 @@ use crate::error::QuoinError;
 use crate::ext_sdk::Host;
 use crate::runtime::big_decimal::{NativeBigDecimal, make_decimal};
 use crate::runtime::big_integer::{NativeBigInteger, make_bigint};
+use crate::runtime::data_value::{MAX_SERIALIZE_DEPTH, too_deep};
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
 use crate::value::{NativeClassBuilder, ObjectPayload, Value};
@@ -23,8 +24,17 @@ fn unserializable(type_name: &str) -> QuoinError {
 
 /// Quoin value → serde_json tree. Numbers keep full precision (`BigInteger`/`BigDecimal` serialize
 /// their exact digits, via `arbitrary_precision`). `Bytes` and non-data types (Block, Duration, a
-/// user instance, …) error — JSON has no representation for them.
+/// user instance, …) error — JSON has no representation for them. A value nested past
+/// [`MAX_SERIALIZE_DEPTH`] errors too: JSON has its own `serde_json` recursion limit of 128 on the
+/// way back in, and an unbounded walk of a cyclic value would abort the process.
 fn value_to_json(v: Value) -> Result<Json, QuoinError> {
+    value_to_json_at(v, 0)
+}
+
+fn value_to_json_at(v: Value, depth: usize) -> Result<Json, QuoinError> {
+    if depth > MAX_SERIALIZE_DEPTH {
+        return Err(too_deep());
+    }
     match v {
         Value::Nil => Ok(Json::Null),
         Value::Bool(b) => Ok(Json::Bool(b)),
@@ -58,7 +68,7 @@ fn value_to_json(v: Value) -> Result<Json, QuoinError> {
             {
                 let arr = items
                     .iter()
-                    .map(|e| value_to_json(*e))
+                    .map(|e| value_to_json_at(*e, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(Json::Array(arr));
             }
@@ -75,7 +85,7 @@ fn value_to_json(v: Value) -> Result<Json, QuoinError> {
                             "JSON: Map keys must be Strings".to_string(),
                         ));
                     };
-                    obj_map.insert((**ks).clone(), value_to_json(val)?);
+                    obj_map.insert((**ks).clone(), value_to_json_at(val, depth + 1)?);
                 }
                 return Ok(Json::Object(obj_map));
             }

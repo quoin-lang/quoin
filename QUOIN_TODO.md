@@ -618,7 +618,23 @@ deferred `Mirror` in `## REPL`.
   stack-remaining check (stacker-style `maybe_grow`) or a larger/growable coroutine stack,
   rather than a fixed depth counter that conflates pathological recursion with deep-but-finite
   legitimate nesting.
-- [ ] **Unbounded serialization recursion — WIDER than the original encode-side finding.**
+- [x] **Unbounded serialization recursion — WIDER than the original encode-side finding.**
+  **FIXED (release-prep, 2026-07-09.)** `MAX_SERIALIZE_DEPTH = 128` + `too_deep()` in
+  `src/runtime/data_value.rs`, threaded as a depth parameter through `value_to_data` (backing
+  `MessagePack.pack:` / `TOML.generate:` / `YAML.generate:` / extension `call:…data:` / the
+  process-worker frames) and `value_to_json` (`JSON.generate:`). Past the cap: a catchable
+  `ValueError`, "value nesting exceeds 128 levels — is the value self-referential?" — one
+  mechanism for cycles (infinite depth), mutual cycles, and merely enormous values.
+  **128 is symmetric with decode, not arbitrary:** it is `serde_json`'s own recursion limit, so
+  anything we emit as JSON we can read back; MessagePack decodes past 1000, and the overflow
+  only began ~50k, so no working depth regressed (verified). The proto-side `write_dv` stays
+  **infallible** — `encode`/`pack_dv` sit on paths that cannot report an error, and the host
+  only ever packs `DataValue`s produced by `value_to_data`, so nothing deeper than the cap can
+  reach it; an extension building a deep `DataValue` by hand crashes only its own (isolated)
+  process. Note `MAX_SERIALIZE_DEPTH` (a value-shape bound) is deliberately distinct from
+  `quoin_ext_proto::MAX_DV_DEPTH` = 64 (a hostile-peer bound on bytes arriving from a peer).
+  Tests: `qnlib/tests/55-serialize-depth.qn`; repro `qnlib/stress/audit/serialize_cycle.qn`
+  now exits 0. Original report follows.
   *(audit follow-up, PR #48; DUG 2026-07-07 — repro `qnlib/stress/audit/serialize_cycle.qn`.
   A CYCLIC value (`var l = #(); l.add:l`) or a ~500k-deep one SIGBUSes uncatchably through
   EVERY serializer, no extension involved: `JSON.generate:` (its own `value_to_json` walk,

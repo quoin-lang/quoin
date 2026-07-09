@@ -220,6 +220,12 @@ pub fn pack_dv(dv: &DataValue) -> Vec<u8> {
     out
 }
 
+/// Recursive and infallible by design: `encode`/`pack_dv` are used on paths that cannot report an
+/// error. That is safe because every `DataValue` the *host* packs is produced by
+/// `runtime::data_value::value_to_data`, which refuses anything deeper than `MAX_SERIALIZE_DEPTH`
+/// (128) — so a cyclic or enormous Quoin value can never reach here. An extension building a deep
+/// `DataValue` by hand can still overflow, but only its own process, which the host already
+/// isolates. Bytes arriving *from* a peer are bounded separately by `MAX_DV_DEPTH` in `read_dv`.
 fn write_dv(out: &mut Vec<u8>, dv: &DataValue) {
     match dv {
         DataValue::Null => out.push(0xc0),

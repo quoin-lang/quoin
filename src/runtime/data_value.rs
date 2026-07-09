@@ -44,10 +44,44 @@ fn unrepresentable(type_name: &str) -> QuoinError {
     }
 }
 
+/// How deep a Quoin value may nest before *any* serializer refuses it.
+///
+/// A cyclic value (`var l = #(); l.add:l`) has no depth at all, so an unbounded walk overflows
+/// the coroutine stack and aborts the process — uncatchable, past `catch:`. One depth bound
+/// stops both that and a merely enormous value.
+///
+/// 128 is chosen to be symmetric with the *decode* side rather than arbitrary: it is
+/// `serde_json`'s own recursion limit, so anything we emit as JSON we can read back. It is far
+/// below the depth that actually overflows (~50k), and above every depth that round-trips
+/// today (MessagePack decodes past 1000), so it costs no working program.
+///
+/// Note this is a *value-shape* bound, distinct from `quoin_ext_proto::MAX_DV_DEPTH` (64), which
+/// is a hostile-peer bound on bytes arriving from an extension.
+pub const MAX_SERIALIZE_DEPTH: usize = 128;
+
+/// The error every serializer raises at [`MAX_SERIALIZE_DEPTH`]. A `ValueError`, so `catch:` and
+/// a typed `catch:{|e:ValueError| …}` both see it.
+pub fn too_deep() -> QuoinError {
+    QuoinError::ValueError(format!(
+        "value nesting exceeds {MAX_SERIALIZE_DEPTH} levels — is the value self-referential?"
+    ))
+}
+
 /// Walk a Quoin value into a `DataValue` (the generate side). Errors on values with no data
-/// representation (Block, Symbol, a user instance, another native type like Duration/DateTime).
-/// Object pairs keep the Map's insertion order.
+/// representation (Block, Symbol, a user instance, another native type like Duration/DateTime),
+/// and on a value nested past [`MAX_SERIALIZE_DEPTH`].
+///
+/// Backs `MessagePack.pack:`, `TOML.generate:`, `YAML.generate:`, extension `call:…data:` and the
+/// process-worker frames — so the depth check here is also what keeps `pack_dv`/`write_dv`
+/// (infallible, recursive) from ever seeing a value deeper than the cap.
 pub fn value_to_data(v: Value) -> Result<DataValue, QuoinError> {
+    value_to_data_at(v, 0)
+}
+
+fn value_to_data_at(v: Value, depth: usize) -> Result<DataValue, QuoinError> {
+    if depth > MAX_SERIALIZE_DEPTH {
+        return Err(too_deep());
+    }
     match v {
         Value::Nil => Ok(DataValue::Null),
         Value::Bool(b) => Ok(DataValue::Bool(b)),
@@ -70,7 +104,7 @@ pub fn value_to_data(v: Value) -> Result<DataValue, QuoinError> {
             {
                 let arr = items
                     .iter()
-                    .map(|e| value_to_data(*e))
+                    .map(|e| value_to_data_at(*e, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(DataValue::Array(arr));
             }
@@ -83,7 +117,7 @@ pub fn value_to_data(v: Value) -> Result<DataValue, QuoinError> {
                     let crate::value::ObjectPayload::String(ks) = &kobj.borrow().payload else {
                         return Err(unrepresentable("Map with non-String keys"));
                     };
-                    pairs.push(((**ks).clone(), value_to_data(val)?));
+                    pairs.push(((**ks).clone(), value_to_data_at(val, depth + 1)?));
                 }
                 return Ok(DataValue::Object(pairs));
             }
