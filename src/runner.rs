@@ -266,9 +266,10 @@ Environment:
 #[derive(clap::Args, Clone, Debug, Default)]
 struct CoverageArgs {
     /// Collect coverage; FORMAT is `lcov` (default) or `cobertura`
-    ///
-    /// `require_equals` matters: without it a bare `--coverage` would swallow the next
-    /// positional as its format, so `qn app.qn --coverage extra` would lose `extra`.
+    //
+    // A `///` second paragraph would print in `--help`; this note is for maintainers.
+    // `require_equals` matters: without it a bare `--coverage` would swallow the next
+    // positional as its format, so `qn app.qn --coverage extra` would lose `extra`.
     #[arg(long, value_name = "FORMAT", num_args = 0..=1, require_equals = true, default_missing_value = "lcov")]
     coverage: Option<String>,
     /// Write the coverage report to PATH instead of stdout (implies --coverage)
