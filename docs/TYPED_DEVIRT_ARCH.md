@@ -1,10 +1,16 @@
 # Typed devirtualization tier (Tier 2) — design
 
+*Status (verified 2026-07-09 at `dbe188d`): **PARTIAL**. The devirtualization tier shipped
+(`src/devirt_ops.rs` is its single source of truth; merged via PR #31, which also brought the
+breaking strict `var`/`let` and sealed types). Slice 2b-B Phase 1 — compile-time seal detection
+and `CallSelfDirect` — shipped in `fb67760`. Phase 2 (the call-site cache) was **spiked and
+parked** as a measured net loss, and Phase 3 (unboxed structs) is **deferred**, blocked on
+gc_arena. Read the future tense below as the plan it was, not as pending work.*
+
 Concrete design for the integrated slice that `docs/FUTURE_ARCH.md` calls Tier 2, following the
 Tier-1 ceiling screen (`profiling/unboxed-ceiling/notes.md`), which returned a decisive **GO**: an
 unboxed + devirtualized interpreter beats Ruby 2.6 and Python 3.9 on all three tracked benchmarks
-(fib ~74×, sieve ~91×, trees ~56× vs Quoin today). This doc is the plan for realizing that in the
-*real* VM — reviewed before any VM code is written.
+(fib ~74×, sieve ~91×, trees ~56× vs Quoin then).
 
 **Targets (the bar we're tracking), from `profiling/unboxed-ceiling/notes.md`:**
 

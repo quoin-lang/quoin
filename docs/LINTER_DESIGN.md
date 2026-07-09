@@ -1,5 +1,13 @@
 # Custom Linter Design: Enforcing "Flush before Yield" in Quoin
 
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED.** `lint/no_gc_across_yield/` is a real
+Dylint `LateLintPass`, and a companion this document does not mention — `lint/no_borrow_across_yield/`
+— ships alongside it. Both are workspace members registered under `[workspace.metadata.dylint]`,
+run by `cargo lint` and by CI's `lint` job (`no_borrow_across_yield` is deny-level, the other
+advisory). They need the nightly `rustc-private` toolchain they pin themselves, which is why the
+main `cargo build --workspace` excludes them. Read "Proposed Lint" below as the design that got
+built.*
+
 This document designs a custom static analysis tool (linter) to automatically verify that native methods in the Quoin VM follow the safety rules for stackful fibers. Specifically, it ensures that no garbage-collected references (`Value<'gc>` or `Gc<'gc, T>`) are held in local variables across a fiber yield point (`yielder.suspend(...)`).
 
 ---

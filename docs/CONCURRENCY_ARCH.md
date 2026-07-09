@@ -1,5 +1,11 @@
 # Concurrency Architecture — compute offload + worker isolates
 
+*Status (verified 2026-07-09 at `dbe188d`): **C1 + C2 SHIPPED (v1)**, as §3 already says — the
+compute-offload pool is `src/compute.rs` (wired through `IoResult::Computed`) and worker isolates
+are `src/worker.rs` + `src/runtime/worker*.rs`, both surfacing counters in `VM.stats`. C4
+(shared heap) was rejected on gc_arena grounds. Remaining shared-buffer and cost items are still
+design. The framing below was written before C1/C2 landed.*
+
 Design survey for multicore Quoin, in the style of `FUTURE_EXT_ARCH.md`: what is
 decided, why, and what stays open. Companion to `ASYNC_ARCH.md` (the
 single-threaded cooperative scheduler this builds on) and `AOT_ARCH.md` (whose

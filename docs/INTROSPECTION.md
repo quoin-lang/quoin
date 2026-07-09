@@ -1,5 +1,11 @@
 # VM introspection — design
 
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED** — this is a reference for the built
+`src/introspect.rs`, not a proposal. Every function and struct in the "Function surface" below
+exists: `globals`, `describe_class`, `describe_value`, `session_locals`, `find_globals`,
+`find_namespaces`, `find_selectors`, `signature`. The Quoin-level `Mirror` wrapper is correctly
+marked future, and is indeed absent.*
+
 A read-only API for inspecting a running Quoin VM, returning **plain owned Rust structs** with
 no `'gc` lifetime. It lives in `src/introspect.rs` and owns all the VM-internal walking
 (`Class` layout, the multimethod method chain, `globals`, `repl_env`) so consumers — the REPL's

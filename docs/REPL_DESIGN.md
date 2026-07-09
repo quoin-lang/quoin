@@ -1,5 +1,11 @@
 # Quoin REPL — design
 
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED (P0–P2)**. `qn repl` lives in
+`src/runner_repl.rs` on rustyline — editing, history, multiline, syntax highlighting,
+`$`-commands (`$help`/`$reset`/`$type`/`$quit`) and tab completion (`src/repl_complete.rs`), plus
+`qn -e` and `~/.quoinrc`. The note below that "P0 uses plain stdin; rustyline lands in P1" is
+stale — it landed. **Not built:** P3, migrating the loop itself into Quoin, and the `Mirror` API.*
+
 An interactive read-eval-print loop, invoked as `qn repl`. Bootstrapped in Rust (a new
 `VmRunnerMode::Repl`) and designed so the loop can later migrate into Quoin once its enabling
 primitives land. Roadmap and priorities live in `QUOIN_TODO.md` (§ "REPL (`qn repl`)"); this

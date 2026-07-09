@@ -1,10 +1,14 @@
 # Debugger Architecture — pausing, stepping, and inspecting the Quoin VM
 
-Status: **Design capture, grounded in a code audit (June 2026).** No debugger code exists
-yet; v0 (a CLI debugger, no wire protocol) is scoped at the end and about to begin. Companion
-to `ASYNC_ARCH.md` (the scheduler this rides on) and `INTROSPECTION.md` (the read-only metadata
-surface this extends). Like `FUTURE_EXT_ARCH.md`, treat the unbuilt parts as decisions to
-revisit with a fresh explain-then-pause.
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**. v0 — the CLI debugger — is `qn debug`
+(`src/debug.rs`, `src/debug_cli.rs`; pause/step/inspect over a `YieldReason::DebugBreak` yield),
+with `--break-on-throw` / `--break-on-uncaught`. v1 — the Debug Adapter Protocol — is `qn debug
+--dap` (`src/dap.rs`, `src/runner_dap.rs`). **Not built:** per-task/per-fiber debugging (the
+debugger pauses the world) and data breakpoints/watchpoints. The text below is the original
+design capture and still describes the mechanism; read its future tense as history.*
+
+Companion to `ASYNC_ARCH.md` (the scheduler this rides on) and `INTROSPECTION.md` (the read-only
+metadata surface this extends).
 
 ## The core insight
 

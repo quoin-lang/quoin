@@ -1,8 +1,14 @@
 # Extension packaging — delivering an out-of-process extension as a `use`-able folder
 
-Status: **Design capture — v1 scope decided, not built.** Records the decisions so a build can
-start without re-litigating them. Companion to `docs/FUTURE_EXT_ARCH.md` (the extension protocol /
-runtime) and `docs/USE_ARCH.md` (the `use` / package-resolution machinery this hooks into).
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**. An extension is a folder with an
+`extension.toml`; `use <name>:*` finds it under a `quoin_packages/` root and synthesizes
+`Extension loadPackage: '<dir>'` glue (`src/packages.rs`, `read_package_manifest` in
+`src/runtime/extension.rs`). Two packages ship: `quoin_packages/adbc` and `quoin_packages/numpy`.
+Tests: `src/packages_tests.rs`, `qnlib/tests/43-adbc.qn`. Package roots are resolved against the
+CWD, not the script — see `FsResolver::package_roots`. The v1 scope below is what got built.*
+
+Companion to `docs/FUTURE_EXT_ARCH.md` (the extension protocol / runtime) and `docs/USE_ARCH.md`
+(the `use` / package-resolution machinery this hooks into).
 
 ## 1. Goal
 

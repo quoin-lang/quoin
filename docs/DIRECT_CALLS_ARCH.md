@@ -1,10 +1,13 @@
 # Direct calls: retiring the outcall shell (D2.5 + D3)
 
-*Status: PLAN (no slices implemented). Successor to the shipped
-outcall-seam arc (docs/OUTCALL_ARCH.md, branch `perf/ic-direct-calls`)
-— this document is the detailed implementation plan for the two
-recorded follow-ups: the cheap interior specialization (D2.5) and the
-full direct-call tier (D3). Written 2026-07-06 at `2197545`.*
+*Status (verified 2026-07-09 at `dbe188d`): **PARTIAL — all slices landed; the tier ships
+default-off.** D2.5a (`8489807`, skip the env swap for env-blind callees), D2.5b (`9b96ac1`,
+per-entry marshaling plans), D3a (`a2a29a9`, the `dispatch_epoch` ABI) and D3b (`7f966c2`, W0
+direct edges) are all on main via PR #75. The machinery is proven, but the direct-edge gate
+measured net-negative, so it is **off unless `QN_DIRECT_WARM` is set** (see also
+`QN_DIRECT_ONLY` / `QN_DIRECT_MAX` / `QN_DIRECT_NULL` in `docs/ENV_FLAGS.md`); code lives in
+`src/codegen/mod.rs` (`lane_plan`, `BakedW0`) with `tests/direct_calls.rs`. Successor arc:
+`docs/WINDOW_ARENA_ARCH.md`. Written 2026-07-06 at `2197545` as a plan; read it as one.*
 
 ## 1. Problem statement, with numbers
 
