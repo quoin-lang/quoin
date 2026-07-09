@@ -137,11 +137,22 @@ Mixin <- Iterate(T U) <- {
         ^false
     };
 
+    "* Seedless fold: the FIRST element becomes the accumulator; the fold
+    "* starts from the second (BUGS.md Finding 9 — the old version seeded
+    "* with the block result's class default and folded the first element
+    "* against it, which is only correct when the default is a left
+    "* identity: `+` and concat survived, `*`/`-`/min-style folds returned
+    "* garbage). A `seeded` flag, not `sum.defined?`, so nil elements fold
+    "* correctly too.
     reduce: -> { |block: Block(T T ^T) ^T?|
         var sum = nil;
+        var seeded = false;
         .each:{ |x|
-            sum.defined?.else:{ sum = (block.valueWithArgs:#(x x)).class.default };
-            sum = block.valueWithArgs:#( sum x )
+            seeded.if:{ sum = block.valueWithArgs:#( sum x ) }
+            else:{
+                sum = x;
+                seeded = true
+            }
         };
         ^sum
     };
