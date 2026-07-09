@@ -1,0 +1,110 @@
+"* [OS]Path (src/runtime/os.rs) — purely LEXICAL path manipulation over Strings. Nothing here
+"* touches the filesystem: no stat, no symlink resolution, no requirement that a path exist,
+"* which is what makes it safe on a path you are about to create. Filesystem access is [IO]File.
+"*
+"* Semantics follow POSIX / Python / Node: `dirname:` is total and idempotent at the root, and
+"* the other accessors return '' rather than nil where there is no such component. Extensions
+"* come back WITHOUT their dot (Node's `extname` includes it).
+
+(TestSuite.new:{ var name = 'OSPath' }).add:{
+    "* Repeated `join:` keywords fold into one List at compile time (the `+` variadic form),
+    "* so both spellings reach the same method.
+    .test:
+    joinBuildsAPathFromSegments -> {
+        .is:{ [OS]Path.join:'usr' join:'local' join:'bin' } equalTo:'usr/local/bin';
+        .is:{ [OS]Path.join:#('usr' 'local') } equalTo:'usr/local';
+        .is:{ [OS]Path.join:'/etc' join:'hosts' } equalTo:'/etc/hosts';
+
+        "* an absolute segment resets the result, as in every shell
+        .is:{ [OS]Path.join:'a' join:'/b' } equalTo:'/b'
+    };
+
+    .test:
+    joinRejectsNonStringSegments -> {
+        .does:{ [OS]Path.join:#(1 2) } throw:TypeError;
+        "* a bare String is not a List — `join:` takes the folded/explicit List form
+        .does:{ [OS]Path.join:'solo' } throw:MessageNotUnderstood
+    };
+
+    "* `dirname:` never returns nil, and is idempotent at the root — so the standard
+    "* walk-upward loop terminates instead of hitting a nil.
+    .test:
+    dirnameIsTotalAndIdempotentAtTheRoot -> {
+        .is:{ [OS]Path.dirname:'/a/b/c.txt' } equalTo:'/a/b';
+        .is:{ [OS]Path.dirname:'c.txt' } equalTo:'.';
+        .is:{ [OS]Path.dirname:'/' } equalTo:'/';
+        .is:{ [OS]Path.dirname:'' } equalTo:''
+    };
+
+    .test:
+    dirnameTerminatesTheWalkUpward -> {
+        var p = '/a/b/c.txt';
+        var steps = 0;
+        { p != ([OS]Path.dirname:p) }.whileDo:{
+            p = [OS]Path.dirname:p;
+            steps = steps + 1
+        };
+        .is:{ p } equalTo:'/';
+        .is:{ steps } equalTo:3
+    };
+
+    "* '' rather than nil where there is no final component. A trailing separator is ignored.
+    .test:
+    basenameIsTheFinalComponent -> {
+        .is:{ [OS]Path.basename:'/a/b.txt' } equalTo:'b.txt';
+        .is:{ [OS]Path.basename:'b.txt' } equalTo:'b.txt';
+        .is:{ [OS]Path.basename:'a/' } equalTo:'a';
+        .is:{ [OS]Path.basename:'/' } equalTo:''
+    };
+
+    "* The dot is NOT part of the extension, and a dotfile is a name, not an extension.
+    .test:
+    extensionAndStemSplitTheFinalComponent -> {
+        .is:{ [OS]Path.extension:'/a/report.tar.gz' } equalTo:'gz';
+        .is:{ [OS]Path.stem:'/a/report.tar.gz' } equalTo:'report.tar';
+        .is:{ [OS]Path.extension:'README' } equalTo:'';
+        .is:{ [OS]Path.stem:'README' } equalTo:'README';
+        .is:{ [OS]Path.extension:'.bashrc' } equalTo:'';
+        .is:{ [OS]Path.stem:'.bashrc' } equalTo:'.bashrc'
+    };
+
+    "* Lexical only: `..` is resolved against the preceding segment textually, never against
+    "* the filesystem — so a leading `..` in a relative path has nothing to cancel and stays.
+    .test:
+    normalizeIsLexical -> {
+        .is:{ [OS]Path.normalize:'a/./b//c' } equalTo:'a/b/c';
+        .is:{ [OS]Path.normalize:'a/b/../c' } equalTo:'a/c';
+        .is:{ [OS]Path.normalize:'/a/./b//c' } equalTo:'/a/b/c';
+
+        "* nothing to resolve a leading `..` against
+        .is:{ [OS]Path.normalize:'../a' } equalTo:'../a';
+        .is:{ [OS]Path.normalize:'a/../../b' } equalTo:'../b';
+
+        "* `..` never escapes the root
+        .is:{ [OS]Path.normalize:'/..' } equalTo:'/';
+        .is:{ [OS]Path.normalize:'/a/../..' } equalTo:'/';
+
+        "* a path that cancels to nothing is the current directory
+        .is:{ [OS]Path.normalize:'' } equalTo:'.';
+        .is:{ [OS]Path.normalize:'a/..' } equalTo:'.';
+
+        "* absoluteness is preserved, trailing separators are not added
+        .is:{ [OS]Path.normalize:'/' } equalTo:'/';
+        .is:{ [OS]Path.normalize:'/a/' } equalTo:'/a'
+    };
+
+    .test:
+    absolutePredicate -> {
+        .isTrue:{ [OS]Path.absolute?:'/a/b' };
+        .isTrue:{ [OS]Path.absolute?:'/' };
+        .isFalse:{ [OS]Path.absolute?:'a/b' };
+        .isFalse:{ [OS]Path.absolute?:'./a' };
+        .isFalse:{ [OS]Path.absolute?:'' }
+    };
+
+    "* A namespace class: instances are meaningless, so `.new` refuses (see 54-native-new.qn).
+    .test:
+    isANamespaceClass -> {
+        .does:{ [OS]Path.new } throw:#/Cannot instantiate abstract class/
+    }
+}

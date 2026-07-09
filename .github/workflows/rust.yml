@@ -8,6 +8,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The root Cargo.toml is both a `[package]` and a `[workspace]`, so a bare `cargo
+  # test` builds and tests ONLY the root package -- it silently skipped 132 tests in
+  # quoin-syntax / quoin-fmt / quoin-ext / quoin-ext-proto (453 run of 585) and still
+  # reported green. `--workspace` reaches them. The two dylint crates are excluded
+  # because they link `rustc-private` and only build on nightly; the `lint` job below
+  # builds them with the toolchain they pin themselves.
+  WORKSPACE: --workspace --exclude no_gc_across_yield --exclude no_borrow_across_yield
 
 jobs:
   build:
@@ -17,9 +24,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose $WORKSPACE
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose $WORKSPACE
     - name: Run Quoin tests
       run: cargo run --verbose -- test qnlib/tests
 

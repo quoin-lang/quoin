@@ -4,10 +4,13 @@ Status: **SHIPPED through extension-backed classes** — Tier 0 (gc-free `Host` 
 Tier 1 (UDS transport, structured values, host reach, crash/timeout isolation), and
 extension-backed classes with Rust + Python SDKs at parity (PRs #17-#22 and follow-ons; see
 `QUOIN_TODO.md` `## Networking & Async I/O` for the live remaining-refinements list).
-Remaining from this design: **Tier 0.5** (publish the `quoin-ext`/`quoin-ext-proto` SDK
-crates), and the explicitly deferred SCM_RIGHTS fd-passing + WASM tiers. Retained as the
-architecture record. Companion to `docs/ASYNC_ARCH.md` (the I/O waist, the scheduler, the
-reap queue, and cancellation — all of which this design reuses).
+Packaging has since shipped too — an extension is a `use`-able folder with an `extension.toml`
+(`docs/EXT_PACKAGING.md`), and `quoin_packages/adbc` + `quoin_packages/numpy` ship as real
+examples. Remaining from this design: **Tier 0.5** (publish the `quoin-ext`/`quoin-ext-proto` SDK
+crates — they are still internal path-dependencies), and the explicitly deferred SCM_RIGHTS
+fd-passing + WASM tiers, neither of which has any code (verified 2026-07-09 at `dbe188d`).
+Retained as the architecture record. Companion to `docs/ASYNC_ARCH.md` (the I/O waist, the
+scheduler, the reap queue, and cancellation — all of which this design reuses).
 
 ---
 

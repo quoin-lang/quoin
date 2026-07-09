@@ -1,11 +1,18 @@
-# `QN_*` environment flags
+# Environment variables
 
-Every environment variable the VM reads. These are internal tuning, debugging,
-and test knobs (`src/tuning.rs`'s header: "for testing and debugging the VM,
-not user-facing") — programs should never need one for correct behavior, and
-disabling any of them is always semantics-preserving.
+*Status (verified 2026-07-09 at `dbe188d`): **REFERENCE**, audited against every `env::var` call
+in `src/` and `crates/`.*
 
-All flags are **read once on first use and cached for the life of the
+The `QN_*` flags are internal tuning, debugging, and test knobs (`src/tuning.rs`'s header: "for
+testing and debugging the VM, not user-facing") — programs should never need one for correct
+behavior, and disabling any of them is always semantics-preserving.
+
+The `QUOIN_*` variables are different in kind: they are **user-facing**, they appear in
+`qn --help`, and they *do* change behavior. See [User-facing](#user-facing) at the bottom. This
+file used to claim it listed "every environment variable the VM reads" while omitting them and
+the three `QN_DIRECT_*` knobs; that claim is now scoped rather than repeated.
+
+All `QN_*` flags are **read once on first use and cached for the life of the
 process** — changing one mid-run has no effect, and checking one on a hot path
 is one predicted branch.
 
@@ -28,6 +35,10 @@ Two value conventions coexist (noted per flag below):
 | `QN_AOT_DUMP` | selector or `1` (off) | bytecode + CLIF dump |
 | `QN_AOT_SPEC_MAX` | integer (∞) | bisect: promote only tids ≤ N |
 | `QN_AOT_SPEC_ONLY` | CSV of tids (all) | bisect: promote only listed tids |
+| `QN_DIRECT_WARM` | integer (unset = off) | direct-call tier: site hits before retranslation |
+| `QN_DIRECT_ONLY` | CSV of tids (all) | bisect: only these callers bake direct edges |
+| `QN_DIRECT_MAX` | integer (∞) | bisect: cap how many callers may bake, process-wide |
+| `QN_DIRECT_NULL` | `1` (off) | test hook: retranslate even with no baked edges |
 | `QN_GC_STRESS` | truthy (off) | collect on every VM step |
 | `QN_GC_SLEEP` | float (4.0) | GC pacing sleep factor |
 | `QN_SCHED_STRESS` | seed or truthy (off) | randomized preemptive scheduling |
@@ -103,15 +114,29 @@ speculative-promotion bisection hooks: `SPEC_MAX=N` promotes only template ids
 loop over these found every S1 seam bug; they gate promotion only — classic
 annotated candidates and block templates compile regardless.
 
-## `QN_DIRECT_WARM`
+## Direct calls
+
+### `QN_DIRECT_WARM`
 
 Site-hit threshold for the direct-call tier's retranslation queue
 (docs/DIRECT_CALLS_ARCH.md §3.3): a warm AOT-IC site that reaches this
 many consecutive fast-path hits queues its CALLER for retranslation at
-the next driver boundary. **Unset or `0` = the tier is off** (the D3a
-default — null retranslations prove the machinery; D3b's baked direct
-edges will justify a real default). `QN_DIRECT_WARM=1` forces
+the next driver boundary. **Unset or `0` = the tier is off.** D3b shipped
+the baked direct edges, but the gate measured net-negative, so the tier
+stays off by default rather than earning one. `QN_DIRECT_WARM=1` forces
 retranslation on the first warm hit — the stress/bisect setting.
+
+### `QN_DIRECT_ONLY` / `QN_DIRECT_MAX` / `QN_DIRECT_NULL`
+
+**CSV of template ids / integer / exactly `1`.** Read in `src/codegen/mod.rs`
+(`direct_allows`, `direct_budget_allows`, `direct_null_forced`). The D3b bisect
+hooks, landed with the feature under the same S1 discipline as
+`QN_AOT_SPEC_*`: `ONLY` limits which callers may bake direct edges, `MAX`
+caps how many may do so process-wide, and `NULL=1` is the test hook that
+retranslates a queued caller even when nothing got baked — the D3a
+null-retranslation contract. Production skips an empty bake, because
+recompiling without edges buys nothing and costs fresh code placement
+(measured +2–3% on the hot benches).
 
 ## Stress modes
 
@@ -182,8 +207,31 @@ knobs). For scripted/embedded REPL sessions.
 **Any string, default `qn> `.** Read in `src/runner_repl.rs`. Overrides the
 REPL prompt.
 
+## User-facing
+
+Not tuning knobs: these change what the program does, and `qn --help` documents them.
+
+### `QUOIN_STDLIB`
+**A directory.** Read in `src/packages.rs` (`STDLIB_ENV`). Loads the stdlib from disk instead of
+the copy `build.rs` embedded in the binary. `.cargo/config.toml` sets it (`relative = true`) for
+every cargo-run build, which preserves the "edit a `.qn`, no rebuild" loop and is the only way to
+reach the units deliberately *not* embedded — the language's own `qnlib/tests/`, `benchmark.qn`,
+and the `use`-fixtures. A bare `./target/debug/qn` uses the embedded copy.
+
+### `QUOIN_PATH`
+**Colon-separated directories.** Read in `src/packages.rs`. Extra roots searched for extension
+packages, on top of `quoin_packages/` under the CWD (`docs/EXT_PACKAGING.md`).
+
+### `QUOIN_ADBC_<NAME>_PATH`
+**A driver path.** Read in `crates/adbc/src/main.rs`. Per-driver override for the ADBC extension,
+which otherwise finds drivers through its manifest directory.
+
 ## Adding a flag
 
 Put the accessor in `src/tuning.rs` (or next to its sole consumer if it is
 subsystem-specific), use `env_flag` for booleans so `=0` means off, cache it
 in a `OnceLock`, and add it to this file and the summary table above.
+
+To re-audit this file, diff the table against every `env::var` / `var_os` call in `src/` and
+`crates/`. Two names look like flags but are not read: `QN_GC_STEPS` (a comment in `tuning.rs`
+for an unimplemented knob) and `QN_FOO` (the doc-comment example on `env_flag`).

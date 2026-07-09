@@ -1,0 +1,68 @@
+"* [OS]Env (src/runtime/os.rs + qnlib/core/12-os.qn) — READ-ONLY access to the process
+"* environment. There is no `at:put:`: since edition 2024 `std::env::set_var` is `unsafe`
+"* (the C environment is global state another thread may be reading), and this VM runs worker
+"* threads and a blocking I/O pool.
+"*
+"* These cases can only read the ambient environment, so they lean on `PATH` (set on every
+"* POSIX host) and a name nothing would define. The empty-value-vs-unset distinction needs a
+"* controlled environment and is pinned in `tests/os_env.rs`, which spawns `qn` with one.
+
+(TestSuite.new:{ var name = 'OSEnv' }).add:{
+    .test:
+    readsAVariableThatIsSet -> {
+        .isTrue:{ ([OS]Env.at:'PATH').defined? };
+        .isTrue:{ ([OS]Env.at:'PATH').length > 0 };
+        .isTrue:{ [OS]Env.contains?:'PATH' }
+    };
+
+    "* An unset variable is nil, never ''. (An empty *value* is '' — see tests/os_env.rs.)
+    .test:
+    anUnsetVariableIsNil -> {
+        .is:{ [OS]Env.at:'QN_DEFINITELY_NOT_SET_58' } equalTo:nil;
+        .isFalse:{ [OS]Env.contains?:'QN_DEFINITELY_NOT_SET_58' }
+    };
+
+    .test:
+    ifAbsentFiresOnlyWhenUnset -> {
+        .is:{ [OS]Env.at:'QN_DEFINITELY_NOT_SET_58' ifAbsent:{ 'fallback' } } equalTo:'fallback';
+        .is:{ [OS]Env.at:'PATH' ifAbsent:{ 'fallback' } } equalTo:([OS]Env.at:'PATH')
+    };
+
+    "* `vars_os` yields an unspecified order, so `keys` sorts — a stdlib that returned a
+    "* different list run-to-run would be a trap for tests and for anything hashing its output.
+    .test:
+    keysAreSortedAndAgreeWithAsMap -> {
+        var keys = [OS]Env.keys;
+        .is:{ keys } equalTo:keys.sort;
+        .isTrue:{ keys.contains?:'PATH' };
+        .is:{ [OS]Env.asMap.keys } equalTo:keys
+    };
+
+    .test:
+    asMapCarriesTheIterateCombinators -> {
+        "* a namespace class has no instances to mix Iterate into, so `asMap` is the door
+        var map = [OS]Env.asMap;
+        .is:{ map.at:'PATH' } equalTo:([OS]Env.at:'PATH');
+        .isTrue:{ (map.select:{ |kv| kv.key == 'PATH' }).count == 1 }
+    };
+
+    .test:
+    eachYieldsKeyValuePairsAndCountAgrees -> {
+        var seen = 0;
+        var foundPath = false;
+        [OS]Env.each:{ |kv|
+            seen = seen + 1;
+            (kv.key == 'PATH').if:{ foundPath = true }
+        };
+        .is:{ seen } equalTo:[OS]Env.count;
+        .isTrue:{ foundPath }
+    };
+
+    "* Read-only, and a namespace class (see 54-native-new.qn).
+    .test:
+    isReadOnlyAndANamespaceClass -> {
+        .does:{ [OS]Env.new } throw:#/Cannot instantiate abstract class/;
+        .does:{ [OS]Env.at:'X' put:'y' } throw:MessageNotUnderstood;
+        .does:{ [OS]Env.remove:'X' } throw:MessageNotUnderstood
+    }
+}

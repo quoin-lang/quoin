@@ -1,8 +1,12 @@
 # The window arena: native slot stores (the crossing-removal arc)
 
-*Status: DESIGN (recon done; no slices implemented). Successor to the
-direct-calls arc (docs/DIRECT_CALLS_ARCH.md, PR #75 + perf/window-hoist).
-Written at `70030c5`.*
+*Status (verified 2026-07-09 at `dbe188d`): **PARTIAL — the arc ran and closed at A3.** A1
+(`d49d958`, fixed `Value` repr), A2 (`0249cd9`, `SlotStack`) and A3 (`519d9aa`, native slot
+access + closure promotion) are on main; `src/value.rs` and `src/vm_tests.rs` cite the §2.1
+layout contract by name, and `slot_peek`/`slot_set` live in `src/codegen/`. A3 returned the edge
+family's "final verdict" — the remaining crossing removal did not pay — so **A4 (W1 method
+edges) and A5 (hardening) were not built**. Successor to the direct-calls arc
+(docs/DIRECT_CALLS_ARCH.md). Written at `70030c5` as a design; the plan below is what was run.*
 
 ## 1. Why: the triple proof
 

@@ -13,6 +13,7 @@ use crate::runtime::method::{MethodBody, NativeMethodState};
 use crate::runtime::regex::NativeRegexState;
 use crate::runtime::runtime::{load_glob, load_unit};
 use crate::runtime::set::NativeSetState;
+use crate::runtime::streams::NativeStream;
 use crate::symbol::{Symbol, init_colon_symbol, init_symbol, new_colon_symbol, self_symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, Fields, InitEntry, InitPlan, NamespacedName, NativeCall,
@@ -513,6 +514,19 @@ pub struct VmState<'gc> {
     /// exit (via `NativeReentryGuard`), and capped at `MAX_NATIVE_REENTRY`.
     #[collect(require_static)]
     pub native_reentry_depth: usize,
+    /// The process's standard input, as a stream, created on first use and reused forever after.
+    ///
+    /// Memoized because a stream *buffers*: two streams over fd 0 would each hold bytes the other
+    /// never sees, so `readLine` twice through two handles would silently drop input. Lazy because
+    /// opening it is an `await_io`, and the benchmark harness (which still runs the prelude) has
+    /// no scheduler to park on.
+    pub stdin_stream: Option<Value<'gc>>,
+    /// Every open *buffered* write stream (`[IO]File.create:` / `append:`), so the driver can
+    /// flush them when the program ends — C's atexit flush, which a GC finaliser cannot do
+    /// because a `Drop` may not perform async I/O. `close` removes its stream from this list.
+    /// Rooted: a stream a program stops referencing must still be flushed, not collected with
+    /// its tail unwritten. Signal death still loses the buffer, as it does in C.
+    pub open_write_streams: Vec<Value<'gc>>,
     /// Lowest usable address of the coroutine stack currently running (`Fiber::stack_limit`),
     /// refreshed by the driver before every `resume`. `0` means "not on a known coroutine"
     /// (the benchmark harness steps the VM straight on the OS thread stack), which disables
@@ -713,6 +727,8 @@ impl<'gc> VmState<'gc> {
             pending_class_def: None,
             next_frame_id: 1,
             native_reentry_depth: 0,
+            stdin_stream: None,
+            open_write_streams: Vec::new(),
             stack_limit: 0,
             requested_exit: None,
             aot: AotTaskState::default(),
@@ -997,6 +1013,51 @@ impl<'gc> VmState<'gc> {
             }
         );
         Value::Object(obj)
+    }
+
+    /// Start flushing this buffered write stream at program exit.
+    pub fn track_write_stream(&mut self, stream: Value<'gc>) {
+        self.open_write_streams.push(stream);
+    }
+
+    /// Stop tracking `stream` — it was closed (and so already flushed), or consumed by a
+    /// `stringStream` that took over its buffer.
+    pub fn untrack_write_stream(&mut self, mc: &Mutation<'gc>, stream: Value<'gc>) {
+        let Ok(id) = stream.with_native_state::<NativeStream, _, _>(|s| s.stream_id()) else {
+            return;
+        };
+        let _ = mc;
+        self.open_write_streams.retain(|v| {
+            v.with_native_state::<NativeStream, _, _>(|s| s.stream_id())
+                .map(|other| other != id)
+                .unwrap_or(true)
+        });
+    }
+
+    /// Take every still-buffered byte from the tracked write streams. The driver writes these
+    /// out when the program ends. Returns `(id, bytes)` pairs in the order the streams were
+    /// opened; a stream with nothing pending contributes nothing.
+    ///
+    /// A stream that is still *open* stays tracked: the REPL drives — and so flushes — once per
+    /// line, and a stream opened on one line is written on the next. Emptying the registry here
+    /// would leave that stream untracked and lose its bytes. Closed streams are dropped; they
+    /// were flushed on the way out.
+    pub fn take_pending_writes(&mut self, mc: &Mutation<'gc>) -> Vec<(StreamId, Vec<u8>)> {
+        let mut pending = Vec::new();
+        self.open_write_streams.retain(|v| {
+            match v.with_native_state_mut::<NativeStream, _, _>(mc, |s| {
+                (!s.is_stream_closed(), s.take_pending())
+            }) {
+                Ok((open, bytes)) => {
+                    if let Some(b) = bytes {
+                        pending.push(b);
+                    }
+                    open
+                }
+                Err(_) => false, // no longer a stream: stop tracking it
+            }
+        });
+        pending
     }
 
     // Scalar value types are immediate `Value` variants — no GC allocation. `mc`
@@ -3147,6 +3208,7 @@ impl<'gc> VmState<'gc> {
             QuoinError::ValueError(msg) => self.make_error(mc, "ValueError", msg, None),
             QuoinError::ParseError(msg) => self.make_error(mc, "ParseError", msg, None),
             QuoinError::ClassError(msg) => self.make_error(mc, "ClassError", msg, None),
+            QuoinError::NameError(msg) => self.make_error(mc, "NameError", msg, None),
             QuoinError::StackExhausted(msg) => self.make_error(mc, "StackError", msg, None),
             QuoinError::ExtensionError(msg) => self.make_error(mc, "Error", msg, None),
             QuoinError::WithSourceInfo { error, .. } => self.quoinerror_to_value(mc, error),
@@ -5199,12 +5261,18 @@ impl<'gc> VmState<'gc> {
                 ip += 1;
             }
             Instruction::LoadGlobal(name) => {
-                let val = self
-                    .globals
-                    .borrow()
-                    .get(name)
-                    .copied()
-                    .unwrap_or_else(|| self.new_nil(mc));
+                // A name bound to nothing is an error, not `nil`. Reading it used to yield
+                // `nil`, so a typo propagated silently even though *assigning* to an
+                // undeclared local is a compile error. A compile-time check is impossible
+                // here — `use` executes at run time, so a unit cannot see the globals its
+                // own `use` will define — but by the time this instruction runs, every
+                // `use` has run and every class is defined. Ask whether a class exists with
+                // `Class.exists?:#Name`.
+                let Some(val) = self.globals.borrow().get(name).copied() else {
+                    return Err(QuoinError::NameError(format!(
+                        "undefined name `{name}` — nothing with that name is in scope"
+                    )));
+                };
                 self.push(val);
                 ip += 1;
             }

@@ -315,6 +315,12 @@ pub fn serve<R: Into<Reply>>(
 ) -> io::Result<()> {
     let listener = UnixListener::bind(path)?;
     let (mut stream, _addr) = listener.accept()?;
+    // Unlink once the host is connected. The established connection is unaffected, and the
+    // protocol never reconnects (one long-lived stream), so the path is dead weight from here
+    // on. Doing it now is the only cleanup that survives a signal death of *either* process,
+    // which runs no destructor -- the host's `Drop` covers only its graceful exits. `qn`'s
+    // worker transport (src/worker.rs) unlinks after its own `accept` for the same reason.
+    let _ = std::fs::remove_file(path);
     while let Some(frame) = read_frame(&mut stream)? {
         match quoin_ext_proto::decode_frame(&frame).map_err(invalid_data)? {
             // A generic-handler extension provides no classes (Phase 3): reply with an empty

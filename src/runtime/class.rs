@@ -1,11 +1,37 @@
 use crate::arg;
+use crate::error::QuoinError;
 use crate::recv;
-use crate::value::{NamespacedName, NativeClassBuilder, Value};
+use crate::value::{NamespacedName, NativeClassBuilder, ObjectPayload, Value};
 use crate::vm::DeferredCall;
+
+/// The text of a `Symbol` or `String` argument — `#Point` and `'Point'` both name a class.
+fn name_text(v: Value<'_>) -> Option<String> {
+    match v {
+        Value::Object(obj) => match &obj.borrow().payload {
+            ObjectPayload::Symbol(s) | ObjectPayload::String(s) => Some((**s).clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 pub fn build_class_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Class", Some("Object"))
         .construct_with("define classes with Name <- { … }")
+        // Ask whether a class exists *by name*, rather than by reading the name and seeing
+        // whether it came back nil — reading an unbound name is a `NameError`. Namespaced
+        // classes need a quoted symbol: `Class.exists?:#'[ADBC]Database'`.
+        .class_method("exists?:", |vm, mc, _receiver, args| {
+            let Some(text) = name_text(args[0]) else {
+                return Err(QuoinError::ValueError(
+                    "Class.exists?: expects a Symbol or String, e.g. `Class.exists?:#Point`"
+                        .to_string(),
+                ));
+            };
+            let key = NamespacedName::parse(&text);
+            let found = matches!(vm.globals.borrow().get(&key), Some(Value::Class(_)));
+            Ok(vm.new_bool(mc, found))
+        })
         .instance_method("name", |vm, mc, receiver, _args| {
             let clz = recv!(receiver, Class);
             Ok(vm.new_string(mc, clz.borrow().name.to_string()))

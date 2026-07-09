@@ -1,6 +1,11 @@
 # Checked generic collections
 
-*Status: G0 + G1 SHIPPED (G0: syntax + lattice, checker-only; G1: runtime
+*Status (verified 2026-07-09 at `dbe188d`): **G0–G4 SHIPPED** — the highest slice is G4b
+(block-literal inference), not G1; the paragraph below already records G2/G3/G4 but its opening
+lagged. Code: `src/runtime/elem_tag.rs`, `type_params` on `ClassSig`, `Type::BlockOf` in
+`src/types.rs`. Tests: `qnlib/tests/51-generics.qn`, `qnlib/tests/50-aot-parity.qn`.*
+
+*Detail: G0 + G1 SHIPPED (G0: syntax + lattice, checker-only; G1: runtime
 tags + enforcement + tag-aware dispatch — `ElemTag` on the three native
 states, all write sites gated including the devirtualized arms and the AOT
 ListPush/ListSet helpers, `List.of:`/`Map.of:`/`Set.of:`, `ensure:`,

@@ -7,7 +7,7 @@ use crate::{ansi_colorizer, arg};
 use gc_arena::{Gc, Mutation};
 use std::ffi::OsString;
 use std::fs::{File, Metadata, ReadDir, metadata, read_dir};
-use std::io::{Stderr, Stdin, Stdout, Write, stderr, stdin, stdout};
+use std::io::{Stderr, Stdin, Stdout, stderr, stdin, stdout};
 use std::path::PathBuf;
 
 pub struct NativeIoFolder {
@@ -28,6 +28,21 @@ pub fn build_io_folder_class() -> NativeClassBuilder {
         .class_method("open:", |vm, mc, _receiver, args| {
             let path = arg!(args, String, 0);
             new_native_io_folder(vm, mc, path)
+        })
+        // create:path -> create the directory and any missing parents (idempotent, like
+        // `mkdir -p`: an existing directory is not an error).
+        .class_method("create:", |vm, mc, _receiver, args| {
+            let path = arg!(args, String, 0);
+            std::fs::create_dir_all(path.as_str())
+                .map_err(|e| QuoinError::from_io_error(&e.into()))?;
+            Ok(vm.new_nil(mc))
+        })
+        // delete:path -> remove an *empty* directory. Refusing to recurse is deliberate:
+        // a one-selector recursive delete is too easy to call by accident.
+        .class_method("delete:", |vm, mc, _receiver, args| {
+            let path = arg!(args, String, 0);
+            std::fs::remove_dir(path.as_str()).map_err(|e| QuoinError::from_io_error(&e.into()))?;
+            Ok(vm.new_nil(mc))
         })
         .instance_method("path", |vm, mc, receiver, _args| {
             receiver
@@ -113,6 +128,29 @@ fn new_native_io_file<'a>(
     vm.new_native_state(mc, vm.get_builtin_class("[IO]File"), state)
 }
 
+/// Open `args[0]` for writing and hand back a buffered `ByteStream`, registered for the
+/// end-of-program flush. `append` picks truncate-or-append.
+fn open_write_stream<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    args: &[Value<'gc>],
+    append: bool,
+) -> Result<Value<'gc>, QuoinError> {
+    let path = arg!(args, String, 0);
+    let path = OsString::from(path.as_str());
+    match vm.await_io(IoRequest::OpenFileWrite { path, append })? {
+        IoResult::Connected(id) => {
+            let stream = crate::runtime::streams::make_write_byte_stream(vm, mc, id);
+            vm.track_write_stream(stream);
+            Ok(stream)
+        }
+        IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
+        other => Err(QuoinError::Other(format!(
+            "[IO]File.create:: unexpected I/O result {other:?}"
+        ))),
+    }
+}
+
 pub fn build_io_file_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]File", Some("Object"))
         .construct_with("use [IO]File.open:")
@@ -125,6 +163,38 @@ pub fn build_io_file_class() -> NativeClassBuilder {
                 os_string.clone(),
                 metadata(os_string).map_err(|e| QuoinError::from_io_error(&e.into()))?,
             ))
+        })
+        // create:path -> a writable ByteStream over a new (or truncated) file. Buffered:
+        // writes accumulate and drain every IO_BUFFER_BYTES, and `close` flushes. A stream
+        // never closed is flushed when the program ends (`VmState::open_write_streams`).
+        .class_method("create:", |vm, mc, _receiver, args| {
+            open_write_stream(vm, mc, &args, false)
+        })
+        // append:path -> the same, positioned at the end of an existing file (created if absent).
+        .class_method("append:", |vm, mc, _receiver, args| {
+            open_write_stream(vm, mc, &args, true)
+        })
+        // delete:path -> remove the file. Synchronous, like `open:`'s metadata read: the
+        // filesystem *stream* ops park, these small metadata ops do not.
+        .class_method("delete:", |vm, mc, _receiver, args| {
+            let path = arg!(args, String, 0);
+            std::fs::remove_file(path.as_str())
+                .map_err(|e| QuoinError::from_io_error(&e.into()))?;
+            Ok(vm.new_nil(mc))
+        })
+        // rename:to: -> rename (or move) a file. Overwrites the destination, as POSIX does.
+        .class_method("rename:to:", |vm, mc, _receiver, args| {
+            let from = arg!(args, String, 0);
+            let to = arg!(args, String, 1);
+            std::fs::rename(from.as_str(), to.as_str())
+                .map_err(|e| QuoinError::from_io_error(&e.into()))?;
+            Ok(vm.new_nil(mc))
+        })
+        // exists?:path -> whether anything exists at `path`. Answers without opening, so it
+        // cannot raise for an absent file the way `open:` does.
+        .class_method("exists?:", |vm, mc, _receiver, args| {
+            let path = arg!(args, String, 0);
+            Ok(vm.new_bool(mc, std::path::Path::new(path.as_str()).exists()))
         })
         .instance_method("fullpath", |vm, mc, receiver, _args| {
             receiver
@@ -220,7 +290,6 @@ pub enum NativeIoHandleWrapper {
     Stdout(Stdout),
     Stderr(Stderr),
     Stdin(Stdin),
-    File(File),
 }
 
 pub struct NativeIoHandle {
@@ -288,11 +357,11 @@ fn is_std_stream(handle: Value<'_>) -> Result<bool, QuoinError> {
 }
 
 /// Write `bytes` to the handle's sink. Stdout/stderr go through `vm.write_std` (so the DAP
-/// adapter can capture them as `output` events instead of corrupting the protocol stream); a
-/// file-backed handle writes directly; stdin errors.
+/// adapter can capture them as `output` events instead of corrupting the protocol stream);
+/// stdin errors. Files are not handles: they are streams (`[IO]File.create:`), because a
+/// blocking `write_all` here would freeze the scheduler.
 fn handle_write<'gc>(
     vm: &mut VmState<'gc>,
-    mc: &Mutation<'gc>,
     handle: Value<'gc>,
     bytes: &[u8],
 ) -> Result<(), QuoinError> {
@@ -300,14 +369,12 @@ fn handle_write<'gc>(
         Out,
         Err,
         Stdin,
-        File,
     }
     let kind = handle
         .with_native_state(|h: &NativeIoHandle| match &h.wrapper {
             NativeIoHandleWrapper::Stdout(_) => Kind::Out,
             NativeIoHandleWrapper::Stderr(_) => Kind::Err,
             NativeIoHandleWrapper::Stdin(_) => Kind::Stdin,
-            NativeIoHandleWrapper::File(_) => Kind::File,
         })
         .map_err(QuoinError::Other)?;
     match kind {
@@ -317,16 +384,103 @@ fn handle_write<'gc>(
         Kind::Err => vm
             .write_std(StdStream::Err, bytes)
             .map_err(|e| QuoinError::Other(e.to_string())),
-        Kind::Stdin => Err(QuoinError::Other("can't write to stdin!".to_string())),
-        Kind::File => handle.with_native_state_mut(mc, |h: &mut NativeIoHandle| {
-            if let NativeIoHandleWrapper::File(f) = &mut h.wrapper {
-                f.write_all(bytes)
-                    .map_err(|e| QuoinError::Other(e.to_string()))
-            } else {
-                Ok(())
-            }
-        })?,
+        // A typed `IoError`, not a bare String: `catch:{|e:Error|}` must be able to see it.
+        // (Mirrors `[IO]Handle.stringStream` refusing the write handles.)
+        Kind::Stdin => Err(QuoinError::io(
+            crate::error::IoErrorKind::InvalidInput,
+            "[IO]Handle.stdin is read-only (stdin cannot be written)",
+        )),
     }
+}
+
+/// The one stdin stream, created on first use (`vm.stdin_stream`).
+///
+/// Memoized rather than freshly opened per call because a stream *buffers*: two streams over
+/// fd 0 would each hold bytes the other never sees, so reading a line through one and then the
+/// other would silently drop input. `kind` therefore also fixes the flavour — asking for the
+/// byte view after the text view (or vice versa) is a mistake, not a conversion.
+fn stdin_stream<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    kind: &str,
+    who: &str,
+) -> Result<Value<'gc>, QuoinError> {
+    let want = if kind == "byteStream" {
+        "ByteStream"
+    } else {
+        "StringStream"
+    };
+    if let Some(existing) = vm.stdin_stream {
+        // `type_name()` says `Object` for a native-state value; the class is what identifies it.
+        let have = match existing {
+            Value::Object(obj) => obj.borrow().class_name(),
+            other => other.type_name().to_string(),
+        };
+        if have != want {
+            return Err(QuoinError::io(
+                crate::error::IoErrorKind::InvalidInput,
+                format!(
+                    "{who}: stdin is already open as a {have}; it buffers, so it cannot also be read as a {want}"
+                ),
+            ));
+        }
+        return Ok(existing);
+    }
+    let stream = match vm.await_io(IoRequest::OpenStdin)? {
+        IoResult::Connected(id) => {
+            if kind == "byteStream" {
+                crate::runtime::streams::make_byte_stream(vm, mc, id)
+            } else {
+                crate::runtime::streams::make_string_stream(vm, mc, id, Vec::new())
+            }
+        }
+        IoResult::Err(e) => return Err(QuoinError::from_io_error(&e)),
+        other => {
+            return Err(QuoinError::Other(format!(
+                "{who}: unexpected I/O result {other:?}"
+            )));
+        }
+    };
+    vm.stdin_stream = Some(stream);
+    Ok(stream)
+}
+
+/// Back `[IO]Handle#stringStream` / `#byteStream`. The write handles are refused here rather
+/// than at first read, so the mistake surfaces where it was made.
+fn open_stdin_stream<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &Mutation<'gc>,
+    receiver: Value<'gc>,
+    kind: &str,
+) -> Result<Value<'gc>, QuoinError> {
+    let readable = receiver.with_native_state(|h: &NativeIoHandle| {
+        matches!(h.wrapper, NativeIoHandleWrapper::Stdin(_))
+    })?;
+    if !readable {
+        return Err(QuoinError::io(
+            crate::error::IoErrorKind::InvalidInput,
+            format!("[IO]Handle.{kind}: only stdin is readable (stdout/stderr are write-only)"),
+        ));
+    }
+    stdin_stream(vm, mc, kind, &format!("[IO]Handle.{kind}"))
+}
+
+/// `[IO]Stdin` — the readable half of the standard streams, mirroring the `[IO]Stdout` /
+/// `[IO]Stderr` constants. A *class*, not a prelude constant, because opening stdin is an
+/// `await_io` and the prelude also runs under `qn benchmark`, which has no scheduler to park on;
+/// the stream is therefore created on first read. `readLine` / `eachLine:` / `readAll` are Quoin
+/// delegators over `.stream` (`qnlib/core/06-io.qn`).
+pub fn build_io_stdin_class() -> NativeClassBuilder {
+    NativeClassBuilder::new("[IO]Stdin", Some("Object"))
+        .abstract_class()
+        .class_method("stream", |vm, mc, _r, _args| {
+            stdin_stream(vm, mc, "stringStream", "[IO]Stdin.stream")
+        })
+        .returns("StringStream")
+        .class_method("byteStream", |vm, mc, _r, _args| {
+            stdin_stream(vm, mc, "byteStream", "[IO]Stdin.byteStream")
+        })
+        .returns("ByteStream")
 }
 
 pub fn build_io_handle_class() -> NativeClassBuilder {
@@ -358,9 +512,18 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
                 NativeIoHandleWrapper::Stdout(_) => "[IO]Handle.stdout",
                 NativeIoHandleWrapper::Stderr(_) => "[IO]Handle.stderr",
                 NativeIoHandleWrapper::Stdin(_) => "[IO]Handle.stdin",
-                NativeIoHandleWrapper::File(_) => "[IO]Handle.file",
             })?;
             Ok(vm.new_string(mc, s.to_string()))
+        })
+        // stringStream / byteStream: read the handle through the same stream stack as a socket
+        // or a file, so `readLine` / `eachLine:` / `readAll` come for free and every read PARKS
+        // the task rather than freezing the single-threaded scheduler. Only stdin is readable;
+        // the write handles say so rather than handing back a stream that fails on first read.
+        .instance_method("stringStream", |vm, mc, receiver, _args| {
+            open_stdin_stream(vm, mc, receiver, "stringStream")
+        })
+        .instance_method("byteStream", |vm, mc, receiver, _args| {
+            open_stdin_stream(vm, mc, receiver, "byteStream")
         })
         .instance_method("write:", |vm, mc, _receiver, args| {
             let mut s = get_io_string(vm, mc, args[0])?;
@@ -368,7 +531,7 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
             if is_std_stream(active_receiver)? && !vm.options.supports_color {
                 s = ansi_colorizer::decolorize(&s);
             }
-            handle_write(vm, mc, active_receiver, s.as_bytes())?;
+            handle_write(vm, active_receiver, s.as_bytes())?;
             Ok(vm.new_nil(mc))
         })
         .instance_method("writeln:", |vm, mc, _receiver, args| {
@@ -378,7 +541,7 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
                 s = ansi_colorizer::decolorize(&s);
             }
             s.push('\n');
-            handle_write(vm, mc, active_receiver, s.as_bytes())?;
+            handle_write(vm, active_receiver, s.as_bytes())?;
             Ok(vm.new_nil(mc))
         })
         .instance_method("==:", |vm, mc, receiver, args| {
@@ -386,13 +549,11 @@ pub fn build_io_handle_class() -> NativeClassBuilder {
                 NativeIoHandleWrapper::Stdout(_) => Some(0),
                 NativeIoHandleWrapper::Stderr(_) => Some(1),
                 NativeIoHandleWrapper::Stdin(_) => Some(2),
-                NativeIoHandleWrapper::File(_) => None,
             })?;
             let rhs_val = args[0].with_native_state(|h: &NativeIoHandle| match &h.wrapper {
                 NativeIoHandleWrapper::Stdout(_) => Some(0),
                 NativeIoHandleWrapper::Stderr(_) => Some(1),
                 NativeIoHandleWrapper::Stdin(_) => Some(2),
-                NativeIoHandleWrapper::File(_) => None,
             });
             match rhs_val {
                 Ok(Some(r)) if lhs_val == Some(r) => Ok(vm.new_bool(mc, true)),
@@ -442,64 +603,6 @@ mod tests {
             assert!(s.contains("bold text"));
             assert!(s.contains("\x1b["));
         });
-    }
-
-    #[test]
-    fn test_handle_write_to_file() {
-        use std::io::Read as _;
-
-        // A file-backed [IO]Handle is not constructible from Quoin (the class only mints
-        // stdout/stderr/stdin), so the File write/writeln arms are exercised here directly.
-        let path = std::env::temp_dir().join(format!("quoin_io_handle_{}.txt", std::process::id()));
-        let arena_path = path.clone();
-
-        let mut arena = Arena::<Rootable![VmState<'_>]>::new(|mc| {
-            let mut vm = VmState::new(mc, VmOptions::default());
-            vm.register_native_class(mc, object::build_object_class());
-            vm.register_native_class(mc, class::build_class_class());
-            vm.register_native_class(mc, string::build_string_class());
-            vm.register_native_class(mc, build_io_handle_class());
-            vm
-        });
-
-        arena.mutate_root(|mc, vm| {
-            let file = File::create(&arena_path).unwrap();
-            let handle =
-                new_native_io_handle_with_wrapper(vm, mc, NativeIoHandleWrapper::File(file));
-
-            // s and ==: also have File arms that Quoin can't reach (no file-backed ctor).
-            let s = vm.call_method(mc, handle, "s", vec![]).unwrap();
-            match s {
-                Value::Object(o) => match &o.borrow().payload {
-                    ObjectPayload::String(st) => assert_eq!(st.as_str(), "[IO]Handle.file"),
-                    _ => panic!("s did not return a string"),
-                },
-                _ => panic!("s did not return an object"),
-            }
-            // Two file-backed handles never compare equal (File -> None).
-            let eq = vm.call_method(mc, handle, "==:", vec![handle]).unwrap();
-            assert!(eq.is_false());
-
-            // write: and writeln: dispatch through call_method, which sets up
-            // active_native_args (the receiver the write arms read back).
-            let hello = vm.new_string(mc, "hello".to_string());
-            let r = vm.call_method(mc, handle, "write:", vec![hello]).unwrap();
-            assert!(r.is_nil());
-
-            let line = vm.new_string(mc, "line".to_string());
-            let r = vm.call_method(mc, handle, "writeln:", vec![line]).unwrap();
-            assert!(r.is_nil());
-        });
-
-        // The arena (and the File it owns) is still alive, but std::fs::File is unbuffered,
-        // so the bytes are already visible to a second handle on the same path.
-        let mut contents = String::new();
-        File::open(&path)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
-        std::fs::remove_file(&path).ok();
-        assert_eq!(contents, "helloline\n");
     }
 
     // With `capture_output` armed (the DAP mode), stdout/stderr `[IO]Handle` writes buffer into

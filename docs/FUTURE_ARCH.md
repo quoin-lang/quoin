@@ -1,5 +1,10 @@
 # Future Architecture — where the VM performance work goes from here
 
+*Status (verified 2026-07-09 at `dbe188d`): **SUPERSEDED**, kept for lineage. Its central bet —
+"execute natively (compilation)" — shipped as the AOT tier (`docs/AOT_ARCH.md`) and speculative
+AOT (`docs/SPECULATIVE_AOT_ARCH.md`). The live ranked roadmap is `docs/PERF_ROADMAP.md`, which
+explicitly synthesizes this document. Do not plan from this file.*
+
 Long-term performance roadmap, at `main` @ `fc362a6` (after the typed-devirt tier and the
 cheap-dispatch work merged). Companion to `docs/TYPED_DEVIRT_ARCH.md`. Grounded in the profiling
 under `profiling/post-cheap-dispatch/`.

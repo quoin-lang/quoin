@@ -1,10 +1,15 @@
 # Performance roadmap: past the interpreter floor
 
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED, and largely executed.** `perf/next-tier`
+is merged: the PGO/LTO pipeline is `[profile.release]` (`lto = "fat"`, `codegen-units = 1`) with
+the recipe in `profiling/pgo-lto/`, and the expanded cross-language suite is `bench/` (see
+`bench/CROSS.md`). Most of the ranked portfolio below has since shipped as its own arc —
+speculative AOT, materialization, the outcall seam, direct calls — each with a doc of its own.
+This remains the live roadmap; check each item against its arc doc before planning from it.*
+
 *Written 2026-07-04, branched from main @ `bfdf478`. Synthesizes the full
 profiling history (`profiling/*/notes.md`), FUTURE_ARCH.md, and a survey of
-the VM hot core into a ranked project portfolio. This branch
-(`perf/next-tier`) ships the first two items: the PGO/LTO build pipeline and
-the expanded benchmark suite.*
+the VM hot core into a ranked project portfolio.*
 
 ## Where the VM stands
 

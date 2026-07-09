@@ -1,0 +1,72 @@
+"* Names bound to nothing (src/vm.rs LoadGlobal, src/codegen/helpers.rs load_global).
+"*
+"* Reading a name that nothing is bound to raises a catchable `NameError`. It used to
+"* evaluate to `nil`, so a misspelling propagated silently -- even though *assigning* to an
+"* undeclared local has always been a compile error. The two halves of the strict `var`/`let`
+"* rule now agree.
+"*
+"* A compile-time check is impossible: `use` executes at run time, so a unit cannot see the
+"* globals its own `use` will define, and a method may name a class defined later in the file.
+"* By the time the read executes, everything is bound -- so the check lives there.
+"*
+"* To ask whether a class exists *without* reading it, use `Class.exists?:#Name`. That replaced
+"* the old `Name.defined?` idiom, which only worked because a missing name read as nil.
+
+(TestSuite.new:{ var name = 'Names' }).add:{
+    .test:readingAnUnboundNameRaises -> {
+        .does:{ noSuchNameAnywhere } throw:NameError;
+        .does:{ noSuchNameAnywhere } throw:#/undefined name `noSuchNameAnywhere`/
+    };
+
+    "* NameError is an Error, so a generic handler catches it.
+    .test:nameErrorIsAnError -> {
+        var caught = nil;
+        { alsoUnbound }.catch:{ |e: Error| caught = e };
+        .is:{ caught.class.name } equalTo:'NameError';
+        .isTrue:{ caught.message.contains?:'alsoUnbound' }
+    };
+
+    "* The namespace is part of the name, and the message says so. Asserted on the message
+    "* rather than a regex: `#/…/` has no escape for a literal `[`.
+    .test:namespacedNamesReportInFull -> {
+        var caught = nil;
+        { [Nope]Missing }.catch:{ |e: NameError| caught = e };
+        .isTrue:{ caught.message.contains?:'[Nope]Missing' }
+    };
+
+    "* Bound names still read, whatever their case: a global is a global.
+    .test:boundNamesRead -> {
+        TNamesConst <- 41;
+        tNamesLower <- 'lower';
+        .is:{ TNamesConst + 1 } equalTo:42;
+        .is:{ tNamesLower } equalTo:'lower'
+    };
+
+    "* ---- Class.exists?: ------------------------------------------------------
+    "* The question the old `Name.defined?` idiom was really asking, asked directly.
+    .test:classExistsAnswersByName -> {
+        .is:{ Class.exists?:#Integer } equalTo:true;
+        .is:{ Class.exists?:#NoSuchClass } equalTo:false;
+        "* A String names a class as well as a Symbol does.
+        .is:{ Class.exists?:'Integer' } equalTo:true
+    };
+
+    "* Namespaced classes need a quoted symbol -- `#[IO]File` is not a symbol literal.
+    .test:classExistsSeesNamespaces -> {
+        .is:{ Class.exists?:#'[IO]File' } equalTo:true;
+        .is:{ Class.exists?:#'[OS]Path' } equalTo:true;
+        .is:{ Class.exists?:#'[IO]NoSuchThing' } equalTo:false
+    };
+
+    "* It answers about *classes*, not about any global. A bound non-class is not a class.
+    .test:classExistsIsAboutClasses -> {
+        tNamesNotAClass <- 7;
+        .is:{ tNamesNotAClass } equalTo:7;
+        .is:{ Class.exists?:#tNamesNotAClass } equalTo:false
+    };
+
+    .test:classExistsRejectsNonNames -> {
+        .does:{ Class.exists?:42 } throw:ValueError;
+        .does:{ Class.exists?:42 } throw:#/Symbol or String/
+    }
+}

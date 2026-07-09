@@ -151,8 +151,10 @@
         } equalTo:7;
         "* Host missing #req -> throws at definition time...
         .does:{ TSCNC_ReqBad <- { .mix:TSCNC_Req } } throw:'TSCNC_ReqBad needs #req';
-        "* ...and the failed class is not registered.
-        .is:{ TSCNC_ReqBad.defined? } equalTo:false;
+        "* ...and the failed class is not registered. Asked by name: reading `TSCNC_ReqBad`
+        "* would raise a NameError, since nothing is bound to it.
+        .is:{ Class.exists?:#TSCNC_ReqBad } equalTo:false;
+        .is:{ Class.exists?:#TSCNC_ReqGood } equalTo:true;
     };
 
     .test:

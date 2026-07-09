@@ -1033,7 +1033,7 @@ pub(super) unsafe extern "C" fn narrow_error(
 }
 
 /// `LoadGlobal` — a global (usually a class reference) into `out_idx`;
-/// missing globals read as nil, exactly like the interpreter arm.
+/// a missing global raises a catchable `NameError`, exactly like the interpreter arm.
 pub(super) unsafe extern "C" fn load_global(
     vm: *mut c_void,
     mc: *const c_void,
@@ -1042,9 +1042,17 @@ pub(super) unsafe extern "C" fn load_global(
 ) -> u8 {
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
     let name = unsafe { &*name };
-    let v = vm.globals.borrow().get(name).copied().unwrap_or(Value::Nil);
+    let found = vm.globals.borrow().get(name).copied();
     let _ = mc;
-    slot_write(vm, out_idx, v)
+    match found {
+        Some(v) => slot_write(vm, out_idx, v),
+        None => store_err(
+            vm,
+            QuoinError::NameError(format!(
+                "undefined name `{name}` — nothing with that name is in scope"
+            )),
+        ),
+    }
 }
 // ============================================================
 // A3 exit-sync wrappers (docs/WINDOW_ARENA_ARCH.md §5): these helpers can

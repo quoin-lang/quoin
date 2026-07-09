@@ -1,6 +1,10 @@
 # The outcall seam: three fixes on one branch
 
-*Status: F1 + F2 + D1 + D2 SHIPPED on `perf/ic-direct-calls` (base
+*Status (verified 2026-07-09 at `dbe188d`): **SHIPPED**, merged to main via PR #61 —
+`perf/ic-direct-calls` is history, not a live branch. The doc's closing line "D3 remains the
+recorded future arc" is stale: D3 has since shipped too (see `docs/DIRECT_CALLS_ARCH.md`).*
+
+*Detail: F1 + F2 + D1 + D2 SHIPPED on `perf/ic-direct-calls` (base
 `449dc84`). Cumulative: **btrees −13.8%, richards −13.9%, combinators
 −7.8%**; maps +3.0% = static code layout, proven by a same-binary
 fast-path-off shim measuring maps flat and btrees −15.3% (notes.md).

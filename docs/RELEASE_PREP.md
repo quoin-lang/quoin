@@ -115,29 +115,169 @@ strict `var`/`let` and no longer compile.
 
 ## Tier 3 — "first real script" stdlib gaps
 
-- [ ] `[IO]Stdin` (line/byte reads — can't write a filter today)
-- [ ] `[OS]Env`
-- [ ] `Path` (join/dirname/basename/…)
-- [ ] `Runtime.exit:`
+- [x] `[IO]Stdin` — `readLine`, `eachLine:`, `readAll`, `stream`, `byteStream`.
+  A `blocking::Unblock` over `std::io::stdin()` registered as a `StreamId`, so
+  reads **park** on the scheduler and reuse the `StringStream` protocol. A class
+  rather than a prelude constant (opening stdin is an `await_io`, and the prelude
+  also runs under `qn benchmark`, which has no scheduler), and the stream is
+  memoized because it buffers. `tests/io_stdin.rs`, `qnlib/tests/59-io-stdin.qn`.
+- [x] `[OS]Env` — read-only (`at:`, `at:ifAbsent:`, `contains?:`, `keys`, `each:`,
+  `count`, `asMap`). No `at:put:`: edition 2024 makes `std::env::set_var` `unsafe`,
+  and the mutation half mainly serves subprocess spawning, deferred past v0.1.
+- [x] `[OS]Path` (join/dirname/basename/extension/stem/normalize/absolute?) —
+  `src/runtime/os.rs`, `qnlib/tests/57-os-path.qn`.
+- [x] `Runtime.exit:`
 - [ ] Digests (sha256/blake3/HMAC) — optional; verified absent.
   (UUID/ULID already ship: `src/runtime/ids.rs`, `qnlib/tests/37-ids.qn`.)
 
 ## Tier 4 — packaging, CI, docs triage
 
-- [ ] **CI tests only the root package.** The root `Cargo.toml` is both a
-  `[package]` and a `[workspace]`, so CI's `cargo test` (and a bare
-  `cargo nextest run`) silently skips **132 tests** in `quoin-syntax`,
-  `quoin-fmt`, `quoin-ext` and `quoin-ext-proto` — 429 run of 561. The `cargo nt`
-  alias now passes `--workspace` (excluding the two dylint crates, which need
-  nightly `rustc-private`); CI must do the same. Also: `cargo run -- test` in CI
-  needs the `qnlib/tests` argument since `qn test [DIR]` landed.
-- [ ] CI: macOS runner, `cargo fmt --check` + clippy, doc-example harness,
-  dependency caching, build `crates/adbc`. Swap `cargo test` for
-  `cargo nextest run` (see below) — ~4× less wall time.
-- [ ] Release workflow producing binaries (macOS arm64 + Linux x86_64).
-- [ ] `CHANGELOG.md`.
-- [ ] Status-stamp the `docs/*_ARCH.md` files (some say "not built" for shipped
-  work — e.g. DEBUGGER_ARCH — and vice versa); keep them out of user-facing nav.
+- [x] **Extension socket files must always be cleaned up on process exit.** FIXED
+  (`f4f9c91`) by the preferred fix below: both SDKs now `unlink` the path
+  immediately after `accept()`. Tests in `tests/extension_socket.rs` assert the
+  path is gone while the extension is live and connected, and that SIGKILL on
+  the host strands nothing; they were verified to fail with the two unlinks
+  reverted. The host also gained the two missing `remove_file` calls on its
+  connect-failure arms. Original analysis retained:
+  `/tmp/quoin-ext-<pid>-<n>.sock` litters `/tmp` — **63 stale files** on the dev
+  box, dating back four days.
+
+  *Measured, not assumed* (2026-07-09): the graceful paths are already clean —
+  normal completion, `Runtime.exit:`, and an uncaught error (exit 1) each leak
+  **zero**, because `NativeExtension::drop` (`src/runtime/extension.rs:371`)
+  removes the file and the arena drops before the runner exits. What leaks is
+  every *signal* death: `SIGTERM`, `SIGINT` and `SIGKILL` each strand exactly one
+  socket. **`SIGINT` is the common case** — a user pressing Ctrl-C on a script
+  that loaded an extension. (Historically SIGBUS did it too; those two crash
+  families are now fixed.) The orphaned *child* exits on its own when the peer
+  closes, so only the filesystem entry is stranded.
+
+  **Preferred fix — unlink after accept.** The *child* binds the socket and the
+  host connects (`extension.rs:1238-1262`), so the standard Unix idiom applies:
+  once `accept()` returns, the path has served its purpose and the child can
+  `unlink` it immediately; the established connection is unaffected, and the
+  protocol is a single long-lived stream with no reconnect
+  (`extension.rs:286`). Then **no exit path of either process can leak**, without
+  an atexit hook, a signal handler, or a sweep. Two lines, in both SDKs:
+  `crates/quoin-ext/src/lib.rs:316-317` and
+  `sdk/python/quoin_ext/__init__.py:434-437` — neither unlinks today.
+
+  Still needed as a belt: the child can die *between* bind and accept, so keep the
+  host's existing `remove_file` on its handshake-failure paths. A startup sweep of
+  `/tmp/quoin-ext-<pid>-*.sock` for pids that are no longer alive would also mop
+  up files stranded by older builds. Supersedes the narrower QUOIN_TODO item
+  ("Extension socket files leak on abnormal *host* exit"), which assumed a sweep
+  or a process-scoped temp dir was the only option.
+
+- [x] **CI tests only the root package.** FIXED (`0c02adb`): the workflow now
+  passes `--workspace --exclude no_gc_across_yield --exclude no_borrow_across_yield`
+  to both `build` and `test`. Measured at the fix: `cargo test` ran **453 of 585**
+  tests and reported green; `--workspace` runs all 585. The 132 it skipped were
+  all of `quoin-syntax`, `quoin-fmt`, `quoin-ext` and `quoin-ext-proto` —
+  including every parser test written for the `#(-1 -2)` fix.
+- [ ] **DEFERRED until the repo moves org.** CI: macOS runner, `cargo fmt --check`
+  + clippy, doc-example harness, dependency caching, build `crates/adbc`. Swap
+  `cargo test` for `cargo nextest run` (see below) — ~4× less wall time.
+- [ ] **DEFERRED until the repo moves org.** Release workflow producing binaries
+  (macOS arm64 + Linux x86_64). Whenever it is written: it must smoke-test the
+  built binary **from outside the source tree** (`cd $(mktemp -d) && qn -e …`),
+  because that is the only place `QUOIN_STDLIB` is unset and the embedded stdlib
+  is actually exercised. Prefer the runner's `gh` CLI over a third-party action so
+  the org move costs nothing. `ubuntu-22.04` for a glibc old enough to be useful.
+- [x] `CHANGELOG.md` (`55bade1`). Heading is dated at tag time.
+- [x] Status-stamp the docs (`bfd59ca`). Every file under `docs/` now opens with a
+  Status line from a fixed vocabulary, verified against the tree rather than from
+  memory, and `docs/README.md` splits the user-facing reference from the internal
+  design notes. Five docs made **false** claims — `DEBUGGER_ARCH` ("No debugger
+  code exists yet"), `EXT_PACKAGING` ("not built"), `DIRECT_CALLS_ARCH` and
+  `WINDOW_ARENA_ARCH` ("no slices implemented"), `TYPED_DEVIRT_ARCH` ("before any
+  VM code is written"). Three more had a lead sentence lagging their own body.
+  Nothing claimed shipped for work that was not built. `ENV_FLAGS.md` claimed to
+  list "every environment variable the VM reads" and omitted six, including the
+  user-facing `QUOIN_STDLIB` and `QUOIN_PATH`.
+
+## Tier 4a — found while writing the release notes (2026-07-09)
+
+Each of these was found by checking a claim against the binary instead of trusting
+it. None is fixed.
+
+- [x] **A compile error in a script file panics.** FIXED (`0e467c7`). The three
+  `panic!("Compilation error: …")` sites sat inside `arena.mutate_root`, whose
+  closure returned `()`; they now return `Result<(), String>`. All four entry
+  points (`qn FILE`, `-e`, `check`, `benchmark`) print `Compile error: …` and
+  exit 1. Tests in `tests/exit_code.rs` assert the message, the exit code, and
+  the *absence* of `panicked` / `RUST_BACKTRACE`.
+
+
+- [x] **Reading an undeclared identifier silently yields `nil`.** FIXED — it now
+  raises a catchable `NameError`, in both the interpreter (`src/vm.rs`) and
+  compiled code (`load_global` in `src/codegen/helpers.rs`), verified to agree.
+
+  A compile-time check is impossible: `use` executes at run time, so a unit cannot
+  see the globals its own `use` will define, and a method may name a class defined
+  later in the file. Both would be false positives. At run time everything is bound.
+
+  Measured before changing anything: instrumenting every missing-global read showed
+  **exactly one** across the whole 1862-assertion suite, and zero in the prelude and
+  the benchmarks. That one was `TSCNC_ReqBad.defined?` — the "is this class defined?"
+  idiom, which only worked *because* a missing name read as nil. It is replaced by
+  `Class.exists?:#Name` (`src/runtime/class.rs`), which asks the question directly;
+  `Object#defined?` is unchanged for nil-testing a value. Tests: `qnlib/tests/60-names.qn`.
+
+- [x] **No file-write API.** FIXED. `[IO]File.create:` / `append:` return a
+  writable `ByteStream` over the same async backend a socket uses (a new
+  `IoRequest::OpenFileWrite`, `async_fs::OpenOptions`); `StringStream` gained
+  `write:` / `writeln:` / `flush!`; and `qnlib/core/06-io.qn` adds the one-shot
+  `[IO]File.write:to:` / `append:to:` / `read:`. Also `delete:`, `rename:to:`,
+  `exists?:`, `[IO]Folder.create:` / `delete:` (synchronous, like `open:`'s
+  metadata read). Tests: `qnlib/tests/61-file-write.qn`, `tests/file_write.rs`.
+
+  **Buffering.** File write streams buffer 16 KiB; sockets stay write-through,
+  because `[HTTP]Server` writes a response and then waits for the client, and a
+  buffered socket write would stall it (the socket test hangs if you buffer them —
+  verified). `flush!` is a no-op on a write-through stream, so the same code runs
+  over both. `close` flushes.
+
+  **Exit flush.** A stream the program never closed is flushed by the driver when
+  the program ends — after normal completion, after `Runtime.exit:`, and after an
+  uncaught error — because a `Drop` may not perform async I/O. It also fires per
+  REPL line, so `take_pending_writes` drains buffers *without* untracking streams
+  that are still open. Signal death still loses the buffer, as in C.
+
+  Also removed: `NativeIoHandleWrapper::File`, a blocking `write_all` on the
+  scheduler thread that no Quoin code could reach (only a Rust test constructed it).
+
+## Tier 4b — found while building the file-write path
+
+- [ ] **The backend allocates and zeroes a fresh buffer on every `Read`.**
+  `io_backend.rs`: `let mut buf = vec![0u8; max];` per fill, then truncate, copy
+  into the stream's `rbuf`, and free. Measured cost: reading a 64 MiB file, the
+  overhead above the 4.5 GB/s floor is +9% at a 16 KiB fill and +4% at 32 KiB, but
+  it *rises again* to +26% at 64 KiB, where the per-read allocation crosses the
+  allocator's large-object threshold. Reuse one scratch buffer per stream and the
+  curve should keep improving; then revisit `IO_BUFFER_BYTES` (32-64 KiB) for file
+  streams specifically. The measurement and the reasoning are recorded on
+  `IO_BUFFER_BYTES` in `src/runtime/streams.rs`.
+
+- [ ] **Compile errors carry no line/column.** `compile_program` returns a bare
+  `String`, unlike parse errors and checker diagnostics, which have spans.
+
+- [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
+  and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so
+  cleanup-on-every-path with no interest in the error must name a handler that
+  only rethrows:
+
+  ```
+  { s.write:text }.catch:{ |e: Error| e.throw } finally:{ s.close }
+  ```
+
+  That is the idiom `[IO]File.write:to:` / `append:to:` / `read:` use in
+  `qnlib/core/06-io.qn`, and it reads as though it were swallowing the error when
+  it is doing the opposite. `{ … }.finally:{ … }` should run the cleanup on the
+  normal, throwing, and non-local-return paths and propagate whatever happened —
+  i.e. `catch:finally:` with an implicit rethrowing handler. Check it against `^`
+  / `^^` leaving the protected block, and against `cancel` (`QuoinError::Cancelled`),
+  which `catch:` deliberately cannot swallow.
 
 ---
 
