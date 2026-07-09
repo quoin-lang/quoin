@@ -1,8 +1,10 @@
 [package]
 name = "no_borrow_across_yield"
-version = "0.1.0"
+version.workspace = true
 description = "Flags RefCell/RefLock borrow guards alive across a fiber yield point"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [lib]

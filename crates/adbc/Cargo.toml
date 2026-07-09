@@ -7,6 +7,11 @@
 name = "adbc"
 version = "0.1.0"
 edition = "2024"
+# Repeated rather than inherited: this is a standalone workspace (see above), so there is
+# no `[workspace.package]` to draw from. Keep in sync with the root Cargo.toml.
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quoin-lang/quoin"
+homepage = "https://quoinlang.dev"
 description = "Quoin's ADBC database extension (out-of-process, out-of-core; SQLite + PostgreSQL)."
 
 [[bin]]

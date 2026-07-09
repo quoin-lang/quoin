@@ -1,9 +1,10 @@
 [package]
 name = "no_gc_across_yield"
-version = "0.1.0"
-authors = ["authors go here"]
-description = "description goes here"
-edition = "2024"
+version.workspace = true
+description = "Flags `'gc` values held live across a fiber yield point"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [lib]

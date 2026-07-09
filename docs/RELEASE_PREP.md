@@ -33,8 +33,15 @@ LSP/VSCode tooling, Windows.
   shipping stdlib subset is compiled into the binary, `use self:…` resolves
   against the entry script's directory, and `qn test [DIR]` runs the *caller's*
   suites.
-- [ ] **No LICENSE / no `license` field in any Cargo.toml.** Also missing root
-  `description`/`repository`; lint crates say `authors = ["authors go here"]`.
+- [x] **No LICENSE / no `license` field in any Cargo.toml.** FIXED: dual
+  MIT OR Apache-2.0, taken from the placeholder `quoin` crate that reserves the
+  name on crates.io (`github.com/quoin-lang/quoin`, which this VM is destined to
+  become). `LICENSE-MIT` + `LICENSE-APACHE` at the root, a `[workspace.package]`
+  block every member inherits (`crates/adbc` repeats it — separate workspace),
+  root `description`/`keywords`/`categories`/`readme`, and the lint crates'
+  `authors = ["authors go here"]` placeholder removed. README has a License
+  section. Verified: `cargo package --list` ships both licenses and the 142
+  `qnlib/` files `build.rs` needs.
 - [x] **CLI hygiene.** `-h/--help` and `-V/--version` exist; bare `qn` prints
   usage instead of running the dev scratch `qnlib/testscript.qn`; an unknown
   flag is an error (exit 2) rather than a filename.

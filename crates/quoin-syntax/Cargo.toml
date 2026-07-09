@@ -1,7 +1,9 @@
 [package]
 name = "quoin-syntax"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Standalone Quoin parser, AST, and syntax-highlighting span producer (no VM/runtime)."
 
 [features]
