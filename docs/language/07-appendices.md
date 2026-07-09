@@ -86,9 +86,11 @@ this first.
 2. **`"` always starts a comment** — there are no double-quoted strings. A `"…"`
    block comment spans newlines, so a **stray `"` silently swallows code** until
    the next quote. Strings are `'…'`.
-3. **No truthiness.** `if:`/`else:` exist only on `true`/`false`. `nil.if:{…}` and
-   `42.if:{…}` are `MessageNotUnderstood`. Conditions must be real booleans — use
-   `==`, `<`, `defined?`, etc.
+3. **Conditionals are strict; combinators coerce.** `if:`/`else:`/`whileDo:`
+   require a real Boolean — `nil.if:{…}`, `42.if:{…}`, and `{5}.whileDo:{…}` all
+   raise (`MessageNotUnderstood`). But `&&`/`||` short-circuit on truthiness and
+   return the operand value, and `!` maps any value to a Boolean. Use `==`, `<`,
+   `defined?`, etc. to build conditions.
 4. **Assignment is a statement, not an expression.** `b = (a = 5)` is a parse
    error; you can't assign inside a condition or argument.
 5. **Ranges are half-open.** `1..5` yields `1 2 3 4`; the end is excluded (both
@@ -136,6 +138,13 @@ this first.
     globals — there's no local import scope, and aliasing is just `X = [Ns]Name`. `use`
     is a *soft keyword* (still usable as an identifier). Packages: bare/`std:` = stdlib,
     `self:` = your project; `dir/*` globs a directory (sorted). See §21.
+18. **Consecutive negatives in a list literal are merged by subtraction.** List
+    elements are greedy expressions (so `#(a + b  c)` is two elements), which means a
+    `-N` immediately after another element is read as infix subtraction, not a new
+    element: `#(-1 -2)` is the single element `#(-3)`, and `#(5 -10)` is `#(-5)`. A
+    *leading* negative is fine (`#(-1 2)` = two elements). Parenthesize to be safe:
+    `#((-1) (-2))`. (BUGS.md Finding 11 — silent, so worth knowing when generating
+    lists of negative numbers.)
 
 ---
 

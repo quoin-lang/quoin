@@ -355,7 +355,16 @@ fn do_catch_finally<'gc>(
     match res {
         Ok(val) => {
             vm.push(val);
+            let pre = vm.frames.len();
             let finally_res = vm.execute_block(mc, finally, Vec::new(), None);
+            if vm.frames.len() < pre {
+                // A `^^` inside `finally` unwound PAST this protection scope:
+                // its MethodReturn truncated the operand stack to the home
+                // frame (discarding the result stashed above) and pushed its
+                // own value. Let the non-local return win — popping here read
+                // a leaked slot or underflowed (BUGS.md Finding 13).
+                return finally_res;
+            }
             let val = vm.pop()?;
             finally_res.map(|_| val)
         }
@@ -393,7 +402,12 @@ fn do_catch_finally<'gc>(
                 }
                 Err(err) => Err(err),
             };
+            let pre = vm.frames.len();
             let finally_res = vm.execute_block(mc, finally, Vec::new(), None);
+            if vm.frames.len() < pre {
+                // Same `^^`-out-of-finally rule as the success arm.
+                return finally_res;
+            }
             match catch_ok {
                 Ok(()) => {
                     let val = vm.pop()?;

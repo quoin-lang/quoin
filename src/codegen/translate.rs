@@ -384,6 +384,7 @@ aot_helpers! {
     slot_set: helpers::slot_set as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
     guard_recv: helpers::guard_recv as fn(*mut c_void, *const c_void, i64, i64, i64, i64) -> u8,
     guard_block: helpers::guard_block as fn(*mut c_void, *const c_void, i64, i64, i64) -> u8,
+    require_bool: helpers::require_bool as fn(*mut c_void, *const c_void, i64) -> u8,
     slot_peek: helpers::slot_peek as fn(*mut c_void, *const c_void, i64, *mut i64) -> i64,
     list_new: helpers::list_new as fn(*mut c_void, *const c_void, i64) -> u8,
     list_from: helpers::list_from as fn(*mut c_void, *const c_void, i64, i64, *const i64, *const i64) -> u8,
@@ -546,6 +547,7 @@ fn compile_group(
                 uses_slot_base: std::cell::Cell::new(false),
                 uses_self_slot: std::cell::Cell::new(false),
                 baked: crate::codegen::take_baked_for(tid),
+                double_tainted: std::collections::HashSet::new(),
                 prior_sites: crate::codegen::prior_sites_for(tid),
                 site_log: Vec::new(),
             };
@@ -846,6 +848,13 @@ struct Translator<'a> {
     /// D3b: baked direct-edge facts per ip, present only on a
     /// retranslation whose drain staged them.
     baked: rustc_hash::FxHashMap<usize, super::BakedW0>,
+    /// BUGS.md Finding 3 (f3b): slot-resident Dyn results of arithmetic
+    /// that involved a Double operand — i.e. values that could be Double at
+    /// runtime. Storing one into an Int-slotted untyped local would
+    /// runtime-narrow-error a legal program, so such a store REFUSES
+    /// (demotes) instead. A clean Dyn (e.g. an `add:to:` result with no
+    /// Double anywhere) stays the checked narrow.
+    double_tainted: std::collections::HashSet<CVal>,
     /// D3a: site ids from this tid's FIRST translation — a retranslation
     /// must reuse them (the D2 cells key on them; the generic fallback and
     /// interpreted IC stay warm through the swap).
@@ -1722,6 +1731,27 @@ impl<'a> Translator<'a> {
                             b.ins().brif(cond, fbl, &args, tbl, &args);
                         }
                         break 'block;
+                    }
+                    Instruction::RequireBool => {
+                        // Statically Bool → no-op. Otherwise materialize the
+                        // top to a slot and let the helper raise on a
+                        // non-Bool (BUGS.md Finding 14). The value stays on
+                        // the stack for the following ElseJump.
+                        match *stack.last().ok_or("stack underflow")? {
+                            AV::C(_, AotKind::Bool) => {}
+                            _ => {
+                                let mut nstack = self.norm_stack(b, &fx, &stack)?;
+                                let idx = match nstack.last() {
+                                    Some(AV::Dyn(i)) => *i,
+                                    _ => return Err("RequireBool: top not slot-resident".into()),
+                                };
+                                let f = self.func_ref(b, self.helpers.require_bool);
+                                let call = b.ins().call(f, &[fx.vm, fx.mc, idx]);
+                                let tag = b.inst_results(call)[0];
+                                self.tag_check(b, &fx, tag);
+                                stack = nstack;
+                            }
+                        }
                     }
                     Instruction::BranchIfNotBool(off) => {
                         let target = (ip as isize + off) as usize;
@@ -2681,6 +2711,21 @@ impl<'a> Translator<'a> {
             Constant::Bool(x) => AV::C(b.ins().iconst(types::I8, *x as i64), AotKind::Bool),
             Constant::Nil => AV::Nil,
             Constant::String(s) => {
+                // BUGS.md Finding 5: `%{…}` interpolation reads the CALLER's
+                // locals by walking the frame env, which a compiled frame
+                // does not materialize — every local silently read as nil.
+                // A method whose string constants can be interpolation
+                // sources therefore stays interpreted (refusal = semantics
+                // preserved; interpolation is dynamic scope reflection).
+                if s.contains("%{") {
+                    return Err(refuse(
+                        RefusalKind::Structural,
+                        "string constant contains a %{…} interpolation source \
+                         (reads caller locals via the frame env, which compiled \
+                         frames do not materialize)"
+                            .to_string(),
+                    ));
+                }
                 // Leak once per site; the code referencing it is process-lived.
                 let leaked: &'static str = Box::leak(s.clone().into_boxed_str());
                 let out = self.alloc_scratch()?;
@@ -2822,11 +2867,30 @@ impl<'a> Translator<'a> {
                 }
             },
             AV::Dyn(idx) if matches!(vars.get(&sym), Some(VarSlot::Scalar(..))) => {
-                // Accumulator pattern: `total = total + (dynamic)` — narrow the
-                // dynamic value back into the scalar local, checked.
+                // Accumulator pattern: `total = total + (dynamic)` — narrow
+                // the dynamic value back into the scalar local, checked. A
+                // STATICALLY wider store (e.g. `x = x + 0.5`, now a devirted
+                // Double) never reaches here: mixed-kind arithmetic yields a
+                // typed AV::C, so the `AV::C` arm's kind-change refusal
+                // demotes it (BUGS.md Finding 3). What remains here is a
+                // genuinely dynamic value (an outcall result) whose kind is
+                // usually the slot's; the runtime check catches the rare
+                // mismatch.
                 let Some(&VarSlot::Scalar(var, k)) = vars.get(&sym) else {
                     unreachable!()
                 };
+                if k != AotKind::Double && self.double_tainted.contains(&idx) {
+                    // Finding 3 (f3b): a possibly-Double value into a
+                    // non-Double scalar local — demote rather than
+                    // runtime-narrow-error a legal untyped program.
+                    return Err(refuse(
+                        RefusalKind::LocalTyping,
+                        format!(
+                            "untyped scalar local '{}' may be reassigned a wider (Double) kind",
+                            sym.as_str()
+                        ),
+                    ));
+                }
                 let val = self.narrow_to_scalar(b, fx, idx, k);
                 b.def_var(var, val);
                 return Ok(());
@@ -3144,6 +3208,20 @@ impl<'a> Translator<'a> {
                 (AV::C(a, AotKind::Double), AV::C(c, AotKind::Double)) => {
                     return Ok(self.emit_double_bin(b, kind, a, c));
                 }
+                // Mixed Int/Double: sealed numeric promotion (`100 + 0.5` is
+                // Double). Devirt to the double op so the RESULT is a typed
+                // AV::C(Double) — correct semantics, a perf win, and it makes
+                // `x = x + 0.5` a statically-visible kind change that the
+                // store's refusal demotes instead of a runtime narrow error
+                // (BUGS.md Finding 3).
+                (AV::C(a, AotKind::Int), AV::C(c, AotKind::Double)) => {
+                    let ad = b.ins().fcvt_from_sint(types::F64, a);
+                    return Ok(self.emit_double_bin(b, kind, ad, c));
+                }
+                (AV::C(a, AotKind::Double), AV::C(c, AotKind::Int)) => {
+                    let cd = b.ins().fcvt_from_sint(types::F64, c);
+                    return Ok(self.emit_double_bin(b, kind, a, cd));
+                }
                 _ => {}
             }
         }
@@ -3206,7 +3284,23 @@ impl<'a> Translator<'a> {
                 return Ok(AV::C(val, rk));
             }
         }
-        self.emit_outcall(b, fx, recv, sel.as_str(), args, ip)
+        let out = self.emit_outcall(b, fx, recv, sel.as_str(), args, ip)?;
+        // Double-taint propagation (Finding 3, f3b): a numeric-operator send
+        // whose result is a Dyn taints it when an operand is Double or
+        // already tainted — the runtime value may be Double.
+        if let AV::Dyn(out_idx) = out
+            && IntBinKind::from_selector(sel.as_str()).is_some()
+        {
+            let operand_double = |t: &Self, v: &AV| match v {
+                AV::C(_, AotKind::Double) => true,
+                AV::Dyn(i) => t.double_tainted.contains(i),
+                _ => false,
+            };
+            if operand_double(self, &recv) || args.iter().any(|a| operand_double(self, a)) {
+                self.double_tainted.insert(out_idx);
+            }
+        }
+        Ok(out)
     }
 
     /// Checked narrow of a slot-resident value to a scalar kind: peek the

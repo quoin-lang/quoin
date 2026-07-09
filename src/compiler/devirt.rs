@@ -610,6 +610,15 @@ impl Compiler {
     /// (`^^s.whileDo:block`). Returns `true` if inlined. Evaluates to `nil`, matching the
     /// bootstrap (the terminating `if:` has no else). `^` in `cond`/`body` ends that block
     /// (redirected by `inline_block_body`); `^^` still returns from the enclosing method.
+    /// Static type of a block's tail expression (its result), for the
+    /// strict-Boolean loop-condition check (BUGS.md Finding 14).
+    fn block_tail_type(&self, blk: &BlockNode) -> Type {
+        match blk.statements.last() {
+            Some(stmt) => self.static_type(stmt),
+            None => Type::Any,
+        }
+    }
+
     pub(super) fn try_compile_inlined_while(
         &mut self,
         call: &MethodCallNode,
@@ -653,11 +662,20 @@ impl Compiler {
             .and_then(|()| self.splice_block_body(body_blk, &mut body_bc));
         self.fused_loop_depth -= 1;
         compiled?;
+        // BUGS.md Finding 14: a non-Boolean loop condition must raise (as
+        // `if:` and the dispatched `whileDo:` do), not loop forever on a
+        // truthy `ElseJump`. Emit a strict check ONLY when the condition
+        // isn't statically Boolean — `{ i < n }` (Int compare) pays nothing.
+        let cond_is_bool = self.block_tail_type(cond_blk) == Type::Bool;
+        if !cond_is_bool {
+            cond_bc.push(Instruction::RequireBool);
+        }
         let c = cond_bc.len() as isize;
         let b = body_bc.len() as isize;
 
         // Layout (each jump offset is relative to its own position):
         //   [start] <cond>          (c instrs; leaves the condition on the stack)
+        //           [RequireBool]    raise unless the condition is a Boolean
         //           ElseJump(b+3)    cond false → exit to the trailing nil
         //           <body>          (b instrs; leaves the body value)
         //           Pop              discard the body value
@@ -778,6 +796,61 @@ impl Compiler {
     /// native lists). Loop semantics mirror `List#each:` exactly: the bound is read
     /// once (a body that mutates the list sees the stale bound; `ListGet` reads
     /// elements fresh, OOB → nil), and the expression's value is nil.
+    /// Does this template (or any nested literal) read or write local
+    /// `sym`? Used to detect loop-variable capture by closures created in a
+    /// fused `each:` body (BUGS.md Finding 10).
+    fn block_references(sb: &crate::instruction::StaticBlock, sym: Symbol) -> bool {
+        use crate::instruction::{Constant, Instruction};
+        for inst in sb.bytecode.iter() {
+            let hit = match inst {
+                Instruction::LoadLocal(s)
+                | Instruction::StoreLocal(s)
+                | Instruction::StoreLocalKeep(s) => *s == sym,
+                Instruction::SendLocal(v, _, _) => *v == sym,
+                Instruction::SendLocalLocal(a, b, _, _) => *a == sym || *b == sym,
+                Instruction::SendLocalConst(a, _, _, _) => *a == sym,
+                Instruction::IntBinLL(a, b, _) | Instruction::DoubleBinLL(a, b, _) => {
+                    *a == sym || *b == sym
+                }
+                Instruction::IntBinLC(a, _, _) | Instruction::DoubleBinLC(a, _, _) => *a == sym,
+                _ => false,
+            };
+            if hit {
+                return true;
+            }
+            if let Instruction::Push(Constant::Block(inner)) = inst
+                && Self::block_references(inner, sym)
+            {
+                return true;
+            }
+            if let Some((_, _, Some(Constant::Block(inner)))) = inst.send_parts()
+                && Self::block_references(inner, sym)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Does compiled body bytecode materialize any block literal that
+    /// references `sym`?
+    fn body_captures(body: &CodeBlock, sym: Symbol) -> bool {
+        use crate::instruction::{Constant, Instruction};
+        for inst in body.bytecode.iter() {
+            if let Instruction::Push(Constant::Block(inner)) = inst
+                && Self::block_references(inner, sym)
+            {
+                return true;
+            }
+            if let Some((_, _, Some(Constant::Block(inner)))) = inst.send_parts()
+                && Self::block_references(inner, sym)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(super) fn try_compile_inlined_each(
         &mut self,
         call: &MethodCallNode,
@@ -839,6 +912,21 @@ impl Compiler {
         self.inline_depth -= 1;
         self.param_override = saved_params;
         body_res?;
+
+        // BUGS.md Finding 10: the fused loop shares ONE param cell across
+        // iterations (DefineLocal hoisted, StoreLocal per element), so a
+        // closure created in the body captures that single cell and every
+        // stashed closure sees the FINAL element. When the body materializes
+        // any block literal referencing the param, fall back to the real
+        // `each:` send — per-invocation frames give each closure its own
+        // binding. The receiver is already on the stack.
+        if let Some(x) = x_t
+            && Self::body_captures(&body_bc, x)
+        {
+            self.compile_node(&call.arguments.expressions[0], bytecode)?;
+            self.emit_call(bytecode, "each:", 1);
+            return Ok(true);
+        }
 
         // Hot path. Layout (jump offsets relative to their own position):
         //   DefineLocal $recv; LoadLocal $recv; ListLen; DefineLocal $n

@@ -515,6 +515,14 @@ pub enum Instruction {
     // performing the real `each:` send (a custom class's own `each:`, Set/Map/Generator,
     // or MNU — exact semantics), with the receiver left on the stack. Never pops.
     BranchIfNotList(isize),
+    /// Strict-Boolean loop condition (BUGS.md Finding 14). Peeks the stack
+    /// top (a `whileDo:` condition value) WITHOUT popping: a `Bool` falls
+    /// through to the loop's `ElseJump`; anything else raises
+    /// `MessageNotUnderstood` (matching the dispatched `if:` contract — the
+    /// guest `whileDo:` already raises via `.if:`, only the fused loop
+    /// coerced). Emitted only when the condition is not statically `Bool`,
+    /// so `{ i < n }`-style loops pay nothing.
+    RequireBool,
     /// Guard for fused instantiation (M2, docs/MATERIALIZATION_ARCH.md). Peeks the stack
     /// top (the `new:` receiver): if `new:` on it resolves to the BUILT-IN
     /// `Callable::New` — no user `new:` anywhere in the class-side chain — and the class

@@ -55,7 +55,8 @@ block argument.
 
 > **Rules**
 > - `if:`, `else:`, `if:else:`, and `not` are methods defined **only on `true` and `false`** (see `core/00-bootstrap.qn`). `nil` has none of them.
-> - There is **no truthiness coercion**. A condition must be an actual boolean. Sending `if:` to a non-boolean — including `nil` — is a `MessageNotUnderstood`.
+> - **Conditionals are strict**: `if:`/`else:`/`if:else:` and `whileDo:` require an actual Boolean condition — sending one to a non-Boolean (including `nil`) is a `MessageNotUnderstood`. There is no truthiness coercion for these.
+> - **Combinators do coerce truthiness** (falsy = `false` or `nil`, everything else truthy): `&&` and `||` short-circuit and return the *operand value* (`7 || false` → `7`, `nil && x` → `nil`), and `!` (via `Object#'!'`/`Nil#'!'`) maps any value to a Boolean (`!5` → `false`, `!nil` → `true`).
 > - The `if:`/`else:` blocks are zero-arg; they run via `.value`.
 > - **Loops** are methods on a *block* used as the condition:
 >   - `{ cond }.whileDo:{ body }` — re-evaluates `cond` (must yield `true`/`false`) before each iteration.

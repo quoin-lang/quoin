@@ -105,9 +105,30 @@ pub fn try_parse_quoin_string_named(code: &str, filename: &str) -> Result<Node, 
 
     let result = QuoinParser::parse(Rule::program, code)
         .map_err(parse_error_from_pest)
-        .map(|mut pairs| {
+        .and_then(|mut pairs| {
             let program_pair = pairs.next().unwrap();
-            parse_program(program_pair, filename, code)
+            // AST-building steps that run AFTER a successful pest parse
+            // (int -> i64, `\u` unescape, …) used to panic! and abort the
+            // process even through `Runtime.eval:` (BUGS.md Findings 4/7).
+            // Convert ANY builder panic into a structured, catchable
+            // ParseError here — the targeted sites carry good messages.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_program(program_pair, filename, code)
+            }))
+            .map_err(|payload| {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "internal parse failure".to_string());
+                ParseError {
+                    message: msg,
+                    line: 0,
+                    column: 0,
+                    start: 0,
+                    end: 0,
+                }
+            })
         });
 
     LINE_OFFSET_TABLE.with(|cell| *cell.borrow_mut() = None);
@@ -141,14 +162,22 @@ pub fn parse_quoin_file(path: &PathBuf) -> Node {
     let filename = path.display().to_string();
 
     let mut file = match File::open(path) {
-        Err(why) => panic!("couldn't open {}: {}", filename, why),
+        Err(why) => {
+            // CLI hygiene (BUGS.md secondary): a missing file is a clean
+            // one-line report + exit 1, not a Rust panic with a backtrace.
+            eprintln!("qn: cannot open {}: {}", filename, why);
+            std::process::exit(1);
+        }
         Ok(file) => file,
     };
 
     let mut contents = String::new();
     match file.read_to_string(&mut contents) {
         Ok(_) => {}
-        Err(why) => panic!("couldn't read {}: {}", filename, why),
+        Err(why) => {
+            eprintln!("qn: cannot read {}: {}", filename, why);
+            std::process::exit(1);
+        }
     };
     let contents = contents
         .strip_prefix('\u{FEFF}')
@@ -157,7 +186,10 @@ pub fn parse_quoin_file(path: &PathBuf) -> Node {
 
     match try_parse_quoin_string_named(&contents, &filename) {
         Ok(node) => node,
-        Err(e) => panic!("Pest parsing error in file {}: {}", filename, e),
+        Err(e) => {
+            eprintln!("qn: parse error in {}: {}", filename, e);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -621,7 +653,12 @@ fn parse_primary(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
                     value: Double(DoubleNode { value: val }),
                 }
             } else {
-                let val: i64 = raw.parse().unwrap();
+                let val: i64 = raw.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "integer literal '{raw}' is out of range for Integer \
+                         (max 9223372036854775807) — use BigInteger.parse:'…'"
+                    )
+                });
                 Node {
                     source_info,
                     value: Integer(IntegerNode { value: val }),
@@ -1278,8 +1315,10 @@ fn parse_namespace(pair: Pair<Rule>, filename: &str, source_text: &str) -> Names
 
 fn unescape(s: String) -> String {
     static ESCAPED_CHAR: Lazy<regex::Regex> = Lazy::new(|| {
-        regex::Regex::new("\\\\(u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]|[\\\\tnr\"'])")
-            .unwrap()
+        regex::Regex::new(
+            "\\\\([ux][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]|[\\\\tnr\"'])",
+        )
+        .unwrap()
     });
 
     ESCAPED_CHAR
@@ -1289,18 +1328,15 @@ fn unescape(s: String) -> String {
                 "n" => "\n".to_string(),
                 "r" => "\r".to_string(),
                 "t" => "\t".to_string(),
-                "u" => {
-                    let maybe_char = unicode_from_hex(s.substring(1, s.len()).to_string());
+                "u" | "x" => {
+                    let hex = s.substring(1, s.len()).to_string();
+                    let maybe_char = unicode_from_hex(hex.clone());
                     match maybe_char {
                         Some(x) => x.to_string(),
-                        None => panic!("Invalid unicode escape sequence \\u{s}"),
-                    }
-                }
-                "x" => {
-                    let maybe_char = unicode_from_hex(s.substring(1, s.len()).to_string());
-                    match maybe_char {
-                        Some(x) => x.to_string(),
-                        None => panic!("Invalid unicode escape sequence \\x{s}"),
+                        None => panic!(
+                            "invalid unicode escape \\u{hex} (not a valid \
+                             scalar value — unpaired surrogates are not chars)"
+                        ),
                     }
                 }
                 _ => s,

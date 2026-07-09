@@ -2,7 +2,6 @@ use crate::arg;
 use crate::compiler::Compiler;
 use crate::error::QuoinError;
 use crate::parser::ast::NodeValue;
-use crate::parser::parse_quoin_string;
 use crate::recv;
 use crate::runtime::list::NativeListState;
 use crate::runtime::map::NativeMapState;
@@ -300,7 +299,16 @@ pub fn build_string_class() -> NativeClassBuilder {
                         result.push_str(&lit);
                     }
                     InterpolPart::Expr(expr_str) => {
-                        let node = parse_quoin_string(&expr_str);
+                        // `%{…}` re-compiles user text at runtime — a bad
+                        // expression must be a CATCHABLE ParseError, not a
+                        // process abort (BUGS.md Finding 6).
+                        let node = crate::parser::try_parse_quoin_string_named(
+                            &expr_str,
+                            "<interpolation>",
+                        )
+                        .map_err(|e| {
+                            QuoinError::ParseError(format!("in %{{…}} interpolation: {e}"))
+                        })?;
                         let program_node = match &node.value {
                             NodeValue::Program(p) => p,
                             _ => {
