@@ -88,6 +88,9 @@ pub const IC_PLAINNEW_KIND: u8 = u8::MAX - 1;
 #[collect(no_drop)]
 pub struct AotSiteCell<'gc> {
     epoch: u64,
+    /// D3a: fast-path hit streak since fill (bump-free). Crossing
+    /// `QN_DIRECT_WARM` queues the CALLER for retranslation (§3.3).
+    pub hits: u32,
     recv_kind: u8,
     recv_ptr: usize,
     n_args: u8,
@@ -102,6 +105,7 @@ impl Default for AotSiteCell<'_> {
     fn default() -> Self {
         AotSiteCell {
             epoch: 0,
+            hits: 0,
             recv_kind: 0,
             recv_ptr: 0,
             n_args: 0,
@@ -170,7 +174,7 @@ impl<'gc> ICSlot<'gc> {
 /// the class pointer for objects/classes (`0` for immediates). Matches what
 /// `MethodCacheKey` keys on, so a guard match ⇒ the same dispatch result.
 #[inline]
-fn value_type_guard<'gc>(v: Value<'gc>) -> (u8, usize) {
+pub(crate) fn value_type_guard<'gc>(v: Value<'gc>) -> (u8, usize) {
     match v {
         Value::Int(_) => (0, 0),
         Value::Double(_) => (1, 0),
@@ -570,6 +574,12 @@ pub struct VmState<'gc> {
     pub ic_registry: FxHashMap<u32, Gc<'gc, RefLock<Option<Box<[ICSlot<'gc>]>>>>>,
     /// D2 site-cache cells, indexed by translation-minted outcall-site id.
     pub aot_sites: Vec<AotSiteCell<'gc>>,
+    /// D3a retranslation queue: caller tids whose sites crossed
+    /// `QN_DIRECT_WARM`, drained at the driver boundary (never inside a VM
+    /// step). The queued set dedups for the process lifetime — one
+    /// retranslation per tid until an epoch-driven refill re-queues (D3b).
+    pub aot_retranslate_queue: Vec<u32>,
+    pub aot_retranslate_queued: rustc_hash::FxHashSet<u32>,
     /// Bumped on any method-table change; a stored `epoch` mismatch self-evicts every
     /// per-`Block` [`ICSlot`] at once, giving O(1) inline-cache invalidation.
     #[collect(require_static)]
@@ -712,6 +722,8 @@ impl<'gc> VmState<'gc> {
             },
             ic_registry: FxHashMap::default(),
             aot_sites: Vec::new(),
+            aot_retranslate_queue: Vec::new(),
+            aot_retranslate_queued: rustc_hash::FxHashSet::default(),
             dispatch_cache: DispatchCache {
                 entries: FxHashMap::default(),
                 uncacheable: false,
@@ -3689,6 +3701,40 @@ impl<'gc> VmState<'gc> {
     /// `parent_env` Gc stays rooted in the traced `aot_sites` vec) for the
     /// argument-phase check.
     #[inline]
+    /// Block-call site peek (D2-for-blocks): the identity is the block's
+    /// TEMPLATE id (every closure shares the `Block` class, so the method
+    /// cells' receiver-class guard would alias all of them). Returns the
+    /// cached entry when live.
+    #[inline]
+    pub(crate) fn aot_block_site_peek(
+        &self,
+        site: usize,
+        template_id: u32,
+    ) -> Option<&'static crate::codegen::AotEntry> {
+        let cell = self.aot_sites.get(site)?;
+        let entry = cell.entry?;
+        if cell.epoch != self.dispatch_epoch || entry.template_id != template_id {
+            return None;
+        }
+        Some(entry)
+    }
+
+    /// Fill a block-call site cell (entry + epoch only — the template-id
+    /// guard lives on the entry itself).
+    pub(crate) fn aot_block_site_fill(
+        &mut self,
+        site: usize,
+        entry: &'static crate::codegen::AotEntry,
+    ) {
+        if site >= self.aot_sites.len() {
+            self.aot_sites.resize(site + 1, AotSiteCell::default());
+        }
+        let cell = &mut self.aot_sites[site];
+        *cell = AotSiteCell::default();
+        cell.epoch = self.dispatch_epoch;
+        cell.entry = Some(entry);
+    }
+
     pub(crate) fn aot_site_peek(
         &self,
         site: usize,
@@ -3709,14 +3755,104 @@ impl<'gc> VmState<'gc> {
 
     /// Argument-phase check for a peeked D2 cell (see [`Self::aot_site_peek`]).
     #[inline]
-    pub(crate) fn aot_site_args_match(cell: &AotSiteCell<'gc>, args: &[Value<'gc>]) -> bool {
-        for (i, a) in args.iter().enumerate() {
-            let (ak, ap) = value_type_guard(*a);
-            if cell.arg_kinds[i] != ak || cell.arg_ptrs[i] != ap {
-                return false;
+    /// One lane of [`aot_site_args_match`] — the D2.5b helper fast path
+    /// guards verbatim scalar lanes by lane-kind compare and only routes
+    /// GENERAL lanes (Obj / precondition-narrowed) through this shape guard.
+    pub(crate) fn aot_site_arg_match_one(cell: &AotSiteCell<'gc>, i: usize, a: Value<'gc>) -> bool {
+        let (ak, ap) = value_type_guard(a);
+        cell.arg_kinds[i] == ak && cell.arg_ptrs[i] == ap
+    }
+
+    /// D3a: count a fast-path hit; crossing the `QN_DIRECT_WARM` threshold
+    /// queues the CALLER tid for retranslation (deduped, process-lifetime).
+    #[inline(always)]
+    pub(crate) fn aot_site_note_hit(&mut self, site: usize, caller_tid: u32) {
+        let Some(threshold) = crate::codegen::direct_warm_threshold() else {
+            return;
+        };
+        let Some(cell) = self.aot_sites.get_mut(site) else {
+            return;
+        };
+        // Saturate at the threshold: a warm site's hits become a read-only
+        // compare — the unconditional per-hit WRITE dirtied the cell's cache
+        // line millions of times on call-heavy programs (measured ~2% on
+        // richards even with the counter inlined).
+        if cell.hits >= threshold {
+            return;
+        }
+        cell.hits += 1;
+        if cell.hits == threshold && self.aot_retranslate_queued.insert(caller_tid) {
+            self.aot_retranslate_queue.push(caller_tid);
+        }
+    }
+
+    /// Drain the retranslation queue (driver-boundary caller).
+    pub(crate) fn take_retranslations(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.aot_retranslate_queue)
+    }
+
+    /// D3b activation, the TARGETED form: clear exactly the caches holding
+    /// `tid`'s (now replaced) entry — its D2 site cells and interpreted IC
+    /// slots — so the next resolution refills from the registry and picks
+    /// up the retranslated code. Everything else stays warm, and earlier
+    /// batches' baked guards stay LIVE (the wholesale dispatch-epoch bump
+    /// this replaces stranded every prior batch's edges and re-warmed the
+    /// world per batch — measured btrees +3.2%/richards +3.7%). Runs at the
+    /// driver boundary; O(total cached slots), rare.
+    pub(crate) fn invalidate_caches_for_template(&mut self, mc: &Mutation<'gc>, tid: u32) {
+        for cell in &mut self.aot_sites {
+            if cell.entry.is_some_and(|e| e.template_id == tid) {
+                *cell = AotSiteCell::default();
             }
         }
-        true
+        for ic in self.ic_registry.values() {
+            let mut slots = ic.borrow_mut(mc);
+            if let Some(slots) = slots.as_mut() {
+                for slot in slots.iter_mut() {
+                    let stale = matches!(
+                        &slot.callable,
+                        Some(crate::dispatch::Callable::AotCall { entry, .. })
+                            if entry.0.template_id == tid
+                    );
+                    if stale {
+                        *slot = ICSlot::empty();
+                    }
+                }
+            }
+        }
+    }
+
+    /// D3b: capture baked W0 facts for a caller's retained sites — warm,
+    /// current-epoch, monomorphic cells whose entry meets the W0 tier
+    /// criteria. Runs in the driver's drain (the translator has no VM).
+    pub(crate) fn bake_w0_sites(
+        &self,
+        sites: &rustc_hash::FxHashMap<usize, u32>,
+        threshold: u32,
+    ) -> rustc_hash::FxHashMap<usize, crate::codegen::BakedW0> {
+        let mut out = rustc_hash::FxHashMap::default();
+        for (&ip, &site) in sites {
+            let Some(cell) = self.aot_sites.get(site as usize) else {
+                continue;
+            };
+            let Some(entry) = cell.entry else { continue };
+            if cell.epoch != self.dispatch_epoch
+                || cell.hits < threshold
+                || !crate::codegen::w0_eligible(entry)
+            {
+                continue;
+            }
+            out.insert(
+                ip,
+                crate::codegen::BakedW0 {
+                    entry,
+                    epoch: self.dispatch_epoch,
+                    recv_kind: cell.recv_kind,
+                    recv_ptr: cell.recv_ptr,
+                },
+            );
+        }
+        out
     }
 
     /// Fill a D2 site cell. The caller gates this on the interpreted IC
@@ -3747,6 +3883,7 @@ impl<'gc> VmState<'gc> {
         }
         self.aot_sites[site] = AotSiteCell {
             epoch: self.dispatch_epoch,
+            hits: 0,
             recv_kind,
             recv_ptr,
             n_args: args.len() as u8,
@@ -3802,7 +3939,24 @@ impl<'gc> VmState<'gc> {
     ) -> Result<Value<'gc>, QuoinError> {
         let ic = self.ic_cell_by_id(mc, tid);
         let method = match self.ic_probe(ic, ip, receiver, &args) {
-            Some(c) => Some(c),
+            Some(c) => {
+                // D2 gap (found by D3b): a caller that TIERS UP mid-run has
+                // warm interpreted ICs, so the cold-arm fill below never
+                // runs and its site cells stay cold forever — the D2 fast
+                // path was inert for every spec-promoted caller. Fill on a
+                // probe-hit too, under the same once-per-epoch gate (the
+                // polymorphic-flip tax the cold-arm comment guards against
+                // stays impossible: a warm cell short-circuits here).
+                if let (Some(site), crate::dispatch::Callable::AotCall { block, entry }) =
+                    (site, &c)
+                    && self.aot_sites.get(site as usize).is_none_or(|cell| {
+                        cell.entry.is_none() || cell.epoch != self.dispatch_epoch
+                    })
+                {
+                    self.aot_site_fill(site as usize, receiver, &args, entry.0, block.parent_env);
+                }
+                Some(c)
+            }
             None => {
                 let m = self.lookup_method(mc, receiver, selector, &args)?;
                 if let Some(c) = &m {

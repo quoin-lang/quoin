@@ -69,6 +69,36 @@ fn decode<'gc>(vm: &VmState<'gc>, kind: i64, bits: i64) -> Value<'gc> {
     }
 }
 
+/// D3b: the baked direct edge's receiver-and-fiber guard. Decodes the
+/// receiver lane, compares its type guard against the baked (kind, ptr),
+/// and reproduces `entry_gates`' fiber arm EXACTLY (running compiled code
+/// inside a fiber must mark `ran_compiled` for the teardown discipline —
+/// an unmarkable fiber fails the guard and the generic path handles it).
+/// Returns 1 = take the direct edge, 0 = generic.
+pub(super) unsafe extern "C" fn guard_recv(
+    vm: *mut c_void,
+    mc: *const c_void,
+    recv_kind: i64,
+    recv_bits: i64,
+    baked_kind: i64,
+    baked_ptr: i64,
+) -> u8 {
+    let (vm, _mc) = unsafe { vm_mc(vm, mc) };
+    if let Some(f) = vm.sched.current_fiber {
+        let marked = f
+            .with_native_state::<crate::runtime::fiber::NativeFiberState, _, _>(|s| {
+                s.coro().ran_compiled.set(true);
+            })
+            .is_ok();
+        if !marked {
+            return 0;
+        }
+    }
+    let v = decode(vm, recv_kind, recv_bits);
+    let (k, p) = crate::vm::value_type_guard(v);
+    (i64::from(k) == baked_kind && p as i64 == baked_ptr) as u8
+}
+
 fn store_err(vm: &mut VmState<'_>, e: QuoinError) -> u8 {
     vm.aot_pending_error = Some(e);
     TAG_ERR
@@ -303,7 +333,7 @@ pub(super) unsafe extern "C" fn block_call(
     vm: *mut c_void,
     mc: *const c_void,
     tid: i64,
-    ip: i64,
+    ip_site: i64,
     bc_len: i64,
     recv_kind: i64,
     recv_bits: i64,
@@ -312,6 +342,10 @@ pub(super) unsafe extern "C" fn block_call(
     out_idx: i64,
 ) -> u8 {
     let (vm, mc) = unsafe { vm_mc(vm, mc) };
+    // The block-site id rides the ip lane's high bits (same packing as
+    // `outcall`).
+    let ip = ip_site & 0xffff_ffff;
+    let site = (ip_site >> 32) as u32;
     let recv = decode(vm, recv_kind, recv_bits);
     let arg = decode(vm, arg_kind, arg_bits);
     let block = match recv {
@@ -340,15 +374,33 @@ pub(super) unsafe extern "C" fn block_call(
     };
     let self_val = super::self_or_arg_self(&block, arg);
     if vm.aot.outcall_nesting < super::spec::MAX_OUTCALL_NESTING
-        && let Some(tid) = block.template.template_id
-        && let Some(entry) = super::block_entry_for(vm, tid)
+        && let Some(btid) = block.template.template_id
     {
-        match super::invoke_block(vm, mc, entry, recv, arg, self_val) {
-            super::AotOutcome::Value(v) => {
-                return slot_write(vm, out_idx, v);
+        // The site cell caches the template's entry — a hit skips the
+        // registry RwLock the combinator loops paid PER ELEMENT.
+        let cached = if site != u32::MAX {
+            vm.aot_block_site_peek(site as usize, btid)
+        } else {
+            None
+        };
+        let entry = match cached {
+            Some(e) => Some(e),
+            None => {
+                let e = super::block_entry_for(vm, btid);
+                if let (Some(e), true) = (e, site != u32::MAX) {
+                    vm.aot_block_site_fill(site as usize, e);
+                }
+                e
             }
-            super::AotOutcome::Err(e) => return store_err(vm, e),
-            super::AotOutcome::Bail => {}
+        };
+        if let Some(entry) = entry {
+            match super::invoke_block(vm, mc, entry, recv, block, arg, self_val) {
+                super::AotOutcome::Value(v) => {
+                    return slot_write(vm, out_idx, v);
+                }
+                super::AotOutcome::Err(e) => return store_err(vm, e),
+                super::AotOutcome::Bail => {}
+            }
         }
     }
     // Interpreted fallback: same self-or-arg answer (a parameterless block
@@ -687,32 +739,98 @@ pub(super) unsafe extern "C" fn outcall(
         && vm.aot.outcall_nesting < crate::codegen::spec::MAX_OUTCALL_NESTING
         && let Some(cell) = vm.aot_site_peek(site as usize, receiver, n)
     {
-        let mut argv = [Value::Nil; 8];
-        for (i, slot) in argv.iter_mut().enumerate().take(n) {
-            let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
-            *slot = decode(vm, k, b);
-        }
-        let args = &argv[..n];
+        // D2.5b: marshal lanes per the entry's plan in ONE pass — a
+        // verbatim scalar lane is a lane-kind compare + a bits copy (the
+        // guard, the S1 precondition, and invoke's re-encode ladder all
+        // fold into it); only general lanes (Obj, precondition-narrowed)
+        // decode and take the classic shape guard.
         let entry = cell.entry.expect("peeked cell has an entry");
-        if VmState::aot_site_args_match(&cell, args)
-            && entry
-                .param_preconditions
-                .iter()
-                .zip(args.iter())
-                .all(|(pre, a)| pre.is_none_or(|k| crate::codegen::scalar_matches(k, *a)))
-        {
-            let recv_start = vm.stack.len();
+        let plan = &entry.lane_plan;
+        let mut argv = [Value::Nil; 8];
+        let mut raw = [0i64; 8];
+        let base = vm.stack.len();
+        let mut hit = plan.len() == n;
+        if hit {
+            for i in 0..n {
+                let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
+                let p = plan[i] as i64;
+                if p >= 0 {
+                    if k == p {
+                        raw[i] = b;
+                        argv[i] = match p {
+                            KIND_INT => Value::Int(b),
+                            KIND_DOUBLE => Value::Double(f64::from_bits(b as u64)),
+                            _ => Value::Bool(b != 0),
+                        };
+                    } else if k == KIND_SLOT {
+                        // The caller holds the value in a window slot (a Dyn
+                        // local): one load, then the same kind fold.
+                        let v = vm.stack[b as usize];
+                        match (p, v) {
+                            (KIND_INT, Value::Int(x)) => {
+                                raw[i] = x;
+                                argv[i] = v;
+                            }
+                            (KIND_DOUBLE, Value::Double(d)) => {
+                                raw[i] = d.to_bits() as i64;
+                                argv[i] = v;
+                            }
+                            (KIND_BOOL, Value::Bool(x)) => {
+                                raw[i] = x as i64;
+                                argv[i] = v;
+                            }
+                            _ => {
+                                hit = false;
+                            }
+                        }
+                    } else {
+                        hit = false;
+                    }
+                } else {
+                    let v = decode(vm, k, b);
+                    // preconditions may be an EMPTY slice (no S1 specs)
+                    let pre = entry.param_preconditions.get(i).copied().flatten();
+                    if !VmState::aot_site_arg_match_one(&cell, i, v)
+                        || !pre.is_none_or(|kk| crate::codegen::scalar_matches(kk, v))
+                        || !matches!(v, Value::Object(_))
+                    {
+                        hit = false;
+                    } else {
+                        raw[i] = (base + 1 + i) as i64;
+                        argv[i] = v;
+                    }
+                }
+                if !hit {
+                    break;
+                }
+            }
+        }
+        if hit {
+            // D3a: warmth accounting. The gate must cost REGISTERS ONLY on
+            // the post-threshold hot path: `cell` is already a stack copy
+            // (the peek), so comparing ITS hits adds one compare to the one
+            // atomic load — the accounting call (bounds check + cell write)
+            // runs only for the ~threshold hits before saturation. The
+            // always-call version measured ~2% on call-heavy benches even
+            // inlined (the per-hit cell-line traffic).
+            let warm_t = crate::codegen::direct_warm_raw();
+            if warm_t != 0 && cell.hits < warm_t {
+                vm.aot_site_note_hit(site as usize, tid as u32);
+            }
+            let args = &argv[..n];
+            let recv_start = base;
             vm.stack.push(receiver);
             for &a in args {
                 vm.stack.push(a);
             }
             vm.aot.outcall_nesting += 1;
-            let outcome = crate::codegen::invoke(
+            let outcome = crate::codegen::invoke_prebuilt(
                 vm,
                 mc,
                 entry,
                 receiver,
                 args,
+                &raw[..n],
                 cell.parent_env,
                 Some(recv_start),
             );
@@ -736,18 +854,15 @@ pub(super) unsafe extern "C" fn outcall(
                 }
             }
         }
-        // Arg-shape / precondition miss (or Bail): classic path, args ready.
+        // Arg-shape / precondition miss (or Bail): classic path — decode
+        // the lanes fresh (the marshaling pass may have stopped early).
+        let mut cargs = Vec::with_capacity(n);
+        for i in 0..n {
+            let (k, b) = unsafe { (*kinds.add(i), *bits.add(i)) };
+            cargs.push(decode(vm, k, b));
+        }
         return outcall_classic(
-            vm,
-            mc,
-            tid,
-            ip,
-            bc_len,
-            receiver,
-            selector,
-            args.to_vec(),
-            out_idx,
-            site,
+            vm, mc, tid, ip, bc_len, receiver, selector, cargs, out_idx, site,
         );
     }
     let mut args = Vec::with_capacity(n);

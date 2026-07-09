@@ -104,6 +104,14 @@ same-binary shim test from OUTCALL_ARCH notes if it moves). Estimated
 effort: one session including the measurement matrix. Every rider is
 revertable independently — land as separate commits.
 
+**MEASURED (profiling/direct-calls/notes.md): the interior is ~free.**
+a and b landed (sound; b's lane_plan/invoke_prebuilt is D3b's baked-site
+marshaling verbatim) but both are wall-flat — btrees +0.5%, richards
++0.3%, noise. c/d skipped: strictly smaller than b's deleted work. The
+itemized ns live in the BOUNDARY (extern call + window discipline), not
+the interior — which moves the arc's weight onto W0 and predicts the
+D3c W1-(A) gate fails (a helper-assisted window keeps the boundary).
+
 ## 3. D3 — the direct-call tier
 
 ### 3.1 Architecture

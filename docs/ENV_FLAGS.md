@@ -103,6 +103,16 @@ speculative-promotion bisection hooks: `SPEC_MAX=N` promotes only template ids
 loop over these found every S1 seam bug; they gate promotion only — classic
 annotated candidates and block templates compile regardless.
 
+## `QN_DIRECT_WARM`
+
+Site-hit threshold for the direct-call tier's retranslation queue
+(docs/DIRECT_CALLS_ARCH.md §3.3): a warm AOT-IC site that reaches this
+many consecutive fast-path hits queues its CALLER for retranslation at
+the next driver boundary. **Unset or `0` = the tier is off** (the D3a
+default — null retranslations prove the machinery; D3b's baked direct
+edges will justify a real default). `QN_DIRECT_WARM=1` forces
+retranslation on the first warm hit — the stress/bisect setting.
+
 ## Stress modes
 
 These exist to surface bug classes the normal schedule hides; the corpus is

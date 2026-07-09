@@ -29,7 +29,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::Arc;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
 
@@ -118,6 +118,7 @@ pub enum AotRole {
     BlockTemplate,
 }
 
+#[derive(Clone)]
 pub struct AotCandidate {
     pub group_id: u32,
     pub selector: String,
@@ -166,6 +167,10 @@ pub type AotRawFn = unsafe extern "C" fn(
     mc: *const c_void,
     fuel: *mut i64,
     depth: *mut i64,
+    // D3a: pointer to the VM's `dispatch_epoch`, rides beside fuel/depth so
+    // D3b's baked-guard sites can compare epochs without raw VmState field
+    // offsets. 8 params = exactly the ARM64 integer-register budget.
+    epoch: *const u64,
     slot_base: i64,
     args: *const i64,
     ret: *mut i64,
@@ -228,6 +233,101 @@ pub struct AotEntry {
     /// and home-id bookkeeping entirely when this is false (the hot
     /// majority, including every `count:`-style write-back arm).
     pub materializes_nlr: bool,
+    /// The body materializes ANY closure (superset of `materializes_nlr`).
+    /// `vm.aot.enclosing_env` is consulted only by `make_closure`, so an
+    /// entry that never materializes never reads it — `invoke` skips the
+    /// env swap/restore entirely (D2.5a, docs/DIRECT_CALLS_ARCH.md §2).
+    pub materializes: bool,
+    /// The body computes ANY absolute slot index (`abs_slot` — self reads,
+    /// Dyn locals, field helpers, scratch). False = truly windowless: the
+    /// entry never dereferences `slot_base`, so a baked W0 edge may pass a
+    /// poison base (D3b, docs/DIRECT_CALLS_ARCH.md §3.2).
+    pub uses_slot_base: bool,
+    /// D2.5b marshaling plan, one i8 per param: for a verbatim-eligible
+    /// scalar param (declared Scalar(K), S1 precondition absent or == K)
+    /// this is the caller lane-kind constant (`helpers::KIND_*`) whose
+    /// `bits` copy STRAIGHT into the raw lane — no `Value` decode, no
+    /// re-encode, and the arg guard is one integer compare. `-1` = general
+    /// lane (Obj params, precondition-narrowed params): full decode +
+    /// cell guard + precondition, exactly the classic checks.
+    pub lane_plan: Box<[i8]>,
+}
+
+/// W0 tier criteria (docs/DIRECT_CALLS_ARCH.md §3.2): a callee a baked
+/// direct edge may call with NO window — all-scalar params, scalar ret, no
+/// scratch, never touches its slot window, materializes nothing, and no
+/// direct_self (its redef-epoch gate lives in `entry_gates`, which the
+/// direct edge skips).
+pub fn w0_eligible(entry: &AotEntry) -> bool {
+    entry.role == AotRole::Method
+        && matches!(entry.ret, AotRet::Scalar(_))
+        && entry.n_scratch == 0
+        && !entry.uses_slot_base
+        && !entry.materializes
+        && !entry.materializes_nlr
+        && !entry.needs_list_self
+        && !entry.direct_self
+        && !entry.lane_plan.is_empty()
+        && entry.lane_plan.iter().all(|&p| p >= 0)
+}
+
+/// One baked W0 site (D3b): the callee identity + the guard facts captured
+/// from the D2 cell at bake time. `Copy` plain data — the entry is 'static.
+#[derive(Clone, Copy)]
+pub struct BakedW0 {
+    pub entry: &'static AotEntry,
+    /// `vm.dispatch_epoch` at bake time; the emitted guard compares the
+    /// live value (through the ABI's epoch pointer) against this constant.
+    pub epoch: u64,
+    pub recv_kind: u8,
+    pub recv_ptr: usize,
+}
+
+/// Staging: the driver's drain captures baked sites (it has VM access; the
+/// translator does not), keyed by caller tid; the retranslation's
+/// Translator takes them. Cleared on take.
+fn baked_staging() -> &'static Mutex<FxHashMap<u32, FxHashMap<usize, BakedW0>>> {
+    static S: OnceLock<Mutex<FxHashMap<u32, FxHashMap<usize, BakedW0>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+pub fn stage_baked(tid: u32, sites: FxHashMap<usize, BakedW0>) {
+    baked_staging().lock().unwrap().insert(tid, sites);
+}
+
+pub(super) fn take_baked_for(tid: u32) -> FxHashMap<usize, BakedW0> {
+    baked_staging()
+        .lock()
+        .unwrap()
+        .remove(&tid)
+        .unwrap_or_default()
+}
+
+/// Baked direct-edge sites emitted across all retranslations (stats/tests).
+pub static TOTAL_DIRECT_SITES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Build the D2.5b plan (see `AotEntry::lane_plan`).
+pub fn build_lane_plan(params: &[AotParam], pres: &[Option<AotKind>]) -> Box<[i8]> {
+    params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match p {
+            AotParam::Scalar(k) => {
+                let pre = pres.get(i).copied().flatten();
+                if pre.is_none() || pre == Some(*k) {
+                    match k {
+                        AotKind::Int => helpers::KIND_INT as i8,
+                        AotKind::Double => helpers::KIND_DOUBLE as i8,
+                        AotKind::Bool => helpers::KIND_BOOL as i8,
+                    }
+                } else {
+                    -1
+                }
+            }
+            AotParam::Obj => -1,
+        })
+        .collect()
 }
 
 /// `Callable`-embeddable handle: `Copy`, no GC content.
@@ -290,6 +390,179 @@ pub fn bump_redef_epoch() {
 /// Mint a D2 outcall-site id (docs/OUTCALL_ARCH.md): the index of this
 /// compiled call site's cell in `VmState::aot_sites`. Monotonic and never
 /// reused; retried translations waste a few — harmless.
+/// D3a (docs/DIRECT_CALLS_ARCH.md §3.3): retained retranslation inputs —
+/// the candidate (the re-translation source) and the outcall site ids its
+/// first translation minted per bytecode ip. The SAME ids must be reused on
+/// retranslation so the D2 cells and the generic fallback keep working.
+pub struct Retained {
+    pub cand: AotCandidate,
+    pub sites: FxHashMap<usize, u32>,
+}
+
+fn retained() -> &'static RwLock<FxHashMap<u32, Retained>> {
+    static RETAINED: OnceLock<RwLock<FxHashMap<u32, Retained>>> = OnceLock::new();
+    RETAINED.get_or_init(|| RwLock::new(FxHashMap::default()))
+}
+
+pub(super) fn prior_sites_for(tid: u32) -> Option<FxHashMap<usize, u32>> {
+    retained()
+        .read()
+        .unwrap()
+        .get(&tid)
+        .map(|r| r.sites.clone())
+}
+
+/// The driver's drain needs a caller's retained site map to bake guard
+/// facts from the live cells (D3b).
+pub fn retained_sites_for(tid: u32) -> Option<FxHashMap<usize, u32>> {
+    prior_sites_for(tid)
+}
+
+/// D3b bisect hooks (the S1 discipline — they land WITH the feature):
+/// `QN_DIRECT_ONLY=tid,tid` limits which callers bake direct edges;
+/// `QN_DIRECT_MAX=n` caps how many callers may bake (process-wide).
+pub fn direct_allows(tid: u32) -> bool {
+    static ONLY: OnceLock<Option<Vec<u32>>> = OnceLock::new();
+    let only = ONLY.get_or_init(|| {
+        std::env::var("QN_DIRECT_ONLY")
+            .ok()
+            .map(|v| v.split(',').filter_map(|t| t.trim().parse().ok()).collect())
+    });
+    match only {
+        Some(list) => list.contains(&tid),
+        None => true,
+    }
+}
+
+/// Test hook: `QN_DIRECT_NULL=1` retranslates queued callers even with no
+/// baked sites (the D3a null-retranslation contract). Production skips
+/// empty bakes: recompiling without edges buys nothing and costs fresh
+/// code placement — measured +2-3% on hot benches (notes.md).
+pub fn direct_null_forced() -> bool {
+    static F: OnceLock<bool> = OnceLock::new();
+    *F.get_or_init(|| std::env::var("QN_DIRECT_NULL").is_ok_and(|v| v == "1"))
+}
+
+pub fn direct_budget_allows() -> bool {
+    static MAX: OnceLock<Option<usize>> = OnceLock::new();
+    static USED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let max = MAX.get_or_init(|| {
+        std::env::var("QN_DIRECT_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    });
+    match max {
+        Some(cap) => USED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < *cap,
+        None => true,
+    }
+}
+
+/// How many warm-site retranslations have run (D3a: null retranslations —
+/// identical code, registry overwrite). Surfaced by `VM.stats`.
+pub static TOTAL_RETRANSLATED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// `QN_DIRECT_WARM`: site-hit threshold that queues the CALLER for
+/// retranslation. Unset/0 = the tier is off (the D3a default; D3b flips the
+/// default once direct edges exist to justify the recompile).
+static DIRECT_WARM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
+pub fn direct_warm_threshold() -> Option<u32> {
+    let mut v = DIRECT_WARM.load(std::sync::atomic::Ordering::Relaxed);
+    if v == u32::MAX {
+        v = std::env::var("QN_DIRECT_WARM")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&n| n > 0 && n < u32::MAX)
+            .unwrap_or(0);
+        DIRECT_WARM.store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    (v != 0).then_some(v)
+}
+
+/// The outcall fast path's per-hit gate: one relaxed load + one branch when
+/// the tier is off (measured: routing every hit through the accounting CALL
+/// cost richards ~1.5%). `compile_candidates` resolves the env eagerly —
+/// a hit requires a compiled entry, so the sentinel is never read hot; if
+/// it somehow were, `true` merely routes into `aot_site_note_hit`, which
+/// resolves and self-disables.
+#[inline(always)]
+pub fn direct_warm_on() -> bool {
+    DIRECT_WARM.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// Raw threshold for the seam's register-only warmth gate: 0 = off.
+/// (`compile_candidates` eager-resolves the sentinel; see
+/// [`direct_warm_threshold`].)
+#[inline(always)]
+pub fn direct_warm_raw() -> u32 {
+    let v = DIRECT_WARM.load(std::sync::atomic::Ordering::Relaxed);
+    if v == u32::MAX { 0 } else { v }
+}
+
+/// Recompile a retained candidate and OVERWRITE its registry entry (§3.1:
+/// in-flight invocations of the old leaked entry complete on their own
+/// code). D3a emits IDENTICAL generic code — the null retranslation that
+/// proves the queue, the site-id reuse, and the registry swap.
+/// Wall-nanoseconds spent inside `retranslate` (attribution: on short
+/// benches the Cranelift recompiles themselves are a visible slice).
+pub static RETRANSLATE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn retranslate(tid: u32) -> bool {
+    let t0 = std::time::Instant::now();
+    let out = retranslate_inner(tid);
+    RETRANSLATE_NS.fetch_add(
+        t0.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    out
+}
+
+fn retranslate_inner(tid: u32) -> bool {
+    let (cand, group_cands) = {
+        let r = retained().read().unwrap();
+        let Some(ret) = r.get(&tid) else {
+            return false;
+        };
+        let group = ret.cand.group_id;
+        let group_cands: Vec<AotCandidate> = r
+            .values()
+            .filter(|x| x.cand.group_id == group)
+            .map(|x| x.cand.clone())
+            .collect();
+        (ret.cand.clone(), group_cands)
+    };
+    // The sibling signature map exactly as the original group compile built
+    // it — without it the retranslated body would lose its S2 direct
+    // sibling calls and stop being "identical code".
+    let mut siblings: HashMap<(u32, String), (Vec<AotParam>, AotRet, u32)> = HashMap::new();
+    for c in &group_cands {
+        if let Some(id) = c.block.template_id {
+            siblings.insert(
+                (c.group_id, c.selector.clone()),
+                (c.params.clone(), c.ret, id),
+            );
+        }
+    }
+    let cands = vec![cand];
+    let (compiled, _refusals) = translate::compile_all(&cands, &siblings);
+    let mut any = false;
+    for (template_id, entry, sites) in compiled {
+        registry()
+            .write()
+            .unwrap()
+            .insert(template_id, Box::leak(Box::new(entry)));
+        retained()
+            .write()
+            .unwrap()
+            .entry(template_id)
+            .and_modify(|r| r.sites = sites.iter().copied().collect());
+        TOTAL_RETRANSLATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        any = true;
+    }
+    any
+}
+
 pub fn next_outcall_site() -> u32 {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -493,6 +766,7 @@ pub fn compile_totals() -> (usize, usize) {
 /// bytecode walk. Refusal is silent and safe (the method stays interpreted);
 /// `QN_AOT_VERBOSE=1` prints per-method outcomes to stderr.
 pub fn compile_candidates(cands: Vec<AotCandidate>) -> CompileStats {
+    let _ = direct_warm_threshold(); // eager-resolve the fast path's gate
     let mut stats = CompileStats::default();
     if cands.is_empty() {
         return stats;
@@ -508,14 +782,29 @@ pub fn compile_candidates(cands: Vec<AotCandidate>) -> CompileStats {
         }
     }
     let verbose = std::env::var("QN_AOT_VERBOSE").is_ok_and(|v| v == "1");
+    let by_tid: HashMap<u32, &AotCandidate> = cands
+        .iter()
+        .filter_map(|c| c.block.template_id.map(|id| (id, c)))
+        .collect();
     let (compiled, refusals) = translate::compile_all(&cands, &siblings);
     {
         let mut reg = registry().write().unwrap();
-        for (template_id, entry) in compiled {
+        let mut ret = retained().write().unwrap();
+        for (template_id, entry, sites) in compiled {
             if verbose {
                 eprintln!("qn aot: compiled template {template_id}");
             }
             reg.insert(template_id, Box::leak(Box::new(entry)));
+            // D3a: retain the retranslation inputs (candidate + site ids).
+            if let Some(c) = by_tid.get(&template_id) {
+                ret.insert(
+                    template_id,
+                    Retained {
+                        cand: (*c).clone(),
+                        sites: sites.iter().copied().collect(),
+                    },
+                );
+            }
             stats.compiled += 1;
         }
     }
@@ -621,13 +910,21 @@ fn run_in_frame_ctx<'gc>(
     enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
     home: HomeCtx,
     base: usize,
+    // D2.5a: the callee never materializes a closure, so `enclosing_env` is
+    // never read during this body — skip the swap/restore pair. Nested
+    // calls that DO materialize install their own env first.
+    env_blind: bool,
     body: impl FnOnce(&mut VmState<'gc>) -> u8,
 ) -> (u8, Option<usize>) {
     if vm.aot.depth == 0 {
         vm.aot.fuel = i64::from(crate::tuning::step_batch());
     }
     vm.aot_pending_error = None;
-    let saved_env = std::mem::replace(&mut vm.aot.enclosing_env, enclosing_env);
+    let saved_env = if env_blind {
+        None
+    } else {
+        Some(std::mem::replace(&mut vm.aot.enclosing_env, enclosing_env))
+    };
     let (minted, saved_home) = match home {
         HomeCtx::Mint => {
             let id = vm.next_frame_id;
@@ -646,7 +943,9 @@ fn run_in_frame_ctx<'gc>(
         HomeCtx::Untracked => (None, None),
     };
     let tag = body(vm);
-    vm.aot.enclosing_env = saved_env;
+    if let Some(env) = saved_env {
+        vm.aot.enclosing_env = env;
+    }
     if let Some(h) = saved_home {
         vm.aot.home_frame_id = h;
     }
@@ -794,6 +1093,53 @@ pub fn invoke<'gc>(
         };
         raw[i] = bits;
     }
+    invoke_tail(vm, mc, entry, receiver, args, raw, enclosing_env, window)
+}
+
+/// D2.5b: the helper fast path enters here with lanes ALREADY marshaled
+/// straight from the caller's `(kind,bits)` per the entry's `lane_plan` —
+/// no `Value` decode/re-encode round trip. Gates and the list-self
+/// precondition still apply; the arity was matched against the plan.
+#[allow(clippy::too_many_arguments)]
+pub fn invoke_prebuilt<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    entry: &'static AotEntry,
+    receiver: Value<'gc>,
+    args: &[Value<'gc>],
+    raw: &[i64],
+    enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
+    window: Option<usize>,
+) -> AotOutcome<'gc> {
+    if !entry_gates(vm, entry) {
+        return AotOutcome::Bail;
+    }
+    if entry.needs_list_self
+        && receiver
+            .with_native_state::<crate::runtime::list::NativeListState, _, _>(|_| ())
+            .is_err()
+    {
+        return AotOutcome::Bail;
+    }
+    invoke_tail(vm, mc, entry, receiver, args, raw, enclosing_env, window)
+}
+
+/// The post-ladder body of [`invoke`]: window/scratch pushes, frame ctx, the
+/// raw call, outcome. `raw` must already hold the lane bits per the entry's
+/// param shapes (the D2.5b helper fast path builds them straight from the
+/// caller's lanes and enters here — `invoke_prebuilt`).
+#[allow(clippy::too_many_arguments)]
+fn invoke_tail<'gc>(
+    vm: &mut VmState<'gc>,
+    mc: &gc_arena::Mutation<'gc>,
+    entry: &'static AotEntry,
+    receiver: Value<'gc>,
+    args: &[Value<'gc>],
+    raw: &[i64],
+    enclosing_env: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::value::EnvFrame<'gc>>>>,
+    window: Option<usize>,
+) -> AotOutcome<'gc> {
+    let base = window.unwrap_or(vm.stack.len());
     if window.is_none() {
         vm.stack.push(receiver); // slot 0
         for &a in args {
@@ -812,9 +1158,11 @@ pub fn invoke<'gc>(
         HomeCtx::Untracked
     };
     let mut ret: i64 = 0;
-    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, |vm| {
+    let env_blind = !entry.materializes && matches!(home, HomeCtx::Untracked);
+    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, env_blind, |vm| {
         let fuel_ptr = &raw mut vm.aot.fuel;
         let depth_ptr = &raw mut vm.aot.depth;
+        let epoch_ptr = &raw const vm.dispatch_epoch;
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
         let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
         unsafe {
@@ -823,6 +1171,7 @@ pub fn invoke<'gc>(
                 mc_ptr,
                 fuel_ptr,
                 depth_ptr,
+                epoch_ptr,
                 base as i64,
                 raw.as_ptr(),
                 &mut ret,
@@ -904,6 +1253,7 @@ pub fn invoke_block<'gc>(
     mc: &gc_arena::Mutation<'gc>,
     entry: &'static AotEntry,
     block_val: Value<'gc>,
+    block: gc_arena::Gc<'gc, crate::value::Block<'gc>>,
     arg: Value<'gc>,
     self_val: Value<'gc>,
 ) -> AotOutcome<'gc> {
@@ -916,13 +1266,8 @@ pub fn invoke_block<'gc>(
     // closure does (S5) — including `None` (a homeless block's `^^` errors,
     // exactly as interpreted). A template is never a `^^` TARGET itself
     // (`HomeCtx::Propagate`, not `Mint` — so `finish_frame` never consumes).
-    let (enclosing_env, home_id) = match block_val {
-        Value::Object(obj) => match &obj.borrow().payload {
-            crate::value::ObjectPayload::Block(b) => (b.parent_env, b.enclosing_method_id),
-            _ => (None, None),
-        },
-        _ => (None, None),
-    };
+    // The caller already holds the block payload — no second object borrow.
+    let (enclosing_env, home_id) = (block.parent_env, block.enclosing_method_id);
     let base = vm.stack.len();
     vm.stack.push(self_val); // slot 0: self (self-or-arg, resolved by the caller)
     vm.stack.push(arg); // slot 1: the parameter (its own cell)
@@ -936,9 +1281,11 @@ pub fn invoke_block<'gc>(
         HomeCtx::Untracked
     };
     let mut ret: i64 = 0;
-    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, |vm| {
+    let env_blind = !entry.materializes && matches!(home, HomeCtx::Untracked);
+    let (tag, minted) = run_in_frame_ctx(vm, enclosing_env, home, base, env_blind, |vm| {
         let fuel_ptr = &raw mut vm.aot.fuel;
         let depth_ptr = &raw mut vm.aot.depth;
+        let epoch_ptr = &raw const vm.dispatch_epoch;
         let vm_ptr = vm as *mut VmState<'gc> as *mut c_void;
         let mc_ptr = mc as *const gc_arena::Mutation<'gc> as *const c_void;
         let raw_args: [i64; 1] = [base as i64 + 1];
@@ -948,6 +1295,7 @@ pub fn invoke_block<'gc>(
                 mc_ptr,
                 fuel_ptr,
                 depth_ptr,
+                epoch_ptr,
                 base as i64,
                 raw_args.as_ptr(),
                 &mut ret,

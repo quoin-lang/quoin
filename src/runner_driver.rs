@@ -533,12 +533,68 @@ pub(crate) fn drive_with_frontend<F: DriverFrontend>(
         let control_rx =
             arena.mutate_root(|_mc, vm| vm.worker_link.as_ref().map(|l| l.control_rx.clone()));
         let mut ps_collect: Option<PsCollect> = None;
+        // D3a: drain warm-site retranslations at the driver boundary (the
+        // B3a placement discipline — a recompile never runs inside a VM
+        // step). Empty-vec take is the whole cost when the tier is off.
+        let drain_retranslations = |arena: &mut ReplArena| {
+            // D3b: bake guard facts from the live cells (VM access lives
+            // here, not in the translator), stage them, then retranslate —
+            // the recompiled caller carries guarded direct edges for its
+            // warm monomorphic W0 sites.
+            let work = arena.mutate_root(|_mc, vm| {
+                let tids = vm.take_retranslations();
+                if tids.is_empty() {
+                    return Vec::new();
+                }
+                let threshold = crate::codegen::direct_warm_threshold().unwrap_or(u32::MAX);
+                let work: Vec<_> = tids
+                    .into_iter()
+                    .map(|tid| {
+                        let baked = crate::codegen::retained_sites_for(tid)
+                            .map(|sites| vm.bake_w0_sites(&sites, threshold))
+                            .unwrap_or_default();
+                        (tid, baked)
+                    })
+                    .collect();
+                work
+            });
+            let mut swapped = Vec::new();
+            for (tid, baked) in work {
+                let stage = !baked.is_empty()
+                    && crate::codegen::direct_allows(tid)
+                    && crate::codegen::direct_budget_allows();
+                if stage {
+                    crate::codegen::stage_baked(tid, baked);
+                }
+                // A retranslation with nothing to bake is PURE COST (the
+                // fresh code placement alone measured +2-3% on hot benches)
+                // — skip it unless the null-machinery test hook forces it.
+                if (stage || crate::codegen::direct_null_forced())
+                    && crate::codegen::retranslate(tid)
+                {
+                    swapped.push(tid);
+                }
+            }
+            // ACTIVATION (targeted): caches hold the OLD entries by 'static
+            // ref — clear exactly the slots caching each swapped tid so the
+            // next resolution refills through the registry. No epoch bump:
+            // the rest of the warm world (and every earlier batch's baked
+            // guards, which compare dispatch_epoch) is untouched.
+            if !swapped.is_empty() {
+                arena.mutate_root(|mc, vm| {
+                    for tid in swapped {
+                        vm.invalidate_caches_for_template(mc, tid);
+                    }
+                });
+            }
+        };
         // FIFO: process-worker pumps correlate control replies by ORDER
         // (one reply lane, ids queued at the reader) — LIFO would misroute.
         let mut ps_queue: std::collections::VecDeque<
             async_channel::Sender<crate::worker::WorkerMsg>,
         > = std::collections::VecDeque::new();
         loop {
+            drain_retranslations(arena);
             // Service control requests opportunistically — once per loop
             // iteration, so a compute-bound task still answers at batch
             // boundaries; the cost when idle is one failed try_recv.
