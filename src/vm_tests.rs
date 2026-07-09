@@ -156,6 +156,7 @@ where
         let static_block = StaticBlock {
             spec_state: Default::default(),
             uses_self: Default::default(),
+            is_closed: Default::default(),
             source_info: None,
             name: Some("test_main".to_string()),
             is_nested_block: false,
@@ -298,6 +299,7 @@ fn test_deferred_call_values_survive_collection() {
         let static_block = StaticBlock {
             spec_state: Default::default(),
             uses_self: Default::default(),
+            is_closed: Default::default(),
             source_info: None,
             name: Some("defer_gc_test".to_string()),
             is_nested_block: false,
@@ -764,6 +766,7 @@ fn test_block_execution_and_returns() {
     let block_static = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("test_block".to_string()),
         is_nested_block: false,
@@ -849,6 +852,7 @@ fn test_method_return() {
     let block_nested = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("nested".to_string()),
         is_nested_block: true,
@@ -870,6 +874,7 @@ fn test_method_return() {
     let block_method = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("method".to_string()),
         is_nested_block: false, // enclosing_method_id will be this frame's ID
@@ -921,6 +926,7 @@ fn test_non_local_return_callback() {
     let block_nested = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("nested".to_string()),
         is_nested_block: true,
@@ -941,6 +947,7 @@ fn test_non_local_return_callback() {
     let block_bar = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("bar".to_string()),
         is_nested_block: false,
@@ -963,6 +970,7 @@ fn test_non_local_return_callback() {
     let block_foo = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("foo".to_string()),
         is_nested_block: false,
@@ -1044,6 +1052,7 @@ fn test_class_and_method_definition_vm() {
     let class_block = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("class_block".to_string()),
         is_nested_block: false,
@@ -1056,6 +1065,7 @@ fn test_class_and_method_definition_vm() {
             Instruction::Push(Constant::block(StaticBlock {
                 spec_state: Default::default(),
                 uses_self: Default::default(),
+                is_closed: Default::default(),
                 source_info: None,
                 name: Some("x".to_string()),
                 is_nested_block: false,
@@ -1077,6 +1087,7 @@ fn test_class_and_method_definition_vm() {
             Instruction::Push(Constant::block(StaticBlock {
                 spec_state: Default::default(),
                 uses_self: Default::default(),
+                is_closed: Default::default(),
                 source_info: None,
                 name: Some("x".to_string()),
                 is_nested_block: false,
@@ -1221,6 +1232,7 @@ fn test_primitive_methods_and_overrides() {
     let custom_true_method = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("custom_true_method".to_string()),
         is_nested_block: false,
@@ -1240,6 +1252,7 @@ fn test_primitive_methods_and_overrides() {
     let class_extension_block = StaticBlock {
         spec_state: Default::default(),
         uses_self: Default::default(),
+        is_closed: Default::default(),
         source_info: None,
         name: Some("class_extension_block".to_string()),
         is_nested_block: false,
@@ -1538,6 +1551,7 @@ fn test_execute_block_helper() {
                 template: Arc::new(StaticBlock {
                     spec_state: Default::default(),
                     uses_self: Default::default(),
+                    is_closed: Default::default(),
                     source_info: None,
                     name: Some("test_block".to_string()),
                     is_nested_block: false,
@@ -1597,6 +1611,7 @@ fn test_execute_block_helper() {
                 template: Arc::new(StaticBlock {
                     spec_state: Default::default(),
                     uses_self: Default::default(),
+                    is_closed: Default::default(),
                     source_info: None,
                     name: Some("test_block_no_self".to_string()),
                     is_nested_block: false,
@@ -1657,6 +1672,7 @@ fn test_cannot_extend_non_existent_class() {
             Instruction::Push(Constant::block(StaticBlock {
                 spec_state: Default::default(),
                 uses_self: Default::default(),
+                is_closed: Default::default(),
                 source_info: None,
                 name: Some("ext_block".to_string()),
                 is_nested_block: false,
@@ -2178,4 +2194,27 @@ fn test_vm_options_at_runtime() {
             .unwrap();
         assert_eq!(to_spec(mapped_color), ValueSpec::Bool(true));
     });
+}
+
+#[test]
+fn value_layout_facts() {
+    // The window-arena CONTRACT (docs/WINDOW_ARENA_ARCH.md §2.1): compiled
+    // code reads/writes slots natively against exactly this layout. A
+    // failure here means the JIT's emission model is wrong for this build.
+    use crate::value::Value;
+    assert_eq!(std::mem::size_of::<Value>(), 16);
+    assert_eq!(std::mem::align_of::<Value>(), 8);
+    let probe = |v: Value<'static>| -> [u64; 2] { unsafe { std::mem::transmute(v) } };
+    // Scalar tags coincide with helpers::KIND_* — payload qword is the bits.
+    assert_eq!(probe(Value::Int(0x1234)), [0, 0x1234]);
+    assert_eq!(
+        probe(Value::Double(2.5)),
+        [1, f64::to_bits(2.5)],
+        "Double: tag 1, payload = to_bits"
+    );
+    assert_eq!(probe(Value::Bool(true))[0], 2);
+    assert_eq!(probe(Value::Bool(true))[1] & 0xff, 1);
+    assert_eq!(probe(Value::Nil)[0], 3);
+    assert_eq!(crate::codegen::helpers_kind_int(), 0);
+    assert_eq!(crate::codegen::helpers_kind_nil(), 3);
 }

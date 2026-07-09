@@ -109,6 +109,8 @@ pub struct StaticBlock {
     /// touches anyway — a side table would cost a dependent pointer chase on
     /// every method call. Shared by all closures of the literal (one `Arc`).
     pub spec_state: SpecState,
+    /// Memoized closed-template scan (see `template_is_closed`).
+    pub is_closed: UsesSelfFlag,
     /// Memoized "does this block (or a nested literal) reference `self` or
     /// touch `@fields`?" — the self-or-arg seams (`valueWithSelfOrArg:`,
     /// compiled outcalls) resolve LEXICAL self through the env chain only
@@ -128,6 +130,70 @@ impl Clone for UsesSelfFlag {
     fn clone(&self) -> Self {
         Self::default()
     }
+}
+
+/// Whether the template is CLOSED — no free-variable reads, no `self`, no
+/// fields, no nested literal that breaks the same rules. A closed template's
+/// closures are all behaviorally identical, so materialization may return a
+/// cached instance (per VM): constant-closure promotion. Memoized like
+/// `uses_self`.
+pub fn template_is_closed(sb: &StaticBlock) -> bool {
+    use std::sync::atomic::Ordering;
+    match sb.is_closed.0.load(Ordering::Relaxed) {
+        1 => return false, // note: 1 = NOT closed (matches UsesSelfFlag polarity: 1=no-hit)
+        2 => return true,
+        _ => {}
+    }
+    let closed = scan_closed(sb);
+    sb.is_closed
+        .0
+        .store(if closed { 2 } else { 1 }, Ordering::Relaxed);
+    closed
+}
+
+fn scan_closed(sb: &StaticBlock) -> bool {
+    if template_uses_self(sb) {
+        return false;
+    }
+    let mut defined: std::collections::HashSet<Symbol> = sb.param_syms.iter().copied().collect();
+    for inst in sb.bytecode.iter() {
+        // Locals defined in this body are not free.
+        if let Instruction::DefineLocal(sym) = inst {
+            defined.insert(*sym);
+        }
+    }
+    for inst in sb.bytecode.iter() {
+        let free = match inst {
+            Instruction::LoadLocal(s)
+            | Instruction::StoreLocal(s)
+            | Instruction::StoreLocalKeep(s) => !defined.contains(s),
+            Instruction::SendLocal(v, _, _) => !defined.contains(v),
+            Instruction::SendLocalLocal(a, b, _, _) => !defined.contains(a) || !defined.contains(b),
+            Instruction::SendLocalConst(a, _, _, _) => !defined.contains(a),
+            Instruction::IntBinLL(a, b, _) | Instruction::DoubleBinLL(a, b, _) => {
+                !defined.contains(a) || !defined.contains(b)
+            }
+            Instruction::IntBinLC(a, _, _) | Instruction::DoubleBinLC(a, _, _) => {
+                !defined.contains(a)
+            }
+            Instruction::MethodReturn => true, // ^^ needs a home
+            _ => false,
+        };
+        if free {
+            return false;
+        }
+        if let Instruction::Push(Constant::Block(inner)) = inst
+            && !scan_closed(inner)
+        {
+            return false;
+        }
+        if let Some((_, _, Some(Constant::Block(inner)))) = inst.send_parts()
+            && !scan_closed(inner)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether the template references `self` — directly (a bare `self` read or

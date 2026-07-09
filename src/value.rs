@@ -212,18 +212,30 @@ unsafe impl<'gc> Collect<'gc> for NativeFunc {
 
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
+/// FIXED LAYOUT (the window-arena contract, docs/WINDOW_ARENA_ARCH.md §2.1):
+/// `#[repr(C, u64)]` — tag qword at offset 0, payload qword at offset 8,
+/// 16 bytes total (pinned by `value_layout_facts`). Compiled code reads and
+/// writes slots natively against this layout; the scalar discriminants
+/// deliberately COINCIDE with the helper lane kinds (`helpers::KIND_*`), so
+/// a scalar lane→slot store is tag=kind, payload=bits verbatim. Object/
+/// Class payloads are Gc pointers: native code only ever copies those
+/// whole (16-byte slot-to-slot), never fabricates them — and the store
+/// order invariant (payload before tag) is what keeps every intermediate
+/// state traceable. Discriminant values are API for the JIT: do not
+/// reorder or renumber without updating codegen's emission.
+#[repr(C, u64)]
 pub enum Value<'gc> {
     /// Immediate value types — no GC allocation. Their class is *derived* from
     /// the variant (see `get_class_for_lookup`), so "numbers are objects" still
     /// holds: they dispatch via `Integer` / `Double` / `Boolean` / `Nil` and
     /// have methods, but no per-instance fields or true eigenclass.
-    Int(i64),
-    Double(f64),
-    Bool(bool),
-    Nil,
-    Object(Gc<'gc, RefLock<Object<'gc>>>),
-    Class(Gc<'gc, RefLock<Class<'gc>>>),
-    ClassMeta(Gc<'gc, RefLock<Class<'gc>>>),
+    Int(i64) = 0,
+    Double(f64) = 1,
+    Bool(bool) = 2,
+    Nil = 3,
+    Object(Gc<'gc, RefLock<Object<'gc>>>) = 4,
+    Class(Gc<'gc, RefLock<Class<'gc>>>) = 5,
+    ClassMeta(Gc<'gc, RefLock<Class<'gc>>>) = 6,
 }
 
 #[derive(Clone, Copy, Collect, Debug)]
@@ -1211,5 +1223,135 @@ mod tests {
             debug_str,
             "OpaqueState<quoin::value::tests::test_opaque_state_debug::Dummy>"
         );
+    }
+}
+/// The VM's slot stack (docs/WINDOW_ARENA_ARCH.md §2.2): a Vec with a
+/// `#[repr(C)]` HEAD at a stable address — compiled code reads `(ptr, len)`
+/// through the head (passed via the raw ABI beside fuel/depth/epoch) and
+/// does native bounds-checked slot loads/stores against `Value`'s fixed
+/// layout. Growth stays in Rust: every mutation routes through methods
+/// that re-sync the head, so Vec reallocation remains legal — native code
+/// re-reads the head per access and never pushes.
+#[repr(C)]
+pub struct SlotHead {
+    /// Read by compiled code at offset 0.
+    pub ptr: *mut u8,
+    /// Read by compiled code at offset 8 (in Values, not bytes).
+    pub len: usize,
+}
+
+pub struct SlotStack<'gc> {
+    head: SlotHead,
+    vec: Vec<Value<'gc>>,
+}
+
+impl<'gc> SlotStack<'gc> {
+    pub fn new() -> Self {
+        let mut s = SlotStack {
+            head: SlotHead {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            },
+            vec: Vec::new(),
+        };
+        s.sync_head();
+        s
+    }
+
+    /// LAZY head discipline (the A2 lesson: syncing on every push/truncate
+    /// sat on the interpreter's two hottest operations and gave back the
+    /// whole A1 win — +6-8% measured). Only compiled code reads the head,
+    /// so it is refreshed explicitly at the compiled-call boundary
+    /// (`invoke`/`invoke_block` before the raw call) and at the exit of any
+    /// helper that can GROW the stack while native code holds slot
+    /// addresses derived from it. Interpreter mutations are plain Vec ops.
+    #[inline(always)]
+    pub fn sync_head(&mut self) {
+        self.head.ptr = self.vec.as_mut_ptr() as *mut u8;
+        self.head.len = self.vec.len();
+    }
+
+    /// The stable head address for the raw ABI.
+    pub fn head_addr(&mut self) -> *mut SlotHead {
+        &raw mut self.head
+    }
+
+    /// The A5 canary: every extern helper that can grow the stack must
+    /// sync before returning into native code (docs/WINDOW_ARENA_ARCH.md
+    /// §5). `slot_write` asserts this in debug builds on every compiled
+    /// slot write, so a missed exit-sync fails the corpus loudly instead
+    /// of reading a reallocated-away buffer.
+    #[cfg(debug_assertions)]
+    pub fn head_is_fresh(&self) -> bool {
+        self.head.ptr as *const Value<'gc> == self.vec.as_ptr() && self.head.len == self.vec.len()
+    }
+
+    /// Task-switch boundary (the scheduler parks a task's stack as a plain
+    /// Vec): O(1) moves either way, head re-synced on entry.
+    pub fn from_vec(vec: Vec<Value<'gc>>) -> Self {
+        let mut s = SlotStack {
+            head: SlotHead {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            },
+            vec,
+        };
+        s.sync_head();
+        s
+    }
+
+    pub fn into_vec(self) -> Vec<Value<'gc>> {
+        self.vec
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, v: Value<'gc>) {
+        self.vec.push(v);
+    }
+
+    #[inline(always)]
+    pub fn pop(&mut self) -> Option<Value<'gc>> {
+        self.vec.pop()
+    }
+
+    #[inline(always)]
+    pub fn truncate(&mut self, n: usize) {
+        self.vec.truncate(n);
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.vec.clear();
+    }
+}
+
+impl Default for SlotStack<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'gc> std::ops::Deref for SlotStack<'gc> {
+    type Target = [Value<'gc>];
+    #[inline(always)]
+    fn deref(&self) -> &[Value<'gc>] {
+        &self.vec
+    }
+}
+
+impl<'gc> std::ops::DerefMut for SlotStack<'gc> {
+    // In-place writes through the slice never move or resize the storage,
+    // so the head stays valid.
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [Value<'gc>] {
+        &mut self.vec
+    }
+}
+
+// The head is plain data (no GC content); the slots trace like the Vec did.
+unsafe impl<'gc> gc_arena::Collect<'gc> for SlotStack<'gc> {
+    const NEEDS_TRACE: bool = true;
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        self.vec.trace(cc);
     }
 }
