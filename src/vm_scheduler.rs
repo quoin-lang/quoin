@@ -244,6 +244,13 @@ pub struct Scheduler<'gc> {
     /// Lives here (not in the runner) so a native `spawn` can enqueue without parking.
     #[collect(require_static)]
     pub ready: VecDeque<TaskId>,
+    /// Recycled fill buffers for the stream read path (`streams.rs::fill_once`): a `Read`'s
+    /// returned vec comes back here once its bytes are copied into the stream's `rbuf`, and
+    /// the next fill sends it out again — the steady state allocates nothing per read and
+    /// re-zeroes only a truncated tail (RELEASE_PREP Tier 4b). A small capped pool rather
+    /// than per-stream scratch, so 10k idle sockets hold no extra buffers.
+    #[collect(require_static)]
+    pub read_scratch: Vec<Vec<u8>>,
     /// The task whose per-task state is currently live in `VmState`.
     #[collect(require_static)]
     pub current_task: TaskId,

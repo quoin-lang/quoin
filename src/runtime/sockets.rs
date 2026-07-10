@@ -251,7 +251,11 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
         .typed_instance_method("read:", &["Integer"], |vm, mc, receiver, args| {
             let id = open_id(receiver)?;
             let n = arg!(args, Int, 0).max(0) as usize;
-            match vm.await_io(IoRequest::Read { id, max: n })? {
+            match vm.await_io(IoRequest::Read {
+                id,
+                max: n,
+                buf: Vec::new(),
+            })? {
                 IoResult::Read(bytes) => Ok(vm.new_bytes(mc, bytes)),
                 IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
                 other => Err(unexpected("read:", other)),
@@ -268,7 +272,11 @@ fn add_socket_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             let id = open_id(receiver)?;
             let mut all = Vec::new();
             loop {
-                match vm.await_io(IoRequest::Read { id, max: 8192 })? {
+                match vm.await_io(IoRequest::Read {
+                    id,
+                    max: 8192,
+                    buf: Vec::new(),
+                })? {
                     IoResult::Read(chunk) if chunk.is_empty() => break, // EOF
                     IoResult::Read(chunk) => all.extend_from_slice(&chunk),
                     IoResult::Err(e) => return Err(QuoinError::from_io_error(&e)),

@@ -281,15 +281,18 @@ it. None is fixed.
 
 ## Tier 4b — found while building the file-write path
 
-- [ ] **The backend allocates and zeroes a fresh buffer on every `Read`.**
-  `io_backend.rs`: `let mut buf = vec![0u8; max];` per fill, then truncate, copy
-  into the stream's `rbuf`, and free. Measured cost: reading a 64 MiB file, the
-  overhead above the 4.5 GB/s floor is +9% at a 16 KiB fill and +4% at 32 KiB, but
-  it *rises again* to +26% at 64 KiB, where the per-read allocation crosses the
-  allocator's large-object threshold. Reuse one scratch buffer per stream and the
-  curve should keep improving; then revisit `IO_BUFFER_BYTES` (32-64 KiB) for file
-  streams specifically. The measurement and the reasoning are recorded on
-  `IO_BUFFER_BYTES` in `src/runtime/streams.rs`.
+- [x] **The backend allocates and zeroes a fresh buffer on every `Read`.** FIXED:
+  the fill buffer recycles — `IoRequest::Read`/`ReadTimed` carry `buf: Vec<u8>`
+  (the backend `resize(max, 0)`s it, a no-op on a recycled full-fill buffer) and
+  `fill_once` round-trips it through a small capped pool
+  (`Scheduler::read_scratch` — a pool, not per-stream, so 10k idle sockets hold
+  no scratch). Steady state: zero allocations/zeroing per read. Measured −12%
+  whole-process reading a 64 MiB file (interleaved A/B, release, 12 pairs;
+  profiling/read-buffer-recycle/notes.md). The "revisit IO_BUFFER_BYTES 32–64 KiB
+  for files" follow-up DISSOLVES: re-measured post-fix, bigger fills lose
+  outright (+13% at 32 KiB, +19% at 64 KiB) — the copy chain is cache-resident
+  at 16 KiB and not above, so the old 64 KiB cliff wasn't (only) the allocator.
+  16 KiB stays, files and sockets alike; doc on `IO_BUFFER_BYTES` updated.
 
 - [x] **Compile errors carry no line/column.** FIXED: `compile_program` returns
   `CompileError { message, span }`; the innermost `compile_node` frame claims a

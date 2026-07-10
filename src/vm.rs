@@ -768,6 +768,7 @@ impl<'gc> VmState<'gc> {
                 yielder: None,
                 tasks: Vec::new(),
                 ready: VecDeque::new(),
+                read_scratch: Vec::new(),
                 current_task: TaskId(0),
                 active_fiber: None,
                 current_fiber: None,
