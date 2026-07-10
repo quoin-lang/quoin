@@ -1262,14 +1262,64 @@ pub fn block_entry_for<'gc>(
     if vm.aot_refused_blocks.contains(&template_id) {
         return None;
     }
-    // Tiering: a once-invoked block would pay Cranelift more than it saves —
-    // compile only once a template proves warm. A combinator loop crosses the
-    // threshold in its first handful of elements.
+    warm_pending_block(vm, template_id, 1, Some(spec::kind_of(arg)))
+}
+
+/// The interpreted `BranchIfNotList` guard's routing question: should this
+/// fused `each:` site take the COLD path (the real send) instead of the
+/// interpreted splice? Yes exactly when the argument block compiled WITH a
+/// speculated scalar param — its body devirts, and the send path reaches it
+/// per element via `invoke_block`, beating the splice ~2x (measured,
+/// bench/micro). An Obj-param compiled block stays spliced: the send would
+/// only wrap the same per-element outcalls in dispatch + entry shell
+/// (measured +23% on maps). While the template is still pending, the guard
+/// FEEDS its tiering instead: the list's elements are the very args the send
+/// path would deliver, so warmth advances by the element count (one hot loop
+/// crosses the threshold at its first call) and the observation lattice
+/// merges the first element's kind (homogeneous lists dominate; a wrong
+/// sample only costs precondition Bails, never wrong answers). A refused or
+/// tombstoned template answers `false` forever — the splice remains the best
+/// available tier.
+pub fn fused_site_prefers_send<'gc>(
+    vm: &mut VmState<'gc>,
+    template_id: u32,
+    len: usize,
+    first: Option<Value<'gc>>,
+) -> bool {
+    let speculated = |entry: &AotEntry| {
+        entry.role == AotRole::BlockTemplate
+            && entry.param_preconditions.iter().any(|p| p.is_some())
+    };
+    if let Some(entry) = lookup(template_id) {
+        return speculated(entry);
+    }
+    if vm.aot_refused_blocks.contains(&template_id) {
+        return false;
+    }
+    let n = u32::try_from(len).unwrap_or(u32::MAX);
+    warm_pending_block(vm, template_id, n, first.map(spec::kind_of)).is_some_and(speculated)
+}
+
+/// Advance a pending block template's warmth/observation by `n` invocations
+/// (kind `Some(k)` merges into the argument lattice) and compile at the
+/// threshold; a refusal tombstones. Returns the entry once compiled.
+///
+/// Tiering rationale: a once-invoked block would pay Cranelift more than it
+/// saves — compile only once a template proves warm. A combinator loop
+/// crosses the threshold in its first handful of elements.
+fn warm_pending_block<'gc>(
+    vm: &mut VmState<'gc>,
+    template_id: u32,
+    n: u32,
+    kind: Option<u8>,
+) -> Option<&'static AotEntry> {
     let warm = warm_threshold();
     {
         let (count, arg_kind, _) = vm.aot_pending_blocks.get_mut(&template_id)?;
-        *count += 1;
-        *arg_kind = spec::merge(*arg_kind, spec::kind_of(arg));
+        *count = count.saturating_add(n);
+        if let Some(k) = kind {
+            *arg_kind = spec::merge(*arg_kind, k);
+        }
         if *count < warm {
             return None;
         }

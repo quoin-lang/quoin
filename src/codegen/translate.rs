@@ -1245,7 +1245,7 @@ impl<'a> Translator<'a> {
                 | Instruction::IfJump(o)
                 | Instruction::ElseJump(o)
                 | Instruction::BranchIfNotBool(o)
-                | Instruction::BranchIfNotList(o)
+                | Instruction::BranchIfNotList(o, _)
                 | Instruction::BranchIfNotPlainNew(o) => *o,
                 _ => continue,
             };
@@ -1555,7 +1555,7 @@ impl<'a> Translator<'a> {
                         self.tag_check(b, &fx, tag);
                         stack.push(AV::Dyn(recv_idx));
                     }
-                    Instruction::BranchIfNotList(_) => {
+                    Instruction::BranchIfNotList(..) => {
                         // The fused-`each:` guard (B1, docs/BLOCK_AOT_ARCH.md §3). A
                         // PROVEN native-List receiver takes the hot path
                         // unconditionally — no branch is emitted, so nothing ever
@@ -2590,7 +2590,7 @@ impl<'a> Translator<'a> {
             | Instruction::IfJump(o)
             | Instruction::ElseJump(o)
             | Instruction::BranchIfNotBool(o)
-            | Instruction::BranchIfNotList(o)
+            | Instruction::BranchIfNotList(o, _)
             | Instruction::BranchIfNotPlainNew(o) => {
                 *o < 0 && {
                     let target = (j as isize + *o) as usize;
@@ -2612,7 +2612,7 @@ impl<'a> Translator<'a> {
     fn in_guard_cold_span(insts: &[Instruction], ip: usize) -> bool {
         insts.iter().enumerate().any(|(j, inst)| match inst {
             Instruction::BranchIfNotBool(o)
-            | Instruction::BranchIfNotList(o)
+            | Instruction::BranchIfNotList(o, _)
             | Instruction::BranchIfNotPlainNew(o) => {
                 *o > 0 && {
                     let t = (j as isize + *o) as usize;

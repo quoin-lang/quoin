@@ -1020,7 +1020,20 @@ impl Compiler {
 
         hot.push(Instruction::Jump(cold.len() as isize + 1));
 
-        bytecode.push(Instruction::BranchIfNotList(hot.len() as isize + 1));
+        // The literal's template id (compiling the cold path just minted it) rides
+        // in the guard: at an INTERPRETED site the guard prefers the cold send once
+        // that template is compiled — the real `each:` reaches the compiled block
+        // per element, beating the interpreted splice — and feeds its warmth
+        // meanwhile. Compiled methods' translation ignores it (their in-frame
+        // fused loop is already optimal).
+        let block_tid = cold.bytecode.iter().find_map(|i| match i {
+            Instruction::Push(Constant::Block(rc)) => rc.template_id,
+            _ => None,
+        });
+        bytecode.push(Instruction::BranchIfNotList(
+            hot.len() as isize + 1,
+            block_tid,
+        ));
         bytecode.extend(hot);
         bytecode.extend(cold);
         Ok(true)

@@ -2477,7 +2477,7 @@ fn each_shapes(src: &str) -> (usize, usize) {
     fn collect(insts: &[Instruction], guards: &mut usize, blocks: &mut usize) {
         for i in insts {
             match i {
-                Instruction::BranchIfNotList(_) => *guards += 1,
+                Instruction::BranchIfNotList(..) => *guards += 1,
                 Instruction::Push(Constant::Block(b)) => {
                     *blocks += 1;
                     collect(&b.bytecode, guards, blocks);

@@ -514,7 +514,15 @@ pub enum Instruction {
     // `List#each:` primitive the loop implements. Anything else jumps to a cold path
     // performing the real `each:` send (a custom class's own `each:`, Set/Map/Generator,
     // or MNU — exact semantics), with the receiver left on the stack. Never pops.
-    BranchIfNotList(isize),
+    //
+    // The second field is the argument block's template id, when the literal minted one:
+    // the interpreted arm ALSO takes the cold path once that template is COMPILED —
+    // the real send reaches the compiled block per element (invoke_block), which beats
+    // the interpreted splice ~2x (measured: 53 vs 100 ns/element on `(x*3)+1`) — and
+    // the guard feeds the template's warmth/argument observation from the list so a
+    // splice-only program still tiers up. Compiled METHODS ignore the field: their
+    // translated in-frame fused loop is already optimal.
+    BranchIfNotList(isize, Option<u32>),
     /// Strict-Boolean loop condition (BUGS.md Finding 14). Peeks the stack
     /// top (a `whileDo:` condition value) WITHOUT popping: a `Bool` falls
     /// through to the loop's `ElseJump`; anything else raises

@@ -6010,20 +6010,37 @@ impl<'gc> VmState<'gc> {
                     });
                 }
             },
-            Instruction::BranchIfNotList(offset) => {
+            Instruction::BranchIfNotList(offset, block_tid) => {
                 let offset = *offset;
+                let block_tid = *block_tid;
                 // Peek the `each:` receiver (do not pop): a native List falls through to
                 // the fused index loop (which consumes it); anything else takes the cold
                 // path (the real `each:` send), which needs it on the stack. One downcast
                 // per each: CALL, not per element.
-                let is_list = self
-                    .stack
-                    .last()
-                    .is_some_and(|v| v.with_native_state::<NativeListState, _, _>(|_| ()).is_ok());
-                if is_list {
-                    ip += 1;
-                } else {
-                    ip = (ip as isize + offset) as usize;
+                let list_probe = self.stack.last().and_then(|v| {
+                    v.with_native_state::<NativeListState, _, _>(|l| {
+                        let v = l.get_vec();
+                        (v.len(), v.first().copied())
+                    })
+                    .ok()
+                });
+                match list_probe {
+                    None => ip = (ip as isize + offset) as usize,
+                    Some((len, first)) => {
+                        // A COMPILED argument block flips the choice: the cold path's
+                        // real send reaches it per element (invoke_block), beating the
+                        // interpreted splice ~2x. The guard also feeds the template's
+                        // warmth (by element count) and its argument observation (the
+                        // elements ARE the args), so splice-only programs tier up.
+                        if let Some(tid) = block_tid
+                            && crate::tuning::aot_enabled()
+                            && crate::codegen::fused_site_prefers_send(self, tid, len, first)
+                        {
+                            ip = (ip as isize + offset) as usize;
+                        } else {
+                            ip += 1;
+                        }
+                    }
                 }
             }
             Instruction::BranchIfNotPlainNew(offset) => {

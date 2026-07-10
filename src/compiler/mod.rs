@@ -141,7 +141,7 @@ fn jump_offset(inst: &Instruction) -> Option<isize> {
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
         | Instruction::BranchIfNotBool(o)
-        | Instruction::BranchIfNotList(o)
+        | Instruction::BranchIfNotList(o, _)
         | Instruction::BranchIfNotPlainNew(o) => Some(*o),
         _ => None,
     }
@@ -153,7 +153,7 @@ fn set_jump_offset(inst: &mut Instruction, off: isize) {
         | Instruction::IfJump(o)
         | Instruction::ElseJump(o)
         | Instruction::BranchIfNotBool(o)
-        | Instruction::BranchIfNotList(o)
+        | Instruction::BranchIfNotList(o, _)
         | Instruction::BranchIfNotPlainNew(o) => *o = off,
         _ => {}
     }
