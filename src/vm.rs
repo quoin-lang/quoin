@@ -6133,11 +6133,13 @@ impl<'gc> VmState<'gc> {
                         .ok_or_else(|| format!("Parent class {} not found", p_name))?;
                     if let Value::Class(parent_class) = val {
                         if parent_class.borrow().is_sealed {
-                            return Err(format!(
+                            // A typed ClassError, matching the sealed-EXTENSION error above
+                            // (ensure_extensible): `catch:{|e:Error|}` must see both. It was
+                            // a bare String throw — the F12 family (RELEASE_PREP Tier 4b).
+                            return Err(QuoinError::ClassError(format!(
                                 "Cannot subclass sealed class {}",
                                 parent_class.borrow().name.to_explicit_string()
-                            )
-                            .into());
+                            )));
                         }
                         Some(parent_class)
                     } else {

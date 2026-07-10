@@ -25,6 +25,14 @@
     };
 
     .test:
+    subclassingSealedThrowsTyped -> {
+        "* Subclassing a sealed class raises the same typed ClassError extension does
+        "* (it was a bare String throw, invisible to catch:{|e:Error|}).
+        .does:{ Integer <- TSCNCSub <- {} } throw:ClassError;
+        .does:{ Integer <- TSCNCSub <- {} } throw:#/Cannot subclass sealed/;
+    };
+
+    .test:
     operatorExtendReturnsLHS -> {
         .is:{ TSCNC1 <-- {} } equalTo:TSCNC1;
         "* An empty extension mutates nothing, so it returns the LHS even for a sealed type.
