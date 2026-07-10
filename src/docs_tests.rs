@@ -78,3 +78,47 @@ fn summary_is_the_first_line() {
     );
     assert_eq!(summary(""), "");
 }
+
+use super::method_doc_above;
+
+/// `qn fmt` wraps a long definition after `->`, putting the block literal — whose location
+/// introspection reports — a line below the selector. The doc block sits above the selector.
+const WRAPPED: &str = r#"X <- {
+    "* Docs for the long one.
+    aVeryLong:selector:with:many:parts: ->
+    { |a b c d e|
+        a
+    };
+
+    plain -> { 1 }
+}
+"#;
+
+#[test]
+fn a_wrapped_header_anchors_on_its_selector_line() {
+    // The block literal is line 4; the selector is line 3; the doc is line 2.
+    assert_eq!(
+        method_doc_above(WRAPPED, 4, "aVeryLong:selector:with:many:parts:").as_deref(),
+        Some("Docs for the long one.")
+    );
+}
+
+#[test]
+fn an_unwrapped_header_behaves_exactly_like_doc_above() {
+    // `plain -> { 1 }` is line 8, block on the same line; line 7 is blank -> no doc.
+    assert_eq!(method_doc_above(WRAPPED, 8, "plain"), None);
+    // And a documented single-line header still attaches (Point fixture from above).
+    assert_eq!(
+        method_doc_above(SRC, 9, "negated").as_deref(),
+        Some("The point mirrored through the origin.")
+    );
+}
+
+#[test]
+fn the_header_scan_requires_the_arrow_signature() {
+    // A line that merely *mentions* the selector (no `->`) is not a header: from the block
+    // line of `plain`, scanning up must not treat `a` (line 5, body code) as an anchor for
+    // selector "a" — the arrow requirement rejects it, and the blank line above `plain`
+    // means no doc either way.
+    assert_eq!(method_doc_above(WRAPPED, 8, "a"), None);
+}

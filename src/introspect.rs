@@ -244,7 +244,7 @@ pub fn doc_of_method<'gc>(
             .get_block_from_method(method_val)
             .and_then(|b| b.template.source_info.clone())
             && let Some(text) = crate::docs::unit_source(&si.filename)
-            && let Some(doc) = crate::docs::doc_above(&text, si.line)
+            && let Some(doc) = crate::docs::method_doc_above(&text, si.line, selector)
         {
             return Some(doc);
         }

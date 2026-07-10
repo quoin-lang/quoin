@@ -45,6 +45,42 @@ pub fn doc_above(source: &str, line: usize) -> Option<String> {
     Some(block.join("\n"))
 }
 
+/// The doc block for the *method* whose block literal starts at 1-based `line`. Like
+/// [`doc_above`], but resilient to a wrapped header: `qn fmt` breaks a long definition after
+/// `->`, so the block literal — whose location is what introspection reports — starts a line
+/// or more below the selector, and the doc block sits above the *selector*. A method header
+/// line is unmistakable (the selector followed by `->`/`-->`), so when the reported line is
+/// not a header, scan a short window upward for it and anchor there.
+pub fn method_doc_above(source: &str, line: usize, selector: &str) -> Option<String> {
+    /// How far a wrapped header can put the block below its selector. Two covers today's
+    /// formatter (selector line + param line); the slack is for a future param-list wrap.
+    const WRAP_WINDOW: usize = 8;
+
+    let lines: Vec<&str> = source.lines().collect();
+    let reported = line.checked_sub(1)?; // 0-based
+    let is_header = |i: usize| {
+        lines.get(i).is_some_and(|l| {
+            l.trim_start().strip_prefix(selector).is_some_and(|rest| {
+                // `-->` also passes the `->` prefix test, covering both arrow forms.
+                rest.trim_start().starts_with("->")
+            })
+        })
+    };
+    if is_header(reported) {
+        return doc_above(source, line);
+    }
+    for back in 1..=WRAP_WINDOW {
+        let Some(i) = reported.checked_sub(back) else {
+            break;
+        };
+        if is_header(i) {
+            return doc_above(source, i + 1);
+        }
+    }
+    // No header found (a runtime-built or unconventional definition): the old behavior.
+    doc_above(source, line)
+}
+
 /// The first line of a doc — the summary shown in selector lists.
 pub fn summary(doc: &str) -> &str {
     doc.lines().next().unwrap_or("")

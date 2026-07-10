@@ -155,11 +155,16 @@ fn write_out(path: &Path, text: &str) {
 /// read once each (`cache`), through the same resolution `$doc` will use.
 fn build_model(infos: Vec<ClassInfo>) -> DocModel {
     let mut cache: HashMap<String, Option<String>> = HashMap::new();
-    let mut doc_at = |file: &str, line: usize| -> Option<String> {
+    // `selector: Some(..)` routes through the wrapped-header-aware anchor (docs.rs); class and
+    // extension sites anchor on their own line.
+    let mut doc_at = |file: &str, line: usize, selector: Option<&str>| -> Option<String> {
         let text = cache
             .entry(file.to_string())
             .or_insert_with(|| docs::unit_source(file));
-        text.as_deref().and_then(|t| docs::doc_above(t, line))
+        text.as_deref().and_then(|t| match selector {
+            Some(sel) => docs::method_doc_above(t, line, sel),
+            None => docs::doc_above(t, line),
+        })
     };
 
     let classes = infos
@@ -174,7 +179,7 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
                 .filter_map(|src| {
                     Some(ExtensionDoc {
                         source: format!("{}:{}", src.file, src.line),
-                        doc: doc_at(&src.file, src.line)?,
+                        doc: doc_at(&src.file, src.line, None)?,
                     })
                 })
                 .collect();
@@ -183,7 +188,7 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
                 .clone()
                 .or_else(|| {
                     let src = info.source.as_ref()?;
-                    doc_at(&src.file, src.line)
+                    doc_at(&src.file, src.line, None)
                 })
                 .or_else(|| (!ext_docs.is_empty()).then(|| ext_docs.remove(0).doc));
             let mut methods = |list: &[MethodInfo]| -> Vec<MethodDoc> {
@@ -195,7 +200,7 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
                         let native_doc = m.variants.iter().find_map(|v| v.doc.clone());
                         let quoin_doc = m.variants.iter().find_map(|v| {
                             let src = v.source.as_ref()?;
-                            doc_at(&src.file, src.line)
+                            doc_at(&src.file, src.line, Some(&m.selector))
                         });
                         let source = m
                             .variants
