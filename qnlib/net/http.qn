@@ -36,6 +36,8 @@ Error <- [HTTP]BodyTooLarge <- {};
                   @maxBytes |
     .mix:Iterate;
 
+    "* Internal: populate the slots — bodies are built through the of:/over: class-side
+    "* constructors, not new: directly.
     init: -> { |bytes stream framing length mediaType encoding meta ownsStream maxBytes|
         @bytes = bytes;
         @stream = stream;
@@ -49,10 +51,14 @@ Error <- [HTTP]BodyTooLarge <- {};
     };
 
     .meta <-- {
-        "* 'application/json; charset=utf-8' -> 'application/json'
+        "* The lowercased media type of a Content-Type header value, or nil for nil.
+        "* ```
+        "* [HTTP]Body.mediaTypeOf:'application/json; charset=utf-8'   "* -> application/json
+        "* ```
         mediaTypeOf: -> { |ct| ^ct.defined?.if:{ ((ct.splitString:';').at:0).lower } else:{ nil } };
 
-        "* bytes-backed (request bodies, already-materialized responses)
+        "* A bytes-backed body over `b`, declaring a Content-Type and a Content-Encoding
+        "* (request bodies, already-materialized responses).
         of:contentType:encoding: -> { |b ct enc|
             ^[HTTP]Body.new:{
                 var bytes = b;
@@ -61,7 +67,12 @@ Error <- [HTTP]BodyTooLarge <- {};
                 var meta = #{}
             }
         };
+        "* A bytes-backed body over `bytes`, declaring its Content-Type.
         of:contentType: -> { |bytes ct| ^[HTTP]Body.of:bytes contentType:ct encoding:nil };
+        "* A bytes-backed body over `bytes` with no declared content type.
+        "* ```
+        "* ([HTTP]Body.of:('hi'.asBytes)).text   "* -> hi
+        "* ```
         of: -> { |bytes| ^[HTTP]Body.of:bytes contentType:nil encoding:nil };
 
         "* A single streamed chunk: bytes-backed, carrying its per-chunk metadata (chunk
@@ -92,11 +103,17 @@ Error <- [HTTP]BodyTooLarge <- {};
         }
     };
 
+    "* The lowercased media type from Content-Type (e.g. 'application/json'), or nil when
+    "* none was declared.
     mediaType -> { @mediaType };
+    "* The Content-Encoding as received ('gzip', 'zstd', 'deflate'), or nil — bytes/text/json
+    "* decode it transparently on drain.
     encoding -> { @encoding };
+    "* Whether the declared media type mentions JSON.
     json? -> { @mediaType.defined? && (@mediaType.contains?:'json') };
     "* Per-entity metadata: a Map of chunk extensions for a streamed chunk, empty otherwise.
     meta -> { @meta };
+    "* One chunk-extension value from .meta by name, or nil.
     meta: -> { |name| @meta.at:name };
 
     "* Internal: the wire-framing generator — a lazy Generator yielding the *raw* (still
@@ -203,6 +220,7 @@ Error <- [HTTP]BodyTooLarge <- {};
         ^(.rawChunks)
     };
 
+    "* Iterate the body chunk by chunk — sugar for (.chunks).each: (see chunks).
     each: -> { |consumer| (.chunks).each:consumer };
 
     "* Drain the whole body: read every chunk, decode any Content-Encoding, close the
@@ -220,14 +238,21 @@ Error <- [HTTP]BodyTooLarge <- {};
     "* Whether the body is already materialized (bytes-backed, or fully drained) —
     "* i.e. reading it costs nothing and touches no stream.
     drained? -> { @bytes.defined? };
-    text -> { ^(.bytes).asStringLossy };  "* UTF-8; charset-aware decoding is a follow-up
-    json -> { ^JSON.parse:(.text) };  "* parse-regardless; throws a catchable ParseError
+    "* Drain the whole body and read it as text — UTF-8, lossily (invalid sequences become
+    "* U+FFFD; charset-aware decoding is a follow-up).
+    text -> { ^(.bytes).asStringLossy };
+    "* Drain the whole body and parse it as JSON — regardless of declared media type; bad
+    "* input throws a catchable ParseError.
+    json -> { ^JSON.parse:(.text) };
+    "* The body's size in bytes (drains a streamed body to count it).
     size -> { ^(.bytes).count };
+    "* Whether the drained body is zero bytes.
     empty? -> { ^((.bytes).count == 0) };
 
     "* Close the underlying stream without draining (abandon a streamed response early).
     close -> { @stream.defined?.if:{ @stream.close; @stream = nil }; self };
 
+    "* Human rendering: the backing ('N bytes' or 'stream') and the media type.
     s -> {
         var sz = @bytes.defined?.if:{ @bytes.count + ' bytes' } else:{ 'stream' };
         var ext = @mediaType.defined?.if:{ ', ' + @mediaType } else:{ '' };
@@ -238,6 +263,7 @@ Error <- [HTTP]BodyTooLarge <- {};
 "* An HTTP response: status line, headers (a list of #(name value) pairs, order- and
 "* duplicate-preserving), and the body as an [HTTP]Body.
 [HTTP]Response <- { | @status @reason @headers @body |
+    "* Internal: populate the four slots (internalSend builds responses).
     init: -> { |status reason headers body|
         @status = status;
         @reason = reason;
@@ -267,14 +293,21 @@ Error <- [HTTP]BodyTooLarge <- {};
         }
     };
 
+    "* The numeric status code (e.g. 200).
     status -> { @status };
+    "* The reason phrase from the status line (e.g. 'OK'); display-only.
     reason -> { @reason };
+    "* Whether the status is 2xx.
     ok? -> { (@status >= 200) && (@status < 300) };
+    "* All headers as a #(name value) pair list, in wire order, duplicates preserved.
     headers -> { @headers };
+    "* Case-insensitive lookup: the first header named `name`, or nil.
     header: -> { |name| [HTTP]Response.find:@headers named:name };
+    "* The Location header (a redirect's target), or nil.
     location -> { .header:'location' };
     "* A redirect we could follow: a 3xx status carrying a Location header.
     redirect? -> { (@status >= 300) && (@status < 400) && ((.header:'location').defined?) };
+    "* The body as an [HTTP]Body — stream-backed until drained (.text / .json / .bytes).
     body -> { @body }
 };
 
@@ -282,6 +315,8 @@ Error <- [HTTP]BodyTooLarge <- {};
 "* a library reaches for this to set a custom verb, headers, body, or `insecure:`.
 "* The setters return self so calls can be threaded.
 [HTTP]Request <- { | @method @url @headers @body @insecure @followRedirects @maxRedirects |
+    "* Internal: builder defaults — GET, no headers or body, TLS verified, redirects
+    "* followed up to 10.
     init: -> { |url|
         @method = 'GET';
         @url = url;
@@ -295,6 +330,10 @@ Error <- [HTTP]BodyTooLarge <- {};
     .meta <-- {
         "* Parse 'scheme://host[:port]/path' into #( scheme host port path ). Port
         "* defaults by scheme; path defaults to '/'. Query (if any) rides in `path`.
+        "* ```
+        "* [HTTP]Request.parseUrl:'https://example.org/docs/intro?lang=qn'
+        "* "* -> #(https example.org 443 /docs/intro?lang=qn)
+        "* ```
         parseUrl: -> { |url|
             var afterScheme = url.splitString:'://';
             var scheme = afterScheme.at:0;
@@ -312,6 +351,10 @@ Error <- [HTTP]BodyTooLarge <- {};
         "* Resolve a Location header against the request URL: an absolute URL is used as-is;
         "* '/path' is root-relative to the base's scheme://host:port; anything else is relative
         "* to the base path's directory.
+        "* ```
+        "* [HTTP]Request.resolveLocation:'/login' against:'https://example.org/a/b'
+        "* "* -> https://example.org:443/login
+        "* ```
         resolveLocation:against: -> { |loc base|
             ((loc.starts?:'http://') || (loc.starts?:'https://')).if:{ ^^loc };
             var parts = [HTTP]Request.parseUrl:base;
@@ -326,11 +369,17 @@ Error <- [HTTP]BodyTooLarge <- {};
         }
     };
 
+    "* Set the request verb (e.g. 'PUT'); returns self.
     method: -> { |m| @method = m; self };
+    "* Append one request header pair; returns self.
     header:value: -> { |name val| @headers.add:#( name val ); self };
+    "* Replace the header list with `pairs` — #(name value) each; returns self.
     headers: -> { |pairs| @headers = pairs; self };
+    "* Skip TLS certificate verification (self-signed test hosts); returns self.
     insecure: -> { |flag| @insecure = flag; self };
+    "* Whether send follows 3xx redirects (default true); returns self.
     followRedirects: -> { |flag| @followRedirects = flag; self };
+    "* Cap the redirects send will follow before throwing (default 10); returns self.
     maxRedirects: -> { |n| @maxRedirects = n; self };
 
     "* Set the body, normalizing a shortcut into an [HTTP]Body: a Map/List is JSON-encoded
@@ -507,12 +556,37 @@ Error <- [HTTP]BodyTooLarge <- {};
 "* of this class without disturbing these.
 [HTTP]Client <- {
     .meta <-- {
+        "* A fresh [HTTP]Request builder for `url` — the escape hatch for custom verbs,
+        "* headers, a body, insecure:, or redirect settings; finish the chain with .send.
+        "* ```
+        "* resp = (([HTTP]Client.request:'https://example.org/x').method:'DELETE').send
+        "* ```
         request: -> { |url| ^[HTTP]Request.new:{ url = url } };
 
+        "* GET `url` and return the [HTTP]Response; redirects are followed. The body
+        "* arrives stream-backed — read it with .body.text / .json / .bytes, or stream
+        "* it with .body.chunks.
+        "* ```
+        "* use std:net/http;
+        "* var resp = [HTTP]Client.get:'https://example.org/';
+        "* resp.status;         "* e.g. 200
+        "* resp.body.text       "* the whole body as a String
+        "* ```
         get: -> { |url| ^(.request:url).send };
+        "* GET with extra request headers — #(name value) pairs.
+        "* ```
+        "* [HTTP]Client.get:url headers:#( #('Accept' 'application/json') )
+        "* ```
         get:headers: -> { |url headers| ^((.request:url).headers:headers).send };
 
+        "* POST `body` to `url`. The body normalizes as [HTTP]Request body: does — a Map
+        "* or List is JSON-encoded (Content-Type application/json), a String sends as its
+        "* UTF-8 bytes, Bytes goes as-is, an [HTTP]Body is used unchanged.
+        "* ```
+        "* resp = [HTTP]Client.post:'https://api.example.org/users' body:#{ 'name':'Quoin' }
+        "* ```
         post:body: -> { |url body| ^(((.request:url).method:'POST').body:body).send };
+        "* POST with extra request headers — #(name value) pairs.
         post:body:headers: -> { |url body headers|
             ^((((.request:url).method:'POST').body:body).headers:headers).send
         }

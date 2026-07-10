@@ -341,21 +341,52 @@ impl AnyCollect for NativeMapState {
 pub fn build_map_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Map", Some("Object"))
         .construct_with("use #{ … } literals")
+        .class_doc(
+            "The insertion-ordered dictionary, written `#{'a': 1 'b': 2}`. Any value can be a \
+             key, and iteration, printing, and serialization keep the order entries were added \
+             — a parse → generate round-trip doesn't reshuffle a document.\n\nScalars, strings, \
+             and other content values key by value; a user instance keys by identity unless \
+             its class overrides both `hash` and `==:` (its `hash` runs once, at insert); the \
+             mutable built-in collections key by identity. Reading an absent key answers nil. \
+             A map with a checked value type comes from `Map.of:` / `ensure:`.",
+        )
         //
         .instance_method("containsKey?:", |vm, mc, receiver, args| {
             let (_, found) = map_find(vm, mc, receiver, args[0])?;
             Ok(vm.new_bool(mc, found.is_some()))
         })
         .returns("Boolean")
+        .doc(
+            "True when the key is present — the way to tell a stored nil from an absent key \
+             (`at:` answers nil for both).\n\n\
+             ```\n\
+             #{'a': 1}.containsKey?:'a'     \"* -> true\n\
+             ```",
+        )
         .instance_method("at:", |vm, mc, receiver, args| {
             let value = map_get_any(vm, mc, receiver, args[0])?;
             Ok(value.unwrap_or_else(|| vm.new_nil(mc)))
         })
         .returns("V?") // value-typed read on a Map(String V) receiver
+        .doc(
+            "The value stored under a key, or nil when the key is absent (use `containsKey?:` \
+             to tell the two apart).\n\n\
+             ```\n\
+             #{'a': 1 'b': 2}.at:'a'     \"* -> 1\n\
+             ```",
+        )
         .instance_method("at:put:", |vm, mc, receiver, args| {
             map_put_any(vm, mc, receiver, args[0], args[1])?;
             Ok(receiver)
         })
+        .doc(
+            "Store a value under a key — replacing what an existing key holds, appending a new \
+             entry (last in iteration order) otherwise. Answers the receiver. On a tagged map \
+             (`Map.of:`) the value is checked first.\n\n\
+             ```\n\
+             #{'a': 1}.at:'b' put:2     \"* -> #{'a': 1 'b': 2}\n\
+             ```",
+        )
         .instance_method("remove:", |vm, mc, receiver, args| {
             let (_, found) = map_find(vm, mc, receiver, args[0])?;
             match found {
@@ -365,11 +396,19 @@ pub fn build_map_class() -> NativeClassBuilder {
                 None => Ok(vm.new_nil(mc)),
             }
         })
+        .doc(
+            "Remove a key's entry, answering the removed value — or nil (removing nothing) \
+             when the key is absent. The remaining entries keep their order.\n\n\
+             ```\n\
+             #{'a': 1 'b': 2}.remove:'a'     \"* -> 1\n\
+             ```",
+        )
         // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6): the VALUE type
         // is generic (`Map(String V)`). ---
         .class_method("new", |vm, mc, _receiver, _args| {
             Ok(vm.new_map(mc, IndexMap::new()))
         })
+        .doc("A fresh empty map — the same value the `#{}` literal builds.")
         // `Map.new:` — a config block on a native map is meaningless; refuse
         // clearly instead of minting a payload-less shell (QUOIN_TODO.md).
         .class_method("new:", |_vm, _mc, _receiver, _args| {
@@ -378,6 +417,10 @@ pub fn build_map_class() -> NativeClassBuilder {
                     .to_string(),
             ))
         })
+        .doc(
+            "Always refused: a Map has no instance fields for a `new:` config block to set. \
+             Construct with `#{}`, `Map.new`, or `Map.of:`.",
+        )
         .class_method("of:", |vm, mc, _receiver, args| {
             let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
                 expected: "Class".to_string(),
@@ -388,6 +431,13 @@ pub fn build_map_class() -> NativeClassBuilder {
             let _ = v.with_native_state_mut::<NativeMapState, _, _>(mc, |m| m.elem = Some(tag));
             Ok(v)
         })
+        .doc(
+            "A fresh empty map tagged with a VALUE class: every later `at:put:` checks the \
+             value (keys stay unrestricted), raising a catchable TypeError on a mismatch.\n\n\
+             ```\n\
+             (Map.of:Integer).at:'n' put:1     \"* -> #{'n': 1}\n\
+             ```",
+        )
         .instance_method("ensure:", |vm, mc, receiver, args| {
             let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
                 expected: "Class".to_string(),
@@ -418,6 +468,11 @@ pub fn build_map_class() -> NativeClassBuilder {
             });
             Ok(v)
         })
+        .doc(
+            "Check every value against a class and answer a NEW map carrying that value tag; \
+             a non-matching value raises a catchable TypeError naming the offending key's \
+             class. The receiver itself stays untagged.",
+        )
         .instance_method("emptyLike", |vm, mc, receiver, _args| {
             let tag = receiver.with_native_state(|m: &NativeMapState| m.elem)?;
             let v = vm.new_map(mc, IndexMap::new());
@@ -427,6 +482,10 @@ pub fn build_map_class() -> NativeClassBuilder {
             Ok(v)
         })
         .returns("Map(String V)") // emptyLike: same shape, same tag, empty
+        .doc(
+            "A fresh empty map like the receiver — value tag included. The species hook the \
+             Iterate mixin uses, so transforms of a checked map stay checked.",
+        )
         .instance_method("elementType", |vm, mc, receiver, _args| {
             let tag = receiver.with_native_state(|m: &NativeMapState| m.elem)?;
             Ok(match tag {
@@ -434,6 +493,12 @@ pub fn build_map_class() -> NativeClassBuilder {
                 None => Value::Nil,
             })
         })
+        .doc(
+            "The checked VALUE type as a Symbol, or nil for an ordinary untagged map.\n\n\
+             ```\n\
+             (Map.of:Integer).elementType     \"* -> Integer\n\
+             ```",
+        )
         .instance_method("count", |vm, mc, receiver, _args| {
             Ok(vm.new_int(
                 mc,
@@ -441,18 +506,36 @@ pub fn build_map_class() -> NativeClassBuilder {
             ))
         })
         .returns("Integer")
+        .doc(
+            "The number of entries.\n\n\
+             ```\n\
+             #{'a': 1 'b': 2}.count     \"* -> 2\n\
+             ```",
+        )
         .instance_method("keys", |vm, mc, receiver, _args| {
             let keys_vec = receiver.with_native_state(|m: &NativeMapState| {
                 m.entries().iter().map(|(_, k, _)| *k).collect::<Vec<_>>()
             })?;
             Ok(vm.new_list(mc, keys_vec))
         })
+        .doc(
+            "The keys as a List, in insertion order.\n\n\
+             ```\n\
+             #{'a': 1 'b': 2}.keys     \"* -> #(a b)\n\
+             ```",
+        )
         .instance_method("values", |vm, mc, receiver, _args| {
             let values_vec = receiver.with_native_state(|m: &NativeMapState| {
                 m.entries().iter().map(|(_, _, v)| *v).collect::<Vec<_>>()
             })?;
             Ok(vm.new_list(mc, values_vec))
         })
+        .doc(
+            "The values as a List, in insertion order (index-aligned with `keys`).\n\n\
+             ```\n\
+             #{'a': 1 'b': 2}.values     \"* -> #(1 2)\n\
+             ```",
+        )
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_len = receiver.with_native_state::<NativeMapState, _, _>(|m| m.len());
             let rhs_len = args[0].with_native_state::<NativeMapState, _, _>(|m| m.len());
@@ -480,6 +563,14 @@ pub fn build_map_class() -> NativeClassBuilder {
             }
             Ok(vm.new_bool(mc, true))
         })
+        .doc(
+            "Entry-wise equality: true when the other value is a Map of the same size holding, \
+             for every key here, an `==` value there — insertion order does not matter. \
+             Anything that is not a Map answers false.\n\n\
+             ```\n\
+             #{'a': 1 'b': 2} == #{'b': 2 'a': 1}     \"* -> true\n\
+             ```",
+        )
 }
 
 #[derive(Debug)]
@@ -539,6 +630,11 @@ impl PrettyPrint for NativeKeyValuePairState {
 pub fn build_key_value_pair_class() -> NativeClassBuilder {
     NativeClassBuilder::new("KeyValuePair", Some("Object"))
         .construct_with("use KeyValuePair.new: (or Map iteration)")
+        .class_doc(
+            "One key/value entry — what a Map yields when iterated: `each:` hands its block a \
+             KeyValuePair per entry, read with `key` and `value`. Build one directly with \
+             `KeyValuePair.new:{ var key = …; var value = … }`.",
+        )
         .class_method("new:", |vm, mc, receiver, args| {
             if !matches!(receiver, Value::Class(_)) {
                 return Err(QuoinError::TypeError {
@@ -622,15 +718,34 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             Ok(Value::Object(obj))
         })
+        .doc(
+            "A pair from a config block that sets `key` and `value` variables; either one left \
+             unset reads as nil.\n\n\
+             ```\n\
+             KeyValuePair.new:{ var key = 'a'; var value = 1 }     \"* -> a:1\n\
+             ```",
+        )
         .instance_method("key", |_vm, _mc, receiver, _args| {
             let key = receiver.with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_key())?;
             Ok(key)
         })
+        .doc(
+            "The key half of the pair.\n\n\
+             ```\n\
+             (KeyValuePair.new:{ var key = 'a'; var value = 1 }).key     \"* -> a\n\
+             ```",
+        )
         .instance_method("value", |_vm, _mc, receiver, _args| {
             let value =
                 receiver.with_native_state(|kvp: &NativeKeyValuePairState| kvp.get_value())?;
             Ok(value)
         })
+        .doc(
+            "The value half of the pair.\n\n\
+             ```\n\
+             (KeyValuePair.new:{ var key = 'a'; var value = 1 }).value     \"* -> 1\n\
+             ```",
+        )
         .instance_method("s", |vm, mc, receiver, _args| {
             let key =
                 receiver.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
@@ -659,6 +774,12 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
 
             Ok(vm.new_string(mc, format!("{}:{}", key_s, val_s)))
         })
+        .doc(
+            "The display string `key:value`, each half through its own `.s`.\n\n\
+             ```\n\
+             (KeyValuePair.new:{ var key = 'a'; var value = 1 }).s     \"* -> a:1\n\
+             ```",
+        )
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_key =
                 receiver.with_native_state::<NativeKeyValuePairState, _, _>(|kvp| kvp.get_key())?;
@@ -688,4 +809,8 @@ pub fn build_key_value_pair_class() -> NativeClassBuilder {
             let vals_eq = vm.call_method(mc, lhs_val, "==:", vec![rhs_val])?.is_true();
             Ok(vm.new_bool(mc, vals_eq))
         })
+        .doc(
+            "True when the other value is a KeyValuePair whose key and value are both `==` to \
+             this pair's; anything else answers false.",
+        )
 }

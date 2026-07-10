@@ -93,6 +93,11 @@ pub fn parse_request_head(buf: &[u8]) -> Result<Option<ParsedRequestHead>, Strin
 pub fn build_http_parser_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[HTTP]Parser", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "Internal: the native HTTP/1.1 head parser under `[HTTP]Client` and \
+             `[HTTP]Server` (`use std:net/http`) — a thin wrapper over `httparse`. Programs \
+             normally use those classes, not this one.",
+        )
         // parseHead: bytes -> nil if the response head is not complete yet, else
         // #( statusInt reasonStr headLenInt headers ), where `headers` is a list of
         // #( nameStr valueStr ) pairs. The body begins at `headLenInt` in `bytes`.
@@ -122,6 +127,16 @@ pub fn build_http_parser_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "Parse an HTTP/1.1 *response* head from Bytes: nil while the head is incomplete \
+             (read more and retry), else `#( status reason headLen headers )` where `headers` \
+             is an order- and duplicate-preserving List of `#( name value )` pairs and the \
+             body begins at byte `headLen`. Malformed input throws a ParseError.\n\n\
+             ```\n\
+             [HTTP]Parser.parseHead:'HTTP/1.1 200 OK\\r\\nContent-Length: 5\\r\\n\\r\\nhello'.asBytes\n\
+             \"* -> #(200 OK 38 #(#(Content-Length 5)))\n\
+             ```",
+        )
         // parseRequestHead: bytes -> nil if the request head is not complete yet, else
         // #( methodStr targetStr versionInt headers ), where `versionInt` is the
         // HTTP/1.x minor (0|1), `targetStr` is the raw request-target, and `headers`
@@ -153,6 +168,16 @@ pub fn build_http_parser_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "Parse an HTTP/1.1 *request* head from Bytes (the server-side mirror of \
+             `parseHead:`): nil while incomplete, else `#( method target version headers )` \
+             where `version` is the HTTP/1.x minor (0 or 1) and `target` is the raw \
+             request-target, undecoded.\n\n\
+             ```\n\
+             [HTTP]Parser.parseRequestHead:'GET /x HTTP/1.1\\r\\nHost: a\\r\\n\\r\\n'.asBytes\n\
+             \"* -> #(GET /x 1 #(#(Host a)))\n\
+             ```",
+        )
 }
 
 #[cfg(test)]

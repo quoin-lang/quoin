@@ -15,7 +15,12 @@ assumes a dark background), and whose classes + stylesheet the doc generator's f
 examples inline — one table, two consumers. Tests: `tests/doc_gen.rs`,
 `qnlib/tests/62-docs.qn`, `src/docs_tests.rs`. One §4 note: extraction is a line-based scan
 rather than `scan_comments` (a doc line is a whole-line `"*` comment and strings cannot span
-lines — recorded in `src/docs.rs`). Remaining: phase 3 (doctests), extension-manifest docs.*
+lines — recorded in `src/docs.rs`). Known extraction gap, found documenting the stdlib: a
+selector long enough that `qn fmt` wraps its header gets a `SourceLoc` on the wrapped line, so
+no doc block can attach — one selector in the stdlib is affected
+(`[HTTP]Body .meta over:framing:…`, the 1 remaining miss at 99.9% coverage). Eigenclass
+methods (`true <-- {…}`) are invisible to `describe_class`, so their docs serve source readers
+only. Remaining: phase 3 (doctests), extension-manifest docs.*
 
 *The three forks are settled: comment docs over a `.doc:` authoring API, plain adjacency over
 a new doc sigil, HTML + JSON output. Companion to `docs/INTROSPECTION.md` (the read-only

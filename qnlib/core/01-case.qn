@@ -1,23 +1,79 @@
+"* A case/switch expression: match a subject against a series of conditions
+"* and answer the first matching arm's value.
+"*
+"* Built with `Object case:` - inside the case block, self is the Case, so
+"* arms read as bare `.when:cond do:...` sends. Conditions are compared with
+"* the match operator `~` (equality by default; e.g. a NumberRange matches
+"* containment), arms are tried in order, and the first match wins by
+"* throwing its result - so `default:` must come last: it throws
+"* unconditionally, and no arm written after it is ever tried. When nothing
+"* matches and there is no default:, the case answers nil.
+"*
+"* ```
+"* 7.case:{
+"*     .when:(1..5) do:{ 'low' };
+"*     .when:(5..10) do:{ 'high' };
+"*     .default:{ 'out' }
+"* }    "* -> high
+"* ```
 Case <- { |@subject|
     .meta <-- {
+        "* Run a case block against obj and answer the first matching arm's
+        "* result.
+        "*
+        "* The block is evaluated with obj as its argument and a fresh Case
+        "* as self; a matching arm throws its result, which is caught and
+        "* answered here. Prefer the `obj.case:{ ... }` form.
         for:with: -> { |obj block:Block|
             { block.value:obj withSelf:.new:{ var subject = obj } }.catch:{ |r| ^^r }
         }
     };
 
+    "* Bind the subject the arms will be matched against.
     init: -> { |subject| @subject = subject };
 
+    "* A match arm: when `cond ~ subject`, the block's value becomes the
+    "* case result (the block receives the subject).
+    "*
+    "* The result is delivered by throwing, so the first matching arm wins
+    "* and later arms are never evaluated.
+    "*
+    "* ```
+    "* 'q'.case:{ .when:'q' do:{ |c| c + '!' }; .default:{ 'no' } }    "* -> q!
+    "* ```
     when:do: -> { |cond block:Block|
         (cond ~ @subject).if:{ (block.value:@subject withSelf:@subject).throw }
     };
 
+    "* A match arm in value form: when `cond ~ subject`, the plain value
+    "* becomes the case result.
+    "*
+    "* The value expression is evaluated whether or not the arm matches (it
+    "* is an ordinary argument) - use the block form for effects or
+    "* expensive values.
+    "*
+    "* ```
+    "* 2.case:{ .when:1 do:'one'; .when:2 do:'two'; .default:'many' }    "* -> two
+    "* ```
     when:do: --> { |cond value:Object| (cond ~ @subject).if:{ value.throw } };
 
+    "* The catch-all arm: unconditionally answer the block's value. Must be
+    "* the last arm - it always matches, so no arm after it is tried.
     default: -> { |block:Block| block.value.throw };
 
+    "* The catch-all arm in value form: the plain value becomes the case
+    "* result.
     default: --> { |value:Object| value.throw }
 };
 
+"* Every object can open a case expression on itself.
 Object <-- {
+    "* Match self against the arms in the block: inside it, self is a Case
+    "* whose subject is this object; answers the first matching arm's result
+    "* (nil when nothing matches and no default: is given).
+    "*
+    "* ```
+    "* 3.case:{ .when:1 do:{ 'one' }; .when:3 do:{ 'three' }; .default:{ 'other' } }    "* -> three
+    "* ```
     case: -> { |block:Block| Case.for:self with:block }
 }

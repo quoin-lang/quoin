@@ -22,6 +22,10 @@ type Binding<'gc> = (Symbol, Value<'gc>);
 pub fn build_runtime_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Runtime", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "The running program's own runtime: command-line `arguments`, process `exit:`, \
+             and the `eval:` family for compiling and running Quoin source at runtime.",
+        )
         // `Runtime.exit:` / `Runtime.exit` — request process exit with a status code.
         // Uncatchable (like cancellation): the raising task unwinds through `finally`
         // blocks, and the `requested_exit` flag stops every other task at the driver,
@@ -31,19 +35,41 @@ pub fn build_runtime_class() -> NativeClassBuilder {
             vm.requested_exit = Some(code);
             Err(QuoinError::ExitRequested(code))
         })
+        .doc(
+            "Request process exit with the given status code. Uncatchable (like \
+             cancellation): the raising task unwinds through its `finally` blocks, every \
+             other task stops at the driver, and the process exits after normal teardown.",
+        )
         .class_method("exit", |vm, _mc, _receiver, _args| {
             vm.requested_exit = Some(0);
             Err(QuoinError::ExitRequested(0))
         })
+        .doc("As `exit:` with status 0.")
         .class_method("eval:", |vm, mc, _receiver, args| {
             let code = arg!(args, String, 0);
             eval_string(vm, mc, &code, "<string>", None, &[])
         })
+        .doc(
+            "Compile and run a String of Quoin source, answering its final value. A syntax \
+             error raises a catchable ParseError. Definitions land in the same global scope \
+             as the running program.\n\n\
+             ```\n\
+             Runtime.eval:'1 + 2'    \"* -> 3\n\
+             ```",
+        )
         .class_method("eval:self:", |vm, mc, _receiver, args| {
             let code = arg!(args, String, 0);
             let self_val = args[1];
             eval_string(vm, mc, &code, "<string>", Some(self_val), &[])
         })
+        .doc(
+            "As `eval:`, with `self` bound to the second argument inside the evaluated code \
+             -- `self` sends and `@ivars` resolve against it.\n\n\
+             ```\n\
+             A <- { |@x| init -> { @x = 7 } };\n\
+             Runtime.eval:'@x + 1' self:A.new    \"* -> 8\n\
+             ```",
+        )
         // eval:'expr' bindings:#{ 'x': 1 } — the map's entries are seeded as locals in the
         // eval'd frame, so the expression can reference them by name.
         .typed_class_method(
@@ -55,6 +81,13 @@ pub fn build_runtime_class() -> NativeClassBuilder {
                 eval_string(vm, mc, &code, "<string>", None, &bindings)
             },
         )
+        .doc(
+            "As `eval:`, with the Map's entries seeded as locals in the evaluated frame \
+             (String keys become the variable names).\n\n\
+             ```\n\
+             Runtime.eval:'x * 2' bindings:#{ 'x': 21 }    \"* -> 42\n\
+             ```",
+        )
         .class_method("arguments", |vm, mc, _receiver, _args| {
             let args_list = vm
                 .options
@@ -64,6 +97,10 @@ pub fn build_runtime_class() -> NativeClassBuilder {
                 .collect::<Vec<_>>();
             Ok(vm.new_list(mc, args_list))
         })
+        .doc(
+            "The program's command-line arguments (those after the script name), as a List \
+             of Strings.",
+        )
         .class_method("options", |vm, mc, _receiver, _args| {
             let mut map = IndexMap::new();
             let args_list = vm
@@ -77,9 +114,14 @@ pub fn build_runtime_class() -> NativeClassBuilder {
             map.insert("supports_color".to_string(), supports_color_val);
             Ok(vm.new_map(mc, map))
         })
+        .doc(
+            "The runtime's facts as a Map: 'arguments' (the command-line List) and \
+             'supports_color' (Boolean) today.",
+        )
         .class_method("supportsColor", |vm, mc, _receiver, _args| {
             Ok(vm.new_bool(mc, vm.options.supports_color))
         })
+        .doc("Whether standard output supports ANSI color, as detected at startup.")
 }
 
 /// Build a runnable top-level `Block` from a freshly compiled `StaticBlock`.

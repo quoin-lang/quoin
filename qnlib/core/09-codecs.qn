@@ -2,16 +2,40 @@
 "* (src/runtime/codecs.rs). Encoding is a really common operation, so the codecs are reachable
 "* directly off Bytes/String as well as via the static Base64/Hex classes.
 
+"* Encoding conveniences: any Bytes can render itself as base64 or hex text.
 Bytes <-- {
-    "* This Bytes encoded as a base64 / hex String.
+    "* This Bytes encoded as a base64 String.
+    "*
+    "* ```
+    "* 'hi'.asBytes.toBase64    "* -> aGk=
+    "* ```
     toBase64 -> { Base64.encode:self };
+    "* This Bytes encoded as a lowercase hex String, two digits per byte.
+    "*
+    "* ```
+    "* 'hi'.asBytes.toHex    "* -> 6869
+    "* ```
     toHex -> { Hex.encode:self }
 };
 
+"* Decoding (and base64-encoding) conveniences for Strings holding encoded data.
 String <-- {
-    "* Decode this String, read as base64 / hex, back to Bytes.
+    "* This String, read as base64, decoded back to Bytes.
+    "*
+    "* ```
+    "* 'aGk='.fromBase64.asString    "* -> hi
+    "* ```
     fromBase64 -> { Base64.decode:self };
+    "* This String, read as hex, decoded back to Bytes.
+    "*
+    "* ```
+    "* '6869'.fromHex.asString    "* -> hi
+    "* ```
     fromHex -> { Hex.decode:self };
-    "* Encode this String's UTF-8 bytes as a base64 String.
+    "* This String's UTF-8 bytes encoded as a base64 String.
+    "*
+    "* ```
+    "* 'hi'.toBase64    "* -> aGk=
+    "* ```
     toBase64 -> { Base64.encode:self.asBytes }
 }

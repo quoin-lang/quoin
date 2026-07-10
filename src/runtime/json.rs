@@ -172,6 +172,18 @@ fn number_to_value<'gc>(raw: &str, host: &dyn Host<'gc>) -> Result<Value<'gc>, Q
 pub fn build_json_class() -> NativeClassBuilder {
     NativeClassBuilder::new("JSON", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "Parse and generate JSON text.\n\n\
+             `parse:` maps JSON onto plain Quoin values — object → Map, array → List, plus \
+             String / Integer / Double / Boolean / nil — and `generate:` / `generatePretty:` \
+             go the other way. Numbers are never silently lossy: an integer past 64 bits \
+             parses as a BigInteger, and a decimal a Double cannot represent exactly parses \
+             as a BigDecimal.\n\n\
+             ```\n\
+             JSON.parse:'{\"a\": 1}'            \"* -> #{'a': 1}\n\
+             JSON.generate:#{'a': 1}          \"* -> '{\"a\":1}'\n\
+             ```",
+        )
         // JSON.parse:'…' → a Quoin value (Map/List/String/Integer/Double/Bool/Nil, with
         // BigInteger/BigDecimal for out-of-range numbers). Malformed input → ParseError.
         .sdk_typed_class_method("parse:", &["String"], |host, _r, args| {
@@ -180,6 +192,15 @@ pub fn build_json_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::ParseError(format!("JSON.parse:: {e}")))?;
             json_to_value(&json, host)
         })
+        .doc(
+            "Parse a JSON string into Quoin values: object → Map, array → List, and String / \
+             Integer / Double / Boolean / nil for the scalars (BigInteger / BigDecimal when a \
+             number won't fit exactly). Malformed input throws a ParseError.\n\n\
+             ```\n\
+             JSON.parse:'{\"a\": 1}'      \"* -> #{'a': 1}\n\
+             JSON.parse:'[1, 2, 3]'     \"* -> #(1 2 3)\n\
+             ```",
+        )
         // JSON.generate:value → a compact JSON string.
         .sdk_class_method("generate:", |host, _r, args| {
             let json = value_to_json(args[0])?;
@@ -187,6 +208,15 @@ pub fn build_json_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(format!("JSON.generate:: {e}")))?;
             Ok(host.new_string(s))
         })
+        .doc(
+            "Generate the compact (single-line) JSON string for a value. Maps, Lists, \
+             Strings, numbers (including BigInteger / BigDecimal, at full precision), \
+             Booleans, and nil serialize; Map keys must be Strings; Bytes and other types \
+             throw a TypeError (encode Bytes with Base64 first).\n\n\
+             ```\n\
+             JSON.generate:#{'a': 1 'b': #(1 2)}     \"* -> '{\"a\":1,\"b\":[1,2]}'\n\
+             ```",
+        )
         // JSON.generatePretty:value → an indented JSON string.
         .sdk_class_method("generatePretty:", |host, _r, args| {
             let json = value_to_json(args[0])?;
@@ -194,4 +224,11 @@ pub fn build_json_class() -> NativeClassBuilder {
                 .map_err(|e| QuoinError::Other(format!("JSON.generatePretty:: {e}")))?;
             Ok(host.new_string(s))
         })
+        .doc(
+            "Like `generate:`, but indented for human eyes (two spaces, one key per \
+             line).\n\n\
+             ```\n\
+             JSON.generatePretty:#{'a': 1}     \"* -> '{\\n  \"a\": 1\\n}'\n\
+             ```",
+        )
 }

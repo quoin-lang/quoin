@@ -1,8 +1,11 @@
 "* Conversions from the built-in Integer to the arbitrary-precision stdlib number types.
 "* (BigInteger / BigDecimal themselves are native — src/runtime/big_integer.rs,
 "* src/runtime/big_decimal.rs — registered before this loads.)
-
 Integer <-- {
     "* This Integer as an exact arbitrary-precision BigInteger.
+    "*
+    "* ```
+    "* 2.asBigInteger.pow:100    "* -> 1267650600228229401496703205376
+    "* ```
     asBigInteger -> { BigInteger.of:self }
 }

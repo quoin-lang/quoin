@@ -19,6 +19,15 @@ TDocPoint <-- {
     manhattan -> { @x.abs }
 };
 
+TDocBare <- {
+    x -> { 1 }
+};
+
+"* A reopen doc standing in for a missing class doc.
+TDocBare <-- {
+    y -> { 2 }
+};
+
 (TestSuite.new:{ var name = 'Docs' }).add:{
     .test:aClassAnswersItsDocBlock -> {
         .is:{ TDocPoint.doc } equalTo:'A haiku about docs.';
@@ -46,10 +55,15 @@ TDocPoint <-- {
         .isTrue:{ ([IO]Stdin.meta.docFor:#readLine).contains?:'without its terminator' }
     };
 
-    "* A native class with no .class_doc but a documented qnlib reopen answers with the
-    "* reopen's block ([IO]File's one-shot-writes commentary).
+    "* The class-doc precedence, last rung: no native .class_doc, no block above the
+    "* definition -> the block above the first documented reopen stands in. Hermetic
+    "* (TDocBare above) rather than pinned to stdlib doc state, which moves as docs are
+    "* added -- this test originally used [IO]File and broke the day it gained a
+    "* .class_doc, which by the higher rung correctly took precedence.
     .test:aReopenDocStandsInForAMissingClassDoc -> {
-        .isTrue:{ ([IO]File.doc).contains?:'One-shot writes' }
+        .is:{ TDocBare.doc } equalTo:'A reopen doc standing in for a missing class doc.';
+        "* ...and the first rung: a native .class_doc wins over any comment block.
+        .isTrue:{ ([IO]Stdin.doc).contains?:'standard input' }
     };
 
     .test:docForRejectsNonSelectors -> {

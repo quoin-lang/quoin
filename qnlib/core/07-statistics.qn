@@ -5,9 +5,13 @@
 "* Design decisions (sample vs population, interpolation, tie handling) are in
 "* docs/STDLIB_NUMBERS.md. Guards use `^^` (non-local return) since they sit inside `if:`/`else:`
 "* blocks; a plain `^` would only exit the block.
-
 Iterate <-- {
-    "* Arithmetic mean. Forces Double division so integer inputs don't truncate (#(1 2).mean -> 1.5).
+    "* Arithmetic mean. Forces Double division so integer inputs don't truncate.
+    "*
+    "* ```
+    "* #(1 2 3 4).mean    "* -> 2.5
+    "* #(1 2).mean        "* -> 1.5
+    "* ```
     mean -> {
         var n = .count;
         (n == 0).if:{ ^^nil };
@@ -16,6 +20,11 @@ Iterate <-- {
 
     "* Middle of the sorted data: the exact element for an odd count, the average of the two
     "* central elements (a Double) for an even count.
+    "*
+    "* ```
+    "* #(3 1 2).median      "* -> 2
+    "* #(1 2 3 4).median    "* -> 2.5
+    "* ```
     median -> {
         var sorted = .sort;
         var n = sorted.count;
@@ -43,13 +52,24 @@ Iterate <-- {
         ^((.sum:{ |x| (x - m) * (x - m) }) / n)
     };
 
-    "* Sample / population standard deviation: the sqrt of the corresponding variance.
+    "* Sample standard deviation: the sqrt of `variance` (n-1 denominator). nil for
+    "* fewer than two elements.
+    "*
+    "* ```
+    "* #(1 2 3 4).stddev    "* -> 1.2909944487358056
+    "* ```
     stddev -> {
         var v = .variance;
         v.defined?.else:{ ^^nil };
         ^v.sqrt
     };
 
+    "* Population standard deviation: the sqrt of `populationVariance` (n
+    "* denominator). nil if empty.
+    "*
+    "* ```
+    "* #(1 2 3 4).populationStddev    "* -> 1.118033988749895
+    "* ```
     populationStddev -> {
         var v = .populationVariance;
         v.defined?.else:{ ^^nil };
@@ -58,6 +78,10 @@ Iterate <-- {
 
     "* The p-th percentile (p in 0..100) by linear interpolation between the two closest ranks,
     "* so percentile:50 == median, percentile:0 == min, percentile:100 == max. nil if empty.
+    "*
+    "* ```
+    "* #(1 2 3 4).percentile:25    "* -> 1.75
+    "* ```
     percentile: -> { |p|
         ((p < 0) || (p > 100)).if:{ ValueError.throw:'percentile: expects p in 0..100' };
         var sorted = .sort;
@@ -74,11 +98,19 @@ Iterate <-- {
     };
 
     "* The single most frequent value; on a tie, the first one encountered. nil if empty.
+    "*
+    "* ```
+    "* #(1 2 2 3 3).mode    "* -> 2
+    "* ```
     mode -> { ^(.modes.first) };
 
     "* Every maximally-frequent value, in first-encountered order (a list; empty if no data).
     "* Use this when the data may be multimodal; `mode` is the single-value shortcut. Values are
     "* keyed by their string form, so == values (e.g. 1 and 1.0) are counted together.
+    "*
+    "* ```
+    "* #(1 2 2 3 3).modes    "* -> #(2 3)
+    "* ```
     modes -> {
         var freqs = #{};
         var order = #();

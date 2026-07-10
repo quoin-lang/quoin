@@ -16,6 +16,15 @@
 "* encoded %2F can never create a segment boundary. See docs/WEB_ARCH.md.
 "* ===========================================================================
 
+"* One compiled path pattern: static segments, ':name' (captures exactly one segment,
+"* percent-decoded), and a final '*name' (the — possibly empty — rest of the path).
+"* Trailing slashes normalize away (except root '/'); decoding happens per segment
+"* after splitting on '/', so an encoded %2F can never create a segment boundary.
+"* ```
+"* var r = [Web]Route.of:'/users/:id/files/*rest';
+"* r ~ '/users/7/files/a/b';       "* -> true (routes implement the ~ protocol)
+"* r.bind:'/users/7/files/a/b'     "* -> #{'id': '7' 'rest': 'a/b'}
+"* ```
 [Web]Route <- { | @pattern @segments @kinds |
     "* Compile `pattern` (via [Web]Route.of:). Each segment becomes a
     "* #( kindInt text ) pair: #(0 'users'), #(1 'id'), #(2 'rest').
@@ -55,6 +64,8 @@
     };
 
     .meta <-- {
+        "* Compile `pattern` into a route; a bad pattern (a non-final *splat, an empty
+        "* parameter name) throws ValueError.
         of: -> { |pattern| ^[Web]Route.new:{ pattern = pattern } };
 
         "* Path/pattern segments: split on '/', dropping the leading empty segment
@@ -76,6 +87,7 @@
         }
     };
 
+    "* The pattern string as given.
     pattern -> { @pattern };
     "* The specificity vector: one of 0 (static) / 1 (:param) / 2 (*splat) per segment.
     kinds -> { @kinds };
@@ -155,14 +167,17 @@
         ^true
     };
 
+    "* Internal: the compiled #( kind text ) segment pairs.
     segments -> { @segments };
 
+    "* Human rendering: the pattern.
     s -> { '[Web]Route(' + @pattern + ')' }
 };
 
 "* Per-verb route tables with most-specific-wins dispatch. The router is pure
 "* data + matching — the [Web]App (and anyone else) drives it.
 [Web]Router <- { | @tables |
+    "* Internal: an empty verb -> route-table map.
     init -> { @tables = #{} };
 
     "* Register `handler` for `verb` (e.g. 'GET') and `pattern`. A duplicate

@@ -31,6 +31,14 @@ impl AnyCollect for NativeRegexState {
 pub fn build_regex_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Regex", Some("Object"))
         .construct_with("use regex literals (#/…/)")
+        .class_doc(
+            "A compiled regular expression -- the type of `#/pattern/` literals. Match \
+             with `~`, split with `split:`, substitute via `String.replace:with:`. \
+             Patterns use Rust's regex syntax.\n\n\
+             ```\n\
+             #/ab+c/ ~ 'xabbbcy'     \"* -> true\n\
+             ```",
+        )
         .sdk_instance_method("==:", |host, receiver, args| {
             let lhs_pat =
                 receiver.with_native_state(|r: &NativeRegexState| r.regex.as_str().to_string())?;
@@ -41,6 +49,15 @@ pub fn build_regex_class() -> NativeClassBuilder {
                 Err(_) => Ok(host.new_bool(false)),
             }
         })
+        .doc(
+            "Whether the argument is a Regex with the identical pattern text -- \
+             equivalent regexes written differently are unequal. A non-Regex is simply \
+             unequal, never an error.\n\n\
+             ```\n\
+             #/a/ == #/a/     \"* -> true\n\
+             #/a/ == 'a'      \"* -> false\n\
+             ```",
+        )
         // `pattern ~ str` -> `Send(pattern, "~:", [str])`: true if the regex matches.
         // A non-String operand never matches (mirrors the old `native_match`).
         .sdk_instance_method("~:", |host, receiver, args| {
@@ -55,6 +72,14 @@ pub fn build_regex_class() -> NativeClassBuilder {
             })?;
             Ok(host.new_bool(matched))
         })
+        .doc(
+            "Whether the pattern matches anywhere in the String argument (`pattern ~ \
+             str`). A non-String argument never matches (false, not an error).\n\n\
+             ```\n\
+             #/\\d+/ ~ 'order 66'     \"* -> true\n\
+             #/ab+c/ ~ 'xyz'         \"* -> false\n\
+             ```",
+        )
         .sdk_instance_method("split:", |host, receiver, args| {
             let s = crate::arg!(args, String, 0);
             let parts: Vec<Value> = receiver.with_native_state(|r: &NativeRegexState| {
@@ -65,4 +90,11 @@ pub fn build_regex_class() -> NativeClassBuilder {
             })?;
             Ok(host.new_list(parts))
         })
+        .doc(
+            "The pieces of the String argument between matches of the pattern, as a List \
+             of Strings (the pattern-based counterpart of `String.splitString:`).\n\n\
+             ```\n\
+             #/,\\s*/.split:'a, b,c'     \"* -> #(a b c)\n\
+             ```",
+        )
 }

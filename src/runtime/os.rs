@@ -105,16 +105,33 @@ fn normalize(path: &str) -> String {
 pub fn build_os_path_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[OS]Path", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "Purely LEXICAL path manipulation over Strings. Nothing here touches the \
+             filesystem -- no stat, no symlink resolution, no requirement that a path \
+             exist -- which is what makes it safe on a path you are about to create. \
+             Filesystem access lives on `[IO]File` / `[IO]Folder`.",
+        )
         // `[OS]Path.join:'usr' join:'local'` — the repeated keyword folds into one List at
         // compile time (the `+` variadic form), so this is the same method as `join:`.
         .typed_class_method("join+:", &["List"], |vm, mc, _r, args| {
             join_list(vm, mc, &args, "[OS]Path.join:")
         })
+        .doc(
+            "The repeated-keyword form of `join:` -- `[OS]Path.join:'usr' join:'local'` \
+             folds into one List at compile time, so this is the same method.",
+        )
         // `[OS]Path.join:#('usr' 'local')` — the explicit List form.
         .typed_class_method("join:", &["List"], |vm, mc, _r, args| {
             join_list(vm, mc, &args, "[OS]Path.join:")
         })
         .returns("String")
+        .doc(
+            "Join a List of String segments, left to right. An absolute segment resets the \
+             result, matching every shell: `join:#('/a' '/b')` is /b.\n\n\
+             ```\n\
+             [OS]Path.join:#('usr' 'local' 'bin')    \"* -> usr/local/bin\n\
+             ```",
+        )
         // Everything up to the last separator. Total, never nil, following POSIX / Python /
         // Node: `.` for a bare name, and *idempotent at the root* (`dirname:'/'` is `/`), so the
         // walk-upward idiom `{ p != [OS]Path.dirname:p }.whileDo:{ … }` terminates.
@@ -128,6 +145,15 @@ pub fn build_os_path_class() -> NativeClassBuilder {
             })
         })
         .returns("String")
+        .doc(
+            "Everything up to the last separator. Total, never nil (following POSIX / \
+             Python / Node): '.' for a bare name, and idempotent at the root ('/' is its \
+             own dirname), so the walk-upward idiom `{ p != [OS]Path.dirname:p }.whileDo:` \
+             terminates.\n\n\
+             ```\n\
+             [OS]Path.dirname:'/a/b/c.txt'    \"* -> /a/b\n\
+             ```",
+        )
         // The final component; `''` where there is none (`/`, `.`, `..`, `''`). A trailing
         // separator is ignored, so `basename:'a/'` is `a`.
         .typed_class_method("basename:", &["String"], |vm, mc, _r, args| {
@@ -139,6 +165,13 @@ pub fn build_os_path_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, name))
         })
         .returns("String")
+        .doc(
+            "The final component; '' where there is none ('/', '.', '..', ''). A trailing \
+             separator is ignored, so `basename:'a/'` is a.\n\n\
+             ```\n\
+             [OS]Path.basename:'/a/b/c.txt'    \"* -> c.txt\n\
+             ```",
+        )
         // The extension *without* its dot (`report.tar.gz` -> `gz`), or `''` when there is none.
         // A dotfile has no extension: `.bashrc` is a name, so `extension:'.bashrc'` is `''`.
         .typed_class_method("extension:", &["String"], |vm, mc, _r, args| {
@@ -150,6 +183,13 @@ pub fn build_os_path_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, ext))
         })
         .returns("String")
+        .doc(
+            "The extension WITHOUT its dot, or '' when there is none. A dotfile has no \
+             extension: '.bashrc' is a name, so `extension:'.bashrc'` is ''.\n\n\
+             ```\n\
+             [OS]Path.extension:'report.tar.gz'    \"* -> gz\n\
+             ```",
+        )
         // The final component with its extension removed (`report.tar.gz` -> `report.tar`).
         .typed_class_method("stem:", &["String"], |vm, mc, _r, args| {
             let p = arg!(args, String, 0);
@@ -160,16 +200,38 @@ pub fn build_os_path_class() -> NativeClassBuilder {
             Ok(vm.new_string(mc, stem))
         })
         .returns("String")
+        .doc(
+            "The final component with its (last) extension removed.\n\n\
+             ```\n\
+             [OS]Path.stem:'report.tar.gz'    \"* -> report.tar\n\
+             ```",
+        )
         .typed_class_method("normalize:", &["String"], |vm, mc, _r, args| {
             let p = arg!(args, String, 0);
             Ok(vm.new_string(mc, normalize(&p)))
         })
         .returns("String")
+        .doc(
+            "Lexical normalization: collapse '.', resolve '..' against the preceding \
+             segment, squash repeated separators. Purely textual, so '..' past the root is \
+             dropped, a LEADING '..' on a relative path is kept (there is nothing to \
+             resolve it against without the filesystem), and a path that cancels to \
+             nothing -- or '' -- is '.'.\n\n\
+             ```\n\
+             [OS]Path.normalize:'a/./b/../c'    \"* -> a/c\n\
+             ```",
+        )
         .typed_class_method("absolute?:", &["String"], |vm, mc, _r, args| {
             let p = arg!(args, String, 0);
             Ok(vm.new_bool(mc, Path::new(&*p).is_absolute()))
         })
         .returns("Boolean")
+        .doc(
+            "Whether the path is absolute (starts at a root).\n\n\
+             ```\n\
+             [OS]Path.absolute?:'/tmp'    \"* -> true\n\
+             ```",
+        )
 }
 
 /// The environment as `(name, value)` pairs, sorted by name, skipping any entry whose name or
@@ -190,6 +252,13 @@ fn env_pairs() -> Vec<(String, String)> {
 pub fn build_os_env_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[OS]Env", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "READ-ONLY access to the process environment. Mutation is deliberately absent: \
+             the C environment is process-global state that other threads (workers, the \
+             blocking I/O pool) may be reading concurrently, so setting variables would be \
+             a soundness hazard. Listings are sorted by name, and entries that are not \
+             valid UTF-8 are skipped rather than mangled.",
+        )
         // The value of `name`, or `nil` when unset. An empty value is `''`, not `nil` — `FOO=`
         // is set. A name or value that is not valid UTF-8 reads as `nil`.
         .typed_class_method("at:", &["String"], |vm, mc, _r, args| {
@@ -202,12 +271,25 @@ pub fn build_os_env_class() -> NativeClassBuilder {
             )
         })
         .returns("String?")
+        .doc(
+            "The value of the variable, or nil when unset. An empty value is '', not nil \
+             -- 'FOO=' is set. A name or value that is not valid UTF-8 reads as nil.\n\n\
+             ```\n\
+             ([OS]Env.at:'PATH').defined?    \"* -> true\n\
+             ```",
+        )
         // Whether `name` is set at all, empty value included.
         .typed_class_method("contains?:", &["String"], |vm, mc, _r, args| {
             let name = arg!(args, String, 0);
             Ok(vm.new_bool(mc, std::env::var_os(&*name).is_some()))
         })
         .returns("Boolean")
+        .doc(
+            "Whether the variable is set at all, empty value included.\n\n\
+             ```\n\
+             [OS]Env.contains?:'PATH'    \"* -> true\n\
+             ```",
+        )
         // Every variable name, sorted.
         .class_method("keys", |vm, mc, _r, _args| {
             let names = env_pairs()
@@ -217,6 +299,7 @@ pub fn build_os_env_class() -> NativeClassBuilder {
             Ok(vm.new_list(mc, names))
         })
         .returns("List")
+        .doc("Every variable name, as a List of Strings sorted by name.")
         // The whole environment as a Map, sorted by name. This is also how you get the `Iterate`
         // combinators (`select:`, `collect:`, …) — a namespace class has no instances to mix into.
         .class_method("asMap", |vm, mc, _r, _args| {
@@ -228,6 +311,11 @@ pub fn build_os_env_class() -> NativeClassBuilder {
             Ok(vm.new_map(mc, map))
         })
         .returns("Map")
+        .doc(
+            "The whole environment as a Map, sorted by name -- and, via Map, the way to \
+             get the Iterate combinators (`select:`, `collect:`, ...) over the environment \
+             (a namespace class has no instances to mix into).",
+        )
 }
 
 #[cfg(test)]

@@ -39,6 +39,8 @@ Error <- [HTTP]HeadTooLarge <- {};
 "* (@params is an inert slot here: the [Web] router binds route params into it
 "* through the reopened params:/param: conveniences.)
 [HTTP]ServerRequest <- { | @method @target @version @headers @body @params |
+    "* Internal: normalize the head fields — nil headers become #(), a nil body an
+    "* empty bytes-backed one.
     init: -> { |method target version headers body|
         @method = method;
         @target = target;
@@ -47,15 +49,22 @@ Error <- [HTTP]HeadTooLarge <- {};
         @body = body.defined?.if:{ body } else:{ [HTTP]Body.of:(Bytes.empty) }
     };
 
+    "* The request verb as sent (e.g. 'GET').
     method -> { @method };
+    "* The raw request-target as sent, query included, still percent-encoded (decoding
+    "* is the [Web] layer's job — see path / query / params there).
     target -> { @target };
+    "* The HTTP/1.x minor version: 0 or 1.
     version -> { @version };
     "* Headers as a #(name value) pair list, order- and duplicate-preserving.
     headers -> { @headers };
     "* Case-insensitive lookup of the first header named `name`, or nil.
     header: -> { |name| [HTTP]Response.find:@headers named:name };
+    "* The body as an [HTTP]Body — stream-backed until read; a request without one
+    "* answers an empty body, never nil.
     body -> { @body };
 
+    "* Human rendering: verb and target.
     s -> { '[HTTP]ServerRequest(' + @method + ' ' + @target + ')' }
 };
 
@@ -65,6 +74,7 @@ Error <- [HTTP]HeadTooLarge <- {};
 "* The setters return self so calls can be threaded. The [Web] layer aliases and
 "* reopens this class with its builder conveniences.
 [HTTP]ServerResponse <- { | @status @headers @body |
+    "* Internal: defaults — status 200, empty headers, nil body.
     init: -> { |status headers body|
         @status = status.defined?.if:{ status } else:{ 200 };
         @headers = headers.defined?.if:{ headers } else:{ #() };
@@ -116,19 +126,28 @@ Error <- [HTTP]HeadTooLarge <- {};
         }
     };
 
+    "* The status code to be sent.
     status -> { @status };
+    "* The header #(name value) pairs added so far.
     headers -> { @headers };
+    "* The body as set: nil, Bytes, or a Generator (streamed as chunked output).
     body -> { @body };
 
+    "* Set the status code; returns self.
     status: -> { |code| @status = code; self };
+    "* Append one header pair; returns self.
     header:value: -> { |name val| @headers.add:#( name val ); self };
+    "* Append a Content-Type header; returns self.
     contentType: -> { |ct| .header:'Content-Type' value:ct };
+    "* Set the body — a String converts to its UTF-8 Bytes; Bytes or a Generator pass
+    "* through; returns self.
     body: -> { |b|
         (String ~ b).if:{ @body = b.asBytes; ^^self };
         @body = b;
         self
     };
 
+    "* Human rendering: the status code.
     s -> { '[HTTP]ServerResponse(' + @status.s + ')' }
 };
 
@@ -139,6 +158,8 @@ Error <- [HTTP]HeadTooLarge <- {};
 "* releases the port.
 [HTTP]Server <- { | @address @handler @maxHeadBytes @maxBodyBytes @headTimeoutMs
                     @idleTimeoutMs @maxConnections @listener @tasks @acceptTask |
+    "* Internal: apply the limit defaults and bind the listener — the port is held from
+    "* construction on, before start.
     init: -> { |address handler maxHeadBytes maxBodyBytes headTimeoutMs idleTimeoutMs
                 maxConnections|
         @address = address;

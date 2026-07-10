@@ -69,6 +69,15 @@ pub fn make_bigint<'gc>(host: &dyn Host<'gc>, n: BigInt) -> Value<'gc> {
 pub fn build_big_integer_class() -> NativeClassBuilder {
     let b = NativeClassBuilder::new("BigInteger", Some("Object"))
         .construct_with("use BigInteger.of:")
+        .class_doc(
+            "An arbitrary-precision integer. Construct explicitly with `BigInteger.of:` \
+             (a decimal String or an Integer); arithmetic never mixes silently -- a plain \
+             Integer operand is 'message not understood', so convert both sides first. \
+             Division truncates toward zero, like Integer.\n\n\
+             ```\n\
+             (BigInteger.of:2).pow:100     \"* -> 1267650600228229401496703205376\n\
+             ```",
+        )
         // BigInteger.of:'123456789012345678901234567890' — parse from a decimal string.
         .sdk_typed_class_method("of:", &["String"], |host, _r, args| {
             let s = arg!(args, String, 0);
@@ -80,6 +89,15 @@ pub fn build_big_integer_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "A BigInteger from a decimal String (any magnitude; raises a ValueError for a \
+             non-integer string) or from an Integer.\n\n\
+             ```\n\
+             BigInteger.of:'123456789012345678901234567890'     \"* -> \
+             123456789012345678901234567890\n\
+             BigInteger.of:42                                    \"* -> 42\n\
+             ```",
+        )
         // BigInteger.of:42 — from an Integer (also reached via `42.asBigInteger`).
         .sdk_typed_class_method("of:", &["Integer"], |host, _r, args| {
             Ok(make_bigint(host, BigInt::from(arg!(args, Int, 0))))
@@ -93,18 +111,26 @@ pub fn build_big_integer_class() -> NativeClassBuilder {
                 bigint_of(receiver, "+:")? + bigint_of(args[0], "+:")?,
             ))
         })
+        .doc(
+            "The sum of two BigIntegers, at any magnitude.\n\n\
+             ```\n\
+             (BigInteger.of:10) + (BigInteger.of:32)     \"* -> 42\n\
+             ```",
+        )
         .sdk_typed_instance_method("-:", &["BigInteger"], |host, receiver, args| {
             Ok(make_bigint(
                 host,
                 bigint_of(receiver, "-:")? - bigint_of(args[0], "-:")?,
             ))
         })
+        .doc("The difference of two BigIntegers.")
         .sdk_typed_instance_method("*:", &["BigInteger"], |host, receiver, args| {
             Ok(make_bigint(
                 host,
                 bigint_of(receiver, "*:")? * bigint_of(args[0], "*:")?,
             ))
         })
+        .doc("The product of two BigIntegers.")
         .sdk_typed_instance_method("/:", &["BigInteger"], |host, receiver, args| {
             let divisor = bigint_of(args[0], "/:")?;
             if divisor.is_zero() {
@@ -115,6 +141,13 @@ pub fn build_big_integer_class() -> NativeClassBuilder {
             // Truncates toward zero (Rust BigInt `/` semantics).
             Ok(make_bigint(host, bigint_of(receiver, "/:")? / divisor))
         })
+        .doc(
+            "The quotient of two BigIntegers, truncated toward zero (matching Integer \
+             `/`); raises an ArithmeticError on a zero divisor.\n\n\
+             ```\n\
+             (BigInteger.of:100) / (BigInteger.of:7)     \"* -> 14\n\
+             ```",
+        )
         .sdk_typed_instance_method("%:", &["BigInteger"], |host, receiver, args| {
             let divisor = bigint_of(args[0], "%:")?;
             if divisor.is_zero() {
@@ -124,10 +157,21 @@ pub fn build_big_integer_class() -> NativeClassBuilder {
             }
             Ok(make_bigint(host, bigint_of(receiver, "%:")? % divisor))
         })
+        .doc(
+            "The remainder after truncating division; takes the dividend's sign. Raises \
+             an ArithmeticError on a zero divisor.\n\n\
+             ```\n\
+             (BigInteger.of:100) % (BigInteger.of:7)     \"* -> 2\n\
+             ```",
+        )
         // Only `<:` is native; `>:`/`<=:`/`>=:` derive from it as shared Quoin on Object.
         .sdk_typed_instance_method("<:", &["BigInteger"], |host, receiver, args| {
             Ok(host.new_bool(bigint_of(receiver, "<:")? < bigint_of(args[0], "<:")?))
         })
+        .doc(
+            "Whether the receiver is less than the BigInteger argument. The one native \
+             comparison -- `>`, `<=` and `>=` derive from it.",
+        )
         // `==:` accepts any argument: a non-BigInteger is simply unequal (never an error).
         .sdk_instance_method("==:", |host, receiver, args| {
             let a = bigint_of(receiver, "==:")?;
@@ -136,10 +180,24 @@ pub fn build_big_integer_class() -> NativeClassBuilder {
                 Err(_) => false,
             };
             Ok(host.new_bool(eq))
-        });
+        })
+        .doc(
+            "Whether the argument is an equal BigInteger. Any other type is simply \
+             unequal, never an error -- including a plain Integer of the same value.\n\n\
+             ```\n\
+             (BigInteger.of:2) == (BigInteger.of:2)     \"* -> true\n\
+             (BigInteger.of:2) == 2                     \"* -> false\n\
+             ```",
+        );
     b.sdk_instance_method("abs", |host, receiver, _args| {
         Ok(make_bigint(host, bigint_of(receiver, "abs")?.abs()))
     })
+    .doc(
+        "The absolute value.\n\n\
+         ```\n\
+         (BigInteger.of:'-7').abs     \"* -> 7\n\
+         ```",
+    )
     // pow: a non-negative Integer exponent. A negative exponent isn't an integer and there is
     // no Double escape for BigInteger, so it errors rather than silently changing type.
     .sdk_typed_instance_method("pow:", &["Integer"], |host, receiver, args| {
@@ -149,6 +207,14 @@ pub fn build_big_integer_class() -> NativeClassBuilder {
         })?;
         Ok(make_bigint(host, bigint_of(receiver, "pow:")?.pow(e)))
     })
+    .doc(
+        "The receiver raised to a non-negative Integer exponent, at full precision. A \
+         negative exponent raises an ArithmeticError: there is no fractional escape from \
+         the integer domain.\n\n\
+         ```\n\
+         (BigInteger.of:2).pow:100     \"* -> 1267650600228229401496703205376\n\
+         ```",
+    )
     // Narrow to an Integer (errors if out of i64 range).
     .sdk_instance_method("asInteger", |host, receiver, _args| {
         match bigint_of(receiver, "asInteger")?.to_i64() {
@@ -158,6 +224,13 @@ pub fn build_big_integer_class() -> NativeClassBuilder {
             )),
         }
     })
+    .doc(
+        "Narrow to a 64-bit Integer; raises an ArithmeticError if the value does not \
+         fit.\n\n\
+         ```\n\
+         (BigInteger.of:42).asInteger     \"* -> 42\n\
+         ```",
+    )
     // Lossy conversion to a Double.
     .sdk_instance_method("asDouble", |host, receiver, _args| {
         match bigint_of(receiver, "asDouble")?.to_f64() {
@@ -167,8 +240,16 @@ pub fn build_big_integer_class() -> NativeClassBuilder {
             )),
         }
     })
+    .doc(
+        "Convert to a Double, losing precision beyond a Double's ~15-17 significant \
+         digits.\n\n\
+         ```\n\
+         (BigInteger.of:'12345678901234567890').asDouble     \"* -> 12345678901234567000\n\
+         ```",
+    )
     // Canonical decimal string.
     .sdk_instance_method("s", |host, receiver, _args| {
         Ok(host.new_string(bigint_of(receiver, "s")?.to_string()))
     })
+    .doc("The value as decimal digits, with a leading `-` when negative.")
 }

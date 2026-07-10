@@ -14,6 +14,13 @@ use crate::vm::VmState;
 pub fn build_bytes_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Bytes", Some("Object"))
         .construct_with("use Bytes.of: / Bytes.empty (or 'abc'.bytes)")
+        .class_doc(
+            "Immutable binary data — a contiguous run of raw octets. Text crosses the boundary \
+             explicitly: `'…'.asBytes` encodes, `asString` decodes (UTF-8). Build from \
+             integers with `Bytes.of:`, slice with `from:to:`, concatenate with `+`. An opaque \
+             blob (an image, a gzip stream) belongs here; a typed numeric column belongs in \
+             `Array`.",
+        )
         // Bytes of:#(72 101 ...) -> bytes from a list of integers (each 0-255).
         .sdk_class_method("of:", |host, _receiver, args| {
             let list_val = *args
@@ -36,22 +43,43 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             }
             Ok(host.new_bytes(bytes))
         })
+        .doc(
+            "Bytes from a list of integers, each 0..=255; anything else raises a catchable \
+             error.\n\n\
+             ```\n\
+             Bytes.of:#(72 105)     \"* -> Bytes[2] 48 69\n\
+             ```",
+        )
         // Bytes empty -> a zero-length Bytes.
         .sdk_class_method("empty", |host, _receiver, _args| {
             Ok(host.new_bytes(Vec::new()))
         })
+        .doc(
+            "A zero-length Bytes.\n\n\
+             ```\n\
+             Bytes.empty     \"* -> Bytes[0]\n\
+             ```",
+        )
         // Bytes new -> same as `empty` (the generic fallback would mint a
         // payload-less shell; QUOIN_TODO.md).
         .sdk_class_method("new", |host, _receiver, _args| {
             Ok(host.new_bytes(Vec::new()))
         })
+        .doc("A zero-length Bytes — the same as `Bytes.empty`.")
         // size / count -> the number of bytes.
         .sdk_instance_method("size", |host, receiver, _args| {
             Ok(host.new_int(recv!(receiver, Bytes).len() as i64))
         })
+        .doc(
+            "The number of bytes.\n\n\
+             ```\n\
+             (Bytes.of:#(1 2 3)).size     \"* -> 3\n\
+             ```",
+        )
         .sdk_instance_method("count", |host, receiver, _args| {
             Ok(host.new_int(recv!(receiver, Bytes).len() as i64))
         })
+        .doc("The number of bytes — an alias of `size`.")
         // at:i -> the byte (0..=255) at index i; out of range throws.
         .sdk_typed_instance_method("at:", &["Integer"], |host, receiver, args| {
             let b = recv!(receiver, Bytes);
@@ -65,6 +93,13 @@ pub fn build_bytes_class() -> NativeClassBuilder {
                 }),
             }
         })
+        .doc(
+            "The byte — an Integer 0..=255 — at a zero-based index; out of range raises a \
+             catchable IndexError.\n\n\
+             ```\n\
+             (Bytes.of:#(10 20 30)).at:1     \"* -> 20\n\
+             ```",
+        )
         // from:to: -> the slice [from, to), clamped to bounds.
         .sdk_typed_instance_method(
             "from:to:",
@@ -77,6 +112,13 @@ pub fn build_bytes_class() -> NativeClassBuilder {
                 Ok(host.new_bytes(b[from..to].to_vec()))
             },
         )
+        .doc(
+            "A new Bytes over the half-open range [from, to) — the end index is excluded — \
+             with both bounds clamped to the buffer, so out-of-range indexes never throw.\n\n\
+             ```\n\
+             (Bytes.of:#(1 2 3 4 5)).from:1 to:4     \"* -> Bytes[3] 02 03 04\n\
+             ```",
+        )
         // Concatenation: `a + b` -> `Send(a, "+:", [b])`. Bytes + Bytes only.
         .sdk_typed_instance_method("+:", &["Bytes"], |host, receiver, args| {
             let a = recv!(receiver, Bytes);
@@ -86,6 +128,13 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             out.extend_from_slice(b.as_slice());
             Ok(host.new_bytes(out))
         })
+        .doc(
+            "Concatenation (`a + b`): a new Bytes of the receiver's bytes followed by the \
+             argument's. Bytes + Bytes only — there is no implicit text coercion.\n\n\
+             ```\n\
+             (Bytes.of:#(1 2)) + (Bytes.of:#(3))     \"* -> Bytes[3] 01 02 03\n\
+             ```",
+        )
         // each:block -> yield each byte (as an Integer) to the block; returns receiver.
         .sdk_instance_method("each:", |host, receiver, args| {
             // Copy the bytes out first: plain data, so nothing is held across the block
@@ -98,6 +147,10 @@ pub fn build_bytes_class() -> NativeClassBuilder {
             }
             Ok(receiver)
         })
+        .doc(
+            "Call a block once per byte (an Integer 0..=255), first to last; answers the \
+             receiver.",
+        )
         // asString -> UTF-8 decode; throws (catchable) on invalid UTF-8.
         .sdk_instance_method("asString", |host, receiver, _args| {
             let bytes = recv!(receiver, Bytes).to_vec();
@@ -109,11 +162,22 @@ pub fn build_bytes_class() -> NativeClassBuilder {
                 ))),
             }
         })
+        .doc(
+            "The bytes decoded as UTF-8 text; invalid UTF-8 raises a catchable ParseError \
+             saying how far the valid prefix ran. To decode anything, use `asStringLossy`.\n\n\
+             ```\n\
+             (Bytes.of:#(72 105)).asString     \"* -> Hi\n\
+             ```",
+        )
         // asStringLossy -> UTF-8 decode with replacement characters (never throws).
         .sdk_instance_method("asStringLossy", |host, receiver, _args| {
             let bytes = recv!(receiver, Bytes);
             Ok(host.new_string(String::from_utf8_lossy(bytes.as_slice()).into_owned()))
         })
+        .doc(
+            "The bytes decoded as UTF-8 with every invalid sequence replaced by U+FFFD — \
+             never throws.",
+        )
         // Content-Encoding (de)compression — gzip + deflate (flate2/miniz_oxide) and zstd
         // decode (ruzstd), all pure Rust. Malformed input throws a catchable ParseError.
         // zstd encode is intentionally absent (no pure-Rust compressor; see compress.rs).
@@ -124,22 +188,56 @@ pub fn build_bytes_class() -> NativeClassBuilder {
         .instance_method("decodeGz", |vm, mc, receiver, _args| {
             run_codec(vm, mc, receiver, "decodeGz", compress::gzip_decode)
         })
+        .doc(
+            "Decompress a gzip stream into a new Bytes; malformed input raises a catchable \
+             ParseError. Large inputs run on the compute pool, so other tasks keep the \
+             scheduler while they grind.\n\n\
+             ```\n\
+             'hello'.asBytes.encodeGz.decodeGz.asString     \"* -> hello\n\
+             ```",
+        )
         .instance_method("encodeGz", |vm, mc, receiver, _args| {
             run_codec(vm, mc, receiver, "encodeGz", compress::gzip_encode)
         })
+        .doc(
+            "Compress into a gzip stream (a new Bytes). Large inputs run on the compute pool, \
+             so other tasks keep the scheduler while they grind.",
+        )
         .instance_method("decodeDeflate", |vm, mc, receiver, _args| {
             run_codec(vm, mc, receiver, "decodeDeflate", compress::deflate_decode)
         })
+        .doc(
+            "Decompress a raw deflate stream into a new Bytes; malformed input raises a \
+             catchable ParseError.\n\n\
+             ```\n\
+             'hello'.asBytes.encodeDeflate.decodeDeflate.asString     \"* -> hello\n\
+             ```",
+        )
         .instance_method("encodeDeflate", |vm, mc, receiver, _args| {
             run_codec(vm, mc, receiver, "encodeDeflate", compress::deflate_encode)
         })
+        .doc(
+            "Compress into a raw deflate stream (a new Bytes) — gzip's body format without \
+             its header and trailer.",
+        )
         .instance_method("decodeZstd", |vm, mc, receiver, _args| {
             run_codec(vm, mc, receiver, "decodeZstd", compress::zstd_decode)
         })
+        .doc(
+            "Decompress a zstandard stream into a new Bytes; malformed input raises a \
+             catchable ParseError. Decode only — there is no `encodeZstd`; gzip and deflate \
+             cover the encode side.",
+        )
         // s -> the inspect string: length + a short hex preview.
         .sdk_instance_method("s", |host, receiver, _args| {
             Ok(host.new_string(format!("{}", receiver)))
         })
+        .doc(
+            "The inspect string: the byte count and a short hex preview.\n\n\
+             ```\n\
+             (Bytes.of:#(1 2 3)).s     \"* -> Bytes[3] 01 02 03\n\
+             ```",
+        )
 }
 
 /// Run a `&[u8] -> Result<Vec<u8>, String>` codec over the receiver Bytes, returning a new

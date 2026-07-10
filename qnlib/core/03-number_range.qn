@@ -1,6 +1,20 @@
+"* A numeric interval from start toward end - end-EXCLUSIVE - iterating in
+"* steps of 1 (counting down when start > end).
+"*
+"* Created with the `..` operator on Integer or Double. Mixes in Iterate, so
+"* every collection combinator works on it; the match operator `~` (as used
+"* by Case when:do: arms) tests containment in the same end-exclusive
+"* interval.
+"*
+"* ```
+"* (1..5).list    "* -> #(1 2 3 4)
+"* (3..0).list    "* -> #(3 2 1)
+"* ```
 NumberRange <- { | @start @end @n |
     .mix:Iterate;
 
+    "* Bind the bounds and choose the step: +1 upward, -1 when start > end.
+    "* Ranges are normally created with `start..end` rather than new:.
     init: -> { |start end|
         @start = start;
         @end = end;
@@ -8,12 +22,31 @@ NumberRange <- { | @start @end @n |
         @n = (@start > @end).if:{ -1 } else:{ 1 }
     };
 
+    "* The readable form of the range.
+    "*
+    "* ```
+    "* (1..5).s    "* -> NumberRange(1..5)
+    "* ```
     s --> { 'NumberRange(' + @start + '..' + @end + ')' };
 
+    "* Containment test for the match operator: true when n lies inside the
+    "* end-exclusive interval (this is what a range condition in a Case
+    "* when:do: arm checks).
+    "*
+    "* ```
+    "* (1..5) ~ 3    "* -> true
+    "* (1..5) ~ 5    "* -> false
+    "* ```
     #'~:' --> { |n|
         (@start > @end).if:{ (n <= @start) && (n > @end) } else:{ (n >= @start) && (n < @end) }
     };
 
+    "* Call the block with each number from start toward end (end excluded),
+    "* stepping by 1 in the range's direction.
+    "*
+    "* ```
+    "* var t = 0; (1..5).each:{ |i| t = t + i }; t    "* -> 10
+    "* ```
     each: -> { |b|
         var i = @start;
         { (@n > 0).if:{ i < @end } else:{ i > @end } }.whileDo:{
@@ -25,10 +58,23 @@ NumberRange <- { | @start @end @n |
     .sealed!
 };
 
+"* Integers gain the `..` range constructor.
 Integer <-- {
+    "* A NumberRange from self (inclusive) to e (exclusive); counts down when
+    "* self > e.
+    "*
+    "* ```
+    "* (2..5).list    "* -> #(2 3 4)
+    "* ```
     #'..:' -> { |e| NumberRange.new:{ var start=self; var end=e } }
 };
 
+"* Doubles gain the `..` range constructor.
 Double <-- {
+    "* A NumberRange from self (inclusive) to e (exclusive), stepping by 1.0.
+    "*
+    "* ```
+    "* (0.5..3.0).list    "* -> #(0.5 1.5 2.5)
+    "* ```
     #'..:' -> { |e| NumberRange.new:{ var start=self; var end=e } }
 }

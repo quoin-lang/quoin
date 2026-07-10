@@ -262,6 +262,15 @@ it. None is fixed.
 - [ ] **Compile errors carry no line/column.** `compile_program` returns a bare
   `String`, unlike parse errors and checker diagnostics, which have spans.
 
+- [ ] **Integer overflow panics the VM (debug) / wraps (release).**
+  `9223372036854775807 + 1` aborts with a Rust arithmetic-overflow panic at
+  `src/devirt_ops.rs:39` in a debug build; a release build wraps silently. Found
+  while writing verified doc examples for Integer. `2.pow:63` raises a proper
+  catchable ArithmeticError, so the checked path exists — the devirtualized
+  arithmetic ops need the same treatment (checked ops raising ArithmeticError,
+  or a promotion-to-BigInteger decision). Same uncatchable-crash family as the
+  Tier 1 SIGBUS fixes.
+
 - [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
   and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so
   cleanup-on-every-path with no interest in the error must name a handler that

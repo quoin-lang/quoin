@@ -1,14 +1,36 @@
+"* Splitting and padding conveniences over the native String primitives.
 String <-- {
     .meta <-- {
+        "* The type's default value: the empty string.
         default -> { '' }
     };
 
+    "* The pieces of the receiver around each occurrence of `pat`, taken as a
+    "* literal String (not a regex).
+    "*
+    "* ```
+    "* 'a,b,c'.split:','    "* -> #(a b c)
+    "* ```
     split: -> { |pat:String| .splitString:pat };
+    "* With a Regex argument, every match of the pattern is a separator.
+    "*
+    "* ```
+    "* 'a1b2c'.split:#/[0-9]/    "* -> #(a b c)
+    "* ```
     split: --> { |p:Regex| p.split:self };
 
+    "* Split on runs of whitespace — the word-splitting shortcut.
+    "*
+    "* ```
+    "* 'one two  three'.split    "* -> #(one two three)
+    "* ```
     split -> { #/\s+/.split:self };
 
-    "* Left-justify to `width` by appending spaces; returns self if already that wide."
+    "* Left-justify to `width` by appending spaces; answers self if already that wide.
+    "*
+    "* ```
+    "* ('hi'.padRight:5) + '|'    "* -> hi   |
+    "* ```
     padRight: -> { |width:Integer|
         var gap = width - .length;
         (gap > 0).if:{ self + ((0..gap).collect:{ ' ' }).join:'' } else:{ self }

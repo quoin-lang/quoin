@@ -8,6 +8,11 @@
 [Parallel]Workers <- #();
 [Parallel]State <- #{ 'busy': false };
 
+"* Pool machinery behind the parallel List combinators (`parallelCollect:` /
+"* `parallelReduce:`): a lazily-started pool of warm worker isolates, order-
+"* preserving chunk dispatch, and a one-flight-at-a-time gate. Programs
+"* normally call the combinators on List rather than this class directly
+"* (docs/CONCURRENCY_ARCH.md §10).
 Parallel <- {
     .meta <-- {
         "* Inputs below this run serially. Chosen from the measured crossover
@@ -49,6 +54,9 @@ Parallel <- {
             [Parallel]State.at:'busy' put:true;
             true
         };
+        "* Release the single parallel flight claimed by `enter`. The
+        "* combinators call it on the success and failure paths alike, so the
+        "* gate cannot stay wedged after an error.
         exit -> { [Parallel]State.at:'busy' put:false };
 
         "* Split a list into up to `k` contiguous chunks, in order.
@@ -100,10 +108,18 @@ Parallel <- {
     .sealed!
 };
 
+"* Parallel combinators on List: `parallelCollect:` / `parallelReduce:` map
+"* and fold across the shared `Parallel` worker pool, preserving order.
 List <-- {
     "* Order-preserving parallel map. The block must be portable (read-only
     "* data captures; no writes to outer bindings, no self/@fields, no ^^) —
     "* violations raise the portability error, catchable at the call site.
+    "* Inputs shorter than `Parallel.minItems` (and calls made from inside a
+    "* worker) run serially, with the same result.
+    "*
+    "* ```
+    "* #(1 2 3).parallelCollect:{ |x| x * 10 }    "* -> #(10 20 30)
+    "* ```
     parallelCollect: -> { |f|
         f.portable!;
         var n = .count;
@@ -126,6 +142,10 @@ List <-- {
     "* folds its chunk, then the partials fold on this side. Non-associative
     "* blocks get chunk-boundary-dependent answers; that's on the caller,
     "* exactly as documented.
+    "*
+    "* ```
+    "* #(1 2 3 4).parallelReduce:{ |a b| a + b }    "* -> 10
+    "* ```
     parallelReduce: -> { |f|
         f.portable!;
         var n = .count;

@@ -171,6 +171,14 @@ pub(crate) fn set_find<'gc>(
 pub fn build_set_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Set", Some("Object"))
         .construct_with("use #< … > literals")
+        .class_doc(
+            "The insertion-ordered collection of unique values, written `#<1 2 3>`. Adding an \
+             element that is already present is a no-op.\n\nMembership is hash-indexed: an \
+             element's `hash` runs once, at insert, and lookup uses the same equality ladder \
+             as Map keys — by value for scalars and strings, by identity for user instances \
+             unless their class overrides both `hash` and `==:`. A set with a checked element \
+             type comes from `Set.of:` / `ensure:`.",
+        )
         .sdk_instance_method("count", |host, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.len())
@@ -178,6 +186,12 @@ pub fn build_set_class() -> NativeClassBuilder {
             Ok(host.new_int(len as i64))
         })
         .returns("Integer")
+        .doc(
+            "The number of elements.\n\n\
+             ```\n\
+             #<1 2 3>.count     \"* -> 3\n\
+             ```",
+        )
         .instance_method("add:", |vm, mc, receiver, args| {
             let tag = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.elem)
@@ -188,6 +202,14 @@ pub fn build_set_class() -> NativeClassBuilder {
             vm.set_add(mc, receiver, args[0])?;
             Ok(receiver)
         })
+        .doc(
+            "Add a value; one already present is left alone (a set holds one of each). Answers \
+             the receiver. On a tagged set (`Set.of:`) the value is checked first.\n\n\
+             ```\n\
+             #<1 2>.add:3     \"* -> #<1 2 3>\n\
+             #<1 2>.add:2     \"* -> #<1 2>\n\
+             ```",
+        )
         // --- checked generics (docs/GENERICS_ARCH.md §4.2/§6) ---
         .sdk_class_method("new", |host, _receiver, _args| {
             Ok(host.new_native_state(
@@ -195,6 +217,7 @@ pub fn build_set_class() -> NativeClassBuilder {
                 NativeSetState::new_empty(),
             ))
         })
+        .doc("A fresh empty set — the same value the `#<>` literal builds.")
         // `Set.new:` — a config block on a native set is meaningless; refuse
         // clearly instead of minting a payload-less shell (QUOIN_TODO.md).
         .sdk_class_method("new:", |_host, _receiver, _args| {
@@ -203,6 +226,10 @@ pub fn build_set_class() -> NativeClassBuilder {
                     .to_string(),
             ))
         })
+        .doc(
+            "Always refused: a Set has no instance fields for a `new:` config block to set. \
+             Construct with `#< >`, `Set.new`, or `Set.of:`.",
+        )
         .sdk_class_method("of:", |host, _receiver, args| {
             let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
                 expected: "Class".to_string(),
@@ -216,6 +243,13 @@ pub fn build_set_class() -> NativeClassBuilder {
             let _ = host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
             Ok(v)
         })
+        .doc(
+            "A fresh empty set tagged with an element class: every later `add:` is checked, \
+             raising a catchable TypeError on a mismatch.\n\n\
+             ```\n\
+             (Set.of:String).elementType     \"* -> String\n\
+             ```",
+        )
         .sdk_instance_method("ensure:", |host, receiver, args| {
             let tag = ElemTag::from_class_value(&args[0]).ok_or_else(|| QuoinError::TypeError {
                 expected: "Class".to_string(),
@@ -241,6 +275,14 @@ pub fn build_set_class() -> NativeClassBuilder {
             let _ = host.with_native_state_mut(v, |s: &mut NativeSetState| s.elem = Some(tag));
             Ok(v)
         })
+        .doc(
+            "Check every element against a class and answer a NEW set carrying that element \
+             tag; a non-matching element raises a catchable TypeError. Cached hashes carry \
+             over, so instance `hash` methods do not re-run.\n\n\
+             ```\n\
+             (#<1 2>.ensure:Integer).elementType     \"* -> Integer\n\
+             ```",
+        )
         .sdk_instance_method("collector", |host, receiver, _args| {
             let tag = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.elem)
@@ -257,6 +299,11 @@ pub fn build_set_class() -> NativeClassBuilder {
             Ok(v)
         })
         .returns("List(T)")
+        .doc(
+            "A fresh empty LIST carrying this set's element tag — the Iterate mixin's staging \
+             collection, where transforms like `collect:` accumulate results in order before \
+             they become the final collection.",
+        )
         .sdk_instance_method("emptyLike", |host, receiver, _args| {
             let tag = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.elem)
@@ -271,6 +318,10 @@ pub fn build_set_class() -> NativeClassBuilder {
             Ok(v)
         })
         .returns("Set(T)") // emptyLike: same shape, same tag, empty
+        .doc(
+            "A fresh empty set like the receiver — element tag included. The species hook the \
+             Iterate mixin uses, so transforms of a checked set stay checked.",
+        )
         .sdk_instance_method("elementType", |host, receiver, _args| {
             let tag = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.elem)
@@ -280,6 +331,12 @@ pub fn build_set_class() -> NativeClassBuilder {
                 None => host.new_nil(),
             })
         })
+        .doc(
+            "The checked element type as a Symbol, or nil for an ordinary untagged set.\n\n\
+             ```\n\
+             (Set.of:String).elementType     \"* -> String\n\
+             ```",
+        )
         .instance_method("remove:", |vm, mc, receiver, args| {
             let (_, found) = set_find(vm, mc, receiver, args[0])?;
             if let Some(idx) = found {
@@ -289,11 +346,26 @@ pub fn build_set_class() -> NativeClassBuilder {
             }
             Ok(receiver)
         })
+        .doc(
+            "Remove a value if present (a miss is a no-op); answers the receiver. The \
+             remaining elements keep their insertion order.\n\n\
+             ```\n\
+             #<1 2 3>.remove:2     \"* -> #<1 3>\n\
+             ```",
+        )
         .instance_method("contains?:", |vm, mc, receiver, args| {
             let (_, found) = set_find(vm, mc, receiver, args[0])?;
             Ok(vm.new_bool(mc, found.is_some()))
         })
         .returns("Boolean")
+        .doc(
+            "True when the value is an element — an O(1) hash probe, using the same equality \
+             ladder as Map keys.\n\n\
+             ```\n\
+             #<1 2 3>.contains?:2     \"* -> true\n\
+             #<1 2 3>.contains?:9     \"* -> false\n\
+             ```",
+        )
         .sdk_instance_method("each:", |host, receiver, args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.len())
@@ -308,6 +380,11 @@ pub fn build_set_class() -> NativeClassBuilder {
             }
             Ok(receiver)
         })
+        .doc(
+            "Call a block once per element, in insertion order; answers the receiver. This is \
+             the one iteration primitive — the whole Iterate surface (`collect:`, `select:`, \
+             …) derives from it.",
+        )
         .sdk_instance_method("s", |host, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.len())
@@ -335,6 +412,13 @@ pub fn build_set_class() -> NativeClassBuilder {
 
             Ok(host.new_string(format!("#<{}>", parts.join(" "))))
         })
+        .doc(
+            "The display string: `#<` and `>` around each element's `.s`, space-separated, in \
+             insertion order.\n\n\
+             ```\n\
+             #<1 2 3>.s     \"* -> #<1 2 3>\n\
+             ```",
+        )
         .instance_method("==:", |vm, mc, receiver, args| {
             let lhs_len = receiver
                 .with_native_state::<NativeSetState, _, _>(|s| s.len())
@@ -357,4 +441,12 @@ pub fn build_set_class() -> NativeClassBuilder {
             }
             Ok(vm.new_bool(mc, true))
         })
+        .doc(
+            "Same-elements equality: true when the other value is a Set of the same size \
+             containing every element of this one — insertion order does not matter. Anything \
+             that is not a Set answers false.\n\n\
+             ```\n\
+             #<1 2 3> == #<3 2 1>     \"* -> true\n\
+             ```",
+        )
 }

@@ -128,6 +128,14 @@ pub fn array_parts(value: Value<'_>) -> Option<(ArrayDType, Vec<u8>)> {
 pub fn build_array_class() -> NativeClassBuilder {
     NativeClassBuilder::new("Array", Some("Object"))
         .construct_with("use Array.ofInts: / Array.ofFloats:")
+        .class_doc(
+            "A typed, contiguous numeric column: every element is the same dtype (`#float64` \
+             or `#int64`), held in one packed buffer rather than exploded into per-element \
+             values. The layout is Apache Arrow's non-nullable primitive format, so extensions \
+             (numpy, databases) read the same bytes with zero conversion.\n\nBuild with \
+             `Array.ofInts:` / `Array.ofFloats:`; leave the bulk world with `toList`. An \
+             untyped blob of octets belongs in `Bytes` instead.",
+        )
         // `Array ofFloats: #( 1.0 2.0 … )` — pack a list of numbers into a Float64 column.
         .class_method("ofFloats:", |vm, mc, _receiver, args| {
             let elems = list_elems(
@@ -147,6 +155,13 @@ pub fn build_array_class() -> NativeClassBuilder {
             }
             Ok(new_array(vm, mc, ArrayDType::Float64, data))
         })
+        .doc(
+            "A float64 Array packed from a list of numbers (integers are widened); a \
+             non-number raises a TypeError naming the element.\n\n\
+             ```\n\
+             Array.ofFloats:#(1.5 2.5)     \"* -> Array[float64; 2]\n\
+             ```",
+        )
         // `Array ofInts: #( 1 2 … )` — pack a list of integers into an Int64 column.
         .class_method("ofInts:", |vm, mc, _receiver, args| {
             let elems = list_elems(
@@ -166,6 +181,13 @@ pub fn build_array_class() -> NativeClassBuilder {
             }
             Ok(new_array(vm, mc, ArrayDType::Int64, data))
         })
+        .doc(
+            "An int64 Array packed from a list of integers; a non-integer raises a TypeError \
+             naming the element.\n\n\
+             ```\n\
+             Array.ofInts:#(1 2 3)     \"* -> Array[int64; 3]\n\
+             ```",
+        )
         // `array.length` — element count.
         .instance_method("length", |vm, mc, receiver, _args| {
             let n = receiver
@@ -173,6 +195,12 @@ pub fn build_array_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_int(mc, n as i64))
         })
+        .doc(
+            "The number of elements.\n\n\
+             ```\n\
+             (Array.ofInts:#(1 2 3)).length     \"* -> 3\n\
+             ```",
+        )
         // `array.dtype` — the element type as a symbol (`#float64` / `#int64`).
         .instance_method("dtype", |vm, mc, receiver, _args| {
             let sym = receiver
@@ -180,6 +208,12 @@ pub fn build_array_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_symbol(mc, sym.to_string()))
         })
+        .doc(
+            "The element type as a Symbol: `#float64` or `#int64`.\n\n\
+             ```\n\
+             (Array.ofInts:#(1 2 3)).dtype     \"* -> int64\n\
+             ```",
+        )
         // `array.sum` — reduce the whole buffer (never exploded). Float64 -> Double, Int64 -> Integer.
         .instance_method("sum", |vm, mc, receiver, _args| {
             enum Sum {
@@ -197,6 +231,14 @@ pub fn build_array_class() -> NativeClassBuilder {
                 Sum::I(i) => vm.new_int(mc, i),
             })
         })
+        .doc(
+            "The sum of all elements, reduced over the packed buffer in one pass: a Double \
+             from a float64 array, an Integer from an int64 one.\n\n\
+             ```\n\
+             (Array.ofInts:#(1 2 3)).sum     \"* -> 6\n\
+             (Array.ofFloats:#(1.5 2.25)).sum     \"* -> 3.75\n\
+             ```",
+        )
         // `array scale: n` — multiply every element by `n`, returning a new `Array` of the same dtype.
         .instance_method("scale:", |vm, mc, receiver, args| {
             let factor = *args
@@ -243,6 +285,14 @@ pub fn build_array_class() -> NativeClassBuilder {
             };
             Ok(new_array(vm, mc, dtype, data))
         })
+        .doc(
+            "A new Array of the same dtype with every element multiplied by a factor — any \
+             number for a float64 array, an integer (wrapping on overflow) for an int64 \
+             one.\n\n\
+             ```\n\
+             ((Array.ofInts:#(1 2 3)).scale:10).toList     \"* -> #(10 20 30)\n\
+             ```",
+        )
         // `array at: i` — one element (Double/Integer); does not explode the array.
         .instance_method("at:", |vm, mc, receiver, args| {
             let idx = arg!(args, Int, 0);
@@ -275,6 +325,13 @@ pub fn build_array_class() -> NativeClassBuilder {
                 }),
             }
         })
+        .doc(
+            "The element at a zero-based index — a Double or an Integer to match the dtype; \
+             out of range raises a catchable IndexError.\n\n\
+             ```\n\
+             (Array.ofFloats:#(1.5 2.5)).at:1     \"* -> 2.5\n\
+             ```",
+        )
         // `array.toList` — explode the column into an ordinary Quoin `List` (leaving the bulk world).
         .instance_method("toList", |vm, mc, receiver, _args| {
             let dtype = receiver
@@ -304,6 +361,13 @@ pub fn build_array_class() -> NativeClassBuilder {
             };
             Ok(vm.new_list(mc, values))
         })
+        .doc(
+            "The elements exploded into an ordinary List — leaving the packed, bulk world, so \
+             reach for it at the edges rather than per element.\n\n\
+             ```\n\
+             (Array.ofInts:#(1 2 3)).toList     \"* -> #(1 2 3)\n\
+             ```",
+        )
         // `array.s` — a compact, structural description (not the elements).
         .instance_method("s", |vm, mc, receiver, _args| {
             let (sym, n) = receiver
@@ -311,6 +375,12 @@ pub fn build_array_class() -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_string(mc, format!("Array[{sym}; {n}]")))
         })
+        .doc(
+            "The display string: dtype and element count, not the elements.\n\n\
+             ```\n\
+             (Array.ofInts:#(1 2 3)).s     \"* -> Array[int64; 3]\n\
+             ```",
+        )
 }
 
 #[cfg(test)]

@@ -121,6 +121,19 @@ impl Drop for NativeStream {
 pub fn build_byte_stream_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("ByteStream", Some("Object"))
         .construct_with("use ByteStream.over: (or streams from sockets/files)")
+        .class_doc(
+            "A buffered binary stream — the one reading/writing surface over every conduit: \
+             files (`[IO]File.byteStream` / `create:` / `append:`), sockets \
+             (`TcpSocket#byteStream` or `ByteStream.over:`), and stdin \
+             (`[IO]Stdin.byteStream`).\n\n\
+             Reads are buffered through 16 KiB of read-ahead and *park the task* rather than \
+             blocking the scheduler. The read family: `read` (whatever is available), \
+             `read:` (up to n), `readExactly:` (n or throw), `readUntil:` (delimiter \
+             framing), `readAll` (to EOF), `peek:` (look without consuming). Writes: \
+             `writeAll:` — straight through on a socket, buffered on a file write stream \
+             (drained by `flush!` / `close` / program exit). For text, wrap it with \
+             `stringStream`.",
+        )
         // ByteStream.over: aSocket -> a buffered byte stream that *consumes* the socket:
         // the fd transfers to the stream and the socket is left closed (further ops on it
         // throw). Works over any conduit that is a `StreamId` — TcpSocket/TlsSocket today.
@@ -128,6 +141,11 @@ pub fn build_byte_stream_class() -> NativeClassBuilder {
             let id = consume_or_raise(mc, args[0], "ByteStream.over:")?;
             Ok(make_byte_stream(vm, mc, id))
         })
+        .doc(
+            "A buffered ByteStream that *consumes* a socket (TcpSocket or TlsSocket): the \
+             connection transfers to the stream and the socket is left closed — further ops \
+             on it throw. Equivalent to the socket's own `byteStream`.",
+        )
         // ByteStream.over: aSocket do:{|st| ...} -> run the block with the stream, closing
         // it on every exit path (normal/throw/cancel); returns the block's value.
         .class_method("over:do:", |vm, mc, _r, args| {
@@ -135,7 +153,11 @@ pub fn build_byte_stream_class() -> NativeClassBuilder {
             let handle = make_byte_stream(vm, mc, id);
             let block = arg!(args, Block, 1);
             scope_stream(vm, mc, handle, block)
-        });
+        })
+        .doc(
+            "Like `over:`, but scoped: run the block with the stream and close it on every \
+             exit path (normal, throw, or cancel); answers the block's value.",
+        );
     add_byte_stream_methods(builder)
 }
 
@@ -189,6 +211,10 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             let bytes = drain_up_to(mc, receiver, usize::MAX)?;
             Ok(vm.new_bytes(mc, bytes))
         })
+        .doc(
+            "Whatever bytes are available right now: drain the buffer, or — when it is \
+             empty — wait for one fill from the conduit. Empty Bytes means EOF.",
+        )
         // read:n -> up to n bytes (may be short; empty = EOF). Buffer first, then at most
         // one fill — POSIX-style, like `TcpSocket.read:`.
         .typed_instance_method("read:", &["Integer"], |vm, mc, receiver, args| {
@@ -200,6 +226,10 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             let bytes = drain_up_to(mc, receiver, n)?;
             Ok(vm.new_bytes(mc, bytes))
         })
+        .doc(
+            "Up to n bytes, POSIX-style: possibly fewer than asked (one fill at most), and \
+             empty Bytes at EOF. For exactly-n-or-throw semantics use `readExactly:`.",
+        )
         // peek:n -> up to n bytes *without* consuming them. Fills until the buffer holds n
         // bytes (or EOF). Lets a caller look ahead before deciding how to frame.
         .typed_instance_method("peek:", &["Integer"], |vm, mc, receiver, args| {
@@ -213,6 +243,11 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             let bytes = peek_up_to(receiver, n)?;
             Ok(vm.new_bytes(mc, bytes))
         })
+        .doc(
+            "Up to n bytes *without* consuming them — the same bytes remain for the next \
+             read. Fills until the buffer holds n bytes (or EOF cuts it short). The tool for \
+             looking ahead before deciding how to frame.",
+        )
         // readUntil:delim -> bytes up to and *including* the first occurrence of `delim`
         // (a String or Bytes). If the stream ends before `delim`, returns the remaining
         // bytes (without it) — the caller can detect the missing delimiter.
@@ -236,6 +271,12 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 }
             }
         })
+        .doc(
+            "Bytes up to and *including* the first occurrence of the delimiter (a String or \
+             Bytes; empty throws a ValueError). If the stream ends first, the remainder is \
+             returned without it — a result not ending in the delimiter means EOF. For \
+             untrusted input prefer `readUntil:limit:`, which bounds the search.",
+        )
         // readUntil:delim limit:n -> like readUntil:, but throws (IoError, kind
         // #limitExceeded) once more than `n` bytes are buffered with no delimiter among
         // them — bounding hostile delimiter-less input instead of buffering it without
@@ -268,6 +309,12 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 }
             }
         })
+        .doc(
+            "Like `readUntil:`, but throws (IoError, kind #limitExceeded) once more than \
+             `limit` bytes are buffered with no delimiter among them — bounding hostile \
+             delimiter-less input instead of buffering it without end. EOF still returns the \
+             partial remainder.",
+        )
         // readAll -> read until EOF, returning all remaining bytes as one Bytes.
         .instance_method("readAll", |vm, mc, receiver, _args| {
             let id = open_stream_id(receiver)?;
@@ -275,6 +322,11 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             let all = drain_up_to(mc, receiver, usize::MAX)?;
             Ok(vm.new_bytes(mc, all))
         })
+        .doc(
+            "Read to EOF and answer everything as one Bytes. The whole remainder is held in \
+             memory — for bounded reading of long streams use `read:` or `readUntil:limit:` \
+             in a loop.",
+        )
         // readExactly:n -> exactly n bytes, or throw if the stream ends first.
         .typed_instance_method("readExactly:", &["Integer"], |vm, mc, receiver, args| {
             let id = open_stream_id(receiver)?;
@@ -290,6 +342,11 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             let bytes = drain_up_to(mc, receiver, n)?;
             Ok(vm.new_bytes(mc, bytes))
         })
+        .doc(
+            "Exactly n bytes, or an IoError (kind #unexpectedEof) if the stream ends first — \
+             the reader for length-prefixed framing, where a short read is a protocol \
+             error.",
+        )
         // writeAll:bytes -> write all of `bytes` (complete-or-throw). On a socket this goes
         // straight through; on a buffered file stream it lands in the write buffer and drains
         // once the buffer fills. Returns nil.
@@ -298,12 +355,22 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             stream_write(vm, mc, receiver, bytes)?;
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Write all of the Bytes — complete or throw. Straight through on a socket \
+             stream; on a buffered file write stream it lands in the write buffer, draining \
+             in 16 KiB chunks (`flush!` / `close` drain the rest). Returns nil.",
+        )
         // flush! -> hand any buffered bytes to the OS now. A no-op on a write-through stream
         // (every socket), so the same code works over a file and a socket. Returns nil.
         .instance_method("flush!", |vm, mc, receiver, _args| {
             stream_flush(vm, mc, receiver)?;
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Hand any buffered written bytes to the OS now. A no-op on a write-through \
+             stream (every socket), so the same code works over a file and a socket. \
+             Returns nil.",
+        )
         // close -> close the stream (idempotent); its fd is reaped next scheduler turn and
         // any buffered-but-unread bytes are discarded. Further ops throw.
         .instance_method("close", |vm, mc, receiver, _args| {
@@ -312,6 +379,11 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             reap_stream_handle(vm, mc, receiver);
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Flush any buffered writes and close the stream (idempotent — a second close is \
+             a no-op). Unread buffered bytes are discarded and further operations throw. \
+             Returns nil.",
+        )
         // closed? -> whether the stream has been closed (or consumed by a higher layer).
         .instance_method("closed?", |vm, mc, receiver, _args| {
             let closed = receiver
@@ -319,6 +391,10 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_bool(mc, closed))
         })
+        .doc(
+            "Whether the stream has been closed — including by being consumed into a \
+             StringStream.",
+        )
         // stringStream -> a text `StringStream` that *consumes* this byte stream: the fd
         // and any buffered read-ahead transfer up; this handle is left closed.
         .instance_method("stringStream", |vm, mc, receiver, _args| {
@@ -327,11 +403,34 @@ fn add_byte_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder {
             retrack_write_stream(vm, mc, receiver, handle)?;
             Ok(handle)
         })
+        .doc(
+            "A text StringStream that *consumes* this byte stream: the connection, any \
+             read-ahead, and any pending writes all transfer, and this handle is left closed \
+             (further ops on it throw).",
+        )
 }
 
 pub fn build_string_stream_class() -> NativeClassBuilder {
     let builder = NativeClassBuilder::new("StringStream", Some("Object"))
         .construct_with("use StringStream.over:")
+        .class_doc(
+            "A text stream: the UTF-8 view of a byte conduit, usually obtained from \
+             `[IO]File#stringStream`, a socket's `stringStream`, or `[IO]Stdin`.\n\n\
+             Reading is line-oriented — `readLine` (nil at EOF), `eachLine:`, `readAll` — \
+             and throws a catchable ParseError on invalid UTF-8; multibyte characters split \
+             across reads are reassembled. Writing is `write:` / `writeln:` with plain \
+             Strings. Like every stream, reads park the task, not the scheduler.\n\n\
+             ```\n\
+             var out = ([IO]File.create:'/tmp/lines.txt').stringStream\n\
+             out.writeln:'alpha'\n\
+             out.close\n\
+             var st = ([IO]File.open:'/tmp/lines.txt').stringStream\n\
+             st.readLine     \"* -> 'alpha'\n\
+             st.readLine     \"* -> nil\n\
+             st.close\n\
+             [IO]File.delete:'/tmp/lines.txt'\n\
+             ```",
+        )
         // StringStream.over: aByteStream -> a text stream that *consumes* the byte stream
         // (its fd and buffered read-ahead transfer; the byte stream is left closed).
         .class_method("over:", |vm, mc, _r, args| {
@@ -340,13 +439,22 @@ pub fn build_string_stream_class() -> NativeClassBuilder {
             retrack_write_stream(vm, mc, args[0], handle)?;
             Ok(handle)
         })
+        .doc(
+            "A text stream that *consumes* a ByteStream: the connection, read-ahead, and any \
+             pending writes transfer, and the byte stream is left closed. Equivalent to the \
+             byte stream's own `stringStream`.",
+        )
         .class_method("over:do:", |vm, mc, _r, args| {
             let parts = consume_stream_or_raise(mc, args[0], "StringStream.over:do:")?;
             let handle = make_string_stream_from(vm, mc, parts);
             retrack_write_stream(vm, mc, args[0], handle)?;
             let block = arg!(args, Block, 1);
             scope_stream(vm, mc, handle, block)
-        });
+        })
+        .doc(
+            "Like `over:`, but scoped: run the block with the text stream and close it on \
+             every exit path (normal, throw, or cancel); answers the block's value.",
+        );
     add_string_stream_methods(builder)
 }
 
@@ -386,12 +494,22 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
                 None => Ok(vm.new_nil(mc)),
             }
         })
+        .doc(
+            "The next line as a String, its trailing `\\n` (or `\\r\\n`) stripped; nil at \
+             EOF. An empty line answers `''`; a final line without a newline is returned \
+             once, then nil. Throws a ParseError if the line is not valid UTF-8.",
+        )
         // eachLine:{|line| ...} -> run the block on each line to EOF; returns self.
         .instance_method("eachLine:", |vm, mc, receiver, args| {
             let block = arg!(args, Block, 0);
             each_line(vm, mc, receiver, block)?;
             Ok(receiver)
         })
+        .doc(
+            "Run the block on each remaining line (terminators stripped, as `readLine`) \
+             until EOF; answers self. The whole-file loop: \
+             `st.eachLine:{ |line| ... }`.",
+        )
         // read -> the largest valid-UTF-8 prefix of what's currently available, as a
         // String, retaining any trailing partial code point for the next read; empty
         // String = EOF. Throws if the stream ends mid-sequence or on a truly invalid byte.
@@ -421,6 +539,12 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
                 }
             }
         })
+        .doc(
+            "Whatever text is available right now: the largest valid-UTF-8 prefix of the \
+             buffered bytes, as a String (a trailing partial code point is kept back for the \
+             next read). An empty String means EOF; a truly invalid byte, or EOF in the \
+             middle of a character, throws a ParseError.",
+        )
         // readAll -> the whole remaining stream as one String (throws on invalid UTF-8).
         .instance_method("readAll", |vm, mc, receiver, _args| {
             let id = open_stream_id(receiver)?;
@@ -429,6 +553,17 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
             let s = decode_utf8(all, "readAll")?;
             Ok(vm.new_string(mc, s))
         })
+        .doc(
+            "Read to EOF and answer the whole remainder as one String (throws a ParseError \
+             on invalid UTF-8). The one-line way to slurp a file:\n\n\
+             ```\n\
+             var out = [IO]File.create:'/tmp/notes.txt'\n\
+             out.writeAll:'hi'.asBytes\n\
+             out.close\n\
+             ([IO]File.open:'/tmp/notes.txt').stringStream.readAll     \"* -> 'hi'\n\
+             [IO]File.delete:'/tmp/notes.txt'\n\
+             ```",
+        )
         // write:text -> the String's UTF-8 bytes. Buffered on a file stream, straight through
         // on a socket. Returns nil.
         .typed_instance_method("write:", &["String"], |vm, mc, receiver, args| {
@@ -436,6 +571,10 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
             stream_write(vm, mc, receiver, text.into_bytes())?;
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Write the String's UTF-8 bytes, without a trailing newline. Buffered on a file \
+             write stream, straight through on a socket. Returns nil.",
+        )
         // writeln:text -> `write:` plus a trailing newline. The line-oriented half of the
         // filter idiom: `[IO]Stdin.eachLine:{ |l| out.writeln:l }`.
         .typed_instance_method("writeln:", &["String"], |vm, mc, receiver, args| {
@@ -444,23 +583,36 @@ fn add_string_stream_methods(builder: NativeClassBuilder) -> NativeClassBuilder 
             stream_write(vm, mc, receiver, text.into_bytes())?;
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "`write:` plus a trailing newline — the line-oriented half of the filter idiom \
+             `[IO]Stdin.eachLine:{ |l| out.writeln:l }`. Returns nil.",
+        )
         // flush! -> hand any buffered bytes to the OS now; a no-op on a write-through stream.
         .instance_method("flush!", |vm, mc, receiver, _args| {
             stream_flush(vm, mc, receiver)?;
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Hand any buffered written bytes to the OS now; a no-op on a write-through \
+             (socket) stream. Returns nil.",
+        )
         .instance_method("close", |vm, mc, receiver, _args| {
             stream_flush(vm, mc, receiver)?;
             vm.untrack_write_stream(mc, receiver);
             reap_stream_handle(vm, mc, receiver);
             Ok(vm.new_nil(mc))
         })
+        .doc(
+            "Flush any buffered writes and close the stream (idempotent). Further \
+             operations throw. Returns nil.",
+        )
         .instance_method("closed?", |vm, mc, receiver, _args| {
             let closed = receiver
                 .with_native_state::<NativeStream, _, _>(|s| s.is_closed())
                 .map_err(QuoinError::Other)?;
             Ok(vm.new_bool(mc, closed))
         })
+        .doc("Whether the stream has been closed.")
 }
 
 /// Read one line (consuming through the next `\n`), or `None` at EOF. The `\n` and an

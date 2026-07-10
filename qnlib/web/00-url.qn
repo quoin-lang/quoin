@@ -10,6 +10,14 @@
 "* conveniences (query / form). See docs/WEB_ARCH.md.
 "* ===========================================================================
 
+"* The URL percent codec: component encoding/decoding plus query- and form-string
+"* parsing — pure class-side functions, no network.
+"* ```
+"* [Web]Url.encode:'a b/c'                 "* -> a%20b%2Fc
+"* [Web]Url.decode:'h%C3%A9llo'            "* -> héllo
+"* [Web]Url.queryParse:'a=1&b=two&flag'    "* -> #{'a': '1' 'b': 'two' 'flag': ''}
+"* [Web]Url.formDecode:'q=a+b%2Bc'         "* -> #{'q': 'a b+c'}
+"* ```
 [Web]Url <- {
     .meta <-- {
         "* Percent-encode `s` as a URL component: unreserved characters (RFC 3986
@@ -62,6 +70,8 @@
         "* to a space (in keys and values both).
         formDecode: -> { |s| ^[Web]Url.parse:s plusAsSpace:true };
 
+        "* Internal: the shared query/form parser — split on '&' and '=', decode each
+        "* side through decodeComponent:plusAsSpace:.
         parse:plusAsSpace: -> { |s plus|
             var out = #{};
             (s == '').if:{ ^^out };

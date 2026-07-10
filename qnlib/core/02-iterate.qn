@@ -8,79 +8,171 @@ iterable) - is derived from `each:`. No `next`/`reset` cursor, so iteration is
 re-entrant and `nil` is a perfectly valid element.
 "
 
+"* Every collection combinator, derived from a single method: `each:`.
+"*
+"* A class mixes in Iterate and implements `each:` (call a block once per
+"* element); collect:/select:/reduce: and the rest of the vocabulary follow,
+"* along with external pull-iteration (`iterator`) and lazy pipelines
+"* (`lazyCollect:`/`lazySelect:`). No cursor state is kept, so iteration is
+"* re-entrant and `nil` is a valid element. `T` is the element type; `U` is
+"* the element type collect: produces.
+"*
+"* ```
+"* Pair <- { |@a @b|
+"*     .mix:Iterate;
+"*     init: -> { |a b| @a = a; @b = b };
+"*     each: -> { |blk| blk.valueWithSelfOrArg:@a; blk.valueWithSelfOrArg:@b }
+"* };
+"* (Pair.new:{ var a = 3; var b = 4 }).collect:{ |x| x * x }    "* -> #(9 16)
+"* ```
 Mixin <- Iterate(T U) <- {
-    "* The accumulator for element-preserving combinators (the species idea,
-    "* GENERICS_ARCH.md 4.5): a fresh list-shaped collector. List overrides it
-    "* with .emptyLike and Set with a tag-carrying list, so select:/take:/...
-    "* on a checked collection stay checked. collect: deliberately does NOT
-    "* use it - its elements are whatever the block returns.
+    "* The fresh, empty collection that element-preserving combinators
+    "* accumulate into.
+    "*
+    "* This is the species idea (GENERICS_ARCH.md 4.5): a list-shaped
+    "* collector. List overrides it with .emptyLike and Set with a
+    "* tag-carrying list, so select:/take:/... on a checked collection stay
+    "* checked. collect: deliberately does NOT use it - its elements are
+    "* whatever the block returns.
     collector -> { |^List| #() };
 
+    "* Transform every element through the block, into a fresh List.
+    "*
+    "* ```
+    "* #(1 2 3).collect:{ |x| x * 2 }    "* -> #(2 4 6)
+    "* ```
     collect: -> { |collectBlock: Block(T ^U) ^List(U)|
         var l = #();
         .each:{ |collectItem| l.add:collectBlock.valueWithSelfOrArg:collectItem };
         ^l
     };
 
+    "* The elements for which the block answers true, in order.
+    "*
+    "* ```
+    "* #(1 2 3 4).select:{ |x| x % 2 == 0 }    "* -> #(2 4)
+    "* ```
     select: -> { |selectBlock: Block(T ^Boolean) ^List(T)|
         var l = .collector;
         .each:{ |x| (selectBlock.valueWithSelfOrArg:x).if:{ l.add:x } };
         ^l
     };
 
+    "* True when the block answers true for every element (vacuously true
+    "* when empty); stops at the first failure.
+    "*
+    "* ```
+    "* #(2 4 6).all?:{ |x| x % 2 == 0 }    "* -> true
+    "* ```
     all?: -> { |allBlock: Block(T ^Boolean)|
         .each:{ |x| (allBlock.valueWithSelfOrArg:x).else:{ ^^false } };
         ^true
     };
 
+    "* True when the block answers true for no element; stops at the first
+    "* match.
+    "*
+    "* ```
+    "* #(1 3 5).none?:{ |x| x % 2 == 0 }    "* -> true
+    "* ```
     none?: -> { |block: Block(T ^Boolean)|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^false } };
         ^true
     };
 
+    "* True when there is at least one element.
+    "*
+    "* ```
+    "* #().any?    "* -> false
+    "* ```
     any? -> {
         .each:{ |_| ^^true };
         ^false
     };
 
+    "* True when the block answers true for at least one element; stops at
+    "* the first match.
+    "*
+    "* ```
+    "* #(1 2 3).any?:{ |x| x > 2 }    "* -> true
+    "* ```
     any?: -> { |block: Block(T ^Boolean)|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^true } };
         ^false
     };
 
+    "* The number of elements, counted by walking `each:`.
+    "*
+    "* ```
+    "* (0..5).count    "* -> 5
+    "* ```
     count -> {
         var n = 0;
         .each:{ |_| n = n + 1 };
         ^n
     };
 
+    "* The number of elements for which the block answers true.
+    "*
+    "* ```
+    "* #(1 2 3 4).count:{ |x| x > 2 }    "* -> 2
+    "* ```
     count: -> { |block: Block(T ^Boolean)|
         var n = 0;
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ n = n + 1 } };
         ^n
     };
 
+    "* The first element for which the block answers true; nil when none
+    "* matches.
+    "*
+    "* ```
+    "* #(1 2 3 4).detect:{ |x| x > 2 }    "* -> 3
+    "* ```
     detect: -> { |block: Block(T ^Boolean) ^T?|
         .each:{ |x| (block.valueWithSelfOrArg:x).if:{ ^^x } };
         ^nil
     };
 
+    "* The element at zero-based position n; nil when out of range.
+    "*
+    "* ```
+    "* #(10 20 30).nth:1    "* -> 20
+    "* ```
     nth: -> { |n ^T?|
         var i = 0;
         .each:{ |x| (i == n).if:{ ^^x }; i = i + 1 };
         ^nil
     };
 
+    "* The first element; nil when empty.
     first -> { .nth:0 };
+    "* The second element; nil if there is none.
     second -> { .nth:1 };
+    "* The third element; nil if there is none.
     third -> { .nth:2 };
+    "* The fourth element; nil if there is none.
     fourth -> { .nth:3 };
+    "* The fifth element; nil if there is none.
     fifth -> { .nth:4 };
+    "* The last element; nil when empty. Walks the whole iteration.
     last -> { .reduce:{ |_ n| n } };
 
-    "* External (pull-style) iteration, backed by a fiber over `each:`."
+    "* An external (pull-style) Iterator over the elements, backed by a fiber
+    "* over `each:`.
+    "*
+    "* ```
+    "* var it = #(10 20).iterator; it.next    "* -> 10
+    "* ```
     iterator -> { Iterator.over:self };
 
+    "* The first n elements, fewer when the iteration is shorter. Pulls
+    "* through an iterator, so it is safe on infinite sources such as
+    "* generators.
+    "*
+    "* ```
+    "* (1..100).take:3    "* -> #(1 2 3)
+    "* ```
     take: -> { |n ^List(T)|
         var l = .collector;
         var it = .iterator;
@@ -89,6 +181,12 @@ Mixin <- Iterate(T U) <- {
         ^l
     };
 
+    "* All elements after the first n. Materializes the remainder, so unlike
+    "* take: it must not be used on an infinite source.
+    "*
+    "* ```
+    "* #(1 2 3 4 5).drop:2    "* -> #(3 4 5)
+    "* ```
     drop: -> { |n ^List(T)|
         var l = .collector;
         var it = .iterator;
@@ -98,24 +196,49 @@ Mixin <- Iterate(T U) <- {
         ^l
     };
 
-    "* Lazy variants return a Generator instead of a materialized list, so they
-    "* compose into pipelines and work on infinite sources (consume with take:)."
+    "* Like collect:, but lazy: a Generator that transforms elements on
+    "* demand instead of a materialized List, so it composes into pipelines
+    "* and works on infinite sources (consume with take:).
+    "*
+    "* ```
+    "* ((1..1000000).lazyCollect:{ |x| x * x }).take:3    "* -> #(1 4 9)
+    "* ```
     lazyCollect: -> { |f: Block(T ^U)|
         var src = self;
         Generator.from:{ src.each:{ |x| ^>(f.valueWithSelfOrArg:x) } }
     };
 
+    "* Like select:, but lazy: a Generator that filters on demand, so it
+    "* composes into pipelines and works on infinite sources (consume with
+    "* take:).
+    "*
+    "* ```
+    "* ((1..100).lazySelect:{ |x| x % 2 == 0 }).take:2    "* -> #(2 4)
+    "* ```
     lazySelect: -> { |p: Block(T ^Boolean)|
         var src = self;
         Generator.from:{ src.each:{ |x| (p.valueWithSelfOrArg:x).if:{ ^>x } } }
     };
 
+    "* Recursively flatten nested Lists into one flat List. Only elements
+    "* whose class is exactly List are descended into; any other element is
+    "* kept as-is.
+    "*
+    "* ```
+    "* #(1 #(2 #(3 4)) 5).flatten    "* -> #(1 2 3 4 5)
+    "* ```
     flatten -> {
         var l = #();
         .each:{ |x| (x.class == List).if:{ x.flatten.each:{ |y| l.add:y } } else:{ l.add:x } };
         ^l
     };
 
+    "* A Map from each block-computed key to the List of elements that
+    "* produced it, keys in first-seen order.
+    "*
+    "* ```
+    "* #(1 2 3 4).groupBy:{ |x| x % 2 }    "* -> #{1: #(1 3) 0: #(2 4)}
+    "* ```
     groupBy: -> { |block: Block(T)|
         var map = #{};
         .each:{ |x|
@@ -132,18 +255,29 @@ Mixin <- Iterate(T U) <- {
         ^map
     };
 
+    "* True when some element == item.
+    "*
+    "* ```
+    "* #(1 2 3).contains?:2    "* -> true
+    "* ```
     contains?: -> { |item|
         .each:{ |x| (x == item).if:{ ^^true } };
         ^false
     };
 
-    "* Seedless fold: the FIRST element becomes the accumulator; the fold
-    "* starts from the second (BUGS.md Finding 9 — the old version seeded
-    "* with the block result's class default and folded the first element
-    "* against it, which is only correct when the default is a left
-    "* identity: `+` and concat survived, `*`/`-`/min-style folds returned
-    "* garbage). A `seeded` flag, not `sum.defined?`, so nil elements fold
-    "* correctly too.
+    "* Seedless fold: combine the elements pairwise with the block, seeding
+    "* the accumulator with the FIRST element; nil when empty.
+    "*
+    "* The fold starts from the second element (BUGS.md Finding 9 - the old
+    "* version seeded with the block result's class default and folded the
+    "* first element against it, which is only correct when the default is a
+    "* left identity: `+` and concat survived, `*`/`-`/min-style folds
+    "* returned garbage). A `seeded` flag, not `sum.defined?`, so nil
+    "* elements fold correctly too.
+    "*
+    "* ```
+    "* #(1 2 3 4).reduce:{ |a b| a * b }    "* -> 24
+    "* ```
     reduce: -> { |block: Block(T T ^T) ^T?|
         var sum = nil;
         var seeded = false;
@@ -157,14 +291,33 @@ Mixin <- Iterate(T U) <- {
         ^sum
     };
 
+    "* Fold the elements into an explicit starting accumulator: the block
+    "* receives (accumulator element) and answers the new accumulator.
+    "*
+    "* ```
+    "* #(1 2 3).reduce:{ |acc x| acc + x } into:100    "* -> 106
+    "* ```
     reduce:into: -> { |block: Block(U T ^U) start: U ^U|
         var sum = start;
         .each:{ |x| sum = block.valueWithArgs:#( sum x ) };
         ^sum
     };
 
+    "* The sum of the elements via `+`; nil when empty. Works for any element
+    "* type with a class default zero - e.g. Strings concatenate.
+    "*
+    "* ```
+    "* #(1 2 3).sum    "* -> 6
+    "* ```
     sum -> { .sum:{ |x| x } };
 
+    "* The sum (via `+`) of the block's results over the elements; nil when
+    "* empty. Seeded with the class default of the first result, so any
+    "* result type with a `default` and `+` works.
+    "*
+    "* ```
+    "* #(1 2 3).sum:{ |x| x * x }    "* -> 14
+    "* ```
     sum: -> { |block: Block(T)|
         var sum = nil;
         .each:{ |x|
@@ -175,6 +328,15 @@ Mixin <- Iterate(T U) <- {
         ^sum
     };
 
+    "* The element the block ranks highest; nil when empty.
+    "*
+    "* The block receives (currentBest candidate) and answers true when
+    "* currentBest outranks the candidate - a `>`-style comparison, the same
+    "* block shape min: takes.
+    "*
+    "* ```
+    "* #(-5 2 3).max:{ |a b| a.abs > b.abs }    "* -> -5
+    "* ```
     max: -> { |block: Block(T T ^Boolean) ^T?|
         var max = nil;
         .each:{ |x|
@@ -183,8 +345,21 @@ Mixin <- Iterate(T U) <- {
         ^max
     };
 
+    "* The largest element by `>`; nil when empty.
+    "*
+    "* ```
+    "* #(3 1 4).max    "* -> 4
+    "* ```
     max -> { |^T?| .max:{ |a b| a > b } };
 
+    "* The element the block ranks lowest; nil when empty.
+    "*
+    "* Takes the same `>`-style (currentBest candidate) comparison block as
+    "* max:, and keeps the element it ranks lowest.
+    "*
+    "* ```
+    "* #(-5 2 3).min:{ |a b| a.abs > b.abs }    "* -> 2
+    "* ```
     min: -> { |block: Block(T T ^Boolean) ^T?|
         var min = nil;
         .each:{ |x|
@@ -193,8 +368,19 @@ Mixin <- Iterate(T U) <- {
         ^min
     };
 
+    "* The smallest element by `>`; nil when empty.
+    "*
+    "* ```
+    "* #(3 1 4).min    "* -> 1
+    "* ```
     min -> { |^T?| .min:{ |a b| a > b } };
 
+    "* Split into two collections: the elements for which the block answers
+    "* true, then the rest, as a two-element List.
+    "*
+    "* ```
+    "* #(1 2 3 4).partition:{ |x| x % 2 == 0 }    "* -> #(#(2 4) #(1 3))
+    "* ```
     partition: -> { |block: Block(T ^Boolean) ^List|
         var trueValues = .collector;
         var falseValues = .collector;
@@ -208,18 +394,34 @@ Mixin <- Iterate(T U) <- {
         #( trueValues falseValues )
     };
 
+    "* The elements for which the block answers false - select:'s complement.
+    "*
+    "* ```
+    "* #(1 2 3 4).reject:{ |x| x % 2 == 0 }    "* -> #(1 3)
+    "* ```
     reject: -> { |block: Block(T ^Boolean) ^List(T)|
         var l = .collector;
         .each:{ |x| (block.valueWithSelfOrArg:x).else:{ l.add:x } };
         ^l
     };
 
+    "* The distinct elements (by ==), keeping first-seen order.
+    "*
+    "* ```
+    "* #(1 2 1 3 2).uniq    "* -> #(1 2 3)
+    "* ```
     uniq -> { |^List(T)|
         var result = .collector;
         .each:{ |x| (result.contains?:x).else:{ result.add:x } };
         ^result
     };
 
+    "* Pair up with another iterable, element by element, stopping at the
+    "* shorter: a List of two-element Lists.
+    "*
+    "* ```
+    "* #(1 2 3).zip:#(10 20)    "* -> #(#(1 10) #(2 20))
+    "* ```
     zip: -> { |other|
         var r = #();
         var a = .iterator;
@@ -228,6 +430,12 @@ Mixin <- Iterate(T U) <- {
         ^r
     };
 
+    "* Concatenate the elements' string forms (.s), with the separator
+    "* between each pair.
+    "*
+    "* ```
+    "* #('a' 'b' 'c').join:', '    "* -> a, b, c
+    "* ```
     join: -> { |sep:String|
         var result = '';
         .each:{ |x|
@@ -237,42 +445,74 @@ Mixin <- Iterate(T U) <- {
         ^result
     };
 
+    "* The elements in reverse order.
+    "*
+    "* ```
+    "* #(1 2 3).reverse    "* -> #(3 2 1)
+    "* ```
     reverse -> { |^List(T)|
         var result = .collector;
         .each:{ |x| result.push:x };
         ^result
     };
 
+    "* The elements sorted by a two-argument precedes-block (true means the
+    "* first argument sorts earlier).
+    "*
+    "* ```
+    "* #(3 1 2).sort:{ |a b| a > b }    "* -> #(3 2 1)
+    "* ```
     sort: -> { |block: Block(T T ^Boolean) ^List(T)| .list.sort:block };
+    "* The elements sorted ascending.
+    "*
+    "* ```
+    "* #(3 1 2).sort    "* -> #(1 2 3)
+    "* ```
     sort -> { |^List(T)| .list.sort };
 
+    "* Materialize the elements into a List.
+    "*
+    "* ```
+    "* (1..4).list    "* -> #(1 2 3)
+    "* ```
     list -> { |^List(T)| self.select:{ true } }
 };
 
-"
-External, pull-style iterator over any `each:`-able. Backed by a fiber: running
-the iterable's `each:` inside a fiber turns each element into a `^>` yield, so we
-can pull one at a time. One element of look-ahead lets `hasNext?` work; `done` is
-decided by the fiber finishing, not by a sentinel value, so `nil` elements are
-fine.
-"
+"* An external, pull-style iterator (hasNext?/next) over any `each:`-able.
+"*
+"* Backed by a fiber: running the iterable's `each:` inside a fiber turns
+"* each element into a `^>` yield, so elements can be pulled one at a time.
+"* One element of look-ahead lets `hasNext?` work; done-ness is decided by
+"* the fiber finishing, not by a sentinel value, so `nil` elements are fine.
+"* Obtain one with `.iterator` rather than constructing it directly.
+"*
+"* ```
+"* var it = #(10 20).iterator; it.next; it.hasNext?    "* -> true
+"* ```
 Iterator <- { |@fiber @nextVal @hasNext|
     .meta <-- {
+        "* An Iterator pulling from any iterable's `each:` (what `.iterator`
+        "* answers).
         over: -> { |it|
             var src = it;
             ^.new:{ var fiber = Fiber.new:{ src.each:{ |x| ^>x } } }
         }
     };
 
+    "* Prime the one-element look-ahead by advancing to the first element.
     init -> { .advance };
 
+    "* Pull the next element from the fiber into the look-ahead slot; flips
+    "* hasNext? off when the fiber finishes.
     advance -> {
         var v = @fiber.resume;
         @fiber.done?.if:{ @hasNext = false } else:{ @hasNext = true; @nextVal = v }
     };
 
+    "* True when another element is available, i.e. next will succeed.
     hasNext? -> { @hasNext };
 
+    "* The next element; throws StopIteration when the iterator is exhausted.
     next -> {
         @hasNext.else:{ StopIteration.throw:'Iterator exhausted' };
         var r = @nextVal;
@@ -281,16 +521,29 @@ Iterator <- { |@fiber @nextVal @hasNext|
     }
 };
 
-"
-A `Generator` turns a yielding block into an iterable: its `each:` runs the block
-in a fiber and forwards every `^>` to the consumer. Consumed lazily through an
-`Iterator` (e.g. `.take:`), so even infinite generators are usable.
-"
+"* An iterable made from a yielding block: each `^>` in the block becomes an
+"* element.
+"*
+"* `each:` runs the block in a fiber and forwards every `^>` to the
+"* consumer. Consumed lazily through an `Iterator` (e.g. `.take:`), so even
+"* infinite generators are usable.
+"*
+"* ```
+"* var naturals = Generator.from:{ var i = 0; { true }.whileDo:{ ^>i; i = i + 1 } };
+"* (naturals.lazyCollect:{ |x| x * x }).take:4    "* -> #(0 1 4 9)
+"* ```
 Iterate <- Generator <- { |@genBlock|
     .meta <-- {
+        "* A Generator over the block's `^>` yields.
+        "*
+        "* ```
+        "* (Generator.from:{ ^>1; ^>2 }).list    "* -> #(1 2)
+        "* ```
         from: -> { |b:Block| ^.new:{ var genBlock = b } }
     };
 
+    "* Call the consumer once per `^>` yield, running the generator block in
+    "* a fresh fiber - so every `each:` restarts the generator from the top.
     each: -> { |consumer|
         var f = Fiber.new:@genBlock;
         { f.alive? }.whileDo:{
@@ -300,17 +553,25 @@ Iterate <- Generator <- { |@genBlock|
     }
 };
 
+"* Maps are iterable: the iteration element is a key/value pair.
 Map <-- {
     .mix:Iterate;
 
     .meta <-- {
+        "* A fresh empty Map, the Map class default.
         default -> { #{} };
 
+        "* A Map built from an iterable of KeyValuePairs (as produced by
+        "* iterating a Map), in iteration order.
+        "*
+        "* ```
+        "* Map.fromPairs:(#{'a': 1 'b': 2}.list.select:{ |p| p.value > 1 })    "* -> #{'b': 2}
+        "* ```
         fromPairs: -> { |pairs| pairs.reduce:{ |m kvp| m.at:kvp.key put:kvp.value } into:#{} }
     };
 
     "* Iterate in insertion order (the Map preserves it). The iteration
-    "* element is a key/value PAIR, not the value type (GENERICS_ARCH 4.4)."
+    "* element is a key/value PAIR, not the value type (GENERICS_ARCH 4.4).
     each: -> { |b: Block(KeyValuePair)|
         var src = self;
         .keys.each:{ |k|
@@ -319,15 +580,25 @@ Map <-- {
     }
 };
 
+"* Lists are iterable in index order, and element-preserving combinators
+"* answer `.emptyLike` collections so a checked List(T) stays checked.
 List <-- {
     .mix:Iterate;
 
     .meta <-- {
+        "* A fresh empty List, the List class default.
         default -> { #() }
     };
 
+    "* Element-preserving combinators on a List accumulate into `.emptyLike`,
+    "* keeping any element-type check.
     collector -> { |^List| .emptyLike };
 
+    "* Call the block once per element, in index order.
+    "*
+    "* ```
+    "* var t = 0; #(1 2 3).each:{ |x| t = t + x }; t    "* -> 6
+    "* ```
     each: -> { |b: Block(T)|
         var i = 0;
         var n = .count;
@@ -338,16 +609,22 @@ List <-- {
     }
 };
 
+"* Sets are iterable (each: is implemented natively - Set#each: in
+"* src/runtime/set.rs) and carry the set-algebra operations, built on the
+"* native add:/contains?: and the Iterate combinators.
 Set <-- {
     .mix:Iterate;
 
     .meta <-- {
+        "* A fresh empty Set, the Set class default.
         default -> { #<> }
     };
 
-    "* each: is implemented natively (Set#each: in src/runtime/set.rs).
-
-    "* Set algebra, built on the native add:/contains?: and the Iterate combinators.
+    "* A new Set holding every element of self and other.
+    "*
+    "* ```
+    "* #<1 2>.union:#<2 3>    "* -> #<1 2 3>
+    "* ```
     union: -> { |other ^Set(T)|
         var r = .emptyLike;
         .each:{ |x| r.add:x };
@@ -355,19 +632,39 @@ Set <-- {
         r
     };
 
+    "* A new Set holding the elements present in both self and other.
+    "*
+    "* ```
+    "* #<1 2 3>.intersection:#<2 3 4>    "* -> #<2 3>
+    "* ```
     intersection: -> { |other ^Set(T)|
         var r = .emptyLike;
         .each:{ |x| (other.contains?:x).if:{ r.add:x } };
         r
     };
 
+    "* A new Set holding the elements of self that are not in other.
+    "*
+    "* ```
+    "* #<1 2 3>.difference:#<2>    "* -> #<1 3>
+    "* ```
     difference: -> { |other ^Set(T)|
         var r = .emptyLike;
         .each:{ |x| (other.contains?:x).else:{ r.add:x } };
         r
     };
 
+    "* True when every element of self is in other.
+    "*
+    "* ```
+    "* #<1 2>.subset?:#<1 2 3>    "* -> true
+    "* ```
     subset?: -> { |other| .all?:{ |x| other.contains?:x } };
 
+    "* True when every element of other is in self.
+    "*
+    "* ```
+    "* #<1 2 3>.superset?:#<2>    "* -> true
+    "* ```
     superset?: -> { |other| other.subset?:self }
 }

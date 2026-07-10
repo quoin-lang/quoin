@@ -2,6 +2,7 @@
 "* [Web]App — the framework core: routing DSL, middleware onion, render
 "* conventions, and error mapping over a PURE handler pipeline.
 "*
+"*   use std:net/http_server;
 "*   use std:web/*;
 "*   var app = [Web]App.new;
 "*   app.get:'/' do:{ 'hello from Quoin' };
@@ -21,15 +22,18 @@
 "* The [Web] layer's request conveniences, layered onto the transport request
 "* by reopening — extension by <-- is the Quoin way to layer without wrappers.
 [HTTP]ServerRequest <-- {
-    "* Route bindings (set by the app's router before the handler runs).
+    "* Route bindings as a Map (set by the app's router before the handler runs).
     params -> { @params.defined?.if:{ @params } else:{ #{} } };
+    "* Internal: bind the route params (the router calls this before the handler).
     params: -> { |m| @params = m; self };
+    "* One route binding by name ('/users/:id' -> req.param:'id'), or nil.
     param: -> { |name| .params.at:name };
 
     "* The request path: the raw target with any query string stripped. Segments
     "* stay percent-encoded — the router decodes per segment, so an encoded %2F
     "* can't split the path; params/query values arrive decoded.
     path -> { (@target.splitString:'?').at:0 };
+    "* The raw request-target exactly as sent, query string included, undecoded.
     rawTarget -> { @target };
 
     "* The query string as a decoded Map ('+' stays literal), parsed on demand.
@@ -37,16 +41,34 @@
         var parts = @target.splitString:'?';
         ^(parts.count > 1).if:{ [Web]Url.queryParse:((parts.drop:1).join:'?') } else:{ #{} }
     };
+    "* One decoded query value by name, or nil.
     query: -> { |name| .query.at:name };
 
-    "* Body views: JSON (throws a catchable ParseError on bad input) and
-    "* application/x-www-form-urlencoded.
+    "* The body parsed as JSON; bad input throws a catchable ParseError.
     json -> { ^.body.json };
+    "* The body parsed as application/x-www-form-urlencoded ('+' means space).
     form -> { ^[Web]Url.formDecode:(.body.text) };
+    "* The body's lowercased media type ('application/json'), or nil.
     mediaType -> { .body.mediaType }
 };
 
+"* The framework core: routing DSL, middleware onion, render conventions, and error
+"* mapping over a pure handler pipeline — the [HTTP]Server is merely the transport.
+"* ```
+"* use std:net/http_server;
+"* use std:web/*;
+"* var app = [Web]App.new;
+"* app.get:'/' do:{ 'hello from Quoin' };
+"* app.get:'/users/:id' do:{ |req| users.at:(req.param:'id') };   "* Map -> JSON
+"* app.use:{ |req next| next.value:req };                         "* middleware
+"* app.serve:':8080'                                              "* start + join (blocks)
+"* ```
+"* Handler blocks may take the request as a parameter ({ |req| … }) or address it as
+"* self ({ .param:'id' }); the return value is normalized by the respondTo:
+"* conventions. app.handle:req is the whole app as a pure function — request in,
+"* response out, no sockets — so apps unit-test in-process. See docs/WEB_ARCH.md.
 [Web]App <- { | @router @middleware @debug @pool @poolMain |
+    "* Internal: an empty router and middleware chain, debug off.
     init -> {
         @router = [Web]Router.new;
         @middleware = #();
@@ -54,30 +76,50 @@
     };
 
     "* -- routing DSL --------------------------------------------------------
+
+    "* Register handler `h` for GET requests matching `pattern` (':name' and '*splat'
+    "* segments capture into req.params — see [Web]Route); returns self.
+    "* ```
+    "* app.get:'/users/:id' do:{ |req| users.at:(req.param:'id') }
+    "* ```
     get:do: -> { |pattern h| @router.add:'GET' pattern:pattern handler:h; self };
+    "* Register handler `h` for POST requests matching `pattern`; returns self.
     post:do: -> { |pattern h| @router.add:'POST' pattern:pattern handler:h; self };
+    "* Register handler `h` for PUT requests matching `pattern`; returns self.
     put:do: -> { |pattern h| @router.add:'PUT' pattern:pattern handler:h; self };
+    "* Register handler `h` for PATCH requests matching `pattern`; returns self.
     patch:do: -> { |pattern h| @router.add:'PATCH' pattern:pattern handler:h; self };
+    "* Register handler `h` for DELETE requests matching `pattern`; returns self.
     delete:do: -> { |pattern h| @router.add:'DELETE' pattern:pattern handler:h; self };
-    "* any other verb
+    "* Register handler `h` for an arbitrary verb (e.g. 'OPTIONS'); returns self.
     on:pattern:do: -> { |verb pattern h| @router.add:verb pattern:pattern handler:h; self };
+    "* The [Web]Router holding the per-verb route tables.
     router -> { @router };
 
     "* -- middleware ---------------------------------------------------------
-    "* Onion model: the first use: is outermost. `mw` is called with
-    "* (req, next) — a two-param block, or anything responding to
-    "* valueWithArgs: — where `next` is a one-arg block producing the inner
-    "* response. Returning without calling next short-circuits; either way the
-    "* return value goes through the respondTo: conventions.
+
+    "* Install middleware `mw`; returns self. Onion model: the first use: is
+    "* outermost. `mw` is called with (req, next) — a two-param block, or anything
+    "* responding to valueWithArgs: — where `next` is a one-arg block producing the
+    "* inner response. Returning without calling next short-circuits; either way
+    "* the return value goes through the respondTo: conventions.
     use: -> { |mw| @middleware.add:mw; self };
 
     "* Include error detail in 500 bodies (a development aid — off by default).
     debug: -> { |flag| @debug = flag; self };
 
     "* -- the pure core ------------------------------------------------------
-    "* Middleware onion -> router -> handler -> respondTo: normalization, with
-    "* HttpError mapped to its status (+ optional body) and anything else to a
-    "* 500. Always returns an [HTTP]ServerResponse; never throws.
+
+    "* Run one request through the whole app — middleware onion -> router -> handler
+    "* -> respondTo: normalization — with HttpError mapped to its status (+ optional
+    "* body) and anything else to a 500. Always returns an [HTTP]ServerResponse;
+    "* never throws. Pure (no sockets), so an app unit-tests in-process:
+    "* ```
+    "* var app = [Web]App.new;
+    "* app.get:'/hello/:name' do:{ |req| 'hi ' + (req.param:'name') };
+    "* var req = [HTTP]ServerRequest.new:{ var method = 'GET'; var target = '/hello/qn' };
+    "* (app.handle:req).body.asString   "* -> hi qn
+    "* ```
     handle: -> { |req|
         var me = self;
         var chain = { |r| me.route:r };
@@ -122,8 +164,13 @@
     };
 
     "* -- render conventions --------------------------------------------------
-    "* Type-directed normalization of a handler's return value; add app-specific
-    "* variants by subclassing [Web]App and extending the multimethod.
+
+    "* Normalize a handler's return value into an [HTTP]ServerResponse (a
+    "* type-directed multimethod): String -> text/plain, Map/List -> JSON,
+    "* Integer -> a bare status, Bytes -> application/octet-stream, Generator -> a
+    "* chunked stream, a response passes through, nil -> 404, anything else -> the
+    "* text of its .s. Add app-specific variants by subclassing [Web]App and
+    "* extending the multimethod.
     respondTo: -> { |v:String| [Web]Response.text:v };
     respondTo: --> { |v:Map| [Web]Response.json:v };
     respondTo: --> { |v:List| [Web]Response.json:v };
@@ -136,19 +183,10 @@
     };
 
     "* -- serving --------------------------------------------------------------
-    "* start: binds and serves in the background, returning the [HTTP]Server
-    "* handle (port / stop / join / close — tests, graceful shutdown); serve:
-    "* blocks driving it.
-    "*
-    "* workers: variants run the pure pipeline on a pool of isolates
-    "* (docs/CONCURRENCY_ARCH.md §13): the transport VM keeps the sockets and
-    "* ships requests as data; each pool worker re-runs THIS app's unit
-    "* (`VM.unit` — the same-unit provisioning model), whose serve call lands
-    "* in poolWorkerLoop below instead of binding. backing:'process' escapes
-    "* the same-process scheduling ceiling for CPU-heavy handlers.
-    "* Constraints, by design: handlers in pool mode cannot capture main-VM
-    "* mutable state (isolates share nothing), and Generator bodies
-    "* materialize. workers:0 = the single-VM path, unchanged.
+
+    "* Bind `address` (e.g. ':8080'; ':0' for ephemeral) and serve in the
+    "* background, returning the [HTTP]Server handle (port / stop / join / close —
+    "* tests, graceful shutdown).
     start: -> { |address|
         var me = self;
         ^([HTTP]Server.new:{
@@ -156,16 +194,30 @@
             var handler = { |req| me.dispatch:req pool:nil }
         }).start
     };
+    "* Serve `address` on the calling task, blocking: start: then join.
     serve: -> { |address| (.start:address).join };
 
+    "* start: with the pure pipeline on a pool of `n` worker isolates,
+    "* thread-backed (see start:workers:backing:).
     start:workers: -> { |address n| ^.start:address workers:n backing:'thread' };
-    "* `Worker.worker?` alone conflates "pool worker" with "any worker": a
+    "* Declare this VM a pool HOST even though it runs inside a worker; returns
+    "* self. `Worker.worker?` alone conflates "pool worker" with "any worker": a
     "* worker that legitimately HOSTS a pool (the soak spawned from the
     "* REPL, any nested-fleet unit) must declare itself with poolMain:true
     "* before its serve call, or that call would park waiting for a pool
     "* sentinel that is never coming.
     poolMain: -> { |flag| @poolMain = flag; self };
 
+    "* start: with the pure pipeline running on a pool of `n` worker isolates
+    "* (docs/CONCURRENCY_ARCH.md §13): the transport VM keeps the sockets and
+    "* ships requests as data; each pool worker re-runs THIS app's unit
+    "* (`VM.unit` — the same-unit provisioning model), whose serve call lands
+    "* in poolWorkerLoop below instead of binding. `backing` is 'thread' or
+    "* 'process' — 'process' escapes the same-process scheduling ceiling for
+    "* CPU-heavy handlers. Constraints, by design: handlers in pool mode cannot
+    "* capture main-VM mutable state (isolates share nothing), and Generator
+    "* bodies materialize. workers:0 = the single-VM path, unchanged; needs a
+    "* unit-run program (throws under the REPL / -e).
     start:workers:backing: -> { |address n backing|
         ((@poolMain != true) && Worker.worker?).if:{ ^^(.poolWorkerLoop) };
         (n < 1).if:{ ^^(.start:address) };
@@ -179,12 +231,17 @@
             var handler = { |req| me.dispatch:req pool:(me.pool) }
         }).start
     };
+    "* Blocking pool serve: start:workers: (thread-backed) then join.
     serve:workers: -> { |address n| ^.serve:address workers:n backing:'thread' };
+    "* Blocking pool serve with an explicit backing ('thread' | 'process'):
+    "* start:workers:backing: then join.
     serve:workers:backing: -> { |address n backing|
         ((@poolMain != true) && Worker.worker?).if:{ ^^(.poolWorkerLoop) };
         (.start:address workers:n backing:backing).join
     };
+    "* The [Web]Pool when serving in pool mode, else nil.
     pool -> { @pool };
+    "* Stop the worker pool, if any; returns self.
     poolStop -> { @pool.defined?.if:{ @pool.stop }; self };
 
     "* The transport-side hop: debug observability is answered HERE (the main
