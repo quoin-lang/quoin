@@ -69,15 +69,16 @@ pub enum AotParam {
 }
 
 impl AotParam {
-    pub fn from_annotation(name: &str) -> Option<AotParam> {
-        if let Some(k) = AotKind::from_annotation(name) {
-            return Some(AotParam::Scalar(k));
-        }
-        match name {
-            // `Block`: any block value is an ordinary heap object in a slot;
-            // compiled code interacts with it through outcalls only (B2).
-            "List" | "Map" | "String" | "Block" => Some(AotParam::Obj),
-            _ => None,
+    /// Scalar names ride in registers; EVERY other annotation is a boxed value
+    /// in a slot (`Obj` assumes nothing, so any class name — `Block`, a user
+    /// class, an erased type variable's `Object`, a nullable `Integer?` — is
+    /// sound). Nullable scalars land here too, never on `Scalar`: the name
+    /// keeps its `?`, so it can't match the scalar arm, and a nil-carrying
+    /// param must not compile into a register lane.
+    pub fn from_annotation(name: &str) -> AotParam {
+        match AotKind::from_annotation(name) {
+            Some(k) => AotParam::Scalar(k),
+            None => AotParam::Obj,
         }
     }
 }
@@ -91,13 +92,15 @@ pub enum AotRet {
 }
 
 impl AotRet {
-    pub fn from_annotation(name: &str) -> Option<AotRet> {
-        if let Some(k) = AotKind::from_annotation(name) {
-            return Some(AotRet::Scalar(k));
-        }
-        match name {
-            "List" | "Map" | "String" => Some(AotRet::Obj),
-            _ => None,
+    /// Same widening as [`AotParam::from_annotation`]: scalars by name, all
+    /// else `Obj`. This is what lets `detect: -> { … ^T? }` be a candidate at
+    /// all — its return erases to `Object`, which used to end candidacy
+    /// (`precheckSignature`) and silently kept the whole `^T`/`^T?`/`^Object`
+    /// family interpreted.
+    pub fn from_annotation(name: &str) -> AotRet {
+        match AotKind::from_annotation(name) {
+            Some(k) => AotRet::Scalar(k),
+            None => AotRet::Obj,
         }
     }
 }
