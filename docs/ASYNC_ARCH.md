@@ -237,15 +237,24 @@ roots every parked task's stashed `Gc` context.
   exactly one parent awaiting it, so there are no orphans and teardown stays small.
   Detached `Task.spawn:`/join and cancellation are **Stage 2b** (deferred).
 
-**Scheduling policy: run-to-block.** A task runs until it parks on I/O or finishes,
-then the next ready task runs (a CPU-bound task blocking its siblings is the
-documented single-threaded model). `QN_SCHED_STRESS` flips this to a randomized,
-preemptive scheduler for testing: it preempts at every cooperative-yield boundary —
-forcing the `save_/load_task_context` round-trip on *every* step — and picks ready
-tasks at random instead of FIFO, which also randomizes gather-child and I/O-wakeup
-ordering. Seeded (SplitMix64) for reproducible replay; the seed is announced once on
-stderr. The existing suites are expected to stay green across a seed sweep, including
-combined with `QN_GC_STRESS`. See `src/tuning.rs`.
+**Scheduling policy: round-robin at yield boundaries.** A task runs until it parks on
+I/O, finishes, or reaches a cooperative-yield boundary (one `QN_BATCH` of instructions,
+in every tier — the interpreter, `run_nested`, and AOT fuel checkpoints all emit the
+same `CooperativeYield`). At a boundary the driver drains any *completed* background
+futures without blocking (so expired timers and finished I/O wake their tasks even
+while a CPU-bound task never parks), and if anything is runnable it stashes the current
+task and requeues it FIFO. A task running alone pays two emptiness checks and keeps
+going — measured free on the whole benchmark suite (±0.35%, noise). This replaced the
+original run-to-block policy, under which a spinning task starved cancellation and
+timers forever (RELEASE_PREP Tier 4b). What still holds: preemption is cooperative, so
+a single long-running *native* call is not preempted mid-call, and cancellation lands
+at the next checkpoint, within ~`QN_BATCH` instructions.
+`QN_SCHED_STRESS` hardens this into a randomized scheduler for testing: it preempts at
+*every* cooperative-yield boundary — forcing the `save_/load_task_context` round-trip
+on every step — and picks ready tasks at random instead of FIFO, which also randomizes
+gather-child and I/O-wakeup ordering. Seeded (SplitMix64) for reproducible replay; the
+seed is announced once on stderr. The existing suites are expected to stay green across
+a seed sweep, including combined with `QN_GC_STRESS`. See `src/tuning.rs`.
 
 ## Cross-cutting concerns
 
@@ -403,11 +412,13 @@ Plan:
   I/O is `futures::abortable`, so `cancel` interrupts a `sleep` promptly. `request_cancel`
   aborts the future / dequeues a join-parked task. `complete_detached` sets status
   `Cancelled` and delivers `Wake::JoinedCancelled`; `join` on a cancelled task is a
-  *catchable* error. **v1 scope:** an infinite CPU loop with no yield-to-reactor
-  monopolizes the single thread (the documented cooperative model — the canceller never
-  runs), and cancelling a task parked on its *own* gather waits for the children. *Test:*
-  a cancel-all round in `async_soak.qn` (checksum-stable across the stress knobs) + Async
-  suite tests (cancel runs `finally`, `catch:` can't swallow it, `join` observes it).
+  *catchable* error. An infinite CPU loop no longer shields itself: the yield-boundary
+  rotation (see *Scheduling policy*) lets the canceller run, and the flag lands at the
+  spinner's next checkpoint (~`QN_BATCH` instructions). Remaining scope: a single
+  long-running *native* call is not preempted mid-call, and cancelling a task parked on
+  its *own* gather waits for the children. *Test:* a cancel-all round in `async_soak.qn`
+  (checksum-stable across the stress knobs) + Async suite tests (cancel runs `finally`,
+  `catch:` can't swallow it, `join` observes it, a spinner is cancellable).
 
 **Stage 3 — `Bytes` + TCP sockets (done).**
 The async *core* is done and generic, so a socket read already round-trips through the
@@ -525,7 +536,8 @@ read is `Async.timeout:ms do:{ s.read:n } onCancel:{ nil }` — `nil` = timed ou
 EOF). *Tests:* the `Async` suite (in-time, throws-on-deadline, `onCancel:` value/nil,
 errors-propagate, `finally`-on-deadline, nesting) + a deterministic `timeout` round in
 `async_soak.qn` (identical checksum across all four stress modes). Sharp edge: cooperative —
-a non-yielding CPU loop is not preempted by the deadline until it hits a checkpoint.
+the deadline lands at a checkpoint, so a CPU loop feels it within ~`QN_BATCH` instructions,
+but a single long-running *native* call is not preempted mid-call.
 
 **Stage 5 — HTTP/1.1 client. ✅ done.** Pure Quoin in **`qnlib/net/http.qn`** (loaded on
 demand via `use std:net/http`) over `TcpSocket`/`TlsSocket`, so HTTPS falls out for free.

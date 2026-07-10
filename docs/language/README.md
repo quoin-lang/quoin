@@ -45,7 +45,7 @@ the REPL with `$doc Name` / `$doc Name.selector` — rather than duplicated here
 ### Part V — Concurrency & iteration · [`05-concurrency-and-iteration.md`](05-concurrency-and-iteration.md)
 16. Fibers & generators — `Fiber.new:`, `^>`, `Generator.from:`, external `Iterator`
 17. The iteration protocol — the `Iterate` mixin, `each:` as the one primitive, custom iterables
-18. Tasks & the cooperative scheduler — `Task.spawn:`, `join`/`cancel`, run-to-block, parking parks the task
+18. Tasks & the cooperative scheduler — `Task.spawn:`, `join`/`cancel`, round-robin at yield boundaries, parking parks the task
 19. Async — `sleep:`, `gather:`, `timeout:do:` (+ `onCancel:`), `joinAll:`
 20. Channels — rendezvous & buffered CSP, `close`, deadlock detection
 21. Workers, Parallel & Plan — isolates, `parallelCollect:`, task graphs, `WorkerService`

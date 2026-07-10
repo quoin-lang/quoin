@@ -366,14 +366,22 @@ it. None is fixed.
   asymmetry updated (the harness caught the stale doc — behavior improvements
   now break doc checks, exactly as designed). Test in 05-classes.qn.
 
-- [ ] **A spinning task starves the whole VM — cancellation and timers never
-  land.** Verified 2026-07-10: `Task.spawn:{ {true}.whileDo:{…} }` then
-  `t.cancel` from main — the cancel never takes effect, and main's own expired
-  `Async.sleep:` never resumes; the process had to be SIGKILLed. Batch-yield
-  boundaries exist (QN_BATCH), but the driver resumes the same task at a
-  cooperative yield instead of rotating to ready tasks/expired timers
-  (run-to-block by design; zero fairness at yield points is the bug-or-decision
-  to make explicit). The book's Part V documents the behavior as a gotcha.
+- [x] **A spinning task starves the whole VM — cancellation and timers never
+  land.** FIXED — the policy decision went to fairness: at a cooperative-yield
+  boundary (every QN_BATCH instructions, all tiers emit the same
+  `CooperativeYield`) the driver now (1) drains completed background futures
+  WITHOUT blocking — rotation alone wouldn't fix timers, since the blocking
+  reactor wait only runs when `ready` is empty and a spinner is always ready —
+  and (2) rotates FIFO when anything is runnable. A task running alone pays two
+  emptiness checks: measured free (release, interleaved A/B, 7 pairs/program —
+  all eight benchmarks within ±0.35%, noise). Rotation correctness was already
+  proven by QN_SCHED_STRESS (which stash-requeues at every yield); two stress
+  seeds green. The exact repro now completes: sleep resumes beside the spinner,
+  cancel lands at the next checkpoint, join observes it. Remaining (documented):
+  a single long-running NATIVE call is still not preempted mid-call. Tests:
+  21-async.qn (bounded spins, so a regression fails instead of hanging CI);
+  docs updated: ASYNC_ARCH policy §, book Part V rules + gotcha (spawning
+  queues; only joining guarantees), Part VI caveat, nav line.
 
 - [x] **Checker reality vs. claims — two drifts found writing Part VII.** FIXED,
   all four faces:
