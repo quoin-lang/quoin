@@ -291,8 +291,16 @@ it. None is fixed.
   streams specifically. The measurement and the reasoning are recorded on
   `IO_BUFFER_BYTES` in `src/runtime/streams.rs`.
 
-- [ ] **Compile errors carry no line/column.** `compile_program` returns a bare
-  `String`, unlike parse errors and checker diagnostics, which have spans.
+- [x] **Compile errors carry no line/column.** FIXED: `compile_program` returns
+  `CompileError { message, span }`; the innermost `compile_node` frame claims a
+  statement-level span at the existing `current_source` choke point, and the
+  marquee sites (undeclared local, `let` reassign, decl-target validation) carry
+  the offending identifier's exact span. File modes render
+  `file:line:col: error: …` + caret through the checker's renderer
+  (`report_compile_error`, same stderr sink → DAP capture intact); string modes
+  (`-e`, REPL, `Runtime.eval:`, workers) embed `(line L, column C)` via
+  `Display`, matching their parse errors. tests/exit_code.rs asserts the exact
+  location per case per entry point.
 
 - [x] **Integer overflow panics the VM (debug) / wraps (release).** FIXED:
   overflow now raises a catchable `ArithmeticError("Integer overflow")` in every
