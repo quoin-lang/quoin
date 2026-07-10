@@ -34,7 +34,7 @@ jobs:
     - name: Check documentation examples
       run: |
         cargo run -- doc --check
-        cargo run -- doc --check docs/language
+        cargo run -- doc --check docs/language README.md
 
   # Dylint lints: no_borrow_across_yield is deny-level (a violation fails this
   # job); no_gc_across_yield stays advisory (warnings only). The lint libraries

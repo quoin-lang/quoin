@@ -84,9 +84,10 @@ LSP/VSCode tooling, Windows.
 
 ## Tier 2 — language reference (`docs/language/`)
 
-The structure (Parts I–VI + appendices, Rules-box format) is right; coverage
-stops at ~40% of the shipped language and most multi-line examples predate
-strict `var`/`let` and no longer compile.
+DONE 2026-07-10 — nine parts (§1–48), 78 runnable examples / 122 assertions in
+the book plus 18/36 in the README, all CI-enforced by `qn doc --check`. The
+original assessment for the record: coverage stopped at ~40% and most examples
+predated strict `var`/`let`.
 
 - [x] **Fix stale examples.** The harness found exactly 18; all fixed — several
   were real rot beyond staleness (a semantically broken `case:` example, a
@@ -113,9 +114,13 @@ strict `var`/`let` and no longer compile.
 - [x] **Small**: all folded into the Part IX re-scope — bytes/codecs and
   UUID/ULID paragraphs, stdlib map rewritten accurate to today's qnlib,
   Array/Timer/VM/streams folded in, internal pointers stripped.
-- [ ] **README**: install/quickstart, full verb list (lists 4 of ~10), license
-  section, fix stale `src/parser/pest/` path (parser lives in
-  `crates/quoin-syntax`).
+- [x] **README**: quickstart, the full 10-verb CLI table, documentation
+  pointers (book + `qn doc`/`$doc`), parser path fixed, and the language tour
+  repaired under the harness — 18 runnable examples, 36 exact-output
+  assertions, CI-checked like the book. The repair found the FRONT-PAGE example
+  had been silently broken (`%{@name}` interpolation does not see instance
+  variables — it printed `Mr `), a `.finally:` chain that never caught, and a
+  reversed `~` matcher; all verified fixes. Tier 2 is COMPLETE.
 
 ## Tier 3 — "first real script" stdlib gaps
 
