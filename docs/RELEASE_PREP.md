@@ -130,6 +130,29 @@ strict `var`/`let` and no longer compile.
 - [ ] Digests (sha256/blake3/HMAC) — optional; verified absent.
   (UUID/ULID already ship: `src/runtime/ids.rs`, `qnlib/tests/37-ids.qn`.)
 
+## Docs publishing — generate everything as HTML, publish to the website
+
+Decided 2026-07-10: the release ships browsable docs on the project website
+(the `quoin-lang` org), not just in-repo markdown. Deferred alongside the CI
+workflows (needs the org + hosting), but the shape is recorded now so the
+Tier 2 work builds toward it:
+
+- [ ] **One generated site from two sources.** The API reference is already
+  HTML (`qn doc`); the language book (`docs/language/*.md`) needs a
+  markdown→HTML render. Reuse the doc generator's page chrome and the shared
+  code stylesheet (`highlighter::code_stylesheet`) so book pages and reference
+  pages read as one site — fenced `quoin` blocks in the book render through
+  `highlight_to_html` exactly like reference examples.
+- [ ] **Publish pipeline**: a workflow that runs `qn doc --out site/reference
+  --json`, renders the book into `site/`, and deploys (GitHub Pages or the
+  org's host — decide at org move). The `--json` model also uploads, as the
+  machine-readable contract.
+- [ ] **Cross-linking between book and reference** — deferred with the hosting
+  decision (2026-07-10): until URLs exist, the book references classes by
+  name and points readers at `qn doc`; once the site exists, linkify.
+- [ ] Doc-example checking (`qn doc --check`, Tier 2) runs in the publish
+  pipeline too: nothing ships with a broken example.
+
 ## Tier 4 — packaging, CI, docs triage
 
 - [x] **Extension socket files must always be cleaned up on process exit.** FIXED
