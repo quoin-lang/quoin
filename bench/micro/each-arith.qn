@@ -1,0 +1,18 @@
+"The same `(x * 3) + 1` block driven by a direct `data.each:` instead of
+collect:. The delta against block-arith is the each:-path overhead (today:
+a direct each: site gets nothing from AOT - the finding this ladder pins).
+The block's value is discarded; nothing eliminates pure block calls today,
+and the ladder must be re-examined if that ever changes. 20M element visits.
+Run whole-process: `qn bench/micro/each-arith.qn`."
+
+var data = #();
+var i = 0;
+{ i < 1000 }.whileDo:{ data.add:i; i = i + 1 };
+
+var k = 0;
+{ k < 20000 }.whileDo:{
+    data.each:{ |x| (x * 3) + 1 };
+    k = k + 1
+};
+
+'each-arith: ok'.print
