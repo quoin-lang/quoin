@@ -115,16 +115,20 @@ fn split_entry(entry: &str) -> (&str, Option<&str>) {
 }
 
 /// The `<head>` links loading the code font — Fira Code, whose ligatures suit Quoin's
-/// arrow-heavy syntax (`->`, `-->`, `<-`, `<--`, `==`, `!=`, `>=`). Linked from Google Fonts
-/// rather than copied into generated folders; `display=swap` and the `ui-monospace` fallback
-/// in [`code_stylesheet`] mean an offline page simply renders in the system code font. The
-/// one sanctioned external resource — scripts stay forbidden (tests/doc_gen.rs pins both).
+/// arrow-heavy syntax (`->`, `-->`, `<-`, `<--`, `==`, `!=`, `>=`). Served from jsDelivr's
+/// copy of the OFFICIAL distribution, not Google Fonts: Google's pipeline strips the
+/// discretionary GSUB features during subsetting (measured on the served TTF: only
+/// `calt dnom frac locl numr tnum` survive), so the `ss05` `@` variant the stylesheet asks
+/// for would be a silent no-op there; the jsDelivr file carries all `ss01`–`ss10` and
+/// `cv01`–`cv32`. Version-pinned for determinism. Linked rather than copied into generated
+/// folders; the `ui-monospace` fallback in [`code_stylesheet`] means an offline page simply
+/// renders in the system code font. The one sanctioned external resource — scripts stay
+/// forbidden (tests/doc_gen.rs pins both).
 pub fn code_font_links() -> &'static str {
     concat!(
-        "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n",
-        "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n",
-        "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2",
-        "?family=Fira+Code:wght@400;600&display=swap\">"
+        "<link rel=\"preconnect\" href=\"https://cdn.jsdelivr.net\" crossorigin>\n",
+        "<link rel=\"stylesheet\" ",
+        "href=\"https://cdn.jsdelivr.net/npm/firacode@6.2.0/distr/fira_code.css\">"
     )
 }
 
@@ -155,10 +159,11 @@ pub fn code_stylesheet() -> String {
     }
     // The font rule lives HERE, not in each consumer's page style, so the doc pages and
     // `qn highlight --html` cannot disagree. Emitted after the page styles in both consumers,
-    // so it wins over any `font:` shorthand they set for sizing.
+    // so it wins over any `font:` shorthand they set for sizing. `ss05` selects Fira Code's
+    // `@` variant; features not named keep their defaults, so the `calt` ligatures stay on.
     let mut css = String::from(
         "pre.qn-code, pre, code, .sig { font-family: 'Fira Code', ui-monospace, \
-         SFMono-Regular, Menlo, monospace; }\n\
+         SFMono-Regular, Menlo, monospace; font-feature-settings: 'ss05'; }\n\
          pre.qn-code { line-height: 1.45; }\n",
     );
     let mut seen: Vec<&str> = Vec::new();

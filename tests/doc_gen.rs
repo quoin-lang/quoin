@@ -99,13 +99,19 @@ fn stdlib_docs_carry_both_native_and_quoin_doc_text() {
         let end = index[i..].find('>').map(|e| i + e).unwrap_or(index.len());
         let link = &index[i..end];
         assert!(
-            link.contains("fonts.googleapis.com") || link.contains("fonts.gstatic.com"),
-            "only the font hosts may be <link>ed: {link}"
+            link.contains("cdn.jsdelivr.net"),
+            "only the font host may be <link>ed: {link}"
         );
     }
+    // jsDelivr's copy of the OFFICIAL Fira Code distribution, not Google Fonts — Google
+    // strips the stylistic sets, which would make the ss05 `@` variant a silent no-op.
     assert!(
-        index.contains("family=Fira+Code") && index.contains("'Fira Code'"),
+        index.contains("firacode@") && index.contains("'Fira Code'"),
         "the ligature code font must be linked and used"
+    );
+    assert!(
+        index.contains("font-feature-settings: 'ss05'"),
+        "the @ variant (ss05) must be enabled"
     );
     let page = std::fs::read_to_string(out_dir.join("IO.Stdin.html")).unwrap();
     assert!(
@@ -261,8 +267,9 @@ fn highlight_html_shares_the_doc_generator_styles() {
         "qn-string",     // 'text'
         ".qn-keyword {", // the shared stylesheet, same classes the doc pages inline
         "prefers-color-scheme: dark",
-        "family=Fira+Code", // the shared ligature font, linked not copied
+        "firacode@", // the shared ligature font, linked not copied (jsDelivr, full features)
         "'Fira Code'",
+        "font-feature-settings: 'ss05'", // the @ variant
     ] {
         assert!(html.contains(needle), "missing {needle} in:\n{html}");
     }
