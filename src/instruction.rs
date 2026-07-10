@@ -554,6 +554,10 @@ pub enum Instruction {
         name: NamespacedName,
         parent_name: Option<NamespacedName>,
         instance_vars: Vec<String>,
+        /// Where the definition sits in source, recorded into `VmState::class_meta` so doc
+        /// extraction can find the `"*` block above it (docs/DOCS_ARCH.md §4). Methods carry
+        /// their own location on the template; classes had nowhere to keep one until this.
+        source: Option<SourceInfo>,
     },
     ExecuteBlockWithSelf,
     DefineMethod(String),

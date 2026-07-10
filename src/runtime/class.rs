@@ -32,6 +32,13 @@ pub fn build_class_class() -> NativeClassBuilder {
             let found = matches!(vm.globals.borrow().get(&key), Some(Value::Class(_)));
             Ok(vm.new_bool(mc, found))
         })
+        .returns("Boolean")
+        .doc(
+            "Whether a class named by the Symbol or String argument is defined -- \
+             `Class.exists?:#Point`, or `Class.exists?:#'[IO]File'` for a namespaced class. \
+             The way to ask without reading the name, which would raise a NameError if it is \
+             unbound.",
+        )
         .instance_method("name", |vm, mc, receiver, _args| {
             let clz = recv!(receiver, Class);
             Ok(vm.new_string(mc, clz.borrow().name.to_string()))

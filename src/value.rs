@@ -1049,6 +1049,11 @@ pub struct NativeMethodDef {
     /// compile-time annotation — the VM never reads it; it flows to `ClassSig.method_returns`
     /// via `describe_class`. Set opt-in through the `.returns(..)` builder modifier.
     pub ret_type: Option<String>,
+    /// Reference-doc text (docs/DOCS_ARCH.md §5): first line is the summary, the rest the
+    /// body. Never consulted at dispatch; surfaced via `describe_class` and `qn doc`. Set
+    /// through the `.doc(..)` builder modifier — the native counterpart of the `"*` block a
+    /// Quoin method carries in its source.
+    pub doc: Option<String>,
 }
 
 /// Which method table a builder call last appended to — so `.returns(..)` knows whose
@@ -1062,6 +1067,11 @@ enum LastSide {
 pub trait NativeClass {
     fn parent_name(&self) -> Option<&'static str>;
     fn name(&self) -> &'static str;
+    /// Class-level reference doc (`.class_doc(..)` on the builder). Recorded in
+    /// `VmState::class_meta` at registration.
+    fn class_doc(&self) -> Option<&str> {
+        None
+    }
     fn class_methods(&self) -> Vec<NativeMethodDef>;
     fn instance_methods(&self) -> Vec<NativeMethodDef>;
     fn new_policy(&self) -> NativeNewPolicy {
@@ -1094,6 +1104,7 @@ pub struct NativeClassBuilder {
     instance_methods: Vec<NativeMethodDef>,
     last_side: Option<LastSide>,
     new_policy: NativeNewPolicy,
+    class_doc: Option<String>,
 }
 
 type NativeFn = for<'a> fn(
@@ -1116,6 +1127,7 @@ impl NativeClassBuilder {
             instance_methods: Vec::new(),
             last_side: None,
             new_policy: NativeNewPolicy::Refuse(None),
+            class_doc: None,
         }
     }
 
@@ -1140,6 +1152,7 @@ impl NativeClassBuilder {
             func,
             param_types,
             ret_type: None,
+            doc: None,
         });
         self.last_side = Some(LastSide::Class);
     }
@@ -1151,6 +1164,7 @@ impl NativeClassBuilder {
             func,
             param_types,
             ret_type: None,
+            doc: None,
         });
         self.last_side = Some(LastSide::Instance);
     }
@@ -1169,6 +1183,29 @@ impl NativeClassBuilder {
         if let Some(def) = last {
             def.ret_type = Some(ret_type.to_string());
         }
+        self
+    }
+
+    /// Attach reference-doc text to the most-recently-registered method
+    /// (docs/DOCS_ARCH.md §5) — the native counterpart of the `"*` block above a Quoin
+    /// method. First line is the summary; the rest is the body. Composes with `.returns(..)`
+    /// in either order; no-op if no method was registered yet.
+    pub fn doc(mut self, text: &str) -> Self {
+        let last = match self.last_side {
+            Some(LastSide::Instance) => self.instance_methods.last_mut(),
+            Some(LastSide::Class) => self.class_methods.last_mut(),
+            None => None,
+        };
+        if let Some(def) = last {
+            def.doc = Some(text.to_string());
+        }
+        self
+    }
+
+    /// Attach reference-doc text to the class itself. Recorded in `VmState::class_meta` at
+    /// registration; Quoin classes get theirs from the `"*` block above the definition.
+    pub fn class_doc(mut self, text: &str) -> Self {
+        self.class_doc = Some(text.to_string());
         self
     }
 
@@ -1243,6 +1280,10 @@ impl NativeClass for NativeClassBuilder {
 
     fn name(&self) -> &'static str {
         self.name
+    }
+
+    fn class_doc(&self) -> Option<&str> {
+        self.class_doc.as_deref()
     }
 
     fn class_methods(&self) -> Vec<NativeMethodDef> {

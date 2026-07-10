@@ -164,6 +164,8 @@ pub(crate) type ReplArena = Arena<Rootable![VmState<'_>]>;
 // the public API (`VmRunner` / `VmRunnerOptions` / `register_builtins`) stays at `crate::runner::…`.
 #[path = "runner_dap.rs"]
 mod runner_dap;
+#[path = "runner_doc.rs"]
+mod runner_doc;
 #[path = "runner_driver.rs"]
 mod runner_driver;
 #[path = "runner_repl.rs"]
@@ -202,6 +204,10 @@ pub struct VmRunnerOptions {
     pub fmt_dry_run: bool,
     /// `qn fmt --diff`: show a unified diff of what would change, without writing.
     pub fmt_diff: bool,
+    /// `qn doc --json`: also emit the raw model as `model.json`.
+    pub doc_json: bool,
+    /// `qn doc --coverage`: report undocumented classes/selectors instead of generating.
+    pub doc_coverage: bool,
 }
 
 /// Recursively collect `.qn` files under `dir`, in sorted order, skipping `target`/`.git`.
@@ -247,6 +253,9 @@ pub enum VmRunnerMode {
     /// `qn check <file>…`: type-check each file (report diagnostics) without running it. The paths
     /// are carried in `VmRunnerOptions::vm_options.arguments`; exits non-zero if any diagnostic.
     Check,
+    /// `qn doc [PATH…]`: generate the API reference (docs/DOCS_ARCH.md). The output directory
+    /// is carried in `target_path`, extra units in `vm_options.arguments`.
+    Doc,
     /// `qn` with no arguments: print usage. (`--help` / `--version` are answered by
     /// the argument parser itself, which prints and exits before a mode is chosen.)
     Help,
@@ -343,6 +352,21 @@ enum Cmd {
     Check {
         #[arg(value_name = "PATH", required = true)]
         paths: Vec<String>,
+    },
+    /// Generate the API reference (HTML, and JSON with --json) for the stdlib plus any PATHs
+    Doc {
+        /// Extra `.qn` units to document, relative to the current directory
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+        /// Output directory
+        #[arg(long, value_name = "DIR", default_value = "qn-docs")]
+        out: String,
+        /// Also write the raw doc model as model.json
+        #[arg(long)]
+        json: bool,
+        /// Report undocumented classes/selectors instead of generating
+        #[arg(long)]
+        coverage: bool,
     },
     /// Format Quoin source in place
     Fmt {
@@ -483,6 +507,8 @@ impl VmRunnerOptions {
         let mut fmt_check = false;
         let mut fmt_dry_run = false;
         let mut fmt_diff = false;
+        let mut doc_json = false;
+        let mut doc_coverage = false;
         let mut target_path = None;
         let mut vm_args = Vec::new();
         let mut coverage = None;
@@ -497,6 +523,18 @@ impl VmRunnerOptions {
             Some(Cmd::Check { paths }) => {
                 vm_args = paths;
                 VmRunnerMode::Check
+            }
+            Some(Cmd::Doc {
+                paths,
+                out,
+                json,
+                coverage: cov,
+            }) => {
+                target_path = Some(out);
+                vm_args = paths;
+                doc_json = json;
+                doc_coverage = cov;
+                VmRunnerMode::Doc
             }
             Some(Cmd::Fmt {
                 check,
@@ -603,6 +641,8 @@ impl VmRunnerOptions {
             fmt_check,
             fmt_dry_run,
             fmt_diff,
+            doc_json,
+            doc_coverage,
         }
     }
 }
@@ -807,6 +847,7 @@ impl VmRunner {
                 self.run_check();
                 Ok(())
             }
+            VmRunnerMode::Doc => self.run_doc(),
         }
     }
 

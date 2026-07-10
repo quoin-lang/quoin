@@ -1,0 +1,77 @@
+//! Doc extraction: the `"*` block above a definition is its reference doc
+//! (docs/DOCS_ARCH.md §4).
+//!
+//! The parser drops comments (pest trivia), so docs are recovered from *source text* at the
+//! location introspection reports (`MethodVariant::source`, `ClassInfo::source`). Extraction
+//! is line-based rather than reusing `quoin-fmt`'s byte-ranged `scan_comments`: a doc line is
+//! a line that contains *nothing but* a `"* …` comment, and since Quoin strings cannot span
+//! lines, a line whose first non-blank characters are `"*` cannot be string interior — so no
+//! string/regex-context tracking is needed for this narrower question.
+//!
+//! The adjacency rules (§4): a contiguous run of `"*` lines **immediately** above the
+//! definition — no blank line between — is its doc; a blank line detaches the block into file
+//! commentary. The extracted text strips the leading `"*` and at most one following space per
+//! line. First line is the summary, the rest the body.
+
+use crate::packages::read_stdlib_unit;
+
+/// The doc block for a definition at 1-based `line` of `source`, under the §4 adjacency
+/// rules. `None` when the line above is blank, code, or the top of the file.
+pub fn doc_above(source: &str, line: usize) -> Option<String> {
+    if line < 2 {
+        return None;
+    }
+    let lines: Vec<&str> = source.lines().collect();
+    // 0-based index of the definition line; scan upward from the line before it.
+    let def = line.checked_sub(1)?;
+    if def > lines.len() {
+        return None;
+    }
+    let mut block: Vec<&str> = Vec::new();
+    for i in (0..def).rev() {
+        let trimmed = lines[i].trim_start();
+        if let Some(rest) = trimmed.strip_prefix("\"*") {
+            // Strip at most one space after the marker; keep deeper indentation (code in
+            // fenced examples relies on it).
+            block.push(rest.strip_prefix(' ').unwrap_or(rest));
+        } else {
+            break; // blank or code: the block (if any) ended
+        }
+    }
+    if block.is_empty() {
+        return None;
+    }
+    block.reverse();
+    Some(block.join("\n"))
+}
+
+/// The first line of a doc — the summary shown in selector lists.
+pub fn summary(doc: &str) -> &str {
+    doc.lines().next().unwrap_or("")
+}
+
+/// Source text for a unit filename as introspection reports it (`SourceLoc::file`):
+/// `[pkg:]path.qn` for `use`-loaded units, `prelude.qn`/`test.qn` for the bootstrap ones, or
+/// a plain filesystem path for an entry script. Embedded stdlib units resolve from the binary
+/// (`read_stdlib_unit` honours `QUOIN_STDLIB`), so `$doc`/`qn doc` work outside a checkout.
+pub fn unit_source(file: &str) -> Option<String> {
+    let unit = file.strip_suffix(".qn").unwrap_or(file);
+    // `std:core/06-io` / bare `core/06-io` / `prelude` — try the stdlib first.
+    let stdlib_key = unit.strip_prefix("std:").unwrap_or(unit);
+    if let Some(text) = read_stdlib_unit(stdlib_key) {
+        return Some(text);
+    }
+    // `self:app/util` — self-rooted package paths; in the doc/eval modes self_root is the
+    // CWD, so a relative read matches how the unit was loaded.
+    if let Some(rest) = unit.strip_prefix("self:") {
+        return std::fs::read_to_string(format!("{rest}.qn")).ok();
+    }
+    // An entry script or other on-disk file, named as given.
+    std::fs::read_to_string(file)
+        .ok()
+        .or_else(|| std::fs::read_to_string(format!("{unit}.qn")).ok())
+}
+
+#[cfg(test)]
+#[path = "docs_tests.rs"]
+mod docs_tests;

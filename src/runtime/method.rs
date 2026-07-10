@@ -20,6 +20,9 @@ pub enum MethodBody {
         /// Declared checker return type (Fork-1b native half), e.g. `Some("String")`. Compile-time
         /// only — never consulted at dispatch; surfaced via `introspect` for the type checker.
         ret_type: Option<String>,
+        /// Reference-doc text (`.doc(..)` on the builder; docs/DOCS_ARCH.md §5). Never
+        /// consulted at dispatch; surfaced via `introspect` for `qn doc` and `$doc`.
+        doc: Option<String>,
     },
     /// An extension-backed method (Phase 3): the selector dispatches over the socket to `ext`
     /// (the owning `Extension` instance, kept GC-rooted via the method table). Whether the send
@@ -55,6 +58,7 @@ impl NativeMethodState {
         func: NativeFunc,
         param_types: Option<Vec<String>>,
         ret_type: Option<String>,
+        doc: Option<String>,
     ) -> Self {
         Self {
             selector,
@@ -62,6 +66,7 @@ impl NativeMethodState {
                 func,
                 param_types,
                 ret_type,
+                doc,
             },
             is_extension: false,
             next: None,
@@ -125,6 +130,15 @@ impl NativeMethodState {
     pub fn native_ret_type(&self) -> Option<String> {
         match &self.body {
             MethodBody::Native { ret_type, .. } => ret_type.clone(),
+            MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
+        }
+    }
+
+    /// Reference-doc text for a native method (`.doc(..)`), or `None` for a user block (whose
+    /// doc lives in source, above its definition), an extension body, or an undocumented one.
+    pub fn native_doc(&self) -> Option<String> {
+        match &self.body {
+            MethodBody::Native { doc, .. } => doc.clone(),
             MethodBody::UserBlock(_) | MethodBody::ExtDispatch { .. } => None,
         }
     }

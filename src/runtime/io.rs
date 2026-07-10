@@ -473,14 +473,27 @@ fn open_stdin_stream<'gc>(
 pub fn build_io_stdin_class() -> NativeClassBuilder {
     NativeClassBuilder::new("[IO]Stdin", Some("Object"))
         .abstract_class()
+        .class_doc(
+            "The process's standard input.\n\nReads park the task rather than blocking the \
+             scheduler, so a program can serve sockets while it waits on a line. The stream is \
+             created on the first read and reused: it buffers, so there can only be one. \
+             `readLine` / `eachLine:` / `readAll` are the everyday surface; `stream` and \
+             `byteStream` expose the stream itself.",
+        )
         .class_method("stream", |vm, mc, _r, _args| {
             stdin_stream(vm, mc, "stringStream", "[IO]Stdin.stream")
         })
         .returns("StringStream")
+        .doc(
+            "The one shared StringStream over standard input, created on first use. Asking \
+             for the byte view after the text view (or vice versa) is an error: a stream \
+             buffers, so two views would each hold bytes the other never sees.",
+        )
         .class_method("byteStream", |vm, mc, _r, _args| {
             stdin_stream(vm, mc, "byteStream", "[IO]Stdin.byteStream")
         })
         .returns("ByteStream")
+        .doc("The one shared ByteStream over standard input, created on first use.")
 }
 
 pub fn build_io_handle_class() -> NativeClassBuilder {

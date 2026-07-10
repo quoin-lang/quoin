@@ -17,7 +17,7 @@ use crate::runtime::streams::NativeStream;
 use crate::symbol::{Symbol, init_colon_symbol, init_symbol, new_colon_symbol, self_symbol};
 use crate::value::{
     AnyCollect, Block, Class, EnvFrame, Fields, InitEntry, InitPlan, NamespacedName, NativeCall,
-    NativeClass, NativeFunc, NativeNewPolicy, Object, ObjectPayload, Value,
+    NativeClass, NativeFunc, NativeNewPolicy, Object, ObjectPayload, SourceInfo, Value,
 };
 use crate::{ansi_colorizer, devirt_ops, gc, gcl};
 use std::sync::Arc;
@@ -478,6 +478,16 @@ pub struct Instrumentation {
     pub coverage: Option<crate::coverage::CoverageState>,
 }
 
+/// Non-hot, non-GC per-class metadata (see `VmState::class_meta`): where the class was
+/// defined, and — for a native class — its `.class_doc(..)` text. Quoin classes get their doc
+/// lazily, from the `"*` block above `source` (docs/DOCS_ARCH.md §4); native classes carry it
+/// here because they have no source to scan.
+#[derive(Default, Clone, Debug)]
+pub struct ClassMeta {
+    pub source: Option<SourceInfo>,
+    pub doc: Option<String>,
+}
+
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct VmState<'gc> {
@@ -521,6 +531,12 @@ pub struct VmState<'gc> {
     /// opening it is an `await_io`, and the benchmark harness (which still runs the prelude) has
     /// no scheduler to park on.
     pub stdin_stream: Option<Value<'gc>>,
+    /// Per-class metadata that lives outside the hot `Class` struct: the source location of
+    /// the definition (recorded by `DefineClass`, used by doc extraction to find the `"*`
+    /// block above it) and a native class's `.class_doc(..)` text. A side table rather than
+    /// fields on `Class` so the many `Class` construction sites stay untouched.
+    #[collect(require_static)]
+    pub class_meta: FxHashMap<NamespacedName, ClassMeta>,
     /// Every open *buffered* write stream (`[IO]File.create:` / `append:`), so the driver can
     /// flush them when the program ends — C's atexit flush, which a GC finaliser cannot do
     /// because a `Drop` may not perform async I/O. `close` removes its stream from this list.
@@ -728,6 +744,7 @@ impl<'gc> VmState<'gc> {
             next_frame_id: 1,
             native_reentry_depth: 0,
             stdin_stream: None,
+            class_meta: FxHashMap::default(),
             open_write_streams: Vec::new(),
             stack_limit: 0,
             requested_exit: None,
@@ -1425,9 +1442,10 @@ impl<'gc> VmState<'gc> {
         func: NativeFunc,
         param_types: Option<Vec<String>>,
         ret_type: Option<String>,
+        doc: Option<String>,
     ) -> Value<'gc> {
         let class = self.get_or_create_builtin_class(mc, "Method");
-        let state = NativeMethodState::new_native(selector, func, param_types, ret_type);
+        let state = NativeMethodState::new_native(selector, func, param_types, ret_type, doc);
         let boxed_state: Box<dyn AnyCollect> = Box::new(state);
         Value::Object(gcl!(
             mc,
@@ -1737,6 +1755,12 @@ impl<'gc> VmState<'gc> {
     }
 
     pub fn register_native_class<T: NativeClass>(&mut self, mc: &Mutation<'gc>, native_class: T) {
+        if let Some(doc) = native_class.class_doc() {
+            self.class_meta
+                .entry(NamespacedName::parse(native_class.name()))
+                .or_default()
+                .doc = Some(doc.to_string());
+        }
         let parent_class = if let Some(parent_name) = native_class.parent_name() {
             Some(self.get_or_create_builtin_class(mc, parent_name))
         } else {
@@ -1755,6 +1779,7 @@ impl<'gc> VmState<'gc> {
                 def.func,
                 def.param_types,
                 def.ret_type,
+                def.doc,
             );
             if let Some(head) = inst_methods.get(&sym).copied() {
                 let _ = Self::append_method_to_chain(mc, head, node);
@@ -1772,6 +1797,7 @@ impl<'gc> VmState<'gc> {
                 def.func,
                 def.param_types,
                 def.ret_type,
+                def.doc,
             );
             if let Some(head) = cls_methods.get(&sym).copied() {
                 let _ = Self::append_method_to_chain(mc, head, node);
@@ -6079,7 +6105,13 @@ impl<'gc> VmState<'gc> {
                 name,
                 parent_name,
                 instance_vars,
+                source,
             } => {
+                // Definition wins over any earlier record (a REPL redefinition moves the
+                // class); a native class's `.class_doc(..)` set at registration survives.
+                if source.is_some() {
+                    self.class_meta.entry(name.clone()).or_default().source = source.clone();
+                }
                 let parent = if let Some(p_name) = parent_name {
                     let val = self
                         .globals

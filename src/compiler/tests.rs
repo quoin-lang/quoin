@@ -1537,6 +1537,7 @@ fn test_compile_class_and_method_definitions() {
         name: ns("MyClass"),
         parent_name: Some(ns("Object")),
         instance_vars: vec!["a".to_string(), "b".to_string()],
+        source: None,
     });
     expected.push(Instruction::Push(Constant::block(expected_block)));
     expected.push(Instruction::ExecuteBlockWithSelf);

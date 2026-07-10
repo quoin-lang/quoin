@@ -629,6 +629,7 @@ fn variant_signature(m: &NativeMethodState) -> String {
             guarded,
             native,
             source: None,
+            doc: None,
         },
     )
 }

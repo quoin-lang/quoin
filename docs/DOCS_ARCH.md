@@ -1,11 +1,22 @@
 # Reference documentation — comment docs, one pipeline, `qn doc`
 
-*Status: DESIGN (decided 2026-07-09 at `944d5d8`, nothing built). The three forks below are
-settled: comment docs over a `.doc:` authoring API, plain adjacency over a new doc sigil, and
-HTML + JSON output. Companion to `docs/INTROSPECTION.md` (the read-only surface this rides on)
-and `crates/quoin-fmt/DESIGN.md` (whose comment scanner this reuses). The language *reference
-book* (`docs/language/`, RELEASE_PREP Tier 2) is a separate, hand-written artifact; this system
-generates the per-class API reference that book links into.*
+*Status: PHASE 1 SHIPPED (2026-07-09; designed at `944d5d8`, built the same day). `qn doc
+[PATH…] [--out DIR] [--json] [--coverage]` generates HTML + JSON for the stdlib plus user
+units; the §4 extractor is `src/docs.rs`, the generator `src/runner_doc.rs`, and
+`.doc(..)`/`.class_doc(..)` live on `NativeClassBuilder` with `[IO]Stdin` and
+`Class.exists?:` seeded as the proof (one page carries both doc worlds — pinned by
+`tests/doc_gen.rs`). Two implementation notes against the text below: extraction is a
+line-based scan rather than `scan_comments` (a doc line is a whole-line `"*` comment, and
+strings cannot span lines, so no context tracking is needed — recorded in `src/docs.rs`);
+and class-extension sites (`Name <-- {…}`) are not yet recorded, so a reopen's doc block —
+including every native class extended from qnlib — waits for phase 2. Remaining: phase 2
+(`docFor:`/`$doc`, `qn highlight --html`, extension sites) and phase 3 (doctests).*
+
+*The three forks are settled: comment docs over a `.doc:` authoring API, plain adjacency over
+a new doc sigil, HTML + JSON output. Companion to `docs/INTROSPECTION.md` (the read-only
+surface this rides on). The language *reference book* (`docs/language/`, RELEASE_PREP Tier 2)
+is a separate, hand-written artifact; this system generates the per-class API reference that
+book links into.*
 
 ## 1. Why
 

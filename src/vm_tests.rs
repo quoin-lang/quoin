@@ -148,6 +148,7 @@ where
             NativeFunc::Legacy(native_add),
             None,
             None,
+            None,
         );
         vm.globals
             .borrow_mut(mc)
@@ -470,6 +471,7 @@ fn test_native_methods_are_chainable() {
             mc,
             "can?:".to_string(),
             NativeFunc::Legacy(|vm, mc, _receiver, _args| Ok(vm.new_nil(mc))),
+            None,
             None,
             None,
         );
@@ -1115,6 +1117,7 @@ fn test_class_and_method_definition_vm() {
                 name: NamespacedName::new(Vec::new(), "Point".to_string()),
                 parent_name: None,
                 instance_vars: vec!["x".to_string(), "y".to_string()],
+                source: None,
             },
             // Push class block
             Instruction::Push(Constant::block(class_block)),
@@ -1345,6 +1348,7 @@ fn test_class_new() {
                 name: NamespacedName::new(Vec::new(), "Point".to_string()),
                 parent_name: None,
                 instance_vars: vec!["x".to_string(), "y".to_string()],
+                source: None,
             },
             Instruction::LoadGlobal(NamespacedName::new(Vec::new(), "Point".to_string())),
             Instruction::Send(Symbol::intern("new"), 0),
@@ -1482,6 +1486,7 @@ fn test_mixin_method_lookup_and_instance_vars() {
                             }),
                             None,
                             None,
+                            None,
                         ),
                     );
                     m
@@ -1591,6 +1596,7 @@ fn test_execute_block_helper() {
             NativeFunc::Legacy(native_add),
             None,
             None,
+            None,
         );
         vm.globals
             .borrow_mut(mc)
@@ -1657,6 +1663,7 @@ fn test_cannot_redefine_existing_class() {
             name: NamespacedName::new(Vec::new(), "Object".to_string()),
             parent_name: None,
             instance_vars: Vec::new(),
+            source: None,
         }],
         |vm, mc| {
             let res = vm.step(mc);

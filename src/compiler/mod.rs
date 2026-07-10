@@ -2576,6 +2576,7 @@ impl Compiler {
                     name,
                     parent_name,
                     instance_vars,
+                    source: node.source_info.clone(),
                 });
                 if is_value_type {
                     self.value_type_def_depth += 1;
