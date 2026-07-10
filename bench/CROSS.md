@@ -1,9 +1,10 @@
 # Cross-language results: Quoin vs Python vs Ruby
 
-*Measured 2026-07-10 on `perf/block-scalar-spec` @ `41a1c80` (main
+*Measured 2026-07-10 on `perf/block-scalar-spec` @ `ed54325` (main
 post #85 plus the block-speculation arc S0-S5), Apple Silicon
-(darwin25). The previous table (2026-07-06, the ic-direct-calls tip
-`80a209b`) is preserved below for the delta story.*
+(darwin25); this run adds the `fib_untyped_32` row. The previous table
+(2026-07-06, the ic-direct-calls tip `80a209b`) is preserved below for
+the delta story.*
 ## Methodology
 
 - **Whole-process wall time** (startup + load + compile + run), median of 5
@@ -29,18 +30,32 @@ post #85 plus the block-speculation arc S0-S5), Apple Silicon
 
 ## Results (seconds, median of 7; ratios = other/quoin, >1 ⇒ Quoin faster)
 
-| bench        | quoin | python | ruby  | rb-yjit | py/qn | rb/qn | yjit/qn |
-|--------------|------:|-------:|------:|--------:|------:|------:|--------:|
-| btrees       | 0.295 | 0.200  | 0.124 | 0.063   | 0.68  | 0.42  | 0.21    |
-| combinators  | 0.100 | 0.049  | 0.051 | 0.050   | 0.49  | 0.51  | 0.49    |
-| fib_typed    | 0.037 | 0.198  | 0.124 | 0.043   | **5.39** | **3.36** | **1.16** |
-| fib_untyped  | 0.021 | 0.085  | 0.063 | 0.032   | **4.03** | **2.98** | **1.50** |
-| json         | 0.305 | 0.227  | 0.122 | 0.122   | 0.75  | 0.40  | 0.40    |
-| maps         | 0.155 | 0.074  | 0.088 | 0.080   | 0.48  | 0.57  | 0.52    |
-| richards     | 0.321 | 0.099  | 0.083 | 0.047   | 0.31  | 0.26  | 0.15    |
-| sieve        | 0.106 | 0.317  | 0.196 | 0.102   | **2.98** | **1.84** | 0.96 |
-| strings      | 0.082 | 0.047  | 0.074 | 0.071   | 0.57  | **0.91** | 0.86 |
-| **geomean**  |       |        |       |         | **1.03** | 0.84  | 0.55 |
+| bench          | quoin | python | ruby  | rb-yjit | py/qn | rb/qn | yjit/qn |
+|----------------|------:|-------:|------:|--------:|------:|------:|--------:|
+| btrees         | 0.287 | 0.193  | 0.121 | 0.061   | 0.67  | 0.42  | 0.21    |
+| combinators    | 0.097 | 0.047  | 0.050 | 0.046   | 0.49  | 0.52  | 0.47    |
+| fib_typed      | 0.035 | 0.191  | 0.119 | 0.041   | **5.52** | **3.44** | **1.18** |
+| fib_untyped    | 0.020 | 0.083  | 0.061 | 0.032   | **4.15** | **3.02** | **1.60** |
+| fib_untyped_32 | 0.035 | 0.191  | 0.119 | 0.041   | **5.51** | **3.44** | **1.18** |
+| json           | 0.288 | 0.220  | 0.119 | 0.119   | 0.76  | 0.41  | 0.41    |
+| maps           | 0.152 | 0.074  | 0.086 | 0.078   | 0.49  | 0.57  | 0.51    |
+| richards       | 0.313 | 0.096  | 0.081 | 0.046   | 0.31  | 0.26  | 0.15    |
+| sieve          | 0.105 | 0.302  | 0.192 | 0.099   | **2.89** | **1.83** | 0.95 |
+| strings        | 0.079 | 0.046  | 0.073 | 0.069   | 0.58  | **0.92** | 0.87 |
+| **geomean**    |       |        |       |         | **1.23** | 0.98  | 0.60 |
+
+**Geomeans are not comparable across tables with different row sets**: this
+table adds `fib_untyped_32` (a Quoin-favorable row), which alone moves the
+py/qn geomean 1.04 → 1.23. On the previous nine-bench set this run measures
+**1.04** — that is the number to compare against the 07-06 table's 1.07.
+
+`fib_untyped_32` is `fib_typed`'s exact workload (n = 32) with the
+annotations deleted — the row that makes the **speculation tax** directly
+readable. Verdict: **zero at this scale** — 0.035s vs 0.035s, identical to
+the run's precision. The tax is a fixed warm-up (the interpreted prefix
+before promotion at OBSERVE_CAP plus entry preconditions), visible only on
+the smaller fib_untyped row (n = 30), where ~3ms of it shows against ~13ms
+of compute.
 
 Previous table (2026-07-06, ic-direct-calls tip `80a209b`): btrees
 0.320 (py/qn 0.61), combinators 0.126, fib_typed 0.028, fib_untyped

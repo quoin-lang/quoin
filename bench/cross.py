@@ -29,6 +29,7 @@ BENCHES = [
     "combinators",
     "fib_typed",
     "fib_untyped",
+    "fib_untyped_32",
     "json",
     "maps",
     "richards",

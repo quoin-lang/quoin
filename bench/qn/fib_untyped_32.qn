@@ -1,0 +1,14 @@
+"Untyped recursive Fibonacci at fib_typed's workload (n = 32), so the
+typed-vs-untyped gap - the speculation tax - reads directly off the table
+instead of requiring phi^2 arithmetic between rows: fib_typed and this row
+differ ONLY in annotations.
+Run whole-process: `qn bench/qn/fib_untyped_32.qn` from the repo root."
+
+Fib <- {
+    .meta <-- {
+        value: -> { |n| (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) } }
+    }
+};
+
+var r = Fib.value:32;
+(r == 2178309).if:{ 'fib_untyped_32: ok'.print } else:{ ('fib_untyped_32: FAIL got ' + r).print }
