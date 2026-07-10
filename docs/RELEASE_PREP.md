@@ -326,60 +326,17 @@ it. None is fixed.
   trailing splats; the book's §4 prose currently soft-claims "any position" and
   shows only verified trailing forms — align it with whichever way this goes.
 
-- [ ] **Top-level method definitions die with "Cannot extend sealed class
-  [/]Nil" — make the semantics explicit.** Found repairing the book (2026-07-10):
-  `greet -> { 42 }` at the top of a file compiles fine, then fails at runtime
-  with an error about a class the user never mentioned. The mechanism: a method
-  definition attaches to the current `self`'s class; top-level `self` is `nil`;
-  `Nil` is sealed (PR #31). Every newcomer who writes a "function" will hit this,
-  and the message explains the implementation, not the mistake.
-
-  Decide one of:
-  1. **A targeted compile-time diagnostic** (recommended): a method definition
-     at unit top level, outside any class body, is statically detectable — reject
-     it at compile time with the actual fix: "methods live in classes; for a
-     standalone callable, bind a block: `var greet = { 42 }` (call it with
-     `greet.value`)". Cheap, no semantics change.
-  2. **Give top-level `sel -> {…}` a real meaning** (a global function/binding)
-     — a language-design decision with dispatch implications; not for v0.1.
-  3. Keep the runtime error but rewrite it to name the situation ("a top-level
-     method definition — `self` is nil here") — weakest, since the failure stays
-     at runtime.
-
-  Whichever way: the book (02-blocks-and-control §9, 03-objects) currently works
-  around it by wrapping examples in classes with a one-line note; once the
-  semantics are explicit, say it in §Rules there too.
-
-- [ ] **`T?` on a method parameter makes the variant unreachable.** Verified
-  2026-07-10: `width: -> { |name: String?| … }` answers MessageNotUnderstood for
-  a String argument AND for nil — the nullable param type matches nothing at
-  dispatch. Found writing the types chapter; no coverage existed. The book
-  documents the workaround (nullable belongs on locals/returns) in Part VII;
-  fix dispatch scoring for `T?` params, then simplify that gotcha.
-
-- [ ] **Sealed-subclass error is a bare String throw.** `Integer <- Sub <- {}`
-  raises a plain String ("Cannot subclass sealed class …") that
-  `catch:{|e:Error|}` cannot see, while sealed-*extension* raises a typed
-  ClassError. Same F12 family as the batch fixed in PR #79; one-line retype.
-
-- [ ] **A spinning task starves the whole VM — cancellation and timers never
-  land.** Verified 2026-07-10: `Task.spawn:{ {true}.whileDo:{…} }` then
-  `t.cancel` from main — the cancel never takes effect, and main's own expired
-  `Async.sleep:` never resumes; the process had to be SIGKILLed. Batch-yield
-  boundaries exist (QN_BATCH), but the driver resumes the same task at a
-  cooperative yield instead of rotating to ready tasks/expired timers
-  (run-to-block by design; zero fairness at yield points is the bug-or-decision
-  to make explicit). The book's Part V documents the behavior as a gotcha.
-
-- [ ] **Checker reality vs. claims — two drifts found writing Part VII.**
-  (a) `qnlib/warnings.qn` gallery drift: `badEachParam` no longer warns, while
-  `wellFormed:` (in the "must emit NO warning" section) now warns
-  `expected List(Integer), found List`. (b) Compile-time argument-type MNU
-  effectively never fires for builtins (gated to from_vm+sealed `Instance`
-  receivers with one fully-typed variant): `5.pow:'x'` is silent at check time.
-  Also statically-visible bad literal elements (`var x: List(Integer) =
-  #(1 'two')`) don't warn — insertions do. Align the gallery + decide whether
-  the arg-check gate should widen.
+- [x] **Top-level method definitions die with "Cannot extend sealed class
+  [/]Nil".** FIXED with option 1, the targeted compile-time diagnostic:
+  `greet -> { 42 }` at unit top level (outside any class body, outside any
+  block, when top-level `self` is the nil default) is rejected at compile time
+  with the actual fix in the message ("methods live in classes… or bind a
+  block: `var greet = { … }`"). The two legitimate shapes are preserved and
+  tested: method definitions in BLOCK position (`.test:name -> { … }` — the
+  test DSL itself) still create Method values against the runtime `self`, and
+  `Runtime.eval:'…' self:obj` still defines on the receiver's eigenclass
+  (`compile_program_with`'s `define_self` flag distinguishes the cases).
+  Tests: tests/exit_code.rs (all three entry points), 05-classes.qn.
 
 - [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
   and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so

@@ -517,12 +517,11 @@ Money <- { |@cents|
 }
 
 { Money <-- { inflate -> { 0 } } }.catch:{ |e| e.class.name }    "* -> 'ClassError'
-{ Money <- Coupon <- {} }.catch:{ |e| e }
-    "* -> 'Cannot subclass sealed class [/]Money'
+{ Money <- Coupon <- {} }.catch:{ |e| e.class.name }    "* -> 'ClassError'
 ```
 
-(Note the asymmetry, as shipped: extension attempts throw a `ClassError`;
-the subclass attempt currently throws a plain `String` — catch accordingly.)
+Extension and subclass attempts both raise a typed `ClassError`, so one
+`catch:{ |e: ClassError| … }` covers either.
 
 `abstract!` is the other, independent switch — a class that exists only to be
 subclassed:

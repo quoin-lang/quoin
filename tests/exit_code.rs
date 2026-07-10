@@ -142,6 +142,14 @@ mod compile_errors {
             "let x = 1;\nx = 2;\n",
             "cannot reassign `let`",
         ),
+        // A top-level method definition used to compile and then die at runtime with
+        // "Cannot extend sealed class [/]Nil" — an error about a class the user never
+        // wrote (top-level `self` is nil). Now rejected at compile time, naming the fix.
+        (
+            "top_level_method",
+            "greet -> { 42 };\n",
+            "methods live in classes",
+        ),
     ];
 
     fn assert_clean_failure(what: &str, code: Option<i32>, stderr: &str, needle: &str) {

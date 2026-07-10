@@ -624,6 +624,8 @@ pub struct Compiler {
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
+    /// Whether this unit's top-level `self` is the nil default (see `compile_program_with`).
+    top_level_self_is_nil: bool,
     /// While compiling an *inlined* control-flow block body (Slice 2d), collects the
     /// bytecode positions of top-level `^` (BlockReturn) placeholder jumps so
     /// `inline_block_body` can patch them to land just past the inlined region. `None`
@@ -689,6 +691,7 @@ impl Compiler {
             splice_rename_counter: 0,
             fused_loop_depth: 0,
             class_ctx: Vec::new(),
+            top_level_self_is_nil: false,
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
             class_table: ClassTable::new(),
@@ -952,6 +955,7 @@ impl Compiler {
             splice_rename_counter: 0,
             fused_loop_depth: 0,
             class_ctx: Vec::new(),
+            top_level_self_is_nil: false,
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
             class_table: ClassTable::new(),
@@ -962,6 +966,27 @@ impl Compiler {
             aot_candidates: Vec::new(),
             class_ctx_counter: 0,
         }
+    }
+
+    /// A method definition at unit top level, outside any class body, when top-level `self`
+    /// is the nil default: reject at COMPILE time with the actual fix. At runtime it would
+    /// die extending sealed Nil — an error naming a class the user never wrote. Inside a
+    /// class body (`class_ctx` non-empty) or under `eval:self:` it is legitimate.
+    fn reject_top_level_method(&self, selector: &str) -> Result<(), String> {
+        // `scopes.len() == 1` = a true top-level STATEMENT. Inside any block literal
+        // (`scopes` grows per block) a method definition is expression material — the
+        // test DSL's `.test:name -> { … }` defines on whatever `self` the block gets at
+        // runtime, which is exactly the eigenclass mechanism working as intended.
+        if self.scopes.len() == 1 && self.class_ctx.is_empty() && self.top_level_self_is_nil {
+            return Err(format!(
+                "`{selector}` is a method definition, and methods live in classes — at the \
+                 top level there is no class to define it on. Put it in a class body \
+                 (`Name <- {{ {selector} -> {{ … }} }}`), or bind a block instead: \
+                 `var {} = {{ … }}` (call it with `.value`)",
+                selector.trim_end_matches(':')
+            ));
+        }
+        Ok(())
     }
 
     /// Is this `<-`/`<--` target an immediate value type? `true`/`false`/`nil` are
@@ -2336,6 +2361,12 @@ impl Compiler {
         program: &ProgramNode,
         define_self: bool,
     ) -> Result<StaticBlock, String> {
+        // Remembered so the MethodDefinition arm can reject a TOP-LEVEL `sel -> { … }` when
+        // `self` is the nil default: it would try to extend sealed Nil at runtime, and that
+        // error ("Cannot extend sealed class [/]Nil") names a class the user never wrote
+        // (RELEASE_PREP Tier 4a). `eval:self:` passes `define_self: false` (a real receiver
+        // is bound), where a top-level definition legitimately targets that receiver.
+        self.top_level_self_is_nil = define_self;
         // Pre-scan this unit's class defs so annotations can forward-reference them (and so
         // later-compiled units see them via the shared `seen_types`).
         self.prescan_class_defs(program);
@@ -2680,12 +2711,14 @@ impl Compiler {
             }
             NodeValue::MethodDefinition(method_def) => {
                 let selector = self.reconstruct_selector(&method_def.signature)?;
+                self.reject_top_level_method(&selector)?;
                 self.compile_block(&method_def.block, bytecode)?;
                 self.maybe_collect_aot_candidate(&selector, &method_def.block, bytecode);
                 bytecode.push(Instruction::DefineMethod(selector));
             }
             NodeValue::MethodExtension(method_ext) => {
                 let selector = self.reconstruct_selector(&method_ext.signature)?;
+                self.reject_top_level_method(&selector)?;
                 self.compile_block(&method_ext.block, bytecode)?;
                 bytecode.push(Instruction::OverrideMethod(selector));
             }
