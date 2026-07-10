@@ -53,10 +53,14 @@ struct ExtensionDoc {
 #[derive(Serialize)]
 struct MethodDoc {
     selector: String,
-    /// Rendered signatures, one per variant (`at:Integer put:`, `sound (native)`).
+    /// Rendered signatures, one per variant (`at:Integer put:`). Unlike the REPL's rendering,
+    /// no `(native)` suffix — nativeness is the `native` field, shown where a Quoin method
+    /// shows its source location.
     signatures: Vec<String>,
     doc: Option<String>,
     source: Option<String>,
+    /// Every variant is Rust-implemented (no source to link).
+    native: bool,
 }
 
 /// Classes that exist as machinery, not API: per-instance eigenclass shells and the
@@ -212,10 +216,16 @@ fn build_model(infos: Vec<ClassInfo>) -> DocModel {
                             signatures: m
                                 .variants
                                 .iter()
-                                .map(|v| introspect::signature(&m.selector, v))
+                                .map(|v| {
+                                    let sig = introspect::signature(&m.selector, v);
+                                    sig.strip_suffix(" (native)")
+                                        .map(String::from)
+                                        .unwrap_or(sig)
+                                })
                                 .collect(),
                             doc: native_doc.or(quoin_doc),
                             source,
+                            native: m.variants.iter().all(|v| v.native),
                         }
                     })
                     .collect();
@@ -299,6 +309,62 @@ fn esc(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Escape, then render `backtick spans` as `<code>` — the one piece of inline markup doc
+/// prose uses. An unpaired trailing backtick renders literally.
+fn inline(text: &str) -> String {
+    let escaped = esc(text);
+    let mut out = String::new();
+    let mut parts = escaped.split('`');
+    if let Some(first) = parts.next() {
+        out.push_str(first);
+    }
+    let rest: Vec<&str> = parts.collect();
+    let mut i = 0;
+    while i < rest.len() {
+        if i + 1 < rest.len() {
+            out.push_str("<code>");
+            out.push_str(rest[i]);
+            out.push_str("</code>");
+            out.push_str(rest[i + 1]);
+            i += 2;
+        } else {
+            // Odd trailing segment: the backtick was literal.
+            out.push('`');
+            out.push_str(rest[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The GitHub blob URL for a `file:line` source ref, when the file is part of the shipped
+/// stdlib (which lives under `qnlib/` in the repository named by the crate metadata). User
+/// units are not in that repository, so they render as plain text.
+fn source_href(source: &str) -> Option<String> {
+    let repo = option_env!("CARGO_PKG_REPOSITORY")?;
+    let (file, line) = source.rsplit_once(':')?;
+    let unit = file.strip_suffix(".qn").unwrap_or(file);
+    let key = unit.strip_prefix("std:").unwrap_or(unit);
+    // In the embed table <=> shipped from qnlib/ in the repo.
+    crate::stdlib::resolve(key)?;
+    Some(format!(
+        "{}/blob/main/qnlib/{key}.qn#L{line}",
+        repo.trim_end_matches('/')
+    ))
+}
+
+/// A source ref as HTML: `<code>file:line</code>`, linked to GitHub when the file is in the
+/// repository. Styled like the surrounding meta text — underline only on hover (`a.src`).
+fn source_html(source: &str) -> String {
+    match source_href(source) {
+        Some(href) => format!(
+            r#"<a class="src" href="{href}"><code>{}</code></a>"#,
+            esc(source)
+        ),
+        None => format!("<code>{}</code>", esc(source)),
+    }
+}
+
 /// Link `name` if the model documents a class by that name (bare or nullable `Foo?`).
 fn type_link(name: &str, model: &DocModel) -> String {
     let bare = name.strip_suffix('?').unwrap_or(name);
@@ -317,7 +383,7 @@ fn doc_html(doc: &str) -> String {
     let mut fence: Option<Vec<&str>> = None;
     let flush_para = |out: &mut String, para: &mut Vec<&str>| {
         if !para.is_empty() {
-            let _ = write!(out, "<p>{}</p>\n", esc(&para.join(" ")));
+            let _ = write!(out, "<p>{}</p>\n", inline(&para.join(" ")));
             para.clear();
         }
     };
@@ -375,6 +441,8 @@ code, pre { font: 0.9em ui-monospace, monospace; }
 pre { background: var(--code-bg); padding: .75rem 1rem; border-radius: 6px; overflow-x: auto; }
 .sig { font-family: ui-monospace, monospace; font-weight: 600; }
 .meta-line { color: var(--dim); font-size: .85rem; }
+a.src { color: inherit; }
+a.src:hover { text-decoration: underline; }
 .method { margin: 1.4rem 0; }
 .method > .body { margin: .3rem 0 0 1rem; }
 .badge { font-size: .75rem; color: var(--dim); border: 1px solid var(--line);
@@ -419,7 +487,12 @@ fn render_index(model: &DocModel) -> String {
             let summary = c
                 .doc
                 .as_deref()
-                .map(|d| format!("<span class=\"summary\">{}</span>", esc(docs::summary(d))))
+                .map(|d| {
+                    format!(
+                        "<span class=\"summary\">{}</span>",
+                        inline(docs::summary(d))
+                    )
+                })
                 .unwrap_or_default();
             let _ = write!(
                 body,
@@ -460,7 +533,7 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
         lineage.push(format!("mixes in {}", mixed.join(", ")));
     }
     if let Some(src) = &class.source {
-        lineage.push(format!("defined at <code>{}</code>", esc(src)));
+        lineage.push(format!("defined at {}", source_html(src)));
     }
     if !lineage.is_empty() {
         let _ = write!(body, "<p class=\"meta-line\">{}</p>\n", lineage.join(" · "));
@@ -471,9 +544,9 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
     for ext in &class.extensions {
         let _ = write!(
             body,
-            "<div class=\"method\"><span class=\"meta-line\">extended at <code>{}</code></span>\
+            "<div class=\"method\"><span class=\"meta-line\">extended at {}</span>\
              <div class=\"body\">{}</div></div>\n",
-            esc(&ext.source),
+            source_html(&ext.source),
             doc_html(&ext.doc)
         );
     }
@@ -500,7 +573,9 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
                 body.push_str(&doc_html(doc));
             }
             if let Some(src) = &m.source {
-                let _ = write!(body, "<p class=\"meta-line\"><code>{}</code></p>", esc(src));
+                let _ = write!(body, "<p class=\"meta-line\">{}</p>", source_html(src));
+            } else if m.native {
+                let _ = write!(body, "<p class=\"meta-line\"><code>native</code></p>");
             }
             body.push_str("</div></div>\n");
         }

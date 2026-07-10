@@ -89,14 +89,37 @@ fn stdlib_docs_carry_both_native_and_quoin_doc_text() {
     // HTML exists, is self-contained, and cross-links resolve to emitted pages.
     let index = std::fs::read_to_string(out_dir.join("index.html")).unwrap();
     assert!(index.contains("<style>"), "the stylesheet must be inline");
-    assert!(
-        !index.contains("http://") && !index.contains("https://"),
-        "no external fetches"
-    );
+    // Self-contained means no external RESOURCES (scripts, stylesheets, images) — plain
+    // hyperlinks (the GitHub source links) are fine.
+    for forbidden in ["<script", "<link", "src=\"http", "@import"] {
+        assert!(!index.contains(forbidden), "external resource: {forbidden}");
+    }
     let page = std::fs::read_to_string(out_dir.join("IO.Stdin.html")).unwrap();
     assert!(
         page.contains("without its terminator"),
         "doc text must reach the HTML"
+    );
+
+    // Source refs link to the repository named by the crate metadata; the path is the
+    // stdlib's home under qnlib/, the fragment the line.
+    assert!(
+        page.contains("href=\"https://github.com/quoin-lang/quoin/blob/main/qnlib/core/06-io.qn#L"),
+        "a stdlib source ref must link to GitHub"
+    );
+    // A native method says so where a Quoin method shows its source — and never as a
+    // signature suffix.
+    assert!(
+        page.contains("<p class=\"meta-line\"><code>native</code></p>"),
+        "native methods must carry the source-position label"
+    );
+    assert!(
+        !page.contains("(native)"),
+        "the (native) signature suffix must not appear in doc pages"
+    );
+    // Backtick spans in prose render as <code> — on class pages and in index summaries.
+    assert!(
+        page.contains("<code>readLine</code>"),
+        "inline backticks must become <code>"
     );
     for href in index.match_indices("href=\"").map(|(i, _)| {
         let rest = &index[i + 6..];
@@ -121,7 +144,7 @@ fn user_units_are_documented_alongside_the_stdlib() {
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::write(
         proj.join("shapes.qn"),
-        "\"* A circle, by radius.\n\
+        "\"* A circle, by `radius`.\n\
          \"*\n\
          \"* ```\n\
          \"* var c = Circle.new:{ r = 2 };\n\
@@ -155,7 +178,7 @@ fn user_units_are_documented_alongside_the_stdlib() {
         .expect("user class documented");
     assert_eq!(
         circle["doc"].as_str().unwrap().lines().next().unwrap(),
-        "A circle, by radius."
+        "A circle, by `radius`."
     );
     let method_doc = |sel: &str| {
         circle["instance_methods"]
@@ -189,6 +212,13 @@ fn user_units_are_documented_alongside_the_stdlib() {
         page.contains("extended at"),
         "the reopen site must appear on the page"
     );
+    // A user unit is not in the Quoin repository: its source refs stay plain text.
+    assert!(
+        !page.contains("github.com"),
+        "a non-stdlib source ref must not link to the Quoin repo"
+    );
+    // ...and the backticked word renders as code.
+    assert!(page.contains("<code>radius</code>"));
     let _ = std::fs::remove_dir_all(&proj);
 }
 
