@@ -405,7 +405,7 @@ pub fn build_string_class() -> NativeClassBuilder {
                         crate::class_table::populate_from_vm(vm, &vm.options.class_table);
                         let compiled = compiler
                             .compile_program(program_node)
-                            .map_err(|e| QuoinError::Other(e))?;
+                            .map_err(|e| QuoinError::Other(e.to_string()))?;
                         vm.report_type_warnings(compiler.diagnostics());
 
                         let block = vm.block_from_template(

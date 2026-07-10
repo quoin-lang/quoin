@@ -443,6 +443,33 @@ pub struct Note {
     pub span: Option<SourceInfo>,
 }
 
+/// A fatal compile error: the message plus the source span it points at, so every entry point
+/// can render `file:line:col` like a [`Diagnostic`] (at `error` level) instead of a bare string.
+/// `span` is `None` only when the failing site has no attributable location. `Display` embeds
+/// the location in parentheses — the form for plain-string contexts (`Runtime.eval:`, worker
+/// failures, the REPL), matching how those modes already render parse errors; file-based modes
+/// render richly via `VmState::report_compile_error`.
+#[derive(Clone, Debug)]
+pub struct CompileError {
+    pub message: String,
+    pub span: Option<SourceInfo>,
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.span {
+            Some(s) => write!(
+                f,
+                "{} (line {}, column {})",
+                self.message,
+                s.line,
+                s.column + 1
+            ),
+            None => write!(f, "{}", self.message),
+        }
+    }
+}
+
 /// Where a local's type came from (Phase 4 provenance), for the why-chain note: the declaration
 /// span plus a short origin phrase (`declared`, `` inferred from `name` ``, `parameter`).
 #[derive(Clone, Debug)]
@@ -642,6 +669,11 @@ pub struct Compiler {
     /// Non-fatal type diagnostics (e.g. `unknown type Foo`) collected during compilation.
     /// Surfaced by the caller; never blocks lowering (gradual best-effort).
     diagnostics: Vec<Diagnostic>,
+    /// The span of a fatal compile error, claimed innermost-first: an error site that knows a
+    /// precise span records it via `err_at`; otherwise the innermost `compile_node` frame to see
+    /// the error fills in its statement-level span. Taken by `compile_program_with` to build the
+    /// returned [`CompileError`].
+    error_span: Option<SourceInfo>,
     /// Declared return types of the block(s) currently being compiled (`|args ^T|`), innermost
     /// last. A `^`/`^^` return or a block's tail expression is checked (and numeric literals
     /// promoted) against the top entry; `None` = no declared return → not checked. Phase 3a.
@@ -696,6 +728,7 @@ impl Compiler {
             seen_types: SeenTypes::with_builtins(),
             class_table: ClassTable::new(),
             diagnostics: Vec::new(),
+            error_span: None,
             return_type_stack: Vec::new(),
             mint_template_ids: false,
             collect_aot: false,
@@ -960,6 +993,7 @@ impl Compiler {
             seen_types: SeenTypes::with_builtins(),
             class_table: ClassTable::new(),
             diagnostics: Vec::new(),
+            error_span: None,
             return_type_stack: Vec::new(),
             mint_template_ids: false,
             collect_aot: false,
@@ -2347,7 +2381,7 @@ impl Compiler {
         })
     }
 
-    pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, String> {
+    pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, CompileError> {
         self.compile_program_with(program, true)
     }
 
@@ -2357,6 +2391,22 @@ impl Compiler {
     /// `self = nil` init would clobber it. `self` still compiles as a local either way
     /// (`is_local` special-cases it), resolving through the env (receiver, or nil when unbound).
     pub fn compile_program_with(
+        &mut self,
+        program: &ProgramNode,
+        define_self: bool,
+    ) -> Result<StaticBlock, CompileError> {
+        self.error_span = None;
+        self.compile_program_inner(program, define_self)
+            .map_err(|message| CompileError {
+                message,
+                span: self.error_span.take(),
+            })
+    }
+
+    /// The body of `compile_program_with`, with the internal `String` error type: the span
+    /// travels out-of-band in `self.error_span` (claimed by the innermost `compile_node`
+    /// frame or a precise `err_at` site) and is attached by the public wrapper.
+    fn compile_program_inner(
         &mut self,
         program: &ProgramNode,
         define_self: bool,
@@ -2421,8 +2471,25 @@ impl Compiler {
         let prev_source = bytecode.current_source.clone();
         bytecode.current_source = node.source_info.clone();
         let res = self.compile_node_internal(node, bytecode);
+        if res.is_err() && self.error_span.is_none() {
+            // Claim the error's span innermost-first: the deepest `compile_node` frame sees
+            // the error while its node's span is still current; enclosing frames find the
+            // claim already made. An `err_at` site with a tighter span pre-empts this.
+            self.error_span = bytecode.current_source.clone();
+        }
         bytecode.current_source = prev_source;
         res
+    }
+
+    /// Record `span` as the compile error's location and pass the message through — for error
+    /// sites that know a tighter span (the offending identifier) than the enclosing statement,
+    /// which `compile_node` would otherwise fill in. First claim wins; `None` leaves the
+    /// statement-level fallback in place.
+    fn err_at(&mut self, span: &Option<SourceInfo>, message: String) -> String {
+        if self.error_span.is_none() && span.is_some() {
+            self.error_span = span.clone();
+        }
+        message
     }
 
     fn compile_node_internal(

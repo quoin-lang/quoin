@@ -231,7 +231,7 @@ impl Compiler {
 
     /// A `var`/`let` target must be a plain local (or `_` / splat / nested thereof) — not a
     /// global (`Foo`), an instance variable (`@x`), or a namespaced name.
-    fn validate_decl_targets(&self, lvalues: &[Arc<Node>]) -> Result<(), String> {
+    fn validate_decl_targets(&mut self, lvalues: &[Arc<Node>]) -> Result<(), String> {
         for lval in lvalues {
             match &lval.value {
                 NodeValue::IdentLValue(l) => self.validate_decl_ident(&l.identifier)?,
@@ -244,18 +244,24 @@ impl Compiler {
         Ok(())
     }
 
-    fn validate_decl_ident(&self, id: &IdentifierNode) -> Result<(), String> {
+    fn validate_decl_ident(&mut self, id: &IdentifierNode) -> Result<(), String> {
         if id.identifier_type == IdentifierType::Instance {
-            return Err(format!(
-                "`var`/`let` cannot declare an instance variable (`@{}`); \
-                 declare instance variables in the class header",
-                id.name
+            return Err(self.err_at(
+                &id.source_info,
+                format!(
+                    "`var`/`let` cannot declare an instance variable (`@{}`); \
+                     declare instance variables in the class header",
+                    id.name
+                ),
             ));
         }
         if id.namespace.is_some() || id.identifier_type == IdentifierType::Namespaced {
-            return Err(format!(
-                "`var`/`let` cannot declare a namespaced name (`{}`)",
-                id.name
+            return Err(self.err_at(
+                &id.source_info,
+                format!(
+                    "`var`/`let` cannot declare a namespaced name (`{}`)",
+                    id.name
+                ),
             ));
         }
         if id
@@ -265,9 +271,12 @@ impl Compiler {
             .map(|c| c.is_ascii_uppercase())
             .unwrap_or(false)
         {
-            return Err(format!(
-                "`var`/`let` declares locals; `{}` is uppercase — globals/classes use `{} = …`",
-                id.name, id.name
+            return Err(self.err_at(
+                &id.source_info,
+                format!(
+                    "`var`/`let` declares locals; `{}` is uppercase — globals/classes use `{} = …`",
+                    id.name, id.name
+                ),
             ));
         }
         Ok(())
@@ -287,7 +296,13 @@ impl Compiler {
                     bytecode.push(Instruction::StoreGlobal(ns_name, false));
                 } else {
                     let name = &id.name;
-                    self.compile_ident_store(&id.identifier_type, name, bytecode, declaring)?;
+                    self.compile_ident_store(
+                        &id.identifier_type,
+                        name,
+                        &id.source_info,
+                        bytecode,
+                        declaring,
+                    )?;
                 }
             }
             NodeValue::IgnoredLValue => {
@@ -305,6 +320,7 @@ impl Compiler {
         &mut self,
         ident_type: &IdentifierType,
         name: &String,
+        span: &Option<SourceInfo>,
         bytecode: &mut CodeBlock,
         declaring: bool,
     ) -> Result<(), String> {
@@ -329,9 +345,12 @@ impl Compiler {
             bytecode.push(Instruction::StoreGlobal(ns_name, false));
         } else if ident_type == &IdentifierType::Instance {
             if self.value_type_def_depth > 0 {
-                return Err(format!(
-                    "value types cannot have instance variables (found '@{}')",
-                    name
+                return Err(self.err_at(
+                    span,
+                    format!(
+                        "value types cannot have instance variables (found '@{}')",
+                        name
+                    ),
                 ));
             }
             bytecode.push(Instruction::StoreField(name.clone()));
@@ -344,7 +363,7 @@ impl Compiler {
             bytecode.push(Instruction::StoreLocal(sym));
         } else if self.is_local(name) {
             if self.is_immutable(name) {
-                return Err(format!("cannot reassign `let` binding `{}`", name));
+                return Err(self.err_at(span, format!("cannot reassign `let` binding `{}`", name)));
             }
             // (E) semantics: a bare store compiled directly in an init-literal body binds
             // locally at runtime — the name is a FIELD, never an alpha-renamed splice
@@ -362,10 +381,13 @@ impl Compiler {
             // into the new object at runtime.
             bytecode.push(Instruction::DefineLocal(Symbol::intern(&(name.clone()))));
         } else {
-            return Err(format!(
-                "undeclared local `{}` — declare it with `var {} = …` \
-                 (assignment no longer implicitly declares locals)",
-                name, name
+            return Err(self.err_at(
+                span,
+                format!(
+                    "undeclared local `{}` — declare it with `var {} = …` \
+                     (assignment no longer implicitly declares locals)",
+                    name, name
+                ),
             ));
         }
         Ok(())
@@ -391,6 +413,7 @@ impl Compiler {
                     self.compile_ident_store(
                         &ident_lval.identifier.identifier_type,
                         name,
+                        &ident_lval.identifier.source_info,
                         bytecode,
                         declaring,
                     )?;
@@ -406,6 +429,7 @@ impl Compiler {
                     self.compile_ident_store(
                         &splat_lval.identifier.identifier_type,
                         name,
+                        &splat_lval.identifier.source_info,
                         bytecode,
                         declaring,
                     )?;

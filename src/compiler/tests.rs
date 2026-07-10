@@ -659,7 +659,9 @@ fn strict_declaration_semantics() {
         let NodeValue::Program(p) = &node.value else {
             panic!("expected a program");
         };
-        Compiler::new().compile_program(p)
+        Compiler::new()
+            .compile_program(p)
+            .map_err(|e| e.to_string())
     }
 
     // `var` declares; a later plain assignment reassigns the same binding.
@@ -985,7 +987,9 @@ fn compile(exprs: Vec<Node>) -> Result<StaticBlock, String> {
         expressions: exprs.into_iter().map(Arc::new).collect(),
         source_info: None,
     };
-    let mut block = compiler.compile_program(&program)?;
+    let mut block = compiler
+        .compile_program(&program)
+        .map_err(|e| e.to_string())?;
     if block.bytecode.last() == Some(&Instruction::Return) {
         Arc::make_mut(&mut block.bytecode.0).pop();
     }
@@ -2611,7 +2615,7 @@ fn declaring_arm_inside_config_refuses() {
     };
     let mut c = Compiler::new();
     match c.compile_program(p) {
-        Err(e) => assert!(e.contains("undeclared local"), "{e}"),
+        Err(e) => assert!(e.message.contains("undeclared local"), "{e}"),
         Ok(code) => {
             fn no_renamed(insts: &[Instruction]) {
                 for i in insts {

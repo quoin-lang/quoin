@@ -126,21 +126,30 @@ fn exit_from_spawned_task_is_process_wide() {
     assert!(!stdout.contains("after"), "main task continued: {stdout}");
 }
 
-/// A *compile* error is a user error, not a VM bug. Every entry point must report it the same
-/// way and exit 1. The run path used to `panic!` inside `arena.mutate_root`, printing a Rust
-/// backtrace note and exiting 101 — and it fired on exactly the two mistakes the strict
-/// `var`/`let` rule invites, so it was the first thing a migrating user saw.
+/// A *compile* error is a user error, not a VM bug. Every entry point must report it, with a
+/// source location, and exit 1. The run path used to `panic!` inside `arena.mutate_root`,
+/// printing a Rust backtrace note and exiting 101 — and it fired on exactly the two mistakes
+/// the strict `var`/`let` rule invites, so it was the first thing a migrating user saw.
+/// File-based modes (`qn FILE`, `qn check`) render `file:line:col: error: message` like a type
+/// warning; string-based modes (`-e`) embed `(line …, column …)` like their parse errors.
 mod compile_errors {
     use super::{run_eval, run_script};
     use std::process::Command;
 
-    /// Every source that fails to compile, and the phrase its message must contain.
-    const CASES: &[(&str, &str, &str)] = &[
-        ("undeclared", "typo = 5;\n", "undeclared local `typo`"),
+    /// Every source that fails to compile: the phrase its message must contain, and the
+    /// 1-based (line, column) the error must point at.
+    const CASES: &[(&str, &str, &str, (usize, usize))] = &[
+        (
+            "undeclared",
+            "typo = 5;\n",
+            "undeclared local `typo`",
+            (1, 1),
+        ),
         (
             "let_reassign",
             "let x = 1;\nx = 2;\n",
             "cannot reassign `let`",
+            (2, 1),
         ),
         // A top-level method definition used to compile and then die at runtime with
         // "Cannot extend sealed class [/]Nil" — an error about a class the user never
@@ -149,22 +158,29 @@ mod compile_errors {
             "top_level_method",
             "greet -> { 42 };\n",
             "methods live in classes",
+            (1, 1),
         ),
     ];
 
-    fn assert_clean_failure(what: &str, code: Option<i32>, stderr: &str, needle: &str) {
+    fn assert_clean_failure(
+        what: &str,
+        code: Option<i32>,
+        stderr: &str,
+        needle: &str,
+        loc_marker: &str,
+    ) {
         assert_eq!(
             code,
             Some(1),
             "{what}: expected exit 1, got {code:?}\n{stderr}"
         );
         assert!(
-            stderr.contains("Compile error:"),
-            "{what}: message should be prefixed `Compile error:`\n{stderr}"
-        );
-        assert!(
             stderr.contains(needle),
             "{what}: message should name the problem ({needle})\n{stderr}"
+        );
+        assert!(
+            stderr.contains(loc_marker),
+            "{what}: message should carry the source location ({loc_marker})\n{stderr}"
         );
         // The two tells of a panic: never acceptable for a user's typo.
         assert!(
@@ -175,16 +191,22 @@ mod compile_errors {
 
     #[test]
     fn a_script_reports_and_exits_one() {
-        for (name, src, needle) in CASES {
+        for (name, src, needle, (line, col)) in CASES {
             let out = run_script(name, src);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            assert_clean_failure(&format!("qn {name}.qn"), out.status.code(), &stderr, needle);
+            assert_clean_failure(
+                &format!("qn {name}.qn"),
+                out.status.code(),
+                &stderr,
+                needle,
+                &format!(":{line}:{col}: error:"),
+            );
         }
     }
 
     #[test]
     fn eval_and_check_agree_with_the_run_path() {
-        for (name, src, needle) in CASES {
+        for (name, src, needle, (line, col)) in CASES {
             let out = run_eval(src);
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert_clean_failure(
@@ -192,6 +214,7 @@ mod compile_errors {
                 out.status.code(),
                 &stderr,
                 needle,
+                &format!("(line {line}, column {col})"),
             );
 
             let path = std::env::temp_dir().join(format!(
@@ -213,6 +236,7 @@ mod compile_errors {
                 out.status.code(),
                 &stderr,
                 needle,
+                &format!(":{line}:{col}: error:"),
             );
         }
     }
