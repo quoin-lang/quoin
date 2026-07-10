@@ -43,7 +43,7 @@ use crate::value::NamespacedName;
 use super::helpers::{self, KIND_BOOL, KIND_DOUBLE, KIND_INT, KIND_NIL, KIND_SLOT};
 use super::{
     AOT_MAX_CALL_DEPTH, AotCandidate, AotEntry, AotKind, AotParam, AotRawFn, AotRet, AotRole,
-    Refusal, RefusalKind, TAG_DEPTH, TAG_DIV_ZERO,
+    Refusal, RefusalKind, TAG_DEPTH, TAG_DIV_ZERO, TAG_INT_OVERFLOW,
 };
 
 /// `%` on doubles: Rust's truncated remainder (what `devirt_ops::double_bin`
@@ -3609,7 +3609,9 @@ impl<'a> Translator<'a> {
             .expect("empty-stack tick cannot fail");
     }
 
-    /// Integer ops with `devirt_ops::int_bin` semantics.
+    /// Integer ops with `devirt_ops::int_bin` semantics: overflow raises (a cold bail to
+    /// `TAG_INT_OVERFLOW`), it does not wrap — the `*_overflow` instructions hand back the
+    /// flag the hardware already computes, so the hot path pays one never-taken branch.
     fn emit_int_bin(
         &mut self,
         b: &mut FunctionBuilder,
@@ -3619,10 +3621,29 @@ impl<'a> Translator<'a> {
         rb: CVal,
     ) -> Result<AV, Refusal> {
         use IntBinKind::*;
+        // `res = a <op> b`, bailing to the overflow tag when the flag is set.
+        let checked = |b: &mut FunctionBuilder, res: CVal, of: CVal| -> AV {
+            let of_bl = b.create_block();
+            let cont = b.create_block();
+            b.ins().brif(of, of_bl, &[], cont, &[]);
+            b.switch_to_block(of_bl);
+            self.bail(b, fx, TAG_INT_OVERFLOW);
+            b.switch_to_block(cont);
+            AV::C(res, AotKind::Int)
+        };
         let out = match kind {
-            Add => AV::C(b.ins().iadd(a, rb), AotKind::Int),
-            Sub => AV::C(b.ins().isub(a, rb), AotKind::Int),
-            Mul => AV::C(b.ins().imul(a, rb), AotKind::Int),
+            Add => {
+                let (res, of) = b.ins().sadd_overflow(a, rb);
+                checked(b, res, of)
+            }
+            Sub => {
+                let (res, of) = b.ins().ssub_overflow(a, rb);
+                checked(b, res, of)
+            }
+            Mul => {
+                let (res, of) = b.ins().smul_overflow(a, rb);
+                checked(b, res, of)
+            }
             Div | Mod => {
                 let is_zero = b.ins().icmp_imm(IntCC::Equal, rb, 0);
                 let zero_bl = b.create_block();
@@ -3639,6 +3660,15 @@ impl<'a> Translator<'a> {
                 b.ins().brif(is_m1, m1_bl, &[], norm_bl, &[]);
                 b.switch_to_block(m1_bl);
                 let m1v = if matches!(kind, Div) {
+                    // The one overflowing quotient: `i64::MIN / -1`. Negation overflows
+                    // exactly when `a == i64::MIN`, so check that rather than the result.
+                    let is_min = b.ins().icmp_imm(IntCC::Equal, a, i64::MIN);
+                    let min_bl = b.create_block();
+                    let neg_bl = b.create_block();
+                    b.ins().brif(is_min, min_bl, &[], neg_bl, &[]);
+                    b.switch_to_block(min_bl);
+                    self.bail(b, fx, TAG_INT_OVERFLOW);
+                    b.switch_to_block(neg_bl);
                     b.ins().ineg(a)
                 } else {
                     b.ins().iconst(types::I64, 0)

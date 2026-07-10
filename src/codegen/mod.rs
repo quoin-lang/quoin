@@ -197,6 +197,7 @@ pub const TAG_CANCELLED: u8 = 0x13;
 /// The helper stored a full `QuoinError` in `VmState::aot_pending_error`
 /// (outcall errors, IndexError, thrown values via `QuoinError::Thrown`, …).
 pub const TAG_ERR: u8 = 0x14;
+pub const TAG_INT_OVERFLOW: u8 = 0x15;
 
 /// Compiled recursion consumes the real coroutine stack (1 MiB) and bypasses
 /// `MAX_NATIVE_REENTRY`, so every compiled prologue counts call depth and bails
@@ -1020,6 +1021,9 @@ fn outcome_from_tag<'gc>(
         },
         TAG_DIV_ZERO => {
             AotOutcome::Err(QuoinError::ArithmeticError("Division by zero".to_string()))
+        }
+        TAG_INT_OVERFLOW => {
+            AotOutcome::Err(QuoinError::ArithmeticError("Integer overflow".to_string()))
         }
         TAG_DEPTH => AotOutcome::Err(QuoinError::Other(
             "Maximum compiled-call depth exceeded (recursion too deep for native code)".to_string(),

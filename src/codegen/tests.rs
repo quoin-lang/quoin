@@ -112,34 +112,36 @@ fn int_arithmetic_matches_devirt_ops() {
                 ("lt:than:", IntBinKind::Lt),
             ] {
                 let got = run_raw(entry_for(&ids, sel), &[a, b]);
+                // Checked semantics end to end: overflow bails with its own tag, a zero
+                // divisor with the division tag; the one overflowing quotient (MIN / -1)
+                // counts as overflow. int_bin is the reference for every non-error case,
+                // with no carve-outs -- it can no longer panic on any input.
                 let want: Result<i64, u8> = match kind {
-                    IntBinKind::Add => Ok(a.wrapping_add(b)),
-                    IntBinKind::Sub => Ok(a.wrapping_sub(b)),
-                    IntBinKind::Mul => Ok(a.wrapping_mul(b)),
+                    IntBinKind::Add => a.checked_add(b).ok_or(TAG_INT_OVERFLOW),
+                    IntBinKind::Sub => a.checked_sub(b).ok_or(TAG_INT_OVERFLOW),
+                    IntBinKind::Mul => a.checked_mul(b).ok_or(TAG_INT_OVERFLOW),
                     IntBinKind::Div if b == 0 => Err(TAG_DIV_ZERO),
-                    IntBinKind::Div => Ok(a.wrapping_div(b)),
+                    IntBinKind::Div => a.checked_div(b).ok_or(TAG_INT_OVERFLOW),
                     IntBinKind::Mod if b == 0 => Err(TAG_DIV_ZERO),
-                    IntBinKind::Mod => Ok(a.wrapping_rem(b)),
+                    IntBinKind::Mod => Ok(a.wrapping_rem(b)), // MIN % -1 == 0, no overflow
                     IntBinKind::Lt => Ok((a < b) as i64),
                     _ => unreachable!(),
                 };
                 assert_eq!(got, want, "{sel} {a} {b}");
-                let overflows = match kind {
-                    IntBinKind::Add => a.checked_add(b).is_none(),
-                    IntBinKind::Sub => a.checked_sub(b).is_none(),
-                    IntBinKind::Mul => a.checked_mul(b).is_none(),
-                    IntBinKind::Div | IntBinKind::Mod => b != 0 && a.checked_div(b).is_none(),
-                    _ => false,
-                };
-                if !overflows {
-                    match devirt_ops::int_bin(kind, a, b) {
-                        Ok(devirt_ops::IntBinOut::Int(w)) => {
-                            assert_eq!(got, Ok(w), "{sel} {a} {b} vs devirt_ops")
-                        }
-                        Ok(devirt_ops::IntBinOut::Bool(w)) => {
-                            assert_eq!(got, Ok(w as i64), "{sel} {a} {b} vs devirt_ops")
-                        }
-                        Err(_) => assert_eq!(got, Err(TAG_DIV_ZERO), "{sel} {a} {b}"),
+                match devirt_ops::int_bin(kind, a, b) {
+                    Ok(devirt_ops::IntBinOut::Int(w)) => {
+                        assert_eq!(got, Ok(w), "{sel} {a} {b} vs devirt_ops")
+                    }
+                    Ok(devirt_ops::IntBinOut::Bool(w)) => {
+                        assert_eq!(got, Ok(w as i64), "{sel} {a} {b} vs devirt_ops")
+                    }
+                    Err(e) => {
+                        let want_tag = if e.to_string().contains("overflow") {
+                            TAG_INT_OVERFLOW
+                        } else {
+                            TAG_DIV_ZERO
+                        };
+                        assert_eq!(got, Err(want_tag), "{sel} {a} {b} vs devirt_ops err")
                     }
                 }
             }

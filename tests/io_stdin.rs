@@ -185,7 +185,7 @@ fn a_read_parks_the_task_rather_than_freezing_the_scheduler() {
             }
         }
     });
-    let mut next_line = |what: &str, child: &mut std::process::Child| -> String {
+    let next_line = |what: &str, child: &mut std::process::Child| -> String {
         match rx.recv_timeout(Duration::from_secs(60)) {
             Ok(line) => line,
             Err(_) => {
