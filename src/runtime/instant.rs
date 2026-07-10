@@ -57,7 +57,7 @@ pub fn build_instant_class() -> NativeClassBuilder {
              ```\n\
              var t0 = Instant.now\n\
              \"* ... work ...\n\
-             t0.elapsed     \"* -> the Duration since t0\n\
+             t0.elapsed     \"* the Duration since t0\n\
              ```",
         )
         // Instant.now -> the current monotonic instant.

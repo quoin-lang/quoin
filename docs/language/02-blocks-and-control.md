@@ -3,7 +3,7 @@
 Blocks are Quoin's closures, and they're also how all control flow works — there are
 no `if`/`while` statements, only messages sent to booleans and blocks.
 
-Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](06-library-and-reference.md) · [Appendices](07-appendices.md)
+Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · [Tooling](08-tooling.md) · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
 
 ---
 
@@ -18,25 +18,23 @@ Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-ob
 > - Calling with the **wrong number of args is not an error**: extra args are ignored; missing params read as `nil`.
 
 ```quoin
-double = { |n| n * 2 }
-double.value:21                  "* 42
-
-adder = { |a b| a + b }
-adder.valueWithArgs:#(3 4)       "* 7
-
-{ |a b| a + b }.arity            "* 2
-{ #greet |x| 'hi ' + x }.name    "* 'greet'
+var double = { |n| n * 2 }
+double.value:21                  "* -> 42
+var adder = { |a b| a + b }
+adder.valueWithArgs:#(3 4)       "* -> 7
+{ |a b| a + b }.arity            "* -> 2
+{ #greet |x| 'hi ' + x }.name    "* -> #greet
 ```
 
 Closures capture the live environment, so a block can see — and call — names that
 change after it was created (this is how recursive named blocks work):
 
 ```quoin
-count = 0
-bump = { count = count + 1 }
+var count = 0
+var bump = { count = count + 1 }
 bump.value
 bump.value
-count                            "* 2
+count                            "* -> 2
 ```
 
 > **⚠ Gotcha — arity is not checked.** `{ |a b| … }.value:1` runs with `b` bound to
@@ -63,11 +61,13 @@ block argument.
 >   - `{ cond }.whileDefinedDo:{ |v| body }` — loops while `cond`'s value is `defined?` (non-`nil`), passing that value into the body.
 
 ```quoin
+var score = 95
 (score > 90).if:{ 'A'.print } else:{ 'not yet'.print }
 
+var x = nil
 (x == nil).if:{ 'missing'.print }     "* compare to produce a boolean first
 
-i = 1
+var i = 1
 { i <= 3 }.whileDo:{ i.print; i = i + 1 }
 ```
 
@@ -91,17 +91,21 @@ boolean. Comparison operators (`==`, `<`, …) and predicate methods (`defined?`
 > - `^> expr` — **yield**: sugar for `Fiber.yield:expr` (Part V).
 
 ```quoin
-firstBig -> { |list|
-    list.each:{ |n|
-        (n > 100).if:{ ^^ n }      "* ^^ returns from firstBig, ending the loop
-    };
-    nil                            "* fell through: nothing big
+Finder <- {
+    firstBig: -> { |list|
+        list.each:{ |n|
+            (n > 100).if:{ ^^ n }  "* ^^ returns from firstBig:, ending the loop
+        };
+        nil                        "* fell through: nothing big
+    }
 }
+
+Finder.new.firstBig:#(7 200 9)     "* -> 200
 ```
 
 Inside the `each:` block, `^ n` would merely end that one iteration of the block
 (returning `n` as the block's value, which `each:` discards) — the loop would
-continue. `^^ n` is what actually exits `firstBig`. The standard `whileDo:` is
+continue. `^^ n` is what actually exits `firstBig:`. The standard `whileDo:` is
 itself defined using `^^` to unwind its recursion.
 
 > **⚠ Gotcha — `^` inside an iterator block does not break the loop.** Use `^^` to

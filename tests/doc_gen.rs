@@ -296,3 +296,89 @@ fn coverage_reports_and_emits_nothing() {
     );
     assert!(!out_dir.exists(), "--coverage must report, not generate");
 }
+
+/// The `--check` harness itself (docs/DOCS_ARCH.md phase 3 + RELEASE_PREP Tier 2): fenced
+/// `quoin` blocks in markdown run; annotations assert; failures name their site. Pinned on a
+/// tiny fixture rather than the real corpora, which CI checks separately (they're slow).
+#[test]
+fn doc_check_runs_annotated_markdown_blocks() {
+    let dir = fresh_out("check");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("good.md"),
+        "# t\n\n```quoin\nvar x = 40;\nx + 2    \"* -> 42\n```\n\
+         \n```quoin norun\nthis would explode\n```\n\
+         \n```\nprose, never runs\n```\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .args(["doc", "--check", dir.join("good.md").to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run qn doc --check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("1 examples, 1 annotations checked, 0 failed"),
+        "norun and untagged blocks must not run:\n{stdout}"
+    );
+
+    // A wrong annotation fails, naming the file and showing expected vs got.
+    std::fs::write(dir.join("bad.md"), "```quoin\n1 + 1    \"* -> 3\n```\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .args(["doc", "--check", dir.join("bad.md").to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run qn doc --check");
+    assert!(
+        !out.status.success(),
+        "a wrong annotation must fail the check"
+    );
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all.contains("bad.md") && all.contains("expected: 3") && all.contains("got:      2"));
+
+    // An annotation separated from the next statement by a blank line still checks (the
+    // group's last line is blank; the scan uses the last NON-blank line), and a fence inside
+    // a blockquote (the book's Gotcha boxes) is not invisible.
+    std::fs::write(
+        dir.join("edges.md"),
+        "```quoin\nvar q = 6 * 7;\nq;    \"* -> 42\n\nvar cleanup = 0;\n```\n\
+         \n> quoted:\n> ```quoin\n> 1 + 2    \"* -> 3\n> ```\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .args(["doc", "--check", dir.join("edges.md").to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run qn doc --check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("2 examples, 2 annotations checked, 0 failed"),
+        "blank-line annotations and blockquoted fences must both check:\n{stdout}"
+    );
+
+    // A block that doesn't parse fails with its location, not a panic.
+    std::fs::write(dir.join("broken.md"), "```quoin\nx = 5\n```\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .args(["doc", "--check", dir.join("broken.md").to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run qn doc --check");
+    assert!(!out.status.success());
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        all.contains("broken.md"),
+        "failure must name the file:\n{all}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -9,7 +9,7 @@ builds on it.
 > common source of wrong code. Every claim here is verified against the pest
 > grammar (`src/parser/pest/`), the VM (`src/vm.rs`), and the test suite.
 
-Nav: **Foundations** · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](06-library-and-reference.md) · [Appendices](07-appendices.md)
+Nav: **Foundations** · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · [Tooling](08-tooling.md) · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
 
 ---
 
@@ -28,7 +28,7 @@ can read "send the message `m` to the object `x`" for every `x.m`, you can read
 almost all of it. A method with no explicit receiver is sent to `self`, written
 with a bare leading dot:
 
-```quoin
+```quoin norun
 .print: 'hello'        "* sends print: to self
 person.greet           "* sends greet to person
 (1..5).collect:{ |n| n * 10 }
@@ -50,7 +50,7 @@ about statements.
 > - **No double-quoted strings exist** — a `"` always begins a comment.
 > - **Separators**: a newline ends a statement *when unambiguous*. A `;` is required when the next line would otherwise continue the expression — i.e. it begins with `.` (a message send) or an infix operator.
 > - **Identifiers**: start with a letter or `_`, then letters/digits/`_`/`?`. So `done?` and `my_var` are valid names. `!` is *not* part of a name (it's a selector suffix — see §5).
-> - **Reserved identifiers**: only `nil`, `true`, `false` (can't be reassigned). The *keywords* are all soft keywords (reserved only as a statement prefix, so ordinary uses of the word are unaffected): `use` (§21) and `var`/`let` (local declarations; §4). Identifiers are case-sensitive.
+> - **Reserved identifiers**: only `nil`, `true`, `false` (can't be reassigned). The *keywords* are all soft keywords (reserved only as a statement prefix, so ordinary uses of the word are unaffected): `use` (§47) and `var`/`let` (local declarations; §4). Identifiers are case-sensitive.
 
 ### Comments
 
@@ -62,7 +62,7 @@ A block comment. It opens with a quote that is NOT followed by '*',
 spans as many lines as you like, and closes at the next quote.
 "
 
-x = 1 "this trailing block comment ends here" + 2   "* x is 3
+var x = 1 "this trailing block comment ends here" + 2   "* x is 3
 ```
 
 > **⚠ Gotcha — a stray `"` swallows code.** Because the `"…"` block comment runs
@@ -120,7 +120,7 @@ statement.
   prefix operator `-` applied to `3` (see §6).
 - **Strings** use single quotes. Escapes: `\t \n \r \" \' \\`, plus `\uXXXX` and
   `\xXXXX` (four hex digits). Plain strings do **not** interpolate; interpolation
-  is a separate `%` form (see [§19](06-library-and-reference.md)).
+  is a separate `%` form (see [§45](09-library-and-reference.md)).
 - **Symbols** are interned selector-like names: `#name`, multi-part `#when:do:`,
   or a quoted form `#'+:'` for operators and otherwise-unspellable names. They are a
   **distinct type** (`#foo.class == Symbol`), compared by identity — `#foo == #foo`
@@ -131,7 +131,7 @@ statement.
   and hold unique elements (deduplicated by `hash` + `==:` — a user class that
   overrides `==:` must also override `hash`, or its instances dedup by identity;
   mirrors the any-key Map contract): `#<1 2 3>`, empty `#<>`.
-- **Ranges** are covered in §6 and Part VI; note they are **half-open** (the end is
+- **Ranges** are covered in §6 and Part IX; note they are **half-open** (the end is
   excluded).
 
 > **⚠ Gotcha — inside `#< … >`, a bare `>` ends the set.** Because the closing `>`
@@ -151,7 +151,7 @@ statement.
 > - A single-target declaration may carry a **type**: `var n: Integer = 5` (drives the typed/unboxed tier). The type may be namespaced — `var f: [IO]File = …`; a bare name means the root namespace. Destructuring targets are untyped.
 > - `_` discards a value on the left-hand side.
 > - **Destructuring**: `var` declares multiple targets from a list — `var a b c = #(1 2 3)`. One splat `*rest` (or `*_`) may appear in **any** position; sub-patterns nest with `( … )`. Plain (keyword-less) `a b c = …` reassigns already-declared targets.
-> - `@name` is an **instance variable** (only meaningful inside class/method bodies — Part III; declared in the class header). `[Ns]name` / `[/]name` are namespaced globals (§20).
+> - `@name` is an **instance variable** (only meaningful inside class/method bodies — Part III; declared in the class header). `[Ns]name` / `[/]name` are namespaced globals (§46).
 > - `Name <- expr` defines a **constant** (redefining one throws).
 
 ```quoin
@@ -163,7 +163,7 @@ var n: Integer = 42         "* typed local
 
 var a b c = #(1 2 3)        "* a=1, b=2, c=3
 var first *rest = #(1 2 3 4) "* first=1, rest=#(2 3 4)
-var a *_ z = #(1 2 3 4 5)   "* a=1, z=5, middle discarded
+var p q *_ = #(1 2 3 4 5)   "* p=1, q=2, rest discarded
 var head (x2 y) = #(1 #(2 3)) "* head=1, x2=2, y=3  (nested)
 
 Pi <- 3.14159               "* a constant; a second `Pi <- …` would throw
@@ -188,7 +188,7 @@ trail. `_` (and `*_`) ignore the corresponding element(s).
 > - **Suffix selectors**: `name!` (e.g. `.sealed!`) and `name?` (e.g. `fiber.done?`) are ordinary method names.
 > - Method (postfix) sends bind **tighter** than infix operators: `a.b + c.d` is `(a.b) + (c.d)`.
 
-```quoin
+```quoin norun
 42.abs                         "* unary
 'a,b,c'.split:','              "* one keyword arg
 scores.at:'amy' put:95         "* selector is at:put:, two args

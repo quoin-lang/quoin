@@ -84,34 +84,43 @@ LSP/VSCode tooling, Windows.
 
 ## Tier 2 — language reference (`docs/language/`)
 
-The structure (Parts I–VI + appendices, Rules-box format) is right; coverage
-stops at ~40% of the shipped language and most multi-line examples predate
-strict `var`/`let` and no longer compile.
+DONE 2026-07-10 — nine parts (§1–48), 78 runnable examples / 122 assertions in
+the book plus 18/36 in the README, all CI-enforced by `qn doc --check`. The
+original assessment for the record: coverage stopped at ~40% and most examples
+predated strict `var`/`let`.
 
-- [ ] **Fix stale examples** (~18 snippets across `02`–`06` use implicit
-  declaration `x = 5`). Small, mechanical, do first.
-- [ ] **Doc-example harness**: extract fenced blocks from `docs/language/` and
-  run them under `qn` in CI, so examples can't rot again.
-- [ ] **Async/concurrency section** (Part V is *titled* Concurrency and covers
-  none of it): `Task`, `Async` (gather/timeout/sleep), `Channel`, `Parallel`,
-  `Plan`. Large.
-- [ ] **Networking/web section**: sockets, streams, `TcpServer`, `[HTTP]`
-  client/server, `[Web]App`. Large.
-- [ ] **Type-system section**: nullable `Integer?` + narrowing, generics
-  `List(Integer)`/`.elementType`, `Block(args ^Ret)`, `^Ret` header form, the
-  gradual checker / `qn check`. Large.
-- [ ] **Tooling section** (new): CLI verbs, REPL, debugger + DAP, `qn fmt`,
-  coverage. Medium.
-- [ ] **Data formats** (JSON/MessagePack/CSV/TOML/YAML), **numbers**
-  (Math/BigInteger/BigDecimal/Statistics), **time** (Duration/Instant/
-  Timestamp/DateTime/TimeZone), **extension usage**. Medium each.
-- [ ] **Small**: Bytes + codecs (base64/hex/gz/zstd), UUID/ULID, refresh stdlib
-  map §22 (stops at `06-io`; core runs `00`–`11` + `net/` + `web/`), fold
-  Array/Timer/VM/streams into §18, strip internal pointers (BUGS.md/QUOIN_TODO
-  references).
-- [ ] **README**: install/quickstart, full verb list (lists 4 of ~10), license
-  section, fix stale `src/parser/pest/` path (parser lives in
-  `crates/quoin-syntax`).
+- [x] **Fix stale examples.** The harness found exactly 18; all fixed — several
+  were real rot beyond staleness (a semantically broken `case:` example, a
+  `select:`-chain precedence trap, examples relying on pre-seal behavior).
+- [x] **Doc-example harness**: `qn doc --check` (one engine, two corpora — the
+  book's ```quoin fences and the stdlib doc-comment examples). `"* -> value`
+  annotations assert exact results; CI runs both on every push. Book:
+  78 examples / 122 annotations; stdlib: 404 / 471; all green.
+- [x] **Async/concurrency section** — Part V §18–21: tasks + the cooperative
+  scheduler, Async, channels, workers/Parallel/Plan, park-don't-block.
+- [x] **Networking/web section** — new Part VI §22–27, ending in an in-process
+  `handle:`-tested app; loopback-only runnable examples.
+- [x] **Type-system section** — new Part VII §28–35, with real captured checker
+  diagnostics; writing it found the `T?`-param dispatch bug and the checker
+  drifts recorded in Tier 4b.
+- [x] **Tooling section** — new Part VIII §36–43, every behavior probed (incl.
+  `qn doc --check` documenting the harness that checks the book).
+- [x] **Data formats / numbers / time** — re-scoped (2026-07-10 decision):
+  the generated API reference covers per-class API at 100%, so Part IX teaches
+  each area in a paragraph with 1–2 verified examples and points at `qn doc` /
+  `$doc` by name (linking deferred to the docs-publishing section). Extension
+  usage: a Part IX pointer; full treatment stays out of v0.1 scope with the
+  extension-install story.
+- [x] **Small**: all folded into the Part IX re-scope — bytes/codecs and
+  UUID/ULID paragraphs, stdlib map rewritten accurate to today's qnlib,
+  Array/Timer/VM/streams folded in, internal pointers stripped.
+- [x] **README**: quickstart, the full 10-verb CLI table, documentation
+  pointers (book + `qn doc`/`$doc`), parser path fixed, and the language tour
+  repaired under the harness — 18 runnable examples, 36 exact-output
+  assertions, CI-checked like the book. The repair found the FRONT-PAGE example
+  had been silently broken (`%{@name}` interpolation does not see instance
+  variables — it printed `Mr `), a `.finally:` chain that never caught, and a
+  reversed `~` matcher; all verified fixes. Tier 2 is COMPLETE.
 
 ## Tier 3 — "first real script" stdlib gaps
 
@@ -129,6 +138,29 @@ strict `var`/`let` and no longer compile.
 - [x] `Runtime.exit:`
 - [ ] Digests (sha256/blake3/HMAC) — optional; verified absent.
   (UUID/ULID already ship: `src/runtime/ids.rs`, `qnlib/tests/37-ids.qn`.)
+
+## Docs publishing — generate everything as HTML, publish to the website
+
+Decided 2026-07-10: the release ships browsable docs on the project website
+(the `quoin-lang` org), not just in-repo markdown. Deferred alongside the CI
+workflows (needs the org + hosting), but the shape is recorded now so the
+Tier 2 work builds toward it:
+
+- [ ] **One generated site from two sources.** The API reference is already
+  HTML (`qn doc`); the language book (`docs/language/*.md`) needs a
+  markdown→HTML render. Reuse the doc generator's page chrome and the shared
+  code stylesheet (`highlighter::code_stylesheet`) so book pages and reference
+  pages read as one site — fenced `quoin` blocks in the book render through
+  `highlight_to_html` exactly like reference examples.
+- [ ] **Publish pipeline**: a workflow that runs `qn doc --out site/reference
+  --json`, renders the book into `site/`, and deploys (GitHub Pages or the
+  org's host — decide at org move). The `--json` model also uploads, as the
+  machine-readable contract.
+- [ ] **Cross-linking between book and reference** — deferred with the hosting
+  decision (2026-07-10): until URLs exist, the book references classes by
+  name and points readers at `qn doc`; once the site exists, linkify.
+- [ ] Doc-example checking (`qn doc --check`, Tier 2) runs in the publish
+  pipeline too: nothing ships with a broken example.
 
 ## Tier 4 — packaging, CI, docs triage
 
@@ -283,6 +315,71 @@ it. None is fixed.
   Deliberately NOT taken: promotion to BigInteger on overflow (Smalltalk-style).
   That is a language-semantics decision with a value-representation cost on the
   hottest paths; raising keeps v0.1 honest and leaves promotion open.
+
+- [ ] **Non-trailing splat destructuring binds wrong.** Found making the book's
+  §4 example runnable (2026-07-10), confirmed by hand: `var a *_ z = #(1 2 3 4 5)`
+  binds `z = 3` (should be 5), and `var *init last = #(1 2)` binds `init` to the
+  WHOLE list while `last = 2` — the splat greedily takes everything to the end and
+  post-splat targets still bind positionally from the start. Trailing splats
+  (`var p q *rest = …`) are correct. No test coverage exists for non-trailing
+  splats. Either fix the compiler's binding plan or restrict the grammar to
+  trailing splats; the book's §4 prose currently soft-claims "any position" and
+  shows only verified trailing forms — align it with whichever way this goes.
+
+- [ ] **Top-level method definitions die with "Cannot extend sealed class
+  [/]Nil" — make the semantics explicit.** Found repairing the book (2026-07-10):
+  `greet -> { 42 }` at the top of a file compiles fine, then fails at runtime
+  with an error about a class the user never mentioned. The mechanism: a method
+  definition attaches to the current `self`'s class; top-level `self` is `nil`;
+  `Nil` is sealed (PR #31). Every newcomer who writes a "function" will hit this,
+  and the message explains the implementation, not the mistake.
+
+  Decide one of:
+  1. **A targeted compile-time diagnostic** (recommended): a method definition
+     at unit top level, outside any class body, is statically detectable — reject
+     it at compile time with the actual fix: "methods live in classes; for a
+     standalone callable, bind a block: `var greet = { 42 }` (call it with
+     `greet.value`)". Cheap, no semantics change.
+  2. **Give top-level `sel -> {…}` a real meaning** (a global function/binding)
+     — a language-design decision with dispatch implications; not for v0.1.
+  3. Keep the runtime error but rewrite it to name the situation ("a top-level
+     method definition — `self` is nil here") — weakest, since the failure stays
+     at runtime.
+
+  Whichever way: the book (02-blocks-and-control §9, 03-objects) currently works
+  around it by wrapping examples in classes with a one-line note; once the
+  semantics are explicit, say it in §Rules there too.
+
+- [ ] **`T?` on a method parameter makes the variant unreachable.** Verified
+  2026-07-10: `width: -> { |name: String?| … }` answers MessageNotUnderstood for
+  a String argument AND for nil — the nullable param type matches nothing at
+  dispatch. Found writing the types chapter; no coverage existed. The book
+  documents the workaround (nullable belongs on locals/returns) in Part VII;
+  fix dispatch scoring for `T?` params, then simplify that gotcha.
+
+- [ ] **Sealed-subclass error is a bare String throw.** `Integer <- Sub <- {}`
+  raises a plain String ("Cannot subclass sealed class …") that
+  `catch:{|e:Error|}` cannot see, while sealed-*extension* raises a typed
+  ClassError. Same F12 family as the batch fixed in PR #79; one-line retype.
+
+- [ ] **A spinning task starves the whole VM — cancellation and timers never
+  land.** Verified 2026-07-10: `Task.spawn:{ {true}.whileDo:{…} }` then
+  `t.cancel` from main — the cancel never takes effect, and main's own expired
+  `Async.sleep:` never resumes; the process had to be SIGKILLed. Batch-yield
+  boundaries exist (QN_BATCH), but the driver resumes the same task at a
+  cooperative yield instead of rotating to ready tasks/expired timers
+  (run-to-block by design; zero fairness at yield points is the bug-or-decision
+  to make explicit). The book's Part V documents the behavior as a gotcha.
+
+- [ ] **Checker reality vs. claims — two drifts found writing Part VII.**
+  (a) `qnlib/warnings.qn` gallery drift: `badEachParam` no longer warns, while
+  `wellFormed:` (in the "must emit NO warning" section) now warns
+  `expected List(Integer), found List`. (b) Compile-time argument-type MNU
+  effectively never fires for builtins (gated to from_vm+sealed `Instance`
+  receivers with one fully-typed variant): `5.pow:'x'` is silent at check time.
+  Also statically-visible bad literal elements (`var x: List(Integer) =
+  #(1 'two')`) don't warn — insertions do. Align the gallery + decide whether
+  the arg-check gate should widen.
 
 - [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
   and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so

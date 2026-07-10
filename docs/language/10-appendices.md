@@ -1,6 +1,6 @@
 # Appendices
 
-Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](06-library-and-reference.md) · **Appendices**
+Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · [Tooling](08-tooling.md) · [Library & reference](09-library-and-reference.md) · **Appendices**
 
 ---
 
@@ -34,7 +34,7 @@ Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-contro
 | `<--` | Extend a class or a single value (eigenclass) |
 | `->` | Add a method (variant) |
 | `-->` | Add a method variant; errors if selector doesn't already exist |
-| `use pkg:path;` | Load a `.qn` file once — a soft keyword, not a reserved word (Part VI §21) |
+| `use pkg:path;` | Load a `.qn` file once — a soft keyword, not a reserved word (Part IX §47) |
 | `^` `^^` `^>` | Block return / method return / yield |
 | `=` | Assign a local (statement only) |
 | `==` `!=` `<` `<=` `>` `>=` | Comparison |
@@ -137,7 +137,7 @@ this first.
     (a repeat/cyclic `use` is a no-op), and its definitions land as ordinary `[Ns]`
     globals — there's no local import scope, and aliasing is just `X = [Ns]Name`. `use`
     is a *soft keyword* (still usable as an identifier). Packages: bare/`std:` = stdlib,
-    `self:` = your project; `dir/*` globs a directory (sorted). See §21.
+    `self:` = your project; `dir/*` globs a directory (sorted). See §47.
 18. **Inside a collection literal, spacing decides whether `+ - %` is a prefix or an infix
     operator.** Elements are juxtaposed expressions (so `#(a + b  c)` is two elements),
     which makes `#(-1 -2)` ambiguous. The rule, in `#( … )`, `#Name( … )` and `#< … >`: an
@@ -179,7 +179,7 @@ this first.
   live in the root namespace.
 - **Unit / package** — a `.qn` file loaded by `use pkg:path` (once, via the host's
   resolver). `std:`/bare = the stdlib, `self:` = the project. The load path is decoupled
-  from the `[Ns]` namespace a unit registers under. (§21)
+  from the `[Ns]` namespace a unit registers under. (§47)
 
 ---
 

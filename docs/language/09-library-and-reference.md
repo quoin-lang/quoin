@@ -1,0 +1,314 @@
+# Part IX — The standard library
+
+A guided tour of the standard library: what each area is for, how the pieces fit
+together, and the idioms that make them work well — concepts, not catalogues.
+
+> **Where the API reference lives.** Every stdlib class is documented per-class
+> and per-method, with verified examples, in the generated API reference: run
+> `qn doc` to build it (it writes `qn-docs/`), or ask the running system
+> directly in the REPL with `$doc Name` / `$doc Name.selector` — e.g. `$doc List`
+> or `$doc [IO]File.create:`. This chapter names the classes; the reference
+> documents them. Method lists are deliberately absent here.
+
+Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · [Tooling](08-tooling.md) · **The standard library** · [Appendices](10-appendices.md)
+
+---
+
+## 44. The library by area
+
+### Collections & the `Iterate` protocol
+
+Four concrete collections — **List** `#(10 20 30)` (ordered, growable,
+zero-based), **Map** `#{ 'a':1 'b':2 }` (insertion-ordered dictionary; iterating
+yields **KeyValuePair** objects, read with `key`/`value`), **Set** `#<1 2 3>`
+(insertion-ordered, unique, hash-indexed membership) and **NumberRange** `a..b`
+(numeric, **end-exclusive**) — share one protocol. Each implements `each:`; the
+**Iterate** mixin derives everything else from it: `collect:`, `select:`,
+`reduce:`, `sort`, `join:`, `groupBy:`, lazy pipelines, external iterators, some
+fifty combinators in all (Part V §17). Because the protocol is a mixin over a
+single method, *anything* with an `each:` — a directory listing, a generator,
+your own class — gets the whole vocabulary. For bulk numeric data there is also
+**Array**, a typed contiguous column (`#int64`/`#float64` in Apache Arrow
+layout) that extensions such as numpy read with zero conversion — a List holds
+anything; an Array holds one dtype, packed.
+
+```quoin
+#(3 1 2).sort.collect:{ |n| n * 10 }    "* -> #(10 20 30)
+(1..10).select:{ |n| (n % 3) == 0 }     "* -> #(3 6 9)
+```
+
+### Strings, regexes & symbols
+
+**String** is immutable UTF-8 text, written `'single-quoted'` (a double quote
+starts a *comment* in Quoin); position-based operations count characters, not
+bytes. **Regex** is the type of `#/pattern/` literals (Rust regex syntax): test
+with the match operator `~`, split with `split:`, substitute via
+`replace:with:`. **Symbol** is an interned identifier — `#name`, or `#'quoted
+form'` — compared by identity, so symbol comparison is a cheap pointer check;
+selectors and other names in the reflective API are symbols, a distinct type
+from String. Formatting and interpolation get their own section (§45).
+
+```quoin
+'quoin'.upper            "* -> QUOIN
+#/[0-9]+/ ~ 'abc 123'    "* -> true
+```
+
+### Numbers
+
+**Integer** is a 64-bit signed whole number (`/` truncates toward zero);
+**Double** is IEEE-754, and mixed arithmetic yields a Double. There is *no
+silent promotion* to arbitrary precision — when a value can outgrow 64 bits you
+convert explicitly: **BigInteger** (`asBigInteger`, `BigInteger.of:`) for exact
+whole numbers, **BigDecimal** (`BigDecimal.of:` a String or Integer —
+deliberately not a Double) for exact base-10 quantities like money. **Math** is
+a namespace of constants and free functions (`Math.pi`, `Math.sin:`) — the
+operations that read naturally *on* a number (`abs`, `sqrt`, `pow:`, `floor`)
+live on the number types themselves. Statistics are part of the collection
+protocol, not a separate toolkit: any Iterate-able of numbers has `mean`,
+`median`, `mode`, `variance`, `stddev`, `percentile:`.
+
+```quoin
+2.asBigInteger.pow:100    "* -> 1267650600228229401496703205376
+#(1 2 3 4).mean           "* -> 2.5
+```
+
+### Time
+
+Four types, split by job so each can be exactly right: **Instant** is the
+monotonic clock — for measuring elapsed time, immune to wall-clock adjustments,
+meaningless across processes; **Timestamp** is absolute UTC wall-clock time;
+**DateTime** is a Timestamp plus its **TimeZone** (IANA zones), which is what
+makes calendar arithmetic, DST, and offsets come out right; **Duration** is a
+signed span with nanosecond precision. **Timer** is the one-selector stopwatch:
+`Timer.time:aBlock` answers the block's elapsed whole microseconds.
+
+```quoin
+(Duration.minutes:2) + (Duration.seconds:30)    "* -> 2m 30s
+(Timestamp.parse:'2026-07-09T12:00:00Z').inZone:(TimeZone.of:'Asia/Tokyo')
+"* -> 2026-07-09T21:00:00+09:00[Asia/Tokyo]
+```
+
+### Data formats
+
+One convention across the text formats — **JSON**, **YAML**, **TOML**, **CSV**:
+`parse:` turns text into ordinary Quoin values (maps, lists, strings, numbers),
+`generate:` turns values back into text. Because Map preserves insertion order,
+a parse → generate round-trip doesn't reshuffle a document. **MessagePack** is
+the binary equivalent (`pack:` to Bytes, `unpack:` back), and **Base64** /
+**Hex** encode between Bytes and text — with conveniences hung directly on the
+values (`'hi'.asBytes.toBase64`, `aString.fromBase64`).
+
+```quoin
+JSON.parse:'[1, 2, 3]'      "* -> #(1 2 3)
+JSON.generate:#{ 'a':1 }    "* -> {"a":1}
+'hi'.asBytes.toBase64       "* -> aGk=
+```
+
+### Bytes & compression
+
+**Bytes** is immutable binary data. Text crosses the boundary *explicitly* —
+`'…'.asBytes` encodes, `asString` decodes (UTF-8) — so there is never a
+question of which encoding applied. Compression is built in as Bytes codecs:
+gzip and deflate both ways (`encodeGz`/`decodeGz`, `encodeDeflate`/
+`decodeDeflate`), zstandard decode (`decodeZstd`); malformed input raises a
+catchable `ParseError`.
+
+```quoin
+'hello'.asBytes.encodeGz.decodeGz.asString    "* -> hello
+```
+
+### Files, I/O & streams
+
+File I/O has two levels. For the common case there are one-shot class methods
+on **[IO]File**: `read:` (the whole file as a String), `write:to:` (replace a
+file's contents), `append:to:` — each opens, writes, and closes, so nothing is
+left unflushed. For incremental work, `open:`, `create:` (truncate/create) and
+`append:` answer a buffered **ByteStream** — writes accumulate and drain in
+chunks; `close` flushes, `flush!` forces the buffer out early, and a stream
+never closed is flushed when the program ends. `stringStream` wraps any byte
+stream as a **StringStream**, the UTF-8 text view (`readLine`, `eachLine:`,
+`writeln:`). These two stream classes are the *single* reading/writing surface
+over every conduit — files, sockets, and standard input all hand you the same
+streams, so code written against a stream doesn't care what's underneath.
+`[IO]Stdout` / `[IO]Stderr` are writable handles, `[IO]Stdin` reads without
+blocking other tasks, and **[IO]Folder** is an Iterate-able directory listing.
+
+```quoin
+[IO]File.write:'saved' to:'/tmp/qn-book-io.txt';
+[IO]File.read:'/tmp/qn-book-io.txt'    "* -> saved
+[IO]File.delete:'/tmp/qn-book-io.txt'
+```
+
+### The operating system
+
+**[OS]Env** is *read-only* access to the process environment (`at:`,
+`at:ifAbsent:`, `asMap`, iteration) — mutation is deliberately absent, because
+the C environment is process-global state other threads may be reading.
+**[OS]Path** is purely *lexical* path manipulation over Strings — `join:`,
+`dirname:`, `basename:`, `extension:`, `normalize:` — it never touches the
+filesystem, which is exactly what makes it safe on a path you are about to
+create. Filesystem truth (existence, deletion, renames) lives on `[IO]File` and
+`[IO]Folder`.
+
+```quoin
+[OS]Path.join:#('etc' 'app' 'conf.toml')                "* -> etc/app/conf.toml
+[OS]Env.at:'QN_SURELY_UNSET' ifAbsent:{ 'fallback' }    "* -> fallback
+```
+
+### Unique identifiers
+
+**UUID** generates the standard 128-bit identifiers — `generateV4` (random) or
+`generateV7` (time-ordered, so fresh IDs sort by creation time) — and parses
+the hyphenated form. **ULID** is the sortable alternative: a millisecond
+timestamp plus randomness, rendered as 26 characters of Crockford base32, where
+string order equals creation order. Both convert to `Bytes` and compare with
+the ordinary operators.
+
+```quoin
+ULID.generate.s.length    "* -> 26
+```
+
+### Covered elsewhere
+
+- **Concurrency** — `Task`, `Fiber`, `Channel`, `Async`, the `parallelCollect:`
+  combinators, and `Plan` are Part V's subject.
+- **Networking & the web** — sockets (`TcpSocket`, `TlsSocket`, `TcpListener`,
+  `TcpServer`), the `[HTTP]Client` / `[HTTP]Server` pair, and the `[Web]App`
+  framework are covered in Part VI.
+- **Types** — annotations, generics, and the gradual checker are Part VII.
+- **Tooling** — the `qn` CLI (`test`, `fmt`, `doc`, `check`, `debug`, the
+  REPL), plus the program-facing side: `Runtime` (command-line `arguments`,
+  `exit:`, `eval:`) and `VM` (runtime introspection: `stats`, `ps`) — Part VIII.
+
+---
+
+## 45. Value rendering & string formatting
+
+> **Rules**
+> - Every value renders two ways: **`s`** is the *human* rendering (a String —
+>   what `writeln:` and interpolation use), **`pp`** is the *structural* dump
+>   for debugging and inspection — escaped strings, instance variables,
+>   width-aware wrapping (`pp:` takes an explicit width). `s` falls back to the
+>   `pp` rendering for values with no intrinsic human form.
+> - **`%:` (binary `%`)** — `'fmt' % arg` substitutes into placeholders:
+>   - a bare `%` consumes the next argument value;
+>   - `%1`, `%2`, … index (1-based) into a **list** argument;
+>   - `%a`, `%b`, … (single letters) key into a **map** argument.
+> - **`mod` (prefix `%`)** — `%'…%{expr}…'` is inline interpolation: each `%{expr}` is evaluated over the surrounding **locals and parameters** and stringified with `.s`. Note: `self`, a leading-dot send (`%{.name}`), and instance fields (`%{@name}`) are **not** in scope inside `%{…}` — they resolve as `nil`/`MessageNotUnderstood`. Bind what you need to a local first.
+> - Values are converted with `.s` before insertion.
+> - ANSI strings are the `#ANSI'…'` literal (a user string mixing in `ActAsUserString`); `%`-formatting works on them too.
+
+```quoin
+#(1 'two' #three).s                  "* -> #(1 two three)
+#(1 'two' #three).pp                 "* -> #(1 'two' #three)
+```
+
+```quoin
+'hello %' % 'world'                  "* -> 'hello world'
+'%1 then %2' % #('a' 'b')            "* -> 'a then b'
+'%h-%w' % #{ 'h':'hi' 'w':'world' }  "* -> 'hi-world'
+var a = 'foo'; var b = 'bar';        "* the ; matters: the next line starts with an operator
+%'value is %{a + b}!'                "* -> 'value is foobar!'
+```
+
+> **⚠ Gotcha — two different `%`.** Binary `%` (between a string and an argument)
+> is `printf`-style substitution; prefix `%` (in front of a string literal) is
+> `%{…}` interpolation. They are distinct operators with distinct selectors
+> (`%:` vs `mod`). And recall `%` as an *infix arithmetic* operator is modulo —
+> three roles for one glyph, disambiguated by position.
+
+---
+
+## 46. Namespaces
+
+> **Rules**
+> - `var name = value` declares a **reassignable local** (§4). `Name <- value` defines a **constant** global — redefining it throws (`"Global […]Name is already defined in this scope"`).
+> - Namespaced names: `[NS]Name` (e.g. `[IO]File`), multi-segment `[A/B]Name`, and root `[/]Name`. A bare `Name` and `[/]Name` both refer to the **root** namespace.
+> - Globals are stored by full namespace + name; namespaces are a lookup/organization mechanism, not modules with their own scope.
+
+```quoin
+Pi <- 3.14159           "* constant; a second `Pi <- …` throws
+var radius = 2          "* local; reassignable
+
+var out = [IO]Stdout    "* namespaced global
+var root = [/]Object    "* explicit root; same as bare `Object`
+```
+
+> **⚠ Gotcha — constants can't be reassigned, locals can't be `<-`.** Use `<-` for
+> things defined once (classes, constants) and `var` for mutable locals. Trying to
+> redefine a `<-` constant is a runtime throw, not a silent overwrite.
+
+---
+
+## 47. File loading & packages (`use`)
+
+> **Rules**
+> - `use (pkg:)? path;` loads a `.qn` file **once** — a repeat `use` (or a cyclic one) is a no-op. It's a statement that runs when reached and evaluates to `nil`. `use` is a **soft keyword**: special only here, an ordinary identifier everywhere else.
+> - **Path is the load address** (with `.qn` implied, `/`-separated); the **`[Ns]` namespace is the logical name** a file's definitions register under. The two are independent — a file may define classes, extend existing ones, add mixins, anything.
+> - **Package qualifier** (`pkg:`): bare or **`std:`** = the standard library; **`self:`** = the current project; any other name is a (reserved) package, not yet resolvable.
+> - **`dir/*`** globs a directory, loading every `.qn` in it in **UTF-8-sorted** order.
+> - Loading is filesystem-**agnostic**: resolution goes through a host-supplied resolver (disk on the CLI; host-provided units on WASM / embedded). There is no way to load an arbitrary OS path.
+
+These forms are illustrative — `self:` paths resolve against *your* project
+(`self:helpers` names a `helpers.qn` this document doesn't ship), so the block
+isn't runnable as pasted:
+
+```quoin norun
+use core/*;             "* every .qn in the stdlib's core/ dir, in sorted order
+use self:helpers;       "* the current project's helpers.qn
+use std:net/http;       "* explicit stdlib; `std:` and bare are the same package
+
+MyFile <- [IO]File;     "* aliasing is just an ordinary definition — not a `use` concern
+```
+
+> **⚠ Gotcha — `use` loads, the namespace names.** `use` does not pull symbols into a
+> local scope (there isn't one). It runs a file, whose `<-`/`<--` definitions register
+> as ordinary namespaced globals — so you reference what a file defined by its
+> `[Ns]Name`, exactly as if it had always been loaded. A second `use` of the same unit
+> does nothing (definitions aren't re-run), so it can't trigger a "redefine" error.
+
+---
+
+## 48. Stdlib map
+
+> **Rules**
+> - The **core library is `qnlib/core/`** and loads automatically as the prelude
+>   (`qnlib/prelude.qn` does `use core/*`, then seals the immediate value types).
+>   Every runner mode loads it; user scripts never `use` it themselves.
+> - **`net/` and `web/` are opt-in**: `use std:net/http;`, `use std:web/*;`, etc.
+> - Native code (Rust, exposed as sealed built-in classes) supplies primitive
+>   payloads and operations; Quoin code (`qnlib/`) supplies the abstractions on
+>   top. Which is which is an implementation detail — `$doc` covers both sides
+>   the same way.
+
+| Unit | Provides |
+|---|---|
+| `prelude.qn` | The prelude entry — `use core/*` (sorted == numeric), then seals Integer/Double so their arithmetic can be optimized. |
+| `core/00-bootstrap.qn` | `true`/`false`/`nil` behavior, `Object`, `Mixin`, the `Error` hierarchy, `Block` loops (`whileDo:`, `whileDefinedDo:`), numeric helpers, the `ANSI` class. |
+| `core/01-case.qn` | `Case` and `Object#case:` pattern matching (built on the `~` match operator). |
+| `core/02-iterate.qn` | The `Iterate` mixin and every combinator, plus `Generator`, the external `Iterator`, and `Set` algebra (`union:`/`intersection:`/…). |
+| `core/03-number_range.qn` | `NumberRange` (`a..b`, end-exclusive): `each:`, `~` containment. |
+| `core/04-string.qn` | Splitting and padding conveniences over the native String primitives. |
+| `core/05-async.qn` | `Async` helpers (`joinAll:`) over the native `Async`/`Task` scheduler primitives. |
+| `core/06-io.qn` | `[IO]Stdout`/`[IO]Stderr` constants, `[IO]Stdin` delegators, the one-shot `[IO]File.read:`/`write:to:`/`append:to:`, and the `Iterate`-able `[IO]Folder`. |
+| `core/07-statistics.qn` | Statistics on `Iterate` — `mean`, `median`, `mode`, `variance`, `stddev`, `percentile:` for any collection of numbers. |
+| `core/08-bignum.qn` | `Integer.asBigInteger` conversion (BigInteger/BigDecimal themselves are native). |
+| `core/09-codecs.qn` | `toBase64`/`fromBase64`/`toHex`/`fromHex` conveniences on Bytes and String, over the native `Base64`/`Hex` codecs. |
+| `core/10-parallel.qn` | The `parallelCollect:`/`parallelReduce:` combinators — a lazily-started pool of worker isolates behind the plain List API. |
+| `core/11-plan.qn` | `Plan` — the lazy join graph: compose `task:`/`thread:`/`process:` leaves with `all:`/`any:`, then `await`. |
+| `core/12-os.qn` | Conveniences over the native `[OS]` namespace (`[OS]Env.at:ifAbsent:`, iteration). |
+| `core/tcp_server.qn` | `TcpServer` — a minimal concurrent accept-loop server (`start:`/`stop`/`join`). |
+| `net/http.qn` | `[HTTP]Client` — an HTTP/1.1 client in pure Quoin over `TcpSocket`/`TlsSocket` (so HTTPS falls out for free). |
+| `net/http_server.qn` | `[HTTP]Server` — the HTTP/1.1 server protocol machine, pure Quoin over `TcpListener`. |
+| `web/00-url.qn` | `[Web]Url` — the percent codec: `encode:`/`decode:`, `queryParse:`, `formDecode:`. |
+| `web/01-error.qn` | `HttpError` — throw a status (and optional body) from anywhere under a `[Web]App`. |
+| `web/02-route.qn` | `[Web]Route`/`[Web]Router` — most-specific-wins path routing (`:param`, `*splat`). |
+| `web/03-response.qn` | `[Web]Response` — response builders (`json:`, `text:`, …) over `[HTTP]ServerResponse`. |
+| `web/04-app.qn` | `[Web]App` — the framework core: routing DSL, middleware onion, render conventions, error mapping. |
+| `web/05-pool.qn` | `[Web]Pool` — multi-core request execution over worker isolates (`serve:workers:`). |
+| `test.qn` | The test framework — `TestSuite`/`TestRunner`/reporters/assertions; suites self-register as files load, and `qn test DIR` runs everything collected. |
+
+---
+
+Next: **[Appendices](10-appendices.md)** — cheat-sheets, the consolidated gotchas
+list, and a glossary.

@@ -210,6 +210,8 @@ pub struct VmRunnerOptions {
     pub doc_coverage: bool,
     /// `qn highlight --html`: emit a standalone HTML page instead of ANSI.
     pub highlight_html: bool,
+    /// `qn doc --check`: run the documentation's fenced examples instead of generating.
+    pub doc_check: bool,
 }
 
 /// Recursively collect `.qn` files under `dir`, in sorted order, skipping `target`/`.git`.
@@ -369,6 +371,10 @@ enum Cmd {
         /// Report undocumented classes/selectors instead of generating
         #[arg(long)]
         coverage: bool,
+        /// Run the documentation's fenced examples instead of generating: with PATHs,
+        /// markdown files/dirs (blocks tagged `quoin`); without, the stdlib's doc examples
+        #[arg(long)]
+        check: bool,
     },
     /// Format Quoin source in place
     Fmt {
@@ -514,6 +520,7 @@ impl VmRunnerOptions {
         let mut fmt_diff = false;
         let mut doc_json = false;
         let mut doc_coverage = false;
+        let mut doc_check = false;
         let mut highlight_html = false;
         let mut target_path = None;
         let mut vm_args = Vec::new();
@@ -535,11 +542,13 @@ impl VmRunnerOptions {
                 out,
                 json,
                 coverage: cov,
+                check,
             }) => {
                 target_path = Some(out);
                 vm_args = paths;
                 doc_json = json;
                 doc_coverage = cov;
+                doc_check = check;
                 VmRunnerMode::Doc
             }
             Some(Cmd::Fmt {
@@ -650,6 +659,7 @@ impl VmRunnerOptions {
             fmt_diff,
             doc_json,
             doc_coverage,
+            doc_check,
             highlight_html,
         }
     }

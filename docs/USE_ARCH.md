@@ -6,7 +6,7 @@ Quoin's explicit file-loading construct, which replaced the hardcoded qnlib star
 **Status: shipped.** Implemented and tested across four commits:
 `6d9883a` (stage 1: single-file loads), `ee26f2e` (stage 2: `self:`/named/globs/cycles/`std`-norm),
 `69f14b8` (stage 3: prelude via `use core/*`), `377485b` (stage 4: test harness + `evalFile:` removal +
-docs). User-facing reference: `docs/language/06-library-and-reference.md` §21. This doc is the
+docs). User-facing reference: `docs/language/09-library-and-reference.md` §21. This doc is the
 implementation/design record.
 
 > **Context for the plugin update:** the plugin needs the *syntax* — see **Syntax reference** below.

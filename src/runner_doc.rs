@@ -71,6 +71,9 @@ fn is_internal(name: &str) -> bool {
 
 impl VmRunner {
     pub(crate) fn run_doc(&self) -> Result<(), QuoinError> {
+        if self.options.doc_check {
+            return self.run_doc_check();
+        }
         let out_dir = PathBuf::from(
             self.options
                 .target_path
@@ -80,44 +83,7 @@ impl VmRunner {
         let want_json = self.options.doc_json;
         let want_coverage = self.options.doc_coverage;
         let user_units: Vec<String> = self.options.vm_options.arguments.clone();
-
-        let Some(mut arena) = self.build_repl_arena() else {
-            exit(1);
-        };
-
-        // The prelude loads `core/*` only; the rest of the shipping stdlib is use-loaded.
-        for unit in ["use std:net/*", "use std:web/*", "use test"] {
-            if let Err(e) = runner_repl::eval_once(&mut arena, unit) {
-                eprintln!("qn doc: loading the stdlib: {e}");
-                exit(1);
-            }
-        }
-        // User units: `qn doc app/util.qn` loads `use self:app/util` (self_root = CWD in the
-        // script-less modes, so relative paths resolve as written).
-        for path in &user_units {
-            let unit = path.strip_suffix(".qn").unwrap_or(path);
-            if Path::new(unit).is_absolute() {
-                eprintln!("qn doc: {path}: give a path relative to the current directory");
-                exit(2);
-            }
-            if let Err(e) = runner_repl::eval_once(&mut arena, &format!("use self:{unit}")) {
-                eprintln!("qn doc: loading {path}: {e}");
-                exit(1);
-            }
-        }
-
-        // Walk the class table into plain data; everything after this is VM-free.
-        let infos: Vec<ClassInfo> = arena.mutate_root(|_mc, vm| {
-            let mut infos: Vec<ClassInfo> = introspect::globals(vm)
-                .into_iter()
-                .filter(|g| g.kind == GlobalKind::Class && !is_internal(&g.name))
-                .filter_map(|g| introspect::describe_class(vm, &g.name))
-                .collect();
-            infos.sort_by(|a, b| a.name.cmp(&b.name));
-            infos
-        });
-
-        let model = build_model(infos);
+        let model = build_model(self.collect_infos(&user_units));
 
         if want_coverage {
             report_coverage(&model);
@@ -145,6 +111,43 @@ impl VmRunner {
             out_dir.display()
         );
         Ok(())
+    }
+
+    /// Boot a VM with the whole shipping stdlib (plus `user_units`, `use self:`-loaded) and
+    /// walk the class table into plain data. Shared by generation, coverage, and `--check`.
+    fn collect_infos(&self, user_units: &[String]) -> Vec<ClassInfo> {
+        let Some(mut arena) = self.build_repl_arena() else {
+            exit(1);
+        };
+        // The prelude loads `core/*` only; the rest of the shipping stdlib is use-loaded.
+        for unit in ["use std:net/*", "use std:web/*", "use test"] {
+            if let Err(e) = runner_repl::eval_once(&mut arena, unit) {
+                eprintln!("qn doc: loading the stdlib: {e}");
+                exit(1);
+            }
+        }
+        // User units: `qn doc app/util.qn` loads `use self:app/util` (self_root = CWD in the
+        // script-less modes, so relative paths resolve as written).
+        for path in user_units {
+            let unit = path.strip_suffix(".qn").unwrap_or(path);
+            if Path::new(unit).is_absolute() {
+                eprintln!("qn doc: {path}: give a path relative to the current directory");
+                exit(2);
+            }
+            if let Err(e) = runner_repl::eval_once(&mut arena, &format!("use self:{unit}")) {
+                eprintln!("qn doc: loading {path}: {e}");
+                exit(1);
+            }
+        }
+        arena.mutate_root(|_mc, vm| {
+            let mut infos: Vec<ClassInfo> = introspect::globals(vm)
+                .into_iter()
+                .filter(|g| g.kind == GlobalKind::Class && !is_internal(&g.name))
+                .filter_map(|g| introspect::describe_class(vm, &g.name))
+                .collect();
+            infos.sort_by(|a, b| a.name.cmp(&b.name));
+            infos
+        })
     }
 }
 
@@ -582,4 +585,328 @@ fn render_class(class: &ClassDoc, model: &DocModel) -> String {
         }
     }
     page(&class.name, &body)
+}
+
+// ---- `qn doc --check`: run the documentation's examples ---------------------------------
+//
+// One engine, two corpora (docs/DOCS_ARCH.md phase 3 + the RELEASE_PREP Tier 2 harness):
+//
+//   * With PATHs: markdown files/directories. A fenced block tagged `quoin` runs; `quoin
+//     norun` displays only. Untagged fences are prose/output samples and never run.
+//   * Without PATHs: the fenced examples inside the stdlib's own doc comments. No tags exist
+//     there, so the rule is the one the corpus was written under: a block runs iff it carries
+//     at least one `"* -> value` annotation — the verified examples annotate, the
+//     illustrative ones (live sockets, HTTP) deliberately do not.
+//
+// Each block runs in a fresh session (prelude only — an example must be runnable as pasted,
+// including its own `use` lines), statement by statement with persistent bindings, exactly
+// like the REPL. An annotated statement's rendered value must match the annotation text —
+// or, failing that, render equal to the annotation evaluated as a literal (`-> nil`,
+// `-> 'quoted\nstring'`), which absorbs both annotation conventions the docs use.
+
+/// One runnable example, with a label good enough to find it again.
+struct ExampleBlock {
+    label: String,
+    source: String,
+}
+
+impl VmRunner {
+    pub(crate) fn run_doc_check(&self) -> Result<(), QuoinError> {
+        let paths: Vec<String> = self.options.vm_options.arguments.clone();
+        let blocks = if paths.is_empty() {
+            let model = build_model(self.collect_infos(&[]));
+            stdlib_doc_blocks(&model)
+        } else {
+            let mut blocks = Vec::new();
+            for p in &paths {
+                collect_markdown_blocks(Path::new(p), &mut blocks);
+            }
+            blocks
+        };
+
+        let total = blocks.len();
+        let mut checked_annotations = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for block in &blocks {
+            match self.run_example(block) {
+                Ok(n) => checked_annotations += n,
+                Err(msg) => failures.push(msg),
+            }
+        }
+
+        for f in &failures {
+            eprintln!("{f}\n");
+        }
+        println!(
+            "qn doc --check: {total} examples, {checked_annotations} annotations checked, {} failed",
+            failures.len()
+        );
+        if !failures.is_empty() {
+            exit(1);
+        }
+        Ok(())
+    }
+
+    /// Run one example block: parse (only to find statement boundaries), then evaluate the
+    /// block line-group by line-group in a fresh session, checking each `"* -> value`
+    /// annotation. Returns the number of annotations checked, or a formatted failure.
+    ///
+    /// Groups are WHOLE LINES between consecutive statements' start lines — not the parser's
+    /// byte spans, which exclude wrapping parentheses (`(a + b).s` would slice to `a + b).s`)
+    /// and may bleed past a statement's own text. Whole lines also carry the trailing
+    /// annotation comment along harmlessly, and a standalone `"* -> …` line after the last
+    /// statement lands in that statement's group.
+    fn run_example(&self, block: &ExampleBlock) -> Result<usize, String> {
+        use crate::parser::{NodeValue, try_parse_quoin_string_named};
+
+        let node = try_parse_quoin_string_named(&block.source, &block.label).map_err(|pe| {
+            format!(
+                "FAIL {} — example does not parse (line {}, col {}): {}",
+                block.label, pe.line, pe.column, pe.message
+            )
+        })?;
+        let NodeValue::Program(program) = &node.value else {
+            return Err(format!("FAIL {} — not a program", block.label));
+        };
+        let lines: Vec<&str> = block.source.lines().collect();
+        // 1-based start lines, deduped: statements sharing a line run as one group.
+        let mut starts: Vec<usize> = program
+            .expressions
+            .iter()
+            .filter_map(|stmt| stmt.source_info.as_ref().map(|si| si.line))
+            .collect();
+        starts.dedup();
+
+        let annotation_of = |first: usize, last: usize| -> Option<&str> {
+            lines[first - 1..last]
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .and_then(|l| l.split_once("\"* ->").map(|(_, v)| v.trim()))
+        };
+        // When only the FINAL statement carries an annotation, run the block as ONE program —
+        // exactly how `qn -e` verified it. Concurrency examples need this: each eval drives
+        // the scheduler to completion, so a `Task.spawn:` evaluated on its own line finishes
+        // before a later line's `join` (a REPL user sees the same thing; a program does not).
+        let group_bounds: Vec<(usize, usize)> = starts
+            .iter()
+            .enumerate()
+            .map(|(i, &st)| (st, starts.get(i + 1).map(|&n| n - 1).unwrap_or(lines.len())))
+            .collect();
+        let intermediate_annotated = group_bounds
+            .iter()
+            .rev()
+            .skip(1)
+            .any(|&(f, l)| annotation_of(f, l).is_some());
+        if !intermediate_annotated {
+            let mut arena = self.example_session(&block.label, &block.source)?;
+            let rendered = match runner_repl::eval_once(&mut arena, &block.source) {
+                Ok(r) => r.unwrap_or_default(),
+                Err(e) => return Err(format!("FAIL {} — {}", block.label, e)),
+            };
+            let Some(expected) = group_bounds.last().and_then(|&(f, l)| annotation_of(f, l)) else {
+                return Ok(0);
+            };
+            if rendered == expected {
+                return Ok(1);
+            }
+            let expected_rendered = runner_repl::eval_once(&mut arena, expected)
+                .map(|r| r.unwrap_or_default())
+                .ok();
+            if expected_rendered.as_deref() == Some(rendered.as_str()) {
+                return Ok(1);
+            }
+            return Err(format!(
+                "FAIL {} — final value:\n  expected: {}\n  got:      {}",
+                block.label, expected, rendered
+            ));
+        }
+
+        let mut arena = self.example_session(&block.label, &block.source)?;
+        let mut checked = 0usize;
+        for (i, &start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).map(|&n| n - 1).unwrap_or(lines.len());
+            let group = lines[start - 1..end].join("\n");
+            let rendered = match runner_repl::eval_once(&mut arena, &group) {
+                Ok(r) => r.unwrap_or_default(),
+                Err(e) => {
+                    return Err(format!(
+                        "FAIL {} (line {start}) — `{}`:\n  {}",
+                        block.label,
+                        first_code_line(&group),
+                        e
+                    ));
+                }
+            };
+            // The group's annotation: on its LAST line — trailing after the expression, or a
+            // standalone `"* -> …` comment line.
+            let Some(expected) = annotation_of(start, end) else {
+                continue;
+            };
+            checked += 1;
+            if rendered == expected {
+                continue;
+            }
+            // Fallback: the annotation as a literal, rendered by the same pipeline — absorbs
+            // `-> nil` (renders empty) and `-> 'quoted\nstrings'`.
+            let expected_rendered = runner_repl::eval_once(&mut arena, expected)
+                .map(|r| r.unwrap_or_default())
+                .ok();
+            if expected_rendered.as_deref() == Some(rendered.as_str()) {
+                continue;
+            }
+            return Err(format!(
+                "FAIL {} (line {start}) — `{}`:\n  expected: {}\n  got:      {}",
+                block.label,
+                first_code_line(&group),
+                expected,
+                rendered
+            ));
+        }
+        Ok(checked)
+    }
+}
+
+impl VmRunner {
+    /// A fresh example session. The reference documents the whole shipping stdlib, so an
+    /// example assumes the class it sits on is loadable (the class doc states any needed
+    /// `use` once; method examples don't repeat it) — but only the prelude is free, so the
+    /// net/web/test units load only when the example's source names them. A miss shows up as
+    /// a visible NameError failure, never a silent pass.
+    fn example_session(&self, label: &str, source: &str) -> Result<ReplArena, String> {
+        let Some(mut arena) = self.build_repl_arena() else {
+            return Err(format!("FAIL {label} — no session arena"));
+        };
+        let mut load = |unit: &str| -> Result<(), String> {
+            runner_repl::eval_once(&mut arena, unit)
+                .map(|_| ())
+                .map_err(|e| format!("FAIL {label} — loading the stdlib: {e}"))
+        };
+        if source.contains("[HTTP]") || source.contains("TcpServer") {
+            load("use std:net/*")?;
+        }
+        if source.contains("[Web]") {
+            load("use std:net/*")?;
+            load("use std:web/*")?;
+        }
+        if source.contains("TestSuite") {
+            load("use test")?;
+        }
+        Ok(arena)
+    }
+}
+
+/// The first non-blank line of a group, for failure messages.
+fn first_code_line(group: &str) -> &str {
+    group
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+}
+
+/// Corpus B: every runnable fenced example in the stdlib's doc comments — class docs,
+/// extension docs, and method docs, labeled by owner.
+fn stdlib_doc_blocks(model: &DocModel) -> Vec<ExampleBlock> {
+    let mut blocks = Vec::new();
+    let mut add = |label: &str, doc: &Option<String>| {
+        if let Some(doc) = doc {
+            for source in fenced_blocks(doc) {
+                // Runs iff annotated (see the module comment): the verified/illustrative
+                // split the corpus was written under.
+                if source.contains("\"* ->") {
+                    blocks.push(ExampleBlock {
+                        label: label.to_string(),
+                        source,
+                    });
+                }
+            }
+        }
+    };
+    for class in &model.classes {
+        add(&class.name, &class.doc);
+        for ext in &class.extensions {
+            add(
+                &format!("{} (extension)", class.name),
+                &Some(ext.doc.clone()),
+            );
+        }
+        for (side, list) in [
+            ("", &class.instance_methods),
+            (".meta ", &class.class_methods),
+        ] {
+            for m in list {
+                add(&format!("{} {side}{}", class.name, m.selector), &m.doc);
+            }
+        }
+    }
+    blocks
+}
+
+/// Corpus A: fenced blocks tagged `quoin` in markdown files (recursively for a directory).
+/// `quoin norun` displays without running; untagged fences are prose/output samples.
+fn collect_markdown_blocks(path: &Path, out: &mut Vec<ExampleBlock>) {
+    if path.is_dir() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        children.sort();
+        for child in children {
+            collect_markdown_blocks(&child, out);
+        }
+        return;
+    }
+    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut in_block: Option<(usize, Vec<String>)> = None;
+    for (i, line) in text.lines().enumerate() {
+        // Fences inside blockquotes (the book's Gotcha boxes) count too: strip the
+        // quote marker before matching, and from body lines before running.
+        let line = line
+            .trim_start()
+            .strip_prefix('>')
+            .map(|r| r.strip_prefix(' ').unwrap_or(r))
+            .unwrap_or(line)
+            .to_string();
+        let trimmed = line.trim_start();
+        if let Some((start, body)) = &mut in_block {
+            if trimmed.starts_with("```") {
+                out.push(ExampleBlock {
+                    label: format!("{}:{}", path.display(), *start + 1),
+                    source: body.join("\n"),
+                });
+                in_block = None;
+            } else {
+                body.push(line.clone());
+            }
+        } else if let Some(info) = trimmed.strip_prefix("```") {
+            let info = info.trim();
+            if info == "quoin" || (info.starts_with("quoin") && !info.contains("norun")) {
+                in_block = Some((i, Vec::new()));
+            }
+        }
+    }
+}
+
+/// The fenced code blocks inside a doc text (post-extraction: the leading `"*` markers are
+/// already stripped; fences are bare ``` lines).
+fn fenced_blocks(doc: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+    for line in doc.lines() {
+        if line.trim_start().starts_with("```") {
+            match current.take() {
+                Some(body) => blocks.push(body.join("\n")),
+                None => current = Some(Vec::new()),
+            }
+        } else if let Some(body) = &mut current {
+            body.push(line);
+        }
+    }
+    blocks
 }

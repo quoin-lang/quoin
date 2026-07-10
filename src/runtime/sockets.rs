@@ -616,7 +616,7 @@ pub fn build_tcp_listener_class() -> NativeClassBuilder {
              serve many listeners and connections concurrently.\n\n\
              ```\n\
              var srv = TcpListener.listen:'127.0.0.1:0'\n\
-             srv.port     \"* -> the ephemeral port the OS chose\n\
+             srv.port     \"* e.g. 50121 -- the ephemeral port the OS chose\n\
              srv.acceptLoop:{ |sock| sock.writeAll:'hi\\n'.asBytes }\n\
              ```",
         )

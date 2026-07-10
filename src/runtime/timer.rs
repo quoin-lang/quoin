@@ -21,7 +21,7 @@ pub fn build_timer_class() -> NativeClassBuilder {
             "Run the block and answer how long it took, in whole microseconds (an Integer). \
              Measured on the monotonic clock, so wall-clock adjustments cannot skew it.\n\n\
              ```\n\
-             Timer.time:{ (1..1000).each:{ |i| i } }     \"* -> the elapsed microseconds\n\
+             Timer.time:{ (1..1000).each:{ |i| i } }     \"* the elapsed microseconds\n\
              ```",
         )
 }
