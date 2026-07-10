@@ -2279,6 +2279,38 @@ fn block_param_seeding_is_a_dissolvable_belief() {
 }
 
 #[test]
+fn fused_each_param_seeding_matches_the_send_path() {
+    // B1 `each:` fusion splices the block body instead of compiling a literal — it must
+    // seed the param's element-type belief exactly like the real send does. The gallery's
+    // `badEachParam` regressed to silence when fusion landed without this (Tier 4b).
+    let d = all_diags(
+        "Probe <- { m -> {
+            var xs: List(Integer) = #(1 2 3);
+            var strs: List(String) = #();
+            xs.each:{ |x| strs.add:x };
+            0
+        } }",
+    );
+    assert!(
+        d.iter().any(|m| m.contains("rejects a `Integer` element")),
+        "{d:?}"
+    );
+    // The same body through the fused path still dissolves the belief on reassignment.
+    let d = all_diags(
+        "Probe <- { m -> {
+            var xs: List(Integer) = #(1 2 3);
+            var strs: List(String) = #();
+            xs.each:{ |x| x = 'now a string'; strs.add:x };
+            0
+        } }",
+    );
+    assert!(
+        !d.iter().any(|m| m.contains("rejects")),
+        "belief must dissolve on reassignment: {d:?}"
+    );
+}
+
+#[test]
 fn annotated_literal_sharpens_and_checks() {
     // A literal with an annotated header carries its shape outward — a declared block
     // var with an incompatible return warns, naming the sharpened literal type.

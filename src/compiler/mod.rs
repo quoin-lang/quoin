@@ -1546,6 +1546,13 @@ impl Compiler {
             Type::Instance(n) if !self.seen_types.contains(n) => return,
             _ => {}
         }
+        // A matching collection LITERAL in a checked position: check its (statically visible)
+        // elements instead — its bare `List` static type would trip the width rule below, a
+        // false positive since the literal is constructed into the checked position.
+        if Self::generic_literal_decl(expected, node) {
+            self.check_literal_elements(node, expected);
+            return;
+        }
         let actual = self.static_type(node);
         if actual.compatible_with(expected) {
             return;
@@ -1625,12 +1632,153 @@ impl Compiler {
         }
     }
 
-    /// The receiver's concrete class name, if statically known. Only a user-class `Instance` —
-    /// builtins aren't `sealed` (so MNU never fires on them), and `Any`/nullable receivers skip.
+    /// The receiver's concrete class name, if statically known. Only a user-class `Instance`:
+    /// MNU claims ABSENCE, which the table can only prove inside a user-class hierarchy —
+    /// builtins inherit from the open (hence stale-in-table) `Object`, whose qnlib reopens
+    /// (`case:`, matchers) the walk would miss, and a Boolean value's `if:`/`not` live on the
+    /// `true`/`false` eigenclasses, not the class. Builtin receivers feed only the arg-type
+    /// checks (`arg_check_receiver_class`), which key on selector EXISTENCE.
     fn receiver_class(&self, call: &MethodCallNode) -> Option<String> {
         match self.static_type(call.subject.as_ref()?) {
             Type::Instance(c) => Some(c.to_string()),
             _ => None,
+        }
+    }
+
+    /// The receiver class the ARG-TYPE checks may use: a user-class `Instance`, or a builtin
+    /// scalar/collection mapped to its class-table entry (the `from_vm` + `sealed` gates
+    /// downstream still drop open classes like `String`). These checks warn only on a
+    /// selector the class provably HAS with mismatching args, so trust matters more than
+    /// coverage: for a LOCAL receiver, only flow narrowing and an explicit annotation count —
+    /// never the inferred devirt hint a plain `var x = 5` records, which is deliberately
+    /// allowed to go stale across reassignment (a devirt gate has a runtime fallback; a
+    /// diagnostic does not). `Bool` is excluded: a Boolean value dispatches through the
+    /// `true`/`false` eigenclasses, which the class's table entry doesn't model.
+    fn arg_check_receiver_class(&self, call: &MethodCallNode) -> Option<String> {
+        let subject = call.subject.as_ref()?;
+        let t = match &subject.value {
+            NodeValue::Identifier(id) => match NarrowKey::from_ident(id) {
+                Some(key) => self.narrowed_type(&key).or_else(|| match &key {
+                    NarrowKey::Local(name) => self.declared_type(name),
+                    NarrowKey::Field(_) => None,
+                })?,
+                // `nil`/`true`/`false` receivers dispatch via eigenclasses; globals unknown.
+                None => return None,
+            },
+            _ => self.static_type(subject),
+        };
+        match t {
+            Type::Instance(c) => Some(c.to_string()),
+            Type::Int => Some("Integer".to_string()),
+            Type::Double => Some("Double".to_string()),
+            Type::String => Some("String".to_string()),
+            Type::List | Type::ListOf(_) => Some("List".to_string()),
+            Type::Map | Type::MapOf(_) => Some("Map".to_string()),
+            Type::Set | Type::SetOf(_) => Some("Set".to_string()),
+            _ => None,
+        }
+    }
+
+    /// The multimethod face of compile-time MNU: for an authoritative, sealed receiver whose
+    /// selector is recorded with 2+ fully-typed variants (`method_param_variants`), warn when
+    /// every argument's static type is confident and NO variant accepts them — dispatch then
+    /// provably raises MessageNotUnderstood at runtime (`5.pow:'x'`). The single-variant case
+    /// is `call_param_types`' (which also promotes literals); an unconfident argument
+    /// (`Any` / nullable / type variable) keeps this silent, per the no-false-positives rule.
+    fn check_variant_mismatch(&mut self, call: &MethodCallNode) {
+        let Some(class) = self.arg_check_receiver_class(call) else {
+            return;
+        };
+        let Some(sig) = self.class_table.get(&class) else {
+            return;
+        };
+        if !sig.from_vm || !sig.sealed || sig.has_catch_all {
+            return;
+        }
+        let Some(selector) = Self::call_selector_nonvariadic(call) else {
+            return;
+        };
+        let Some(variants) = sig.method_param_variants.get(selector.as_str()) else {
+            return;
+        };
+        let args = &call.arguments.expressions;
+        let arg_types: Vec<Type> = args.iter().map(|a| self.static_type(a)).collect();
+        if arg_types
+            .iter()
+            .any(|t| matches!(t, Type::Any | Type::Nullable(_)) || t.contains_var())
+        {
+            return;
+        }
+        let accepted = variants.iter().any(|params| {
+            params.len() == arg_types.len()
+                && arg_types
+                    .iter()
+                    .zip(params)
+                    .all(|(a, p)| a.compatible_with(p))
+        });
+        if !accepted {
+            let got = arg_types
+                .iter()
+                .map(|t| format!("`{}`", t.name()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let takes = variants
+                .iter()
+                .map(|v| {
+                    format!(
+                        "({})",
+                        v.iter().map(|t| t.name()).collect::<Vec<_>>().join(" ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.warn(
+                format!(
+                    "no `{selector}` variant on `{class}` accepts {got} — \
+                     declared: {takes}; this raises MessageNotUnderstood at runtime"
+                ),
+                call.subject.as_deref().and_then(|n| n.source_info.as_ref()),
+            );
+        }
+    }
+
+    /// A collection LITERAL in a `List(T)`-checked position: its elements are statically
+    /// visible, so check THEM against `T` — the same contract `check_generic_insertion`
+    /// enforces on inserts — instead of letting the literal's bare `List` static type trip
+    /// the width rule (a bare collection never satisfies a checked one, but THIS literal is
+    /// constructed into the checked position, tagged on the decl path). Map literals check
+    /// their values (keys are pinned String). Nil elements pass, matching the insert check.
+    fn check_literal_elements(&mut self, node: &Node, expected: &Type) {
+        let (elem, items): (Type, Vec<&Arc<Node>>) = match (expected, &node.value) {
+            (Type::ListOf(t), NodeValue::List(l)) => ((**t).clone(), l.values.iter().collect()),
+            (Type::SetOf(t), NodeValue::Set(s)) => ((**t).clone(), s.values.iter().collect()),
+            (Type::MapOf(t), NodeValue::Map(m)) => ((**t).clone(), m.values.iter().collect()),
+            _ => return,
+        };
+        if elem.contains_var() {
+            return;
+        }
+        let allowed = Type::Nullable(Box::new(elem));
+        for item in items {
+            let actual = self.static_type(item);
+            if actual.compatible_with(&allowed) {
+                continue;
+            }
+            // Instance subtyping may rescue (a Circle literal element into List(Shape)).
+            if let (Type::Instance(sub), Type::Nullable(sup)) = (&actual, &allowed)
+                && let Type::Instance(sup) = sup.as_ref()
+                && self.class_table.is_subtype(sub, sup) != Some(false)
+            {
+                continue;
+            }
+            self.warn(
+                format!(
+                    "`{}` rejects a `{}` element — this raises a TypeError at runtime",
+                    expected.name(),
+                    actual.name(),
+                ),
+                item.source_info.as_ref().or(node.source_info.as_ref()),
+            );
         }
     }
 
@@ -1666,7 +1814,7 @@ impl Compiler {
     /// authoritative (`from_vm`), `sealed` class, and the (non-variadic) selector resolves to a
     /// single fully-typed method whose arity matches. `None` → args compile unchecked (gradual).
     fn call_param_types(&self, call: &MethodCallNode) -> Option<Vec<Type>> {
-        let class = self.receiver_class(call)?;
+        let class = self.arg_check_receiver_class(call)?;
         let sig = self.class_table.get(&class)?;
         if !sig.from_vm || !sig.sealed {
             return None;
@@ -2849,6 +2997,8 @@ impl Compiler {
     ) -> Result<(), String> {
         // Phase 3b: compile-time MNU (a pure analysis, before any inlining/lowering).
         self.check_mnu(call);
+        // The multimethod face of MNU: args that provably match no recorded variant.
+        self.check_variant_mismatch(call);
         // Phase 3c: a non-nil-safe send to a confidently-nullable, un-narrowed receiver.
         self.check_nil_misuse(call);
         self.check_generic_insertion(call);

@@ -372,15 +372,37 @@ it. None is fixed.
   (run-to-block by design; zero fairness at yield points is the bug-or-decision
   to make explicit). The book's Part V documents the behavior as a gotcha.
 
-- [ ] **Checker reality vs. claims — two drifts found writing Part VII.**
-  (a) `qnlib/warnings.qn` gallery drift: `badEachParam` no longer warns, while
-  `wellFormed:` (in the "must emit NO warning" section) now warns
-  `expected List(Integer), found List`. (b) Compile-time argument-type MNU
-  effectively never fires for builtins (gated to from_vm+sealed `Instance`
-  receivers with one fully-typed variant): `5.pow:'x'` is silent at check time.
-  Also statically-visible bad literal elements (`var x: List(Integer) =
-  #(1 'two')`) don't warn — insertions do. Align the gallery + decide whether
-  the arg-check gate should widen.
+- [x] **Checker reality vs. claims — two drifts found writing Part VII.** FIXED,
+  all four faces:
+  (a) `badEachParam` regression root-caused: B1 `each:` fusion (landed 2h after
+  G4b seeding) splices the block body without seeding the param's element-type
+  belief — the fused path now installs the same narrowing-grade belief
+  (annotation first, else the receiver's element type) under the param's source
+  name, shadow-saved around the splice. Unit test pins the FUSED shape (the
+  existing seeding test used a non-fused method, which is exactly how it
+  slipped).
+  (b) `wellFormed:` false positive + silent `#(1 'two')`: one shared fix —
+  a collection literal in a checked position now has its statically-visible
+  ELEMENTS checked (`check_literal_elements`, same message as the insert check)
+  instead of its bare `List` static type tripping the width rule; the decl path
+  keeps the runtime tag as backstop.
+  (c) `5.pow:'x'` now warns: `method_param_variants` on ClassSig records every
+  fully-typed variant set (2+, ALL typed — one untyped variant would accept
+  anything), and `check_variant_mismatch` warns when confident args match no
+  variant. Root cause of "never fires for builtins" found deeper: builtins are
+  sealed by `prelude.qn` at RUNTIME, after the table's first authoritative
+  snapshot — `populate_from_vm` now re-snapshots a class once, on the
+  monotone unsealed→sealed transition (which also picks up the complete
+  post-extension method set). Single-variant builtin args check too
+  (`#(1 2).at:'x'`).
+  Receiver trust is explicit (`arg_check_receiver_class`): flow narrowing +
+  declared annotations only for locals — never the stale-able inferred devirt
+  hint; `Bool`/`nil` excluded (eigenclass dispatch); MNU keeps its
+  user-`Instance`-only gate (absence isn't provable through the open, stale
+  `Object` root — `case:`, `if:` false positives found and avoided).
+  (d) The gallery is now a CI canary: `tests/check_warnings.rs` pins the exact
+  warning count (25), the drift-prone messages, and `wellFormed:`'s silence;
+  new `ArgGallery` section documents the builtin arg checks.
 
 - [x] **Add `Block#finally:`.** DONE: `{ … }.finally:{ cleanup }` =
   `catch:finally:` with an empty handler list — the cleanup runs and whatever

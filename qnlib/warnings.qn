@@ -59,6 +59,29 @@ BadOverride <- {
     defined? -> { |^String| 'nope' }
 };
 
+"* --- builtin argument checks (the sealed builtins are authoritative post-seal) ---
+ArgGallery <- {
+    "* single-variant arg mismatch: List#at: takes an Integer.
+    badBuiltinArg -> { #(1 2).at:'x' };
+
+    "* multimethod arg mismatch: no pow: variant on Integer accepts a String —
+    "* dispatch provably raises MessageNotUnderstood.
+    badVariantArgs -> { 5.pow:'x' };
+
+    "* a collection literal's statically-visible bad element — the compile-time
+    "* face of the runtime tag enforcement.
+    badLiteralElem -> { var xs: List(Integer) = #( 1 'two' ); xs };
+
+    "* --- these are CORRECT and must emit NO warning ---
+
+    "* args that match a variant, on both sides of the multimethod.
+    goodVariants -> { (5.pow:2).s + (5.pow:2.5).s };
+
+    "* an untyped local's type is an inferred devirt HINT, allowed to go stale across
+    "* reassignment — so it is never trusted as a receiver claim: no MNU, no arg check.
+    staleHintStaysSilent -> { var x = 5; x = 'now a string'; x.upper }
+};
+
 "* --- generic annotations (G0, checker-only: docs/GENERICS_ARCH.md) ---
 "* Malformed generic shapes each get a targeted diagnostic; a declared
 "* class-header type variable (T) is silently in scope for that body.

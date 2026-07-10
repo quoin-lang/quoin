@@ -43,6 +43,11 @@ pub struct ClassSig {
     /// (`Object`) parameter is omitted, so a checkable entry unambiguously fixes the arg types.
     /// Populated only for `from_vm` sigs (a VM sig's variant set is complete).
     pub method_params: HashMap<Arc<str>, Vec<Type>>,
+    /// The multimethod face of arg-checking: `selector → every variant's param types`, recorded
+    /// only when a method has 2+ variants and EVERY one is fully typed — dispatch then provably
+    /// MNUs when the args match none of them (`5.pow:'x'`). A single untyped variant would accept
+    /// anything, so such selectors are omitted entirely. Populated only for `from_vm` sigs.
+    pub method_param_variants: HashMap<Arc<str>, Vec<Vec<Type>>>,
     /// Declared return types: `selector → Type`, from a method's `^Ret` header. Recorded from the
     /// AST — both `Foo <- {}` definitions and `Foo <-- {}` reopens (how the core classes add
     /// methods). `insert` *merges* these so a later `from_vm` overwrite (VM sigs carry no returns
@@ -91,6 +96,7 @@ impl ClassSig {
                 vec![Type::parse_annotation_str("Block(T ^Any)", &type_params)],
             );
         }
+        let mut method_param_variants = HashMap::new();
         for m in info.instance_methods.iter().chain(&info.class_methods) {
             // A single variant fixes the arg types (all typed) and/or the return unambiguously.
             if let [variant] = m.variants.as_slice() {
@@ -110,6 +116,27 @@ impl ClassSig {
                         Type::parse_annotation_str(ret, &type_params),
                     );
                 }
+            } else if m.variants.len() >= 2
+                && m.variants
+                    .iter()
+                    .all(|v| v.param_types.iter().all(Option::is_some))
+            {
+                // A multimethod whose EVERY variant is fully typed: dispatch provably MNUs
+                // when the args match none. One untyped variant would accept anything, so
+                // such a selector is omitted entirely (missed check fine, wrong one not).
+                let variants = m
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        v.param_types
+                            .iter()
+                            .map(|p| {
+                                Type::parse_annotation_str(p.as_deref().unwrap(), &type_params)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                method_param_variants.insert(Arc::from(m.selector.as_str()), variants);
             }
         }
         ClassSig {
@@ -120,6 +147,7 @@ impl ClassSig {
             has_catch_all: false,
             from_vm: true,
             method_params,
+            method_param_variants,
             method_returns,
             type_params,
         }
@@ -131,6 +159,7 @@ impl ClassSig {
 /// and cheap on repeat: a class already recorded `from_vm` is skipped. Called at each compile site
 /// (where `vm` is in scope) so a unit's checker sees the fully-built classes it can dispatch to.
 pub fn populate_from_vm<'gc>(vm: &crate::vm::VmState<'gc>, table: &ClassTable) {
+    let sealed_now = crate::introspect::sealed_class_names(vm);
     for g in crate::introspect::globals(vm) {
         if !matches!(g.kind, crate::introspect::GlobalKind::Class) {
             continue;
@@ -146,7 +175,22 @@ pub fn populate_from_vm<'gc>(vm: &crate::vm::VmState<'gc>, table: &ClassTable) {
             .get(g.name.as_str())
             .is_some_and(|s| s.from_vm);
         if already_authoritative {
-            continue;
+            // One exception to the skip: `sealed!` runs at RUNTIME, and the prelude seals
+            // the builtins as its LAST act — after the core units have applied every
+            // extension — so an entry snapshotted mid-prelude says open-and-partial
+            // forever, which silently disabled MNU/arg-checks on every builtin
+            // (RELEASE_PREP Tier 4b). Sealing is monotone and happens once, so the flag's
+            // false→true transition is the one moment to re-snapshot; the fresh describe
+            // then carries the complete post-extension method set, and `insert`'s merge
+            // keeps any richer AST-recorded params/returns.
+            let recorded_sealed = table
+                .0
+                .borrow()
+                .get(g.name.as_str())
+                .is_some_and(|s| s.sealed);
+            if recorded_sealed || !sealed_now.contains(&g.name) {
+                continue;
+            }
         }
         if let Some(info) = crate::introspect::describe_class(vm, &g.name) {
             table.insert(&g.name, ClassSig::from_class_info(&info));
@@ -197,6 +241,13 @@ impl ClassTable {
                         .or_insert_with(|| ps.clone());
                 }
             }
+            // Variant sets are VM-recorded only (an AST sig never carries them), so an AST
+            // re-insert must not drop them — same survival rule as returns/type_params.
+            for (sel, vs) in &existing.method_param_variants {
+                sig.method_param_variants
+                    .entry(sel.clone())
+                    .or_insert_with(|| vs.clone());
+            }
         }
         map.insert(Arc::from(name), sig);
     }
@@ -218,6 +269,7 @@ impl ClassTable {
             has_catch_all: false,
             from_vm: false,
             method_params: HashMap::new(),
+            method_param_variants: HashMap::new(),
             method_returns: HashMap::new(),
             type_params: Vec::new(),
         });
@@ -240,6 +292,7 @@ impl ClassTable {
             has_catch_all: false,
             from_vm: false,
             method_params: HashMap::new(),
+            method_param_variants: HashMap::new(),
             method_returns: HashMap::new(),
             type_params: Vec::new(),
         });
@@ -263,6 +316,7 @@ impl ClassTable {
             has_catch_all: false,
             from_vm: false,
             method_params: HashMap::new(),
+            method_param_variants: HashMap::new(),
             method_returns: HashMap::new(),
             type_params: Vec::new(),
         });

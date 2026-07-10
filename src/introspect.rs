@@ -167,6 +167,20 @@ fn find_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<Gc<'gc, RefLock<Clas
     })
 }
 
+/// The names of every currently-`sealed!` class, in one pass over the globals — the cheap
+/// bulk form `class_table::populate_from_vm` uses to notice a runtime seal (the prelude
+/// seals the builtins as its LAST act) without a per-class global scan.
+pub fn sealed_class_names<'gc>(vm: &VmState<'gc>) -> std::collections::HashSet<String> {
+    vm.globals
+        .borrow()
+        .iter()
+        .filter_map(|(key, val)| match val {
+            Value::Class(c) if c.borrow().is_sealed => Some(key.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Surface metadata for the class named `name`, or `None` if no such class global.
 pub fn describe_class<'gc>(vm: &VmState<'gc>, name: &str) -> Option<ClassInfo> {
     let class_gc = find_class(vm, name)?;

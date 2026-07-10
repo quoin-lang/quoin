@@ -132,6 +132,9 @@ impl Compiler {
             // literal is honestly untagged until this lowering runs).
             Some(expected) if Self::generic_literal_decl(expected, &decl.rvalue) => {
                 self.compile_node(&decl.rvalue, bytecode)?;
+                // Statically visible bad elements warn at check time; the runtime tag
+                // below stays as the enforcement backstop for the rest.
+                self.check_literal_elements(&decl.rvalue, expected);
                 let inner = match expected {
                     Type::ListOf(t) | Type::MapOf(t) | Type::SetOf(t) => t,
                     _ => unreachable!("gated by generic_literal_decl"),

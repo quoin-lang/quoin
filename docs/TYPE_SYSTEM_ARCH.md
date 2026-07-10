@@ -3,7 +3,8 @@
 *Status (verified 2026-07-09 at `dbe188d`): **MOSTLY SHIPPED** — `experiment/type-system` is
 merged into main and is no longer a live branch. Phases 0–4 are in the tree (`src/types.rs` holds
 the `Type` lattice, `src/class_table.rs` the parallel `ClassSig` table; nil-narrowing and
-span+caret diagnostics both work — `qn check qnlib/warnings.qn` is the gallery), plus several
+span+caret diagnostics both work — `qn check qnlib/warnings.qn` is the gallery, pinned in CI by
+`tests/check_warnings.rs` after two silent drifts, RELEASE_PREP Tier 4b), plus several
 Phase-5 optimizer slices. **Remaining:** 3c·3 loop back-edge widening, 3c·4d nullable-guard
 inline recovery, and the rest of Phase 5.*
 
