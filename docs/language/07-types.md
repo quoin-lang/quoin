@@ -297,13 +297,21 @@ var n: Integer? = scores.at:'grace'
 n.defined?.if:{ 'present' } else:{ 'absent' }      "* -> 'absent'
 ```
 
-> **⚠ Gotcha — don't put `T?` on a *method* parameter.** Parameter types
-> participate in multimethod dispatch, and dispatch has no nullable rule today: a
-> `|name: String?|` variant matches **nothing** — not a `String`, not even
-> `nil` — so the method becomes unreachable and every call is a
-> `MessageNotUnderstood` listing `width:String?` as an unmatchable candidate.
-> Keep parameters bare (or concretely typed) and declare nullability where it's
-> checker-only: locals (`var n: Integer? = …`) and return types (`^Integer?`).
+A `T?` parameter participates in dispatch as base-type-or-nil: a
+`|name: String?|` variant matches a `String` argument at the base type's
+specificity, and matches `nil` exactly — so a nullable variant can sit beside
+concretely-typed siblings:
+
+```quoin
+W <- {
+    width: -> { |name: String?| name.defined?.if:{ 'str' } else:{ 'none' } };
+    width: --> { |n: Integer| 'int' }
+};
+var w = W.new;
+w.width:'x'    "* -> 'str'
+w.width:nil    "* -> 'none'
+w.width:7      "* -> 'int'
+```
 
 ---
 
