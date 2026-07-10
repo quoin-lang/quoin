@@ -317,6 +317,30 @@ it. None is fixed.
   trailing splats; the book's §4 prose currently soft-claims "any position" and
   shows only verified trailing forms — align it with whichever way this goes.
 
+- [ ] **Top-level method definitions die with "Cannot extend sealed class
+  [/]Nil" — make the semantics explicit.** Found repairing the book (2026-07-10):
+  `greet -> { 42 }` at the top of a file compiles fine, then fails at runtime
+  with an error about a class the user never mentioned. The mechanism: a method
+  definition attaches to the current `self`'s class; top-level `self` is `nil`;
+  `Nil` is sealed (PR #31). Every newcomer who writes a "function" will hit this,
+  and the message explains the implementation, not the mistake.
+
+  Decide one of:
+  1. **A targeted compile-time diagnostic** (recommended): a method definition
+     at unit top level, outside any class body, is statically detectable — reject
+     it at compile time with the actual fix: "methods live in classes; for a
+     standalone callable, bind a block: `var greet = { 42 }` (call it with
+     `greet.value`)". Cheap, no semantics change.
+  2. **Give top-level `sel -> {…}` a real meaning** (a global function/binding)
+     — a language-design decision with dispatch implications; not for v0.1.
+  3. Keep the runtime error but rewrite it to name the situation ("a top-level
+     method definition — `self` is nil here") — weakest, since the failure stays
+     at runtime.
+
+  Whichever way: the book (02-blocks-and-control §9, 03-objects) currently works
+  around it by wrapping examples in classes with a one-line note; once the
+  semantics are explicit, say it in §Rules there too.
+
 - [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
   and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so
   cleanup-on-every-path with no interest in the error must name a handler that
