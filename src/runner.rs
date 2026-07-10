@@ -749,7 +749,7 @@ impl VmRunner {
                     // A standalone page over the shared code stylesheet — the same classes and
                     // colors the doc generator's fenced examples use (docs/DOCS_ARCH.md §8).
                     println!(
-                        "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{}</title>\n\
+                        "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{}</title>\n{}\n\
                          <style>\nbody {{ margin: 2rem auto; max-width: 60rem; padding: 0 1rem; \
                          background: #ffffff; color: #1a1a1a; }}\n\
                          @media (prefers-color-scheme: dark) {{ body {{ background: #1e1e1e; \
@@ -757,6 +757,7 @@ impl VmRunner {
                          pre.qn-code {{ font: 14px/1.5 ui-monospace, monospace; }}\n{}</style>\n\
                          </head>\n<body>\n{}\n</body></html>",
                         path,
+                        crate::highlighter::code_font_links(),
                         crate::highlighter::code_stylesheet(),
                         crate::highlighter::highlight_to_html(&source)
                     );

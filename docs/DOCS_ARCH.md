@@ -150,7 +150,10 @@ qn doc [PATH…] [--out DIR] [--json] [--coverage]
   (native/extension). The class table is the source of truth; nothing re-parses source except
   the comment lift.
 - **HTML**: one page per class + a namespace-grouped index (`[IO]`, `[OS]`, `[Web]`, `[HTTP]`,
-  core). Self-contained — one inline stylesheet, no JS dependencies. Signatures cross-link:
+  core). One inline stylesheet, no scripts; the single external resource is the code font
+  (Fira Code via Google Fonts `<link>` — its ligatures suit Quoin's arrow-heavy syntax, and
+  `display=swap` + the `ui-monospace` fallback degrade cleanly offline). Source refs link to
+  the repository named by the crate metadata. Signatures cross-link:
   `param_types` / `ret_type` are class names, so `^String` links to `String.html`. Source
   links from `SourceLoc`. In-page anchors are `#i-<selector>` / `#c-<selector>` (instance vs
   class side — `read` can exist on both); `:`, `?` and `!` are all legal in URI fragments, so

@@ -456,8 +456,9 @@ fn page(title: &str, body: &str) -> String {
     format!(
         "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title>\n<style>{}\n{}</style>\n</head>\n<body>\n{}\n</body></html>\n",
+         <title>{}</title>\n{}\n<style>{}\n{}</style>\n</head>\n<body>\n{}\n</body></html>\n",
         esc(title),
+        crate::highlighter::code_font_links(),
         STYLE,
         crate::highlighter::code_stylesheet(),
         body

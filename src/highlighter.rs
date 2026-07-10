@@ -114,6 +114,20 @@ fn split_entry(entry: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// The `<head>` links loading the code font — Fira Code, whose ligatures suit Quoin's
+/// arrow-heavy syntax (`->`, `-->`, `<-`, `<--`, `==`, `!=`, `>=`). Linked from Google Fonts
+/// rather than copied into generated folders; `display=swap` and the `ui-monospace` fallback
+/// in [`code_stylesheet`] mean an offline page simply renders in the system code font. The
+/// one sanctioned external resource — scripts stay forbidden (tests/doc_gen.rs pins both).
+pub fn code_font_links() -> &'static str {
+    concat!(
+        "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n",
+        "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n",
+        "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2",
+        "?family=Fira+Code:wght@400;600&display=swap\">"
+    )
+}
+
 /// The code stylesheet both consumers inline. Dark-scheme colors are generated from the ANSI
 /// `colors_for` table (exact terminal parity); light-scheme from a hand-picked map, since the
 /// terminal palette assumes a dark background — `#ffffff` operators would vanish on white.
@@ -139,7 +153,14 @@ pub fn code_stylesheet() -> String {
             _ => "inherit", // qn-plain / qn-op / qn-return: default foreground
         }
     }
-    let mut css = String::from("pre.qn-code { line-height: 1.45; }\n");
+    // The font rule lives HERE, not in each consumer's page style, so the doc pages and
+    // `qn highlight --html` cannot disagree. Emitted after the page styles in both consumers,
+    // so it wins over any `font:` shorthand they set for sizing.
+    let mut css = String::from(
+        "pre.qn-code, pre, code, .sig { font-family: 'Fira Code', ui-monospace, \
+         SFMono-Regular, Menlo, monospace; }\n\
+         pre.qn-code { line-height: 1.45; }\n",
+    );
     let mut seen: Vec<&str> = Vec::new();
     for &t in ALL_TYPES {
         let class = css_class(t);

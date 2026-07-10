@@ -89,11 +89,24 @@ fn stdlib_docs_carry_both_native_and_quoin_doc_text() {
     // HTML exists, is self-contained, and cross-links resolve to emitted pages.
     let index = std::fs::read_to_string(out_dir.join("index.html")).unwrap();
     assert!(index.contains("<style>"), "the stylesheet must be inline");
-    // Self-contained means no external RESOURCES (scripts, stylesheets, images) — plain
-    // hyperlinks (the GitHub source links) are fine.
-    for forbidden in ["<script", "<link", "src=\"http", "@import"] {
+    // Self-containment, current stance: scripts/images/@import stay forbidden; the ONE
+    // sanctioned external resource is the code font (Google Fonts <link>s, which degrade to
+    // the system monospace offline), and plain hyperlinks (GitHub source refs) are fine.
+    for forbidden in ["<script", "src=\"http", "@import"] {
         assert!(!index.contains(forbidden), "external resource: {forbidden}");
     }
+    for (i, _) in index.match_indices("<link") {
+        let end = index[i..].find('>').map(|e| i + e).unwrap_or(index.len());
+        let link = &index[i..end];
+        assert!(
+            link.contains("fonts.googleapis.com") || link.contains("fonts.gstatic.com"),
+            "only the font hosts may be <link>ed: {link}"
+        );
+    }
+    assert!(
+        index.contains("family=Fira+Code") && index.contains("'Fira Code'"),
+        "the ligature code font must be linked and used"
+    );
     let page = std::fs::read_to_string(out_dir.join("IO.Stdin.html")).unwrap();
     assert!(
         page.contains("without its terminator"),
@@ -125,6 +138,11 @@ fn stdlib_docs_carry_both_native_and_quoin_doc_text() {
         let rest = &index[i + 6..];
         &rest[..rest.find('"').unwrap()]
     }) {
+        // Internal cross-links must resolve to emitted pages; absolute URLs (the font hosts,
+        // GitHub source refs) are not files.
+        if href.starts_with("http") {
+            continue;
+        }
         assert!(
             out_dir.join(href).exists(),
             "index links to {href}, which was not emitted"
@@ -243,6 +261,8 @@ fn highlight_html_shares_the_doc_generator_styles() {
         "qn-string",     // 'text'
         ".qn-keyword {", // the shared stylesheet, same classes the doc pages inline
         "prefers-color-scheme: dark",
+        "family=Fira+Code", // the shared ligature font, linked not copied
+        "'Fira Code'",
     ] {
         assert!(html.contains(needle), "missing {needle} in:\n{html}");
     }
