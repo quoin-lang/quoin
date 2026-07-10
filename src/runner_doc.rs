@@ -679,7 +679,9 @@ impl VmRunner {
 
         let annotation_of = |first: usize, last: usize| -> Option<&str> {
             lines[first - 1..last]
-                .last()
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
                 .and_then(|l| l.split_once("\"* ->").map(|(_, v)| v.trim()))
         };
         // When only the FINAL statement carries an annotation, run the block as ONE program —
@@ -861,8 +863,16 @@ fn collect_markdown_blocks(path: &Path, out: &mut Vec<ExampleBlock>) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    let mut in_block: Option<(usize, Vec<&str>)> = None;
+    let mut in_block: Option<(usize, Vec<String>)> = None;
     for (i, line) in text.lines().enumerate() {
+        // Fences inside blockquotes (the book's Gotcha boxes) count too: strip the
+        // quote marker before matching, and from body lines before running.
+        let line = line
+            .trim_start()
+            .strip_prefix('>')
+            .map(|r| r.strip_prefix(' ').unwrap_or(r))
+            .unwrap_or(line)
+            .to_string();
         let trimmed = line.trim_start();
         if let Some((start, body)) = &mut in_block {
             if trimmed.starts_with("```") {
@@ -872,7 +882,7 @@ fn collect_markdown_blocks(path: &Path, out: &mut Vec<ExampleBlock>) {
                 });
                 in_block = None;
             } else {
-                body.push(line);
+                body.push(line.clone());
             }
         } else if let Some(info) = trimmed.strip_prefix("```") {
             let info = info.trim();

@@ -341,6 +341,27 @@ fn doc_check_runs_annotated_markdown_blocks() {
     );
     assert!(all.contains("bad.md") && all.contains("expected: 3") && all.contains("got:      2"));
 
+    // An annotation separated from the next statement by a blank line still checks (the
+    // group's last line is blank; the scan uses the last NON-blank line), and a fence inside
+    // a blockquote (the book's Gotcha boxes) is not invisible.
+    std::fs::write(
+        dir.join("edges.md"),
+        "```quoin\nvar q = 6 * 7;\nq;    \"* -> 42\n\nvar cleanup = 0;\n```\n\
+         \n> quoted:\n> ```quoin\n> 1 + 2    \"* -> 3\n> ```\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_qn"))
+        .args(["doc", "--check", dir.join("edges.md").to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run qn doc --check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("2 examples, 2 annotations checked, 0 failed"),
+        "blank-line annotations and blockquoted fences must both check:\n{stdout}"
+    );
+
     // A block that doesn't parse fails with its location, not a panic.
     std::fs::write(dir.join("broken.md"), "```quoin\nx = 5\n```\n").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_qn"))

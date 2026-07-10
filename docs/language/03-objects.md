@@ -3,7 +3,7 @@
 Classes, instances, methods, extension, the meta-object, mixins, and how a message
 is dispatched to a method (including multimethods).
 
-Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · **Objects** · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
+Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · **Objects** · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Networking & the web](06-networking-and-web.md) · [Types](07-types.md) · [Tooling](08-tooling.md) · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
 
 ---
 
@@ -47,8 +47,10 @@ a.dist:b                                              "* -> 3
 
 Reopen a class with `<--` to add methods later; extend a single value with `<--`
 to give just that object new behavior (a singleton/eigenclass, named `$Type`
-internally). Note that a **sealed** class refuses both (§12) — and the unboxed
-built-ins (`Integer`, `Double`, `Boolean`, `List`) ship sealed; `String` is open:
+internally). Note that a **sealed** class refuses both (§12) — and the value
+built-ins (`Integer`, `Double`, `Boolean`, `Nil`, `List`, `Map`, `Set`,
+`NumberRange`) ship sealed (the full list, and why sealing matters to the
+optimizer: Part VII §34); `String` is open:
 
 ```quoin
 String <-- { shout -> { .upper + '!' } }      "* every String gains shout
