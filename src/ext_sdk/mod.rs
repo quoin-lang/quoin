@@ -119,6 +119,9 @@ pub trait Host<'gc> {
     fn active_native_args(&self) -> &[NativeCall<'gc>];
     fn options(&self) -> &VmOptions;
     fn write_std(&mut self, stream: StdStream, bytes: &[u8]) -> std::io::Result<()>;
+    /// `write_std` for guest program output: a broken pipe on stdout/stderr becomes a quiet
+    /// `ExitRequested(141)` unwind instead of a catchable error (see `VmState::write_std_guest`).
+    fn write_std_guest(&mut self, stream: StdStream, bytes: &[u8]) -> Result<(), QuoinError>;
     fn take_program_output(&mut self) -> Vec<OutputChunk>;
 
     // --- class registry / type queries -------------------------------------
@@ -279,6 +282,9 @@ impl<'gc> Host<'gc> for HostCtx<'_, 'gc> {
     }
     fn write_std(&mut self, stream: StdStream, bytes: &[u8]) -> std::io::Result<()> {
         self.vm.write_std(stream, bytes)
+    }
+    fn write_std_guest(&mut self, stream: StdStream, bytes: &[u8]) -> Result<(), QuoinError> {
+        self.vm.write_std_guest(stream, bytes)
     }
     fn take_program_output(&mut self) -> Vec<OutputChunk> {
         self.vm.take_program_output()
