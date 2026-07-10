@@ -15,9 +15,9 @@ Everything in this chapter rides Part V's concurrency system: all I/O is
 proceed **parks the current task**, and the cooperative scheduler runs other
 tasks meanwhile — one API, no blocking/non-blocking split, so thousands of idle
 connections multiplex over one program. Tasks and their handles, `Async.gather:`,
-`Async.timeout:do:`, and cancellation are Part V's subject (§18–19); so is the
-run-to-block caveat that a CPU-bound handler starves its siblings until it
-yields (§18) — multi-core parallelism is worker isolates (§21, or
+`Async.timeout:do:`, and cancellation are Part V's subject (§18–19); a CPU-bound
+handler round-robins with its siblings at scheduler boundaries rather than
+starving them (§18), but real multi-core parallelism is worker isolates (§21, or
 `serve:workers:` in §26). Sockets, listeners, and streams are **native
 built-ins** — always available, no `use`. The HTTP layers are **pure Quoin** in
 the stdlib: `use std:net/http` loads the `[HTTP]` client, `use std:net/http_server`

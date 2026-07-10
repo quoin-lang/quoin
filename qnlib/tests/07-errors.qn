@@ -125,10 +125,14 @@
         .is:{ var l = #(1 2 3); l.at:1 put:9; l.at:1 } equalTo:9;
         .is:{ 'abcd'.insert:'X' at:2 } equalTo:'abXcd';
 
-        .does:{ #(1 2).at:'x' } throw:MessageNotUnderstood;
-        .does:{ #(1 2).at:'x' put:9 } throw:MessageNotUnderstood;
-        .does:{ #(1 2).sliceFrom:'x' } throw:MessageNotUnderstood;
-        .does:{ 'abcd'.insert:'e' at:'z' } throw:MessageNotUnderstood;
+        "* The bad index is laundered through an untyped local: written literally, the
+        "* checker (correctly) flags these at check time, and this test is about the
+        "* RUNTIME dispatcher's answer.
+        var bad = 'x';
+        .does:{ #(1 2).at:bad } throw:MessageNotUnderstood;
+        .does:{ #(1 2).at:bad put:9 } throw:MessageNotUnderstood;
+        .does:{ #(1 2).sliceFrom:bad } throw:MessageNotUnderstood;
+        .does:{ 'abcd'.insert:'e' at:bad } throw:MessageNotUnderstood;
     };
 
     .test:

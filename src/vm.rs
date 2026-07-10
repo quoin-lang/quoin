@@ -768,6 +768,7 @@ impl<'gc> VmState<'gc> {
                 yielder: None,
                 tasks: Vec::new(),
                 ready: VecDeque::new(),
+                read_scratch: Vec::new(),
                 current_task: TaskId(0),
                 active_fiber: None,
                 current_fiber: None,
@@ -846,84 +847,85 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// `file:line:col: <level>: <message>` header, the level keyword colored (yellow warning,
+    /// red error, gray note) like uncaught errors. `indent` shifts a provenance note under its
+    /// parent. Shared by `report_type_warnings` and `report_compile_error`.
+    fn diag_header(
+        level: &str,
+        color: &str,
+        message: &str,
+        span: Option<&crate::value::SourceInfo>,
+        colorize: bool,
+        indent: bool,
+    ) -> String {
+        let pad = if indent { "  " } else { "" };
+        let label = if colorize {
+            ansi_colorizer::colorize(&format!("${color}[{level}$]"))
+        } else {
+            level.to_string()
+        };
+        match span {
+            Some(s) => {
+                // The `file:line:col` form colored exactly like a stack
+                // trace's location (gray separators, cyan numbers).
+                let loc = if colorize {
+                    ansi_colorizer::colorize(&format!(
+                        "{}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
+                        s.filename,
+                        s.line,
+                        s.column + 1
+                    ))
+                } else {
+                    format!("{}:{}:{}", s.filename, s.line, s.column + 1)
+                };
+                format!("{pad}{loc}: {label}: {message}\n")
+            }
+            None => format!("{pad}{label}: {message}\n"),
+        }
+    }
+
+    /// The offending line under a gray `|` gutter with a caret beneath the span — the same
+    /// visual language as an uncaught error's source block. `None` if the file can't be read.
+    fn diag_source_block(span: &crate::value::SourceInfo, colorize: bool) -> Option<String> {
+        let content = fs::read_to_string(&span.filename).ok()?;
+        let line_text = content.lines().nth(span.line.saturating_sub(1))?;
+        let width = content
+            .get(span.start..span.end)
+            .map(|s| s.chars().count())
+            .unwrap_or(1)
+            .max(1);
+        let gutter = span.line.to_string();
+        let pad = " ".repeat(gutter.len());
+        let pipe = if colorize {
+            ansi_colorizer::colorize("$#808080[|$]")
+        } else {
+            "|".to_string()
+        };
+        let line_hl = if colorize {
+            highlight_to_ansi(line_text)
+        } else {
+            line_text.to_string()
+        };
+        let carets = format!("{}{}", " ".repeat(span.column), "^".repeat(width));
+        let carets = if colorize {
+            ansi_colorizer::colorize(&format!("$#ffcc00[{carets}$]"))
+        } else {
+            carets
+        };
+        Some(format!(
+            "  {pad} {pipe}\n  {gutter} {pipe} {line_hl}\n  {pad} {pipe} {carets}\n"
+        ))
+    }
+
     /// Emit collected compile-time type diagnostics through the stderr sink (so under the DAP
     /// adapter, with `capture` on, they become `output` events rather than leaking to raw stderr).
     /// Each is rendered `file:line:col: warning: message` (the standard, editor-jumpable form) when
     /// a span is known, else bare `warning: message`. Best-effort; never fatal. (Phase 4.)
     pub fn report_type_warnings(&mut self, diagnostics: &[crate::compiler::Diagnostic]) {
-        // `file:line:col: <level>: <message>` header, the level keyword colored (yellow warning,
-        // gray note) like uncaught errors. `indent` shifts a provenance note under its warning.
-        fn header(
-            level: &str,
-            color: &str,
-            message: &str,
-            span: Option<&crate::value::SourceInfo>,
-            colorize: bool,
-            indent: bool,
-        ) -> String {
-            let pad = if indent { "  " } else { "" };
-            let label = if colorize {
-                ansi_colorizer::colorize(&format!("${color}[{level}$]"))
-            } else {
-                level.to_string()
-            };
-            match span {
-                Some(s) => {
-                    // The `file:line:col` form colored exactly like a stack
-                    // trace's location (gray separators, cyan numbers).
-                    let loc = if colorize {
-                        ansi_colorizer::colorize(&format!(
-                            "{}$#808080[:$]$#00bfff[{}$]$#808080[:$]$#00bfff[{}$]",
-                            s.filename,
-                            s.line,
-                            s.column + 1
-                        ))
-                    } else {
-                        format!("{}:{}:{}", s.filename, s.line, s.column + 1)
-                    };
-                    format!("{pad}{loc}: {label}: {message}\n")
-                }
-                None => format!("{pad}{label}: {message}\n"),
-            }
-        }
-
-        // The offending line under a gray `|` gutter with a caret beneath the span — the same
-        // visual language as an uncaught error's source block. `None` if the file can't be read.
-        fn source_block(span: &crate::value::SourceInfo, colorize: bool) -> Option<String> {
-            let content = fs::read_to_string(&span.filename).ok()?;
-            let line_text = content.lines().nth(span.line.saturating_sub(1))?;
-            let width = content
-                .get(span.start..span.end)
-                .map(|s| s.chars().count())
-                .unwrap_or(1)
-                .max(1);
-            let gutter = span.line.to_string();
-            let pad = " ".repeat(gutter.len());
-            let pipe = if colorize {
-                ansi_colorizer::colorize("$#808080[|$]")
-            } else {
-                "|".to_string()
-            };
-            let line_hl = if colorize {
-                highlight_to_ansi(line_text)
-            } else {
-                line_text.to_string()
-            };
-            let carets = format!("{}{}", " ".repeat(span.column), "^".repeat(width));
-            let carets = if colorize {
-                ansi_colorizer::colorize(&format!("$#ffcc00[{carets}$]"))
-            } else {
-                carets
-            };
-            Some(format!(
-                "  {pad} {pipe}\n  {gutter} {pipe} {line_hl}\n  {pad} {pipe} {carets}\n"
-            ))
-        }
-
         let colorize = self.options.supports_color;
         let mut out = String::new();
         for d in diagnostics {
-            out.push_str(&header(
+            out.push_str(&Self::diag_header(
                 "warning",
                 "#ffcc00",
                 &d.message,
@@ -932,13 +934,13 @@ impl<'gc> VmState<'gc> {
                 false,
             ));
             if let Some(s) = &d.span
-                && let Some(block) = source_block(s, colorize)
+                && let Some(block) = Self::diag_source_block(s, colorize)
             {
                 out.push_str(&block);
             }
             // Why-chain notes (Phase 4 provenance): each under its own span, indented.
             for note in &d.notes {
-                out.push_str(&header(
+                out.push_str(&Self::diag_header(
                     "note",
                     "#808080",
                     &note.message,
@@ -947,11 +949,34 @@ impl<'gc> VmState<'gc> {
                     true,
                 ));
                 if let Some(s) = &note.span
-                    && let Some(block) = source_block(s, colorize)
+                    && let Some(block) = Self::diag_source_block(s, colorize)
                 {
                     out.push_str(&block);
                 }
             }
+        }
+        let _ = self.write_std(StdStream::Err, out.as_bytes());
+    }
+
+    /// Report a fatal compile error through the stderr sink, `file:line:col: error: message`
+    /// with the offending line and caret — the same visual language as `report_type_warnings`,
+    /// at `error` level. Used by the file-based entry points (run, check, debug, benchmark);
+    /// string-based modes (`-e`, REPL, `Runtime.eval:`, workers) use the error's `Display`,
+    /// which embeds `(line …, column …)` the way those modes render parse errors.
+    pub fn report_compile_error(&mut self, err: &crate::compiler::CompileError) {
+        let colorize = self.options.supports_color;
+        let mut out = Self::diag_header(
+            "error",
+            "#ff6961",
+            &err.message,
+            err.span.as_ref(),
+            colorize,
+            false,
+        );
+        if let Some(s) = &err.span
+            && let Some(block) = Self::diag_source_block(s, colorize)
+        {
+            out.push_str(&block);
         }
         let _ = self.write_std(StdStream::Err, out.as_bytes());
     }
@@ -6133,11 +6158,13 @@ impl<'gc> VmState<'gc> {
                         .ok_or_else(|| format!("Parent class {} not found", p_name))?;
                     if let Value::Class(parent_class) = val {
                         if parent_class.borrow().is_sealed {
-                            return Err(format!(
+                            // A typed ClassError, matching the sealed-EXTENSION error above
+                            // (ensure_extensible): `catch:{|e:Error|}` must see both. It was
+                            // a bare String throw — the F12 family (RELEASE_PREP Tier 4b).
+                            return Err(QuoinError::ClassError(format!(
                                 "Cannot subclass sealed class {}",
                                 parent_class.borrow().name.to_explicit_string()
-                            )
-                            .into());
+                            )));
                         }
                         Some(parent_class)
                     } else {

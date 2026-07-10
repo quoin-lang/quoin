@@ -95,6 +95,50 @@
         .is:{ trace } equalTo:#('finally');
     };
 
+    "* Scheduler fairness (RELEASE_PREP Tier 4b): a CPU-bound task that never parks used
+    "* to starve the whole VM — the driver re-resumed it at every batch boundary, so
+    "* expired timers were never serviced and a cancel never landed (the process had to
+    "* be SIGKILLed). The driver now drains completed I/O and rotates to ready tasks at
+    "* cooperative-yield boundaries. The spin is BOUNDED so a scheduler regression fails
+    "* these assertions after a few seconds instead of hanging the suite forever.
+    .test:
+    spinnerDoesNotStarveTimersOrCancel -> {
+        var spun = #();
+        var t = Task.spawn:{
+            var i = 0;
+            { i < 1000000000 }.whileDo:{ i = i + 1 };
+            spun.add:i
+        };
+        "* The spinner is running; this sleep must still resume (timers land at the
+        "* spinner's yield boundaries), long before the bounded spin completes.
+        Async.sleep:5;
+        t.cancel;
+        .is:{ { t.join }.catch:{ |e| 'observed' } } equalTo:'observed';
+        .is:{ t.status } equalTo:'cancelled';
+        "* Cancelled mid-spin: the body never reached its post-loop statement.
+        .is:{ spun.count } equalTo:0;
+    };
+
+    "* Rotation is FIFO and lets compute-bound siblings interleave: two counters that
+    "* only ever spin still both make progress before either finishes.
+    .test:
+    computeBoundTasksInterleave -> {
+        var progress = #();
+        var a = Task.spawn:{
+            var i = 0;
+            { i < 3000 }.whileDo:{ i = i + 1 };
+            progress.add:'a'
+        };
+        var b = Task.spawn:{
+            var i = 0;
+            { i < 3000 }.whileDo:{ i = i + 1 };
+            progress.add:'b'
+        };
+        a.join;
+        b.join;
+        .is:{ progress.sort } equalTo:#('a' 'b');
+    };
+
     "* Stage 5a: `Async.timeout:ms do:{…}` runs the block raced against a deadline.
     "* A block that finishes in time returns its value.
     .test:

@@ -893,6 +893,35 @@ impl Compiler {
         let i_t = temp(self);
         let x_t = blk.arguments.first().map(|_| temp(self));
 
+        // G4b parity for the FUSED path (a checker drift, RELEASE_PREP Tier 4b): the normal
+        // send seeds an unannotated block param from the receiver's element type via
+        // `next_block_expected` → `compile_block`, but the splice bypasses both — which
+        // silently dropped e.g. the `badEachParam` gallery warning when B1 fusion landed.
+        // Install the same narrowing-grade belief (annotation first, else the receiver's
+        // element type) under the param's SOURCE name — the checker reads source names,
+        // `param_override` only renames the emitted loads/stores — shadow-saving any outer
+        // claim on that name, since the splice shares the enclosing scope.
+        let seeded = blk.arguments.first().and_then(|arg| {
+            let ty = match &arg.type_hint {
+                Some(hint) => self.resolve_annotation(hint),
+                None => match call.subject.as_ref().map(|s| self.static_type(s)) {
+                    Some(Type::ListOf(e)) => (*e).clone(),
+                    _ => Type::Any,
+                },
+            };
+            if matches!(ty, Type::Any) || ty.contains_var() {
+                return None;
+            }
+            let key = NarrowKey::Local(arg.identifier.name.clone());
+            let prev = self
+                .scopes
+                .last_mut()
+                .unwrap()
+                .narrowed
+                .insert(key.clone(), ty);
+            Some((key, prev))
+        });
+
         // The body, spliced with the param rebound to its temp. `param_override` is
         // EXTENDED, not replaced: an `each:` block's free names belong to the same
         // scope as the call site (unlike a spliced method body's, whose free names
@@ -911,6 +940,17 @@ impl Compiler {
         self.fused_loop_depth -= 1;
         self.inline_depth -= 1;
         self.param_override = saved_params;
+        if let Some((key, prev)) = seeded {
+            let narrowed = &mut self.scopes.last_mut().unwrap().narrowed;
+            match prev {
+                Some(p) => {
+                    narrowed.insert(key, p);
+                }
+                None => {
+                    narrowed.remove(&key);
+                }
+            }
+        }
         body_res?;
 
         // BUGS.md Finding 10: the fused loop shares ONE param cell across

@@ -175,6 +175,24 @@
 
     "* A definition may not repeat a keyword literally — `+` is the only way to declare a
     "* variadic component, so `dup:dup:` is a compile error (surfaced as a ParseError by eval).
+    "* A `T?` parameter dispatches as base-type-or-nil (it used to match NOTHING —
+    "* the variant was unreachable; RELEASE_PREP Tier 4b). nil matches exactly, a
+    "* base-type argument matches at the base's specificity, and typed siblings
+    "* still win their own types.
+    .test:
+    nullableParamsDispatch -> {
+        TMNullW <- {
+            width: -> { |name: String?| name.defined?.if:{ 'str' } else:{ 'none' } };
+            width: --> { |n: Integer| 'int' }
+        };
+        var w = TMNullW.new;
+        .is:{ w.width:'x' } equalTo:'str';
+        .is:{ w.width:nil } equalTo:'none';
+        .is:{ w.width:7 } equalTo:'int';
+        "* A wrong type still refuses (Double matches neither String? nor Integer).
+        .does:{ w.width:1.5 } throw:MessageNotUnderstood;
+    };
+
     .test:
     repeatedKeywordSelectorIsACompileError -> {
         .does:{ Runtime.eval:'Bad <- { dup:dup: -> { |a b| a } }' } throw:ParseError;

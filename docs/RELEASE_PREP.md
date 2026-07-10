@@ -281,18 +281,29 @@ it. None is fixed.
 
 ## Tier 4b — found while building the file-write path
 
-- [ ] **The backend allocates and zeroes a fresh buffer on every `Read`.**
-  `io_backend.rs`: `let mut buf = vec![0u8; max];` per fill, then truncate, copy
-  into the stream's `rbuf`, and free. Measured cost: reading a 64 MiB file, the
-  overhead above the 4.5 GB/s floor is +9% at a 16 KiB fill and +4% at 32 KiB, but
-  it *rises again* to +26% at 64 KiB, where the per-read allocation crosses the
-  allocator's large-object threshold. Reuse one scratch buffer per stream and the
-  curve should keep improving; then revisit `IO_BUFFER_BYTES` (32-64 KiB) for file
-  streams specifically. The measurement and the reasoning are recorded on
-  `IO_BUFFER_BYTES` in `src/runtime/streams.rs`.
+- [x] **The backend allocates and zeroes a fresh buffer on every `Read`.** FIXED:
+  the fill buffer recycles — `IoRequest::Read`/`ReadTimed` carry `buf: Vec<u8>`
+  (the backend `resize(max, 0)`s it, a no-op on a recycled full-fill buffer) and
+  `fill_once` round-trips it through a small capped pool
+  (`Scheduler::read_scratch` — a pool, not per-stream, so 10k idle sockets hold
+  no scratch). Steady state: zero allocations/zeroing per read. Measured −12%
+  whole-process reading a 64 MiB file (interleaved A/B, release, 12 pairs;
+  profiling/read-buffer-recycle/notes.md). The "revisit IO_BUFFER_BYTES 32–64 KiB
+  for files" follow-up DISSOLVES: re-measured post-fix, bigger fills lose
+  outright (+13% at 32 KiB, +19% at 64 KiB) — the copy chain is cache-resident
+  at 16 KiB and not above, so the old 64 KiB cliff wasn't (only) the allocator.
+  16 KiB stays, files and sockets alike; doc on `IO_BUFFER_BYTES` updated.
 
-- [ ] **Compile errors carry no line/column.** `compile_program` returns a bare
-  `String`, unlike parse errors and checker diagnostics, which have spans.
+- [x] **Compile errors carry no line/column.** FIXED: `compile_program` returns
+  `CompileError { message, span }`; the innermost `compile_node` frame claims a
+  statement-level span at the existing `current_source` choke point, and the
+  marquee sites (undeclared local, `let` reassign, decl-target validation) carry
+  the offending identifier's exact span. File modes render
+  `file:line:col: error: …` + caret through the checker's renderer
+  (`report_compile_error`, same stderr sink → DAP capture intact); string modes
+  (`-e`, REPL, `Runtime.eval:`, workers) embed `(line L, column C)` via
+  `Display`, matching their parse errors. tests/exit_code.rs asserts the exact
+  location per case per entry point.
 
 - [x] **Integer overflow panics the VM (debug) / wraps (release).** FIXED:
   overflow now raises a catchable `ArithmeticError("Integer overflow")` in every
@@ -316,87 +327,105 @@ it. None is fixed.
   That is a language-semantics decision with a value-representation cost on the
   hottest paths; raising keeps v0.1 honest and leaves promotion open.
 
-- [ ] **Non-trailing splat destructuring binds wrong.** Found making the book's
-  §4 example runnable (2026-07-10), confirmed by hand: `var a *_ z = #(1 2 3 4 5)`
-  binds `z = 3` (should be 5), and `var *init last = #(1 2)` binds `init` to the
-  WHOLE list while `last = 2` — the splat greedily takes everything to the end and
-  post-splat targets still bind positionally from the start. Trailing splats
-  (`var p q *rest = …`) are correct. No test coverage exists for non-trailing
-  splats. Either fix the compiler's binding plan or restrict the grammar to
-  trailing splats; the book's §4 prose currently soft-claims "any position" and
-  shows only verified trailing forms — align it with whichever way this goes.
+- [x] **Non-trailing splat destructuring binds wrong.** FIXED by repairing the
+  binding plan (the book's "any position" claim stands): patterns with a
+  non-trailing splat compute `count` once, post-splat targets bind end-relative
+  (`at:(count-(n-i))`), and the splat takes the bounded middle via the new
+  `List#sliceFrom:to:` (end-exclusive, clamped, tag-carrying). Trailing/splat-less
+  patterns compile exactly as before (golden tests unchanged). Length semantics
+  stay silent-nil (missing → nil, splat → `#()`, too-short overlaps documented).
+  Also now enforced: ONE splat per pattern level (compile error with span; nested
+  `( … )` patterns each get their own), and a lone `var *a = …` gets a real
+  message instead of "Unsupported store target". Tests:
+  qnlib/tests/64-destructuring.qn + a golden-bytecode case; book §4 gained
+  verified non-trailing examples; the presentation file's nested comment was
+  wrong even for the intended semantics and is fixed.
 
-- [ ] **Top-level method definitions die with "Cannot extend sealed class
-  [/]Nil" — make the semantics explicit.** Found repairing the book (2026-07-10):
-  `greet -> { 42 }` at the top of a file compiles fine, then fails at runtime
-  with an error about a class the user never mentioned. The mechanism: a method
-  definition attaches to the current `self`'s class; top-level `self` is `nil`;
-  `Nil` is sealed (PR #31). Every newcomer who writes a "function" will hit this,
-  and the message explains the implementation, not the mistake.
+- [x] **Top-level method definitions die with "Cannot extend sealed class
+  [/]Nil".** FIXED with option 1, the targeted compile-time diagnostic:
+  `greet -> { 42 }` at unit top level (outside any class body, outside any
+  block, when top-level `self` is the nil default) is rejected at compile time
+  with the actual fix in the message ("methods live in classes… or bind a
+  block: `var greet = { … }`"). The two legitimate shapes are preserved and
+  tested: method definitions in BLOCK position (`.test:name -> { … }` — the
+  test DSL itself) still create Method values against the runtime `self`, and
+  `Runtime.eval:'…' self:obj` still defines on the receiver's eigenclass
+  (`compile_program_with`'s `define_self` flag distinguishes the cases).
+  Tests: tests/exit_code.rs (all three entry points), 05-classes.qn.
 
-  Decide one of:
-  1. **A targeted compile-time diagnostic** (recommended): a method definition
-     at unit top level, outside any class body, is statically detectable — reject
-     it at compile time with the actual fix: "methods live in classes; for a
-     standalone callable, bind a block: `var greet = { 42 }` (call it with
-     `greet.value`)". Cheap, no semantics change.
-  2. **Give top-level `sel -> {…}` a real meaning** (a global function/binding)
-     — a language-design decision with dispatch implications; not for v0.1.
-  3. Keep the runtime error but rewrite it to name the situation ("a top-level
-     method definition — `self` is nil here") — weakest, since the failure stays
-     at runtime.
+- [x] **`T?` on a method parameter makes the variant unreachable.** FIXED in
+  the dispatch scorer: a nullable hint is base-type-or-nil — nil scores an
+  exact match (the annotation says nil is expected), a non-nil argument scores
+  as the base type, and typed siblings still win their own types. The book's
+  Part VII gotcha that taught the workaround is now a worked example of the
+  correct behavior — the doc harness flagged it the moment dispatch changed.
+  Test: 06-methods.qn nullableParamsDispatch.
 
-  Whichever way: the book (02-blocks-and-control §9, 03-objects) currently works
-  around it by wrapping examples in classes with a one-line note; once the
-  semantics are explicit, say it in §Rules there too.
+- [x] **Sealed-subclass error is a bare String throw.** FIXED: typed
+  `ClassError`, symmetric with sealed-extension; the book's note about the
+  asymmetry updated (the harness caught the stale doc — behavior improvements
+  now break doc checks, exactly as designed). Test in 05-classes.qn.
 
-- [ ] **`T?` on a method parameter makes the variant unreachable.** Verified
-  2026-07-10: `width: -> { |name: String?| … }` answers MessageNotUnderstood for
-  a String argument AND for nil — the nullable param type matches nothing at
-  dispatch. Found writing the types chapter; no coverage existed. The book
-  documents the workaround (nullable belongs on locals/returns) in Part VII;
-  fix dispatch scoring for `T?` params, then simplify that gotcha.
+- [x] **A spinning task starves the whole VM — cancellation and timers never
+  land.** FIXED — the policy decision went to fairness: at a cooperative-yield
+  boundary (every QN_BATCH instructions, all tiers emit the same
+  `CooperativeYield`) the driver now (1) drains completed background futures
+  WITHOUT blocking — rotation alone wouldn't fix timers, since the blocking
+  reactor wait only runs when `ready` is empty and a spinner is always ready —
+  and (2) rotates FIFO when anything is runnable. A task running alone pays two
+  emptiness checks: measured free (release, interleaved A/B, 7 pairs/program —
+  all eight benchmarks within ±0.35%, noise). Rotation correctness was already
+  proven by QN_SCHED_STRESS (which stash-requeues at every yield); two stress
+  seeds green. The exact repro now completes: sleep resumes beside the spinner,
+  cancel lands at the next checkpoint, join observes it. Remaining (documented):
+  a single long-running NATIVE call is still not preempted mid-call. Tests:
+  21-async.qn (bounded spins, so a regression fails instead of hanging CI);
+  docs updated: ASYNC_ARCH policy §, book Part V rules + gotcha (spawning
+  queues; only joining guarantees), Part VI caveat, nav line.
 
-- [ ] **Sealed-subclass error is a bare String throw.** `Integer <- Sub <- {}`
-  raises a plain String ("Cannot subclass sealed class …") that
-  `catch:{|e:Error|}` cannot see, while sealed-*extension* raises a typed
-  ClassError. Same F12 family as the batch fixed in PR #79; one-line retype.
+- [x] **Checker reality vs. claims — two drifts found writing Part VII.** FIXED,
+  all four faces:
+  (a) `badEachParam` regression root-caused: B1 `each:` fusion (landed 2h after
+  G4b seeding) splices the block body without seeding the param's element-type
+  belief — the fused path now installs the same narrowing-grade belief
+  (annotation first, else the receiver's element type) under the param's source
+  name, shadow-saved around the splice. Unit test pins the FUSED shape (the
+  existing seeding test used a non-fused method, which is exactly how it
+  slipped).
+  (b) `wellFormed:` false positive + silent `#(1 'two')`: one shared fix —
+  a collection literal in a checked position now has its statically-visible
+  ELEMENTS checked (`check_literal_elements`, same message as the insert check)
+  instead of its bare `List` static type tripping the width rule; the decl path
+  keeps the runtime tag as backstop.
+  (c) `5.pow:'x'` now warns: `method_param_variants` on ClassSig records every
+  fully-typed variant set (2+, ALL typed — one untyped variant would accept
+  anything), and `check_variant_mismatch` warns when confident args match no
+  variant. Root cause of "never fires for builtins" found deeper: builtins are
+  sealed by `prelude.qn` at RUNTIME, after the table's first authoritative
+  snapshot — `populate_from_vm` now re-snapshots a class once, on the
+  monotone unsealed→sealed transition (which also picks up the complete
+  post-extension method set). Single-variant builtin args check too
+  (`#(1 2).at:'x'`).
+  Receiver trust is explicit (`arg_check_receiver_class`): flow narrowing +
+  declared annotations only for locals — never the stale-able inferred devirt
+  hint; `Bool`/`nil` excluded (eigenclass dispatch); MNU keeps its
+  user-`Instance`-only gate (absence isn't provable through the open, stale
+  `Object` root — `case:`, `if:` false positives found and avoided).
+  (d) The gallery is now a CI canary: `tests/check_warnings.rs` pins the exact
+  warning count (25), the drift-prone messages, and `wellFormed:`'s silence;
+  new `ArgGallery` section documents the builtin arg checks.
 
-- [ ] **A spinning task starves the whole VM — cancellation and timers never
-  land.** Verified 2026-07-10: `Task.spawn:{ {true}.whileDo:{…} }` then
-  `t.cancel` from main — the cancel never takes effect, and main's own expired
-  `Async.sleep:` never resumes; the process had to be SIGKILLed. Batch-yield
-  boundaries exist (QN_BATCH), but the driver resumes the same task at a
-  cooperative yield instead of rotating to ready tasks/expired timers
-  (run-to-block by design; zero fairness at yield points is the bug-or-decision
-  to make explicit). The book's Part V documents the behavior as a gotcha.
-
-- [ ] **Checker reality vs. claims — two drifts found writing Part VII.**
-  (a) `qnlib/warnings.qn` gallery drift: `badEachParam` no longer warns, while
-  `wellFormed:` (in the "must emit NO warning" section) now warns
-  `expected List(Integer), found List`. (b) Compile-time argument-type MNU
-  effectively never fires for builtins (gated to from_vm+sealed `Instance`
-  receivers with one fully-typed variant): `5.pow:'x'` is silent at check time.
-  Also statically-visible bad literal elements (`var x: List(Integer) =
-  #(1 'two')`) don't warn — insertions do. Align the gallery + decide whether
-  the arg-check gate should widen.
-
-- [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
-  and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so
-  cleanup-on-every-path with no interest in the error must name a handler that
-  only rethrows:
-
-  ```
-  { s.write:text }.catch:{ |e: Error| e.throw } finally:{ s.close }
-  ```
-
-  That is the idiom `[IO]File.write:to:` / `append:to:` / `read:` use in
-  `qnlib/core/06-io.qn`, and it reads as though it were swallowing the error when
-  it is doing the opposite. `{ … }.finally:{ … }` should run the cleanup on the
-  normal, throwing, and non-local-return paths and propagate whatever happened —
-  i.e. `catch:finally:` with an implicit rethrowing handler. Check it against `^`
-  / `^^` leaving the protected block, and against `cancel` (`QuoinError::Cancelled`),
-  which `catch:` deliberately cannot swallow.
+- [x] **Add `Block#finally:`.** DONE: `{ … }.finally:{ cleanup }` =
+  `catch:finally:` with an empty handler list — the cleanup runs and whatever
+  unwound (value, throw, cancellation, exit, `^^`) propagates unchanged; an
+  error from the cleanup overrides a normal result but never masks a
+  cancellation. Registered in `is_catch_family` (the AOT `^^`-parity gate
+  requires listing any new absorber). The three `catch:{|e| e.throw} finally:`
+  call sites in `qnlib/core/06-io.qn` — the idiom that motivated this — are now
+  bare `.finally:`. Grammar note: dot form only (`{…}.finally:{…}`); a
+  space-form keyword send does not chain off a bare block literal. Tests in
+  02-blocks.qn: success / throw-reraise-order / typed rethrow visibility /
+  cleanup-error override / `^^`.
 
 ---
 

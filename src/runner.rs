@@ -1117,7 +1117,7 @@ impl VmRunner {
             let sb = match compiler.compile_program(p) {
                 Ok(sb) => sb,
                 Err(e) => {
-                    eprintln!("Compile error: {e}");
+                    vm.report_compile_error(&e);
                     return false;
                 }
             };
@@ -1342,7 +1342,15 @@ impl VmRunner {
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
-                let program = compiler.compile_program(program_node)?;
+                let program = match compiler.compile_program(program_node) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // Rendered through the VM's stderr sink: `file:line:col: error: …`
+                        // plus the offending line and caret, like a type warning.
+                        vm.report_compile_error(&e);
+                        return Err(());
+                    }
+                };
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
 
@@ -1350,10 +1358,9 @@ impl VmRunner {
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 // Run this program unit as scheduler task #0; driven to completion below.
                 install_main_task(mc, vm);
-                Ok::<(), String>(())
+                Ok::<(), ()>(())
             });
-            if let Err(e) = compiled {
-                eprintln!("Compile error: {e}");
+            if compiled.is_err() {
                 ended = Some(UnitOutcome::Aborted);
                 break;
             }
@@ -1449,7 +1456,7 @@ impl VmRunner {
                 let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
                 install_main_task(mc, vm);
-                Ok::<(), String>(())
+                Ok::<(), crate::compiler::CompileError>(())
             });
             if let Err(e) = compiled {
                 eprintln!("qn check: the prelude failed to compile: {e}");
@@ -1481,7 +1488,7 @@ impl VmRunner {
                         had
                     }
                     Err(e) => {
-                        eprintln!("Compile error: {e}");
+                        vm.report_compile_error(&e);
                         true
                     }
                 }
@@ -1653,16 +1660,21 @@ impl VmRunner {
                 compiler.set_seen_types(vm.options.seen_types.clone());
                 compiler.set_class_table(vm.options.class_table.clone());
                 crate::class_table::populate_from_vm(vm, &vm.options.class_table);
-                let program = compiler.compile_program(program_node)?;
+                let program = match compiler.compile_program(program_node) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        vm.report_compile_error(&e);
+                        return Err(());
+                    }
+                };
                 vm.report_type_warnings(compiler.diagnostics());
                 compile_unit_aot(vm, &mut compiler);
 
                 let main_block = vm.block_from_template(mc, Arc::new(program), None, None);
                 vm.start_block(mc, main_block, Vec::new(), None, None);
-                Ok::<(), String>(())
+                Ok::<(), ()>(())
             });
-            if let Err(e) = compiled {
-                eprintln!("Compile error: {e}");
+            if compiled.is_err() {
                 aborted = true;
                 break;
             }

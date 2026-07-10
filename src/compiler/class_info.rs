@@ -144,6 +144,9 @@ impl Compiler {
             sealed,
             has_catch_all: false,
             from_vm: false,
+            // AST sigs never see the runtime variant set; `insert` carries VM-recorded
+            // variants across an AST re-insert the same way it carries returns.
+            method_param_variants: HashMap::new(),
             method_params: self.declared_method_params(&class_def.block, &class_def.type_params),
             method_returns: self
                 .declared_method_returns_with_vars(&class_def.block, &class_def.type_params),

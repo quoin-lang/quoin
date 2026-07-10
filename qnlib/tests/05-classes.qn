@@ -24,6 +24,24 @@
         .does:{ 42.class <-- { abc -> { 'Hi' } } } throw:ClassError;
     };
 
+    "* A method definition in BLOCK position stays legal — `self` is bound at run
+    "* time (the test DSL itself is `.test:name -> { … }`); only a bare top-level
+    "* statement is rejected, at compile time (tests/exit_code.rs).
+    .test:
+    blockPositionMethodDefsStillWork -> {
+        var m = nil;
+        { m = probe -> { 7 } }.value;
+        .is:{ m.selector } equalTo:#probe;
+    };
+
+    .test:
+    subclassingSealedThrowsTyped -> {
+        "* Subclassing a sealed class raises the same typed ClassError extension does
+        "* (it was a bare String throw, invisible to catch:{|e:Error|}).
+        .does:{ Integer <- TSCNCSub <- {} } throw:ClassError;
+        .does:{ Integer <- TSCNCSub <- {} } throw:#/Cannot subclass sealed/;
+    };
+
     .test:
     operatorExtendReturnsLHS -> {
         .is:{ TSCNC1 <-- {} } equalTo:TSCNC1;

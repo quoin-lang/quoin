@@ -443,6 +443,33 @@ pub struct Note {
     pub span: Option<SourceInfo>,
 }
 
+/// A fatal compile error: the message plus the source span it points at, so every entry point
+/// can render `file:line:col` like a [`Diagnostic`] (at `error` level) instead of a bare string.
+/// `span` is `None` only when the failing site has no attributable location. `Display` embeds
+/// the location in parentheses — the form for plain-string contexts (`Runtime.eval:`, worker
+/// failures, the REPL), matching how those modes already render parse errors; file-based modes
+/// render richly via `VmState::report_compile_error`.
+#[derive(Clone, Debug)]
+pub struct CompileError {
+    pub message: String,
+    pub span: Option<SourceInfo>,
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.span {
+            Some(s) => write!(
+                f,
+                "{} (line {}, column {})",
+                self.message,
+                s.line,
+                s.column + 1
+            ),
+            None => write!(f, "{}", self.message),
+        }
+    }
+}
+
 /// Where a local's type came from (Phase 4 provenance), for the why-chain note: the declaration
 /// span plus a short origin phrase (`declared`, `` inferred from `name` ``, `parameter`).
 #[derive(Clone, Debug)]
@@ -624,6 +651,8 @@ pub struct Compiler {
     /// Stack of per-class compile context, pushed while compiling a class body: method
     /// return types (Slice 2b-A) + the method set + whether the class is sealed (2b-B).
     class_ctx: Vec<ClassCtx>,
+    /// Whether this unit's top-level `self` is the nil default (see `compile_program_with`).
+    top_level_self_is_nil: bool,
     /// While compiling an *inlined* control-flow block body (Slice 2d), collects the
     /// bytecode positions of top-level `^` (BlockReturn) placeholder jumps so
     /// `inline_block_body` can patch them to land just past the inlined region. `None`
@@ -640,6 +669,11 @@ pub struct Compiler {
     /// Non-fatal type diagnostics (e.g. `unknown type Foo`) collected during compilation.
     /// Surfaced by the caller; never blocks lowering (gradual best-effort).
     diagnostics: Vec<Diagnostic>,
+    /// The span of a fatal compile error, claimed innermost-first: an error site that knows a
+    /// precise span records it via `err_at`; otherwise the innermost `compile_node` frame to see
+    /// the error fills in its statement-level span. Taken by `compile_program_with` to build the
+    /// returned [`CompileError`].
+    error_span: Option<SourceInfo>,
     /// Declared return types of the block(s) currently being compiled (`|args ^T|`), innermost
     /// last. A `^`/`^^` return or a block's tail expression is checked (and numeric literals
     /// promoted) against the top entry; `None` = no declared return → not checked. Phase 3a.
@@ -689,10 +723,12 @@ impl Compiler {
             splice_rename_counter: 0,
             fused_loop_depth: 0,
             class_ctx: Vec::new(),
+            top_level_self_is_nil: false,
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
             class_table: ClassTable::new(),
             diagnostics: Vec::new(),
+            error_span: None,
             return_type_stack: Vec::new(),
             mint_template_ids: false,
             collect_aot: false,
@@ -952,16 +988,39 @@ impl Compiler {
             splice_rename_counter: 0,
             fused_loop_depth: 0,
             class_ctx: Vec::new(),
+            top_level_self_is_nil: false,
             inline_carets: None,
             seen_types: SeenTypes::with_builtins(),
             class_table: ClassTable::new(),
             diagnostics: Vec::new(),
+            error_span: None,
             return_type_stack: Vec::new(),
             mint_template_ids: false,
             collect_aot: false,
             aot_candidates: Vec::new(),
             class_ctx_counter: 0,
         }
+    }
+
+    /// A method definition at unit top level, outside any class body, when top-level `self`
+    /// is the nil default: reject at COMPILE time with the actual fix. At runtime it would
+    /// die extending sealed Nil — an error naming a class the user never wrote. Inside a
+    /// class body (`class_ctx` non-empty) or under `eval:self:` it is legitimate.
+    fn reject_top_level_method(&self, selector: &str) -> Result<(), String> {
+        // `scopes.len() == 1` = a true top-level STATEMENT. Inside any block literal
+        // (`scopes` grows per block) a method definition is expression material — the
+        // test DSL's `.test:name -> { … }` defines on whatever `self` the block gets at
+        // runtime, which is exactly the eigenclass mechanism working as intended.
+        if self.scopes.len() == 1 && self.class_ctx.is_empty() && self.top_level_self_is_nil {
+            return Err(format!(
+                "`{selector}` is a method definition, and methods live in classes — at the \
+                 top level there is no class to define it on. Put it in a class body \
+                 (`Name <- {{ {selector} -> {{ … }} }}`), or bind a block instead: \
+                 `var {} = {{ … }}` (call it with `.value`)",
+                selector.trim_end_matches(':')
+            ));
+        }
+        Ok(())
     }
 
     /// Is this `<-`/`<--` target an immediate value type? `true`/`false`/`nil` are
@@ -1487,6 +1546,13 @@ impl Compiler {
             Type::Instance(n) if !self.seen_types.contains(n) => return,
             _ => {}
         }
+        // A matching collection LITERAL in a checked position: check its (statically visible)
+        // elements instead — its bare `List` static type would trip the width rule below, a
+        // false positive since the literal is constructed into the checked position.
+        if Self::generic_literal_decl(expected, node) {
+            self.check_literal_elements(node, expected);
+            return;
+        }
         let actual = self.static_type(node);
         if actual.compatible_with(expected) {
             return;
@@ -1566,12 +1632,153 @@ impl Compiler {
         }
     }
 
-    /// The receiver's concrete class name, if statically known. Only a user-class `Instance` —
-    /// builtins aren't `sealed` (so MNU never fires on them), and `Any`/nullable receivers skip.
+    /// The receiver's concrete class name, if statically known. Only a user-class `Instance`:
+    /// MNU claims ABSENCE, which the table can only prove inside a user-class hierarchy —
+    /// builtins inherit from the open (hence stale-in-table) `Object`, whose qnlib reopens
+    /// (`case:`, matchers) the walk would miss, and a Boolean value's `if:`/`not` live on the
+    /// `true`/`false` eigenclasses, not the class. Builtin receivers feed only the arg-type
+    /// checks (`arg_check_receiver_class`), which key on selector EXISTENCE.
     fn receiver_class(&self, call: &MethodCallNode) -> Option<String> {
         match self.static_type(call.subject.as_ref()?) {
             Type::Instance(c) => Some(c.to_string()),
             _ => None,
+        }
+    }
+
+    /// The receiver class the ARG-TYPE checks may use: a user-class `Instance`, or a builtin
+    /// scalar/collection mapped to its class-table entry (the `from_vm` + `sealed` gates
+    /// downstream still drop open classes like `String`). These checks warn only on a
+    /// selector the class provably HAS with mismatching args, so trust matters more than
+    /// coverage: for a LOCAL receiver, only flow narrowing and an explicit annotation count —
+    /// never the inferred devirt hint a plain `var x = 5` records, which is deliberately
+    /// allowed to go stale across reassignment (a devirt gate has a runtime fallback; a
+    /// diagnostic does not). `Bool` is excluded: a Boolean value dispatches through the
+    /// `true`/`false` eigenclasses, which the class's table entry doesn't model.
+    fn arg_check_receiver_class(&self, call: &MethodCallNode) -> Option<String> {
+        let subject = call.subject.as_ref()?;
+        let t = match &subject.value {
+            NodeValue::Identifier(id) => match NarrowKey::from_ident(id) {
+                Some(key) => self.narrowed_type(&key).or_else(|| match &key {
+                    NarrowKey::Local(name) => self.declared_type(name),
+                    NarrowKey::Field(_) => None,
+                })?,
+                // `nil`/`true`/`false` receivers dispatch via eigenclasses; globals unknown.
+                None => return None,
+            },
+            _ => self.static_type(subject),
+        };
+        match t {
+            Type::Instance(c) => Some(c.to_string()),
+            Type::Int => Some("Integer".to_string()),
+            Type::Double => Some("Double".to_string()),
+            Type::String => Some("String".to_string()),
+            Type::List | Type::ListOf(_) => Some("List".to_string()),
+            Type::Map | Type::MapOf(_) => Some("Map".to_string()),
+            Type::Set | Type::SetOf(_) => Some("Set".to_string()),
+            _ => None,
+        }
+    }
+
+    /// The multimethod face of compile-time MNU: for an authoritative, sealed receiver whose
+    /// selector is recorded with 2+ fully-typed variants (`method_param_variants`), warn when
+    /// every argument's static type is confident and NO variant accepts them — dispatch then
+    /// provably raises MessageNotUnderstood at runtime (`5.pow:'x'`). The single-variant case
+    /// is `call_param_types`' (which also promotes literals); an unconfident argument
+    /// (`Any` / nullable / type variable) keeps this silent, per the no-false-positives rule.
+    fn check_variant_mismatch(&mut self, call: &MethodCallNode) {
+        let Some(class) = self.arg_check_receiver_class(call) else {
+            return;
+        };
+        let Some(sig) = self.class_table.get(&class) else {
+            return;
+        };
+        if !sig.from_vm || !sig.sealed || sig.has_catch_all {
+            return;
+        }
+        let Some(selector) = Self::call_selector_nonvariadic(call) else {
+            return;
+        };
+        let Some(variants) = sig.method_param_variants.get(selector.as_str()) else {
+            return;
+        };
+        let args = &call.arguments.expressions;
+        let arg_types: Vec<Type> = args.iter().map(|a| self.static_type(a)).collect();
+        if arg_types
+            .iter()
+            .any(|t| matches!(t, Type::Any | Type::Nullable(_)) || t.contains_var())
+        {
+            return;
+        }
+        let accepted = variants.iter().any(|params| {
+            params.len() == arg_types.len()
+                && arg_types
+                    .iter()
+                    .zip(params)
+                    .all(|(a, p)| a.compatible_with(p))
+        });
+        if !accepted {
+            let got = arg_types
+                .iter()
+                .map(|t| format!("`{}`", t.name()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let takes = variants
+                .iter()
+                .map(|v| {
+                    format!(
+                        "({})",
+                        v.iter().map(|t| t.name()).collect::<Vec<_>>().join(" ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.warn(
+                format!(
+                    "no `{selector}` variant on `{class}` accepts {got} — \
+                     declared: {takes}; this raises MessageNotUnderstood at runtime"
+                ),
+                call.subject.as_deref().and_then(|n| n.source_info.as_ref()),
+            );
+        }
+    }
+
+    /// A collection LITERAL in a `List(T)`-checked position: its elements are statically
+    /// visible, so check THEM against `T` — the same contract `check_generic_insertion`
+    /// enforces on inserts — instead of letting the literal's bare `List` static type trip
+    /// the width rule (a bare collection never satisfies a checked one, but THIS literal is
+    /// constructed into the checked position, tagged on the decl path). Map literals check
+    /// their values (keys are pinned String). Nil elements pass, matching the insert check.
+    fn check_literal_elements(&mut self, node: &Node, expected: &Type) {
+        let (elem, items): (Type, Vec<&Arc<Node>>) = match (expected, &node.value) {
+            (Type::ListOf(t), NodeValue::List(l)) => ((**t).clone(), l.values.iter().collect()),
+            (Type::SetOf(t), NodeValue::Set(s)) => ((**t).clone(), s.values.iter().collect()),
+            (Type::MapOf(t), NodeValue::Map(m)) => ((**t).clone(), m.values.iter().collect()),
+            _ => return,
+        };
+        if elem.contains_var() {
+            return;
+        }
+        let allowed = Type::Nullable(Box::new(elem));
+        for item in items {
+            let actual = self.static_type(item);
+            if actual.compatible_with(&allowed) {
+                continue;
+            }
+            // Instance subtyping may rescue (a Circle literal element into List(Shape)).
+            if let (Type::Instance(sub), Type::Nullable(sup)) = (&actual, &allowed)
+                && let Type::Instance(sup) = sup.as_ref()
+                && self.class_table.is_subtype(sub, sup) != Some(false)
+            {
+                continue;
+            }
+            self.warn(
+                format!(
+                    "`{}` rejects a `{}` element — this raises a TypeError at runtime",
+                    expected.name(),
+                    actual.name(),
+                ),
+                item.source_info.as_ref().or(node.source_info.as_ref()),
+            );
         }
     }
 
@@ -1607,7 +1814,7 @@ impl Compiler {
     /// authoritative (`from_vm`), `sealed` class, and the (non-variadic) selector resolves to a
     /// single fully-typed method whose arity matches. `None` → args compile unchecked (gradual).
     fn call_param_types(&self, call: &MethodCallNode) -> Option<Vec<Type>> {
-        let class = self.receiver_class(call)?;
+        let class = self.arg_check_receiver_class(call)?;
         let sig = self.class_table.get(&class)?;
         if !sig.from_vm || !sig.sealed {
             return None;
@@ -2322,7 +2529,7 @@ impl Compiler {
         })
     }
 
-    pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, String> {
+    pub fn compile_program(&mut self, program: &ProgramNode) -> Result<StaticBlock, CompileError> {
         self.compile_program_with(program, true)
     }
 
@@ -2335,7 +2542,29 @@ impl Compiler {
         &mut self,
         program: &ProgramNode,
         define_self: bool,
+    ) -> Result<StaticBlock, CompileError> {
+        self.error_span = None;
+        self.compile_program_inner(program, define_self)
+            .map_err(|message| CompileError {
+                message,
+                span: self.error_span.take(),
+            })
+    }
+
+    /// The body of `compile_program_with`, with the internal `String` error type: the span
+    /// travels out-of-band in `self.error_span` (claimed by the innermost `compile_node`
+    /// frame or a precise `err_at` site) and is attached by the public wrapper.
+    fn compile_program_inner(
+        &mut self,
+        program: &ProgramNode,
+        define_self: bool,
     ) -> Result<StaticBlock, String> {
+        // Remembered so the MethodDefinition arm can reject a TOP-LEVEL `sel -> { … }` when
+        // `self` is the nil default: it would try to extend sealed Nil at runtime, and that
+        // error ("Cannot extend sealed class [/]Nil") names a class the user never wrote
+        // (RELEASE_PREP Tier 4a). `eval:self:` passes `define_self: false` (a real receiver
+        // is bound), where a top-level definition legitimately targets that receiver.
+        self.top_level_self_is_nil = define_self;
         // Pre-scan this unit's class defs so annotations can forward-reference them (and so
         // later-compiled units see them via the shared `seen_types`).
         self.prescan_class_defs(program);
@@ -2390,8 +2619,25 @@ impl Compiler {
         let prev_source = bytecode.current_source.clone();
         bytecode.current_source = node.source_info.clone();
         let res = self.compile_node_internal(node, bytecode);
+        if res.is_err() && self.error_span.is_none() {
+            // Claim the error's span innermost-first: the deepest `compile_node` frame sees
+            // the error while its node's span is still current; enclosing frames find the
+            // claim already made. An `err_at` site with a tighter span pre-empts this.
+            self.error_span = bytecode.current_source.clone();
+        }
         bytecode.current_source = prev_source;
         res
+    }
+
+    /// Record `span` as the compile error's location and pass the message through — for error
+    /// sites that know a tighter span (the offending identifier) than the enclosing statement,
+    /// which `compile_node` would otherwise fill in. First claim wins; `None` leaves the
+    /// statement-level fallback in place.
+    fn err_at(&mut self, span: &Option<SourceInfo>, message: String) -> String {
+        if self.error_span.is_none() && span.is_some() {
+            self.error_span = span.clone();
+        }
+        message
     }
 
     fn compile_node_internal(
@@ -2680,12 +2926,14 @@ impl Compiler {
             }
             NodeValue::MethodDefinition(method_def) => {
                 let selector = self.reconstruct_selector(&method_def.signature)?;
+                self.reject_top_level_method(&selector)?;
                 self.compile_block(&method_def.block, bytecode)?;
                 self.maybe_collect_aot_candidate(&selector, &method_def.block, bytecode);
                 bytecode.push(Instruction::DefineMethod(selector));
             }
             NodeValue::MethodExtension(method_ext) => {
                 let selector = self.reconstruct_selector(&method_ext.signature)?;
+                self.reject_top_level_method(&selector)?;
                 self.compile_block(&method_ext.block, bytecode)?;
                 bytecode.push(Instruction::OverrideMethod(selector));
             }
@@ -2749,6 +2997,8 @@ impl Compiler {
     ) -> Result<(), String> {
         // Phase 3b: compile-time MNU (a pure analysis, before any inlining/lowering).
         self.check_mnu(call);
+        // The multimethod face of MNU: args that provably match no recorded variant.
+        self.check_variant_mismatch(call);
         // Phase 3c: a non-nil-safe send to a confidently-nullable, un-narrowed receiver.
         self.check_nil_misuse(call);
         self.check_generic_insertion(call);

@@ -1081,6 +1081,17 @@ impl<'gc> VmState<'gc> {
     /// `val` is directly of that type), or `None` if `val` isn't an instance of it.
     /// A mixin counts as one hop from the class that mixes it in.
     fn type_distance(&self, val: Value<'gc>, hint: &str) -> Option<i64> {
+        // A nullable hint (`String?`) means base-type-or-nil. It used to match NOTHING —
+        // no class is named "String?", so the variant was unreachable for every argument
+        // including nil (RELEASE_PREP Tier 4b). nil scores 0 (the annotation says nil is
+        // expected, not merely tolerated); a non-nil argument scores as the base type.
+        if let Some(base) = hint.strip_suffix('?') {
+            return if matches!(val, Value::Nil) {
+                Some(0)
+            } else {
+                self.type_distance(val, base)
+            };
+        }
         // Fast path / exact match. Also the only thing that matches a `Class` or
         // `ClassMeta` value (whose `get_class_for_lookup` returns the class itself,
         // not a class named "Class"). `Object` is exempt: `type_name()` reports

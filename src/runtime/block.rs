@@ -272,6 +272,26 @@ pub fn build_block_class() -> NativeClassBuilder {
              { 'x'.throw }.catch:{ |e: IoError| 'io' } catch:{ |e| 'other' }    \"* -> other\n\
              ```",
         )
+        .instance_method("finally:", |vm, mc, receiver, args| {
+            let protected = recv!(receiver, Block);
+            let finally = arg!(args, Block, 0);
+            // `catch:finally:` with no handlers: nothing matches, so whatever unwound —
+            // error, cancellation, exit, `^^` — propagates unchanged after the cleanup
+            // runs. The close-on-every-path form that previously needed a rethrowing
+            // handler (`catch:{|e| e.throw} finally:{…}`, RELEASE_PREP Tier 4b).
+            do_catch_finally(vm, mc, protected, &[], finally)
+        })
+        .doc(
+            "Run the block, then ALWAYS run the cleanup — on success, on a throw (which \
+             re-raises unchanged after the cleanup), on cancellation, and on the way out of \
+             a non-local return. An error thrown by the cleanup itself overrides a normal \
+             result but never masks a cancellation.\n\n\
+             ```\n\
+             var log = #();\n\
+             { { 'boom'.throw }.finally:{ log.add:'cleaned' } }.catch:{ |e| log.add:e };\n\
+             log    \"* -> #(cleaned boom)\n\
+             ```",
+        )
         .instance_method("catch:finally:", |vm, mc, receiver, args| {
             let protected = recv!(receiver, Block);
             let finally = arg!(args, Block, 1);
@@ -307,7 +327,7 @@ pub fn build_block_class() -> NativeClassBuilder {
 pub fn is_catch_family(selector: &str) -> bool {
     matches!(
         selector,
-        "catch:" | "catch+:" | "catch:finally:" | "catch+:finally:"
+        "catch:" | "catch+:" | "catch:finally:" | "catch+:finally:" | "finally:"
     )
 }
 

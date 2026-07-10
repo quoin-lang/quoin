@@ -1,0 +1,79 @@
+"* Destructuring declarations and assignments: splats in every position (the binding
+"* plan indexes post-splat targets from the END — RELEASE_PREP Tier 4b), nesting,
+"* short/empty sources, and the compile-time one-splat-per-level rule.
+(TestSuite.new:{ var name = 'Destructuring' }).add:{
+    .test:
+    plainAndTrailingSplat -> {
+        .is:{ var a b c = #(1 2 3); #(a b c) } equalTo:#(1 2 3);
+        .is:{ var p q *rest = #(1 2 3 4); #(p q rest) } equalTo:#(1 2 #(3 4));
+        .is:{ var first *rest = #(1); #(first rest) } equalTo:#(1 #());
+    };
+
+    .test:
+    leadingSplat -> {
+        "* The splat stops where the tail targets begin - `last` is the LAST element,
+        "* not a positional read from the start.
+        .is:{ var *init last = #(1 2); #(init last) } equalTo:#(#(1) 2);
+        .is:{ var *init last = #(9); #(init last) } equalTo:#(#() 9);
+        .is:{ var *init a b = #(1 2 3 4 5); #(init a b) } equalTo:#(#(1 2 3) 4 5);
+    };
+
+    .test:
+    middleSplat -> {
+        .is:{ var a *mid z = #(1 2 3 4 5); #(a mid z) } equalTo:#(1 #(2 3 4) 5);
+        .is:{ var a *_ z = #(1 2 3 4 5); #(a z) } equalTo:#(1 5);
+        "* Exactly enough elements for the non-splat targets: the middle is empty.
+        .is:{ var a *mid z = #(1 2); #(a mid z) } equalTo:#(1 #() 2);
+    };
+
+    .test:
+    shortAndEmptySources -> {
+        "* Destructuring never length-errors: missing positions read nil, the splat
+        "* clamps to #(), and on a too-short source the end-relative tail overlaps
+        "* the head (same element binds twice).
+        .is:{ var a b c = #(1); #(a b c) } equalTo:#(1 nil nil);
+        .is:{ var a *mid z = #(); #(a mid z) } equalTo:#(nil #() nil);
+        .is:{ var a *m z = #(7); #(a m z) } equalTo:#(7 #() 7);
+    };
+
+    .test:
+    nestedPatterns -> {
+        "* One splat per LEVEL: a nested ( ... ) pattern gets its own.
+        .is:{ var a (b *c) *d = #(1 #(2 3 4) 5 6); #(a b c d) }
+            equalTo:#(1 2 #(3 4) #(5 6));
+        .is:{ var (x *_ y) tail = #(#(1 2 3 4) 9); #(x y tail) } equalTo:#(1 4 9);
+        "* A nested pattern needs its element to exist: destructuring nil raises.
+        .does:{ Runtime.eval:'var a (b *c) *d = #(); b' } throw:MessageNotUnderstood;
+    };
+
+    .test:
+    reassignmentDestructuring -> {
+        "* Plain (keyword-less) destructuring reassigns already-declared targets
+        "* through the same end-relative plan.
+        .is:{
+            var a *b c = #(1 2 3 4 5 6);
+            a *b c = #(9 8 7);
+            #(a b c)
+        } equalTo:#(9 #(8) 7);
+    };
+
+    .test:
+    oneSplatPerLevel -> {
+        "* Two splats in one pattern level: there is no rule for which absorbs the
+        "* middle, so it is a compile error (surfaced as ParseError through eval).
+        .does:{ Runtime.eval:'var a *b *c = #(1 2 3)' } throw:ParseError;
+        .does:{ Runtime.eval:'var *a b *c = #(1 2 3)' } throw:ParseError;
+        "* A lone named splat is not destructuring - nothing to split.
+        .does:{ Runtime.eval:'var *a = #(1 2)' } throw:ParseError;
+    };
+
+    .test:
+    sliceFromTo -> {
+        "* The bounded slice the middle splat compiles to, usable directly: end is
+        "* exclusive, both ends clamp, inverted answers #().
+        .is:{ #(10 20 30 40).sliceFrom:1 to:3 } equalTo:#(20 30);
+        .is:{ #(10 20 30 40).sliceFrom:0 to:99 } equalTo:#(10 20 30 40);
+        .is:{ #(10 20 30 40).sliceFrom:3 to:1 } equalTo:#();
+        .is:{ #(10 20 30 40).sliceFrom:0-5 to:2 } equalTo:#(10 20);
+    };
+}

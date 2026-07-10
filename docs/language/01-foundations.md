@@ -169,8 +169,22 @@ var head (x2 y) = #(1 #(2 3)) "* head=1, x2=2, y=3  (nested)
 Pi <- 3.14159               "* a constant; a second `Pi <- …` would throw
 ```
 
-Only one splat is allowed per pattern, but it may lead, sit in the middle, or
-trail. `_` (and `*_`) ignore the corresponding element(s).
+Only one splat is allowed per pattern **level** (a compile error otherwise; each
+nested `( … )` sub-pattern may carry its own), but it may lead, sit in the
+middle, or trail. Targets *after* a splat bind from the **end** of the list:
+
+```quoin
+var a *mid z = #(10 20 30 40 50)
+#(a mid z)                       "* -> #(10 #(20 30 40) 50)
+var *init last = #('x' 'y')
+#(init last)                     "* -> #(#(x) y)
+var lead (p *q) *tail = #(1 #(2 3 4) 5 6)
+#(lead p q tail)                 "* -> #(1 2 #(3 4) #(5 6))
+```
+
+Destructuring never errors on length: a missing position reads `nil` and a splat
+clamps to `#()` (on a too-short list the end-relative targets can re-read leading
+elements). `_` (and `*_`) ignore the corresponding element(s).
 
 > **⚠ Gotcha — assignment is statement-only.** `a = 5` does not produce a value you
 > can feed into another expression. Write conditions and arguments as plain

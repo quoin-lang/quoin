@@ -34,7 +34,11 @@ ShapeG <- CircleG <- {
 
     .test:
     taggedLiteralChecksItsElements -> {
-        .is:{ { var bad: List(Integer) = #(1 'two' 3); bad }.catch:{ |e| 'caught' } }
+        "* The bad element is laundered through an untyped local: written literally the
+        "* checker (correctly) flags it at check time, and this test is about the
+        "* RUNTIME tag enforcement.
+        var two = 'two';
+        .is:{ { var bad: List(Integer) = #(1 two 3); bad }.catch:{ |e| 'caught' } }
             equalTo:'caught';
     };
 

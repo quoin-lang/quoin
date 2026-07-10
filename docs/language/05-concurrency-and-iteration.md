@@ -94,9 +94,9 @@ itself a task) on one cooperative scheduler, overlapping their waits.
 
 > **Rules**
 > - `Task.spawn:{ … }` starts a **detached task** from a zero-parameter block and answers a **handle** immediately — the spawner keeps running. On the handle: `join` (park until finished; answers the task's result), `cancel`, `status` (`'running'`/`'done'`/`'failed'`/`'cancelled'`), `done?`. `Task.running` is a snapshot List of the handles of all still-running tasks.
-> - **One thread, run-to-block.** A task runs until it **parks** — an I/O wait, `Async.sleep:`, a channel operation, a `join` — or finishes; only then does the next ready task run. Nothing preempts mid-expression: two tasks never touch a List "at the same time", so plain data needs no locks — but every parking point is a potential interleaving point.
+> - **One thread, cooperative round-robin.** A task runs until it **parks** — an I/O wait, `Async.sleep:`, a channel operation, a `join` — finishes, or reaches a **scheduler boundary** (every few hundred instructions), where a runnable sibling gets a turn. One thread means no data races: a single method send always completes before any other task runs, so plain data needs no locks — but a *sequence* of statements can interleave with other tasks at any parking point or scheduler boundary.
 > - **Parking parks the task, not the VM.** A blocking read (`[IO]Stdin.readLine`, a socket receive) suspends only the task that issued it; every other task keeps running, and the process truly sleeps only when *all* tasks are parked.
-> - `join` re-raises a failed task's error **catchably** at the join site (and raises if the task was cancelled). `cancel` is **cooperative**: the task raises an *uncatchable* cancellation at its next parking point — `finally:` blocks run on the way out, but no `catch:` handler fires.
+> - `join` re-raises a failed task's error **catchably** at the join site (and raises if the task was cancelled). `cancel` is **cooperative**: the task raises an *uncatchable* cancellation at its next checkpoint — within a few hundred instructions, parked or not — `finally:` blocks run on the way out, but no `catch:` handler fires.
 > - **The process exits when the main program finishes.** Detached tasks still running — even ones that never got a turn — are abandoned, not awaited: `join` what must complete. `Runtime.exit:code` is likewise uncatchable: the raising task unwinds through its `finally:` blocks, every other task stops, and the process exits (with that status) after normal teardown.
 
 ```quoin
@@ -159,12 +159,14 @@ t.join;    "* main parks here; the spawned task runs
 log        "* -> #(0 1 2)
 ```
 
-> **⚠ Gotcha — a spawned task runs only when the spawner yields.** `Task.spawn:`
-> queues the task; it first runs when the current task parks or finishes. A main
-> program that never parks never runs its spawned tasks at all — and a CPU-bound
-> task with no parking points starves its siblings until it finishes (run-to-block
-> is the documented model). `join`, `Async.gather:`, or any wait both hands the
-> scheduler control *and* (for joins) guarantees completion.
+> **⚠ Gotcha — spawning queues; only joining guarantees.** `Task.spawn:` queues the
+> task; it gets its first turn at the spawner's next parking point or scheduler
+> boundary (near-immediately, even if the spawner is compute-bound — CPU-bound
+> tasks round-robin rather than starving each other). But **the process exits when
+> the main program finishes**, abandoning whatever is still queued or running —
+> `join`, `Async.gather:`, or a channel handshake is what guarantees completion.
+> The one thing that still monopolizes the thread is a single long-running *native*
+> call: nothing preempts inside one send.
 
 ---
 

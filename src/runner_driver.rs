@@ -633,6 +633,32 @@ fn drive_to_completion<F: DriverFrontend>(
         let mut ps_queue: std::collections::VecDeque<
             async_channel::Sender<crate::worker::WorkerMsg>,
         > = std::collections::VecDeque::new();
+        // Deliver a background completion: an I/O result wakes its task onto `ready`; a
+        // deadline routes through `deliver_deadline` (which resolves the completion/deadline
+        // race). Shared by the idle reactor wait and the yield-boundary drain below.
+        let deliver = |arena: &mut ReplArena, tid: TaskId, wakeup: TaskWakeup| {
+            arena.mutate_root(|_mc, vm| match wakeup {
+                TaskWakeup::Io(result) => {
+                    {
+                        let t = vm.sched.tasks[tid.0]
+                            .as_mut()
+                            .expect("woken task slot is empty");
+                        t.abort_handle = None; // the future is done
+                        // On `Err(Aborted)` the task was cancelled: leave `wake`
+                        // unset — `await_io` raises `Cancelled` instead.
+                        if let Ok(io_result) = result {
+                            t.wake = Some(Wake::Io { result: io_result });
+                        }
+                    }
+                    vm.sched.ready.push_back(tid);
+                }
+                // A deadline elapsed: `deliver_deadline` resolves the race and
+                // enqueues the joiner if it won.
+                TaskWakeup::Deadline { target, epoch } => {
+                    vm.deliver_deadline(tid, target, epoch);
+                }
+            });
+        };
         loop {
             // A guest requested process exit (`Runtime.exit:`). The raising task's own
             // unwind only reaches this loop's `Err` arm when it was the CURRENT task's
@@ -778,27 +804,7 @@ fn drive_to_completion<F: DriverFrontend>(
                             Woke::Tick => continue,
                         };
                         let (tid, wakeup) = step.expect("futures is non-empty");
-                        arena.mutate_root(|_mc, vm| match wakeup {
-                            TaskWakeup::Io(result) => {
-                                {
-                                    let t = vm.sched.tasks[tid.0]
-                                        .as_mut()
-                                        .expect("woken task slot is empty");
-                                    t.abort_handle = None; // the future is done
-                                    // On `Err(Aborted)` the task was cancelled: leave `wake`
-                                    // unset — `await_io` raises `Cancelled` instead.
-                                    if let Ok(io_result) = result {
-                                        t.wake = Some(Wake::Io { result: io_result });
-                                    }
-                                }
-                                vm.sched.ready.push_back(tid);
-                            }
-                            // A deadline elapsed: `deliver_deadline` resolves the race and
-                            // enqueues the joiner if it won.
-                            TaskWakeup::Deadline { target, epoch } => {
-                                vm.deliver_deadline(tid, target, epoch);
-                            }
-                        });
+                        deliver(arena, tid, wakeup);
                         continue;
                     }
                 }
@@ -814,13 +820,34 @@ fn drive_to_completion<F: DriverFrontend>(
             frontend.on_output(arena)?;
             match step {
                 Ok(RunStep::Yielded) => {
-                    // A clean cooperative-yield boundary. Under stress, preempt: stash and
-                    // requeue so the save/load round-trip runs every step and ordering varies.
-                    if rng.is_some() {
-                        arena.mutate_root(|_mc, vm| {
+                    // A clean cooperative-yield boundary — one `QN_BATCH` of instructions, in
+                    // any tier (`run_dispatch`, `run_nested`, or an AOT fuel checkpoint).
+                    // Fairness lives here (RELEASE_PREP Tier 4b: a spinning task starved
+                    // cancellation and timers forever): first drain already-completed
+                    // background futures WITHOUT blocking — the idle reactor wait above only
+                    // runs when nothing is ready, and a spinner is always ready, so an
+                    // expired timer would otherwise never be serviced. Then, if anything is
+                    // runnable, rotate: stash the current task and requeue it FIFO —
+                    // deterministic round-robin at yield boundaries. A task running alone
+                    // (every benchmark) pays two emptiness checks and keeps going.
+                    // Under stress, always preempt (and pick at random) so ordering varies.
+                    if !futures.is_empty() {
+                        while let Some(Some((tid, wakeup))) =
+                            futures_lite::future::poll_once(futures.next()).await
+                        {
+                            deliver(arena, tid, wakeup);
+                        }
+                    }
+                    let rotate = arena.mutate_root(|_mc, vm| {
+                        if rng.is_some() || !vm.sched.ready.is_empty() {
                             vm.save_task_context(cur);
                             vm.sched.ready.push_back(cur);
-                        });
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    if rotate {
                         current = None;
                     }
                 }

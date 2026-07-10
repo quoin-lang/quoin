@@ -14,17 +14,20 @@ use std::rc::Rc;
 /// Quoin's one I/O buffer size: how many bytes a single fill pulls from the backend per `Read`,
 /// and how much a buffered write stream accumulates before it drains.
 ///
-/// 16 KiB, measured rather than inherited. One `await_io` round trip costs ~270ns (a fiber park,
-/// a scheduler pass, a backend poll) — an order more than the syscall it wraps — so the buffer
-/// buys down that fixed cost. Reading a 64 MiB file, overhead above the 4.5 GB/s
-/// memory-bandwidth floor is +28% at 4 KiB, +16% at 8 KiB, +9% at 16 KiB, +4% at 32 KiB, and
-/// then *worsens* to +26% at 64 KiB — because the backend allocates and zeroes a fresh
-/// `max`-byte Vec on every `Read` (`io_backend.rs`), which crosses the allocator's large-object
-/// threshold there. That cliff is an artifact of the per-read allocation, not of the size, so
-/// 16 KiB sits below it and stays right once the allocation is fixed.
+/// 16 KiB, measured rather than inherited — twice. One `await_io` round trip costs ~270ns (a
+/// fiber park, a scheduler pass, a backend poll) — an order more than the syscall it wraps —
+/// so the buffer buys down that fixed cost. The fill buffer RECYCLES through
+/// `Scheduler::read_scratch` (the request carries it out, the `IoResult::Read` vec carries it
+/// back), so the steady state allocates and zeroes nothing per read — fixing that was worth
+/// −12% whole-process reading a 64 MiB file (profiling/read-buffer-recycle/notes.md).
+/// Re-measured post-fix, BIGGER fills lose outright: +13% at 32 KiB, +19% at 64 KiB on the
+/// same read — the kernel → fill buffer → `rbuf` copy chain stays cache-resident at 16 KiB
+/// and does not above it. (The pre-fix curve blamed the 64 KiB cliff on the per-read
+/// allocation crossing the allocator's large-object threshold; the allocation is gone and the
+/// cliff remains.) So 16 KiB is simply the right size, files and sockets alike.
 ///
-/// The top end is set by memory, not throughput: this is also every *socket's* read-ahead, so a
-/// server holding 10k connections holds 10k of these. 32 KiB would buy 4% and cost it 160 MB.
+/// Memory agrees: this is also every *socket's* read-ahead, so a server holding 10k
+/// connections holds 10k of these.
 pub const IO_BUFFER_BYTES: usize = 16 * 1024;
 
 /// Native backing for a buffered stream (`ByteStream`; `StringStream` joins it in 6b).
@@ -834,27 +837,48 @@ fn write_through<'gc>(
 /// Pull one `Read` from the conduit into `rbuf`. Returns `true` at EOF (an empty read).
 /// The borrow of native state is released around the await — `rbuf` is plain bytes, so
 /// nothing `Gc` is held across the suspend (`no_gc_across_yield`).
+///
+/// The fill buffer recycles through `sched.read_scratch`: it rides out in the request,
+/// comes back as the `IoResult::Read` vec, and returns to the pool after the copy into
+/// `rbuf` — the steady state allocates and zeroes nothing per read (the backend's
+/// `resize` on a recycled full-fill buffer is a no-op). A buffer lost to an aborted op
+/// is simply not recycled.
 fn fill_once<'gc>(
     vm: &mut VmState<'gc>,
     mc: &Mutation<'gc>,
     receiver: Value<'gc>,
     id: StreamId,
 ) -> Result<bool, QuoinError> {
+    let buf = vm.sched.read_scratch.pop().unwrap_or_default();
     match vm.await_io(IoRequest::Read {
         id,
         max: IO_BUFFER_BYTES,
+        buf,
     })? {
-        IoResult::Read(chunk) if chunk.is_empty() => Ok(true), // EOF
+        IoResult::Read(chunk) if chunk.is_empty() => {
+            recycle_read_buf(vm, chunk);
+            Ok(true) // EOF
+        }
         IoResult::Read(chunk) => {
             receiver
                 .with_native_state_mut::<NativeStream, _, _>(mc, |s| {
                     s.rbuf.extend_from_slice(&chunk)
                 })
                 .map_err(QuoinError::Other)?;
+            recycle_read_buf(vm, chunk);
             Ok(false)
         }
         IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
         other => Err(unexpected("read", other)),
+    }
+}
+
+/// Return a fill buffer to the scratch pool. Capped: the pool needs to cover the reads
+/// parked at one moment, not the stream count — beyond that, capacity is just dropped.
+fn recycle_read_buf(vm: &mut VmState<'_>, buf: Vec<u8>) {
+    const POOL_CAP: usize = 8;
+    if vm.sched.read_scratch.len() < POOL_CAP && buf.capacity() > 0 {
+        vm.sched.read_scratch.push(buf);
     }
 }
 

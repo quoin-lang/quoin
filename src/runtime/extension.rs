@@ -402,7 +402,11 @@ fn unique_sock_path() -> String {
 
 /// Read up to one chunk from the extension stream, parking the fiber on the socket.
 fn read_chunk<'gc>(vm: &mut VmState<'gc>, id: StreamId) -> Result<Vec<u8>, QuoinError> {
-    match vm.await_io(IoRequest::Read { id, max: 4096 })? {
+    match vm.await_io(IoRequest::Read {
+        id,
+        max: 4096,
+        buf: Vec::new(),
+    })? {
         IoResult::Read(b) => Ok(b),
         IoResult::Err(e) => Err(QuoinError::from_io_error(&e)),
         other => Err(QuoinError::Other(format!(
@@ -1147,6 +1151,7 @@ fn read_reply_frame_timed<'gc>(
             id,
             max: 4096,
             ms: remaining.as_millis() as u64,
+            buf: Vec::new(),
         })? {
             IoResult::Read(chunk) if chunk.is_empty() => Err(QuoinError::Other(
                 "Extension handshake: connection closed before manifest".to_string(),

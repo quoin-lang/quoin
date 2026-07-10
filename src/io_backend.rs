@@ -113,13 +113,27 @@ pub enum IoRequest {
     /// extension call is then just `Write`+`Read` on this stream. Mirrors `Connect`;
     /// the `UnixStream` drops into the same `AsyncStream` registry.
     ConnectUnix { path: String },
-    /// Read up to `max` bytes. An empty result means EOF.
-    Read { id: StreamId, max: usize },
+    /// Read up to `max` bytes. An empty result means EOF. `buf` is the buffer to fill —
+    /// the backend `resize(max, 0)`s it, so `Vec::new()` always works, and a caller that
+    /// recycles the returned `IoResult::Read` vec back through here pays no allocation
+    /// and re-zeroes only the tail its last fill truncated (nothing, on a full fill).
+    /// The recycle loop lives in `streams.rs::fill_once` + `Scheduler::read_scratch`;
+    /// one-shot callers just pass `Vec::new()`.
+    Read {
+        id: StreamId,
+        max: usize,
+        buf: Vec<u8>,
+    },
     /// Like `Read`, but the op fails with a `TimedOut` error if no bytes arrive within
     /// `ms` milliseconds. Used to bound reads that have no surrounding `Async.timeout:`
     /// (e.g. the extension handshake, which runs at spawn time), so a peer that accepts
     /// the socket but never replies cannot park the caller forever.
-    ReadTimed { id: StreamId, max: usize, ms: u64 },
+    ReadTimed {
+        id: StreamId,
+        max: usize,
+        ms: u64,
+        buf: Vec<u8>,
+    },
     /// Write all of `bytes`.
     Write { id: StreamId, bytes: Vec<u8> },
     /// Offload a pure, self-contained CPU-bound job to the compute pool
@@ -578,7 +592,7 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
-            IoRequest::Read { id, max } => Box::pin(async move {
+            IoRequest::Read { id, max, buf } => Box::pin(async move {
                 // Leased, not taken: aborting a parked read (task cancel / timeout)
                 // must return the stream to the registry, not drop the fd. The op is
                 // additionally abortable by `close` on the handle (see `op_aborts`):
@@ -593,7 +607,8 @@ impl IoBackend for SmolBackend {
                 let res = Abortable::new(
                     async move {
                         let mut lease = lease;
-                        let mut buf = vec![0u8; max];
+                        let mut buf = buf;
+                        buf.resize(max, 0);
                         let r = lease.stream().read(&mut buf).await;
                         drop(lease);
                         (r, buf)
@@ -614,7 +629,7 @@ impl IoBackend for SmolBackend {
                 }
             }),
 
-            IoRequest::ReadTimed { id, max, ms } => Box::pin(async move {
+            IoRequest::ReadTimed { id, max, ms, buf } => Box::pin(async move {
                 // Leased like Read, plus a wall-clock deadline: whichever of the read or
                 // the timer resolves first wins. On timeout the lease drops (returning
                 // the stream to the registry — the caller decides whether to close it).
@@ -627,7 +642,8 @@ impl IoBackend for SmolBackend {
                 let read = Abortable::new(
                     async move {
                         let mut lease = lease;
-                        let mut buf = vec![0u8; max];
+                        let mut buf = buf;
+                        buf.resize(max, 0);
                         let r = lease.stream().read(&mut buf).await;
                         drop(lease);
                         (r, buf)
@@ -955,6 +971,7 @@ mod tests {
         let r = block_on(mock.perform(IoRequest::Read {
             id: StreamId(0),
             max: 64,
+            buf: Vec::new(),
         }));
         assert!(matches!(r, IoResult::Read(b) if b == b"hello"));
 
@@ -962,6 +979,7 @@ mod tests {
         let r = block_on(mock.perform(IoRequest::Read {
             id: StreamId(0),
             max: 64,
+            buf: Vec::new(),
         }));
         assert!(matches!(r, IoResult::Read(b) if b.is_empty()));
     }
@@ -1020,7 +1038,14 @@ mod tests {
                 IoResult::Wrote(5) => {}
                 other => panic!("write failed: {other:?}"),
             }
-            match backend.perform(IoRequest::Read { id, max: 64 }).await {
+            match backend
+                .perform(IoRequest::Read {
+                    id,
+                    max: 64,
+                    buf: Vec::new(),
+                })
+                .await
+            {
                 IoResult::Read(data) => assert_eq!(data, b"hello"),
                 other => panic!("read failed: {other:?}"),
             }
@@ -1039,6 +1064,7 @@ mod tests {
         let r = block_on(backend.perform(IoRequest::Read {
             id: StreamId(999),
             max: 16,
+            buf: Vec::new(),
         }));
         assert!(matches!(r, IoResult::Err(e) if e.kind == std::io::ErrorKind::NotFound));
     }
@@ -1118,7 +1144,14 @@ mod tests {
                 IoResult::Wrote(5) => {}
                 other => panic!("write failed: {other:?}"),
             }
-            match backend.perform(IoRequest::Read { id, max: 64 }).await {
+            match backend
+                .perform(IoRequest::Read {
+                    id,
+                    max: 64,
+                    buf: Vec::new(),
+                })
+                .await
+            {
                 IoResult::Read(data) => assert_eq!(data, b"hello"),
                 other => panic!("read failed: {other:?}"),
             }
@@ -1161,7 +1194,14 @@ mod tests {
                 IoResult::Wrote(_) => {}
                 other => panic!("write failed: {other:?}"),
             }
-            match backend.perform(IoRequest::Read { id, max: 256 }).await {
+            match backend
+                .perform(IoRequest::Read {
+                    id,
+                    max: 256,
+                    buf: Vec::new(),
+                })
+                .await
+            {
                 IoResult::Read(data) => {
                     let head = String::from_utf8_lossy(&data);
                     assert!(head.starts_with("HTTP/1."), "unexpected response: {head:?}");
