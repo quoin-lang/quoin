@@ -7,11 +7,14 @@
 
 use std::process::Command;
 
-fn run(script: &str, aot_env: &[(&str, &str)]) -> (String, bool) {
+fn run(name: &str, script: &str, aot_env: &[(&str, &str)]) -> (String, bool) {
+    // Uniquified by TEST NAME, not just pid: under plain `cargo test` both tests run as
+    // threads of one process, so a pid-only path made them share a file and race (the CI
+    // failure this comment is the tombstone of — nextest's process-per-test hid it locally).
     let path = std::env::temp_dir().join(format!(
         "qn_overflow_aot_{}_{}.qn",
         std::process::id(),
-        aot_env.len()
+        name
     ));
     std::fs::write(&path, script).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_qn"));
@@ -52,7 +55,7 @@ caught.print;
 #[test]
 fn compiled_overflow_raises_the_same_catchable_error() {
     // Force-warm compilation so the overflowing call runs native code.
-    let (out, ok) = run(SCRIPT, &[("QN_AOT_WARM", "1")]);
+    let (out, ok) = run("compiled", SCRIPT, &[("QN_AOT_WARM", "1")]);
     assert!(ok, "qn failed:\n{out}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -65,7 +68,7 @@ fn compiled_overflow_raises_the_same_catchable_error() {
 #[test]
 fn interpreted_overflow_agrees() {
     // The same program with AOT off: byte-identical observable behavior.
-    let (out, ok) = run(SCRIPT, &[("QN_AOT", "0")]);
+    let (out, ok) = run("interpreted", SCRIPT, &[("QN_AOT", "0")]);
     assert!(ok, "qn failed:\n{out}");
     assert_eq!(out.lines().collect::<Vec<_>>(), ["Integer overflow", "42"]);
 }
