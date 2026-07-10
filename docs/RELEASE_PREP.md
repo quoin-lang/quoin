@@ -338,22 +338,17 @@ it. None is fixed.
   (`compile_program_with`'s `define_self` flag distinguishes the cases).
   Tests: tests/exit_code.rs (all three entry points), 05-classes.qn.
 
-- [ ] **Add `Block#finally:`.** `Block` has `catch:`, `catch+:`, `catch:finally:`
-  and `catch+:finally:` (`src/runtime/block.rs`), but no bare `finally:` — so
-  cleanup-on-every-path with no interest in the error must name a handler that
-  only rethrows:
-
-  ```
-  { s.write:text }.catch:{ |e: Error| e.throw } finally:{ s.close }
-  ```
-
-  That is the idiom `[IO]File.write:to:` / `append:to:` / `read:` use in
-  `qnlib/core/06-io.qn`, and it reads as though it were swallowing the error when
-  it is doing the opposite. `{ … }.finally:{ … }` should run the cleanup on the
-  normal, throwing, and non-local-return paths and propagate whatever happened —
-  i.e. `catch:finally:` with an implicit rethrowing handler. Check it against `^`
-  / `^^` leaving the protected block, and against `cancel` (`QuoinError::Cancelled`),
-  which `catch:` deliberately cannot swallow.
+- [x] **Add `Block#finally:`.** DONE: `{ … }.finally:{ cleanup }` =
+  `catch:finally:` with an empty handler list — the cleanup runs and whatever
+  unwound (value, throw, cancellation, exit, `^^`) propagates unchanged; an
+  error from the cleanup overrides a normal result but never masks a
+  cancellation. Registered in `is_catch_family` (the AOT `^^`-parity gate
+  requires listing any new absorber). The three `catch:{|e| e.throw} finally:`
+  call sites in `qnlib/core/06-io.qn` — the idiom that motivated this — are now
+  bare `.finally:`. Grammar note: dot form only (`{…}.finally:{…}`); a
+  space-form keyword send does not chain off a bare block literal. Tests in
+  02-blocks.qn: success / throw-reraise-order / typed rethrow visibility /
+  cleanup-error override / `^^`.
 
 ---
 
