@@ -26,7 +26,7 @@ fn gallery_warnings_match_reality() {
 
     // The full census: a NEW warning is a false positive, a LOST one is a regressed check.
     let count = stderr.lines().filter(|l| l.contains(": warning:")).count();
-    assert_eq!(count, 25, "gallery warning count drifted\n{stderr}");
+    assert_eq!(count, 29, "gallery warning count drifted\n{stderr}");
 
     // The historically drift-prone checks, by message.
     for needle in [
@@ -40,6 +40,10 @@ fn gallery_warnings_match_reality() {
         "does not respond to `nopeMethod`",
         // return-type covariance.
         "override of `defined?` returns `String`",
+        // the `allow:` pragma polices itself: a typo'd kind…
+        "unknown warning kind `nil-reciever`",
+        // …and a pragma on its own line (a doc-block collision) each warn.
+        "an `allow:` pragma must trail the code line it suppresses",
     ] {
         assert!(
             stderr.contains(needle),
@@ -61,5 +65,17 @@ fn gallery_warnings_match_reality() {
     assert!(
         !stderr.contains(&format!("warnings.qn:{well_formed_line}:")),
         "must-not-warn `wellFormed:` (line {well_formed_line}) drew a warning\n{stderr}"
+    );
+
+    // `allowedNilReceiver:` carries a matching trailing `"* allow: nil-receiver` — its
+    // nil-receiver warning must be suppressed. Located by content, like `wellFormed:`.
+    let allowed_line = gallery
+        .lines()
+        .position(|l| l.contains("allowedNilReceiver:"))
+        .expect("gallery defines allowedNilReceiver:")
+        + 1;
+    assert!(
+        !stderr.contains(&format!("warnings.qn:{allowed_line}:")),
+        "the `allow:` pragma on line {allowed_line} stopped suppressing\n{stderr}"
     );
 }

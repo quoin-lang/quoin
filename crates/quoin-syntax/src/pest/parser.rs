@@ -254,6 +254,10 @@ fn parse_program(pair: Pair<Rule>, filename: &str, source_text: &str) -> Node {
         value: Program(ProgramNode {
             expressions: stmts,
             source_info,
+            // Comments are pest trivia; the checker's `"* allow:` suppression
+            // pragmas are recovered from raw source here, the one place every
+            // parse (file, string, REPL, eval) funnels through.
+            allow_pragmas: crate::pragmas::scan_allow_pragmas(source_text, filename),
         }),
     }
 }
@@ -1515,6 +1519,7 @@ mod tests {
         let ast = parse("123;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![integer(123)],
         }));
         assert_eq!(ast, expected);
@@ -1522,6 +1527,7 @@ mod tests {
         let ast = parse("12.34;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![double(12.34)],
         }));
         assert_eq!(ast, expected);
@@ -1529,6 +1535,7 @@ mod tests {
         let ast = parse("'hello';");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![string_node("hello")],
         }));
         assert_eq!(ast, expected);
@@ -1536,6 +1543,7 @@ mod tests {
         let ast = parse("#foo;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![symbol("foo")],
         }));
         assert_eq!(ast, expected);
@@ -1543,6 +1551,7 @@ mod tests {
         let ast = parse("#/^[a-z]+$/;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Regex(RegexNode {
                 value: "#/^[a-z]+$/".to_string(),
             }))],
@@ -1555,6 +1564,7 @@ mod tests {
         let ast = parse("x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![ident("x", IdentifierType::Local)],
         }));
         assert_eq!(ast, expected);
@@ -1562,6 +1572,7 @@ mod tests {
         let ast = parse("@x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![ident("x", IdentifierType::Instance)],
         }));
         assert_eq!(ast, expected);
@@ -1580,6 +1591,7 @@ mod tests {
         }));
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Assignment(AssignmentNode {
                 lvalues: vec![lval],
                 rvalue: integer(42),
@@ -1593,6 +1605,7 @@ mod tests {
         let ast = parse("1 + 2;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![binary(BinaryOperatorType::Add, integer(1), integer(2))],
         }));
         assert_eq!(ast, expected);
@@ -1600,6 +1613,7 @@ mod tests {
         let ast = parse("!x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![unary(
                 UnaryOperatorType::Bang,
                 ident("x", IdentifierType::Local),
@@ -1613,6 +1627,7 @@ mod tests {
         let ast = parse("#(1 2);");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::List(ListNode {
                 values: vec![integer(1), integer(2)],
             }))],
@@ -1622,6 +1637,7 @@ mod tests {
         let ast = parse("#{'a': 1};");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Map(MapNode {
                 keys: vec![string_node("a")],
                 values: vec![integer(1)],
@@ -1635,6 +1651,7 @@ mod tests {
         let ast = parse("{ 1 + 2 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 source_info: None,
                 name: None,
@@ -1702,6 +1719,7 @@ mod tests {
         });
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodCall(MethodCallNode {
                 subject: Some(ident("x", IdentifierType::Local)),
                 arguments: Arc::new(MethodCallArgumentsNode {
@@ -1718,6 +1736,7 @@ mod tests {
         let ast = parse("!!!;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Bang3)],
         }));
         assert_eq!(ast, expected);
@@ -1725,6 +1744,7 @@ mod tests {
         let ast = parse("...;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Dot3)],
         }));
         assert_eq!(ast, expected);
@@ -1732,6 +1752,7 @@ mod tests {
         let ast = parse("???;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Huh3)],
         }));
         assert_eq!(ast, expected);
@@ -1739,6 +1760,7 @@ mod tests {
         let ast = parse("^x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::BlockReturn(BlockReturnNode {
                 value: ident("x", IdentifierType::Local),
             }))],
@@ -1748,6 +1770,7 @@ mod tests {
         let ast = parse("^>x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::YieldReturn(YieldReturnNode {
                 value: ident("x", IdentifierType::Local),
             }))],
@@ -1757,6 +1780,7 @@ mod tests {
         let ast = parse("^^x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodReturn(MethodReturnNode {
                 value: ident("x", IdentifierType::Local),
             }))],
@@ -1778,6 +1802,7 @@ mod tests {
         }));
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Assignment(AssignmentNode {
                 lvalues: vec![lval],
                 rvalue: ident("x", IdentifierType::Local),
@@ -1790,6 +1815,7 @@ mod tests {
         let lval = arc_node(NodeValue::IgnoredLValue);
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Assignment(AssignmentNode {
                 lvalues: vec![lval],
                 rvalue: ident("x", IdentifierType::Local),
@@ -1802,6 +1828,7 @@ mod tests {
         let lval = arc_node(NodeValue::IgnoredSplatLValue);
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Assignment(AssignmentNode {
                 lvalues: vec![lval],
                 rvalue: ident("x", IdentifierType::Local),
@@ -1832,6 +1859,7 @@ mod tests {
         }));
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Assignment(AssignmentNode {
                 lvalues: vec![sub_lval],
                 rvalue: ident("x", IdentifierType::Local),
@@ -1863,6 +1891,7 @@ mod tests {
             let ast = parse(&code);
             let expected = val_node(NodeValue::Program(ProgramNode {
                 source_info: None,
+                allow_pragmas: Vec::new(),
                 expressions: vec![binary(op_type, integer(1), integer(2))],
             }));
             assert_eq!(ast, expected);
@@ -1874,6 +1903,7 @@ mod tests {
         let ast = parse("+x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![unary(
                 UnaryOperatorType::Add,
                 ident("x", IdentifierType::Local),
@@ -1884,6 +1914,7 @@ mod tests {
         let ast = parse("-x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![unary(
                 UnaryOperatorType::Sub,
                 ident("x", IdentifierType::Local),
@@ -1894,6 +1925,7 @@ mod tests {
         let ast = parse("%x;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![unary(
                 UnaryOperatorType::Mod,
                 ident("x", IdentifierType::Local),
@@ -1908,6 +1940,7 @@ mod tests {
         let ast = parse("MY_CONST <- 42;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::ConstDefinition(ConstDefinitionNode {
                 identifier: Arc::new(IdentifierNode {
                     source_info: None,
@@ -1924,6 +1957,7 @@ mod tests {
         let ast = parse("MyClass <- { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::ClassDefinition(ClassDefinitionNode {
                 identifier: Arc::new(IdentifierNode {
                     source_info: None,
@@ -1950,6 +1984,7 @@ mod tests {
         let ast = parse("ParentClass <- ChildClass <- { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::ClassDefinition(ClassDefinitionNode {
                 identifier: Arc::new(IdentifierNode {
                     source_info: None,
@@ -1981,6 +2016,7 @@ mod tests {
         let ast = parse("MyClass <-- { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::ClassExtension(ClassExtensionNode {
                 expression: ident("MyClass", IdentifierType::Local),
                 block: Arc::new(BlockNode {
@@ -2003,6 +2039,7 @@ mod tests {
         let ast = parse("foo -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
@@ -2031,6 +2068,7 @@ mod tests {
         let ast = parse("foo! -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
@@ -2059,6 +2097,7 @@ mod tests {
         let ast = parse("foo: bar: -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
@@ -2095,6 +2134,7 @@ mod tests {
         let ast = parse("#foo -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
@@ -2123,6 +2163,7 @@ mod tests {
         let ast = parse("foo --> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodExtension(MethodExtensionNode {
                 signature: Arc::new(MethodSelectorNode {
                     identifiers: vec![Arc::new(IdentifierNode {
@@ -2149,6 +2190,7 @@ mod tests {
         let ast = parse("nil -> { 1 };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodDefinition(
                 MethodDefinitionNode {
                     signature: Arc::new(MethodSelectorNode {
@@ -2180,6 +2222,7 @@ mod tests {
         let ast = parse(".foo;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodCall(MethodCallNode {
                 subject: None,
                 arguments: Arc::new(MethodCallArgumentsNode {
@@ -2201,6 +2244,7 @@ mod tests {
         let ast = parse(".foo!;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodCall(MethodCallNode {
                 subject: None,
                 arguments: Arc::new(MethodCallArgumentsNode {
@@ -2222,6 +2266,7 @@ mod tests {
         let ast = parse("x.foo!;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodCall(MethodCallNode {
                 subject: Some(ident("x", IdentifierType::Local)),
                 arguments: Arc::new(MethodCallArgumentsNode {
@@ -2243,6 +2288,7 @@ mod tests {
         let ast = parse("x.foo: 1 bar: 2;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::MethodCall(MethodCallNode {
                 subject: Some(ident("x", IdentifierType::Local)),
                 arguments: Arc::new(MethodCallArgumentsNode {
@@ -2292,6 +2338,7 @@ mod tests {
         });
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Identifier(IdentifierNode {
                 source_info: None,
                 namespace: Some(ns),
@@ -2309,6 +2356,7 @@ mod tests {
         });
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Identifier(IdentifierNode {
                 source_info: None,
                 namespace: Some(ns),
@@ -2322,6 +2370,7 @@ mod tests {
         let ast = parse("nil;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Identifier(IdentifierNode {
                 source_info: None,
                 namespace: None,
@@ -2338,6 +2387,7 @@ mod tests {
         let ast = parse("#<1 2>;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Set(SetNode {
                 values: vec![integer(1), integer(2)],
             }))],
@@ -2348,6 +2398,7 @@ mod tests {
         let ast = parse("#MyStr'hello';");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::UserString(UserStringNode {
                 identifier: Arc::new(IdentifierNode {
                     source_info: None,
@@ -2364,6 +2415,7 @@ mod tests {
         let ast = parse("#MyList(1 2);");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::UserList(UserListNode {
                 identifier: Arc::new(IdentifierNode {
                     source_info: None,
@@ -2383,6 +2435,7 @@ mod tests {
         let ast = parse("{ #my_block |x| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 source_info: None,
                 name: Some(Arc::new(SymbolNode {
@@ -2401,6 +2454,7 @@ mod tests {
         let ast = parse("{ |x:Int| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 source_info: None,
                 name: None,
@@ -2422,6 +2476,7 @@ mod tests {
         let ast = parse("{ |_| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 source_info: None,
                 name: None,
@@ -2438,6 +2493,7 @@ mod tests {
         let ast = parse("{ |@x| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 source_info: None,
                 name: None,
@@ -2454,6 +2510,7 @@ mod tests {
         let ast = parse("{ | - x| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 source_info: None,
                 name: None,
@@ -2470,6 +2527,7 @@ mod tests {
         let ast = parse("{ | - x:Int| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 source_info: None,
                 name: None,
@@ -2490,6 +2548,7 @@ mod tests {
         let ast = parse("{ |x { 2 } - y| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Block(BlockNode {
                 source_info: None,
                 name: None,
@@ -2597,6 +2656,7 @@ mod tests {
         let ast = parse("{ |l: List(Integer)| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![block_arg(
                     "l",
@@ -2613,6 +2673,7 @@ mod tests {
         let ast = parse("{ |^Map(String List(Integer))| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![],
                 Some(generic_type(
@@ -2634,6 +2695,7 @@ mod tests {
         let ast = parse("{ |b: Block(Integer Integer ^Integer)| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![block_arg(
                     "b",
@@ -2656,6 +2718,7 @@ mod tests {
         );
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![
                     block_arg("a", IdentifierType::Local, Some(block_type(vec![], None))),
@@ -2726,6 +2789,7 @@ mod tests {
         let ast = parse("{ |e:[Web]Halt| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![Arc::new(BlockArgNode {
                     identifier: ident_node("e", IdentifierType::Local),
@@ -2742,6 +2806,7 @@ mod tests {
         let ast = parse("{ |x ^[Web]Halt| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![block_arg("x", IdentifierType::Local, None)],
                 Some(ns_type(&["Web"], "Halt")),
@@ -2754,6 +2819,7 @@ mod tests {
         let ast = parse("{ | - g:[A/B]Gadget?| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![],
                 None,
@@ -2769,6 +2835,7 @@ mod tests {
         let ast = parse("{ |x:[/]Thing| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![Arc::new(BlockArgNode {
                     identifier: ident_node("x", IdentifierType::Local),
@@ -2784,6 +2851,7 @@ mod tests {
         let ast = parse("var x: [IO]File = 1;");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![arc_node(NodeValue::Declaration(DeclarationNode {
                 kind: DeclKind::Var,
                 lvalues: vec![arc_node(NodeValue::IdentLValue(IdentLValueNode {
@@ -2799,6 +2867,7 @@ mod tests {
         let ast = parse("{ |x:Integer| 1; };");
         let expected = val_node(NodeValue::Program(ProgramNode {
             source_info: None,
+            allow_pragmas: Vec::new(),
             expressions: vec![block_with(
                 vec![block_arg(
                     "x",

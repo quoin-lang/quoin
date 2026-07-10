@@ -986,6 +986,7 @@ fn compile(exprs: Vec<Node>) -> Result<StaticBlock, String> {
     let program = ProgramNode {
         expressions: exprs.into_iter().map(Arc::new).collect(),
         source_info: None,
+        allow_pragmas: Vec::new(),
     };
     let mut block = compiler
         .compile_program(&program)

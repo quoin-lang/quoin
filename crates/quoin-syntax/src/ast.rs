@@ -257,10 +257,37 @@ impl PartialEq for NamespaceNode {
     }
 }
 
+/// A `"* allow: <kind …>` warning-suppression pragma recovered from raw source
+/// (comments are pest trivia, so the parser re-scans for them — `pragmas.rs`).
+/// The scanner is deliberately dumb: kind-name validation and the trailing-only
+/// rule are the checker's job, so its diagnostics carry proper spans.
 #[derive(Debug, Clone, PartialEq)]
+pub struct AllowPragma {
+    /// 1-indexed line the comment sits on — the line whose warnings it suppresses.
+    pub line: usize,
+    /// The names after `allow:`, comma/space separated, as written.
+    pub kinds: Vec<String>,
+    /// Whether code precedes the comment on its line. A pragma must *trail* the
+    /// statement it suppresses: on its own line it would be captured as a doc
+    /// comment by the `"*`-block adjacency rules (docs.rs §4).
+    pub trailing: bool,
+    pub span: SourceInfo,
+}
+
+#[derive(Debug, Clone)]
 pub struct ProgramNode {
     pub expressions: Vec<Arc<Node>>,
     pub source_info: Option<SourceInfo>,
+    /// Suppression pragmas for the checker, in source order. Trivia: excluded
+    /// from equality like `source_info` on identifier nodes.
+    pub allow_pragmas: Vec<AllowPragma>,
+}
+
+// allow_pragmas excluded from equality (trivia, see IdentifierNode's source_info).
+impl PartialEq for ProgramNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.expressions == other.expressions && self.source_info == other.source_info
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

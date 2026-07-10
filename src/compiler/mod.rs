@@ -425,10 +425,30 @@ struct ClassCtx {
     bodies: HashMap<String, Arc<BlockNode>>,
 }
 
+/// The warning taxonomy: every checker diagnostic carries one of these stable kind slugs,
+/// and a trailing `"* allow: <kind>` comment on the warned line suppresses it. The names are
+/// user-facing contract (they appear in pragmas and in the unknown-kind message) — renaming
+/// one breaks existing suppressions.
+pub const WARNING_KINDS: &[&str] = &[
+    "allow-pragma", // a malformed `allow:` pragma itself (unknown kind, no kind, not trailing)
+    "annotation",   // type-annotation shape: generic arity, Map keys, checker-only nesting…
+    "caret-discard", // `^` ends a discarded `if:`/`else:` arm — control falls through
+    "element-type", // a typed collection rejects an element (literal or insert)
+    "mnu",          // the receiver's class does not respond to the selector
+    "nil-receiver", // non-nil-safe send (or operator operand) on a maybe-nil value
+    "no-variant",   // no multimethod variant accepts the argument types
+    "return-type",  // an override's return is incompatible with the inherited return
+    "type-mismatch", // a value's type contradicts the declared/expected type
+    "unknown-type", // an annotation names a type the checker has never seen
+];
+
 /// A non-fatal type diagnostic: the message plus the source span it points at, for `path:line:col`
 /// rendering (Phase 4). `span` is `None` when a check can't attribute a precise location.
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
+    /// The [`WARNING_KINDS`] slug this diagnostic belongs to — the handle an
+    /// `"* allow: <kind>` pragma suppresses it by.
+    pub kind: &'static str,
     pub message: String,
     pub span: Option<SourceInfo>,
     /// Secondary "why-chain" notes (Phase 4 provenance): e.g. where a variable got the type that
@@ -669,6 +689,10 @@ pub struct Compiler {
     /// Non-fatal type diagnostics (e.g. `unknown type Foo`) collected during compilation.
     /// Surfaced by the caller; never blocks lowering (gradual best-effort).
     diagnostics: Vec<Diagnostic>,
+    /// The current unit's validated `"* allow: <kind>` suppressions, line → kinds
+    /// (trailing pragmas with known kind names only — `install_allow_pragmas`).
+    /// `warn_with_notes` drops a diagnostic whose span line carries its kind.
+    allow_pragmas: HashMap<usize, Vec<String>>,
     /// The span of a fatal compile error, claimed innermost-first: an error site that knows a
     /// precise span records it via `err_at`; otherwise the innermost `compile_node` frame to see
     /// the error fills in its statement-level span. Taken by `compile_program_with` to build the
@@ -728,6 +752,7 @@ impl Compiler {
             seen_types: SeenTypes::with_builtins(),
             class_table: ClassTable::new(),
             diagnostics: Vec::new(),
+            allow_pragmas: HashMap::new(),
             error_span: None,
             return_type_stack: Vec::new(),
             mint_template_ids: false,
@@ -993,6 +1018,7 @@ impl Compiler {
             seen_types: SeenTypes::with_builtins(),
             class_table: ClassTable::new(),
             diagnostics: Vec::new(),
+            allow_pragmas: HashMap::new(),
             error_span: None,
             return_type_stack: Vec::new(),
             mint_template_ids: false,
@@ -1250,18 +1276,96 @@ impl Compiler {
     /// Resolve a type-annotation name to a `Type`, flagging an unknown user class with a
     /// non-fatal `unknown type Foo` diagnostic (Phase 2). Resolution never fails: an unknown
     /// name still yields `Instance(name)` so lowering proceeds (gradual best-effort).
-    /// Push a non-fatal type diagnostic, pointing at `span` when one is available (Phase 4).
-    fn warn(&mut self, message: String, span: Option<&SourceInfo>) {
-        self.warn_with_notes(message, span, Vec::new());
+    /// Push a non-fatal type diagnostic of `kind` (a [`WARNING_KINDS`] slug), pointing at
+    /// `span` when one is available (Phase 4).
+    fn warn(&mut self, kind: &'static str, message: String, span: Option<&SourceInfo>) {
+        self.warn_with_notes(kind, message, span, Vec::new());
     }
 
     /// Like [`warn`](Self::warn) but with secondary why-chain notes (Phase 4 provenance).
-    fn warn_with_notes(&mut self, message: String, span: Option<&SourceInfo>, notes: Vec<Note>) {
+    /// The one diagnostic sink — a `"* allow: <kind>` pragma trailing the warned line
+    /// (installed by `install_allow_pragmas`) drops the diagnostic here, so every consumer
+    /// (`qn check`'s exit code, warning counts, reports) sees the suppressed set.
+    fn warn_with_notes(
+        &mut self,
+        kind: &'static str,
+        message: String,
+        span: Option<&SourceInfo>,
+        notes: Vec<Note>,
+    ) {
+        if let Some(s) = span
+            && self
+                .allow_pragmas
+                .get(&s.line)
+                .is_some_and(|kinds| kinds.iter().any(|k| k == kind))
+        {
+            return;
+        }
         self.diagnostics.push(Diagnostic {
+            kind,
             message,
             span: span.cloned(),
             notes,
         });
+    }
+
+    /// Validate and install this unit's `"* allow: …` pragmas (scanned by the parser —
+    /// comments are pest trivia). Only a *trailing* pragma with known kind names suppresses:
+    /// on its own line a pragma would be captured as a doc block by the `"*` adjacency rules,
+    /// so that shape gets a warning instead of a silent no-op — as do an unknown kind name
+    /// and an empty kind list. Runs before the statement loop so suppression is in place
+    /// when the first check fires.
+    fn install_allow_pragmas(&mut self, program: &ProgramNode) {
+        self.allow_pragmas.clear();
+        for p in &program.allow_pragmas {
+            let span = Some(&p.span);
+            let known: Vec<&String> = p
+                .kinds
+                .iter()
+                .filter(|k| WARNING_KINDS.contains(&k.as_str()))
+                .collect();
+            if !p.trailing {
+                // Prose in an ordinary comment can start with `allow:` (e.g. documenting a
+                // selector named `allow:`); only warn when it names a real warning kind.
+                if !known.is_empty() {
+                    self.warn(
+                        "allow-pragma",
+                        "an `allow:` pragma must trail the code line it suppresses".to_string(),
+                        span,
+                    );
+                }
+                continue;
+            }
+            if p.kinds.is_empty() {
+                self.warn(
+                    "allow-pragma",
+                    format!(
+                        "`allow:` names no warning kind — nothing is suppressed (known kinds: {})",
+                        WARNING_KINDS.join(", ")
+                    ),
+                    span,
+                );
+                continue;
+            }
+            for k in &p.kinds {
+                if !WARNING_KINDS.contains(&k.as_str()) {
+                    self.warn(
+                        "allow-pragma",
+                        format!(
+                            "unknown warning kind `{k}` in `allow:` (known kinds: {})",
+                            WARNING_KINDS.join(", ")
+                        ),
+                        span,
+                    );
+                }
+            }
+            if !known.is_empty() {
+                self.allow_pragmas
+                    .entry(p.line)
+                    .or_default()
+                    .extend(known.into_iter().cloned());
+            }
+        }
     }
 
     /// Lint (QUOIN_TODO): a `^` ending an `if:`/`else:` arm whose send value
@@ -1288,6 +1392,7 @@ impl Compiler {
             };
             if matches!(&last.value, NodeValue::BlockReturn(_)) {
                 self.warn(
+                    "caret-discard",
                     "`^` returns from this block, but the surrounding `if:`/`else:` \
                      value is discarded — control falls through to the next \
                      statement; a method return here is `^^`"
@@ -1322,6 +1427,7 @@ impl Compiler {
             // (`Block(Integer ^Boolean)`, GENERICS_ARCH.md §11).
             if tr.ret.is_some() && base != "Block" {
                 self.warn(
+                    "annotation",
                     format!(
                         "`^` return types belong to `Block(…)` annotations; `{base}` \
                          takes plain type arguments"
@@ -1337,6 +1443,7 @@ impl Compiler {
                     let key = annotation_name(&tr.args[0]);
                     if key != "String" {
                         self.warn(
+                            "annotation",
                             format!(
                                 "Map keys are String (got `Map({} …)`); only the value \
                                  type is generic for now",
@@ -1348,18 +1455,21 @@ impl Compiler {
                 }
                 ("List", n) | ("Set", n) => {
                     self.warn(
+                        "annotation",
                         format!("`{base}` takes 1 type argument, got {n}"),
                         tr.ident.source_info.as_ref(),
                     );
                 }
                 ("Map", n) => {
                     self.warn(
+                        "annotation",
                         format!("`Map` takes 2 type arguments (`Map(String V)`), got {n}"),
                         tr.ident.source_info.as_ref(),
                     );
                 }
                 _ => {
                     self.warn(
+                        "annotation",
                         format!("type `{base}` does not take generic arguments"),
                         tr.ident.source_info.as_ref(),
                     );
@@ -1383,6 +1493,7 @@ impl Compiler {
         if let Type::Instance(class) = base {
             if !self.seen_types.contains(class) {
                 self.warn(
+                    "unknown-type",
                     format!("unknown type `{}`", class),
                     tr.ident.source_info.as_ref(),
                 );
@@ -1450,6 +1561,7 @@ impl Compiler {
                 };
                 if let Some(b) = base {
                     self.warn(
+                        "annotation",
                         format!(
                             "nested element types are checker-only; `{}` is enforced as \
                              `{}` at runtime",
@@ -1487,6 +1599,7 @@ impl Compiler {
                 };
                 if let Some(b) = base {
                     self.warn(
+                        "annotation",
                         format!(
                             "nested element types are checker-only; `{}` is enforced as \
                              `{}` at runtime",
@@ -1567,6 +1680,7 @@ impl Compiler {
         }
         let notes = self.mismatch_notes(node, &actual);
         self.warn_with_notes(
+            "type-mismatch",
             format!(
                 "type mismatch: expected `{}`, found `{}`",
                 expected.name(),
@@ -1626,6 +1740,7 @@ impl Compiler {
         };
         if self.class_table.responds_to(&class, &selector) == Some(false) {
             self.warn(
+                "mnu",
                 format!("`{class}` does not respond to `{selector}`"),
                 call.subject.as_deref().and_then(|n| n.source_info.as_ref()),
             );
@@ -1733,6 +1848,7 @@ impl Compiler {
                 .collect::<Vec<_>>()
                 .join(", ");
             self.warn(
+                "no-variant",
                 format!(
                     "no `{selector}` variant on `{class}` accepts {got} — \
                      declared: {takes}; this raises MessageNotUnderstood at runtime"
@@ -1772,6 +1888,7 @@ impl Compiler {
                 continue;
             }
             self.warn(
+                "element-type",
                 format!(
                     "`{}` rejects a `{}` element — this raises a TypeError at runtime",
                     expected.name(),
@@ -2037,6 +2154,7 @@ impl Compiler {
             }
         }
         self.warn(
+            "element-type",
             format!(
                 "`{}` rejects a `{}` element — this raises a TypeError at runtime",
                 recv_t.name(),
@@ -2076,6 +2194,7 @@ impl Compiler {
             })
         };
         self.warn(
+            "nil-receiver",
             format!("receiver of `{selector}` may be nil"),
             subject.source_info.as_ref(),
         );
@@ -2090,6 +2209,7 @@ impl Compiler {
         }
         if matches!(self.static_type(&op.left), Type::Nullable(_)) {
             self.warn(
+                "nil-receiver",
                 format!(
                     "left operand of `{}` may be nil",
                     Self::binop_symbol(&op.operator)
@@ -2410,6 +2530,7 @@ impl Compiler {
             let over = type_from_ref_with_vars(rt, &self.ctx_type_params());
             if self.override_return_violates(&over, &base) {
                 self.warn(
+                    "return-type",
                     format!(
                         "override of `{}` returns `{}`, incompatible with `{}` from `{}`",
                         selector,
@@ -2565,6 +2686,8 @@ impl Compiler {
         // (RELEASE_PREP Tier 4a). `eval:self:` passes `define_self: false` (a real receiver
         // is bound), where a top-level definition legitimately targets that receiver.
         self.top_level_self_is_nil = define_self;
+        // Suppressions first: the pragma set must be live before any check can warn.
+        self.install_allow_pragmas(program);
         // Pre-scan this unit's class defs so annotations can forward-reference them (and so
         // later-compiled units see them via the shared `seen_types`).
         self.prescan_class_defs(program);

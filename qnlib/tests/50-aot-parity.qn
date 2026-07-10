@@ -147,7 +147,7 @@ AotNilIf <- {
             var flags: List(Boolean) = #();
             flags.add:true;
             flags.add:false;
-            (flags.at:n).if:{ ^^1 };
+            (flags.at:n).if:{ ^^1 };  "* allow: nil-receiver (nil->MNU is the point)
             0
         }
     };

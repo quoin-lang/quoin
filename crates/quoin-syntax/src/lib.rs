@@ -10,11 +10,13 @@ pub mod ast;
 pub mod complete;
 pub mod highlight;
 pub mod pest;
+pub mod pragmas;
 pub mod source_info;
 
 pub use ast::*;
 pub use complete::complete_source;
 pub use highlight::highlight_resilient;
+pub use pragmas::scan_allow_pragmas;
 pub use source_info::{ParseError, SourceInfo};
 
 // Parsing entry points. `try_parse_quoin_string_named` returns a structured

@@ -226,7 +226,7 @@
                     ^r
                 };
                 discarded -> {
-                    (true).if:{ var t = 5; ^t * 2 };
+                    (true).if:{ var t = 5; ^t * 2 }; "* allow: caret-discard (the fall-through is the subject under test)
                     ^0 - 1
                 };
                 nlr: -> { |flag|
