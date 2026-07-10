@@ -378,3 +378,43 @@ fn spec_kind_lattice_merges() {
     assert_eq!(merge(K_BOOL, K_OBJ), K_OBJ, "Obj absorbs");
     assert_eq!(merge(K_OBJ, K_INT), K_OBJ, "Obj never narrows back");
 }
+
+#[test]
+fn guarded_conditional_cold_span_keeps_untyped_fib_scalar_pure() {
+    // The F1 strict-Boolean fix wraps every not-statically-Bool conditional in
+    // a BranchIfNotBool guard whose COLD span re-materializes the arm blocks
+    // and re-dispatches the real if:else: send. That span is dynamically dead
+    // once the speculated compare folds the guard away — it must not evict the
+    // method from the scalar-pure set. Shipping that blind spot cost untyped
+    // fib 8x: eviction killed direct self-recursion, which made the speculated
+    // scalar return unprovable, which demoted the entry to an Obj ret.
+    let src = "Fib <- { .meta <-- { value: -> { |n| \
+               (n <= 1).if:{ ^n } else:{ ^(.value:(n - 1)) + (.value:(n - 2)) } } } };";
+    let ast = try_parse_quoin_string_named(src, "<aot-test>").expect("parse");
+    let NodeValue::Program(p) = &ast.value else {
+        panic!("not a program");
+    };
+    let mut compiler = Compiler::new().with_template_ids().with_aot();
+    compiler.compile_program(p).expect("compile");
+    let mut cands = compiler.take_aot_candidates();
+    let cand = cands
+        .iter_mut()
+        .find(|c| c.selector == "value:")
+        .expect("fib is a speculative candidate");
+    assert!(cand.speculative(), "untyped fib must be speculative");
+    // What spec_promote mints after a saturated all-Int profile (S1/S2):
+    // scalar param + entry precondition + observed-scalar return.
+    let tid = cand.block.template_id.unwrap();
+    cand.params = vec![AotParam::Scalar(AotKind::Int)];
+    cand.spec_preconditions = vec![Some(AotKind::Int)];
+    cand.ret = AotRet::Scalar(AotKind::Int);
+    let stats = compile_candidates(vec![cand.clone()]);
+    assert!(stats.refused.is_empty(), "refused: {:?}", stats.refused);
+    let entry = lookup(tid).expect("fib registered");
+    assert_eq!(
+        entry.ret,
+        AotRet::Scalar(AotKind::Int),
+        "the speculated scalar return must survive the guarded-conditional \
+         shape (a RetDemote here means the cold span broke scalar purity)"
+    );
+}

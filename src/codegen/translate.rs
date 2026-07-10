@@ -206,7 +206,43 @@ fn scalar_pure_set(
             if !pure.contains(&tid) {
                 continue;
             }
-            let ok = c.block.bytecode.0.iter().all(|inst| match inst {
+            // The guarded-conditional COLD spans (F1, strict Boolean
+            // conditionals) are excluded from the scan: `BranchIfNotBool(off)`
+            // jumps to a cold path that re-materializes the arm blocks and
+            // re-dispatches the real `if:`/`if:else:` send, and the hot span's
+            // trailing `Jump` hops over it. That span is dynamically DEAD
+            // whenever the condition proves Bool at translation — for a
+            // speculated-scalar compare (untyped fib's `n <= 1`) the guard
+            // folds away entirely — so its block literals and dynamic send
+            // must not evict the member syntactically. A member whose guard
+            // does NOT fold reaches the cold span at translation and trips
+            // the slot-window purity check there, demoting exactly as before
+            // (the same optimistic-admission contract as scalar operators
+            // below). Shipping this blind spot cost untyped fib 8x: the F1
+            // shape evicted it from the pure set, which killed direct
+            // self-recursion, which made its speculated scalar return
+            // unprovable, which demoted it to an Obj ret.
+            let insts = &c.block.bytecode.0;
+            let mut cold = vec![false; insts.len()];
+            for (i, inst) in insts.iter().enumerate() {
+                if let Instruction::BranchIfNotBool(off) = inst
+                    && let Some(cs) = i.checked_add_signed(*off)
+                    && cs >= 1
+                    && cs <= insts.len()
+                    && let Some(Instruction::Jump(k)) = insts.get(cs - 1)
+                    && let Some(ce) = (cs - 1).checked_add_signed(*k)
+                    && ce >= cs
+                    && ce <= insts.len()
+                {
+                    cold[cs..ce].iter_mut().for_each(|d| *d = true);
+                }
+            }
+            let ok = insts.iter().enumerate().all(|(i, inst)| match inst {
+                _ if cold[i] => true,
+                // The strict-Boolean guards themselves: free when the value
+                // proves Bool (the pure case); a Dyn operand cannot arise in
+                // a pure member (no slot sources), so admission is safe.
+                Instruction::BranchIfNotBool(..) | Instruction::RequireBool => true,
                 Instruction::Push(
                     Constant::Int(_) | Constant::Double(_) | Constant::Bool(_) | Constant::Nil,
                 )
