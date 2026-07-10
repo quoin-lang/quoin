@@ -9,7 +9,7 @@ builds on it.
 > common source of wrong code. Every claim here is verified against the pest
 > grammar (`src/parser/pest/`), the VM (`src/vm.rs`), and the test suite.
 
-Nav: **Foundations** · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](06-library-and-reference.md) · [Appendices](07-appendices.md)
+Nav: **Foundations** · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
 
 ---
 
@@ -120,7 +120,7 @@ statement.
   prefix operator `-` applied to `3` (see §6).
 - **Strings** use single quotes. Escapes: `\t \n \r \" \' \\`, plus `\uXXXX` and
   `\xXXXX` (four hex digits). Plain strings do **not** interpolate; interpolation
-  is a separate `%` form (see [§19](06-library-and-reference.md)).
+  is a separate `%` form (see [§19](09-library-and-reference.md)).
 - **Symbols** are interned selector-like names: `#name`, multi-part `#when:do:`,
   or a quoted form `#'+:'` for operators and otherwise-unspellable names. They are a
   **distinct type** (`#foo.class == Symbol`), compared by identity — `#foo == #foo`

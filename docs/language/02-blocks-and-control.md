@@ -3,7 +3,7 @@
 Blocks are Quoin's closures, and they're also how all control flow works — there are
 no `if`/`while` statements, only messages sent to booleans and blocks.
 
-Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](06-library-and-reference.md) · [Appendices](07-appendices.md)
+Nav: [Foundations](01-foundations.md) · **Blocks & control** · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
 
 ---
 

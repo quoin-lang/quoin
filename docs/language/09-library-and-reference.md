@@ -5,7 +5,7 @@ the standard library. For method-level detail, the stdlib `.qn` files and the
 Rust `src/runtime/*.rs` modules are the source of truth — this part points you at
 them rather than duplicating them.
 
-Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · **Library & reference** · [Appendices](07-appendices.md)
+Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · **Library & reference** · [Appendices](10-appendices.md)
 
 ---
 
@@ -157,5 +157,5 @@ MyFile <- [IO]File;     "* aliasing is just an ordinary definition — not a `us
 
 ---
 
-Next: **[Appendices](07-appendices.md)** — cheat-sheets, the consolidated gotchas
+Next: **[Appendices](10-appendices.md)** — cheat-sheets, the consolidated gotchas
 list, and a glossary.

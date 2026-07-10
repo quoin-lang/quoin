@@ -3,7 +3,7 @@
 Fibers (stackful coroutines), generators built on them, and the `Iterate` mixin
 that turns a single `each:` into a full collection API.
 
-Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · **Concurrency & iteration** · [Library & reference](06-library-and-reference.md) · [Appendices](07-appendices.md)
+Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · [Objects](03-objects.md) · [Patterns & errors](04-patterns-and-errors.md) · **Concurrency & iteration** · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
 
 ---
 
@@ -84,4 +84,4 @@ Every combinator here — `collect:`, `select:`, and the rest — comes from tha
 
 ---
 
-Next: **[Part VI — Library & reference](06-library-and-reference.md)**.
+Next: **[Part VI — Library & reference](09-library-and-reference.md)**.

@@ -3,7 +3,7 @@
 Classes, instances, methods, extension, the meta-object, mixins, and how a message
 is dispatched to a method (including multimethods).
 
-Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · **Objects** · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](06-library-and-reference.md) · [Appendices](07-appendices.md)
+Nav: [Foundations](01-foundations.md) · [Blocks & control](02-blocks-and-control.md) · **Objects** · [Patterns & errors](04-patterns-and-errors.md) · [Concurrency & iteration](05-concurrency-and-iteration.md) · [Library & reference](09-library-and-reference.md) · [Appendices](10-appendices.md)
 
 ---
 

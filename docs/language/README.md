@@ -43,14 +43,14 @@ truth rather than duplicating it.
 16. Fibers & generators — `Fiber.new:`, `^>`, `Generator.from:`, external `Iterator`
 17. The iteration protocol — the `Iterate` mixin, `each:` as the one primitive, custom iterables
 
-### Part VI — Library & reference · [`06-library-and-reference.md`](06-library-and-reference.md)
+### Part VI — Library & reference · [`09-library-and-reference.md`](09-library-and-reference.md)
 18. Collections & core types — brief tables, pointers to stdlib
 19. String formatting & ANSI — `%` interpolation, `%'…%{expr}'`
 20. Namespaces — `[IO]`, `[/]`, `[Y]`
 21. File loading & packages — `use (pkg:)? path`, the resolver seam, directory globs
 22. Stdlib map — the prelude (`core/*`) and what each file provides; native vs Quoin
 
-### Appendices · [`07-appendices.md`](07-appendices.md)
+### Appendices · [`10-appendices.md`](10-appendices.md)
 - A. Sigil & operator cheat-sheet
 - B. Selector / desugaring quick-reference
 - C. **Gotchas for writing & generating Quoin** — all corner cases consolidated
