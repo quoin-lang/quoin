@@ -1156,6 +1156,62 @@ fn test_compile_assignments() {
     expected.push(Instruction::DefineLocal(Symbol::intern("rest")));
     assert_eq!(res.bytecode, fused(expected));
 
+    // NON-TRAILING splat: a *mid z = x; — the source count is computed once, the splat
+    // takes the bounded middle (`sliceFrom:1 to:(count - tail)`), and the post-splat
+    // target binds from the END (`at:(count - 1)`), not positionally from the start.
+    let mk_ident = |name: &str| Node {
+        source_info: None,
+        value: NodeValue::IdentLValue(IdentLValueNode {
+            identifier: Arc::new(IdentifierNode {
+                source_info: None,
+                namespace: None,
+                name: name.to_string(),
+                identifier_type: IdentifierType::Local,
+            }),
+        }),
+    };
+    let lval_mid = Node {
+        source_info: None,
+        value: NodeValue::SplatLValue(SplatLValueNode {
+            identifier: Arc::new(IdentifierNode {
+                source_info: None,
+                namespace: None,
+                name: "mid".to_string(),
+                identifier_type: IdentifierType::Local,
+            }),
+        }),
+    };
+    let res = compile(vec![assign_node(
+        vec![mk_ident("a"), lval_mid, mk_ident("z")],
+        local_id("x"),
+    )])
+    .unwrap();
+    let mut expected = prefix_ops();
+    expected.push(Instruction::LoadGlobal(ns("x")));
+    expected.push(Instruction::Dup);
+    expected.push(Instruction::DefineLocal(Symbol::intern("__qn_temp_1")));
+    expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
+    expected.push(Instruction::Send(Symbol::intern("count"), 0));
+    expected.push(Instruction::DefineLocal(Symbol::intern("__qn_temp_2")));
+    expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
+    expected.push(Instruction::Push(Constant::Int(0)));
+    expected.push(Instruction::Send(Symbol::intern("at:"), 1));
+    expected.push(Instruction::DefineLocal(Symbol::intern("a")));
+    expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
+    expected.push(Instruction::Push(Constant::Int(1)));
+    expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_2")));
+    expected.push(Instruction::Push(Constant::Int(1)));
+    expected.push(Instruction::Send(Symbol::intern("-:"), 1));
+    expected.push(Instruction::Send(Symbol::intern("sliceFrom:to:"), 2));
+    expected.push(Instruction::DefineLocal(Symbol::intern("mid")));
+    expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_1")));
+    expected.push(Instruction::LoadLocal(Symbol::intern("__qn_temp_2")));
+    expected.push(Instruction::Push(Constant::Int(1)));
+    expected.push(Instruction::Send(Symbol::intern("-:"), 1));
+    expected.push(Instruction::Send(Symbol::intern("at:"), 1));
+    expected.push(Instruction::DefineLocal(Symbol::intern("z")));
+    assert_eq!(res.bytecode, fused(expected));
+
     // IgnoredSplatLValue: _ *_ = x;
     let lval_ignore = Node {
         source_info: None,

@@ -311,6 +311,18 @@ impl Compiler {
             NodeValue::IgnoredSplatLValue => {
                 bytecode.push(Instruction::Pop);
             }
+            NodeValue::SplatLValue(splat_lval) => {
+                // A single-target pattern isn't destructuring, so a lone named splat has
+                // nothing to split (`*_` alone stays legal — it discards the value).
+                let name = &splat_lval.identifier.name;
+                return Err(self.err_at(
+                    &splat_lval.identifier.source_info,
+                    format!(
+                        "a lone `*{name}` splat has nothing to split — \
+                         bind the whole list plainly: `{name} = …`"
+                    ),
+                ));
+            }
             _ => return Err(format!("Unsupported store target: {:?}", lval.value)),
         }
         Ok(())
@@ -400,6 +412,58 @@ impl Compiler {
         bytecode: &mut CodeBlock,
         declaring: bool,
     ) -> Result<(), String> {
+        // One splat per pattern LEVEL — each nested `( … )` sub-pattern gets its own. With two
+        // splats there is no rule for which absorbs the middle. Checked here (not in the decl
+        // validator) so plain reassignment destructuring is covered too.
+        let n = lvalues.len();
+        let is_splat = |lv: &Arc<Node>| {
+            matches!(
+                lv.value,
+                NodeValue::SplatLValue(_) | NodeValue::IgnoredSplatLValue
+            )
+        };
+        let mut splats = lvalues.iter().enumerate().filter(|(_, lv)| is_splat(lv));
+        let splat_at = splats.next().map(|(i, _)| i);
+        if let Some((_, second)) = splats.next() {
+            return Err(self.err_at(
+                &second.source_info,
+                "a destructuring pattern allows only one splat (`*name` or `*_`)".to_string(),
+            ));
+        }
+
+        // A NON-TRAILING splat changes the index base: the `tail` targets after it bind from
+        // the END (`count`-relative), and the splat takes the bounded middle. Everything else —
+        // pre-splat targets, and every target of a trailing-splat or splat-less pattern —
+        // binds `at:i` from the start. On a too-short source the end-relative math goes
+        // negative: `at:` answers nil and the slice clamps to `#()`, the same silent-nil
+        // philosophy as a too-short plain pattern (leading and trailing targets can then
+        // overlap; destructuring never length-errors).
+        let tail = match splat_at {
+            Some(k) if k + 1 < n => n - 1 - k,
+            _ => 0,
+        };
+        let len_temp = if tail > 0 {
+            // The source's count, computed once and shared by the tail targets.
+            let lt = self.new_temp_var();
+            self.scopes.last_mut().unwrap().locals.insert(lt.clone());
+            bytecode.push(Instruction::LoadLocal(Symbol::intern(temp_var)));
+            bytecode.push(Instruction::Send(Symbol::intern("count"), 0));
+            bytecode.push(Instruction::DefineLocal(Symbol::intern(&lt)));
+            Some(lt)
+        } else {
+            None
+        };
+        // Push the element index for target `i`: `count - (n - i)` from the end for a
+        // post-splat target, else the plain start-relative position.
+        let push_index = |i: usize, bytecode: &mut CodeBlock| match (&len_temp, splat_at) {
+            (Some(lt), Some(k)) if i > k => {
+                bytecode.push(Instruction::LoadLocal(Symbol::intern(lt)));
+                bytecode.push(Instruction::Push(Constant::Int((n - i) as i64)));
+                bytecode.push(Instruction::Send(Symbol::intern("-:"), 1));
+            }
+            _ => bytecode.push(Instruction::Push(Constant::Int(i as i64))),
+        };
+
         for (i, lval) in lvalues.iter().enumerate() {
             match &lval.value {
                 NodeValue::IdentLValue(ident_lval) => {
@@ -407,7 +471,7 @@ impl Compiler {
                     bytecode.push(Instruction::LoadLocal(Symbol::intern(
                         &(temp_var.to_string()),
                     )));
-                    bytecode.push(Instruction::Push(Constant::Int(i as i64)));
+                    push_index(i, bytecode);
                     bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
 
                     self.compile_ident_store(
@@ -424,7 +488,15 @@ impl Compiler {
                         &(temp_var.to_string()),
                     )));
                     bytecode.push(Instruction::Push(Constant::Int(i as i64)));
-                    bytecode.push(Instruction::Send(Symbol::intern("sliceFrom:"), 1));
+                    if let Some(lt) = &len_temp {
+                        // The bounded middle: `sliceFrom:i to:(count - tail)`.
+                        bytecode.push(Instruction::LoadLocal(Symbol::intern(lt)));
+                        bytecode.push(Instruction::Push(Constant::Int(tail as i64)));
+                        bytecode.push(Instruction::Send(Symbol::intern("-:"), 1));
+                        bytecode.push(Instruction::Send(Symbol::intern("sliceFrom:to:"), 2));
+                    } else {
+                        bytecode.push(Instruction::Send(Symbol::intern("sliceFrom:"), 1));
+                    }
 
                     self.compile_ident_store(
                         &splat_lval.identifier.identifier_type,
@@ -447,7 +519,7 @@ impl Compiler {
                     bytecode.push(Instruction::LoadLocal(Symbol::intern(
                         &(temp_var.to_string()),
                     )));
-                    bytecode.push(Instruction::Push(Constant::Int(i as i64)));
+                    push_index(i, bytecode);
                     bytecode.push(Instruction::Send(Symbol::intern("at:"), 1));
                     bytecode.push(Instruction::DefineLocal(Symbol::intern(
                         &(nested_temp.clone()),

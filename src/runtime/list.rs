@@ -433,6 +433,37 @@ pub fn build_list_class() -> NativeClassBuilder {
              #(10 20 30 40).sliceFrom:2     \"* -> #(30 40)\n\
              ```",
         )
+        .typed_instance_method(
+            "sliceFrom:to:",
+            &["Integer", "Integer"],
+            |vm, mc, receiver, args| {
+                let from = arg!(args, Int, 0);
+                let to = arg!(args, Int, 1);
+                receiver
+                    .with_native_state::<NativeListState, _, _>(|l| {
+                        let vec = l.get_vec();
+                        let start = from.max(0) as usize;
+                        let end = (to.max(0) as usize).min(vec.len());
+                        let sliced = if start < end {
+                            vec[start..end].to_vec()
+                        } else {
+                            Vec::new()
+                        };
+                        // A slice's elements are already checked — carry the tag.
+                        Ok(new_list_with_tag(vm, mc, sliced, l.elem))
+                    })
+                    .map_err(|e| QuoinError::Other(e))?
+            },
+        )
+        .returns("List(T)") // sliceFrom:to: carries the receiver's tag
+        .doc(
+            "A new list of the elements from a zero-based start index to an exclusive end \
+             index, both clamped to the list's bounds (an empty or inverted range answers \
+             `#()`). A checked receiver's element tag carries over.\n\n\
+             ```\n\
+             #(10 20 30 40).sliceFrom:1 to:3     \"* -> #(20 30)\n\
+             ```",
+        )
         .instance_method("s", |vm, mc, receiver, _args| {
             let len = receiver
                 .with_native_state::<NativeListState, _, _>(|l| l.get_vec().len())
