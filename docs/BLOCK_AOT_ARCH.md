@@ -266,3 +266,16 @@ Compile block literals as registry entries under their existing
 4. Whether `valueWithSelfOrArg:` should get the `value:` flat-loop fast
    path independent of this arc (a B0-adjacent interpreter win; measure
    after B0).
+
+## 7. 2026-07-10: the speculation follow-on (recorded here, designed in SPECULATIVE_AOT_ARCH §7)
+
+Two of this arc's seams moved again on `perf/block-scalar-spec`: block
+templates now speculate their argument's scalar kind through the B3a warmth
+window (the vWSOA seam observes; `invoke_block` gains an entry
+precondition), and the B1 guard (`BranchIfNotList`) carries the literal's
+template id so INTERPRETED fused sites route to the cold send once the
+block compiles speculated — the splice had been starving the block tier at
+direct `each:` sites. §6.2's "which combinators compile first" is settled
+differently than anticipated: the combinator bodies were already compiling
+(B2/B3b); the wins were inside the *blocks* and at the *interpreted call
+sites*. The per-element cost model lives in `bench/micro/`.

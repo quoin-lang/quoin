@@ -1,9 +1,9 @@
 # Cross-language results: Quoin vs Python vs Ruby
 
-*Measured 2026-07-06 on `perf/ic-direct-calls` @ `80a209b` (main
-post #59/#60 plus the outcall-seam arc F1-D2, pre-merge), Apple
-Silicon (darwin25). The previous table (same day, the materialization
-arc tip `5af70cc`) is preserved below for the delta story.*
+*Measured 2026-07-10 on `perf/block-scalar-spec` @ `41a1c80` (main
+post #85 plus the block-speculation arc S0-S5), Apple Silicon
+(darwin25). The previous table (2026-07-06, the ic-direct-calls tip
+`80a209b`) is preserved below for the delta story.*
 ## Methodology
 
 - **Whole-process wall time** (startup + load + compile + run), median of 5
@@ -31,50 +31,58 @@ arc tip `5af70cc`) is preserved below for the delta story.*
 
 | bench        | quoin | python | ruby  | rb-yjit | py/qn | rb/qn | yjit/qn |
 |--------------|------:|-------:|------:|--------:|------:|------:|--------:|
-| btrees       | 0.320 | 0.195  | 0.120 | 0.061   | 0.61  | 0.37  | 0.19    |
-| combinators  | 0.126 | 0.047  | 0.049 | 0.046   | 0.38  | 0.39  | 0.36    |
-| fib_typed    | 0.028 | 0.191  | 0.117 | 0.040   | **6.79** | **4.16** | **1.42** |
-| fib_untyped  | 0.016 | 0.082  | 0.059 | 0.030   | **5.08** | **3.67** | **1.87** |
-| json         | 0.231 | 0.217  | 0.116 | 0.116   | 0.94  | 0.50  | 0.50    |
-| maps         | 0.138 | 0.070  | 0.084 | 0.075   | 0.51  | 0.60  | 0.54    |
-| richards     | 0.314 | 0.094  | 0.079 | 0.045   | 0.30  | 0.25  | 0.14    |
-| sieve        | 0.101 | 0.301  | 0.187 | 0.097   | **2.97** | **1.85** | 0.96 |
-| strings      | 0.077 | 0.043  | 0.071 | 0.067   | 0.57  | **0.92** | 0.88 |
-| **geomean**  |       |        |       |         | **1.07** | 0.87  | 0.57 |
+| btrees       | 0.295 | 0.200  | 0.124 | 0.063   | 0.68  | 0.42  | 0.21    |
+| combinators  | 0.100 | 0.049  | 0.051 | 0.050   | 0.49  | 0.51  | 0.49    |
+| fib_typed    | 0.037 | 0.198  | 0.124 | 0.043   | **5.39** | **3.36** | **1.16** |
+| fib_untyped  | 0.021 | 0.085  | 0.063 | 0.032   | **4.03** | **2.98** | **1.50** |
+| json         | 0.305 | 0.227  | 0.122 | 0.122   | 0.75  | 0.40  | 0.40    |
+| maps         | 0.155 | 0.074  | 0.088 | 0.080   | 0.48  | 0.57  | 0.52    |
+| richards     | 0.321 | 0.099  | 0.083 | 0.047   | 0.31  | 0.26  | 0.15    |
+| sieve        | 0.106 | 0.317  | 0.196 | 0.102   | **2.98** | **1.84** | 0.96 |
+| strings      | 0.082 | 0.047  | 0.074 | 0.071   | 0.57  | **0.91** | 0.86 |
+| **geomean**  |       |        |       |         | **1.03** | 0.84  | 0.55 |
 
-Previous table (2026-07-06, materialization-arc tip `5af70cc`): btrees
-0.361 (py/qn 0.55), richards 0.371 (0.27), combinators 0.128, maps
-0.141, json 0.239; geomeans **1.05** / 0.85 / 0.55.
+Previous table (2026-07-06, ic-direct-calls tip `80a209b`): btrees
+0.320 (py/qn 0.61), combinators 0.126, fib_typed 0.028, fib_untyped
+0.016, json 0.231, maps 0.138, richards 0.314, sieve 0.101, strings
+0.077; geomeans **1.07** / 0.87 / 0.57.
 
 ## Honest reading
 
-**The outcall-seam arc (F1-D2) moved the two seam-bound rows again**:
-btrees 0.361 → 0.320 and richards 0.371 → 0.314 (−11/−15%), from the
-per-site AOT IC dispatching warm compiled→compiled calls straight to
-the entry, plus entry-nil deferred locals compiling `sum`/`reduce:`
-(the suite's last coverage refusal). Suite geomean vs CPython edges
-1.05 → **1.07**; vs Ruby 0.87; vs YJIT 0.57. maps improved to 0.138 —
-its +3% on the local profiling build was static code layout, exactly
-as the same-binary shim test said, and PGO washes it.
+**The block-speculation arc (S0-S5) moved its target row and repaired a
+regression.** combinators 0.126 → **0.100** (−21%): block-template
+arguments now speculate scalar kinds through the B3a warmth window, so
+`(x * 3) + 1` inside a `collect:` block devirts to native arithmetic
+instead of paying two classic outcalls per element, and interpreted
+fused `each:` sites route to compiled speculated blocks (the splice had
+been starving them). The per-element cost ladder that scoped the arc is
+now permanent (`bench/micro/`, `run.py` interleaves two binaries).
 
-Quoin holds four rows outright (both fibs, sieve, json-at-parity) and
-the geomean vs CPython. What remains behind, in measured order:
+**fib_untyped 0.077 → 0.021** — not an arc win but a repair: the F1
+strict-Boolean fix (PR #77) had silently evicted every untyped
+conditional-bearing method from the scalar-pure set (the syntactic scan
+is reachability-blind and saw the guard's dead cold span), which killed
+direct self-recursion and demoted the speculated scalar return to Obj —
+an unnoticed 8x on the headline row. The pure-set scan now masks
+guarded-conditional cold spans.
 
-1. **The irreducible outcall shell** (btrees 1.6×, richards 3.3×
-   behind CPython): window push + preconditions + invoke +
-   `run_in_frame_ctx` per call even on an AOT-IC hit. The recorded
-   next step is D3 (docs/OUTCALL_ARCH.md): guarded direct inner calls
-   baked into the caller's native code — needs
-   re-translation-on-warm-IC machinery.
-2. **Combinator pipelines** (2.6×): per-element `valueWithSelfOrArg:`
-   block-call seams — the same shell in block clothing.
-3. **maps/json/strings** (≈2×/parity/1.7×): interpreter residue and
-   C-library string ops; diminishing returns.
+Two drifts vs the 07-06 table are NOT explained by this branch (every
+row measured flat-or-better under interleaved A/B against main):
 
-The dispatch and allocation frontiers that headed this list across the
-last three arcs are substantially closed: untyped dispatch (S-arcs),
-alloc/GC (alloc-churn), materialization (M-arcs), and now the warm
-outcall lookup itself (D2).
+1. **A ~5-9ms across-the-board startup tax** — visible on rows with no
+   arc-relevant code at all (strings +5ms, sieve +5ms, richards +7ms,
+   fib_typed +9ms). Between the tables sit ~25 merges including the
+   embedded/relocatable stdlib and the language-reference-era prelude
+   growth. fib_untyped's floor moved the same way (pre-F1 checkout
+   measures 0.01 profiling where today's repaired build is 0.02).
+2. **json +32%** (0.231 → 0.305) — exceeds the startup tax; untracked.
+
+What remains behind, in measured order: the outcall shell (richards
+3.2x behind CPython; D3's direct-edge tier ships default-off — its gate
+measured net-negative), the remaining combinator gap (2x; the ladder
+puts the hand-fused ceiling at 0.72 vs 0.94 on the scaled workload),
+and the maps/json/strings residue — now joined by the two drifts above
+as the cheapest opens.
 
 ## Reproducing
 
