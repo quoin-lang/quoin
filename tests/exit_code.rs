@@ -126,6 +126,86 @@ fn exit_from_spawned_task_is_process_wide() {
     assert!(!stdout.contains("after"), "main task continued: {stdout}");
 }
 
+/// A broken stdout pipe is the reader hanging up (`qn test … | head`), not a program error.
+/// The guest write converts it to a quiet `Runtime.exit:`-style unwind with the conventional
+/// SIGPIPE status (128+13 = 141): uncatchable, `finally` blocks run, nothing on stderr. It
+/// used to surface as an uncaught "VM execution error: Broken pipe (os error 32)".
+mod broken_pipe {
+    use std::process::{Command, Stdio};
+
+    /// Spawn `qn` on an inline script with stdout piped, close the read end immediately,
+    /// and collect status + stderr. The scripts loop a *bounded* number of prints so a
+    /// regression fails fast instead of hanging: the pipe buffer caps at ~64 KiB, so the
+    /// child blocks long before finishing and the close is never racy.
+    fn run_with_closed_stdout(name: &str, src: &str) -> (Option<i32>, String) {
+        let path =
+            std::env::temp_dir().join(format!("quoin_epipe_{}_{}.qn", name, std::process::id()));
+        std::fs::write(&path, src).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_qn"))
+            .arg(&path)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn qn");
+        drop(child.stdout.take()); // hang up: the next write gets EPIPE
+        let out = child.wait_with_output().expect("qn exits");
+        let _ = std::fs::remove_file(&path);
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    #[test]
+    fn print_to_closed_pipe_exits_141_quietly() {
+        let (code, stderr) =
+            run_with_closed_stdout("print", "(1..1000000).each:{ |i| 'x'.print };\n");
+        assert_eq!(code, Some(141), "expected the SIGPIPE status\n{stderr}");
+        assert!(
+            !stderr.contains("VM execution error") && !stderr.contains("panicked"),
+            "a broken pipe must not be reported as an error\n{stderr}"
+        );
+    }
+
+    #[test]
+    fn broken_pipe_is_uncatchable_but_runs_finally() {
+        let (code, stderr) = run_with_closed_stdout(
+            "finally",
+            "{ (1..1000000).each:{ |i| 'x'.print } }.catch:{ |e| [IO]Stderr.write:'caught' } \
+             finally:{ [IO]Stderr.write:'cleanup' };\n",
+        );
+        assert_eq!(code, Some(141), "expected the SIGPIPE status\n{stderr}");
+        assert!(stderr.contains("cleanup"), "finally skipped: {stderr}");
+        assert!(!stderr.contains("caught"), "handler ran: {stderr}");
+    }
+
+    /// The CLI's own bulk output (`qn highlight … | head`) takes the same quiet exit — it
+    /// used to panic ("failed printing to stdout").
+    #[test]
+    fn highlight_to_closed_pipe_exits_141_quietly() {
+        // Well over the 64 KiB pipe buffer, so the child cannot finish before the close.
+        let src = "'hello'.print;\n".repeat(10_000);
+        let path =
+            std::env::temp_dir().join(format!("quoin_epipe_highlight_{}.qn", std::process::id()));
+        std::fs::write(&path, src).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_qn"))
+            .arg("highlight")
+            .arg(&path)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn qn highlight");
+        drop(child.stdout.take());
+        let out = child.wait_with_output().expect("qn exits");
+        let _ = std::fs::remove_file(&path);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(141), "{stderr}");
+        assert!(!stderr.contains("panicked"), "highlight panicked\n{stderr}");
+    }
+}
+
 /// A *compile* error is a user error, not a VM bug. Every entry point must report it, with a
 /// source location, and exit 1. The run path used to `panic!` inside `arena.mutate_root`,
 /// printing a Rust backtrace note and exiting 101 — and it fired on exactly the two mistakes

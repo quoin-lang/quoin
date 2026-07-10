@@ -444,6 +444,23 @@ fn split_types(types: Option<String>) -> Vec<String> {
         .collect()
 }
 
+/// `print!` for the CLI's bulk/report output (`highlight`, `fmt`, `doc`, the `-e` result
+/// echo): `println!` panics when the reader hangs up (`qn highlight big.qn | head`), but a
+/// broken pipe is not a program error — exit quietly with the conventional SIGPIPE status
+/// (128+13), like the guest-output path (`VmState::write_std_guest`). Any other stdout
+/// failure is real: report it and fail. Only for arena-free paths — exiting here skips
+/// `Drop` teardown, so callers holding a live arena map `BrokenPipe` themselves.
+pub(crate) fn print_or_exit(text: &str) {
+    use std::io::Write;
+    if let Err(e) = std::io::stdout().write_all(text.as_bytes()) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            exit(141);
+        }
+        eprintln!("qn: cannot write to stdout: {e}");
+        exit(1);
+    }
+}
+
 /// The synthesized `qn test` entry unit: pull in the test framework, glob the caller's
 /// test directory (each suite self-registers as it loads), then run the registry.
 ///
@@ -758,21 +775,21 @@ impl VmRunner {
                 if self.options.highlight_html {
                     // A standalone page over the shared code stylesheet — the same classes and
                     // colors the doc generator's fenced examples use (docs/DOCS_ARCH.md §8).
-                    println!(
+                    print_or_exit(&format!(
                         "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{}</title>\n{}\n\
                          <style>\nbody {{ margin: 2rem auto; max-width: 60rem; padding: 0 1rem; \
                          background: #ffffff; color: #1a1a1a; }}\n\
                          @media (prefers-color-scheme: dark) {{ body {{ background: #1e1e1e; \
                          color: #d4d4d4; }} }}\n\
                          pre.qn-code {{ font: 14px/1.5 ui-monospace, monospace; }}\n{}</style>\n\
-                         </head>\n<body>\n{}\n</body></html>",
+                         </head>\n<body>\n{}\n</body></html>\n",
                         path,
                         crate::highlighter::code_font_links(),
                         crate::highlighter::code_stylesheet(),
                         crate::highlighter::highlight_to_html(&source)
-                    );
+                    ));
                 } else {
-                    print!("{}", highlight_to_ansi(&source));
+                    print_or_exit(&highlight_to_ansi(&source));
                 }
                 Ok(())
             }
@@ -1000,11 +1017,11 @@ impl VmRunner {
             };
             if self.options.fmt_check {
                 if formatted != source {
-                    println!("{name}");
+                    print_or_exit(&format!("{name}\n"));
                     unformatted = true;
                 }
             } else if self.options.fmt_dry_run {
-                print!("{formatted}");
+                print_or_exit(&formatted);
             } else if self.options.fmt_diff {
                 if formatted != source {
                     unformatted = true;
@@ -1039,7 +1056,7 @@ impl VmRunner {
         }
         match quoin_fmt::format_source(&source, "<stdin>") {
             Ok(formatted) => {
-                print!("{formatted}");
+                print_or_exit(&formatted);
                 exit(0);
             }
             Err(e) => {
@@ -1065,7 +1082,7 @@ impl VmRunner {
                 // Replace the temp path in diff's `+++` header with a readable label.
                 let text = String::from_utf8_lossy(&out.stdout)
                     .replace(&tmp.display().to_string(), &format!("{name} (formatted)"));
-                print!("{text}");
+                print_or_exit(&text);
                 true
             }
             Err(e) => {
@@ -1285,7 +1302,19 @@ impl VmRunner {
             exit(code);
         }
         match res {
-            Ok(Some(out)) => println!("{out}"),
+            Ok(Some(out)) => {
+                use std::io::Write;
+                if let Err(e) = std::io::stdout().write_all(format!("{out}\n").as_bytes()) {
+                    // The reader hung up on the result echo: quiet SIGPIPE status (141),
+                    // arena dropped first so teardown runs (as the exit path above).
+                    let broken = e.kind() == std::io::ErrorKind::BrokenPipe;
+                    if !broken {
+                        eprintln!("qn: cannot write to stdout: {e}");
+                    }
+                    drop(arena);
+                    exit(if broken { 141 } else { 1 });
+                }
+            }
             Ok(None) => {}
             Err(msg) => {
                 eprintln!("{msg}");
@@ -1407,7 +1436,21 @@ impl VmRunner {
                         eprintln!("coverage written to {path}");
                     }
                 }
-                None => print!("{output}"),
+                None => {
+                    use std::io::Write;
+                    // A truncated report must not exit 0 (CI consumes this stream), and
+                    // the arena is live — so no `print_or_exit` here: report through the
+                    // normal outcome (a guest exit already recorded in `ended` wins).
+                    if let Err(e) = std::io::stdout().write_all(output.as_bytes())
+                        && ended.is_none()
+                    {
+                        let broken = e.kind() == std::io::ErrorKind::BrokenPipe;
+                        if !broken {
+                            eprintln!("qn: cannot write coverage to stdout: {e}");
+                        }
+                        ended = Some(UnitOutcome::ExitRequested(if broken { 141 } else { 1 }));
+                    }
+                }
             }
         }
 

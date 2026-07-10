@@ -429,6 +429,23 @@ it. None is fixed.
 
 ---
 
+## Broken stdout pipes exit quietly (2026-07-10)
+
+**A broken stdout pipe is a hang-up, not an error.** `qn test … | head` used to
+die with an uncaught `VM execution error: Broken pipe (os error 32)` and exit 1;
+`qn highlight … | head` panicked outright. Guest writes to the standard streams
+(`.print`, `[IO]Stdout`/`[IO]Stderr` — `VmState::write_std_guest`) now convert
+`EPIPE` into a quiet `Runtime.exit:`-style unwind with the conventional SIGPIPE
+status (128+13 = 141): uncatchable, `finally` blocks run, teardown is normal,
+stderr stays silent. The CLI's own bulk output (`highlight`, `fmt`, `doc`,
+coverage, the `-e` echo) takes the same quiet 141 (`runner::print_or_exit`).
+Sockets and files are deliberately untouched — their broken pipes stay catchable
+`IoError`s, which is also why the classic restore-`SIG_DFL` fix was rejected: it
+would kill a server writing to a hung-up TCP client. Go's stdout/stderr-only
+SIGPIPE scoping is the model. Tests: `exit_code.rs::broken_pipe`.
+
+---
+
 ## Relocatable stdlib loading (2026-07-09)
 
 **The binary is self-contained.** `build.rs` compiles the *shipping* stdlib subset

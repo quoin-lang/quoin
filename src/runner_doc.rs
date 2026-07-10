@@ -105,11 +105,11 @@ impl VmRunner {
                 &render_class(class, &model),
             );
         }
-        println!(
-            "qn doc: {} classes -> {}",
+        crate::runner::print_or_exit(&format!(
+            "qn doc: {} classes -> {}\n",
             model.classes.len(),
             out_dir.display()
-        );
+        ));
         Ok(())
     }
 
@@ -270,7 +270,7 @@ fn report_coverage(model: &DocModel) {
         if class.doc.is_some() {
             documented += 1;
         } else {
-            println!("undocumented class: {}", class.name);
+            crate::runner::print_or_exit(&format!("undocumented class: {}\n", class.name));
         }
         for (side, list) in [
             ("", &class.instance_methods),
@@ -281,7 +281,10 @@ fn report_coverage(model: &DocModel) {
                 if m.doc.is_some() {
                     documented += 1;
                 } else {
-                    println!("undocumented: {} {}{}", class.name, side, m.selector);
+                    crate::runner::print_or_exit(&format!(
+                        "undocumented: {} {}{}\n",
+                        class.name, side, m.selector
+                    ));
                 }
             }
         }
@@ -291,7 +294,7 @@ fn report_coverage(model: &DocModel) {
     } else {
         documented as f64 * 100.0 / total as f64
     };
-    println!("doc coverage: {documented}/{total} ({pct:.1}%)");
+    crate::runner::print_or_exit(&format!("doc coverage: {documented}/{total} ({pct:.1}%)\n"));
 }
 
 // ---- HTML rendering -------------------------------------------------------------------
@@ -637,10 +640,10 @@ impl VmRunner {
         for f in &failures {
             eprintln!("{f}\n");
         }
-        println!(
-            "qn doc --check: {total} examples, {checked_annotations} annotations checked, {} failed",
+        crate::runner::print_or_exit(&format!(
+            "qn doc --check: {total} examples, {checked_annotations} annotations checked, {} failed\n",
             failures.len()
-        );
+        ));
         if !failures.is_empty() {
             exit(1);
         }

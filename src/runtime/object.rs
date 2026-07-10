@@ -345,8 +345,7 @@ pub fn build_object_class() -> NativeClassBuilder {
             };
             // Route through the VM's stdout sink (not `println!`) so the DAP adapter can capture
             // program output as `output` events instead of it hitting fd 1/2 directly.
-            host.write_std(crate::vm::StdStream::Out, format!("{text}\n").as_bytes())
-                .map_err(|e| QuoinError::Other(e.to_string()))?;
+            host.write_std_guest(crate::vm::StdStream::Out, format!("{text}\n").as_bytes())?;
             Ok(host.new_nil())
         })
         .doc(

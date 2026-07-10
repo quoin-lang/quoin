@@ -847,6 +847,22 @@ impl<'gc> VmState<'gc> {
         }
     }
 
+    /// `write_std` for *guest* output (`.print`, `[IO]Stdout`/`[IO]Stderr`): a broken pipe on
+    /// a standard stream is the reader hanging up (`qn test | head`), not a program error —
+    /// convert it to a quiet `Runtime.exit:`-style unwind with the conventional SIGPIPE status
+    /// (128+13), uncatchable, running `finally` blocks and normal teardown on the way out.
+    /// Sockets and files are unaffected: their broken pipes stay catchable `IoError`s.
+    pub fn write_std_guest(&mut self, stream: StdStream, bytes: &[u8]) -> Result<(), QuoinError> {
+        self.write_std(stream, bytes).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                self.requested_exit = Some(141);
+                QuoinError::ExitRequested(141)
+            } else {
+                QuoinError::Other(e.to_string())
+            }
+        })
+    }
+
     /// `file:line:col: <level>: <message>` header, the level keyword colored (yellow warning,
     /// red error, gray note) like uncaught errors. `indent` shifts a provenance note under its
     /// parent. Shared by `report_type_warnings` and `report_compile_error`.

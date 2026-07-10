@@ -506,12 +506,8 @@ fn handle_write<'gc>(
         })
         .map_err(QuoinError::Other)?;
     match kind {
-        Kind::Out => vm
-            .write_std(StdStream::Out, bytes)
-            .map_err(|e| QuoinError::Other(e.to_string())),
-        Kind::Err => vm
-            .write_std(StdStream::Err, bytes)
-            .map_err(|e| QuoinError::Other(e.to_string())),
+        Kind::Out => vm.write_std_guest(StdStream::Out, bytes),
+        Kind::Err => vm.write_std_guest(StdStream::Err, bytes),
         // A typed `IoError`, not a bare String: `catch:{|e:Error|}` must be able to see it.
         // (Mirrors `[IO]Handle.stringStream` refusing the write handles.)
         Kind::Stdin => Err(QuoinError::io(
