@@ -324,15 +324,19 @@ it. None is fixed.
   That is a language-semantics decision with a value-representation cost on the
   hottest paths; raising keeps v0.1 honest and leaves promotion open.
 
-- [ ] **Non-trailing splat destructuring binds wrong.** Found making the book's
-  §4 example runnable (2026-07-10), confirmed by hand: `var a *_ z = #(1 2 3 4 5)`
-  binds `z = 3` (should be 5), and `var *init last = #(1 2)` binds `init` to the
-  WHOLE list while `last = 2` — the splat greedily takes everything to the end and
-  post-splat targets still bind positionally from the start. Trailing splats
-  (`var p q *rest = …`) are correct. No test coverage exists for non-trailing
-  splats. Either fix the compiler's binding plan or restrict the grammar to
-  trailing splats; the book's §4 prose currently soft-claims "any position" and
-  shows only verified trailing forms — align it with whichever way this goes.
+- [x] **Non-trailing splat destructuring binds wrong.** FIXED by repairing the
+  binding plan (the book's "any position" claim stands): patterns with a
+  non-trailing splat compute `count` once, post-splat targets bind end-relative
+  (`at:(count-(n-i))`), and the splat takes the bounded middle via the new
+  `List#sliceFrom:to:` (end-exclusive, clamped, tag-carrying). Trailing/splat-less
+  patterns compile exactly as before (golden tests unchanged). Length semantics
+  stay silent-nil (missing → nil, splat → `#()`, too-short overlaps documented).
+  Also now enforced: ONE splat per pattern level (compile error with span; nested
+  `( … )` patterns each get their own), and a lone `var *a = …` gets a real
+  message instead of "Unsupported store target". Tests:
+  qnlib/tests/64-destructuring.qn + a golden-bytecode case; book §4 gained
+  verified non-trailing examples; the presentation file's nested comment was
+  wrong even for the intended semantics and is fixed.
 
 - [x] **Top-level method definitions die with "Cannot extend sealed class
   [/]Nil".** FIXED with option 1, the targeted compile-time diagnostic:
